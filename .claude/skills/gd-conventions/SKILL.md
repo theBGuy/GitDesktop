@@ -92,7 +92,10 @@ dialog.
   announcement; menu/popover trigger sites keep the reason on a titled span
   wrapper (its doc comment shows the idiom — a bare `title` on a disabled
   element never shows). A disabled submit may instead explain via the field's
-  `warning` hint.
+  `warning` hint. Raw-`<button>` sites the vendored Button can't size (reaction
+  chips, the discussion upvote chip) take the SAME contract from the shared
+  `useDisabledReason` hook + `ARIA_DISABLED_CLASS`
+  (`src/lib/use-disabled-reason.ts`) — never hand-rolled.
 - Per-variant copy/labels/glyphs are `Record` lookups, never ternary chains:
   an exact union discriminant gets a total `Record` (compiler
   exhaustiveness); a wide wire string gets `Partial<Record>` + explicit

@@ -3,4 +3,6 @@
   rebase-merged branches turn up in the list with a `merged #123` badge naming the
   pull request that took them. The match goes by branch name, so it only ever badges
   a row: what comes pre-checked is still what your own history shows — merged into
-  the default branch, or idle past the window you picked.
+  the default branch, or idle past the window you picked. The dialog names pull
+  requests only where it could read them, so its wording always matches the checks
+  behind the list in front of you.

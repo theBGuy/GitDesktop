@@ -122,9 +122,14 @@ pub(crate) async fn run_git_mutating_with_creds(
         out = run_git_with_creds_once(repo_path, cred, sub, timeout).await?;
     }
     if out.code != 0 {
+        // Both streams: a merge-mode `pull` that conflicts puts the fetch summary
+        // on stderr and the whole merge verdict (`CONFLICT (…`, `Automatic merge
+        // failed`) on stdout, so substituting one for the other would drop the
+        // verdict. Inert for fetch/set-head/push, whose failures write no stdout.
+        // The classifier above reads raw `out.stderr` on purpose — keep it there.
         return Err(AppError::Git {
             code: out.code,
-            stderr: out.stderr,
+            stderr: out.full_failure_text(),
         });
     }
     Ok(out)
@@ -870,6 +875,65 @@ mod tests {
             }
             Err(other) => panic!("expected AppError::Git, got {other:?}"),
             Ok(_) => panic!("merging a missing ref should fail"),
+        }
+    }
+
+    /// The half that stderr alone cannot carry: a merge-mode pull that conflicts
+    /// writes only its fetch summary to stderr and the whole merge verdict to
+    /// stdout, so an error shaped from stderr looks populated while saying
+    /// nothing about the conflict the user now has to resolve.
+    #[tokio::test]
+    async fn a_conflicted_pull_surfaces_gits_merge_verdict() {
+        let (_base, base) = temp_base("pull-conflict");
+        let origin = base.join("origin.git");
+        let work = base.join("work");
+        let clone = base.join("clone");
+        std::fs::create_dir_all(&work).unwrap();
+        let base_s = base.to_string_lossy().into_owned();
+        let work_s = work.to_string_lossy().into_owned();
+        let clone_s = clone.to_string_lossy().into_owned();
+        let url = format!("file://{}", origin.to_string_lossy().replace('\\', "/"));
+
+        run(&base_s, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        init_repo(&work_s, "a.txt").await;
+        run(&work_s, &["branch", "-M", "main"]).await;
+        run(&work_s, &["remote", "add", "origin", &url]).await;
+        run(&work_s, &["push", "-q", "-u", "origin", "main"]).await;
+        run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"]).await;
+        run(&clone_s, &["config", "core.autocrlf", "false"]).await;
+        run(&clone_s, &["config", "user.email", "t@t.local"]).await;
+        run(&clone_s, &["config", "user.name", "T"]).await;
+
+        // Both sides rewrite the same file, so `--no-rebase` merges and conflicts.
+        std::fs::write(work.join("a.txt"), "upstream\n").unwrap();
+        run(&work_s, &["commit", "-qam", "upstream"]).await;
+        run(&work_s, &["push", "-q"]).await;
+        std::fs::write(clone.join("a.txt"), "mine\n").unwrap();
+        run(&clone_s, &["commit", "-qam", "local"]).await;
+
+        let state = AppState::default();
+        let result = run_git_mutating_with_creds(
+            &state,
+            &clone_s,
+            &[],
+            &["pull", "--no-rebase"],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        match result {
+            Err(AppError::Git { code, stderr }) => {
+                assert_eq!(code, 1);
+                assert!(
+                    stderr.contains("Automatic merge failed"),
+                    "the merge verdict rides stdout and must reach the error, got: {stderr}"
+                );
+                assert!(
+                    stderr.contains("CONFLICT (content): Merge conflict in a.txt"),
+                    "and the conflicted-file list with it, got: {stderr}"
+                );
+            }
+            Err(other) => panic!("expected AppError::Git, got {other:?}"),
+            Ok(_) => panic!("a diverged pull with an overlapping edit should conflict"),
         }
     }
 

@@ -29,10 +29,11 @@ impl GitOutput {
     }
 
     /// The text describing a non-zero exit: stderr, or stdout when stderr is
-    /// EMPTY. git splits its reporting across both streams — a conflicted merge,
-    /// `stash pop` or `revert` writes everything to stdout and leaves stderr
-    /// empty (measured, git 2.51.1) — and an error carrying only that empty
-    /// stderr renders as "git exited with code N".
+    /// EMPTY. Correct only for the families that report on stdout ALONE — a
+    /// conflicted merge or `stash pop` (measured, git 2.51.1) — where an error
+    /// carrying that empty stderr renders as "git exited with code N". Anything
+    /// that splits ONE report across both streams needs
+    /// [`full_failure_text`](Self::full_failure_text) instead.
     pub fn failure_text(&self) -> String {
         let stderr = self.stderr.trim();
         if stderr.is_empty() {
@@ -40,6 +41,36 @@ impl GitOutput {
         } else {
             stderr.to_string()
         }
+    }
+
+    /// Both halves of a non-zero exit, stderr first and stdout below it, each
+    /// omitted when empty.
+    ///
+    /// [`failure_text`](Self::failure_text) substitutes rather than combines, so
+    /// it is a silent no-op wherever git splits ONE report across both streams:
+    /// a conflicted revert/cherry-pick/rebase puts its diagnostic on stderr and
+    /// its `CONFLICT (…)` file list on stdout, and a merge-mode `pull` puts the
+    /// fetch summary on stderr and the whole merge verdict on stdout (measured,
+    /// git 2.51.1). Dropping either half is data loss at the moment the user is
+    /// deciding how to resolve.
+    ///
+    /// stderr leads because the frontend reads line 1 alone: `ROLLBACK_VERDICTS`
+    /// and `firstMeaningfulLine` (`src/lib/error-summary.ts`), and the rollback
+    /// funnels in `git::ops` prepend their verdict above whatever this returns.
+    /// `strip_eol_warnings` runs over the stdout half too — the runner filters
+    /// only stderr, so autocrlf advisories would otherwise ride into Details.
+    ///
+    /// One consequence to know: git's sequencer status stdout can carry
+    /// `(all conflicts fixed: run "git cherry-pick --continue")`, which matches
+    /// the frontend's `OP_ADVICE`, so combining the streams puts stdout advice
+    /// within reach of the summary scanner.
+    pub fn full_failure_text(&self) -> String {
+        let stdout = strip_eol_warnings(&self.stdout_lossy());
+        [self.stderr.trim(), stdout.trim()]
+            .into_iter()
+            .filter(|half| !half.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -381,8 +412,9 @@ pub async fn run_git_mutating(
 
 /// `run_git_mutating` without its non-zero-exit verdict: same lock and same
 /// one-shot index.lock retry, but the raw output comes back so the caller can
-/// read STDOUT on failure. Use it wherever git reports a failure there —
-/// [`GitOutput::failure_text`] is the shaping those callers share.
+/// read STDOUT on failure. [`GitOutput::full_failure_text`] is the shaping those
+/// callers share; [`GitOutput::failure_text`] only suits the ones whose failure
+/// lands on stdout ALONE, which is merge.
 pub async fn run_git_mutating_raw(
     state: &AppState,
     repo_path: &str,

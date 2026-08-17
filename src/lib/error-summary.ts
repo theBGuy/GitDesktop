@@ -76,10 +76,11 @@ function firstMeaningfulLine(message: string): string {
 const CONFLICT_MARKERS = [
   // git emits both `error: could not apply …` and a bare `Could not apply
   // <sha>…` tail line (rebase); a revert says `could not revert` for the same
-  // thing, and that line is the ONLY marker a conflicted revert produces — the
-  // rest of its report (`CONFLICT (…`) rides stdout, which `git_revert_core`'s
-  // runner drops. Deliberately the same shape as SUBJECT_ECHO_LINE below: the
-  // line that PROVES a conflict is the one that must not be read as its NAME.
+  // thing. The rest of that report (`CONFLICT (…`) rides stdout, which the
+  // revert/cherry-pick/rebase cores now carry into the error alongside stderr,
+  // so both markers arrive. Deliberately the same shape as SUBJECT_ECHO_LINE
+  // below: the line that PROVES a conflict is the one that must not be read as
+  // its NAME.
   /^(?:error: )?[Cc]ould not (?:apply|revert) /m,
   /^(?:error: |hint: )Resolve all conflicts/m,
   // Git's own line is always uppercase; a path named "conflict (old)" is not.
@@ -127,12 +128,18 @@ const DIRTY_TREE_MARKERS = [
   // `pull --rebase` refuses up front, with a distinct line per dirty kind.
   "cannot pull with rebase: you have unstaged changes",
   "cannot pull with rebase: your index contains uncommitted changes",
+  // Plain `rebase` and `rebase --onto` refuse the same way, on ANY dirty tracked
+  // file rather than an overlapping one. Kept at full length: the bare
+  // "you have unstaged changes" suffix would subsume the two lines above and
+  // widen the match against arbitrary git output.
+  "cannot rebase: you have unstaged changes",
+  "cannot rebase: your index contains uncommitted changes",
 ];
 
 /**
  * Whether a thrown value is git refusing an operation because it would
- * overwrite uncommitted work — the pull / merge / switch dirty-tree family that
- * stash-and-reapply recovers from. Anything else (including real merge
+ * overwrite uncommitted work — the pull / merge / rebase / switch dirty-tree
+ * family that stash-and-reapply recovers from. Anything else (including real merge
  * conflicts) returns false and keeps its normal error presentation.
  */
 export function isDirtyTreeRefusal(e: unknown): boolean {
@@ -156,12 +163,14 @@ const SUBJECT_ECHO_LINE = /^(?:error: )?[Cc]ould not (?:apply|revert) /;
 const OP_ADVICE = /\bgit (rebase|merge|cherry-pick|revert) --continue\b/;
 
 /** A conflicted merge is the one family git gives no `--continue` advice for —
- *  it prints this verdict instead, on stdout, with stderr empty (which is why
- *  `git_merge_core` backfills stdout into the error). Line-anchored, because the
- *  phrase is otherwise reachable as user text. Rebase and cherry-pick emit it on
- *  neither stream, so it names a merge unambiguously — both halves are pinned by
- *  the Rust canary `conflict_output_still_matches_the_anchored_frontend_markers`
- *  (autostash.rs); keep the two in step. */
+ *  it prints this verdict instead, on stdout. Both the plain merge and a
+ *  merge-mode `pull` carry that stdout into the error (`git_merge_core` and
+ *  `run_git_mutating_with_creds`), so this names either one. Line-anchored,
+ *  because the phrase is otherwise reachable as user text. Rebase and
+ *  cherry-pick emit it on neither stream, so it means a merge unambiguously —
+ *  all of it pinned by the Rust canary
+ *  `conflict_output_still_matches_the_anchored_frontend_markers` (autostash.rs);
+ *  keep the two in step. */
 const MERGE_VERDICT = /^Automatic merge failed/;
 
 /** The paused operation and the action that finishes it. The name is read only

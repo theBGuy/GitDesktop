@@ -16,14 +16,18 @@ import { Spinner } from "@/components/ui/spinner";
 export interface StashReapplyTarget {
   operationLabel: string;
   detail?: string;
+  /** Preposition joining `detail` to the operation word. Defaults to "from";
+   *  a rebase runs *onto* its target, so it supplies its own. */
+  detailPreposition?: string;
 }
 
 /**
- * Offered when git refuses a pull, update, or merge because it would overwrite
- * uncommitted changes: set them aside, run the operation, put them back. Open
- * when `target` is the pending recovery (null = closed). Presentational — the
- * caller owns the compound mutation, the pending flag, and persisting the
- * preference when `always` comes back true.
+ * Offered when git refuses a pull, update, merge, or rebase because it would
+ * overwrite uncommitted changes: set them aside, run the operation, put them
+ * back. Open when `target` is the pending recovery (null = closed). Also
+ * offered proactively by a surface that already knows the tree is dirty.
+ * Presentational — the caller owns the compound mutation, the pending flag, and
+ * persisting the preference when `always` comes back true.
  */
 export function StashReapplyDialog({
   target,
@@ -39,6 +43,9 @@ export function StashReapplyDialog({
   const open = target !== null;
   const [always, setAlways] = useState(false);
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const detailPhrase = target?.detail
+    ? ` ${target.detailPreposition ?? "from"} ${target.detail}`
+    : "";
 
   // Reset the checkbox each time the dialog opens — it only ever shows while
   // the preference is off, so a remembered tick would be meaningless.
@@ -62,9 +69,9 @@ export function StashReapplyDialog({
           <DialogDescription>
             GitDesktop can set your uncommitted changes aside, run the{" "}
             {target?.operationLabel}
-            {target?.detail ? ` from ${target.detail}` : ""}, then put them back
-            where they were — including untracked files. If putting them back
-            hits conflicts, your stash is kept as a backup.
+            {detailPhrase}, then put them back where they were — including
+            untracked files. If putting them back hits conflicts, your stash is
+            kept as a backup.
           </DialogDescription>
         </DialogHeader>
         <label className="flex cursor-pointer items-center gap-2 text-xs">

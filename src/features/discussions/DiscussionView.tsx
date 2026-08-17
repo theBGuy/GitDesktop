@@ -74,7 +74,11 @@ import type { PrThreadOut } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { cn } from "@/lib/utils";
 
@@ -126,35 +130,57 @@ const CLOSE_REASONS: [string, DiscussionCloseReason][] = [
 type ReplyDraft = { targetId: string | null; body: string };
 const EMPTY_REPLY: ReplyDraft = { targetId: null, body: "" };
 
+/** The `useDisabledReason` contract on a plain `<button>` — the chip carries its
+ *  own sizing, which none of the vendored Button's sizes match (same arm as
+ *  `ReactionButton`, which it sits beside). */
 function UpvoteButton({
   count,
   active,
   onClick,
   disabled,
+  reason,
 }: {
   count: number;
   active: boolean;
   onClick: () => void;
   disabled?: boolean;
+  /** Why the toggle is held — shown and announced while `disabled` holds.
+   *  Absent leaves a native disable, which explains nothing. */
+  reason?: string | null;
 }) {
+  const title = active ? "Remove upvote" : "Upvote";
+  const { blockedReason, reasonId, wrapperTitle, describedBy, nativeProps } =
+    useDisabledReason({ disabled, reason, title, onClick });
+
   return (
-    <button
-      type="button"
-      aria-label={`Upvote, ${count}`}
-      aria-pressed={active}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        "flex items-center gap-1 border px-1.5 py-0.5 text-[11px] tabular-nums transition-colors",
-        active
-          ? "border-primary bg-primary/10 text-foreground"
-          : "text-muted-foreground hover:bg-muted/60",
-      )}
-      title={active ? "Remove upvote" : "Upvote"}
+    <span
+      className={cn("inline-flex", blockedReason && "cursor-not-allowed")}
+      title={wrapperTitle}
     >
-      <CaretUpIcon className="size-3" weight="bold" />
-      {count}
-    </button>
+      <button
+        {...nativeProps}
+        type="button"
+        aria-label={`Upvote, ${count}`}
+        aria-pressed={active}
+        aria-describedby={describedBy}
+        title={title}
+        className={cn(
+          ARIA_DISABLED_CLASS,
+          "flex items-center gap-1 border px-1.5 py-0.5 text-[11px] tabular-nums transition-colors",
+          active
+            ? "border-primary bg-primary/10 text-foreground"
+            : "text-muted-foreground hover:bg-muted/60",
+        )}
+      >
+        <CaretUpIcon className="size-3" weight="bold" />
+        {count}
+      </button>
+      {blockedReason ? (
+        <span id={reasonId} className="sr-only">
+          {blockedReason}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -265,6 +291,26 @@ export function DiscussionView({
         return undefined;
     }
   })();
+  const upvoteHeld = toggleUpvoteMutation.isPending || detailsStale;
+  // Ranked like `busyReason`: the switch window outranks the write the viewer
+  // started, being the hold they can't have caused themselves.
+  const upvoteReason = (() => {
+    switch (true) {
+      case detailsStale:
+        return staleReason;
+      case toggleUpvoteMutation.isPending:
+        return "Recording your upvote…";
+      default:
+        return undefined;
+    }
+  })();
+  // A typed draft rides Close/Reopen rather than being discarded by them.
+  const draftRidesStateChange = !!compose.value.trim();
+  // Both live on menu items, which drop pointer events when disabled and have no
+  // room for a title, so the draft promise rides the label like the reasons
+  // above — but a hold outranks it: a held item posts nothing.
+  const draftSuffix =
+    staleSuffix || (draftRidesStateChange ? " — posts your draft" : "");
 
   function submitComment() {
     if (!d || detailsStale || !compose.value.trim()) return;
@@ -382,19 +428,63 @@ export function DiscussionView({
     });
   }
 
-  function doClose(reason: DiscussionCloseReason) {
-    if (!d || detailsStale) return;
+  /** Posts the riding draft ahead of a state change. False means the comment
+   *  failed and the state change is abandoned: the draft stays put for a retry,
+   *  so a lost note can never be the price of a failed close. */
+  async function postRidingDraft(discussionId: string): Promise<boolean> {
+    if (!draftRidesStateChange) return true;
+    const submittedFor = discussionIdentity;
+    try {
+      await addComment.mutateAsync({
+        discussionId,
+        body: compose.value.trim(),
+      });
+      // Only a landed comment clears the draft.
+      compose.clearFor(submittedFor);
+      return true;
+    } catch (e) {
+      onError(e);
+      return false;
+    }
+  }
+
+  async function doClose(reason: DiscussionCloseReason) {
+    // Unlike the button surfaces, a menu item can be reached again during the
+    // comment round trip (the menu closes on click, but reopens) — so the
+    // in-flight post is the re-entry guard the item's own `disabled` can't be.
+    if (!d || detailsStale || addComment.isPending) return;
+    // Captured before the await: posting clears the draft, and the error arm
+    // below has to know a comment already went out.
+    const withComment = draftRidesStateChange;
+    if (!(await postRidingDraft(d.id))) return;
     closeDiscussion.mutate(
       { discussionId: d.id, reason },
-      { onSuccess: () => toast.success("Discussion closed"), onError },
+      {
+        onSuccess: () => toast.success("Discussion closed"),
+        onError: (e) =>
+          withComment
+            ? toastErrorWithNote(
+                e,
+                "Your comment was posted, but closing failed — try Close again.",
+              )
+            : onError(e),
+      },
     );
   }
 
-  function doReopen() {
-    if (!d || detailsStale) return;
+  async function doReopen() {
+    if (!d || detailsStale || addComment.isPending) return;
+    const withComment = draftRidesStateChange;
+    if (!(await postRidingDraft(d.id))) return;
     reopenDiscussion.mutate(d.id, {
       onSuccess: () => toast.success("Discussion reopened"),
-      onError,
+      onError: (e) =>
+        withComment
+          ? toastErrorWithNote(
+              e,
+              "Your comment was posted, but reopening failed — try Reopen again.",
+            )
+          : onError(e),
     });
   }
 
@@ -466,7 +556,7 @@ export function DiscussionView({
                   disabled={reopenDiscussion.isPending || detailsStale}
                   onClick={doReopen}
                 >
-                  Reopen discussion{staleSuffix}
+                  Reopen discussion{draftSuffix}
                 </DropdownMenuItem>
               ) : (
                 <DropdownMenuSub>
@@ -476,7 +566,7 @@ export function DiscussionView({
                     disabled={closeDiscussion.isPending || detailsStale}
                     className="data-disabled:opacity-50"
                   >
-                    Close discussion…{staleSuffix}
+                    Close discussion…{draftSuffix}
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>
                     {CLOSE_REASONS.map(([label, reason]) => (
@@ -636,16 +726,14 @@ export function DiscussionView({
                 No description provided.
               </p>
             )}
-            {/* The counts are a read and stay; the toggles hold through a switch.
-                Disabled buttons swallow `title`, so the wait rides this row. */}
-            <div
-              title={staleReason}
-              className="flex flex-wrap items-center gap-2 pt-1"
-            >
+            {/* The counts are a read and stay; the toggles hold through a
+                switch, each carrying its own reason. */}
+            <div className="flex flex-wrap items-center gap-2 pt-1">
               <UpvoteButton
                 count={d.upvoteCount}
                 active={d.viewerHasUpvoted}
-                disabled={toggleUpvoteMutation.isPending || detailsStale}
+                disabled={upvoteHeld}
+                reason={upvoteReason}
                 onClick={() => toggleUpvote(d.id, d.viewerHasUpvoted)}
               />
               <ReactionBar
@@ -702,14 +790,13 @@ export function DiscussionView({
                   reactionsReason={staleReason}
                 />
               </div>
-              <div
-                title={staleReason}
-                className="flex flex-wrap items-center gap-2"
-              >
+              {/* Every control in the row carries its own reason. */}
+              <div className="flex flex-wrap items-center gap-2">
                 <UpvoteButton
                   count={c.upvoteCount}
                   active={c.viewerHasUpvoted}
-                  disabled={toggleUpvoteMutation.isPending || detailsStale}
+                  disabled={upvoteHeld}
+                  reason={upvoteReason}
                   onClick={() => toggleUpvote(c.id, c.viewerHasUpvoted)}
                 />
                 <DisabledReasonButton

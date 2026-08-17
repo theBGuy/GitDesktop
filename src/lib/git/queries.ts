@@ -65,8 +65,6 @@ import {
   listUserWorktrees,
   lockWorktree,
   moveUserWorktree,
-  pruneWorktrees,
-  removeWorktree,
   repairWorktrees,
   unlockWorktree,
 } from "./worktree";
@@ -318,22 +316,6 @@ export function useRepairWorktrees(repo: string) {
   return useRepoMutation(repo, (_: void) => repairWorktrees(repo), {
     invalidate: [worktreeKey(repo)],
   });
-}
-
-/** Removes a user worktree (keeping its branch), then prunes any stale admin
- *  entry. `force` drops a worktree with uncommitted changes. */
-export function useRemoveUserWorktree(repo: string) {
-  return useRepoMutation(
-    repo,
-    async (args: { path: string; force: boolean }) => {
-      // Pass branch=null: removing a worktree leaves the branch intact (deleting
-      // a user's branch is a separate, more destructive action).
-      await removeWorktree(repo, args.path, null, args.force);
-      // Best-effort cleanup; a clean remove already drops its own admin entry.
-      await pruneWorktrees(repo).catch(() => undefined);
-    },
-    { invalidate: [worktreeKey(repo), repoKeys.branches(repo)] },
-  );
 }
 
 /** Owners (from each repo's origin remote) for grouping the repo list. */
@@ -3675,7 +3657,7 @@ export function usePull(repo: string) {
   );
 }
 
-/** Stash → run → reapply variants of pull, merge, and switch. Whole-repo
+/** Stash → run → reapply variants of pull, merge, rebase, and switch. Whole-repo
  *  invalidation like their plain counterparts: each moves HEAD and rewrites the
  *  working tree, and the stash list changes too. */
 export function usePullAutostash(repo: string) {
@@ -3687,6 +3669,18 @@ export function usePullAutostash(repo: string) {
 export function useMergeAutostash(repo: string) {
   return useRepoMutation(repo, (branch: string) =>
     api.gitMergeAutostash(repo, branch),
+  );
+}
+
+export function useRebaseAutostash(repo: string) {
+  return useRepoMutation(repo, (branch: string) =>
+    api.gitRebaseAutostash(repo, branch),
+  );
+}
+
+export function useRebaseOntoAutostash(repo: string) {
+  return useRepoMutation(repo, (args: { newBase: string; oldBase: string }) =>
+    api.gitRebaseOntoAutostash(repo, args.newBase, args.oldBase),
   );
 }
 

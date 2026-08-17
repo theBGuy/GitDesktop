@@ -757,6 +757,20 @@ export const gitPullAutostash = (repoPath: string, mode: PullMode = "ffOnly") =>
 export const gitMergeAutostash = (repoPath: string, branch: string) =>
   invoke<AutostashOutcome>("git_merge_autostash", { repoPath, branch });
 
+export const gitRebaseAutostash = (repoPath: string, branch: string) =>
+  invoke<AutostashOutcome>("git_rebase_autostash", { repoPath, branch });
+
+export const gitRebaseOntoAutostash = (
+  repoPath: string,
+  newBase: string,
+  oldBase: string,
+) =>
+  invoke<AutostashOutcome>("git_rebase_onto_autostash", {
+    repoPath,
+    newBase,
+    oldBase,
+  });
+
 export const gitSwitchAutostash = (
   repoPath: string,
   name: string,

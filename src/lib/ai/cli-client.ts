@@ -148,6 +148,9 @@ export function createCliClient(settings: AiSettings): AiClient {
             return;
           } else if (event.kind === "error") {
             settled = true;
+            // `partialText` is intentionally discarded on this path: the contract above
+            // is that a failed run never paints text into the caller's draft field, and
+            // these Tier-1 callers write straight into an editable field.
             throw new Error(event.message);
           }
           // status / tool / nativeSession are ignored: Tier-1 runs no tools and

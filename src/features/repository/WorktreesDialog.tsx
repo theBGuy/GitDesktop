@@ -55,6 +55,7 @@ import {
 import type { UserWorktree } from "@/lib/git/worktree";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
+import { useWorktreeRemovals } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
@@ -148,6 +149,10 @@ function WorktreeList({
 
   const list = worktrees.data ?? [];
   const linkedCount = list.filter((w) => !w.isMain).length;
+  // A row whose folder is being removed still lists (the removal can outlive
+  // this dialog), but nothing may act on it until it settles.
+  const removals = useWorktreeRemovals(repoPath);
+  const removingPaths = new Set(removals.map((r) => r.path));
 
   const onKeyDown = listKeyboardNav({
     items: list,
@@ -159,6 +164,7 @@ function WorktreeList({
 
   async function handleOpen(w: UserWorktree) {
     if (norm(w.path) === activeNorm) return; // already here
+    if (removingPaths.has(w.path)) return; // its folder is going away
     await openWorktree(w.path);
     onClose();
   }
@@ -201,6 +207,7 @@ function WorktreeList({
                 worktree={w}
                 highlighted={i === highlight}
                 isCurrent={norm(w.path) === activeNorm}
+                isRemoving={removingPaths.has(w.path)}
                 onFocus={() => setHighlight(i)}
                 onOpen={() => handleOpen(w)}
                 onRename={() => setRenameTarget(w)}
@@ -287,6 +294,7 @@ function WorktreeRow({
   worktree,
   highlighted,
   isCurrent,
+  isRemoving,
   onFocus,
   onOpen,
   onRename,
@@ -298,6 +306,8 @@ function WorktreeRow({
   worktree: UserWorktree;
   highlighted: boolean;
   isCurrent: boolean;
+  /** Its folder is being removed right now — every action on it is off. */
+  isRemoving: boolean;
   onFocus: () => void;
   onOpen: () => void;
   onRename: () => void;
@@ -307,6 +317,15 @@ function WorktreeRow({
   onPromote: () => void;
 }) {
   const { path, branch, isMain, isDetached, isLocked, lockReason } = worktree;
+
+  // A disabled menu item can't carry a tooltip, so its blocking reason rides the
+  // label. A removal in progress outranks the other reasons — the worktree is on
+  // its way out, whatever else is true of it.
+  const itemLabel = (label: string, otherReason?: string) => {
+    if (isRemoving) return `${label} (removal in progress)`;
+    return otherReason ? `${label} (${otherReason})` : label;
+  };
+  const openTitle = isCurrent ? "Current worktree" : "Open this worktree";
 
   return (
     <div
@@ -325,16 +344,17 @@ function WorktreeRow({
         role="option"
         aria-selected={highlighted}
         // Not `disabled`: the current row must stay focusable so arrow-key nav
-        // can move through it. onOpen already no-ops on the current worktree.
-        aria-disabled={isCurrent || undefined}
+        // can move through it. onOpen already no-ops on the current worktree
+        // and on one being removed.
+        aria-disabled={isCurrent || isRemoving || undefined}
         data-wt-path={path}
         onFocus={onFocus}
         onClick={onOpen}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left",
-          isCurrent && "cursor-default",
+          (isCurrent || isRemoving) && "cursor-default",
         )}
-        title={isCurrent ? "Current worktree" : "Open this worktree"}
+        title={isRemoving ? "Removal in progress" : openTitle}
       >
         <GitBranchIcon
           weight={isCurrent ? "fill" : "regular"}
@@ -354,6 +374,7 @@ function WorktreeRow({
               isDetached={isDetached}
               isLocked={isLocked}
               lockReason={lockReason}
+              isRemoving={isRemoving}
             />
           </span>
           <span
@@ -382,10 +403,11 @@ function WorktreeRow({
           <DotsThreeVerticalIcon />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-44">
-          <DropdownMenuItem disabled={isCurrent} onClick={onOpen}>
+          <DropdownMenuItem disabled={isCurrent || isRemoving} onClick={onOpen}>
             <FolderOpenIcon />
-            {isCurrent ? "Current worktree" : "Open worktree"}
+            {itemLabel(isCurrent ? "Current worktree" : "Open worktree")}
           </DropdownMenuItem>
+          {/* Copying a path acts on nothing, so a removal doesn't block it. */}
           <DropdownMenuItem onClick={() => copyText(path, "Path copied")}>
             <CopyIcon />
             Copy path
@@ -394,44 +416,48 @@ function WorktreeRow({
             // git can't move the main worktree or a locked one, and moving the
             // one you're standing in risks a cwd lock + a stale active path —
             // rename it after switching away.
-            disabled={isMain || isCurrent || isLocked}
+            disabled={isMain || isCurrent || isLocked || isRemoving}
             onClick={onRename}
           >
             <PencilSimpleIcon />
-            {isLocked ? "Rename… (locked)" : "Rename…"}
+            {itemLabel("Rename…", isLocked ? "locked" : undefined)}
           </DropdownMenuItem>
           {!isMain &&
             (isLocked ? (
-              <DropdownMenuItem onClick={onUnlock}>
+              <DropdownMenuItem disabled={isRemoving} onClick={onUnlock}>
                 <LockSimpleOpenIcon />
-                Unlock
+                {itemLabel("Unlock")}
               </DropdownMenuItem>
             ) : (
-              <DropdownMenuItem onClick={onLock}>
+              <DropdownMenuItem disabled={isRemoving} onClick={onLock}>
                 <LockSimpleIcon />
-                Lock…
+                {itemLabel("Lock…")}
               </DropdownMenuItem>
             ))}
           {/* Promote moves this worktree's branch into the main workspace: it
               removes the worktree (a branch can't live in two) and checks the
               branch out in main. Only for a linked worktree that has a branch. */}
           {!isMain && !isDetached && (
-            <DropdownMenuItem disabled={isLocked} onClick={onPromote}>
+            <DropdownMenuItem
+              disabled={isLocked || isRemoving}
+              onClick={onPromote}
+            >
               <ArrowLineUpIcon />
-              {isLocked
-                ? "Promote to main workspace… (locked)"
-                : "Promote to main workspace…"}
+              {itemLabel(
+                "Promote to main workspace…",
+                isLocked ? "locked" : undefined,
+              )}
             </DropdownMenuItem>
           )}
           <DropdownMenuItem
             variant="destructive"
             // Can't delete the main worktree, nor the one you're standing in
             // (it'd leave the app pointing at a removed folder) — switch away first.
-            disabled={isMain || isCurrent}
+            disabled={isMain || isCurrent || isRemoving}
             onClick={onDelete}
           >
             <TrashIcon />
-            Delete worktree…
+            {itemLabel("Delete worktree…")}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -445,15 +471,25 @@ function RowTags({
   isDetached,
   isLocked,
   lockReason,
+  isRemoving,
 }: {
   isMain: boolean;
   isCurrent: boolean;
   isDetached: boolean;
   isLocked: boolean;
   lockReason: string;
+  isRemoving: boolean;
 }) {
   return (
     <>
+      {/* First and in words: it's why every action on this row is off, and the
+          repo banner behind this dialog is the only other place it shows. */}
+      {isRemoving && (
+        <Badge variant="outline" className="shrink-0">
+          <Spinner aria-hidden data-icon="inline-start" />
+          Removing…
+        </Badge>
+      )}
       {isMain && (
         <Badge variant="secondary" className="shrink-0">
           Main

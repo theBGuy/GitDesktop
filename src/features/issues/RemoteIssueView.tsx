@@ -74,7 +74,7 @@ import { providerLabel } from "@/lib/git/types";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
@@ -347,11 +347,67 @@ export function RemoteIssueView({
     makeQuoteReply({ composerRef, setBody: compose.set })(body);
   };
 
-  function doClose(reason: "completed" | "not_planned") {
+  // A typed draft rides Close/Reopen rather than being discarded by them. Gated
+  // on `canComment` so the labels below never promise a comment the provider
+  // won't take.
+  const draftRidesStateChange = canComment && !!compose.value.trim();
+  const draftSuffix = draftRidesStateChange ? " — posts your draft" : "";
+
+  /** Posts the riding draft ahead of a state change. False means the comment
+   *  failed and the state change is abandoned: the draft stays put for a retry,
+   *  so a lost note can never be the price of a failed close. */
+  async function postRidingDraft(): Promise<boolean> {
+    if (!draftRidesStateChange) return true;
+    const body = compose.value.trim();
+    const submittedFor = issueIdentity;
+    try {
+      await comment.mutateAsync({
+        number,
+        body,
+        author: forge.data?.login ?? "You",
+      });
+      // Only a landed comment clears the draft.
+      compose.clearFor(submittedFor);
+      return true;
+    } catch (e) {
+      onError(e);
+      return false;
+    }
+  }
+
+  async function doClose(reason: "completed" | "not_planned") {
+    // Captured before the await: posting clears the draft, and the error arm
+    // below has to know a comment already went out.
+    const withComment = draftRidesStateChange;
+    if (!(await postRidingDraft())) return;
     closeIssue.mutate(
       { number, reason },
-      { onSuccess: () => toast.success(`Closed #${number}`), onError },
+      {
+        onSuccess: () => toast.success(`Closed #${number}`),
+        onError: (e) =>
+          withComment
+            ? toastErrorWithNote(
+                e,
+                "Your comment was posted, but closing failed — try Close again.",
+              )
+            : onError(e),
+      },
     );
+  }
+
+  async function doReopen() {
+    const withComment = draftRidesStateChange;
+    if (!(await postRidingDraft())) return;
+    reopenIssue.mutate(number, {
+      onSuccess: () => toast.success(`Reopened #${number}`),
+      onError: (e) =>
+        withComment
+          ? toastErrorWithNote(
+              e,
+              "Your comment was posted, but reopening failed — try Reopen again.",
+            )
+          : onError(e),
+    });
   }
 
   function saveCommentEdit(commentId: string, body: string) {
@@ -470,14 +526,21 @@ export function RemoteIssueView({
       {canChangeState &&
         (isOpen ? (
           <>
+            {/* The label swaps while a draft rides along: the action changed
+                meaning, and only the label reaches a viewer before the click. */}
             <DisabledReasonButton
               variant="outline"
               size="sm"
               disabled={busy || triageBlocked}
               reason={triageReason ?? staleReason}
               onClick={() => doClose("completed")}
+              title={
+                draftRidesStateChange
+                  ? "Closes and posts your draft as a comment"
+                  : undefined
+              }
             >
-              Close issue
+              {draftRidesStateChange ? "Close with comment" : "Close issue"}
             </DisabledReasonButton>
             {/* Close reasons are a GitHub concept; GitLab has none. The caret is
                 a menu TRIGGER: native `disabled` holds the menu shut, and the
@@ -503,11 +566,14 @@ export function RemoteIssueView({
                   </DropdownMenuTrigger>
                 </span>
                 <DropdownMenuContent align="end" className="min-w-52">
+                  {/* A menu item drops pointer events when disabled and has no
+                      room for a title, so the draft promise rides the label —
+                      the same reason-in-label idiom the items above use. */}
                   <DropdownMenuItem onClick={() => doClose("completed")}>
-                    Close as completed
+                    Close as completed{draftSuffix}
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => doClose("not_planned")}>
-                    Close as not planned
+                    Close as not planned{draftSuffix}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -519,15 +585,15 @@ export function RemoteIssueView({
             size="sm"
             disabled={busy || triageBlocked}
             reason={triageReason ?? staleReason}
-            onClick={() =>
-              reopenIssue.mutate(number, {
-                onSuccess: () => toast.success(`Reopened #${number}`),
-                onError,
-              })
+            onClick={doReopen}
+            title={
+              draftRidesStateChange
+                ? "Reopens and posts your draft as a comment"
+                : undefined
             }
           >
             <ArrowCounterClockwiseIcon data-icon="inline-start" />
-            Reopen
+            {draftRidesStateChange ? "Reopen with comment" : "Reopen"}
           </DisabledReasonButton>
         ))}
     </>

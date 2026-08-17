@@ -36,6 +36,8 @@ import { listLocalPrs, updateLocalPr } from "@/lib/pulls/local";
 import {
   listReviews,
   type PersistedReview,
+  reviewHistoryKey,
+  reviewPartialKey,
   saveReview,
 } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
@@ -430,6 +432,8 @@ async function run(
     // Wall-clock start, mirrored into the persisted history record so an automated review
     // carries a real duration.
     const runStartedMs = Date.now();
+    // Per-action, so a second mode's run never inherits the first's text or verdict.
+    const progress: RunProgress = { text: "", timedOut: false };
     // Let-box so the rerun closure carries THIS run's own key (assigned right
     // after registration): a re-run of the fresh row must replace the fresh row,
     // not the stale one it grew from.
@@ -494,6 +498,7 @@ async function run(
         event,
         controller.signal,
         handle.setCliId,
+        progress,
       );
       if (handle.isCancelled()) {
         // The dock's Cancel already patched the row to "cancelled" (keeping its Re-run)
@@ -568,6 +573,31 @@ async function run(
       // errorMessage unwraps AppError/Error shapes — a raw interpolation renders
       // Tauri invoke rejections as "[object Object]" (observed live).
       const message = errorMessage(e);
+      // A run the backend killed at its deadline keeps whatever it wrote first: nothing
+      // else holds that text (the dock row is memory-only, no comment was delivered), so
+      // this record is its only copy. ONLY the timeout arm — the `looksLikeProviderError`
+      // throw's accumulated text is the provider's error message, not review output.
+      // Coverage stays safe for free: a PARTIAL is dropped by `listReviews`, so the
+      // pr-sync gate still sees this head as un-reviewed and re-reviews it.
+      let keptPartial = false;
+      if (
+        progress.timedOut &&
+        progress.text.trim() !== "" &&
+        (event.kind === "pr-open" || event.kind === "pr-sync")
+      ) {
+        // Resolved from the write itself, so the notification below only promises kept
+        // output when a record actually landed.
+        keptPartial = await persistPartialReviewHistory(
+          event,
+          action,
+          progress.text,
+          reviewCfg.model,
+          message,
+          runStartedMs,
+        )
+          .then(() => true)
+          .catch(() => false);
+      }
       toast.error(`AI ${label} failed: ${message}`);
       // Inbox parity with manual runs (reviews.ts's notifyReviewDone): a genuine failure
       // records an inbox row too, gated on the same automations pref.
@@ -578,7 +608,12 @@ async function run(
           event.kind === "commit"
             ? `"${event.hash.slice(0, 7)}"`
             : `"${event.title}"`;
-        const subtitle = message.trim() ? `${subject} — ${message}` : subject;
+        const reason = message.trim() ? `${subject} — ${message}` : subject;
+        // The inbox row is where a kept partial gets discovered — a durable failure that
+        // doesn't mention it reads as a run with nothing to show for it.
+        const subtitle = keptPartial
+          ? `${reason}${reason.endsWith(".") ? "" : "."} Partial output is kept under Previous reviews.`
+          : reason;
         // Local alias for the loop's `action: ReviewMode` — the Re-run closure's
         // `run` body sees the outer `action` fine, but aliasing keeps the object
         // literal (which also has a field named `action`) unambiguous to read.
@@ -692,6 +727,18 @@ interface ReviewResult {
   thoughts: string;
 }
 
+/** Live progress of one review run, owned by the CALLER so a run that throws can still
+ *  read what streamed before it died — {@link generateReviewText}'s return value is
+ *  reachable only on the success path. CLI providers only: the HTTP branch has no
+ *  backend deadline, so it never reports a timeout and its buffer is never kept. */
+interface RunProgress {
+  /** The newest text the stream reported (already the agent's own output — a killed
+   *  whole-message CLI's answer is adopted upstream in `runCliStream`). */
+  text: string;
+  /** The backend killed the run at its deadline, rather than the run failing outright. */
+  timedOut: boolean;
+}
+
 /** The whole unified diff a review event covers, from whichever source can serve
  *  it — every branch here lands unfiltered text that the caller then filters. */
 async function resolveDiff(
@@ -742,6 +789,8 @@ async function resolveDiff(
  * `signal` aborts the HTTP stream; `onCliId` reports the CLI run's id so the
  * caller can kill the subprocess (CLI providers don't take an AbortSignal).
  * Returns the final answer plus any agentic narration, or null for no changes.
+ * `progress` is filled as the run streams, so the caller's catch can keep a
+ * timed-out run's output (see {@link RunProgress}).
  */
 async function generateReviewText(
   ai: AiSettings,
@@ -749,6 +798,7 @@ async function generateReviewText(
   event: AutomationEvent,
   signal: AbortSignal,
   onCliId: (id: string) => void,
+  progress: RunProgress,
 ): Promise<ReviewResult | null> {
   // Independent of each other, and the settings are only needed by the filter
   // below (the budget profile reuses the same read) — so they resolve alongside
@@ -912,7 +962,6 @@ async function generateReviewText(
   // CLI providers (claude-cli/codex-cli) run as a subprocess, not the AI SDK —
   // route them the same way the interactive review does.
   if (isCliProvider(ai.provider)) {
-    let result = "";
     let thoughts = "";
     await runCliStream({
       ai,
@@ -925,18 +974,23 @@ async function generateReviewText(
       // The user's Review-timeout override (null = the backend's tier defaults).
       timeoutSecs: reviewTimeoutSecs(appSettings.reviewTimeout),
       timeoutConfigurable: true,
+      // Sunk into the caller-owned `progress` rather than a local: a timed-out run
+      // rejects, so a local would be unreachable exactly when the text matters most.
       // runCliStream replaces with the agent's final answer on done; the last
       // setText carries that clean review body (narration is peeled into onThoughts).
       setText: (t) => {
-        result = t;
+        progress.text = t;
       },
       setStatus: () => undefined,
       registerId: onCliId,
       onThoughts: (t) => {
         thoughts = t;
       },
+      onTimedOut: () => {
+        progress.timedOut = true;
+      },
     });
-    return { text: result, thoughts };
+    return { text: progress.text, thoughts };
   }
 
   const client = await createAiClient(ai);
@@ -1083,6 +1137,55 @@ async function persistReviewHistory(
     finishedAt: now,
   });
   await queryClient.invalidateQueries({
-    queryKey: ["review-history", event.repoPath, "origin", kind, ref],
+    queryKey: reviewHistoryKey(event.repoPath, "origin", kind, ref),
   });
+}
+
+/**
+ * Persists the output a TIMED-OUT automated review left behind, as a partial record
+ * (`phase: "error"`) — the failure-path sibling of {@link persistReviewHistory}. Callers
+ * must gate on the timeout arm: any other failure's accumulated text may be a provider
+ * error message rather than review output, so `timedOut` is true by construction here.
+ * A partial is invisible to every "previous review" read, so it neither feeds the next
+ * run's context nor marks this head covered for the pr-sync gate. Both query keys are
+ * invalidated — the partial key is the one the panel's restored output reads.
+ */
+async function persistPartialReviewHistory(
+  event: PrAutomationEvent,
+  mode: ReviewMode,
+  text: string,
+  model: string,
+  /** The failure reason shown with the kept output. */
+  error: string,
+  startedAtMs: number,
+): Promise<void> {
+  if (!text.trim()) return;
+  const kind = event.target.type;
+  const ref = targetRef(event);
+  await saveReview(event.repoPath, {
+    schemaVersion: 1,
+    id: crypto.randomUUID(),
+    kind,
+    ref,
+    // Origin-pinned like the rest of this path — the poller is origin-scoped.
+    lens: "origin",
+    mode,
+    model,
+    title: event.title,
+    text,
+    phase: "error",
+    error,
+    timedOut: true,
+    headSha: event.headSha ?? "",
+    startedAt: startedAtMs,
+    finishedAt: Date.now(),
+  });
+  await Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: reviewHistoryKey(event.repoPath, "origin", kind, ref),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: reviewPartialKey(event.repoPath, "origin", kind, ref),
+    }),
+  ]);
 }

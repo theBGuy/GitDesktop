@@ -44,7 +44,6 @@ export function RebaseOntoDialog({
   otherBranches,
   currentLabel,
   defaultBranch,
-  hasChanges,
   isPushed,
 }: {
   repoPath: string;
@@ -55,8 +54,6 @@ export function RebaseOntoDialog({
   otherBranches: Branch[];
   currentLabel: string;
   defaultBranch: string | null;
-  /** Dirty working tree — a rebase can't run until it's clean. */
-  hasChanges: boolean;
   /** The current branch tracks a remote — rebasing will need a force-push. */
   isPushed: boolean;
 }) {
@@ -92,12 +89,10 @@ export function RebaseOntoDialog({
   );
   const moving = comparison.data?.ahead ?? [];
   const movingCount = moving.length;
+  // No clean-tree term: uncommitted changes are handled by the caller's stash →
+  // rebase → reapply offer, not by blocking the run.
   const canRun =
-    !hasChanges &&
-    Boolean(newBase) &&
-    Boolean(oldBase) &&
-    !sameBranch &&
-    movingCount > 0;
+    Boolean(newBase) && Boolean(oldBase) && !sameBranch && movingCount > 0;
 
   function run() {
     if (!canRun) return;
@@ -105,17 +100,6 @@ export function RebaseOntoDialog({
   }
 
   function renderPreview() {
-    if (hasChanges) {
-      return (
-        <span className="flex items-start gap-1.5 text-warning">
-          <WarningIcon className="mt-px size-3.5 shrink-0" />
-          <span>
-            Commit or stash your changes first — a rebase needs a clean working
-            tree.
-          </span>
-        </span>
-      );
-    }
     if (sameBranch) {
       return (
         <span className="text-muted-foreground">

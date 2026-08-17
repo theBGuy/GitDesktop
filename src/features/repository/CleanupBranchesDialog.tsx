@@ -43,6 +43,57 @@ interface Candidate {
 
 const pluralBranches = (n: number) => `${n} branch${n === 1 ? "" : "es"}`;
 
+/**
+ * What the dialog is entitled to say about the pull-request half of merged
+ * detection: `"unavailable"` — it never ran, so pull requests go unmentioned;
+ * `"pending"` — still reading; `"failed"` — the read failed, which is a coverage
+ * gap worth naming; `"checked"` — read and complete.
+ */
+export type PrCheckState = "unavailable" | "pending" | "failed" | "checked";
+
+/**
+ * Derives that state from the forge capability and the closed-PR query. It takes
+ * `canGh` rather than the query flags alone because a repo whose forge has no
+ * pull requests never STARTS the query: its flags are indistinguishable from a
+ * finished, empty read, and "we looked and found none" is a claim the app hasn't
+ * earned there.
+ *
+ * `isPending` carries the same weight for a query that HAS started: status-pending
+ * means no data yet, which is also how an offline read looks, since react-query's
+ * default `networkMode: "online"` PAUSES the fetch rather than failing it
+ * (`isFetching` false, `isError` false). Without that arm an offline dialog would
+ * claim the pull requests came back clean.
+ */
+export function prCheckStateFrom(
+  canGh: boolean,
+  closedPrs: {
+    isError: boolean;
+    isPending: boolean;
+    isFetching: boolean;
+    isPlaceholderData: boolean;
+  },
+): PrCheckState {
+  if (!canGh) return "unavailable";
+  if (closedPrs.isError) return "failed";
+  if (closedPrs.isPending) return "pending";
+  // Data in hand, but a background refetch or a previous key's rows: still not an
+  // answer about THIS repo's pull requests.
+  if (closedPrs.isFetching || closedPrs.isPlaceholderData) return "pending";
+  return "checked";
+}
+
+/** The empty state's merged clause, per PR-check outcome. It names pull requests
+ *  only where they were actually read: a failed read gets its own caveat below,
+ *  and a check that never ran says nothing about them either way. */
+const EMPTY_MERGED_CLAUSE: Record<PrCheckState, string> = {
+  checked:
+    ", directly or through a recent pull request, and nothing is idle for ",
+  pending:
+    ", directly or through a recent pull request, and nothing is idle for ",
+  failed: " and nothing is idle for ",
+  unavailable: " and nothing is idle for ",
+};
+
 /** The one state badge a row can carry, in precedence order. Text carries the
  *  meaning — the color never stands alone. */
 function RowBadge({
@@ -96,8 +147,7 @@ export function CleanupBranchesDialog({
   isProtected,
   isInWorktree,
   prMergedByBranch,
-  prMergedPending,
-  prMergedFailed,
+  prCheckState,
 }: {
   repoPath: string;
   open: boolean;
@@ -114,12 +164,10 @@ export function CleanupBranchesDialog({
    *  Name-keyed and limited to the PRs the app has fetched, so it labels rows,
    *  never selects them. */
   prMergedByBranch: Map<string, string>;
-  /** True while that map is still filling — the empty state must not claim the
-   *  pull requests were checked before they were read. */
-  prMergedPending: boolean;
-  /** True when reading them FAILED. A read the app couldn't make is not an
-   *  absence of merges, so the copy drops the pull-request claim and says so. */
-  prMergedFailed: boolean;
+  /** How far the pull-request half of merged detection got. Every line that
+   *  mentions pull requests renders off this: a read that failed says so, and
+   *  one that never ran leaves them out rather than passing for a clean check. */
+  prCheckState: PrCheckState;
 }) {
   const queryClient = useQueryClient();
   // Shared 30s clock: the idle-past-the-window classification below must
@@ -237,7 +285,8 @@ export function CleanupBranchesDialog({
   // Age-based candidates already show instantly (branch data is cached), so this
   // only gates the truly-empty first paint.
   const checkingMerged =
-    (Boolean(defaultBranch) && divergence.isLoading) || prMergedPending;
+    (Boolean(defaultBranch) && divergence.isLoading) ||
+    prCheckState === "pending";
 
   const selectedCount = candidateNames.filter((n) => selected.has(n)).length;
   const allChecked =
@@ -352,9 +401,10 @@ export function CleanupBranchesDialog({
               Local branches already merged into{" "}
               <span className="font-mono">
                 {defaultBranch ?? "the default branch"}
-              </span>{" "}
-              — directly or through a recent pull request — or with no commits
-              in a while.{" "}
+              </span>
+              {prCheckState === "unavailable"
+                ? ", or with no commits in a while. "
+                : " — directly or through a recent pull request — or with no commits in a while. "}
               {mode === "archive"
                 ? "Archiving hides them from the switcher — unarchive anytime."
                 : "Deleting removes them permanently, including commits only on them."}
@@ -464,11 +514,9 @@ export function CleanupBranchesDialog({
               <span className="font-mono">
                 {defaultBranch ?? "the default branch"}
               </span>
-              {prMergedFailed
-                ? " and nothing is idle for "
-                : ", directly or through a recent pull request, and nothing is idle for "}
+              {EMPTY_MERGED_CLAUSE[prCheckState]}
               {windowDays} days. Try a shorter window.
-              {prMergedFailed
+              {prCheckState === "failed"
                 ? " Pull requests couldn't be checked, so a branch merged through one may be missing here."
                 : null}
             </p>
@@ -482,7 +530,7 @@ export function CleanupBranchesDialog({
                   Checking which branches are merged…
                 </p>
               )}
-              {prMergedFailed && (
+              {prCheckState === "failed" && (
                 <p className="px-1 py-1 text-[11px] text-muted-foreground">
                   Pull requests couldn't be checked — a branch merged through
                   one may be missing.

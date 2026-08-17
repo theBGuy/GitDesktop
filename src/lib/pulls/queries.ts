@@ -16,8 +16,11 @@ import {
 import {
   clearReviewsFor,
   deleteReview,
+  listPartialReviews,
   listReviews,
+  reviewHistoryKey,
   reviewPartialKey,
+  reviewPartialsKey,
   updateReviewText,
 } from "./reviews-history";
 
@@ -64,13 +67,6 @@ export function useDeleteLocalPr(repo: string) {
 
 type PrKind = "remote" | "local";
 
-const reviewHistoryKey = (
-  repo: string,
-  lens: RemoteLens,
-  kind: PrKind,
-  ref: string,
-) => ["review-history", repo, lens, kind, ref] as const;
-
 /** Persisted AI reviews for a PR (both modes), newest first. Read-only — never
  *  creates a record, so a never-reviewed PR's first run stays unchanged. */
 export function useReviewHistory(
@@ -82,6 +78,22 @@ export function useReviewHistory(
   return useQuery({
     queryKey: reviewHistoryKey(repo, lens, kind, ref),
     queryFn: () => listReviews(repo, lens, kind, ref),
+  });
+}
+
+/** Kept PARTIAL runs for a PR (both modes), newest first — the timed-out output the
+ *  history list shows beside completed reviews. Its own hook, never a widening of
+ *  {@link useReviewHistory}: callers that mean "the previous review" (the panel's
+ *  context banner, the automation gates) must not be able to read a partial by accident. */
+export function useReviewPartials(
+  repo: string,
+  lens: RemoteLens,
+  kind: PrKind,
+  ref: string,
+) {
+  return useQuery({
+    queryKey: reviewPartialsKey(repo, lens, kind, ref),
+    queryFn: () => listPartialReviews(repo, lens, kind, ref),
   });
 }
 
@@ -98,6 +110,8 @@ function useReviewHistoryMutation<TArgs>(
     // Both keys: every mutation here writes the whole record set, and clear/delete
     // remove kept PARTIAL runs too (they carry no phase filter). Refreshing only the
     // completed-review key would leave a deleted partial's cached text on screen.
+    // The partial key is invalidated as a PREFIX, which covers the list read keyed
+    // under it as well as the single latest-partial read.
     onSettled: () =>
       Promise.all([
         queryClient.invalidateQueries({

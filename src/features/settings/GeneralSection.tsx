@@ -111,14 +111,14 @@ export const GeneralSection = withForm({
           <form.AppField name="autoStashOnPull">
             {(field) => (
               <field.CheckboxField
-                label="Automatically stash and reapply on pull, merge, and branch updates"
+                label="Automatically stash and reapply on pull, merge, rebase, and branch updates"
                 className="flex cursor-pointer items-center gap-2 text-xs"
               />
             )}
           </form.AppField>
           <p className="text-xs text-muted-foreground">
-            When a pull, merge, or branch update would overwrite uncommitted
-            changes, stash them, run it, then reapply.
+            When a pull, merge, rebase, or branch update would overwrite
+            uncommitted changes, stash them, run it, then reapply.
           </p>
         </div>
         <div className="space-y-1.5">

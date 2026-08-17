@@ -2,7 +2,12 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
 import type { AutostashOutcome, PullMode } from "@/lib/git/api";
-import { useMergeAutostash, usePullAutostash } from "@/lib/git/queries";
+import {
+  useMergeAutostash,
+  usePullAutostash,
+  useRebaseAutostash,
+  useRebaseOntoAutostash,
+} from "@/lib/git/queries";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
 import {
@@ -90,7 +95,9 @@ export function reportAutostashOutcome(
 /** Which compound to run once the user confirms. */
 export type StashReapplyRun =
   | { op: "pull"; mode: PullMode }
-  | { op: "merge"; ref: string };
+  | { op: "merge"; ref: string }
+  | { op: "rebase"; ref: string }
+  | { op: "rebaseOnto"; newBase: string; oldBase: string };
 
 /** One surface's pending recovery: what to say, and what to run. */
 export interface StashReapplyRequest {
@@ -98,6 +105,9 @@ export interface StashReapplyRequest {
   operationLabel: string;
   /** Optional phrase naming the operation's target, e.g. `upstream/main`. */
   detail?: string;
+  /** Preposition joining `detail` to the operation word in the prompt.
+   *  Defaults to "from"; a rebase runs *onto* its target. */
+  detailPreposition?: string;
   /** Toast for a clean stash → run → reapply. */
   reappliedMessage: string;
   /** Toast when nothing needed stashing. Required — the user confirmed this
@@ -109,8 +119,12 @@ export interface StashReapplyRequest {
 /**
  * The classify → prompt → retry → report choreography shared by every surface
  * that can hit a dirty-tree refusal (pull, update from upstream, update branch
- * from). Owns the prompt's state and the two compound mutations, so a call site
- * only says what it was doing and how to redo it.
+ * from, rebase). Owns the prompt's state and the compound mutations, so a call
+ * site only says what it was doing and how to redo it.
+ *
+ * `begin` is also the proactive entry point: a surface that already knows the
+ * tree is dirty (the rebase-onto dialog) offers the compound instead of letting
+ * git refuse first.
  *
  * With "Always stash and reapply" saved, the prompt is skipped and the compound
  * runs straight away.
@@ -120,9 +134,15 @@ export function useStashReapplyRecovery(repoPath: string) {
   const saveSettings = useSaveSettings();
   const pullAutostash = usePullAutostash(repoPath);
   const mergeAutostash = useMergeAutostash(repoPath);
+  const rebaseAutostash = useRebaseAutostash(repoPath);
+  const rebaseOntoAutostash = useRebaseOntoAutostash(repoPath);
   const [request, setRequest] = useState<StashReapplyRequest | null>(null);
 
-  const pending = pullAutostash.isPending || mergeAutostash.isPending;
+  const pending =
+    pullAutostash.isPending ||
+    mergeAutostash.isPending ||
+    rebaseAutostash.isPending ||
+    rebaseOntoAutostash.isPending;
 
   function runRecovery(req: StashReapplyRequest) {
     const copy: AutostashCopy = {
@@ -140,8 +160,24 @@ export function useStashReapplyRecovery(repoPath: string) {
         toastError(e);
       },
     };
-    if (req.run.op === "pull") pullAutostash.mutate(req.run.mode, opts);
-    else mergeAutostash.mutate(req.run.ref, opts);
+    const run = req.run;
+    switch (run.op) {
+      case "pull":
+        pullAutostash.mutate(run.mode, opts);
+        return;
+      case "merge":
+        mergeAutostash.mutate(run.ref, opts);
+        return;
+      case "rebase":
+        rebaseAutostash.mutate(run.ref, opts);
+        return;
+      case "rebaseOnto":
+        rebaseOntoAutostash.mutate(
+          { newBase: run.newBase, oldBase: run.oldBase },
+          opts,
+        );
+        return;
+    }
   }
 
   /** Start the recovery for an already-classified refusal. */
@@ -179,6 +215,7 @@ export function useStashReapplyRecovery(repoPath: string) {
             ? ({
                 operationLabel: request.operationLabel,
                 detail: request.detail,
+                detailPreposition: request.detailPreposition,
               } satisfies StashReapplyTarget)
             : null
         }

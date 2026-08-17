@@ -133,7 +133,7 @@ export const capabilities: Capability[] = [
   {
     group: "Rewrite & recovery",
     label:
-      "Stash and reapply — one click when a pull, merge, update or switch is blocked",
+      "Stash and reapply — one click when a pull, merge, rebase, update or switch is blocked",
   },
   {
     group: "Rewrite & recovery",
@@ -273,6 +273,11 @@ export const capabilities: Capability[] = [
   {
     group: "Issues & discussions",
     label: "GitHub Discussions — read, post & react",
+  },
+  {
+    group: "Issues & discussions",
+    label:
+      "Close or reopen with a comment — on PRs, issues & discussions, your draft posts alongside",
   },
 
   // — CI, tags & releases —

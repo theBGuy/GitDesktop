@@ -84,6 +84,7 @@ import { OpRecoveryBanner } from "./OpRecoveryBanner";
 import { RepoHeader } from "./RepoHeader";
 import { usePrNotifications } from "./usePrNotifications";
 import { useRepoVisibilityProbe } from "./useRepoVisibilityProbe";
+import { WorktreeRemovalBanner } from "./WorktreeRemovalBanner";
 
 // Base OS window title. In a `tauri dev` session (Vite serving) it gets a
 // "(Dev)" suffix so the dev instance is tellable apart in the taskbar / Alt-Tab
@@ -399,6 +400,7 @@ export function RepositoryView() {
     <div className="flex min-h-0 flex-1 flex-col">
       <RepoHeader repoPath={repoPath} />
       <OpRecoveryBanner repoPath={repoPath} />
+      <WorktreeRemovalBanner repoPath={repoPath} />
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-96 shrink-0 flex-col border-r">
           <Tabs

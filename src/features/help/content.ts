@@ -439,14 +439,16 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   push publishes it under its own name — pairs with pushing a branch without switching to it
   (below).
 - **Clean up branches** — from the switcher's menu or the command palette — opens a bulk
-  sweep of stale branches: those **merged** into the default branch — directly, or through a
-  recent pull request, so squash- and rebase-merged branches turn up too, each badged
-  **merged #123** with the pull request that took them — and those with no commits in a
-  chosen window (30/60/90 days). Branches your own history calls merged, and idle ones,
-  start **pre-checked**; a pull-request match goes by branch name, so it never pre-checks
-  a row on its own — it badges one for you to confirm. Review the list, then **archive**
-  them (reversible) or **delete** them together. The current branch, the default branch,
-  and protected branches are never included.
+  sweep of stale branches: those **merged** into the default branch — directly, or, where
+  the repository's forge connection can supply them, through a recent pull request, so
+  squash- and rebase-merged branches turn up too, each badged **merged #123** with the pull
+  request that took them — and those with no commits in a chosen window (30/60/90 days).
+  The dialog describes exactly the checks it made, naming pull requests only where it read
+  them, so you always know what the list in front of you covers. Branches your own history
+  calls merged, and idle ones, start **pre-checked**; a pull-request match goes by branch
+  name, so it never pre-checks a row on its own — it badges one for you to confirm. Review
+  the list, then **archive** them (reversible) or **delete** them together. The current
+  branch, the default branch, and protected branches are never included.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that
@@ -466,6 +468,8 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   branch you meant to base on and the branch you actually did, and only your branch's own
   commits move — the wrong base's commits are left behind. A preview lists exactly which
   commits will move before you run it, and any conflicts drop into the resolve flow below.
+  Run it with uncommitted changes and it offers to stash them, rebase, and put them back
+  (see *Stash and reapply*).
 - **Update a branch from its own upstream** without switching to it: when a branch is
   behind the remote it tracks, its context menu offers **Update from _origin/…_**. This
   is the "just merged a PR — bring the default branch current before I switch back" flow;
@@ -554,9 +558,13 @@ test, or review several branches at once without stashing or switching.
   removed: renaming needs an unlock first, and deleting asks for a forced confirmation.
   Useful for one on a removable or network drive; **Unlock** to undo.
 - **Delete** a worktree to remove its folder; its branch is kept. A worktree with
-  uncommitted changes, or a locked one, asks before force-removing. The main worktree,
-  and whichever one you're currently in, can't be renamed or deleted — switch away first.
-  A locked worktree can't be renamed until you unlock it.
+  uncommitted changes, or a locked one, asks before force-removing. Removing a worktree can
+  take a few minutes, and you can close the dialog and carry on: the removal keeps a line at
+  the top of the repository view until it finishes, its row here reads **Removing…**, and
+  the actions held while it runs say *removal in progress*. It runs to completion once
+  started, so there's nothing to cancel. The main worktree, and whichever one you're
+  currently in, can't be renamed or deleted — switch away first. A locked worktree can't be
+  renamed until you unlock it.
 - **Promote to main workspace** brings a worktree's branch into your main checkout: it
   removes the worktree (a branch can't be checked out in two at once) and checks that branch
   out in the main workspace. The worktree must be clean first; any uncommitted work in the
@@ -609,15 +617,16 @@ the pull runs, then they come back on top of it. If reapplying them hits conflic
 conflicted files appear in **Changes** to resolve as usual and the stash is kept as a backup
 until you're done; if they can't go back at all (say the pull brought in a file with the
 same name), they stay safely in the stash. The same recovery covers
-**Update from upstream**, updating the branch you're on from another branch, and **merging**
-a branch into the one you're on. A **squash**, **no-fast-forward**, or strategy merge reports
+**Update from upstream**, updating the branch you're on from another branch, **merging**
+a branch into the one you're on, and **rebasing** (the branch menu's **Rebase** and
+**Change base…** alike). A **squash**, **no-fast-forward**, or strategy merge reports
 the refusal instead: the recovery redoes the merge plainly, so offering it there would drop
 the option you chose.
 
 Tick **Always stash and reapply** in the prompt — or turn on **Automatically stash and
-reapply on pull, merge, and branch updates** under **Settings → General** — and those
-operations recover on their own, with no prompt. Either way it only ever kicks in when git
-actually refuses the operation.
+reapply on pull, merge, rebase, and branch updates** under **Settings → General** — and
+those operations recover on their own, with no prompt. Either way it only kicks in when
+uncommitted changes would otherwise block the operation.
 
 ## Update a fork from upstream
 
@@ -966,7 +975,8 @@ is open, {{kbd:generate-commit-message}} runs its **Generate** for you.{{/ai}}
 Point the app at a **GitLab** repo and the same tab lists its **merge requests** (open and
 closed/merged) next to any local PRs. Open one for the description, comments, commits, and a
 highlighted **diff** (with an **Open on GitLab** link) — and the GitLab MR writes:
-**comment** on it (and **edit** or **delete** your own comments), **close / reopen** it,
+**comment** on it (and **edit** or **delete** your own comments), **close / reopen** it
+(posting your drafted comment alongside, as **request changes** does),
 **edit** its title and description (and **retarget** its target branch),
 **approve / unapprove** it (a reviewer action,
 with the approval count shown inline), **request changes** (the blocking reviewer state —
@@ -1072,9 +1082,10 @@ or GitLab read that couldn't get through.
 ## Local PRs
 
 A **local PR** is the same review workflow against any two branches with **no remote at
-all** — describe it in Markdown, comment, label, approve, and merge locally. Local PRs
-are private to you and never written into the repo. When you're ready, **promote** a
-local PR to a real GitHub PR or GitLab MR in one click, history preserved.
+all** — describe it in Markdown, comment, label, approve, close or reopen (posting your
+drafted comment alongside), and merge locally. Local PRs are private to you and never
+written into the repo. When you're ready, **promote** a local PR to a real GitHub PR or
+GitLab MR in one click, history preserved.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA
@@ -1138,9 +1149,11 @@ reviewing model's context window (probing Ollama live), or pick Compact / Standa
 Expanded. **Review timeout** (shown when an agent CLI drives reviews or security audits)
 caps how long such a review may run before it's stopped: **Auto** allows 5 minutes (20 when
 the review is agentic — always, for Codex), or pin a fixed limit that applies to every
-agent-CLI review. Whatever the reviewer already wrote is kept when the limit hits: it stays
-on screen and is saved with the pull request, labelled **Timed out — partial output kept**,
-so it's still there after a restart. Kept output is never treated as a finished review — it
+agent-CLI review. Whatever the reviewer already wrote is kept when the limit hits, for an
+automated pull-request review as much as one you started yourself: it stays on screen and is saved with
+the pull request, labelled **Timed out — partial output kept**, so it's still there after a
+restart. It also gets its own row under **Previous reviews**, where you can read, copy, or
+delete it like any other record. Kept output is never treated as a finished review — it
 doesn't feed the next run's context and doesn't count as coverage for an automated review,
 so run it again for a full one.
 
@@ -1151,9 +1164,9 @@ breach.
 **One review at a time — queue the other.** A PR streams one AI review at a time,
 but you don't have to pick between a code review and a security audit: start one
 while the other is running and it **queues**, then starts automatically when the
-first finishes (whose result moves to **Previous reviews**). A chip shows what's up
-next; **Dismiss** drops it, and cancelling the running review still lets the queued
-one proceed.
+first finishes (whose result moves to **Previous reviews**, kept partial output
+included). A chip shows what's up next; **Dismiss** drops it, and cancelling the running
+review still lets the queued one proceed.
 
 **Agentic review.** The panel's **Agentic review** toggle gives the reviewer read-only
 tools so that, instead of relying on the prompt's truncated summary, it pulls the **full PR
@@ -1200,7 +1213,8 @@ GitLab actions are available.)
 Browse, filter, and open issues in a full view: body, comments, labels, assignees,
 milestone, and reactions. The **funnel** filter is the same searchable author/label
 popup as the PR list. **Create** an issue, comment with the Markdown editor, edit,
-add labels, **close / reopen**, **lock**, and **transfer** an issue to another repo.
+add labels, **close / reopen** (posting your drafted comment alongside), **lock**, and
+**transfer** an issue to another repo.
 
 - **Sub-issues** — break an issue into a parent/child checklist with completion tracking.
 - **Dependencies** — link issues as blocked-by / blocking.
@@ -1233,7 +1247,7 @@ reads **Create in \<parent\>**.
 Point the app at a **GitLab** repo and the same tab lists its **issues** (open and closed)
 next to any local issues. Open one to read the description and comments — and the GitLab
 issue **writes**: **comment** on the issue (and **edit** or **delete** your own comments),
-**close / reopen** it, **edit** its title and
+**close / reopen** it (posting your drafted comment alongside), **edit** its title and
 description, **react** with emoji on the description and comments (GitLab's award emoji),
 and set its **assignees**, **labels**, and **milestone** right in the side
 rail. The rail also carries GitLab-unique fields: a **due date** (type a date and
@@ -1316,9 +1330,9 @@ credential** with one button instead of re-entering it.
 ## Local issues
 
 A **local issue** is a private, offline to-do tracked in the app — create, edit, label,
-and close it with no remote. When it's ready to share, **promote** it to a GitHub or
-GitLab issue — or, when the repo has a **linked Jira project**, to a Jira issue — in one
-click.
+and close or reopen it with no remote, your drafted comment posted alongside. When it's
+ready to share, **promote** it to a GitHub or GitLab issue — or, when the repo has a
+**linked Jira project**, to a Jira issue — in one click.
 {{ai}}
 ## Hand off to an agent
 
@@ -1336,9 +1350,12 @@ part in GitHub Discussions for the repo. (Discussions must be enabled on the rep
 - Read **threaded conversations** — top-level comments with nested replies — and post,
   edit, delete, or hide comments with the Markdown editor.
 - In a Q&A discussion, **mark a reply as the answer**.
-- Add **reactions** and upvotes.
+- Add **reactions** and upvotes. The upvote chip stays keyboard-reachable while a vote is
+  being recorded, or while the discussion you picked is still loading, and says what it's
+  waiting on.
 - Manage a discussion's lifecycle: **close** (as resolved / outdated / duplicate),
-  **reopen**, **lock**, and **delete**.
+  **reopen**, **lock**, and **delete**. Closing or reopening posts your drafted comment
+  alongside, and the menu item says so while a draft is waiting.
 - **Create a discussion**, or **create an issue from a discussion** when a thread turns
   into actionable work (the new issue links back to it).`,
   },
@@ -2128,8 +2145,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   background work continues; launching the app again while it's running —
   tray-hidden or not — focuses the existing window), **automatically fetch from your
   remotes** (a background fetch on an interval you pick — it never pulls, merges, or
-  changes your files), **automatically stash and reapply on pull, merge, and branch
-  updates** (an operation git would refuse over uncommitted changes recovers on its own,
+  changes your files), **automatically stash and reapply on pull, merge, rebase, and branch
+  updates** (an operation uncommitted changes would otherwise block recovers on its own,
   no prompt), **reapply stashed changes after switching branches** (*Stash and switch*
   puts your changes back once the switch lands), **create pull requests as drafts** by
   default (off by default — pre-checks the Create-PR dialog's draft box, still

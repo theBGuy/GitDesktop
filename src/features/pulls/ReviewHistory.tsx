@@ -1,6 +1,7 @@
 import {
   CaretDownIcon,
   CaretRightIcon,
+  CopyIcon,
   PencilSimpleIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
@@ -10,24 +11,32 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { Textarea } from "@/components/ui/textarea";
+import { copyText } from "@/lib/clipboard";
 import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   useClearReviews,
   useDeleteReview,
   useReviewHistory,
+  useReviewPartials,
   useUpdateReviewText,
 } from "@/lib/pulls/queries";
+import {
+  isPartialReview,
+  partialReviewReason,
+  reviewText,
+} from "@/lib/pulls/reviews-history";
 import { formatDuration, validEpochMs } from "@/lib/time";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /**
- * The "Previous reviews" disclosure — past AI reviews for this PR (both modes),
- * each expandable to its text. The latest per mode is what the next run feeds as
- * soft context, so each row is **editable** ("trim before re-running"): deleting
- * a false finding here persists, and the trimmed text is what travels next round.
- * Rows are arrow-key navigable; every text surface is `ph-no-capture` (it quotes
- * the user's source + AI output).
+ * The "Previous reviews" disclosure — past AI reviews for this PR (both modes) plus
+ * any kept partial output from a run that stopped early, each expandable to its text.
+ * The latest completed review per mode is what the next run feeds as soft context, so
+ * those rows are **editable** ("trim before re-running"): deleting a false finding here
+ * persists, and the trimmed text is what travels next round. Kept partials feed nothing,
+ * so they offer no trim. Rows are arrow-key navigable; every text surface is
+ * `ph-no-capture` (it quotes the user's source + AI output).
  */
 export function ReviewHistory({
   repoPath,
@@ -43,6 +52,7 @@ export function ReviewHistory({
   prRef: string;
 }) {
   const history = useReviewHistory(repoPath, lens, prKind, prRef);
+  const partials = useReviewPartials(repoPath, lens, prKind, prRef);
   const del = useDeleteReview(repoPath, lens, prKind, prRef);
   const clear = useClearReviews(repoPath, lens, prKind, prRef);
   const update = useUpdateReviewText(repoPath, lens, prKind, prRef);
@@ -53,7 +63,13 @@ export function ReviewHistory({
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
 
-  const records = history.data ?? [];
+  // ONE list: completed reviews and kept partial runs interleave by time, so the
+  // disclosure, its count, and the arrow-key walk all cover every stored record — a PR
+  // whose only record is a kept partial still gets its row (and its Clear).
+  const partialRecords = partials.data ?? [];
+  const records = [...(history.data ?? []), ...partialRecords].sort(
+    (a, b) => b.finishedAt - a.finishedAt,
+  );
   if (records.length === 0) return null;
 
   function toggleExpand(id: string) {
@@ -97,8 +113,12 @@ export function ReviewHistory({
         {open &&
           (confirmingClear ? (
             <span className="ml-auto flex items-center gap-1">
+              {/* Clearing takes the kept partials with it (the store's filter carries no
+                  phase test), so say so whenever there is one to lose. */}
               <span className="text-muted-foreground">
-                Clear this PR's history?
+                {partialRecords.length > 0
+                  ? "Clear this PR's history, including the kept partial output?"
+                  : "Clear this PR's history?"}
               </span>
               <Button
                 variant="ghost"
@@ -152,6 +172,7 @@ export function ReviewHistory({
               r.finishedAt - r.startedAt > 0
                 ? formatDuration(r.finishedAt - r.startedAt)
                 : null;
+            const partial = isPartialReview(r);
             return (
               <div key={r.id} role="listitem" className="border">
                 <div className="flex items-center gap-2 px-2 py-1">
@@ -173,6 +194,17 @@ export function ReviewHistory({
                     <Badge variant="secondary" className="shrink-0">
                       {r.mode === "security" ? "Security" : "Review"}
                     </Badge>
+                    {/* Says in words what the tone shows — kept output is not a review. */}
+                    {partial && (
+                      <Badge
+                        variant="outline"
+                        className="shrink-0 border-warning/40 bg-warning/10 text-warning"
+                      >
+                        {partialReviewReason(r).timedOut
+                          ? "Timed out — partial output"
+                          : "Stopped early"}
+                      </Badge>
+                    )}
                     <span className="truncate font-mono text-muted-foreground">
                       {r.model || "model"}
                     </span>
@@ -194,7 +226,11 @@ export function ReviewHistory({
                   </button>
                   <button
                     type="button"
-                    aria-label="Delete this review from history"
+                    aria-label={
+                      partial
+                        ? "Delete this kept partial output from history"
+                        : "Delete this review from history"
+                    }
                     className="shrink-0 text-muted-foreground hover:text-destructive"
                     onClick={() => del.mutate(r.id)}
                   >
@@ -235,19 +271,44 @@ export function ReviewHistory({
                       </div>
                     ) : (
                       <>
-                        <Markdown>{r.text}</Markdown>
-                        {r.thoughts?.trim() && (
-                          <ThoughtsDisclosure thoughts={r.thoughts} />
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="xs"
-                          className="mt-1 text-muted-foreground"
-                          onClick={() => startEdit(r.id, r.text)}
-                        >
-                          <PencilSimpleIcon data-icon="inline-start" />
-                          Trim before re-running
-                        </Button>
+                        {/* Capped + self-scrolling: an expanded review is arbitrarily long,
+                            and this disclosure sits in the panel's fixed header, above the
+                            Close/Merge controls. */}
+                        <div className="max-h-64 overflow-y-auto">
+                          <Markdown>{reviewText(r)}</Markdown>
+                          {r.thoughts?.trim() && (
+                            <ThoughtsDisclosure thoughts={r.thoughts} />
+                          )}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          {/* Kept output feeds no later run, so it gets no trim — only the
+                              copy path, since it may be the only copy left. */}
+                          {!partial && (
+                            <Button
+                              variant="ghost"
+                              size="xs"
+                              className="text-muted-foreground"
+                              onClick={() => startEdit(r.id, reviewText(r))}
+                            >
+                              <PencilSimpleIcon data-icon="inline-start" />
+                              Trim before re-running
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="text-muted-foreground"
+                            onClick={() =>
+                              copyText(
+                                reviewText(r),
+                                partial ? "Partial output copied" : "Review copied",
+                              )
+                            }
+                          >
+                            <CopyIcon data-icon="inline-start" />
+                            Copy
+                          </Button>
+                        </div>
                       </>
                     )}
                   </div>

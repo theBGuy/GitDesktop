@@ -342,6 +342,46 @@ export function LocalPrView({
     });
   }
 
+  // A typed note rides Close/Reopen rather than being discarded by them.
+  const draftRidesStateChange = !!comment.trim();
+
+  /** Close/Reopen, carrying any typed note. The note is appended in the SAME
+   *  record mutation as the status flip, so the store can never persist one
+   *  without the other; the draft clears only once that write lands. */
+  function setStatus(next: "open" | "closed") {
+    // Appending the note makes this non-idempotent, and the mutate callback
+    // re-reads the record from disk — so a second click lands after the first
+    // note is already stored and would post it twice.
+    if (!pr || update.isPending) return;
+    const note = comment.trim();
+    update.mutate(
+      {
+        id: pr.id,
+        mutate: (cur) => ({
+          ...cur,
+          comments: note
+            ? [
+                ...cur.comments,
+                {
+                  id: crypto.randomUUID(),
+                  body: note,
+                  createdAt: new Date().toISOString(),
+                },
+              ]
+            : cur.comments,
+          status: next,
+          closedAt: next === "closed" ? new Date().toISOString() : undefined,
+        }),
+      },
+      {
+        onSuccess: () => setComment(""),
+        // Nothing was written, the note included — say so rather than leave a
+        // silent no-op behind a button that promised to post it.
+        onError: toastError,
+      },
+    );
+  }
+
   function openEdit() {
     if (!pr) return;
     // The chips OWN the trailing ref block: peel any exact `Closes #N` /
@@ -938,21 +978,19 @@ export function LocalPrView({
                 {ghStatus.data?.provider === "gitlab" ? "GitLab" : "GitHub"}
               </Button>
             )}
+            {/* The label swaps while a note rides along: the action changed
+                meaning, and only the label reaches a viewer before the click. */}
             <Button
               variant="outline"
               size="sm"
-              onClick={() =>
-                update.mutate({
-                  id: pr.id,
-                  mutate: (cur) => ({
-                    ...cur,
-                    status: "closed",
-                    closedAt: new Date().toISOString(),
-                  }),
-                })
+              onClick={() => setStatus("closed")}
+              title={
+                draftRidesStateChange
+                  ? "Closes and posts your draft as a comment"
+                  : undefined
               }
             >
-              Close
+              {draftRidesStateChange ? "Close with comment" : "Close"}
             </Button>
             <span className="flex-1" />
             {/* GitHub-style "Update branch": only when head has fallen behind
@@ -1055,19 +1093,15 @@ export function LocalPrView({
             <Button
               variant="outline"
               size="sm"
-              onClick={() =>
-                update.mutate({
-                  id: pr.id,
-                  mutate: (cur) => ({
-                    ...cur,
-                    status: "open",
-                    closedAt: undefined,
-                  }),
-                })
+              onClick={() => setStatus("open")}
+              title={
+                draftRidesStateChange
+                  ? "Reopens and posts your draft as a comment"
+                  : undefined
               }
             >
               <ArrowCounterClockwiseIcon data-icon="inline-start" />
-              Reopen
+              {draftRidesStateChange ? "Reopen with comment" : "Reopen"}
             </Button>
           </>
         )}

@@ -162,7 +162,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
@@ -1345,6 +1345,78 @@ export function RemotePrView({
         },
       },
     );
+  }
+
+  // A typed draft rides Close/Reopen rather than being discarded by them. Gated
+  // on `canComment` so the labels below never promise a comment the provider
+  // won't take.
+  const draftRidesStateChange = canComment && !!compose.value.trim();
+
+  /** Posts the riding draft ahead of a state change. False means the comment
+   *  failed and the state change is abandoned: the draft stays put for a retry,
+   *  so a lost note can never be the price of a failed close. */
+  async function postRidingDraft(): Promise<boolean> {
+    if (!draftRidesStateChange) return true;
+    const body = compose.value.trim();
+    const submittedFor = entityKey;
+    try {
+      await comment.mutateAsync({
+        number,
+        body,
+        author: forge.data?.login ?? "You",
+      });
+      // Only a landed comment clears the draft.
+      compose.clearFor(submittedFor);
+      return true;
+    } catch (e) {
+      onError(e);
+      return false;
+    }
+  }
+
+  async function doClose() {
+    // Captured before the await: posting clears the draft, and the error arm
+    // below has to know a comment already went out.
+    const withComment = draftRidesStateChange;
+    if (!(await postRidingDraft())) return;
+    closePr.mutate(number, {
+      // The riding comment posts through `mutateAsync`, which skips the
+      // "Comment added" toast the ordinary submit gets, so the confirmation
+      // here has to account for both writes.
+      onSuccess: () =>
+        toast.success(
+          withComment
+            ? `Closed #${number} and posted your comment`
+            : `Closed #${number}`,
+        ),
+      onError: (e) =>
+        withComment
+          ? toastErrorWithNote(
+              e,
+              "Your comment was posted, but closing failed — try Close again.",
+            )
+          : onError(e),
+    });
+  }
+
+  async function doReopen() {
+    const withComment = draftRidesStateChange;
+    if (!(await postRidingDraft())) return;
+    reopenPr.mutate(number, {
+      onSuccess: () =>
+        toast.success(
+          withComment
+            ? `Reopened #${number} and posted your comment`
+            : `Reopened #${number}`,
+        ),
+      onError: (e) =>
+        withComment
+          ? toastErrorWithNote(
+              e,
+              "Your comment was posted, but reopening failed — try Reopen again.",
+            )
+          : onError(e),
+    });
   }
 
   function confirmMerge() {
@@ -2840,19 +2912,21 @@ export function RemotePrView({
           )}
           <span className="flex-1" />
           {canChangeState && (
+            // The label swaps while a draft rides along: the action changed
+            // meaning, and only the label reaches a viewer before the click.
             <DisabledReasonButton
               variant="outline"
               size="sm"
               disabled={busy || triageBlocked}
               reason={triageReason ?? staleReason}
-              onClick={() =>
-                closePr.mutate(number, {
-                  onSuccess: () => toast.success(`Closed #${number}`),
-                  onError,
-                })
+              onClick={doClose}
+              title={
+                draftRidesStateChange
+                  ? "Closes and posts your draft as a comment"
+                  : undefined
               }
             >
-              Close
+              {draftRidesStateChange ? "Close with comment" : "Close"}
             </DisabledReasonButton>
           )}
           {canMerge && (
@@ -2952,15 +3026,15 @@ export function RemotePrView({
             size="sm"
             disabled={busy || triageBlocked}
             reason={triageReason ?? staleReason}
-            onClick={() =>
-              reopenPr.mutate(number, {
-                onSuccess: () => toast.success(`Reopened #${number}`),
-                onError,
-              })
+            onClick={doReopen}
+            title={
+              draftRidesStateChange
+                ? "Reopens and posts your draft as a comment"
+                : undefined
             }
           >
             <ArrowCounterClockwiseIcon data-icon="inline-start" />
-            Reopen
+            {draftRidesStateChange ? "Reopen with comment" : "Reopen"}
           </DisabledReasonButton>
         </div>
       )}

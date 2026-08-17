@@ -58,6 +58,13 @@ export function isPartialReview(r: Pick<PersistedReview, "phase">): boolean {
   return r.phase === "error";
 }
 
+/** A stored record's findings text, type-checked out of untrusted store JSON (a
+ *  hand-edited `pr-reviews.json` reaches the UI verbatim): a non-string `text` reads
+ *  as no text instead of throwing mid-render. Shared by every surface that renders a
+ *  record's body. */
+export const reviewText = (r: Pick<PersistedReview, "text">): string =>
+  typeof r.text === "string" ? r.text : "";
+
 /** A partial record's stop reason, type-checked out of untrusted store JSON: a
  *  non-boolean `timedOut` reads as "failed", a non-string `error` as no reason. */
 export function partialReviewReason(
@@ -233,6 +240,17 @@ export async function getLatestReview(
     .sort((a, b) => b.finishedAt - a.finishedAt)[0];
 }
 
+/** Query key for {@link listReviews}. Homed here beside the read it keys, for the
+ *  same reason as {@link reviewPartialKey}: the review store and the automations
+ *  runner both invalidate it after a write, and neither may pull `queries.ts`'s
+ *  react-query/forge-status graph in to do so. */
+export const reviewHistoryKey = (
+  repo: string,
+  lens: RemoteLens,
+  kind: "remote" | "local",
+  ref: string,
+) => ["review-history", repo, lens, kind, ref] as const;
+
 /** Query key for {@link getLatestPartialReview}. Lives here, beside the read it keys,
  *  so all three consumers share one builder: any writer that can remove a partial
  *  record (history clear, per-record delete) must invalidate it, and a hand-written
@@ -268,11 +286,45 @@ export async function getLatestPartialReview(
     .sort((a, b) => b.finishedAt - a.finishedAt)[0];
 }
 
-/** Every COMPLETED review for a PR (both modes), newest first. Two consumers, so
- *  narrowing what this returns is not a UI-only change: the "Previous reviews"
- *  disclosure, and the runner's pr-sync gate, which reads the whole retained set to
- *  decide whether a head was already covered. Kept partial runs are excluded for that
- *  second reason above all — a timed-out run must not mark a head as reviewed
+/** Query key for {@link listPartialReviews}. Deliberately a CHILD of
+ *  {@link reviewPartialKey}: react-query matches by prefix, so every writer that already
+ *  invalidates that key refreshes this list too, and the set of keys a partial-removing
+ *  writer must remember stays at two. */
+export const reviewPartialsKey = (
+  repo: string,
+  lens: RemoteLens,
+  kind: "remote" | "local",
+  ref: string,
+) => [...reviewPartialKey(repo, lens, kind, ref), "list"] as const;
+
+/** Every kept PARTIAL run for a PR, newest first — at most one per mode, so at most two.
+ *  A separate read rather than a widening of {@link listReviews} because that read's other
+ *  consumers are the automation coverage gates (the runner's pr-open/pr-sync gate and
+ *  `prOpenEligible`): a partial visible there would mark a head as already reviewed and
+ *  silently stop the automated re-review the timeout made necessary. */
+export async function listPartialReviews(
+  repo: string,
+  lens: RemoteLens,
+  kind: "remote" | "local",
+  ref: string,
+): Promise<PersistedReview[]> {
+  const all = await read(repo);
+  return all
+    .filter(
+      (r) =>
+        lensOf(r) === lens &&
+        r.kind === kind &&
+        r.ref === ref &&
+        isPartialReview(r),
+    )
+    .sort((a, b) => b.finishedAt - a.finishedAt);
+}
+
+/** Every COMPLETED review for a PR (both modes), newest first. Three consumers, so
+ *  what this returns is not a UI-only concern: the "Previous reviews" disclosure, the
+ *  runner's pr-open/pr-sync gate, and `prOpenEligible` — the two gates read the whole
+ *  retained set to decide whether a head was already covered. Kept partial runs are
+ *  excluded for that reason above all — a timed-out run must not mark a head as reviewed
  *  ({@link getLatestPartialReview} is the one reader that wants them). `fresh`
  *  re-reads the store from disk first — see {@link read}. */
 export async function listReviews(
@@ -339,9 +391,11 @@ export async function deleteReview(repo: string, id: string): Promise<void> {
   });
 }
 
-/** Clears every persisted review for ONE PR (both modes) — scoped so clearing
- *  from a PR's panel never touches the other PRs' history in the same repo, nor the
- *  other lens's same-numbered PR. */
+/** Clears every persisted record for ONE PR (both modes) — completed reviews AND
+ *  kept partial runs, since the filter deliberately carries no phase test: "clear this
+ *  PR's history" means every stored copy of its output. Scoped so clearing from a PR's
+ *  panel never touches the other PRs' history in the same repo, nor the other lens's
+ *  same-numbered PR. */
 export async function clearReviewsFor(
   repo: string,
   lens: RemoteLens,

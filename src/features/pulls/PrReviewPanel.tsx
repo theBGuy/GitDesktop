@@ -56,6 +56,7 @@ import {
   type PersistedReview,
   partialReviewReason,
   reviewPartialKey,
+  reviewText,
 } from "@/lib/pulls/reviews-history";
 import { useSecretPreview, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -80,12 +81,6 @@ const DELTA_NOTE: Partial<Record<string, string>> = {
 };
 
 const PROVIDER_IDS = Object.keys(PROVIDER_LABELS) as AiProviderId[];
-
-/** A stored review's findings text. The plugin-store JSON is untrusted (a
- *  hand-edited `pr-reviews.json` reaches here verbatim), so a non-string `text` reads
- *  as no text instead of throwing mid-render. */
-const reviewText = (r: PersistedReview): string =>
-  typeof r.text === "string" ? r.text : "";
 
 export function PrReviewPanel({
   context,
@@ -360,7 +355,10 @@ export function PrReviewPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="space-y-2 border-b p-3">
+      {/* shrink-0: the header holds growable content (banners, the history disclosure),
+          and a flex child that may shrink would squeeze the output ScrollArea below to
+          nothing instead of scrolling itself. */}
+      <div className="shrink-0 space-y-2 border-b p-3">
         {/* DOM capture, not Base UI event props. Pointer-down is load-bearing:
             WebKit doesn't focus buttons on click, and the Select moves focus into
             a portalled popup outside this container. */}
@@ -792,6 +790,19 @@ export function PrReviewPanel({
                 </span>
               </p>
               <Markdown>{reviewText(keptPartial)}</Markdown>
+              {/* After a restart this record is the only copy of the output, so it needs
+                  its own copy path — the live run's Copy above is gone with the run. */}
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-muted-foreground"
+                onClick={() =>
+                  copyText(reviewText(keptPartial), "Partial output copied")
+                }
+              >
+                <CopyIcon data-icon="inline-start" />
+                Copy
+              </Button>
             </div>
           ) : (
             <p className="text-xs text-muted-foreground">

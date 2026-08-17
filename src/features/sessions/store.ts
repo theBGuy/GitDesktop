@@ -420,7 +420,22 @@ async function runTurn(
             statusText: "",
           });
         else if (ev.kind === "error")
-          patchTurn({ status: "error", error: ev.message, statusText: "" });
+          patchTurn({
+            status: "error",
+            error: ev.message,
+            statusText: "",
+            // Keep what a killed turn wrote — a whole-message agent (codex) delivers it
+            // only here, so adopt it when nothing streamed, mirroring the done branch.
+            ...(ev.partialText?.trim() && !last.narration
+              ? {
+                  narration: ev.partialText,
+                  segments: appendTranscriptText(
+                    last.segments ?? [],
+                    ev.partialText,
+                  ),
+                }
+              : {}),
+          });
         else if (ev.kind === "done")
           patchTurn({
             costUsd: ev.costUsd,

@@ -133,11 +133,13 @@ divergence vs. the default branch (labeled with the default's name), and a
 PR badge.
 
 - **Clean up branches** ⭐: one reviewed list that archives or deletes every
-  stale branch — merged into the default branch (directly, or by a recent
-  pull request, so squash and rebase merges count) or with no commits in a
-  chosen window. Pull-request matches go by branch name, so they only badge
-  a row with the PR that took it; pre-checking still comes from your own
-  history: merged into the default branch, or idle past that window.
+  stale branch — merged into the default branch (directly, or, where the
+  forge connection supplies them, by a recent pull request, so squash and
+  rebase merges count) or with no commits in a chosen window. Pull-request
+  matches go by branch name, so they only badge a row with the PR that took
+  it; pre-checking still comes from your own history: merged into the
+  default branch, or idle past that window. The dialog names pull requests
+  only where it read them, so its wording matches the checks behind the list.
 - **Advanced merge tooling** ⭐: predicts a merge's result in memory before
   you commit (fast-forward, already up to date, clean, or exactly which
   files will conflict), with `--no-ff` and a clearly cautioned auto-resolve
@@ -227,17 +229,18 @@ pushing and pulling stay manual.
   a file, review the proposal as a diff, and accept it (per file or all at
   once). Multi-provider, runs on local Ollama or a keyless Claude Code /
   Codex agent, and never writes until you accept.
-- **Stash and reapply**: when a pull, a merge into the branch you're on, or
-  a branch update is blocked by uncommitted changes, or you switch branches
-  with work in progress, one click stashes them (untracked files included),
-  runs the operation, and reapplies them on the other side. A reapply that
-  hits conflicts drops the files into the changes list; one that git refuses
+- **Stash and reapply**: when a pull, a merge into the branch you're on, a
+  rebase (the branch menu's *Rebase* and *Change base* alike), or a branch
+  update is blocked by uncommitted changes, or you switch branches with work
+  in progress, one click stashes them (untracked files included), runs the
+  operation, and reapplies them on the other side. A reapply that hits
+  conflicts drops the files into the changes list; one that git refuses
   outright leaves them safely stashed. The stash is kept as a backup either
   way. (A squash, no-ff, or strategy merge reports the refusal instead — the
   recovery redoes the merge plainly.) **Automatically stash and reapply on
-  pull, merge, and branch updates** (Settings → General) makes it the default
-  for all of them, and the switch prompt remembers a **Reapply after
-  switching** choice of its own.
+  pull, merge, rebase, and branch updates** (Settings → General) makes it
+  the default for all of them, and the switch prompt remembers a **Reapply
+  after switching** choice of its own.
 
 ### Pull requests
 
@@ -428,8 +431,9 @@ needed; publishable to GitHub in one click). Browse, create, and edit
 (drafting with AI from your repo's issue templates), react with emoji, and
 manage the full metadata: labels, assignees, milestones, issue type,
 sub-issues, dependencies (blocked-by / blocking), and development links
-(linked and closing PRs and branches, plus create-a-branch). Duplicate,
-transfer, pin/unpin, lock/unlock, or delete. On a **fork**, the same
+(linked and closing PRs and branches, plus create-a-branch). Close or
+reopen with a comment you've drafted posted alongside; duplicate, transfer,
+pin/unpin, lock/unlock, or delete. On a **fork**, the same
 **Fork | Upstream** lens as the PR tab browses the parent repository's
 issues (creating one under the Upstream lens opens it **on the parent**),
 and a fork with issues turned off offers a one-click switch to Upstream
@@ -451,7 +455,8 @@ any other local issue.
 ### Discussions
 
 Browse and read a repository's GitHub Discussions, create and edit them, and
-react or upvote, with Write/Preview markdown throughout.
+react or upvote, with Write/Preview markdown throughout. Close or reopen one
+with a comment you've drafted posted alongside.
 
 ### GitHub Actions
 
@@ -545,17 +550,18 @@ and Insights charts GitLab pipelines. GitHub is unchanged.
 <details>
 <summary><strong>The full GitLab surface</strong>: merge requests, issues, time tracking, pipelines and releases, project settings</summary>
 
-- **Merge requests**: comment (edit/delete your own), close/reopen, edit
-  title and description, retarget the target branch, react with emoji (on
-  descriptions and comments), edit labels and assignees, **approve /
-  unapprove**, request changes, and **merge** (merge/squash), including
-  **auto-merge** when the pipeline succeeds (cancelable in place). Plus
-  **create**: push-and-open, drafts, duplicate-MR detection. GitLab's own
-  merge status drives the **conflict** strip, the list's **Conflicts** chip,
-  and in-app conflict resolution.
-- **Issues**: create, comment, close/reopen, edit labels and assignees, set
-  **milestone**, **due date** (past-due cue), **confidential**, and **linked
-  related issues**; lock/unlock, move to another project, or delete.
+- **Merge requests**: comment (edit/delete your own), close/reopen with a
+  drafted comment posted alongside, edit title and description, retarget the
+  target branch, react with emoji (on descriptions and comments), edit labels
+  and assignees, **approve / unapprove**, request changes, and **merge**
+  (merge/squash), including **auto-merge** when the pipeline succeeds
+  (cancelable in place). Plus **create**: push-and-open, drafts,
+  duplicate-MR detection. GitLab's own merge status drives the **conflict**
+  strip, the list's **Conflicts** chip, and in-app conflict resolution.
+- **Issues**: create, comment, close/reopen with a drafted comment posted
+  alongside, edit labels and assignees, set **milestone**, **due date**
+  (past-due cue), **confidential**, and **linked related issues**;
+  lock/unlock, move to another project, or delete.
 - **Time tracking**: estimate + spent, on an issue *or* an MR.
 - **Pipelines and releases**: retry, cancel, or run pipelines with CI/CD
   variables and **play a manual job**; publish, edit, and delete

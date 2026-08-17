@@ -1,5 +1,8 @@
-import { useId } from "react";
 import { Button } from "@/components/ui/button";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 
 type DisabledReasonButtonProps = React.ComponentProps<typeof Button> & {
@@ -10,16 +13,14 @@ type DisabledReasonButtonProps = React.ComponentProps<typeof Button> & {
 };
 
 /**
- * Button that explains its own disabled state. A natively-disabled button
- * swallows its own `title` and leaves the tab order, so a button WITH a reason
- * takes Base UI's `focusableWhenDisabled` — `aria-disabled` instead of the
- * native attribute, focus intact, activation still blocked in its handler layer.
- * A reason-less disable stays native rather than becoming a mute tab stop.
+ * Button that explains its own disabled state — the vendored-Button arm of the
+ * `useDisabledReason` contract, where a reason takes Base UI's
+ * `focusableWhenDisabled` (activation still blocked in its own handler layer).
  * Trigger sites pick an arm by who needs the reason: a titled span around
  * `<Trigger disabled render={<Button/>}/>` is hover-only, so keyboard/AT reach
  * takes `<Trigger render={<DisabledReasonButton disabled reason/>}/>` instead —
  * disabled on the button, never the trigger, whose open handler the inner
- * `useButton` then swallows. `ReactionBar` hand-rolls this on a raw `<button>`.
+ * `useButton` then swallows.
  */
 export function DisabledReasonButton({
   reason,
@@ -29,14 +30,13 @@ export function DisabledReasonButton({
   className,
   ...props
 }: DisabledReasonButtonProps) {
-  const id = useId();
-  const blockedReason = disabled && reason ? reason : null;
-  // `aria-describedby` outranks `title` as the accessible description, so a
-  // caller's own description has to survive alongside the reason.
-  const describedBy =
-    [props["aria-describedby"], blockedReason ? id : null]
-      .filter(Boolean)
-      .join(" ") || undefined;
+  const { blockedReason, reasonId, wrapperTitle, describedBy } =
+    useDisabledReason({
+      disabled,
+      reason,
+      title,
+      describedBy: props["aria-describedby"],
+    });
 
   return (
     <span
@@ -45,27 +45,18 @@ export function DisabledReasonButton({
         blockedReason && "cursor-not-allowed",
         wrapperClassName,
       )}
-      // Both disabled paths kill pointer events on the button, so the wrapper
-      // owns the hover text whenever it is disabled — the reason when there is
-      // one, otherwise the caller's ordinary hint.
-      title={blockedReason ?? title}
+      title={wrapperTitle}
     >
       <Button
         {...props}
         focusableWhenDisabled={!!blockedReason}
         disabled={disabled}
         title={title}
-        // A reason trades the native attribute for `aria-disabled`, which the
-        // vendored `disabled:` dim can't see; the dim lifts under focus so a
-        // keyboard user isn't left tracking a half-opacity focus ring.
-        className={cn(
-          "aria-disabled:pointer-events-none aria-disabled:opacity-50 aria-disabled:focus-visible:opacity-100",
-          className,
-        )}
+        className={cn(ARIA_DISABLED_CLASS, className)}
         aria-describedby={describedBy}
       />
       {blockedReason ? (
-        <span id={id} className="sr-only">
+        <span id={reasonId} className="sr-only">
           {blockedReason}
         </span>
       ) : null}

@@ -125,6 +125,8 @@ pub fn run() {
             git::branches::git_checkout_remote_branch,
             git::autostash::git_pull_autostash,
             git::autostash::git_merge_autostash,
+            git::autostash::git_rebase_autostash,
+            git::autostash::git_rebase_onto_autostash,
             git::autostash::git_switch_autostash,
             git::branches::git_create_branch,
             git::branches::git_rename_branch,

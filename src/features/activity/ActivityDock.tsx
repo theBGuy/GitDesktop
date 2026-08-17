@@ -89,7 +89,10 @@ export function ActivityStrip() {
     return null;
   }
   return (
-    <div className="flex h-7 shrink-0 items-center border-t bg-background px-1.5">
+    // box-content: the trigger inside is h-7 too, so border-box would leave a
+    // 27px content box and hang the child 0.5px past the viewport — the last
+    // element in the h-screen column, so the document grows a window scrollbar.
+    <div className="box-content flex h-7 shrink-0 items-center border-t bg-background px-1.5">
       <ActivityBell variant="strip" />
     </div>
   );

@@ -1,8 +1,12 @@
 import { Popover } from "@base-ui/react/popover";
 import { SmileyIcon } from "@phosphor-icons/react";
-import { type ComponentProps, useId, useState } from "react";
+import { type ComponentProps, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import type { Reaction } from "@/lib/git/types";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 
 /** GitHub's eight reactions, in their canonical picker order. */
@@ -31,13 +35,8 @@ const REACTION_ORDER = [
 const label = (content: string) => content.toLowerCase().replace(/_/g, " ");
 
 /**
- * `DisabledReasonButton`'s contract on a plain `<button>` — chips and picker cells
- * carry their own sizing, which none of the vendored Button's sizes match. A
- * reason trades the native `disabled` attribute for `aria-disabled`, keeping the
- * tab stop and an sr-only description a natively-disabled element could never
- * announce; both disabled paths kill pointer events, so the wrapper owns the
- * hover text. The contract lives in two places now and has to change in both; a
- * third site extracts it to a shared hook instead.
+ * The `useDisabledReason` contract on a plain `<button>` — chips and picker
+ * cells carry their own sizing, which none of the vendored Button's sizes match.
  */
 function ReactionButton({
   reason,
@@ -47,36 +46,30 @@ function ReactionButton({
   className,
   ...props
 }: ComponentProps<"button"> & { reason?: string | null }) {
-  const id = useId();
-  const blockedReason = disabled && reason ? reason : null;
-  // `aria-describedby` outranks `title` as the accessible description, so a
-  // caller's own description has to survive alongside the reason.
-  const describedBy =
-    [props["aria-describedby"], blockedReason ? id : null]
-      .filter(Boolean)
-      .join(" ") || undefined;
+  const { blockedReason, reasonId, wrapperTitle, describedBy, nativeProps } =
+    useDisabledReason({
+      disabled,
+      reason,
+      title,
+      describedBy: props["aria-describedby"],
+      onClick,
+    });
 
   return (
     <span
       className={cn("inline-flex", blockedReason && "cursor-not-allowed")}
-      title={blockedReason ?? title}
+      title={wrapperTitle}
     >
       <button
         {...props}
+        {...nativeProps}
         type="button"
         title={title}
-        disabled={blockedReason ? undefined : disabled}
-        aria-disabled={blockedReason ? true : undefined}
         aria-describedby={describedBy}
-        // `aria-disabled` is advisory only, so activation is withheld here.
-        onClick={blockedReason ? undefined : onClick}
-        className={cn(
-          "aria-disabled:pointer-events-none aria-disabled:opacity-50 aria-disabled:focus-visible:opacity-100",
-          className,
-        )}
+        className={cn(ARIA_DISABLED_CLASS, className)}
       />
       {blockedReason ? (
-        <span id={id} className="sr-only">
+        <span id={reasonId} className="sr-only">
           {blockedReason}
         </span>
       ) : null}

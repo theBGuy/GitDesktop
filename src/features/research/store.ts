@@ -389,6 +389,18 @@ export const useResearchStore = create<ResearchState>((set, get) => {
             }
           } else if (ev.kind === "error") {
             errored = true;
+            // Keep what a killed run wrote — a whole-message agent (codex) delivers it
+            // only here, so adopt it when nothing streamed and fold it in exactly as the
+            // done branch does. `errored` returns before `extractResearchReport` below,
+            // so a truncated report can still never become the saved report.
+            if (ev.partialText?.trim() && !finalText) {
+              finalText = ev.partialText;
+              const cur = get().runs.find((r) => r.id === id);
+              patch(id, {
+                text: finalText,
+                segments: ensureTranscriptText(cur?.segments ?? [], finalText),
+              });
+            }
             if (!superseded()) patch(id, { error: ev.message });
           }
         },
@@ -618,6 +630,8 @@ export const useResearchStore = create<ResearchState>((set, get) => {
               if (ev.costUsd != null) patch(id, { costUsd: ev.costUsd });
               if (ev.isError) errored = true;
             } else if (ev.kind === "error") {
+              // A killed distill's `partialText` is deliberately dropped: the errored
+              // path hands off the RAW report, which beats a truncated synthesis of it.
               errored = true;
             }
           },

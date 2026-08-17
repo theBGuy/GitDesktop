@@ -310,6 +310,18 @@ export const usePlanStore = create<PlanState>((set, get) => {
             }
           } else if (ev.kind === "error") {
             errored = true;
+            // Keep what a killed run wrote — a whole-message agent (codex) delivers it
+            // only here, so adopt it when nothing streamed and fold it in exactly as the
+            // done branch does. `errored` returns before `extractPlanDraft` below, so a
+            // truncated plan can still never become a draft.
+            if (ev.partialText?.trim() && !finalText) {
+              finalText = ev.partialText;
+              const cur = get().runs.find((r) => r.id === id);
+              patch(id, {
+                text: finalText,
+                segments: ensureTranscriptText(cur?.segments ?? [], finalText),
+              });
+            }
             if (!superseded()) patch(id, { error: ev.message });
           }
         },

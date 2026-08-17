@@ -1061,9 +1061,11 @@ fn copilot_effort(level: &str) -> Option<&'static str> {
     }
 }
 
-/// App effort level → a Claude "thinking" keyword. The Claude CLI has no effort
-/// flag; including one of these phrases in the user turn raises the thinking
-/// budget (think < think hard < think harder < ultrathink). "" = none.
+/// App effort level → a Claude "thinking" keyword. The Claude CLI does ship
+/// `--effort` (2.1.227), but this app deliberately stays on the keyword
+/// mechanism, which works on every installed version: one of these phrases in
+/// the user turn raises the thinking budget
+/// (think < think hard < think harder < ultrathink). "" = none.
 fn claude_thinking_keyword(level: &str) -> Option<&'static str> {
     match level {
         "low" => Some("think"),
@@ -2186,8 +2188,9 @@ pub async fn agent_review(
     // diff on stdin; Codex has no system-prompt flag, so both go on stdin.
     let (args, stdin_text) = match kind {
         AgentKind::Claude => {
-            // Claude has no effort flag — raise the thinking budget by appending a
-            // keyword to the user turn (same as a session).
+            // Claude's own `--effort` is deliberately unused: the thinking keyword
+            // appended to the user turn works on every installed CLI version
+            // (same as a session).
             let prompt = match claude_thinking_keyword(&effort) {
                 Some(kw) => format!("{user_prompt}\n\n{kw}"),
                 None => user_prompt,
@@ -2436,8 +2439,9 @@ pub async fn agent_session(
     // 1 only — a resumed Codex session already has it in context).
     let (inner, stdin_text) = match kind {
         AgentKind::Claude => {
-            // Claude has no effort flag — raise the thinking budget by appending a
-            // keyword to the user turn (applies per-turn, so on resume too).
+            // Claude's own `--effort` is deliberately unused: the thinking keyword
+            // appended to the user turn works on every installed CLI version, and
+            // applies per-turn, so on resume too.
             let prompt = match claude_thinking_keyword(&effort) {
                 Some(kw) => format!("{user_prompt}\n\n{kw}"),
                 None => user_prompt,

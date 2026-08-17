@@ -62,13 +62,34 @@ async fn git_path_exists(repo: &str, name: &str) -> bool {
     }
 }
 
+/// The repo's OWN git dir, absolute — one spawn, so [`op_state`]'s eight marker
+/// probes become plain filesystem reads instead of eight `rev-parse` children.
+///
+/// `--absolute-git-dir`, never `--git-common-dir`: a linked worktree keeps its
+/// op markers (`MERGE_HEAD`, `rebase-merge`, the sequencer) under
+/// `<main>/.git/worktrees/<name>/`, and the common dir names the MAIN checkout's
+/// `.git` — reading markers there would report the wrong tree's operation
+/// (measured, git 2.51.1; same call as `git::stats`). `None` for anything that
+/// isn't a repo, which callers must read as "no operation", not as an error.
+async fn absolute_git_dir(repo: &str) -> Option<std::path::PathBuf> {
+    let out = run_git(
+        Some(repo),
+        &["rev-parse", "--absolute-git-dir"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    let raw = out.stdout_lossy();
+    // Line endings ONLY: a trailing space can be part of the directory name, and
+    // `trim()` would strip it into a path that does not exist.
+    let dir = raw.trim_end_matches(['\r', '\n']);
+    (!dir.is_empty()).then(|| std::path::PathBuf::from(dir))
+}
+
 /// True when an interactive rebase is paused at an `edit` instruction (the last
 /// executed todo line is `edit`/`e`), as opposed to a conflict.
-async fn rebase_stopped_for_edit(repo: &str) -> bool {
-    let Some(path) = git_dir_path(repo, "rebase-merge/done").await else {
-        return false;
-    };
-    let Ok(done) = std::fs::read_to_string(path) else {
+fn rebase_stopped_for_edit(git_dir: &Path) -> bool {
+    let Ok(done) = std::fs::read_to_string(git_dir.join("rebase-merge/done")) else {
         return false;
     };
     done.lines()
@@ -89,14 +110,11 @@ async fn rebase_stopped_for_edit(repo: &str) -> bool {
 /// squash/fixup engine creates it. An unreadable or empty todo reads as
 /// cherry-pick, matching the best-effort probes around it. Interactive rebase
 /// uses `rebase-merge/git-rebase-todo` instead, so it can never land here.
-async fn sequencer_reverting(repo: &str) -> Option<bool> {
-    if !git_path_exists(repo, "sequencer").await {
+fn sequencer_reverting(git_dir: &Path) -> Option<bool> {
+    if !git_dir.join("sequencer").exists() {
         return None;
     }
-    let todo = git_dir_path(repo, "sequencer/todo")
-        .await
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .unwrap_or_default();
+    let todo = std::fs::read_to_string(git_dir.join("sequencer/todo")).unwrap_or_default();
     let verb = todo
         .lines()
         .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
@@ -115,21 +133,35 @@ pub async fn git_op_state(repo_path: String) -> AppResult<RepoOpState> {
 /// touch a tree with in-progress state gate on the SAME marker files the banner
 /// reports on.
 pub(crate) async fn op_state(repo_path: &str) -> AppResult<RepoOpState> {
-    let rebasing = git_path_exists(repo_path, "rebase-merge").await
-        || git_path_exists(repo_path, "rebase-apply").await;
-    let edit_paused = rebasing && rebase_stopped_for_edit(repo_path).await;
-    let cherry_head = git_path_exists(repo_path, "CHERRY_PICK_HEAD").await;
-    let revert_head = git_path_exists(repo_path, "REVERT_HEAD").await;
+    let quiet = RepoOpState {
+        merging: false,
+        rebasing: false,
+        cherry_picking: false,
+        reverting: false,
+        edit_paused: false,
+    };
+    // An unresolvable git dir reads as "nothing in flight", NEVER an error:
+    // `op_in_progress` maps `Err` to true, so failing here would fail-close every
+    // stash / history-edit / promotion guard in the app.
+    let Some(git_dir) = absolute_git_dir(repo_path).await else {
+        return Ok(quiet);
+    };
+    let exists = |name: &str| git_dir.join(name).exists();
+
+    let rebasing = exists("rebase-merge") || exists("rebase-apply");
+    let edit_paused = rebasing && rebase_stopped_for_edit(&git_dir);
+    let cherry_head = exists("CHERRY_PICK_HEAD");
+    let revert_head = exists("REVERT_HEAD");
     // The sequencer only decides the verb when neither head marker names it —
     // folding a revert into `cherry_picking` would mislabel the banner and hand
     // Continue/Abort the wrong git command.
     let sequencer = if cherry_head || revert_head {
         None
     } else {
-        sequencer_reverting(repo_path).await
+        sequencer_reverting(&git_dir)
     };
     Ok(RepoOpState {
-        merging: git_path_exists(repo_path, "MERGE_HEAD").await,
+        merging: exists("MERGE_HEAD"),
         rebasing,
         cherry_picking: cherry_head || sequencer == Some(false),
         reverting: revert_head || sequencer == Some(true),
@@ -193,13 +225,19 @@ pub async fn git_op_abort(
     op: String,
 ) -> AppResult<()> {
     validate_op(&op)?;
-    run_git_mutating(
+    let out = run_git_mutating_raw(
         &state,
         &repo_path,
         &[op.as_str(), "--abort"],
         DEFAULT_TIMEOUT,
     )
     .await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
     Ok(())
 }
 
@@ -226,7 +264,16 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
         "merge" => vec!["commit", "--no-edit", "--cleanup=strip"],
         other => vec!["-c", "core.editor=true", other, "--continue"],
     };
-    run_git_mutating(state, repo_path, &args, DEFAULT_TIMEOUT).await?;
+    // Raw: a `--continue` refused over unresolved paths reports `<path>: needs
+    // merge` on STDOUT with stderr empty (measured, git 2.51.1), which a
+    // stderr-only error renders as "git exited with code 1".
+    let out = run_git_mutating_raw(state, repo_path, &args, DEFAULT_TIMEOUT).await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
     Ok(())
 }
 
@@ -316,8 +363,21 @@ pub(crate) async fn git_revert_core(
 ) -> AppResult<()> {
     validate_hash(&hash)?;
     // -m is not supported here; reverting merge commits needs a parent choice
-    run_git_mutating(state, &repo_path, &["revert", "--no-edit", &hash], DEFAULT_TIMEOUT)
-        .await?;
+    // Raw: a conflicted revert splits its report — `could not revert` on stderr,
+    // the `CONFLICT (…` file list on stdout — so the error needs both halves.
+    let out = run_git_mutating_raw(
+        state,
+        &repo_path,
+        &["revert", "--no-edit", &hash],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
     Ok(())
 }
 
@@ -339,22 +399,29 @@ pub(crate) async fn git_cherry_pick_core(
     hash: String,
 ) -> AppResult<bool> {
     validate_hash(&hash)?;
-    match run_git_mutating(state, &repo_path, &["cherry-pick", &hash], DEFAULT_TIMEOUT).await {
-        Ok(_) => Ok(true),
-        Err(AppError::Git { stderr, .. })
-            if stderr.contains("is now empty") || stderr.contains("--allow-empty") =>
-        {
-            let _ = run_git_mutating(
-                state,
-                &repo_path,
-                &["cherry-pick", "--skip"],
-                DEFAULT_TIMEOUT,
-            )
-            .await;
-            Ok(false)
-        }
-        Err(e) => Err(e),
+    // Raw: a conflicted pick splits its report — `could not apply` on stderr, the
+    // `CONFLICT (…` file list on stdout — so the error needs both halves.
+    let out =
+        run_git_mutating_raw(state, &repo_path, &["cherry-pick", &hash], DEFAULT_TIMEOUT).await?;
+    if out.code == 0 {
+        return Ok(true);
     }
+    // The already-applied sentence arrives on stderr (measured); gating on the raw
+    // stream keeps the stdout backfill from widening what counts as "empty".
+    if out.stderr.contains("is now empty") || out.stderr.contains("--allow-empty") {
+        let _ = run_git_mutating_raw(
+            state,
+            &repo_path,
+            &["cherry-pick", "--skip"],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        return Ok(false);
+    }
+    Err(AppError::Git {
+        code: out.code,
+        stderr: out.full_failure_text(),
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -519,24 +586,43 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
         // the rollback itself fails, which the error then says.
         let mut failure: Option<(String, AppError)> = None;
         'picks: for hash in hashes {
-            match run_git(Some(repo_path), &["cherry-pick", hash], pick_timeout).await {
-                Ok(_) => applied += 1,
-                Err(AppError::Git { stderr, .. })
-                    if stderr.contains("is now empty") || stderr.contains("--allow-empty") =>
-                {
-                    let _ = run_git(
-                        Some(repo_path),
-                        &["cherry-pick", "--skip"],
-                        DEFAULT_TIMEOUT,
-                    )
-                    .await;
-                    skipped += 1;
-                }
+            // Raw plus an explicit code check, never a mutating runner: this loop
+            // runs inside the compound's own `repo_lock` hold. A conflicted pick
+            // splits its report — `could not apply` on stderr, the `CONFLICT (…`
+            // file list on stdout — so the rollback verdict below needs both.
+            let out = match run_git_raw(Some(repo_path), &["cherry-pick", hash], pick_timeout).await
+            {
+                Ok(out) => out,
                 Err(e) => {
                     failure = Some((hash.clone(), e));
                     break 'picks;
                 }
+            };
+            if out.code == 0 {
+                applied += 1;
+                continue;
             }
+            // The already-applied sentence arrives on stderr (measured); gating on
+            // the raw stream keeps the stdout half from widening what counts as
+            // "empty".
+            if out.stderr.contains("is now empty") || out.stderr.contains("--allow-empty") {
+                let _ = run_git(
+                    Some(repo_path),
+                    &["cherry-pick", "--skip"],
+                    DEFAULT_TIMEOUT,
+                )
+                .await;
+                skipped += 1;
+                continue;
+            }
+            failure = Some((
+                hash.clone(),
+                AppError::Git {
+                    code: out.code,
+                    stderr: out.full_failure_text(),
+                },
+            ));
+            break 'picks;
         }
 
         if let Some((hash, err)) = failure {
@@ -1862,13 +1948,21 @@ pub(crate) async fn git_rebase_core(
     branch: String,
 ) -> AppResult<()> {
     validate_branch_arg(&branch)?;
-    run_git_mutating(
+    // Raw: a conflicted rebase splits its report — `could not apply` plus the
+    // resolve hints on stderr, the `CONFLICT (…` file list on stdout.
+    let out = run_git_mutating_raw(
         state,
         &repo_path,
         &["-c", "core.editor=true", "rebase", &branch],
         DEFAULT_TIMEOUT,
     )
     .await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
     Ok(())
 }
 
@@ -1886,7 +1980,8 @@ async fn rebase_onto(
 ) -> AppResult<()> {
     validate_branch_arg(new_base)?;
     validate_branch_arg(old_base)?;
-    run_git_mutating(
+    // Raw, for the same split report as `git_rebase_core`.
+    let out = run_git_mutating_raw(
         state,
         repo_path,
         &[
@@ -1900,6 +1995,12 @@ async fn rebase_onto(
         DEFAULT_TIMEOUT,
     )
     .await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
     Ok(())
 }
 
@@ -2346,9 +2447,11 @@ pub(crate) async fn merge_local_pr(
                 )
                 .await
                 .and_then(check_code),
+                // Hand-rolled rather than `check_code` because the success arm
+                // chains a commit; the failure shaping has to match it.
                 Ok(o) => Err(AppError::Git {
                     code: o.code,
-                    stderr: o.stderr,
+                    stderr: o.full_failure_text(),
                 }),
                 Err(e) => Err(e),
             }
@@ -3303,9 +3406,11 @@ fn check_code(o: crate::git::runner::GitOutput) -> AppResult<()> {
     if o.code == 0 {
         Ok(())
     } else {
+        // Both streams: the cherry-pick/merge strategies below conflict with their
+        // file list on stdout, which a stderr-only error would drop.
         Err(AppError::Git {
             code: o.code,
-            stderr: o.stderr,
+            stderr: o.full_failure_text(),
         })
     }
 }
@@ -4609,6 +4714,13 @@ mod tests {
                     stderr.contains("target is unchanged"),
                     "the error must tell the user the target is unchanged: {stderr}"
                 );
+                // Below the verdict, git's whole report: the batch loop splits it
+                // across both streams exactly like the single-pick path.
+                assert!(
+                    stderr.contains("could not apply")
+                        && stderr.contains("CONFLICT (content): Merge conflict in a.txt"),
+                    "the verdict must carry git's diagnostic AND its file list: {stderr}"
+                );
             }
             Ok(_) => panic!("the conflicting pick must fail"),
             Err(e) => panic!("expected a Git error, got {e}"),
@@ -4939,6 +5051,150 @@ mod tests {
         std::fs::remove_dir_all(&seq).unwrap();
         let state = op_state(&repo).await.unwrap();
         assert!(!state.cherry_picking && !state.reverting);
+    }
+
+    /// A linked worktree keeps its op markers under
+    /// `<main>/.git/worktrees/<name>/`, so the banner and every mid-op guard read
+    /// the WRONG tree unless the git dir is resolved with `--absolute-git-dir`:
+    /// under the common dir the FIRST assertion below fails. The second is a
+    /// redundancy check that the marker really is worktree-local — it reads the
+    /// main `.git` either way, so it discriminates nothing on its own.
+    #[tokio::test]
+    async fn op_state_reads_a_linked_worktrees_own_markers() {
+        let (dir, repo) = setup_repo("worktree-markers").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+        let tip = rev(&repo, "HEAD").await;
+
+        // Outside the repo's own tree, so the checkout isn't a nested untracked
+        // directory; both temp dirs are removed when the test ends.
+        let link_dir = tempfile::Builder::new()
+            .prefix("gd-rewrite-worktree-link-")
+            .tempdir()
+            .expect("create temp dir");
+        let link = link_dir.path().join("linked").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "--detach", &link, &tip]).await;
+
+        let merge = run_git_raw(
+            Some(&link),
+            &["merge", "--no-edit", "feature"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(merge.code, 0, "the merge inside the worktree should conflict");
+
+        assert!(
+            op_state(&link).await.unwrap().merging,
+            "the worktree's own MERGE_HEAD must be the one that's read"
+        );
+        assert!(op_in_progress(&link).await);
+        assert!(
+            !op_state(&repo).await.unwrap().merging,
+            "and the main checkout stays quiet — nothing is in progress there"
+        );
+
+        git(&repo, &["worktree", "remove", "--force", &link]).await;
+    }
+
+    /// Conflicted revert / cherry-pick / rebase all split ONE report across both
+    /// streams: the diagnostic on stderr, the conflicted-file list on stdout. An
+    /// error carrying either alone looks populated while dropping exactly what
+    /// the user needs to decide how to resolve.
+    #[tokio::test]
+    async fn a_conflicted_revert_carries_both_streams() {
+        let (dir, repo) = setup_repo("revert-details").await;
+        commit_file(&repo, dir.path(), "a.txt", "one\n", "one").await;
+        let target = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "two\n", "two").await;
+
+        let state = AppState::default();
+        let err = git_revert_core(&state, repo.clone(), target)
+            .await
+            .unwrap_err();
+        assert_both_streams(&err, "could not revert");
+    }
+
+    #[tokio::test]
+    async fn a_conflicted_cherry_pick_carries_both_streams() {
+        let (dir, repo) = setup_repo("pick-details").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+        let feature = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+
+        let state = AppState::default();
+        let err = git_cherry_pick_core(&state, repo.clone(), feature)
+            .await
+            .unwrap_err();
+        assert_both_streams(&err, "could not apply");
+    }
+
+    #[tokio::test]
+    async fn a_conflicted_rebase_carries_both_streams() {
+        let (dir, repo) = setup_repo("rebase-details").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+
+        let state = AppState::default();
+        let err = git_rebase_core(&state, repo.clone(), "feature".into())
+            .await
+            .unwrap_err();
+        assert_both_streams(&err, "ould not apply");
+    }
+
+    /// The one stdout-ONLY case in the family: `--continue` with paths still
+    /// unmerged names them on stdout and writes nothing to stderr, which a
+    /// stderr-only error renders to the user as "git exited with code 1".
+    #[tokio::test]
+    async fn a_refused_continue_names_the_unresolved_file() {
+        let (dir, repo) = setup_repo("continue-unresolved").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+
+        let state = AppState::default();
+        assert!(
+            git_rebase_core(&state, repo.clone(), "feature".into())
+                .await
+                .is_err(),
+            "the rebase must conflict for --continue to have something to refuse"
+        );
+
+        let err = op_continue(&state, &repo, "rebase").await.unwrap_err();
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected a git error, got {err:?}");
+        };
+        assert!(
+            stderr.contains("a.txt: needs merge"),
+            "the refusal must name the unresolved file: {stderr}"
+        );
+    }
+
+    /// Both halves of a conflicted sequencer op's report reached the error:
+    /// `diagnostic` on stderr, and the `CONFLICT (…` file list on stdout.
+    fn assert_both_streams(err: &AppError, diagnostic: &str) {
+        let AppError::Git { stderr, .. } = err else {
+            panic!("expected a git error, got {err:?}");
+        };
+        assert!(
+            stderr.contains(diagnostic),
+            "stderr's own diagnostic ({diagnostic:?}) must survive: {stderr}"
+        );
+        assert!(
+            stderr.contains("CONFLICT (content): Merge conflict in a.txt"),
+            "and stdout's conflicted-file list with it: {stderr}"
+        );
     }
 
     #[tokio::test]
