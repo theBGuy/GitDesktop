@@ -17,7 +17,7 @@ import ForgeMark from "../components/ForgeMark.astro";
 import McpConfig from "../components/McpConfig.astro";
 import { highlightCapabilities } from "../data/capabilities";
 import SiteLayout from "../layouts/SiteLayout.astro";
-import { getPosts, postUrl } from "../lib/posts";
+import { getRequiredPost, postUrl } from "../lib/posts";
 import { getLatestRelease } from "../lib/release";
 
 const repo = "https://github.com/theBGuy/GitDesktop";
@@ -26,19 +26,10 @@ const base = import.meta.env.BASE_URL;
 // GitHub Releases).
 const download = `${base}download/`;
 
-// Resolved from the collection rather than hardcoded, so renaming the post
-// fails the build here instead of silently 404ing the hero link in both views.
-// Asymmetry worth knowing: getPosts() hides drafts and future-dated posts
-// outside DEV/PUBLIC_SHOW_DRAFTS, so marking this post `draft` (or dating it
-// ahead) would pass a Pages preview and fail production.
-const founderEssay = (await getPosts()).find(
-  (p) => p.id === "the-whole-loop-one-window",
+const founderEssay = await getRequiredPost(
+  "the-whole-loop-one-window",
+  "Hero link target missing",
 );
-if (!founderEssay) {
-  throw new Error(
-    'Hero link target missing: no blog post with id "the-whole-loop-one-window".',
-  );
-}
 
 // Build-time release facts (guarded fetch, package.json fallback) so the
 // version exists as text for crawlers; the runtime script still refreshes it.

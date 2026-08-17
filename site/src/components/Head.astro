@@ -124,7 +124,7 @@ if (breadcrumbs && breadcrumbs.length > 0) {
 if (person) {
   graph.push({
     "@type": "Person",
-    "@id": new URL("#person", canonicalUrl).href,
+    "@id": new URL("#person", homeUrl).href,
     name: person.name,
     url: canonicalUrl,
     mainEntityOfPage: canonicalUrl,

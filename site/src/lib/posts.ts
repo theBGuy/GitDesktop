@@ -36,6 +36,24 @@ export async function getPosts(): Promise<Post[]> {
 }
 
 /**
+ * Resolve a post a page hardcodes a link to, or fail the BUILD — renaming the
+ * post then breaks CI instead of silently 404ing the link. Asymmetry worth
+ * knowing: getPosts() hides drafts and future-dated posts outside
+ * DEV/PUBLIC_SHOW_DRAFTS, so marking the target `draft` (or dating it ahead)
+ * would pass a Pages preview and fail production.
+ */
+export async function getRequiredPost(
+  id: string,
+  label: string,
+): Promise<Post> {
+  const post = (await getPosts()).find((p) => p.id === id);
+  if (!post) {
+    throw new Error(`${label}: no blog post with id "${id}".`);
+  }
+  return post;
+}
+
+/**
  * Every distinct tag across published posts, with counts, most-used first.
  * `aiCount` exists so Just-Git surfaces can show honest numbers
  * (`count - aiCount`) and hide all-AI tags outright instead of advertising

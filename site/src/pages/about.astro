@@ -6,26 +6,19 @@
 // privacy page's no-third-party-fetch claim stays true; its anchor href is
 // the listing requirement and must stay exactly as issued.
 import SiteLayout from "../layouts/SiteLayout.astro";
-import { getPosts, postUrl } from "../lib/posts";
+import { getRequiredPost, postUrl } from "../lib/posts";
 
-// Resolved from the collection so renaming the essay fails the build here
-// instead of silently 404ing the "Why I built this" link (same guard as the
-// homepage's copy of this link).
-const founderEssay = (await getPosts()).find(
-  (p) => p.id === "the-whole-loop-one-window",
+const founderEssay = await getRequiredPost(
+  "the-whole-loop-one-window",
+  "About-page link target missing",
 );
-if (!founderEssay) {
-  throw new Error(
-    'About-page link target missing: no blog post with id "the-whole-loop-one-window".',
-  );
-}
 
 const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
 const profile = "https://github.com/theBGuy";
 const download = `${base}download/`;
 
-const principles = [
+const principles: { term: string; note: string; ai?: boolean }[] = [
   {
     term: "Local-first",
     note: "Your code never reaches us, and the app works without any account.",
@@ -45,6 +38,7 @@ const principles = [
   {
     term: "Optional AI",
     note: "Your own models or keyless CLIs, keys in your OS keychain, and one switch hides every AI surface.",
+    ai: true,
   },
   {
     term: "Careful with your work",
@@ -112,7 +106,7 @@ const record = [
         <p class="mt-6 max-w-[62ch] leading-relaxed text-body">
           GitDesktop began with a question that kept coming back: why does
           everything past the commit mean leaving the Git client? Creating a
-          pull request, reviewing changes, managing branches, using AI. Each
+          pull request, reviewing changes, managing branches<span data-view="ai">, using AI</span>. Each
           one meant leaving. The answer became a five-word design constraint.
           <span class="text-ink">The whole loop, one window.</span>
         </p>
@@ -159,7 +153,10 @@ const record = [
       <dl data-reveal style="transition-delay:80ms" class="mt-10 border-t border-line">
         {
           principles.map((p) => (
-            <div class="grid gap-x-8 gap-y-1 border-b border-line py-4 sm:grid-cols-[1fr_2.2fr]">
+            <div
+              data-view={p.ai ? "ai" : undefined}
+              class="grid gap-x-8 gap-y-1 border-b border-line py-4 sm:grid-cols-[1fr_2.2fr]"
+            >
               <dt class="text-ink">{p.term}</dt>
               <dd class="text-sm leading-relaxed text-muted">{p.note}</dd>
             </div>
@@ -193,7 +190,7 @@ const record = [
     </div>
   </section>
 
-  <!-- Around the web -->
+  <!-- Where it lives -->
   <section class="border-b border-line">
     <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
       <div data-reveal class="max-w-2xl">
