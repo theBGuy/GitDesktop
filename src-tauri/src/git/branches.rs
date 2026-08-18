@@ -206,6 +206,11 @@ pub async fn git_set_branch_archived(
     archived: bool,
 ) -> AppResult<()> {
     validate_ref_name(&name)?;
+    // No current/default-branch refusal here by design: the frontend owns the
+    // guard (the current-branch arm is total; the default arm is best-effort,
+    // dropping out while defaultName resolves), no MCP tool mutates the flag,
+    // and it is fully reversible — a backend default-branch check would also
+    // ride the multi-spawn, fallible remote-HEAD resolution per call.
     let key = format!("branch.{name}.gitdesktopArchived");
     if archived {
         run_git(Some(&repo_path), &["config", &key, "true"], DEFAULT_TIMEOUT).await?;

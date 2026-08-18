@@ -376,7 +376,7 @@ selection to compare a range.
 - **Amend** the most recent commit (reword, or fold in staged changes).
 - **Revert** — create a new commit that undoes a commit's changes.
 - **Cherry-pick** a commit onto the current branch, or **Cherry-pick to branch…** to copy
-  it (or a multi-selection) onto another branch without switching. A single commit that
+  it (or a multi-selection) onto another branch and switch to it. A single commit that
   conflicts pauses on the destination branch so you can resolve it and continue; a
   multi-commit batch rolls back automatically on any failure.
 - **Reset** the current branch to a commit — a **mixed reset**, so the changes from later
@@ -435,11 +435,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   and labeled with the default branch's name.
 - **Create** a branch ({{kbd:new-branch}}), **rename** ({{kbd:rename-branch}}), **delete**
   ({{kbd:delete-branch}}), or **archive** it — archiving hides a branch without deleting
-  it, collapsing it into an "Archived" section. The default branch can't be archived, and
-  **Unarchive** works even on the branch you're checked out on. When creating, the
-  **Base it on** picker is
-  a searchable list grouped into **Local** and **Remote** branches, so you can start from
-  *any* branch — not just the one you're on. Basing on a remote branch (e.g. \`origin/epic/…\`)
+  it, collapsing it into an "Archived" section. The branch you're on and the default
+  branch can't be archived; **Unarchive** has no such limit — it works even on the
+  branch you're checked out on. When creating, the **Base it on** picker is a
+  searchable list grouped into **Local** and **Remote** branches, so you can start
+  from *any* branch — not just the one you're on. Basing on a remote branch (e.g. \`origin/epic/…\`)
   starts from the remote tip and leaves the new branch with **no upstream**, so its first
   push publishes it under its own name — pairs with pushing a branch without switching to it
   (below).

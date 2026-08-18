@@ -389,8 +389,11 @@ interface UiState {
    *  switch). The previous draft is already mirrored in `commitDrafts`. */
   loadCommitDraft: (key: string) => void;
   /** Carry a commit draft across a branch rename: moves its `commitDrafts` entry
-   *  and, when the renamed branch owns the live fields, retargets `activeDraftKey`
-   *  so nothing in flight is orphaned by the new name. */
+   *  and, when the renamed branch owns the live fields, retargets `activeDraftKey`.
+   *  Always records the old -> new remap so consumers holding the old key (the
+   *  generation guard, a `restoreCommitDraft` deferred behind a commit) resolve
+   *  to the renamed draft — key identity, not stream survival: a poll that flips
+   *  the key first has already cancelled an in-flight generation's next chunk. */
   migrateCommitDraft: (
     repoPath: string,
     fromBranch: string,
@@ -722,17 +725,22 @@ export const useUiStore = create<UiState>()((set, get) => {
           else delete drafts[newKey];
           result.commitDrafts = drafts;
         }
+        // Recorded for every rename, not just the retargeting one: the status
+        // poll can flip the key first, and a generation or a deferred restore
+        // still holds the old key. Collapse existing entries onto the new key so
+        // a chain of renames stays one lookup deep, dropping any identities.
+        const remaps: Record<string, string> = {};
+        for (const [from, to] of Object.entries(s.draftKeyRemaps)) {
+          const next = to === oldKey ? newKey : to;
+          if (next !== from) remaps[from] = next;
+        }
+        remaps[oldKey] = newKey;
+        // A freshly claimed name has no live owner elsewhere, so any surviving
+        // mapping AWAY from it is dead — left in place it would hijack the key.
+        delete remaps[newKey];
+        result.draftKeyRemaps = remaps;
         if (retargeting) {
           result.activeDraftKey = newKey;
-          // Collapse existing remaps onto the new key so a chain of renames stays
-          // one lookup deep, and drop any that become identities.
-          const remaps: Record<string, string> = {};
-          for (const [from, to] of Object.entries(s.draftKeyRemaps)) {
-            const next = to === oldKey ? newKey : to;
-            if (next !== from) remaps[from] = next;
-          }
-          remaps[oldKey] = newKey;
-          result.draftKeyRemaps = remaps;
         } else if (s.activeDraftKey === newKey && moved) {
           // The status poll can flip the key to the new name before this runs,
           // which blanks the live fields; put the carried-over draft back into

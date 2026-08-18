@@ -239,14 +239,22 @@ export function CherryPickOntoDialog({
         <DialogHeader>
           <DialogTitle>Cherry-pick to branch</DialogTitle>
           <DialogDescription>
-            {count > 1
-              ? `Copies these ${count} commits onto the chosen branch and switches to it. `
-              : "Copies this commit onto the chosen branch and switches to it. "}
-            They stay on {currentBranch ?? "this branch"} too. Commits already
-            present are skipped;{" "}
-            {count > 1
-              ? "any failure rolls the whole batch back automatically."
-              : "the cherry-pick pauses on the destination branch, where you can resolve the conflict and continue; any other failure rolls it back automatically."}
+            {count > 1 ? (
+              <>
+                Copies these {count} commits onto the chosen branch and switches
+                to it. They stay on {currentBranch ?? "this branch"} too.
+                Commits already present are skipped; any failure rolls the whole
+                batch back automatically.
+              </>
+            ) : (
+              <>
+                Copies this commit onto the chosen branch and switches to it. It
+                stays on {currentBranch ?? "this branch"} too. If the
+                destination already has it, it's skipped; a conflict pauses the
+                cherry-pick on the destination branch, where you can resolve it
+                and continue; any other failure rolls it back automatically.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">

@@ -3119,8 +3119,9 @@ function useRepoMutation<TArgs, TData>(
     refetchBeforeSuccess?: boolean;
     /** Runs on success before any invalidation fires (react-query awaits
      *  `onSuccess` ahead of `onSettled`), so store state can be fixed up while the
-     *  cache still describes the pre-mutation world. Must not throw: under
-     *  `refetchBeforeSuccess` a throw would skip the invalidation entirely. */
+     *  cache still describes the pre-mutation world. Must be synchronous — an
+     *  async callback's rejection escapes the containment; a synchronous throw
+     *  is contained and logged, and the invalidation still runs. */
     onSuccess?: (data: TData, variables: TArgs) => void;
   } = {},
 ) {
@@ -3137,18 +3138,27 @@ function useRepoMutation<TArgs, TData>(
         queryClient.invalidateQueries({ queryKey }),
       ),
     );
+  // A caller's hook must not take the mutation down with it: a throw here would
+  // otherwise skip the invalidation, or report a succeeded mutation as failed.
+  const notifySuccess = (data: TData, variables: TArgs) => {
+    try {
+      opts.onSuccess?.(data, variables);
+    } catch (e) {
+      console.error("[queries] mutation onSuccess failed", e);
+    }
+  };
   return useMutation({
     mutationFn,
     ...(opts.refetchBeforeSuccess
       ? {
           onSuccess: async (data: TData, variables: TArgs) => {
-            opts.onSuccess?.(data, variables);
+            notifySuccess(data, variables);
             await invalidate();
             void invalidateAfter();
           },
         }
       : {
-          onSuccess: opts.onSuccess,
+          onSuccess: notifySuccess,
           onSettled: () => {
             void invalidate();
             void invalidateAfter();

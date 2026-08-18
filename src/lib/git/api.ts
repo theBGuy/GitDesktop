@@ -306,8 +306,12 @@ export const gitOpState = (repoPath: string) =>
 export const gitOpAbort = (repoPath: string, op: RepoOp) =>
   invoke<void>("git_op_abort", { repoPath, op });
 
+/** Resolves true when the operation completed normally, false when the pending
+ *  cherry-pick was skipped as empty (its changes were already on this branch).
+ *  Per-commit: a skip can still let the rest of a multi-commit sequence apply,
+ *  so false never means the whole operation committed nothing. */
 export const gitOpContinue = (repoPath: string, op: RepoOp) =>
-  invoke<void>("git_op_continue", { repoPath, op });
+  invoke<boolean>("git_op_continue", { repoPath, op });
 
 /** Base64 file content at a rev (null rev = working tree; null result = absent). */
 export const gitFileBase64 = (

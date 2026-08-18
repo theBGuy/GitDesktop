@@ -2,7 +2,8 @@ import { invoke } from "@/lib/tauri/invoke";
 
 /** The clean and marked versions of one conflicted file, for AI resolution. */
 export interface ConflictSides {
-  /** The working-tree file with conflict markers — the primary input. */
+  /** The working-tree file with conflict markers — the primary input. Not every
+   *  conflict has markers; a modify/delete file is the surviving side's content. */
   working: string;
   /** Common-ancestor version (stage 1); null for add/add conflicts. */
   base: string | null;

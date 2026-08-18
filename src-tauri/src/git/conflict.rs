@@ -26,7 +26,9 @@ const RESOLVE_MAX_BYTES: usize = 256_000;
 #[serde(rename_all = "camelCase")]
 pub struct ConflictSides {
     /// The working-tree file, conflict markers and all — the primary input, since
-    /// its `<<<<<<<`/`>>>>>>>` markers label each side in place.
+    /// its `<<<<<<<`/`>>>>>>>` markers label each side in place. Not every
+    /// conflict carries markers — a modify/delete file, for one, is just the
+    /// surviving side's content.
     pub working: String,
     /// Common-ancestor version (index stage 1). `None` for add/add conflicts,
     /// which have no shared base.

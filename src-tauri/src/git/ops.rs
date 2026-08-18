@@ -244,18 +244,23 @@ pub async fn git_op_abort(
 /// Finishes an in-progress operation once every conflict is resolved and
 /// staged. A merge concludes with its commit; rebase/cherry-pick/revert continue
 /// with `core.editor=true` so git never tries to open an editor.
+///
+/// `false` means the pending cherry-pick was dropped as empty instead of
+/// committed (its changes are already on this branch); `true` that the operation
+/// completed normally. Callers must say which happened — the frontend's
+/// "continued" copy would otherwise promise a commit that was never made.
 #[tauri::command]
 pub async fn git_op_continue(
     state: State<'_, AppState>,
     repo_path: String,
     op: String,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     op_continue(&state, &repo_path, &op).await
 }
 
 /// Testable core of [`git_op_continue`] — takes a plain `&AppState` so real-repo
-/// tokio tests can drive it.
-pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> AppResult<()> {
+/// tokio tests can drive it. Same `bool` contract.
+pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> AppResult<bool> {
     validate_op(op)?;
     let args: Vec<&str> = match op {
         // `--cleanup=strip` is load-bearing: with no editor run, cleanup defaults
@@ -286,7 +291,7 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
             )
             .await?;
             if skip.code == 0 {
-                return Ok(());
+                return Ok(false);
             }
             return Err(
                 classify_failure(repo_path, op, &[], skip.code, skip.full_failure_text()).await,
@@ -297,7 +302,7 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
         // are attributable by construction rather than by having just appeared.
         return Err(classify_failure(repo_path, op, &[], out.code, out.full_failure_text()).await);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Discards selected 1-based lines from an untracked (new) file by deleting them
@@ -539,7 +544,7 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
     // 2.51.1). Shares `op_state`'s detection, like the rebase-edit guard.
     if op_in_progress(repo_path).await {
         return Err(AppError::InvalidArgument(
-            "a rebase, merge, cherry-pick or revert is already in progress — finish or abort it from the banner first".into(),
+            "Can't cherry-pick while a merge, rebase, cherry-pick or revert is in progress — finish or abort it from the banner first.".into(),
         ));
     }
 
@@ -4029,7 +4034,7 @@ pub async fn git_rebase_edit(
     // hand-rolled copy this replaces missed the sequencer-only and revert windows.
     if op_in_progress(&repo_path).await {
         return Err(AppError::InvalidArgument(
-            "a rebase, merge, cherry-pick or revert is already in progress — finish or abort it from the banner first".into(),
+            "Can't edit history while a merge, rebase, cherry-pick or revert is in progress — finish or abort it from the banner first.".into(),
         ));
     }
     // git rebase refuses a dirty tree too, but a clear message here is nicer.
@@ -5173,8 +5178,8 @@ mod tests {
         match cherry_pick_onto(&state, &repo, &[c1], "target").await {
             Err(AppError::InvalidArgument(msg)) => {
                 assert!(
-                    msg.contains("already in progress"),
-                    "the refusal must name the in-flight op: {msg}"
+                    msg.starts_with("Can't cherry-pick while") && msg.contains("in progress"),
+                    "the refusal is the toast summary verbatim, so it reads as a sentence: {msg}"
                 );
             }
             Ok(_) => panic!("a second pick must be refused while one is in progress"),
@@ -5246,9 +5251,13 @@ mod tests {
         git(&repo, &["checkout", "--ours", "a.txt"]).await;
         git(&repo, &["add", "a.txt"]).await;
 
-        op_continue(&state, &repo, "cherry-pick")
+        let recorded = op_continue(&state, &repo, "cherry-pick")
             .await
             .expect("continue must finish a pick emptied by its own resolution");
+        assert!(
+            !recorded,
+            "the skipped pick recorded no commit, and the banner's copy keys on that"
+        );
         assert!(
             !op_state(&repo).await.unwrap().cherry_picking,
             "the escape must leave nothing in progress"
@@ -5257,6 +5266,38 @@ mod tests {
         assert_eq!(rev(&repo, "HEAD").await, target_tip);
         let status = git(&repo, &["status", "--porcelain"]).await;
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
+    }
+
+    /// The sibling arm: a resolution that keeps content of its own DOES commit, so
+    /// the same call answers true and the banner says the pick continued.
+    #[tokio::test]
+    async fn op_continue_reports_a_recorded_commit_for_a_resolved_cherry_pick() {
+        let (dir, repo) = setup_repo("continue-resolved-pick").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c1 = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let target_tip = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        assert!(cherry_pick_onto(&state, &repo, &[c1], "target")
+            .await
+            .is_err());
+        std::fs::write(dir.path().join("a.txt"), "merged\n").unwrap();
+        git(&repo, &["add", "a.txt"]).await;
+
+        let recorded = op_continue(&state, &repo, "cherry-pick")
+            .await
+            .expect("a resolved pick must continue");
+        assert!(recorded, "a pick that commits must answer true");
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+        assert_ne!(
+            rev(&repo, "HEAD").await,
+            target_tip,
+            "the resolution must have landed as a commit"
+        );
     }
 
     /// Only a CONFLICT stops on the target; every other failure class still rolls
@@ -5483,7 +5524,7 @@ mod tests {
             panic!("edit-rebase must refuse over sequencer state, got {refused:?}");
         };
         assert!(
-            msg.contains("already in progress"),
+            msg.starts_with("Can't edit history while"),
             "the mid-op guard must be the one that refuses: {msg}"
         );
     }
