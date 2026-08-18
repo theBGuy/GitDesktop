@@ -164,18 +164,21 @@ export function ConflictBanner({
               onClick={() =>
                 continueOp.mutate(op, {
                   onSuccess: (recorded) => {
-                    // The flag is per-commit: the conflicted pick was dropped as
-                    // empty, while a multi-commit sequencer may still have applied
-                    // the rest — so this names the skipped commit, never the whole
-                    // operation's outcome.
+                    // Only a resolution that emptied the pick reaches this: a commit
+                    // whose changes the destination already had never conflicts, so
+                    // it is skipped inside the pick itself and never pauses here.
+                    // The flag speaks for that one pick — a longer sequence may
+                    // still have applied its remaining commits.
                     if (!recorded) {
-                      toast.success(
-                        "Commit skipped — the destination already had its changes.",
+                      toast.info(
+                        "Commit skipped — your resolution left nothing to commit.",
                       );
                       return;
                     }
                     toast.success(
-                      op === "merge" ? "Merge completed" : `${opVerb} continued`,
+                      op === "merge"
+                        ? "Merge completed"
+                        : `${opVerb} continued`,
                     );
                   },
                   onError,

@@ -153,14 +153,6 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     (b) => !b.isCurrent && !b.name.startsWith("gd/session/"),
   );
   const targetBranches = pickOntoCandidates.filter((b) => !b.archived);
-  const noPickOntoTargets = targetBranches.length === 0;
-  // Why cherry-pick-to-branch is unavailable — in particular the case a repo full of
-  // (archived) branches makes look like a bug: every candidate is archived, and the
-  // remedy lives in the branch switcher rather than here.
-  const pickOntoDisabledHint =
-    pickOntoCandidates.length > 0
-      ? " (all other branches are archived — unarchive one first)"
-      : " (no other branches)";
 
   const branchForm = useAppForm({
     ...createRefFromCommitFormOpts,
@@ -469,6 +461,17 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const editHistoryHint = opInProgress
     ? " (finish the operation in Changes first)"
     : "";
+  // Why cherry-picking onto a branch is unavailable, in precedence order: an
+  // in-flight operation (the pick's own conflict path pauses one), then a repo
+  // whose every other branch is archived — offerable-looking, but not offered.
+  const pickOntoDisabledHint = (() => {
+    if (opInProgress) return " (finish the operation in Changes first)";
+    if (targetBranches.length > 0) return "";
+    if (pickOntoCandidates.length > 0)
+      return " (all other branches are archived — unarchive one first)";
+    return " (no other branches)";
+  })();
+  const canPickOnto = pickOntoDisabledHint === "";
   const editCommits = commits.slice(0, Math.max(editLen, 0));
   const editBase = commits[Math.max(editLen, 0)]?.hash ?? "";
 
@@ -559,11 +562,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       return (
         <>
           <ContextMenuItem
-            disabled={noPickOntoTargets}
+            disabled={!canPickOnto}
             onClick={() => openCherryPickOnto(commit.hash)}
           >
             Cherry-pick {selected.size} commits to branch…
-            {noPickOntoTargets && pickOntoDisabledHint}
+            {pickOntoDisabledHint}
           </ContextMenuItem>
           <ContextMenuItem disabled={!canSquash} onClick={openSquash}>
             Squash {selected.size} commits…
@@ -656,11 +659,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           Cherry-pick commit
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={noPickOntoTargets}
+          disabled={!canPickOnto}
           onClick={() => openCherryPickOnto(commit.hash)}
         >
           Cherry-pick to branch…
-          {noPickOntoTargets && pickOntoDisabledHint}
+          {pickOntoDisabledHint}
         </ContextMenuItem>
         <ContextMenuItem
           disabled={!canEditHistory}

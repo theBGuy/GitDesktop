@@ -307,9 +307,10 @@ export const gitOpAbort = (repoPath: string, op: RepoOp) =>
   invoke<void>("git_op_abort", { repoPath, op });
 
 /** Resolves true when the operation completed normally, false when the pending
- *  cherry-pick was skipped as empty (its changes were already on this branch).
- *  Per-commit: a skip can still let the rest of a multi-commit sequence apply,
- *  so false never means the whole operation committed nothing. */
+ *  cherry-pick was skipped because the resolution left nothing to commit. The
+ *  flag speaks for that pick alone: it fully describes a single-commit
+ *  cherry-pick, while a longer sequence may still have applied its remaining
+ *  picks. */
 export const gitOpContinue = (repoPath: string, op: RepoOp) =>
   invoke<boolean>("git_op_continue", { repoPath, op });
 

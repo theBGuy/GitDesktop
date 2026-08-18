@@ -246,7 +246,7 @@ pub async fn git_op_abort(
 /// with `core.editor=true` so git never tries to open an editor.
 ///
 /// `false` means the pending cherry-pick was dropped as empty instead of
-/// committed (its changes are already on this branch); `true` that the operation
+/// committed (the resolution left nothing to commit); `true` that the operation
 /// completed normally. Callers must say which happened — the frontend's
 /// "continued" copy would otherwise promise a commit that was never made.
 #[tauri::command]
