@@ -59,6 +59,9 @@ back-catalogue in the same change rather than grandfathering it.
   whole article", "it's worth").
 - **No takeaway scaffolds.** "The thing to take away is…", "here's the part that…",
   "the key insight…" — state the point, don't announce it.
+- **Flagged words.** Owner-flagged AI-register vocabulary — recast on sight in
+  reader-facing prose, even where the use feels natural; code comments exempt.
+  Current list: "load-bearing".
 - **Antithesis budget.** "X, not Y" / "isn't X — it's Y" is a density guide, not a
   ban: keep every instance where the contrast IS the technical point being made, and
   cut the rest — reflex-reaching for the scaffold is the tell, especially twice in
