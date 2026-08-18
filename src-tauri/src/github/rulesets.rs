@@ -123,6 +123,56 @@ pub async fn gh_ruleset_delete(repo_path: String, id: u64) -> AppResult<()> {
     Ok(())
 }
 
+/// The `required_status_checks` contexts in a `/rules/branches/{branch}` response,
+/// in GitHub's own order and deduplicated — several rulesets may require the same
+/// context. Pure so the shape is pinned without a live `gh` call.
+fn required_check_contexts(rules: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for rule in rules.as_array().into_iter().flatten() {
+        if rule.get("type").and_then(Value::as_str) != Some("required_status_checks") {
+            continue;
+        }
+        let checks = rule
+            .pointer("/parameters/required_status_checks")
+            .and_then(Value::as_array);
+        for check in checks.into_iter().flatten() {
+            let Some(context) = check.get("context").and_then(Value::as_str) else {
+                continue;
+            };
+            if context.is_empty() || out.iter().any(|c| c == context) {
+                continue;
+            }
+            out.push(context.to_string());
+        }
+    }
+    out
+}
+
+/// The status-check contexts the branch's active rules require, for the pull-request
+/// view's blocked-merge line. `/rules/branches` aggregates every ruleset that applies
+/// and answers `[]` for a readable branch under no rules. A branch the token can't
+/// read is an Err, like every other `run_gh` non-zero exit; the caller may treat that
+/// the same as empty, but it is not reported as empty here.
+#[tauri::command]
+pub async fn gh_branch_required_checks(
+    repo_path: String,
+    branch: String,
+    lens: Option<String>,
+) -> AppResult<Vec<String>> {
+    // The lens slug, not the origin one: a fork PR's base branch — and its rules —
+    // live in the repo the PR targets.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let out = run_gh(
+        Some(&repo_path),
+        &["api", &format!("repos/{slug}/rules/branches/{branch}")],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let rules: Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse the branch rules: {e}")))?;
+    Ok(required_check_contexts(&rules))
+}
+
 /// Flips only `enforcement` (the reversible soft-off). PUT is a full replace, so
 /// we GET the ruleset and resend its writable fields with the new enforcement —
 /// the rules are preserved.
@@ -151,4 +201,59 @@ pub async fn gh_ruleset_set_enforcement(
         "rules": full.get("rules").cloned().unwrap_or(json!([])),
     });
     gh_ruleset_update(repo_path, id, body).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contexts(raw: &str) -> Vec<String> {
+        required_check_contexts(&serde_json::from_str::<Value>(raw).expect("valid JSON"))
+    }
+
+    #[test]
+    fn reads_the_contexts_of_a_live_rules_response() {
+        // Verbatim `gh api repos/theBGuy/GitDesktop/rules/branches/master`, so the
+        // parser is pinned against the shape the endpoint actually returns.
+        let raw = r#"[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"do_not_enforce_on_create":false,"required_status_checks":[{"context":"build"},{"context":"fragment"}]},"ruleset_source_type":"Repository","ruleset_source":"theBGuy/GitDesktop","ruleset_id":20332127}]"#;
+        assert_eq!(contexts(raw), vec!["build", "fragment"]);
+    }
+
+    #[test]
+    fn ignores_rules_of_every_other_type() {
+        let raw = r#"[
+            {"type":"pull_request","parameters":{"required_approving_review_count":1}},
+            {"type":"deletion"},
+            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"lint","integration_id":15368}]}}
+        ]"#;
+        assert_eq!(contexts(raw), vec!["lint"]);
+    }
+
+    #[test]
+    fn dedupes_a_context_required_by_two_rulesets() {
+        let raw = r#"[
+            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"},{"context":"test"}]}},
+            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}
+        ]"#;
+        assert_eq!(contexts(raw), vec!["build", "test"]);
+    }
+
+    #[test]
+    fn an_unprotected_branch_requires_nothing() {
+        assert_eq!(contexts("[]"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn tolerates_shapes_the_endpoint_never_promised() {
+        // A rules read that isn't a list of well-formed rules yields no contexts
+        // rather than panicking — the banner falls back to its generic line.
+        for raw in [
+            r#"{"message":"Not Found"}"#,
+            r#"[{"type":"required_status_checks"}]"#,
+            r#"[{"type":"required_status_checks","parameters":{"required_status_checks":{}}}]"#,
+            r#"[{"type":"required_status_checks","parameters":{"required_status_checks":[{},{"context":42},{"context":""}]}}]"#,
+        ] {
+            assert_eq!(contexts(raw), Vec::<String>::new(), "raw: {raw}");
+        }
+    }
 }

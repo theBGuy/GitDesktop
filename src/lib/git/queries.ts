@@ -4045,6 +4045,10 @@ export function useBranchDivergence(
     queryKey: ["repo", repo, "divergence", base] as const,
     queryFn: () => api.gitBranchDivergence(repo, base ?? ""),
     enabled: enabled && Boolean(base),
+    // Local rev-list reads only. react-query's default "online" mode parks the
+    // fetch whenever the OS reports no connection, and a parked query is neither
+    // loading nor errored — consumers would silently render without divergence.
+    networkMode: "always",
   });
 }
 

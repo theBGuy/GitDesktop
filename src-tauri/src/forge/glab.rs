@@ -72,10 +72,18 @@ pub async fn run_glab_raw(
         cmd.current_dir(repo);
     }
     // Keep glab non-interactive + quiet (stdin null already blocks prompts).
+    // GLAB_CHECK_UPDATE is glab's update-notice switch and its polarity is
+    // inverted from gh's GH_NO_UPDATE_NOTIFIER — glab gates on the value being
+    // TRUE (cmd/glab/main.go `isUpdateCheckEnabled`, verified against v1.105.0).
+    // The value is `strconv.ParseBool`'d, so it must be a bool literal: an empty
+    // string logs a parse warning to stderr instead of disabling anything, and
+    // the notice it suppresses writes to stderr, where it would ride along in
+    // AppError::Glab and in the reconnect child's merged line scan.
     cmd.env("GLAB_PAGER", "")
         .env("PAGER", "")
         .env("NO_COLOR", "1")
-        .env("CLICOLOR", "0");
+        .env("CLICOLOR", "0")
+        .env("GLAB_CHECK_UPDATE", "false");
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -168,22 +176,78 @@ fn normalize_host(value: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
-/// The host keys of the `hosts:` section of a glab config.yml. A minimal
-/// line scanner, not a YAML parser: glab writes plain unquoted keys, and the
-/// file also holds live tokens — only key NAMES may leave this function, so
-/// values are never inspected at all.
+/// True for the `hosts:` section header. Only a trailing comment may follow the
+/// colon: `hosts2:` is a different key, and a flow-form `hosts: {…}` holds no
+/// line-scannable entries.
+fn is_hosts_header(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("hosts:") else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    // YAML opens a comment only after whitespace, so `hosts:#x` is a plain
+    // scalar value — a section header with a value holds no scannable entries.
+    rest.starts_with(char::is_whitespace) && rest.trim_start().starts_with('#')
+}
+
+/// The line with a leading `<scheme>://` removed, so the first colon left is the
+/// key's own. Guarded on the scheme's own shape: a bare `://` search would also
+/// hit a URL in the line's VALUE (a trailing comment, a flow map) and eat the key.
+fn strip_scheme(trimmed: &str) -> &str {
+    match trimmed.split_once("://") {
+        Some((scheme, after))
+            if !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
+        {
+            after
+        }
+        _ => trimmed,
+    }
+}
+
+/// The host a line at host-key indent declares, if it declares one. Whatever
+/// follows the colon is a value — an anchor, alias, flow map, or comment — and
+/// is never inspected, so any `key:`-shaped line names a host except the YAML
+/// merge key `<<`, which is a mapping directive. A key carrying whitespace or a
+/// comma is never a hostname and is refused: that is the one shape a stray value
+/// fragment (a mis-indented flow continuation) could otherwise arrive in.
+fn host_from_key_line(trimmed: &str) -> Option<String> {
+    let key = strip_scheme(trimmed).split_once(':')?.0.trim();
+    if key == "<<" || key.contains(char::is_whitespace) || key.contains(',') {
+        return None;
+    }
+    // Quotes around a key are YAML syntax; left on they bake into the hostname.
+    let unquoted = ['\'', '"']
+        .iter()
+        .find_map(|q| key.strip_prefix(*q)?.strip_suffix(*q))
+        .unwrap_or(key);
+    normalize_host(unquoted)
+}
+
+/// The host keys of the `hosts:` section of a glab config.yml. A minimal line
+/// scanner, not a YAML parser: it accepts the hand-written forms glab's own
+/// writer never emits (anchors, aliases, comments, quoted keys) because a
+/// dropped host silently disables GitLab detection for that config. The file
+/// also holds live tokens — only key NAMES may leave this function, so values
+/// are never inspected at all. A non-host key under `hosts:` (an anchor-definition
+/// block, an alias key) is therefore reported as a host — parity with glab, which
+/// unmarshals the section as host→config and reads that key as a host too.
 fn hosts_from_config(text: &str) -> Vec<String> {
     let mut hosts = Vec::new();
     let mut in_hosts = false;
     let mut key_indent: Option<usize> = None;
     for line in text.lines() {
         let content = line.trim_end();
-        if content.trim_start().starts_with('#') || content.trim().is_empty() {
+        let trimmed = content.trim_start();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
             continue;
         }
-        let indent = content.len() - content.trim_start().len();
+        let indent = content.len() - trimmed.len();
         if !in_hosts {
-            in_hosts = indent == 0 && content == "hosts:";
+            in_hosts = indent == 0 && is_hosts_header(trimmed);
             continue;
         }
         // Any top-level key (or a dedent past the host level) ends the section.
@@ -197,11 +261,8 @@ fn hosts_from_config(text: &str) -> Vec<String> {
         if indent < level {
             break;
         }
-        // A host entry is `<host>:` with nothing after the colon.
-        if let Some(key) = content.trim_start().strip_suffix(':') {
-            if let Some(host) = normalize_host(key) {
-                hosts.push(host);
-            }
+        if let Some(host) = host_from_key_line(trimmed) {
+            hosts.push(host);
         }
     }
     hosts
@@ -275,7 +336,8 @@ pub async fn run_glab_ex(
     cmd.env("GLAB_PAGER", "")
         .env("PAGER", "")
         .env("NO_COLOR", "1")
-        .env("CLICOLOR", "0");
+        .env("CLICOLOR", "0")
+        .env("GLAB_CHECK_UPDATE", "false"); // see run_glab_raw for the polarity
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -336,7 +398,14 @@ pub async fn run_glab_ex(
 
 #[cfg(test)]
 mod known_hosts_tests {
-    use super::{hosts_from_config, normalize_host};
+    use super::{hosts_from_config, known_hosts, normalize_host};
+
+    /// Table driver: `(label, config, expected hosts)`.
+    fn check(cases: &[(&str, &str, &[&str])]) {
+        for (label, config, expected) in cases {
+            assert_eq!(hosts_from_config(config), *expected, "case: {label}");
+        }
+    }
 
     #[test]
     fn extracts_host_keys_only() {
@@ -393,5 +462,179 @@ hosts:
             Some("gitlab.example.com".into())
         );
         assert_eq!(normalize_host("  "), None);
+    }
+
+    #[test]
+    fn structural_forms_keep_scanning() {
+        // The forms that already worked: they must survive the key-grammar
+        // widening, which is otherwise free to swallow non-host lines.
+        check(&[
+            (
+                "plain key",
+                "hosts:\n  gitlab.example.com:\n    token: secret\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "port in the key — split at the first colon, then normalized away",
+                "hosts:\n  gitlab.example.com:443:\n    token: secret\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "scheme on the key",
+                "hosts:\n  https://gitlab.example.com:\n    token: secret\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "scheme and port on the key",
+                "hosts:\n  https://gitlab.example.com:8443:\n    token: secret\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "a URL in the value must not be mistaken for the key's scheme",
+                "hosts:\n  gitlab.example.com: # see https://docs.example.com\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "CRLF line endings",
+                "hosts:\r\n  gitlab.example.com:\r\n    token: secret\r\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "document marker ahead of the section",
+                "---\nhosts:\n  gitlab.example.com:\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "trailing whitespace on the header",
+                "hosts:  \n  gitlab.example.com:\n",
+                &["gitlab.example.com"],
+            ),
+            ("empty section", "hosts:\ncheck_update: true\n", &[]),
+            (
+                "the YAML merge key is a directive, not a host",
+                "hosts:\n  <<: *defaults\n  gitlab.example.com:\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "a wrapped flow map's continuation is a value fragment, not a key",
+                "hosts:\n  gitlab.example.com: {token: abc,\n  def456, user: someone}\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "a host's own sub-keys",
+                "hosts:\n  gitlab.example.com:\n    api_host: nested.example.com\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "a dedent past host level ends the section",
+                "hosts:\n    gitlab.example.com:\n  stray.example.com:\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "a top-level key ends the section",
+                "hosts:\n  gitlab.example.com:\ncheck_update: true\nstray.example.com:\n",
+                &["gitlab.example.com"],
+            ),
+        ]);
+    }
+
+    #[test]
+    fn reads_decorated_host_keys() {
+        // glab's writer emits a bare `<host>:`, but a hand-edited config can
+        // decorate the key or hang any value off it — dropping those hosts
+        // disables GitLab detection silently.
+        check(&[
+            (
+                "anchor",
+                "hosts:\n  gitlab.example.com: &defaults\n    token: secret\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "alias",
+                "hosts:\n  gitlab.example.com: *defaults\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "trailing comment",
+                "hosts:\n  gitlab.example.com: # work instance\n    token: secret\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "flow map",
+                "hosts:\n  gitlab.example.com: {token: secret}\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "quoted keys",
+                "hosts:\n  \"gitlab.example.com\":\n  'other.example.com':\n",
+                &["gitlab.example.com", "other.example.com"],
+            ),
+        ]);
+    }
+
+    #[test]
+    fn reads_a_commented_hosts_header() {
+        check(&[(
+            "a comment on the header must not hide the whole section",
+            "hosts: # my instances\n  gitlab.example.com:\n    token: secret\n",
+            &["gitlab.example.com"],
+        )]);
+    }
+
+    #[test]
+    fn lookalike_headers_open_nothing() {
+        check(&[
+            ("a longer key", "hosts2:\n  stray.example.com:\n", &[]),
+            (
+                "a value, not a section",
+                "hosts: mine\n  stray.example.com:\n",
+                &[],
+            ),
+            (
+                "`#` without leading whitespace is a scalar, not a comment",
+                "hosts:#mine\n  stray.example.com:\n",
+                &[],
+            ),
+            (
+                "flow-form mapping",
+                "hosts: {}\n  stray.example.com:\n",
+                &[],
+            ),
+            (
+                "not at top level",
+                "  hosts:\n    stray.example.com:\n",
+                &[],
+            ),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn known_hosts_never_claims_github_or_bitbucket() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-glab-cfg")
+            .tempdir()
+            .expect("tempdir");
+        std::fs::write(
+            dir.path().join("config.yml"),
+            "hosts:\n  github.com:\n  bitbucket.org:\n  gitlab.example.com:\n",
+        )
+        .expect("write config");
+        // SAFETY: GLAB_CONFIG_DIR/GITLAB_HOST are read only by `known_hosts`, and
+        // no other test drives it. GLAB_CONFIG_DIR is exclusive when set, so this
+        // pins the read to the fixture instead of the developer's real config.
+        // Both are snapshotted and restored: this process may have inherited them.
+        let prior_dir = std::env::var_os("GLAB_CONFIG_DIR");
+        let prior_host = std::env::var_os("GITLAB_HOST");
+        std::env::set_var("GLAB_CONFIG_DIR", dir.path());
+        std::env::remove_var("GITLAB_HOST");
+        let hosts = known_hosts().await;
+        match prior_dir {
+            Some(d) => std::env::set_var("GLAB_CONFIG_DIR", d),
+            None => std::env::remove_var("GLAB_CONFIG_DIR"),
+        }
+        if let Some(h) = prior_host {
+            std::env::set_var("GITLAB_HOST", h);
+        }
+        assert_eq!(hosts, vec!["gitlab.example.com"]);
     }
 }

@@ -165,6 +165,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Pull requests & review",
+    label:
+      "A merge blocked by branch protection names the required checks still unmet (GitHub)",
+  },
+  {
+    group: "Pull requests & review",
     label: "Set labels & assignees when you open a PR/MR (GitHub & GitLab)",
   },
   {

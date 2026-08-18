@@ -17,6 +17,7 @@ export interface ErrorPresentation {
 /** Human labels for every AppError kind (mirrors the union in tauri/invoke.ts). */
 const KIND_LABELS: Record<AppError["kind"], string> = {
   git: "Git error",
+  conflict: "Merge conflict",
   notARepo: "Not a Git repository",
   gitNotFound: "Git not found",
   ghNotFound: "GitHub CLI not found",
@@ -61,7 +62,9 @@ function firstMeaningfulLine(message: string): string {
   return stripToolPrefix(nonEmpty ?? message).trim() || message.trim();
 }
 
-/** Conflict-family markers: anchored to git's own diagnostic line shapes and
+/** Conflict-family markers — the FALLBACK classifier, for `git`-kind errors from
+ *  a producer that doesn't carry the structured `conflict` variant. Anchored to
+ *  git's own diagnostic line shapes and
  *  matched case-sensitively against the raw text, because git echoes commit
  *  subjects and file paths into the same blob, so an unanchored match would
  *  collapse ANY failure into the conflict summary — a commit titled "resolve
@@ -136,6 +139,12 @@ const DIRTY_TREE_MARKERS = [
   "cannot rebase: your index contains uncommitted changes",
 ];
 
+/** The `git` kind is the only one carrying a stderr blob distinct from its
+ *  message; every other kind folds its detail into `message` itself. */
+function gitStderr(e: AppError): string {
+  return e.kind === "git" ? (e.stderr?.trim() ?? "") : "";
+}
+
 /**
  * Whether a thrown value is git refusing an operation because it would
  * overwrite uncommitted work — the pull / merge / rebase / switch dirty-tree
@@ -144,7 +153,7 @@ const DIRTY_TREE_MARKERS = [
  */
 export function isDirtyTreeRefusal(e: unknown): boolean {
   const text = isAppError(e)
-    ? `${e.message ?? ""}\n${e.stderr ?? ""}`
+    ? `${e.message ?? ""}\n${gitStderr(e)}`
     : e instanceof Error
       ? e.message
       : String(e);
@@ -206,6 +215,30 @@ function conflictSummary(text: string): string {
   return paused("Operation", "continue");
 }
 
+/** What a paused operation is called and how the user finishes it, keyed by the
+ *  `op` a structured conflict names. Same grammar as `conflictSummary` above,
+ *  which has to read the name out of git's own advice instead. The stash trio
+ *  has no `--continue` to point at, so each says where its changes ended up:
+ *  pop and apply keep the entry (measured, git 2.51.1), while `stash-restore`
+ *  recovers a DANGLING stash that is already off the list — promising a kept
+ *  entry there would send the user looking for one that isn't coming back. */
+const CONFLICT_SUMMARIES: Record<string, string> = {
+  merge: "Merge paused — resolve the conflicts, then commit.",
+  rebase: "Rebase paused — resolve the conflicts, then continue.",
+  "cherry-pick": "Cherry-pick paused — resolve the conflicts, then continue.",
+  revert: "Revert paused — resolve the conflicts, then continue.",
+  "stash-pop": "Stash pop hit conflicts — resolve them; your stash was kept.",
+  "stash-apply":
+    "Stash apply hit conflicts — resolve them; your stash was kept.",
+  "stash-restore":
+    "Restore hit conflicts — resolve them; the recovered changes are in your working tree.",
+};
+
+/** Mirrors `conflictSummary`'s own unknown-operation line, so an `op` the Rust
+ *  layer adds ahead of a table entry still reads as a paused operation. */
+const UNKNOWN_CONFLICT_SUMMARY =
+  "Operation paused — resolve the conflicts, then continue.";
+
 /** Count of non-empty lines in a string. */
 function nonEmptyLineCount(text: string): number {
   return text.split("\n").filter((l) => l.trim() !== "").length;
@@ -215,12 +248,32 @@ function nonEmptyLineCount(text: string): number {
  * Humanize any thrown value into a toast-friendly summary plus the raw full
  * text. AppErrors get a kind label; plain Error/string values get label null and
  * their first line as the summary. Conflict-family errors collapse to one calm
- * "<Op> paused" line while preserving the raw dump in `fullText`.
+ * "<Op> paused" line while preserving the raw dump in `fullText` — from the
+ * structured `conflict` variant where the producer carries it, from the anchored
+ * prose markers otherwise.
  */
 export function presentError(e: unknown): ErrorPresentation {
   if (isAppError(e)) {
+    const label = KIND_LABELS[e.kind];
+    // The structured variant first: the Rust layer already named the paused
+    // operation, so nothing is inferred from prose. The markers below stay for
+    // `git`-kind errors — every producer not carrying the structured variant.
+    if (e.kind === "conflict") {
+      // The Rust layer substitutes a one-line stand-in into `message` when git
+      // wrote to neither stream, so falling back to it keeps Details populated
+      // in the one case `report` cannot fill — and `long` follows the report,
+      // since that stand-in says no more than the summary already does.
+      const report = (e.report ?? "").trim();
+      return {
+        label,
+        summary: CONFLICT_SUMMARIES[e.op] ?? UNKNOWN_CONFLICT_SUMMARY,
+        fullText: report || (e.message ?? ""),
+        long: report !== "",
+      };
+    }
+
     const message = e.message ?? "";
-    const stderr = e.stderr?.trim() ?? "";
+    const stderr = gitStderr(e);
     // Append stderr only when it adds something the message doesn't already carry.
     const fullText =
       stderr && !message.includes(stderr) ? `${message}\n\n${stderr}` : message;
@@ -235,7 +288,6 @@ export function presentError(e: unknown): ErrorPresentation {
       ROLLBACK_VERDICTS.some((v) => verdictLine.includes(v));
     const isConflict =
       !rolledBack && CONFLICT_MARKERS.some((m) => m.test(combined));
-    const label = KIND_LABELS[e.kind];
     const summary = isConflict
       ? conflictSummary(combined)
       : firstMeaningfulLine(message) || label;

@@ -269,10 +269,10 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
     // stderr-only error renders as "git exited with code 1".
     let out = run_git_mutating_raw(state, repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
-        return Err(AppError::Git {
-            code: out.code,
-            stderr: out.full_failure_text(),
-        });
+        // Empty baseline, unlike every other site: a refused `--continue` reports
+        // the paths the operation the CALLER named is already paused on, so they
+        // are attributable by construction rather than by having just appeared.
+        return Err(classify_failure(repo_path, op, &[], out.code, out.full_failure_text()).await);
     }
     Ok(())
 }
@@ -362,6 +362,7 @@ pub(crate) async fn git_revert_core(
     hash: String,
 ) -> AppResult<()> {
     validate_hash(&hash)?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
     // -m is not supported here; reverting merge commits needs a parent choice
     // Raw: a conflicted revert splits its report — `could not revert` on stderr,
     // the `CONFLICT (…` file list on stdout — so the error needs both halves.
@@ -373,10 +374,14 @@ pub(crate) async fn git_revert_core(
     )
     .await?;
     if out.code != 0 {
-        return Err(AppError::Git {
-            code: out.code,
-            stderr: out.full_failure_text(),
-        });
+        return Err(classify_failure(
+            &repo_path,
+            "revert",
+            &already_unmerged,
+            out.code,
+            out.full_failure_text(),
+        )
+        .await);
     }
     Ok(())
 }
@@ -399,6 +404,7 @@ pub(crate) async fn git_cherry_pick_core(
     hash: String,
 ) -> AppResult<bool> {
     validate_hash(&hash)?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw: a conflicted pick splits its report — `could not apply` on stderr, the
     // `CONFLICT (…` file list on stdout — so the error needs both halves.
     let out =
@@ -418,10 +424,14 @@ pub(crate) async fn git_cherry_pick_core(
         .await;
         return Ok(false);
     }
-    Err(AppError::Git {
-        code: out.code,
-        stderr: out.full_failure_text(),
-    })
+    Err(classify_failure(
+        &repo_path,
+        "cherry-pick",
+        &already_unmerged,
+        out.code,
+        out.full_failure_text(),
+    )
+    .await)
 }
 
 #[derive(serde::Serialize)]
@@ -1059,7 +1069,21 @@ pub async fn git_stash_pop(state: State<'_, AppState>, repo_path: String) -> App
 }
 
 pub(crate) async fn git_stash_pop_core(state: &AppState, repo_path: String) -> AppResult<()> {
-    run_git_mutating(state, &repo_path, &["stash", "pop"], DEFAULT_TIMEOUT).await?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
+    // Raw: a conflicted pop reports entirely on stdout and leaves stderr empty
+    // (measured, git 2.51.1), so a stderr-only error is blind to the whole report
+    // — and to the fact that git kept the stash entry.
+    let out = run_git_mutating_raw(state, &repo_path, &["stash", "pop"], DEFAULT_TIMEOUT).await?;
+    if out.code != 0 {
+        return Err(classify_failure(
+            &repo_path,
+            "stash-pop",
+            &already_unmerged,
+            out.code,
+            out.full_failure_text(),
+        )
+        .await);
+    }
     Ok(())
 }
 
@@ -1714,15 +1738,45 @@ pub async fn git_orphaned_stash_file_diff(
 }
 
 /// Restore a dangling (orphaned) stash into the working tree. Applies (never
-/// drops or commits); a conflict surfaces through the normal error path.
+/// drops or commits); a conflict surfaces through the normal error path under
+/// its own `stash-restore` op, because there is no stash-list entry left to send
+/// the user back to — that is the whole point of the orphaned path.
 #[tauri::command]
 pub async fn git_restore_orphaned(
     state: State<'_, AppState>,
     repo_path: String,
     sha: String,
 ) -> AppResult<()> {
+    git_restore_orphaned_core(&state, repo_path, sha).await
+}
+
+/// Testable core of [`git_restore_orphaned`] — takes a plain `&AppState` so the
+/// real-repo tokio tests can drive it (mirrors [`git_stash_apply_core`]).
+pub(crate) async fn git_restore_orphaned_core(
+    state: &AppState,
+    repo_path: String,
+    sha: String,
+) -> AppResult<()> {
     validate_hash(&sha)?;
-    run_git_mutating(&state, &repo_path, &["stash", "apply", &sha], DEFAULT_TIMEOUT).await?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
+    // Raw, for the same stdout-only conflict report as `git_stash_pop_core`.
+    let out = run_git_mutating_raw(
+        state,
+        &repo_path,
+        &["stash", "apply", &sha],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        return Err(classify_failure(
+            &repo_path,
+            "stash-restore",
+            &already_unmerged,
+            out.code,
+            out.full_failure_text(),
+        )
+        .await);
+    }
     Ok(())
 }
 
@@ -1744,7 +1798,21 @@ pub(crate) async fn git_stash_apply_core(
 ) -> AppResult<()> {
     let spec = format!("stash@{{{index}}}");
     let sub = if pop { "pop" } else { "apply" };
-    run_git_mutating(state, &repo_path, &["stash", sub, &spec], DEFAULT_TIMEOUT).await?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
+    // Raw, for the same stdout-only conflict report as `git_stash_pop_core`.
+    let out =
+        run_git_mutating_raw(state, &repo_path, &["stash", sub, &spec], DEFAULT_TIMEOUT).await?;
+    if out.code != 0 {
+        let op = if pop { "stash-pop" } else { "stash-apply" };
+        return Err(classify_failure(
+            &repo_path,
+            op,
+            &already_unmerged,
+            out.code,
+            out.full_failure_text(),
+        )
+        .await);
+    }
     Ok(())
 }
 
@@ -1823,14 +1891,19 @@ pub(crate) async fn git_merge_core(
         }
     }
     args.push(&branch);
+    let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw, because a conflicted merge reports entirely on stdout and leaves
-    // stderr empty — `failure_text` is what keeps that report in the error.
+    // stderr empty — the combined text is what keeps that report in the error.
     let out = run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
-        return Err(AppError::Git {
-            code: out.code,
-            stderr: out.failure_text(),
-        });
+        return Err(classify_failure(
+            &repo_path,
+            "merge",
+            &already_unmerged,
+            out.code,
+            out.full_failure_text(),
+        )
+        .await);
     }
     Ok(())
 }
@@ -1847,11 +1920,11 @@ pub struct MergePreview {
 
 /// Predicts merging `branch` into the current branch **without touching the
 /// working tree or index**: merge-base for the up-to-date / fast-forward cases,
-/// then `git merge-tree --write-tree` (needs git 2.38+; file names need 2.40+) for
-/// a real in-memory merge, honoring `strategy` ("ours"/"theirs" → `-X`) so the
-/// prediction matches the real merge — content conflicts auto-resolve, structural
-/// ones still report as conflicts. Older git or any error degrades to "unknown"
-/// so the UI hides the preview.
+/// then `git merge-tree --write-tree` (needs git 2.38+, which is also where
+/// `--name-only` landed) for a real in-memory merge, honoring `strategy`
+/// ("ours"/"theirs" → `-X`) so the prediction matches the real merge — content
+/// conflicts auto-resolve, structural ones still report as conflicts. Older git
+/// or any error degrades to "unknown" so the UI hides the preview.
 #[tauri::command]
 pub async fn git_merge_preview(
     repo_path: String,
@@ -1948,6 +2021,7 @@ pub(crate) async fn git_rebase_core(
     branch: String,
 ) -> AppResult<()> {
     validate_branch_arg(&branch)?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw: a conflicted rebase splits its report — `could not apply` plus the
     // resolve hints on stderr, the `CONFLICT (…` file list on stdout.
     let out = run_git_mutating_raw(
@@ -1958,10 +2032,14 @@ pub(crate) async fn git_rebase_core(
     )
     .await?;
     if out.code != 0 {
-        return Err(AppError::Git {
-            code: out.code,
-            stderr: out.full_failure_text(),
-        });
+        return Err(classify_failure(
+            &repo_path,
+            "rebase",
+            &already_unmerged,
+            out.code,
+            out.full_failure_text(),
+        )
+        .await);
     }
     Ok(())
 }
@@ -1980,6 +2058,7 @@ async fn rebase_onto(
 ) -> AppResult<()> {
     validate_branch_arg(new_base)?;
     validate_branch_arg(old_base)?;
+    let already_unmerged = unmerged_paths(repo_path).await;
     // Raw, for the same split report as `git_rebase_core`.
     let out = run_git_mutating_raw(
         state,
@@ -1996,10 +2075,14 @@ async fn rebase_onto(
     )
     .await?;
     if out.code != 0 {
-        return Err(AppError::Git {
-            code: out.code,
-            stderr: out.full_failure_text(),
-        });
+        return Err(classify_failure(
+            repo_path,
+            "rebase",
+            &already_unmerged,
+            out.code,
+            out.full_failure_text(),
+        )
+        .await);
     }
     Ok(())
 }
@@ -2048,7 +2131,7 @@ pub struct LocalPrMergeOutcome {
 /// `diff --name-only --diff-filter=U`. Uses `run_git_raw` so a non-zero exit
 /// (e.g. mid-operation) is treated as "no readable conflicts" rather than an
 /// error. Empty ⇒ no conflicts / a clean tree.
-async fn unmerged_paths(repo_path: &str) -> Vec<String> {
+pub(crate) async fn unmerged_paths(repo_path: &str) -> Vec<String> {
     let out = run_git_raw(
         Some(repo_path),
         &["diff", "--name-only", "--diff-filter=U"],
@@ -2064,6 +2147,59 @@ async fn unmerged_paths(repo_path: &str) -> Vec<String> {
             .map(str::to_string)
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Shapes a failed mutating git op, telling a PAUSED operation from a plain
+/// failure: an op that ADDED an unmerged path stopped mid-way and left the tree
+/// for the user to resolve, which is a different thing for the frontend to say
+/// than "the command failed". Otherwise the `AppError::Git` the site produced
+/// before, byte-identical.
+///
+/// `already_unmerged` is the site's unmerged set from BEFORE the op, and it is
+/// what keeps a pre-existing conflict from being re-attributed: git refuses
+/// outright on an unmerged index rather than adding to it — a pull answers
+/// "Pulling is not possible because you have unmerged files", a `stash pop`
+/// "error: could not write index", and one with nothing to pop "No stash entries
+/// found" (measured, git 2.51.1). Every one of those leaves the index untouched,
+/// so the post-failure snapshot alone would hand the paused merge's files to
+/// whichever op merely bounced off them, under that op's copy. `op_continue`
+/// passes an empty baseline on purpose: the paths it reports are the ones the
+/// operation it names is already paused on.
+///
+/// A baseline rather than matching `op` against [`op_state`]'s flags, which
+/// would look equivalent and is not: a conflicted `merge --squash` writes NO
+/// marker at all (measured, git 2.51.1 — the same fact
+/// `local_pr_finish_squash_all_ours_is_a_known_no_op` rests on), so a flag gate
+/// would silently stop classifying every squash-merge conflict.
+///
+/// `op` is the closed set the frontend's copy table keys on — `merge`, `rebase`,
+/// `cherry-pick`, `revert`, `stash-pop`, `stash-apply`, `stash-restore` — and
+/// names the operation the user now has to finish, not the git subcommand that
+/// failed (a refused `commit --no-edit` concluding a merge is a paused `merge`).
+///
+/// `report` must be [`GitOutput::full_failure_text`]: the conflict families split
+/// ONE report across both streams, so either half alone is silent data loss.
+/// Lock-free (the probe uses `run_git_raw`), so compounds may call it while
+/// holding `repo_lock`.
+pub(crate) async fn classify_failure(
+    repo_path: &str,
+    op: &str,
+    already_unmerged: &[String],
+    code: i32,
+    report: String,
+) -> AppError {
+    let paths = unmerged_paths(repo_path).await;
+    if paths.iter().all(|p| already_unmerged.contains(p)) {
+        return AppError::Git {
+            code,
+            stderr: report,
+        };
+    }
+    AppError::Conflict {
+        op: op.to_string(),
+        paths,
+        report,
     }
 }
 
@@ -2636,12 +2772,16 @@ pub(crate) async fn finish_local_pr_merge(
                 });
             }
             // A non-conflict, non-zero exit means something genuinely failed
-            // (e.g. "no cherry-pick in progress" when nothing was staged). Surface
-            // it rather than silently reporting success.
-            if out.code != 0 && !out.stderr.trim().is_empty() {
+            // (e.g. "no cherry-pick in progress" when nothing was staged) — surface
+            // it on the exit code ALONE, since git can refuse with stderr empty and
+            // its whole report on stdout
+            // (`a_refusing_commit_reports_on_stdout_with_stderr_empty`), which a
+            // stderr gate would report as "merged". Defensive, not behavior-changing:
+            // no `--continue` failure measured on 2.51.1 is stdout-only (3 shapes).
+            if out.code != 0 {
                 return Err(AppError::Git {
                     code: out.code,
-                    stderr: out.stderr,
+                    stderr: out.full_failure_text(),
                 });
             }
         }
@@ -2672,16 +2812,18 @@ pub(crate) async fn finish_local_pr_merge(
                 )
                 .await?;
                 if commit.code != 0 {
-                    let lower = commit.stderr.to_lowercase();
+                    // Both streams, for the tolerance test as well as the error: a
+                    // refusing `commit` reports on stdout with stderr EMPTY
+                    // (`a_refusing_commit_reports_on_stdout_with_stderr_empty`), so
+                    // reading stderr alone can never see the sentence it looks for.
+                    let report = commit.full_failure_text();
+                    let lower = report.to_lowercase();
                     let already = lower.contains("nothing to commit")
                         || lower.contains("no changes added");
                     if !already {
-                        // Both streams: a failing `commit` can report on stdout alone
-                        // (measured, git 2.51.1), which stderr-only renders as the
-                        // bare "git exited with code 1".
                         return Err(AppError::Git {
                             code: commit.code,
-                            stderr: commit.full_failure_text(),
+                            stderr: report,
                         });
                     }
                 }
@@ -3274,16 +3416,18 @@ pub(crate) async fn finish_remote_pr_resolve(
         };
         let commit = run_git_raw(Some(worktree_path), &args, DEFAULT_TIMEOUT).await?;
         if commit.code != 0 {
-            let lower = commit.stderr.to_lowercase();
+            // Both streams, for the tolerance test as well as the error: a
+            // refusing `commit` reports on stdout with stderr EMPTY
+            // (`a_refusing_commit_reports_on_stdout_with_stderr_empty`), so
+            // reading stderr alone can never see the sentence it looks for.
+            let report = commit.full_failure_text();
+            let lower = report.to_lowercase();
             let already =
                 lower.contains("nothing to commit") || lower.contains("no changes added");
             if !already {
-                // Both streams: a failing `commit` can report on stdout alone
-                // (measured, git 2.51.1), which stderr-only renders as the bare
-                // "git exited with code 1".
                 return Err(AppError::Git {
                     code: commit.code,
-                    stderr: commit.full_failure_text(),
+                    stderr: report,
                 });
             }
         }
@@ -3423,8 +3567,8 @@ fn check_code(o: crate::git::runner::GitOutput) -> AppResult<()> {
 
 /// Predicts whether merging `head` into `base` would conflict, **without touching
 /// the working tree or index** — the read-only precheck for a local-PR merge.
-/// Reuses `git merge-tree --write-tree --name-only` (git 2.38+, file names need
-/// 2.40+): exit 0 ⇒ `"clean"`; exit 1 ⇒ `"conflict"` with the conflicted names;
+/// Reuses `git merge-tree --write-tree --name-only` (both landed in git 2.38):
+/// exit 0 ⇒ `"clean"`; exit 1 ⇒ `"conflict"` with the conflicted names;
 /// anything else / old git ⇒ `"unknown"`. Up-to-date and fast-forward cases are
 /// short-circuited via merge-base and reported as `"clean"` (the merge would
 /// succeed).
@@ -5219,7 +5363,8 @@ mod tests {
     /// Conflicted revert / cherry-pick / rebase all split ONE report across both
     /// streams: the diagnostic on stderr, the conflicted-file list on stdout. An
     /// error carrying either alone looks populated while dropping exactly what
-    /// the user needs to decide how to resolve.
+    /// the user needs to decide how to resolve — and each leaves the repo PAUSED,
+    /// which the structured variant says outright instead of by prose match.
     #[tokio::test]
     async fn a_conflicted_revert_carries_both_streams() {
         let (dir, repo) = setup_repo("revert-details").await;
@@ -5231,7 +5376,7 @@ mod tests {
         let err = git_revert_core(&state, repo.clone(), target)
             .await
             .unwrap_err();
-        assert_both_streams(&err, "could not revert");
+        assert_both_streams(&err, "revert", "could not revert");
     }
 
     #[tokio::test]
@@ -5248,7 +5393,7 @@ mod tests {
         let err = git_cherry_pick_core(&state, repo.clone(), feature)
             .await
             .unwrap_err();
-        assert_both_streams(&err, "could not apply");
+        assert_both_streams(&err, "cherry-pick", "could not apply");
     }
 
     #[tokio::test]
@@ -5264,7 +5409,30 @@ mod tests {
         let err = git_rebase_core(&state, repo.clone(), "feature".into())
             .await
             .unwrap_err();
-        assert_both_streams(&err, "ould not apply");
+        assert_both_streams(&err, "rebase", "ould not apply");
+    }
+
+    /// `rebase --onto` shares the shaping but not the argv, so it gets its own
+    /// conflict test: `fix` branched off `feature` (the wrong base) and replaying
+    /// only its own commits onto the default branch collides there.
+    #[tokio::test]
+    async fn a_conflicted_rebase_onto_carries_both_streams() {
+        let (dir, repo) = setup_repo("rebase-onto-conflict").await;
+        let main = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "f.txt", "f\n", "feature edit").await;
+        git(&repo, &["switch", "-c", "fix"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "fix edit").await;
+        git(&repo, &["switch", &main]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+        git(&repo, &["switch", "fix"]).await;
+
+        let state = AppState::default();
+        let err = rebase_onto(&state, &repo, &main, "feature")
+            .await
+            .unwrap_err();
+        assert_both_streams(&err, "rebase", "ould not apply");
+        assert!(op_state(&repo).await.unwrap().rebasing);
     }
 
     /// The one stdout-ONLY case in the family: `--continue` with paths still
@@ -5288,28 +5456,173 @@ mod tests {
         );
 
         let err = op_continue(&state, &repo, "rebase").await.unwrap_err();
-        let AppError::Git { stderr, .. } = &err else {
-            panic!("expected a git error, got {err:?}");
+        let AppError::Conflict { op, paths, report } = &err else {
+            panic!("expected a conflict error, got {err:?}");
         };
+        // The caller's own op passes through: this refusal names no operation, and
+        // a `--continue` that did nothing leaves no diagnostic to read one from.
+        assert_eq!(op, "rebase");
+        assert_eq!(paths, &vec!["a.txt".to_string()]);
         assert!(
-            stderr.contains("a.txt: needs merge"),
-            "the refusal must name the unresolved file: {stderr}"
+            report.contains("a.txt: needs merge"),
+            "the refusal must name the unresolved file: {report}"
         );
     }
 
-    /// Both halves of a conflicted sequencer op's report reached the error:
-    /// `diagnostic` on stderr, and the `CONFLICT (…` file list on stdout.
-    fn assert_both_streams(err: &AppError, diagnostic: &str) {
-        let AppError::Git { stderr, .. } = err else {
-            panic!("expected a git error, got {err:?}");
+    /// The paused operation is named, the conflicted file listed, and both halves
+    /// of git's report reached `report`: `diagnostic` on stderr, and the
+    /// `CONFLICT (…` file list on stdout.
+    fn assert_both_streams(err: &AppError, op: &str, diagnostic: &str) {
+        let AppError::Conflict {
+            op: named,
+            paths,
+            report,
+        } = err
+        else {
+            panic!("expected a conflict error, got {err:?}");
         };
-        assert!(
-            stderr.contains(diagnostic),
-            "stderr's own diagnostic ({diagnostic:?}) must survive: {stderr}"
+        assert_eq!(named, op, "the paused operation must be named");
+        assert_eq!(
+            paths,
+            &vec!["a.txt".to_string()],
+            "the conflicted file must be listed"
         );
         assert!(
-            stderr.contains("CONFLICT (content): Merge conflict in a.txt"),
-            "and stdout's conflicted-file list with it: {stderr}"
+            report.contains(diagnostic),
+            "stderr's own diagnostic ({diagnostic:?}) must survive: {report}"
+        );
+        assert!(
+            report.contains("CONFLICT (content): Merge conflict in a.txt"),
+            "and stdout's conflicted-file list with it: {report}"
+        );
+    }
+
+    /// A stash holding an edit to `a.txt`, and a committed `a.txt` in the way, so
+    /// reapplying it conflicts. git keeps the entry either way (measured, 2.51.1).
+    async fn stash_over_a_conflicting_commit(marker: &str) -> (tempfile::TempDir, String) {
+        let (dir, repo) = setup_repo(marker).await;
+        std::fs::write(dir.path().join("a.txt"), "mine\n").unwrap();
+        git(&repo, &["stash", "push", "--include-untracked"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "diverge").await;
+        (dir, repo)
+    }
+
+    /// The whole stash family reports a conflict on stdout with stderr EMPTY, so a
+    /// stderr-only error rendered as "git exited with code 1" — and said nothing
+    /// about the entry git kept.
+    fn assert_stash_conflict(err: &AppError, expected_op: &str) {
+        let AppError::Conflict { op, paths, report } = err else {
+            panic!("expected a conflict error, got {err:?}");
+        };
+        assert_eq!(op, expected_op);
+        assert_eq!(paths, &vec!["a.txt".to_string()]);
+        assert!(
+            report.contains("CONFLICT (content): Merge conflict in a.txt"),
+            "the stdout-only report must survive: {report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conflicted_stash_pop_names_its_op_and_keeps_the_entry() {
+        let (_dir, repo) = stash_over_a_conflicting_commit("stash-pop-conflict").await;
+        let state = AppState::default();
+
+        let err = git_stash_pop_core(&state, repo.clone()).await.unwrap_err();
+        assert_stash_conflict(&err, "stash-pop");
+        // The copy this drives promises the stash is still there — pin that.
+        assert!(
+            !git(&repo, &["stash", "list"]).await.trim().is_empty(),
+            "a conflicted pop keeps the entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conflicted_stash_apply_names_the_sub_command_it_ran() {
+        let (_dir, repo) = stash_over_a_conflicting_commit("stash-apply-conflict").await;
+        let state = AppState::default();
+
+        let err = git_stash_apply_core(&state, repo.clone(), 0, false)
+            .await
+            .unwrap_err();
+        assert_stash_conflict(&err, "stash-apply");
+
+        // The same entrypoint with `pop` set names the other op.
+        git(&repo, &["checkout", "--ours", "a.txt"]).await;
+        git(&repo, &["reset", "--hard", "HEAD"]).await;
+        let err = git_stash_apply_core(&state, repo.clone(), 0, true)
+            .await
+            .unwrap_err();
+        assert_stash_conflict(&err, "stash-pop");
+    }
+
+    /// The orphaned path takes its OWN op: the entry it restores is dangling —
+    /// dropped from the list, as this fixture does — so the stash-apply copy's
+    /// promise that "your stash was kept" would send the user to a `stash list`
+    /// that no longer holds their work.
+    #[tokio::test]
+    async fn a_conflicted_orphaned_restore_takes_its_own_op() {
+        let (_dir, repo) = stash_over_a_conflicting_commit("stash-orphan-conflict").await;
+        // Browse the entry by sha, then drop it: that dangling commit is exactly
+        // what the orphaned-stash restore is handed.
+        let sha = rev(&repo, "stash@{0}").await;
+        git(&repo, &["stash", "drop"]).await;
+        assert!(
+            git(&repo, &["stash", "list"]).await.trim().is_empty(),
+            "the fixture's entry really is off the list"
+        );
+        let state = AppState::default();
+
+        let err = git_restore_orphaned_core(&state, repo.clone(), sha)
+            .await
+            .unwrap_err();
+        assert_stash_conflict(&err, "stash-restore");
+    }
+
+    /// A tree already paused on conflicts, so every op below fails by BOUNCING
+    /// off the unmerged index rather than adding to it. The pre-op baseline is
+    /// what keeps the paused merge's files from being re-attributed to whichever
+    /// op merely refused — the toast would otherwise name an operation the
+    /// conflict banner (which reads op_state) disagrees with.
+    async fn repo_paused_on_a_conflicted_merge(marker: &str) -> (tempfile::TempDir, String) {
+        let (dir, repo) = setup_repo(marker).await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "side"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "side edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+        let merge = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "side"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(merge.code, 0, "the fixture's merge must conflict");
+        assert_eq!(unmerged_paths(&repo).await, vec!["a.txt".to_string()]);
+        assert!(op_state(&repo).await.unwrap().merging);
+        (dir, repo)
+    }
+
+    /// Popping with NOTHING to pop, on a tree already paused on a merge: git
+    /// answers "No stash entries found." without touching the index, so the
+    /// paused merge's file is still the only unmerged path. Attributing it to the
+    /// pop would tell the user their stash was kept when there was never a stash.
+    #[tokio::test]
+    async fn a_stashless_pop_on_a_paused_tree_is_not_a_stash_conflict() {
+        let (_dir, repo) = repo_paused_on_a_conflicted_merge("stash-pop-misattrib").await;
+        let state = AppState::default();
+
+        let err = git_stash_pop_core(&state, repo.clone()).await.unwrap_err();
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected a plain git error, got {err:?}");
+        };
+        assert!(
+            stderr.contains("No stash entries found"),
+            "git's own answer must reach the user: {stderr}"
+        );
+        assert!(
+            op_state(&repo).await.unwrap().merging,
+            "and the merge it bounced off is still the operation in progress"
         );
     }
 
@@ -5377,17 +5690,20 @@ mod tests {
         )
         .await
         .unwrap_err();
-        let AppError::Git { stderr, .. } = &err else {
-            panic!("expected a git error, got {err:?}");
+        let AppError::Conflict { op, paths, report } = &err else {
+            panic!("expected a conflict error, got {err:?}");
         };
-        // Mirrors the frontend's anchored CONFLICT_MARKERS (error-summary.ts).
+        assert_eq!(op, "merge");
+        assert_eq!(paths, &vec!["a.txt".to_string()]);
+        // Kept against `report`: the same text still classifies through the
+        // frontend's anchored CONFLICT_MARKERS fallback (error-summary.ts).
         assert!(
-            stderr.lines().any(|l| l.starts_with("CONFLICT (")),
-            "the conflict line must reach the frontend: {stderr}"
+            report.lines().any(|l| l.starts_with("CONFLICT (")),
+            "the conflict line must reach the frontend: {report}"
         );
         assert!(
-            stderr.contains("Automatic merge failed"),
-            "git's merge verdict must survive: {stderr}"
+            report.contains("Automatic merge failed"),
+            "git's merge verdict must survive: {report}"
         );
         assert!(op_state(&repo).await.unwrap().merging);
     }
@@ -7186,6 +7502,126 @@ detached
         assert!(
             !lower.contains("nothing to commit") && !lower.contains("no changes added"),
             "the untracked refusal must not match the tolerate-it substrings: {report}"
+        );
+    }
+
+    /// Resolving and committing BY HAND in the resolve worktree still finishes the
+    /// merge. The arm that carries it is the SKIP above the conclude-with-commit
+    /// step: a hand commit clears MERGE_HEAD and leaves nothing staged, so no
+    /// commit is attempted at all. The "nothing to commit" tolerance below it now
+    /// reads git's combined output, which is where that sentence actually lands —
+    /// it covers a commit refused between the staged probe and the commit itself.
+    #[tokio::test]
+    async fn local_pr_finish_accepts_a_hand_committed_resolution() {
+        let (dir, repo) = setup_repo("lpr-hand-commit").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        // Off `base` so advancing it never touches the main working tree.
+        git(&repo, &["switch", "-c", "work"]).await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_local_pr(&state, &repo, &base, "feature", "merge it", "merge", &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+        git(&wt, &["commit", "-m", "resolved by hand"]).await;
+        let resolved = rev(&wt, "HEAD").await;
+        assert!(
+            !git_path_exists(&wt, "MERGE_HEAD").await,
+            "a hand commit concludes the merge, clearing MERGE_HEAD"
+        );
+
+        let done = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "merge it",
+            &wt,
+            &outcome.worktree_id.clone().unwrap_or_default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.status, "merged");
+        assert_eq!(
+            rev(&repo, &base).await,
+            resolved,
+            "base advances to the commit the user made"
+        );
+        assert!(
+            !Path::new(&wt).exists(),
+            "the resolve worktree is torn down"
+        );
+    }
+
+    /// The `rebase` strategy's `cherry-pick --continue` can fail with no conflict
+    /// left to report — an all-"ours" resolution makes the pick empty. That is a
+    /// failure, never "merged", and the report splits: git explains itself on
+    /// stderr while the state of the tree rides stdout.
+    #[tokio::test]
+    async fn local_pr_finish_rebase_reports_a_failed_continue_from_both_streams() {
+        let (dir, repo) = setup_repo("lpr-rebase-continue").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        git(&repo, &["switch", "-c", "work"]).await;
+        let base_before = rev(&repo, &base).await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_local_pr(&state, &repo, &base, "feature", "", "rebase", &root)
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, "conflicts");
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+
+        // Every conflict resolved as "ours": nothing unmerged is left, so the
+        // continue runs — and lands on a pick with no content.
+        git(&wt, &["checkout", "--ours", "a.txt"]).await;
+        git(&wt, &["add", "a.txt"]).await;
+
+        let err = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "rebase",
+            "",
+            &wt,
+            &outcome.worktree_id.clone().unwrap_or_default(),
+            None,
+        )
+        .await;
+        let Err(err) = err else {
+            panic!("expected the failed continue to be reported");
+        };
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected a git error, got {err:?}");
+        };
+        assert!(
+            stderr.contains("is now empty"),
+            "git's own explanation (stderr) must survive: {stderr}"
+        );
+        assert!(
+            stderr.contains("nothing to commit"),
+            "and the stdout half that says what the tree looks like: {stderr}"
+        );
+        assert_eq!(
+            rev(&repo, &base).await,
+            base_before,
+            "a failed continue never advances base"
         );
     }
 

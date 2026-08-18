@@ -172,6 +172,7 @@ import { PendingReviewBar } from "./PendingReviewBar";
 import { PrActivityFeed, usePrThreadClaims } from "./PrActivityFeed";
 import { PrCommitDetail } from "./PrCommitDetail";
 import {
+  blockedMergeLine,
   PR_SWITCH_LOADING_REASON,
   type PrMergeabilityArm,
   PrMergeabilityBanner,
@@ -198,6 +199,10 @@ import {
 } from "./StackSection";
 import { SubmitReviewDialog } from "./SubmitReviewDialog";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
+import {
+  unmetRequiredChecks,
+  useBranchRequiredChecks,
+} from "./useBranchRequiredChecks";
 import {
   useCancelOnIdentityChange,
   useGeneratePrDescription,
@@ -887,6 +892,13 @@ export function RemotePrView({
   // or still-running one has nothing to say. Gated like every other prediction reader.
   const predictedClean =
     previewEnabled && conflictPreview.data?.status === "clean";
+  // GitHub reports a PR the base branch's rules are refusing as MERGEABLE with a
+  // BLOCKED merge-state — the merge itself is clean, the rules are the refusal.
+  // GitLab/Bitbucket `detail` values are not interpreted here.
+  const blockedByRules =
+    provider === "github" &&
+    serverState === "mergeable" &&
+    mergeability.data?.detail === "BLOCKED";
   const behindBy = divergenceEnabled ? (divergence.data?.behindBy ?? 0) : 0;
   // Same gate as `behindBy` — a disabled divergence query keeps serving its last value,
   // and a latch left armed on one PR must never paint onto the next.
@@ -969,16 +981,50 @@ export function RemotePrView({
       // read that never landed leaves the banner with nothing but the local prediction.
       case forgeUnreachable:
         return "unreachable";
+      // Below the answer-shaped arms above only for reading order: a BLOCKED detail
+      // rides a settled "mergeable" answer, which neither `checking` nor
+      // `unreachable` can be true of. It does outrank `behind` — rules the base is
+      // enforcing are more pressing than a base that has merely moved on.
+      case blockedByRules:
+        return "blocked";
       case behindBy > 0:
         return "behind";
       default:
         return null;
     }
   })();
-  // No `updating` term needed: the arm only reads "behind" once the ladder has fallen
-  // past that case. The submitting window is its own thing — it precedes the latch.
+  // Both halves below read `details`, which through a PR switch still serves the
+  // PREVIOUS pull request — and revisiting a blocked PR serves its cached mergeability
+  // synchronously, so the arm can be "blocked" while the base ref and checks belong to
+  // the last one. Naming that PR's checks, or reading rules for its base, would both
+  // be wrong.
+  const blockedDetailsReady =
+    bannerArm === "blocked" && !details.isPlaceholderData;
+  // The base branch's required checks, read only for the arm that names them. The
+  // repoTab term is the <Activity> gate every sibling read here carries: a hidden
+  // subtree still refetches, and this one would respawn `gh` on every focus regain.
+  const requiredChecks = useBranchRequiredChecks(
+    repoPath,
+    details.data?.baseRefName ?? "",
+    lens,
+    repoTab === "pulls" && blockedDetailsReady,
+  );
+  // A failed or empty rules read leaves this empty and the line stays generic — the
+  // banner never waits on the join to say that the merge is blocked.
+  const blockedRequirements = blockedDetailsReady
+    ? unmetRequiredChecks(
+        requiredChecks.data ?? [],
+        details.data?.checks ?? [],
+        providerKey,
+      )
+    : [];
+  // `blocked` outranks `behind` on the ladder, so a PR that is both would otherwise
+  // lose every route to the update (button, caret, hotkey, palette) while the rules
+  // block it: the strip's sentence changes, the affordance does not. Neither arm
+  // needs an `updating` term — both sit below it. The submitting window precedes
+  // the latch.
   const canUpdateBranch =
-    bannerArm === "behind" &&
+    (bannerArm === "behind" || (bannerArm === "blocked" && behindBy > 0)) &&
     updateBlockedReason === undefined &&
     !updateBranch.isPending;
 
@@ -1477,7 +1523,12 @@ export function RemotePrView({
           setMergeOpen(false);
         },
         onError: (e) => {
-          onError(e);
+          // The forge's own refusal text advises flags this app doesn't offer, so
+          // where the rules are the known reason, say which requirement is unmet
+          // alongside it — the same line the strip is already showing.
+          if (bannerArm === "blocked")
+            toastErrorWithNote(e, blockedMergeLine(blockedRequirements));
+          else onError(e);
           setMergeOpen(false);
         },
       },
@@ -2336,6 +2387,7 @@ export function RemotePrView({
         predictedClean={predictedClean}
         forgeUnreachable={forgeUnreachable}
         behindBy={behindBy}
+        blockedRequirements={blockedRequirements}
         updateBlockedReason={updateBlockedReason}
         // Busy-shaped, not a reason — the banner supplies its own words for the wait,
         // which now spans GitHub's whole queued update rather than one CLI call.

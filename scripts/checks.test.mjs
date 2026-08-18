@@ -25,6 +25,7 @@ import {
 import {
   checkRefspecTemplates,
   checkSecretArgv,
+  checkStderrOnlyGitError,
   checkSyncCommands,
   enclosingFn,
   staleAllowlistEntries,
@@ -316,6 +317,146 @@ test("sync #[tauri::command] is caught, async is not, unreadable fails closed", 
   assert.equal(failClosed.length, 1);
   assert.equal(failClosed[0].fn, "<unresolved>");
   assert.equal(failClosed[0].allowlisted, false);
+});
+
+test("stderr-only AppError::Git is caught, bare and format!-wrapped", () => {
+  const src = [
+    "async fn plain(out: GitOutput) -> AppError {",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: out.stderr,",
+    "    }",
+    "}",
+    "async fn wrapped(out: GitOutput) -> AppError {",
+    "    AppError::Git {",
+    "        code: out.code,",
+    '        stderr: format!("prefix\\n{}", out.stderr),',
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => h.fn),
+    ["plain", "wrapped"],
+  );
+  assert.equal(hits[0].allowlisted, false);
+});
+
+test("stderr-only check ignores correct shaping and bare binding patterns", () => {
+  const src = [
+    "async fn shaped(out: GitOutput) -> AppError {",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: out.full_failure_text(),",
+    "    }",
+    "}",
+    "fn matched(e: AppError) -> bool {",
+    '    matches!(e, AppError::Git { stderr, .. } if stderr.contains("x"))',
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(hits, []);
+});
+
+test("a stderr value naming a binding is judged by that binding's initializer", () => {
+  // The shape the conflict batch itself uses (`let report = …; stderr: report`):
+  // the field alone says nothing, so substituting `.stderr` into the binding
+  // later has to stay visible.
+  const src = [
+    "async fn good(commit: GitOutput) -> AppError {",
+    "    let report = commit.full_failure_text();",
+    "    let _lower = report.to_lowercase();",
+    "    AppError::Git {",
+    "        code: commit.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+    "async fn bad(commit: GitOutput) -> AppError {",
+    "    let report = commit.stderr;",
+    "    AppError::Git {",
+    "        code: commit.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => h.fn),
+    ["bad"],
+  );
+});
+
+test("an unresolvable stderr binding fails closed", () => {
+  // A parameter has no initializer in range, so the checker cannot know which
+  // shaping built it — that is a finding, not a pass.
+  const src = [
+    "async fn passthrough(code: i32, report: String) -> AppError {",
+    "    AppError::Git {",
+    "        code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "passthrough");
+  assert.match(hits[0].fix, /cannot resolve/);
+});
+
+test("failure_text() substitution is caught apart from the combining helper", () => {
+  const src = [
+    "async fn substituting(out: GitOutput) -> AppError {",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: out.failure_text(),",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.match(hits[0].fix, /SUBSTITUTES/);
+});
+
+test("a comment naming full_failure_text does not disarm the check", () => {
+  // The verdict is read from the field VALUE as an expression; a window-wide
+  // substring test would have accepted this site on the strength of its prose.
+  const src = [
+    "async fn commented(out: GitOutput) -> AppError {",
+    "    // full_failure_text() is what this should use.",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: out.stderr,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "commented");
+});
+
+test("stderr-only check does not scan test modules", () => {
+  // A renaming pattern (`stderr: text`) is indistinguishable from an
+  // unresolvable field, and only tests carry them — they assert on these shapes
+  // rather than building them.
+  const src = [
+    "#[cfg(test)]",
+    "mod tests {",
+    "    fn renamed(e: &AppError) {",
+    "        if let AppError::Git { code: c, stderr: text } = e {",
+    "            drop((c, text));",
+    "        }",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(hits, []);
 });
 
 // ----------------------------------------------------------- check-dead-surface

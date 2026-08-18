@@ -558,6 +558,7 @@ pub fn run() {
             github::rulesets::gh_ruleset_update,
             github::rulesets::gh_ruleset_delete,
             github::rulesets::gh_ruleset_set_enforcement,
+            github::rulesets::gh_branch_required_checks,
             github::secrets::gh_secrets_list,
             github::secrets::gh_secret_set,
             github::secrets::gh_secret_delete,

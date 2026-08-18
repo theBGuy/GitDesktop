@@ -98,21 +98,35 @@ const EMPTY_MERGED_CLAUSE: Record<PrCheckState, string> = {
 
 /** The one-line status above the candidate list while merged detection runs.
  *  A parked check has no progress to report, so it names what it's waiting on
- *  rather than implying the read is underway. */
-function MergedCheckLine({ paused }: { paused: boolean }) {
+ *  rather than implying the read is underway — and only the pull-request half
+ *  can park, since divergence reads local objects with no connection at all.
+ *  `srOnly` announces it without drawing it, for the states that show no
+ *  status line today. */
+function MergedCheckLine({
+  paused,
+  srOnly,
+}: {
+  paused: boolean;
+  srOnly?: boolean;
+}) {
   return (
-    <p className="px-1 py-1 text-[11px] text-muted-foreground">
+    <p
+      className={
+        srOnly ? "sr-only" : "px-1 py-1 text-[11px] text-muted-foreground"
+      }
+    >
       {paused
-        ? "Waiting for a connection to check which branches are merged…"
+        ? "Waiting for a connection to check which branches a pull request merged…"
         : "Checking which branches are merged…"}
     </p>
   );
 }
 
 /** Empty first paint while merged detection runs. An animated skeleton over a
- *  parked check would be a false activity signal. */
+ *  parked check would be a false activity signal, so a parked check paints
+ *  nothing here — the status region above already names what it's waiting on. */
 function CheckingMergedPlaceholder({ paused }: { paused: boolean }) {
-  if (paused) return <MergedCheckLine paused />;
+  if (paused) return null;
   return (
     <div className="space-y-1 py-2" aria-busy>
       {[0, 1, 2].map((i) => (
@@ -320,6 +334,13 @@ export function CleanupBranchesDialog({
   const checkingMerged =
     (Boolean(defaultBranch) && divergence.isLoading) ||
     prCheckState === "pending";
+  // Which of the status region's lines are DRAWN — it announces more than it
+  // shows: the check line stays sr-only on the empty first paint (the skeleton
+  // is the visual signal there) and on a parked re-check of an answered list,
+  // whose visible staleness caveat is a surface this change doesn't own.
+  const showCheckLine =
+    checkingMerged && (prCheckPaused || candidates.length > 0);
+  const showPrFailedLine = prCheckState === "failed" && candidates.length > 0;
 
   const selectedCount = candidateNames.filter((n) => selected.has(n)).length;
   const allChecked =
@@ -534,73 +555,116 @@ export function CleanupBranchesDialog({
             </button>
           )}
 
-          {/* List / skeleton / empty */}
-          {checkingMerged && candidates.length === 0 ? (
-            <CheckingMergedPlaceholder paused={prCheckPaused} />
-          ) : candidates.length === 0 ? (
-            <p className="py-6 text-center text-xs text-muted-foreground">
-              No stale branches — nothing is merged into{" "}
-              <span className="font-mono">
-                {defaultBranch ?? "the default branch"}
-              </span>
-              {EMPTY_MERGED_CLAUSE[prCheckState]}
-              {windowDays} days. Try a shorter window.
-              {prCheckState === "failed"
-                ? " Pull requests couldn't be checked, so a branch merged through one may be missing here."
-                : null}
-            </p>
-          ) : (
+          {/* Merged-detection status + the list it describes. `gap` (not
+              `space-y`) spaces the two, so the status region contributes none
+              while it is sr-only and therefore out of flow. */}
+          <div className="flex flex-col gap-0.5">
+            {/* Mounted unconditionally: a live region created together with its
+                text announces unreliably, so the region pre-exists and only its
+                CONTENT changes. `sr-only` keeps the silent states out of layout.
+                No aria-busy — on a live region it tells a screen reader to hold
+                announcements back; it belongs on the skeleton, which sits
+                outside this region. */}
             <div
-              className="-mx-1 max-h-[45vh] space-y-0.5 overflow-x-hidden overflow-y-auto px-1"
-              onKeyDown={onKeyDown}
+              role="status"
+              className={cn(
+                "flex flex-col gap-0.5",
+                !showCheckLine && !showPrFailedLine && "sr-only",
+              )}
             >
-              {checkingMerged && <MergedCheckLine paused={prCheckPaused} />}
-              {prCheckState === "failed" && (
-                <p className="px-1 py-1 text-[11px] text-muted-foreground">
+              {/* A parked pull-request read is still waiting, so it keeps the
+                  waiting line; the resting line reports the count and claims
+                  nothing about the check, which is what a `role="status"`
+                  region can honestly repeat on every mode and window change. */}
+              {checkingMerged || prCheckPaused ? (
+                <MergedCheckLine
+                  paused={prCheckPaused}
+                  srOnly={!checkingMerged}
+                />
+              ) : (
+                <p className="sr-only">
+                  {candidates.length === 0
+                    ? "No stale branches."
+                    : `${pluralBranches(candidates.length)} to review.`}
+                </p>
+              )}
+              {/* Announced even where the empty state carries it in prose: only
+                  the region's copy reaches a screen reader as it happens. */}
+              {prCheckState === "failed" ? (
+                <p
+                  className={
+                    showPrFailedLine
+                      ? "px-1 py-1 text-[11px] text-muted-foreground"
+                      : "sr-only"
+                  }
+                >
                   Pull requests couldn't be checked — a branch merged through
                   one may be missing.
                 </p>
-              )}
-              {candidates.map((c, idx) => {
-                const name = c.branch.name;
-                const checked = selected.has(name);
-                const err = failed.get(name);
-                const rovingTab =
-                  idx === (activeIndex === -1 ? 0 : activeIndex) ? 0 : -1;
-                return (
-                  <label
-                    key={name}
-                    className={cn(
-                      "flex cursor-pointer items-center gap-2 rounded-none px-1.5 py-1.5 text-xs transition-colors hover:bg-accent",
-                      activeName === name && "bg-accent",
-                    )}
-                  >
-                    <Checkbox
-                      data-row={name}
-                      tabIndex={rovingTab}
-                      checked={checked}
-                      disabled={running}
-                      onCheckedChange={() => toggle(name)}
-                      onFocus={() => setActiveName(name)}
-                    />
-                    <span className="min-w-0 flex-1 truncate font-mono">
-                      {name}
-                    </span>
-                    <span className="flex shrink-0 items-center gap-2">
-                      <RowBadge
-                        error={err}
-                        merged={c.merged}
-                        prMerged={c.prMerged}
-                      />
-                      <span className="tabular-nums text-muted-foreground">
-                        <RelativeTime date={c.branch.lastCommitDate} />
-                      </span>
-                    </span>
-                  </label>
-                );
-              })}
+              ) : null}
             </div>
-          )}
+
+            {/* List / skeleton / empty */}
+            {checkingMerged && candidates.length === 0 ? (
+              <CheckingMergedPlaceholder paused={prCheckPaused} />
+            ) : candidates.length === 0 ? (
+              <p className="py-6 text-center text-xs text-muted-foreground">
+                No stale branches — nothing is merged into{" "}
+                <span className="font-mono">
+                  {defaultBranch ?? "the default branch"}
+                </span>
+                {EMPTY_MERGED_CLAUSE[prCheckState]}
+                {windowDays} days. Try a shorter window.
+                {prCheckState === "failed"
+                  ? " Pull requests couldn't be checked, so a branch merged through one may be missing here."
+                  : null}
+              </p>
+            ) : (
+              <div
+                className="-mx-1 max-h-[45vh] space-y-0.5 overflow-x-hidden overflow-y-auto px-1"
+                onKeyDown={onKeyDown}
+              >
+                {candidates.map((c, idx) => {
+                  const name = c.branch.name;
+                  const checked = selected.has(name);
+                  const err = failed.get(name);
+                  const rovingTab =
+                    idx === (activeIndex === -1 ? 0 : activeIndex) ? 0 : -1;
+                  return (
+                    <label
+                      key={name}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-2 rounded-none px-1.5 py-1.5 text-xs transition-colors hover:bg-accent",
+                        activeName === name && "bg-accent",
+                      )}
+                    >
+                      <Checkbox
+                        data-row={name}
+                        tabIndex={rovingTab}
+                        checked={checked}
+                        disabled={running}
+                        onCheckedChange={() => toggle(name)}
+                        onFocus={() => setActiveName(name)}
+                      />
+                      <span className="min-w-0 flex-1 truncate font-mono">
+                        {name}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <RowBadge
+                          error={err}
+                          merged={c.merged}
+                          prMerged={c.prMerged}
+                        />
+                        <span className="tabular-nums text-muted-foreground">
+                          <RelativeTime date={c.branch.lastCommitDate} />
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
 
           <DialogFooter>
             <Button

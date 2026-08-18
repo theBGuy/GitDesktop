@@ -784,8 +784,8 @@ the local prediction below — so a clash visible from your last fetch is still 
 still resolvable. On **GitHub** a conflicting pull request also runs no checks until the
 conflicts are resolved, and the strip says so — an empty checks list there means *never
 ran*, not *passed*. In the list, **GitHub** and **GitLab** rows carry a **Conflicts**
-chip (icon plus the word) on open pull requests, so you can spot a blocked one without
-opening it.
+chip (icon plus the word) on open pull requests, so you can spot a conflicting one
+without opening it.
 
 **Resolve conflicts** settles it right here. GitDesktop merges the base branch into the
 pull request's **head** branch in an **isolated worktree** — your own branch and working
@@ -828,10 +828,32 @@ request branch's history and force-pushes it, so it asks you to confirm first: o
 request from a fork, that branch is the contributor's. Both controls are disabled with
 the reason on hover when you don't have push access, or when a fork's author left
 GitHub's *Allow edits by maintainers* off. This reads GitHub's own comparison of the two
-branches, so it's **GitHub** only, and the line yields to anything more pressing — a
-conflict, an unfinished resolution, or a mergeability answer the app couldn't read.
-**Update pull request branch** is in the command palette ({{kbd:command-palette}}) too —
-no default shortcut, so give it one in **Settings → Keyboard**.
+branches, so it's **GitHub** only, and the line yields to anything more pressing: a
+conflict, an unfinished resolution, a merge the base branch's rules are blocking, or
+a mergeability answer the app couldn't read. **Update pull request branch** is in the
+command palette ({{kbd:command-palette}}) too — no default shortcut, so give it one in
+**Settings → Keyboard**.
+
+## Blocked by branch protection
+
+A pull request can merge cleanly and still be refused. **GitHub** reports one as
+blocked while the base branch's rules go unmet, and the strip says so, naming what is
+outstanding: **Merge is blocked — waiting on: build, fragment.** GitDesktop asks
+GitHub what that branch requires and matches it against the checks on this pull
+request, counting one as outstanding when it has failed, is still running, or has
+never reported. Four are named, then *and N more*. Wherever the specific
+requirements can't be named, the line falls back to **Merge is blocked by the
+base branch's protection rules.**
+
+Where the head is also behind its base, the refusal says so in the same breath and
+**Update branch** stays on the strip, so a blocked pull request never loses the route
+to updating it.
+
+**Merge** stays available throughout. A repository admin, or anyone a ruleset lists as
+a bypass actor, can merge a blocked pull request, and GitDesktop can't tell from here
+whether that's you, so the decision stays yours. If the forge does refuse the merge,
+the notice carries that same line beside the forge's own words. This reads GitHub's
+rules, so it's **GitHub** only.
 
 ## Maintaining a pull request from a fork
 

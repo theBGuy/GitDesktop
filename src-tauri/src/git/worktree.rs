@@ -547,12 +547,21 @@ pub(crate) async fn worktree_commit_all(
         return Ok(None);
     }
     run_git(Some(worktree_path), &["add", "-A"], DEFAULT_TIMEOUT).await?;
-    run_git(
+    // Raw: a refusing `commit` writes its whole report to stdout and leaves
+    // stderr EMPTY (measured, git 2.51.1), which a stderr-only error renders as
+    // the bare "git exited with code 1".
+    let commit = run_git_raw(
         Some(worktree_path),
         &["commit", "-m", message],
         DEFAULT_TIMEOUT,
     )
     .await?;
+    if commit.code != 0 {
+        return Err(AppError::Git {
+            code: commit.code,
+            stderr: commit.full_failure_text(),
+        });
+    }
     let head = run_git(
         Some(worktree_path),
         &["rev-parse", "HEAD"],
@@ -596,12 +605,21 @@ pub async fn git_worktree_squash(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    run_git(
+    // Raw, for the same stdout-only commit refusal as `worktree_commit_all` — and
+    // this one leaves the branch rewound with everything staged, so the error the
+    // user reads has to say why.
+    let commit = run_git_raw(
         Some(&worktree_path),
         &["commit", "-m", &message],
         DEFAULT_TIMEOUT,
     )
     .await?;
+    if commit.code != 0 {
+        return Err(AppError::Git {
+            code: commit.code,
+            stderr: commit.full_failure_text(),
+        });
+    }
     Ok(true)
 }
 

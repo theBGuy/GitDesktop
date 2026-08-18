@@ -1,27 +1,39 @@
 import { getTransport } from "@/lib/transport";
 
-export interface AppError {
-  kind:
-    | "git"
-    | "notARepo"
-    | "gitNotFound"
-    | "ghNotFound"
-    | "gh"
-    | "issuesDisabled"
-    | "glabNotFound"
-    | "glab"
-    | "bitbucketNotConfigured"
-    | "bitbucket"
-    | "jira"
-    | "keyring"
-    | "invalidArgument"
-    | "command"
-    | "io"
-    | "timeout";
-  message: string;
-  code?: number;
-  stderr?: string;
-}
+/** The kinds whose wire shape is kind + message alone (Rust `AppError`
+ *  serializes a payload only for the two members below). */
+type PlainErrorKind =
+  | "notARepo"
+  | "gitNotFound"
+  | "ghNotFound"
+  | "gh"
+  | "issuesDisabled"
+  | "glabNotFound"
+  | "glab"
+  | "bitbucketNotConfigured"
+  | "bitbucket"
+  | "jira"
+  | "keyring"
+  | "invalidArgument"
+  | "command"
+  | "io"
+  | "timeout";
+
+/** Mirrors Rust's `AppError` — a union on `kind`, so a payload is only in reach
+ *  once the kind that carries it has been narrowed. */
+export type AppError =
+  | { kind: "git"; message: string; code?: number; stderr?: string }
+  /** A git operation stopped on conflicts and left the repo mid-op: `op` names
+   *  what the user now has to finish, `paths` the conflicted files, `report`
+   *  git's own output across both streams. */
+  | {
+      kind: "conflict";
+      message: string;
+      op: string;
+      paths: string[];
+      report: string;
+    }
+  | { kind: PlainErrorKind; message: string };
 
 export function isAppError(e: unknown): e is AppError {
   return (

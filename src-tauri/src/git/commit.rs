@@ -1,7 +1,9 @@
 use tauri::State;
 
-use crate::error::AppResult;
-use crate::git::runner::{run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT};
+use crate::error::{AppError, AppResult};
+use crate::git::runner::{
+    run_git, run_git_mutating, run_git_mutating_raw, run_git_raw, DEFAULT_TIMEOUT,
+};
 use crate::git::types::{CommitAuthor, CommitResult, CommitSummary};
 use crate::state::AppState;
 
@@ -226,7 +228,16 @@ pub(crate) async fn git_commit_core(
     if let Some(body) = &body {
         args.extend(["-m", body.as_str()]);
     }
-    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    // Raw: a refusing `commit` writes its whole report to stdout and leaves
+    // stderr EMPTY (measured, git 2.51.1) — this is the commit box's own error
+    // path, so "git exited with code 1" would be the user's only explanation.
+    let commit = run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    if commit.code != 0 {
+        return Err(AppError::Git {
+            code: commit.code,
+            stderr: commit.full_failure_text(),
+        });
+    }
     let out = run_git(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
     Ok(CommitResult {
         hash: out.stdout_lossy().trim().to_string(),

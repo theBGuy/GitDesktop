@@ -58,7 +58,7 @@ export const APPROVE_RUN_CONFIRM = {
 /** Tone + glyph for a CI check, so pass/fail is never conveyed by color alone.
  *  `provider` only distinguishes ACTION_REQUIRED — the one state whose meaning
  *  differs per forge. */
-function checkPresentation(
+export function checkPresentation(
   status: string,
   provider: ForgeProvider,
 ): {

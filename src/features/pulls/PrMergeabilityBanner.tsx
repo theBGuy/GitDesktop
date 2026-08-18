@@ -28,14 +28,32 @@ const FORK_BLOCKED_REASON =
 /** How many conflicting paths get their own row before the rest collapse to a count. */
 const MAX_FILE_ROWS = 5;
 
+/** How many unmet requirements the blocked line names before the rest collapse. */
+const MAX_REQUIREMENT_NAMES = 4;
+
+/** The one wording for a merge the base branch's rules are refusing — the strip says
+ *  it, and so does the note on a refused merge, so the two can't drift apart. With
+ *  nothing named (the rules read failed, or named nothing the app could join) it
+ *  still states where things stand rather than going quiet. */
+export function blockedMergeLine(requirements: string[]): string {
+  if (requirements.length === 0)
+    return "Merge is blocked by the base branch's protection rules.";
+  const shown = requirements.slice(0, MAX_REQUIREMENT_NAMES);
+  const extra = requirements.length - shown.length;
+  const names =
+    extra > 0 ? `${shown.join(", ")} and ${extra} more` : shown.join(", ");
+  return `Merge is blocked — waiting on: ${names}.`;
+}
+
 /** What a control held open through the PR-switch window says. Shared with the view's
  *  own stale-held controls so the one wording can't drift into two. */
 export const PR_SWITCH_LOADING_REASON = "Loading this pull request…";
 
 /** Which line the banner shows. `predicted` is the local fallback wherever the forge has
  *  no mergeability to give — Bitbucket by design, or a read that failed; `unknown` is a
- *  `checking` poll that gave up, `unreachable` a read that never landed at all, and
- *  `updating` the forge's queued update-branch job still running. */
+ *  `checking` poll that gave up, `unreachable` a read that never landed at all,
+ *  `updating` the forge's queued update-branch job still running, and `blocked` a PR
+ *  that merges cleanly but whose base branch rules are refusing it. */
 export type PrMergeabilityArm =
   | "conflicting"
   | "predicted"
@@ -45,6 +63,7 @@ export type PrMergeabilityArm =
   | "resume"
   | "behind"
   | "updating"
+  | "blocked"
   | null;
 
 /** Words carry the meaning; the icon and tone only reinforce it. */
@@ -60,6 +79,9 @@ const ARM_ICON: Record<
   resume: InfoIcon,
   behind: InfoIcon,
   updating: Spinner,
+  // Informational, not a warning: nothing is wrong with the pull request, and a
+  // viewer who can bypass the rules may still merge it.
+  blocked: InfoIcon,
 };
 
 /** The line each arm says. */
@@ -71,6 +93,7 @@ const ARM_MESSAGE: Record<
     behindBy: number;
     predictedClean: boolean;
     forgeUnreachable: boolean;
+    blockedRequirements: string[];
   }) => ReactNode
 > = {
   conflicting: ({ base, provider }) => (
@@ -121,6 +144,21 @@ const ARM_MESSAGE: Record<
   ),
   resume: () =>
     "An unfinished conflict resolution exists for this pull request.",
+  // The behind clause rides along in the `behind` arm's own words, because the update
+  // controls come with it — a bare refusal beside an Update branch button would leave
+  // the button unexplained.
+  blocked: ({ base, behindBy, blockedRequirements }) => (
+    <>
+      {blockedMergeLine(blockedRequirements)}
+      {behindBy > 0 ? (
+        <>
+          {` It is also ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
+          <span className="font-mono">{base}</span>
+          {"."}
+        </>
+      ) : null}
+    </>
+  ),
   behind: ({ base, behindBy }) => (
     <>
       {`This branch is ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
@@ -147,6 +185,7 @@ export function PrMergeabilityBanner({
   predictedClean,
   forgeUnreachable,
   behindBy,
+  blockedRequirements,
   updateBlockedReason,
   updateBusy,
   updateSubmitting,
@@ -173,8 +212,13 @@ export function PrMergeabilityBanner({
   /** The forge answer never landed, as opposed to a forge that has none to give. Adds
    *  the couldn't-reach qualifier and a Retry to the arms driven by the prediction. */
   forgeUnreachable: boolean;
-  /** Commits the base is ahead of the head — only read on the `behind` arm. */
+  /** Commits the base is ahead of the head — read on the `behind` arm, and on
+   *  `blocked` where it decides whether the update controls ride along. */
   behindBy: number;
+  /** Unmet requirements of the base branch's rules — only read on the `blocked`
+   *  arm, where an empty list means the app couldn't name any and the line stays
+   *  generic. */
+  blockedRequirements: string[];
   /** Why updating the branch is refused, if it is; undefined = allowed. */
   updateBlockedReason: string | undefined;
   updateBusy: boolean;
@@ -258,6 +302,7 @@ export function PrMergeabilityBanner({
             behindBy,
             predictedClean,
             forgeUnreachable,
+            blockedRequirements,
           })}
         </span>
       </span>
@@ -314,7 +359,12 @@ export function PrMergeabilityBanner({
         </div>
       )}
 
-      {(arm === "behind" || arm === "updating") && (
+      {/* The blocked arm re-admits these EXISTING controls when the head is also
+          behind: the ladder gives that PR the blocked sentence, and losing the only
+          route to the update along with it would be a refusal the app never intended. */}
+      {(arm === "behind" ||
+        arm === "updating" ||
+        (arm === "blocked" && behindBy > 0)) && (
         <div className="flex items-center gap-1.5">
           <DisabledReasonButton
             variant="ghost"

@@ -1035,11 +1035,13 @@ mod tests {
         );
     }
 
-    /// The conflict summary in `src/lib/error-summary.ts` keys off the ANCHORED
-    /// shapes of these lines, so a git release that reworded one would silently
-    /// change how conflicts present. Markers 1-2 guard live toast classification;
-    /// markers 3-4 ride stdout, which only the paths shaping their error through
-    /// `GitOutput::failure_text` / `full_failure_text` carry.
+    /// The FALLBACK conflict summary in `src/lib/error-summary.ts` keys off the
+    /// ANCHORED shapes of these lines — the arm that classifies any producer not
+    /// carrying `AppError::Conflict`, this compound's own outcomes included — so a
+    /// git release that reworded one would silently change how those present.
+    /// Markers 1-2 guard live toast classification; markers 3-4 ride stdout, which
+    /// only the paths shaping their error through `GitOutput::failure_text` /
+    /// `full_failure_text` carry.
     ///
     /// The STREAM SPLIT each family reports on is pinned here too, because the
     /// shaping choice depends on it: a family that writes to both streams needs
@@ -1500,6 +1502,11 @@ mod tests {
     /// leaves behind once the user commits or the changes are already away.
     /// Pull has its own arm below (a different stream split); switch never will,
     /// since a failing `git switch` writes no stdout to lose.
+    ///
+    /// The parity is over git's TEXT, not the variant: the plain core names the
+    /// paused operation structurally while this compound reports its own outcome
+    /// enum and shapes the no-stash arm as a plain git error, which the frontend's
+    /// prose markers still classify identically.
     #[tokio::test]
     async fn a_conflict_with_nothing_stashed_carries_the_stdout_report() {
         let (dir, repo) = setup_with_feat("plain-parity-conflict").await;
@@ -1528,17 +1535,16 @@ mod tests {
 
         match (&compound, &plain) {
             (
-                AppError::Git {
-                    code: a,
-                    stderr: a_err,
-                },
-                AppError::Git {
-                    code: b,
-                    stderr: b_err,
+                AppError::Git { stderr: a_err, .. },
+                AppError::Conflict {
+                    op,
+                    paths,
+                    report: b_err,
                 },
             ) => {
-                assert_eq!(a, b);
                 assert_eq!(a_err, b_err);
+                assert_eq!(op, "merge");
+                assert_eq!(paths, &vec!["a.txt".to_string()]);
                 // Mirrors the frontend's anchored CONFLICT_MARKERS: without the
                 // stdout backfill both sides carry an empty stderr instead, which
                 // renders as "git exited with code 1".
@@ -1551,14 +1557,15 @@ mod tests {
                     "and the verdict line that names it a merge: {a_err}"
                 );
             }
-            other => panic!("expected two git errors, got {other:?}"),
+            other => panic!("expected a git error and a conflict, got {other:?}"),
         }
     }
 
     /// Pull's version of the same parity, on the split that hides the loss: the
     /// fetch summary fills stderr while the merge verdict rides stdout, so an
     /// error carrying stderr alone looks populated and still says nothing about
-    /// the conflict. Both sides must carry the whole report, identically.
+    /// the conflict. Both sides must carry the whole report, identically — the
+    /// plain core additionally naming the operation it paused.
     #[tokio::test]
     async fn a_conflicted_pull_with_nothing_stashed_carries_the_stdout_report() {
         let (dir, work, clone) = setup_clone("pull-parity-conflict").await;
@@ -1602,17 +1609,16 @@ mod tests {
 
         match (&compound, &plain) {
             (
-                AppError::Git {
-                    code: a,
-                    stderr: a_err,
-                },
-                AppError::Git {
-                    code: b,
-                    stderr: b_err,
+                AppError::Git { stderr: a_err, .. },
+                AppError::Conflict {
+                    op,
+                    paths,
+                    report: b_err,
                 },
             ) => {
-                assert_eq!(a, b);
                 assert_eq!(a_err, b_err);
+                assert_eq!(op, "merge", "a merge-mode pull pauses a merge");
+                assert_eq!(paths, &vec!["a.txt".to_string()]);
                 assert!(
                     a_err.lines().any(|l| l.starts_with("CONFLICT (")),
                     "the conflict line must reach the frontend: {a_err}"
@@ -1622,7 +1628,7 @@ mod tests {
                     "and the verdict line that names it a merge: {a_err}"
                 );
             }
-            other => panic!("expected two git errors, got {other:?}"),
+            other => panic!("expected a git error and a conflict, got {other:?}"),
         }
     }
 }

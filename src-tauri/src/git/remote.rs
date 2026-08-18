@@ -466,8 +466,33 @@ pub(crate) async fn git_pull_core(
         "merge" => "--no-rebase",
         _ => "--ff-only",
     };
+    // The paused operation a conflicted pull leaves behind is the mode it RAN, so
+    // it is named here rather than inside the runner: `run_git_mutating_with_creds`
+    // also carries fetch and push, whose failures are never a paused conflict and
+    // would each pay for an unmerged probe that can only come back empty.
+    // A refused `--ff-only` leaves nothing unmerged, so its label never surfaces.
+    let op = if mode == "rebase" { "rebase" } else { "merge" };
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
-    run_git_mutating_with_creds(state, &repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await?;
+    let already_unmerged = crate::git::ops::unmerged_paths(&repo_path).await;
+    if let Err(err) =
+        run_git_mutating_with_creds(state, &repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await
+    {
+        // The runner already folded both streams into `stderr`, so the report is
+        // relabeled here rather than re-running git.
+        return Err(match err {
+            AppError::Git { code, stderr } => {
+                crate::git::ops::classify_failure(
+                    &repo_path,
+                    op,
+                    &already_unmerged,
+                    code,
+                    stderr,
+                )
+                .await
+            }
+            other => other,
+        });
+    }
     Ok(())
 }
 
@@ -738,7 +763,7 @@ pub(crate) fn publish_refspec(branch: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_push_args, cache_get, cache_invalidate, cache_put, git_push_core,
+        build_push_args, cache_get, cache_invalidate, cache_put, git_pull_core, git_push_core,
         git_remote_remove_core, is_auth_class_failure, parse_upstream_tracking, publish_refspec,
         resolve_push_target, run_git_mutating_with_creds,
     };
@@ -935,6 +960,135 @@ mod tests {
             Err(other) => panic!("expected AppError::Git, got {other:?}"),
             Ok(_) => panic!("a diverged pull with an overlapping edit should conflict"),
         }
+    }
+
+    /// A clone diverged from its origin on `a.txt`, so a reconciling pull in
+    /// either mode conflicts. Returns the temp guard (drop removes the fixture)
+    /// and the clone's path.
+    async fn diverged_clone(tag: &str) -> (tempfile::TempDir, String) {
+        let (guard, base) = temp_base(tag);
+        let origin = base.join("origin.git");
+        let work = base.join("work");
+        let clone = base.join("clone");
+        std::fs::create_dir_all(&work).unwrap();
+        let base_s = base.to_string_lossy().into_owned();
+        let work_s = work.to_string_lossy().into_owned();
+        let clone_s = clone.to_string_lossy().into_owned();
+        let url = format!("file://{}", origin.to_string_lossy().replace('\\', "/"));
+
+        run(&base_s, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        init_repo(&work_s, "a.txt").await;
+        run(&work_s, &["branch", "-M", "main"]).await;
+        run(&work_s, &["remote", "add", "origin", &url]).await;
+        run(&work_s, &["push", "-q", "-u", "origin", "main"]).await;
+        run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"]).await;
+        run(&clone_s, &["config", "core.autocrlf", "false"]).await;
+        run(&clone_s, &["config", "user.email", "t@t.local"]).await;
+        run(&clone_s, &["config", "user.name", "T"]).await;
+
+        std::fs::write(work.join("a.txt"), "upstream\n").unwrap();
+        run(&work_s, &["commit", "-qam", "upstream"]).await;
+        run(&work_s, &["push", "-q"]).await;
+        std::fs::write(clone.join("a.txt"), "mine\n").unwrap();
+        run(&clone_s, &["commit", "-qam", "local"]).await;
+        (guard, clone_s)
+    }
+
+    /// A pull that conflicts leaves a PAUSED merge/rebase, and `git_pull_core` is
+    /// where that gets named — the runner it goes through also carries fetch and
+    /// push, whose failures are never paused.
+    #[tokio::test]
+    async fn a_conflicted_pull_reports_a_paused_merge() {
+        let (_guard, clone_s) = diverged_clone("pull-conflict-op").await;
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "merge".into())
+            .await
+            .unwrap_err();
+        let AppError::Conflict { op, paths, report } = &err else {
+            panic!("expected a conflict error, got {err:?}");
+        };
+        assert_eq!(op, "merge", "a merge-mode pull pauses a merge");
+        assert_eq!(paths, &vec!["a.txt".to_string()]);
+        // Both halves: the fetch summary fills stderr while the merge verdict and
+        // its file list ride stdout, so either alone loses the conflict.
+        assert!(
+            report.contains("CONFLICT (content): Merge conflict in a.txt"),
+            "git's conflict list must survive: {report}"
+        );
+        assert!(
+            report.contains("Automatic merge failed"),
+            "and the verdict line with it: {report}"
+        );
+    }
+
+    /// The other half of the mode→op branch: the same divergence pulled with
+    /// `--rebase` leaves a paused REBASE, and the frontend's copy for the two
+    /// differs (a merge finishes with a commit, a rebase with `--continue`).
+    #[tokio::test]
+    async fn a_conflicted_rebase_pull_reports_a_paused_rebase() {
+        let (_guard, clone_s) = diverged_clone("pull-conflict-rebase").await;
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+            .await
+            .unwrap_err();
+        let AppError::Conflict { op, paths, report } = &err else {
+            panic!("expected a conflict error, got {err:?}");
+        };
+        assert_eq!(op, "rebase", "a rebase-mode pull pauses a rebase");
+        assert_eq!(paths, &vec!["a.txt".to_string()]);
+        assert!(
+            report.contains("CONFLICT (content): Merge conflict in a.txt"),
+            "git's conflict list must survive: {report}"
+        );
+        assert!(
+            crate::git::ops::op_state(&clone_s).await.unwrap().rebasing,
+            "and the rebase really is the operation left in progress"
+        );
+    }
+
+    /// Pulling on a tree already paused on a MERGE: git refuses without touching
+    /// the index ("Pulling is not possible because you have unmerged files",
+    /// measured on git 2.51.1), so the only unmerged path belongs to that merge.
+    /// Attributing it to the pull would toast "Rebase paused…" over a tree whose
+    /// conflict banner reads *merge*.
+    #[tokio::test]
+    async fn a_pull_refused_over_someone_elses_conflict_is_not_a_paused_rebase() {
+        let (_guard, clone_s) = diverged_clone("pull-refused-misattrib").await;
+        // Pause a merge from a side branch, so the tree is unmerged before the pull.
+        run(&clone_s, &["switch", "-q", "-c", "side", "HEAD~1"]).await;
+        std::fs::write(
+            std::path::Path::new(&clone_s).join("a.txt"),
+            "side\n",
+        )
+        .unwrap();
+        run(&clone_s, &["commit", "-qam", "side"]).await;
+        run(&clone_s, &["switch", "-q", "main"]).await;
+        let merged = run_git(
+            Some(&clone_s),
+            &["merge", "--no-edit", "side"],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        assert!(merged.is_err(), "the fixture's merge must conflict");
+        assert!(crate::git::ops::op_state(&clone_s).await.unwrap().merging);
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+            .await
+            .unwrap_err();
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected a plain git error, got {err:?}");
+        };
+        assert!(
+            stderr.contains("unmerged files"),
+            "git's own refusal must reach the user: {stderr}"
+        );
+        assert!(
+            !crate::git::ops::op_state(&clone_s).await.unwrap().rebasing,
+            "no rebase was ever started — naming one would contradict the banner"
+        );
     }
 
     // --- Pure arg-building for a named-branch push. ---

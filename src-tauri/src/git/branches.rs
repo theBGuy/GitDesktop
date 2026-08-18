@@ -687,8 +687,19 @@ pub async fn git_update_branch_from(
     branch: String,
     base: String,
 ) -> AppResult<String> {
-    validate_branch_name(&branch)?;
-    validate_branch_name(&base)?;
+    update_branch_from(&state, &repo_path, &branch, &base).await
+}
+
+/// Testable core of [`git_update_branch_from`] — takes a plain `&AppState` so
+/// real-repo tokio tests can drive it (mirrors `git::ops`' `*_core` pairs).
+pub(crate) async fn update_branch_from(
+    state: &AppState,
+    repo_path: &str,
+    branch: &str,
+    base: &str,
+) -> AppResult<String> {
+    validate_branch_name(branch)?;
+    validate_branch_name(base)?;
     if branch == base {
         return Err(AppError::InvalidArgument(
             "a branch can't be updated from itself".to_string(),
@@ -696,11 +707,11 @@ pub async fn git_update_branch_from(
     }
 
     // Mutating refs — serialize against other writes to this repo.
-    let lock = state.repo_lock(&repo_path).await;
+    let lock = state.repo_lock(repo_path).await;
     let _guard = lock.lock().await;
 
     let current = run_git(
-        Some(&repo_path),
+        Some(repo_path),
         &["rev-parse", "--abbrev-ref", "HEAD"],
         DEFAULT_TIMEOUT,
     )
@@ -711,19 +722,33 @@ pub async fn git_update_branch_from(
 
     // The current branch is already checked out, so just merge in place.
     if branch == current {
-        run_git(
-            Some(&repo_path),
-            &["merge", "--no-edit", &base],
+        let already_unmerged = crate::git::ops::unmerged_paths(repo_path).await;
+        // Raw: a conflicted merge reports entirely on stdout and leaves stderr
+        // empty (measured, git 2.51.1), which a stderr-only error renders as
+        // "git exited with code 1". Lock-free runners only — the hold is ours.
+        let out = run_git_raw(
+            Some(repo_path),
+            &["merge", "--no-edit", base],
             DEFAULT_TIMEOUT,
         )
         .await?;
+        if out.code != 0 {
+            return Err(crate::git::ops::classify_failure(
+                repo_path,
+                "merge",
+                &already_unmerged,
+                out.code,
+                out.full_failure_text(),
+            )
+            .await);
+        }
         return Ok("merge".to_string());
     }
 
     // base already reachable from branch → nothing to bring in.
     let already = run_git_raw(
-        Some(&repo_path),
-        &["merge-base", "--is-ancestor", &base, &branch],
+        Some(repo_path),
+        &["merge-base", "--is-ancestor", base, branch],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -735,14 +760,14 @@ pub async fn git_update_branch_from(
     // `fetch .` refuses to touch a checked-out branch, but we've excluded the
     // current branch above, so this only ever updates an idle branch.
     let ff = run_git_raw(
-        Some(&repo_path),
-        &["merge-base", "--is-ancestor", &branch, &base],
+        Some(repo_path),
+        &["merge-base", "--is-ancestor", branch, base],
         DEFAULT_TIMEOUT,
     )
     .await?;
     if ff.code == 0 {
         run_git(
-            Some(&repo_path),
+            Some(repo_path),
             &["fetch", ".", &format!("{base}:{branch}")],
             DEFAULT_TIMEOUT,
         )
@@ -755,8 +780,8 @@ pub async fn git_update_branch_from(
     let tmp_str = tmp.to_string_lossy().to_string();
 
     run_git(
-        Some(&repo_path),
-        &["worktree", "add", "--quiet", &tmp_str, &branch],
+        Some(repo_path),
+        &["worktree", "add", "--quiet", &tmp_str, branch],
         WORKTREE_OP_TIMEOUT,
     )
     .await?;
@@ -765,7 +790,7 @@ pub async fn git_update_branch_from(
     // the whole tree, and both arms below tear the temp worktree down regardless.
     let merged = run_git(
         Some(&tmp_str),
-        &["merge", "--no-edit", &base],
+        &["merge", "--no-edit", base],
         DEFAULT_TIMEOUT,
     )
     .await;
@@ -783,12 +808,12 @@ pub async fn git_update_branch_from(
 
     // Always tear the throwaway worktree down, success or failure.
     let _ = run_git_raw(
-        Some(&repo_path),
+        Some(repo_path),
         &["worktree", "remove", "--force", &tmp_str],
         WORKTREE_OP_TIMEOUT,
     )
     .await;
-    let _ = run_git_raw(Some(&repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    let _ = run_git_raw(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
 
     result
 }
@@ -854,8 +879,9 @@ fn unique_suffix() -> String {
 mod tests {
     use super::{
         build_create_branch_args, git_branches, git_create_branch_core, git_default_branch,
-        parse_upstream_track, validate_branch_name, validate_ref_name,
+        parse_upstream_track, update_branch_from, validate_branch_name, validate_ref_name,
     };
+    use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
     use crate::state::AppState;
 
@@ -1267,6 +1293,49 @@ mod tests {
             git_default_branch(repo_s).await.expect("resolves"),
             None,
             "a remote with no HEAD symref and no main/master resolves to nothing"
+        );
+    }
+
+    /// "Update from main" on the branch you are ON merges in place, so a conflict
+    /// is a PAUSED merge in the user's own checkout — the app has to hand back
+    /// git's CONFLICT list and leave the tree mid-merge for the banner to drive.
+    /// The conflicted merge writes all of that to stdout with stderr EMPTY, which
+    /// is what a stderr-only error turned into "git exited with code 1".
+    #[tokio::test]
+    async fn update_branch_from_in_place_conflict_names_the_paused_merge() {
+        let (_base, base) = temp_base("update-in-place-conflict");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+
+        let main = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["switch", "-qc", "feature"]).await;
+        std::fs::write(repo.join("a.txt"), "feature-side\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "feature edit"]).await;
+        run(&repo_s, &["switch", "-q", &main]).await;
+        std::fs::write(repo.join("a.txt"), "main-side\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "main edit"]).await;
+
+        let state = AppState::default();
+        let err = update_branch_from(&state, &repo_s, &main, "feature")
+            .await
+            .unwrap_err();
+        let AppError::Conflict { op, paths, report } = &err else {
+            panic!("expected a conflict error, got {err:?}");
+        };
+        assert_eq!(op, "merge");
+        assert_eq!(paths, &vec!["a.txt".to_string()]);
+        assert!(
+            report.contains("CONFLICT (content): Merge conflict in a.txt"),
+            "git's conflict list must survive: {report}"
+        );
+        assert!(
+            crate::git::ops::op_state(&repo_s).await.unwrap().merging,
+            "the merge is left in progress for the conflict banner to finish"
         );
     }
 }

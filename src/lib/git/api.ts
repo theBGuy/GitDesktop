@@ -3084,6 +3084,15 @@ export const ghRulesetsList = (repoPath: string) =>
 export const ghRulesetGet = (repoPath: string, id: number) =>
   invoke<RulesetFull>("gh_ruleset_get", { repoPath, id });
 
+/** The status-check contexts a branch's active rules require. Empty for a readable
+ *  branch under no rules; a branch this token can't read rejects, which a caller
+ *  showing a fallback may treat as empty. GitHub only. */
+export const ghBranchRequiredChecks = (
+  repoPath: string,
+  branch: string,
+  lens: RemoteLens,
+) => invoke<string[]>("gh_branch_required_checks", { repoPath, branch, lens });
+
 export const ghRulesetCreate = (
   repoPath: string,
   body: Record<string, unknown>,
