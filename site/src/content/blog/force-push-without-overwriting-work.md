@@ -193,8 +193,8 @@ fetch answers it for you. `--force-if-includes` asks whether the
 remote's tip is part of the history you're pushing — a question about
 the work, and only integrating that commit answers it. A fetch can't
 fake the answer. Neither can a cherry-picked copy of the commit:
-the check wants the remote tip itself reachable in your branch,
-not a lookalike.
+the check walks your branch's reflog looking for the remote tip
+itself, not a lookalike.
 
 The flag is easy to make permanent:
 
