@@ -511,10 +511,47 @@ test("a stderr field beyond a six-line constructor is still read", () => {
   assert.equal(hits[0].fn, "padded");
 });
 
-test("stderr-only check does not scan test modules", () => {
+test("an alias initializer is judged whole, not truncated at a `;`", () => {
+  // The `;` that ends the statement can also sit inside a string literal, and
+  // the truncated head matches no shaping test and is not an ident — a pass.
+  const src = [
+    "async fn semicolon_in_literal(out: GitOutput) -> AppError {",
+    '    let report = format!("a; {}", out.stderr);',
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "semicolon_in_literal");
+  assert.match(hits[0].fix, /full_failure_text/);
+});
+
+test("a `stderr:` inside a string literal does not answer for the real field", () => {
+  // Matching the first `stderr:` in the text lets an earlier field's STRING
+  // stand in for the field — and a string naming the correct helper passes.
+  const src = [
+    "async fn masked(out: GitOutput) -> AppError {",
+    "    AppError::Git {",
+    '        code: fallback("shape it as stderr: out.full_failure_text()"),',
+    "        stderr: out.stderr,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "masked");
+  assert.match(hits[0].fix, /full_failure_text/);
+});
+
+test("test modules are skipped by SPAN, so production code after one is scanned", () => {
   // A renaming pattern (`stderr: text`) is indistinguishable from an
-  // unresolvable field, and only tests carry them — they assert on these shapes
-  // rather than building them.
+  // unresolvable field, and only tests carry them. Cutting the scan at the
+  // module instead of bounding it would leave everything below unchecked.
   const src = [
     "#[cfg(test)]",
     "mod tests {",
@@ -524,10 +561,19 @@ test("stderr-only check does not scan test modules", () => {
     "        }",
     "    }",
     "}",
+    "async fn after_tests(out: GitOutput) -> AppError {",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: out.stderr,",
+    "    }",
+    "}",
   ].join("\n");
   const hits = [];
   checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
-  assert.deepEqual(hits, []);
+  assert.deepEqual(
+    hits.map((h) => h.fn),
+    ["after_tests"],
+  );
 });
 
 // ----------------------------------------------------------- check-dead-surface

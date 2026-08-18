@@ -209,8 +209,9 @@ fn strip_scheme(trimmed: &str) -> &str {
 }
 
 /// The flow-collection nesting depth after `text`, counting bracket characters
-/// only — no value is read. A trailing comment is dropped first so a stray `{`
-/// in prose can't wedge the scanner open across the rest of the section.
+/// only — no value is read. Only ever runs on text already known to sit inside a
+/// flow collection: the value that opened it, or a later continuation line. A
+/// trailing comment is dropped first so a `{` in prose can't wedge it open.
 fn flow_depth_after(depth: usize, text: &str) -> usize {
     let code = text
         .char_indices()
@@ -221,6 +222,24 @@ fn flow_depth_after(depth: usize, text: &str) -> usize {
         '}' | ']' => d.saturating_sub(1),
         _ => d,
     })
+}
+
+/// The flow-collection depth a key line OPENS. Zero unless its value BEGINS with
+/// `{`/`[` — that is the only place YAML starts a flow collection, so a bracket
+/// inside a plain scalar (`token: abc[def`) must not latch the scanner shut.
+fn flow_open_depth(trimmed: &str) -> usize {
+    // The same key/value split `host_from_key_line` uses, scheme term included:
+    // without it a `https://host: {…}` line splits at the scheme and its flow map
+    // goes unseen, so the wrapped continuation is read back as a host key.
+    let Some((_, value)) = strip_scheme(trimmed).split_once(':') else {
+        return 0;
+    };
+    let value = value.trim_start();
+    if value.starts_with(['{', '[']) {
+        flow_depth_after(0, value)
+    } else {
+        0
+    }
 }
 
 /// The host a line at host-key indent declares, if it declares one. Whatever
@@ -280,7 +299,7 @@ fn hosts_from_config(text: &str) -> Vec<String> {
         if indent > level {
             // A host's own sub-keys (token, api_host, …) — not hosts, but their
             // values can open a flow collection that wraps onto later lines.
-            flow_depth = flow_depth_after(flow_depth, trimmed);
+            flow_depth = flow_open_depth(trimmed);
             continue;
         }
         if indent < level {
@@ -289,7 +308,7 @@ fn hosts_from_config(text: &str) -> Vec<String> {
         if let Some(host) = host_from_key_line(trimmed) {
             hosts.push(host);
         }
-        flow_depth = flow_depth_after(flow_depth, trimmed);
+        flow_depth = flow_open_depth(trimmed);
     }
     hosts
 }
@@ -559,7 +578,22 @@ hosts:
                 &["gitlab.example.com", "other.example.com"],
             ),
             (
-                "a brace in a trailing comment must not wedge the section open",
+                "a scheme'd key opening a wrapped flow map",
+                "hosts:\n  https://gitlab.example.com: {token: secret,\n  api_host: x}\n  other.example.com:\n",
+                &["gitlab.example.com", "other.example.com"],
+            ),
+            (
+                "a bracket in a plain scalar is not a flow collection",
+                "hosts:\n  gitlab.example.com:\n    token: abc[def\n  other.example.com:\n",
+                &["gitlab.example.com", "other.example.com"],
+            ),
+            (
+                "a brace in a comment trailing a flow map must not wedge it open",
+                "hosts:\n  gitlab.example.com: {token: secret} # a { brace\n  other.example.com:\n",
+                &["gitlab.example.com", "other.example.com"],
+            ),
+            (
+                "a brace in a comment is not a flow collection either",
                 "hosts:\n  gitlab.example.com: # a { brace\n  other.example.com:\n",
                 &["gitlab.example.com", "other.example.com"],
             ),

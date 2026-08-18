@@ -429,16 +429,27 @@ const UNRESOLVED_FIX =
   "this stderr value names a binding the checker cannot resolve, so it cannot tell " +
   "which shaping built it — inline the shaping, or allowlist with rationale";
 
-/** First line of a `#[cfg(test)]` module, or `Infinity`. The invariant governs
- *  how PRODUCTION code shapes a user-facing error; test code destructures these
- *  same shapes, and a fail-closed binding check reads every renaming pattern as
- *  an unresolvable field. Rests on test modules coming last in the file, which
- *  is this codebase's layout. */
-export function testModuleStart(lines) {
-  const idx = lines.findIndex((l) =>
-    /^\s*#\[cfg\(\s*(?:all\(\s*)?test\b/.test(l),
-  );
-  return idx === -1 ? Number.POSITIVE_INFINITY : idx;
+/** Character spans of every `#[cfg(test)]`-gated `mod`, as `[open, close]` brace
+ *  indices. The invariant governs how PRODUCTION code shapes a user-facing
+ *  error; test code destructures those same shapes, and a fail-closed binding
+ *  check reads every renaming pattern as an unresolvable field.
+ *
+ *  Spans, not a cut at the first attribute: a cut leaves every constructor after
+ *  a test module unscanned, which is a fail-open that grows with the file.
+ *  Matching `mod` specifically is load-bearing too — `#[cfg(test)]` also gates
+ *  statics, functions and even `if let` blocks (`app_store.rs`), whose next
+ *  brace would otherwise be read as a module body. */
+export function testModuleSpans(text) {
+  const attr =
+    /#\[cfg\(\s*(?:all\(\s*)?test\b[^\]]*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{/g;
+  const spans = [];
+  for (let m = attr.exec(text); m; m = attr.exec(text)) {
+    const open = m.index + m[0].length - 1;
+    const close = open + 1 + braceBody(text, open).length;
+    spans.push([open, close]);
+    attr.lastIndex = close;
+  }
+  return spans;
 }
 
 /** Index of a char literal's closing quote at `i`, or -1 when the `'` opens a
@@ -450,6 +461,19 @@ function charLiteralEnd(text, i) {
   return m ? i + m[0].length - 1 : -1;
 }
 
+/** Index of the closing delimiter of the string or char literal starting at `i`,
+ *  or -1 when the character opens neither. An unterminated string ends at the
+ *  text, so a scan can never run past its own input. */
+function literalEnd(text, i) {
+  if (text[i] === "'") return charLiteralEnd(text, i);
+  if (text[i] !== '"') return -1;
+  for (let j = i + 1; j < text.length; j++) {
+    if (text[j] === "\\") j++;
+    else if (text[j] === '"') return j;
+  }
+  return text.length - 1;
+}
+
 /** The body of the `{ … }` opening at `openIdx`, brace-balanced. Rustfmt and a
  *  long field expression can push `stderr:` arbitrarily far down a constructor,
  *  and a fixed line window that ends before it reads as "no stderr field" — a
@@ -457,52 +481,69 @@ function charLiteralEnd(text, i) {
 export function braceBody(text, openIdx) {
   let depth = 0;
   for (let i = openIdx; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
-      for (i++; i < text.length && text[i] !== '"'; i++) {
-        if (text[i] === "\\") i++;
-      }
+    const lit = literalEnd(text, i);
+    if (lit >= 0) {
+      i = lit;
       continue;
     }
-    if (c === "'") {
-      const end = charLiteralEnd(text, i);
-      if (end >= 0) i = end;
-      continue;
-    }
-    if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) return text.slice(openIdx + 1, i);
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}" && --depth === 0)
+      return text.slice(openIdx + 1, i);
   }
   // Unbalanced (a truncated file): hand back the remainder rather than nothing,
   // so a `stderr:` below still gets read.
   return text.slice(openIdx + 1);
 }
 
-/** The `stderr:` field's value expression, or null when the text has no such
- *  field. Scans to the `,` or `}` that closes the field at bracket depth 0,
- *  skipping string literals so a `format!("…{stderr}")` brace cannot end it. */
-export function stderrFieldValue(text) {
-  const at = /\bstderr\s*:/.exec(text);
-  if (!at) return null;
+/** Index just past the `stderr:` field's colon in a constructor `body`, or -1.
+ *  Found by scanning at depth 0 outside literals rather than by matching text:
+ *  an earlier field whose STRING happens to contain `stderr: …` would otherwise
+ *  answer for the real field and hide it. */
+function stderrFieldStart(body) {
   let depth = 0;
-  let out = "";
-  for (let i = at.index + at[0].length; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
-      const start = i;
-      for (i++; i < text.length && text[i] !== '"'; i++) {
-        if (text[i] === "\\") i++;
-      }
-      out += text.slice(start, i + 1);
+  for (let i = 0; i < body.length; i++) {
+    const lit = literalEnd(body, i);
+    if (lit >= 0) {
+      i = lit;
       continue;
     }
-    if (c === "'") {
-      const end = charLiteralEnd(text, i);
-      if (end >= 0) {
-        out += text.slice(i, end + 1);
-        i = end;
-        continue;
-      }
+    const c = body[i];
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (depth === 0 && /[A-Za-z_]/.test(c)) {
+      let j = i;
+      while (j < body.length && /\w/.test(body[j])) j++;
+      let k = j;
+      while (k < body.length && /\s/.test(body[k])) k++;
+      // `::` is a path, not a field.
+      if (
+        body.slice(i, j) === "stderr" &&
+        body[k] === ":" &&
+        body[k + 1] !== ":"
+      )
+        return k + 1;
+      i = j - 1;
     }
+  }
+  return -1;
+}
+
+/** The `stderr:` field's value expression, or null when the constructor `body`
+ *  has no such field. Scans to the `,` or `}` that closes the field at bracket
+ *  depth 0, skipping literals so a `format!("…{stderr}")` brace cannot end it. */
+export function stderrFieldValue(body) {
+  const start = stderrFieldStart(body);
+  if (start < 0) return null;
+  let depth = 0;
+  let out = "";
+  for (let i = start; i < body.length; i++) {
+    const lit = literalEnd(body, i);
+    if (lit >= 0) {
+      out += body.slice(i, lit + 1);
+      i = lit;
+      continue;
+    }
+    const c = body[i];
     if ("([{".includes(c)) depth++;
     else if (")]".includes(c)) depth--;
     else if (c === "}") {
@@ -556,8 +597,12 @@ function stderrValueVerdict(value, lines, ctorIdx) {
     seen.add(expr);
     const init = bindingInitializer(lines, ctorIdx, expr);
     if (init === null) return UNRESOLVED_FIX;
-    // The initializer is captured to end-of-statement, so the `;` (and anything
-    // rustfmt put after it) has to come off before the next hop can be an ident.
+    // Judge the WHOLE initializer. The split below truncates at the first `;`,
+    // including one inside a string (`format!("a; {}", out.stderr)`), so it is
+    // only ever good enough to name the next alias — never to decide a verdict.
+    if (FULL_FAILURE_TEXT_RE.test(init)) return null;
+    if (SUBSTITUTING_RE.test(init)) return SUBSTITUTION_FIX;
+    if (STDERR_READ_RE.test(init)) return STDERR_ONLY_FIX;
     expr = init.split(";")[0].trim();
   }
 }
@@ -565,11 +610,11 @@ function stderrValueVerdict(value, lines, ctorIdx) {
 export function checkStderrOnlyGitError(file, _src, lines, hits) {
   const code = stripComments(lines);
   const codeSrc = code.join("\n");
-  const limit = testModuleStart(lines);
+  const spans = testModuleSpans(codeSrc);
   GIT_CTOR_RE.lastIndex = 0;
   for (let m = GIT_CTOR_RE.exec(codeSrc); m; m = GIT_CTOR_RE.exec(codeSrc)) {
+    if (spans.some(([s, e]) => m.index > s && m.index < e)) continue;
     const line = codeSrc.slice(0, m.index).split("\n").length;
-    if (line - 1 >= limit) continue;
     const open = m.index + m[0].length - 1;
     const value = stderrFieldValue(braceBody(codeSrc, open));
     if (value === null) continue;
