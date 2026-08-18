@@ -8,7 +8,7 @@ import {
   gitStagedDiff,
   readRepoInstructions,
 } from "@/lib/git/api";
-import { useUiStore } from "@/lib/stores/ui";
+import { resolveDraftKey, useUiStore } from "@/lib/stores/ui";
 
 /** Raw diff bytes requested from the backend; prompt budgeting trims further. */
 const RAW_DIFF_MAX_BYTES = 200_000;
@@ -31,7 +31,12 @@ export function useGenerateCommitMessage(repoPath: string) {
     // A null startKey (pre-branch-resolution) treats any later key as a move.
     // On a move, cancel() always aborts THIS run: a second generation can't
     // start while `generating` is set (CommitBox gates the button and hotkey).
-    const keyMoved = () => useUiStore.getState().activeDraftKey !== startKey;
+    // The test is draft identity, not key equality: a branch rename re-keys the
+    // same draft, so resolve the captured key through the store's rename remaps.
+    const keyMoved = () => {
+      const s = useUiStore.getState();
+      return resolveDraftKey(s.draftKeyRemaps, startKey) !== s.activeDraftKey;
+    };
     setGenerating(true);
     const buffer = await run(
       async (settings) => {

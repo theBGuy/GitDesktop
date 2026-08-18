@@ -35,7 +35,8 @@ export const resolveConflict = (
 ) => invoke<void>("git_resolve_conflict", { repoPath, path, content, stage });
 
 /** Resolves a whole conflicted file by taking one side: "ours" (current/HEAD)
- *  or "theirs" (incoming). Writes that side + stages it. Works for binary too. */
+ *  or "theirs" (incoming). Writes that side + stages it, or removes the file when
+ *  that side has no version at this path. Works for binary too. */
 export const checkoutConflictSide = (
   repoPath: string,
   path: string,

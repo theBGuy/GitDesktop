@@ -269,6 +269,29 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
     // stderr-only error renders as "git exited with code 1".
     let out = run_git_mutating_raw(state, repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
+        // A resolution that keeps the target's side leaves the pick with nothing to
+        // commit: `--continue` then exits 1 asking for `--skip`, on stderr, with
+        // CHERRY_PICK_HEAD still in place (measured, git 2.51.1). Taking that escape
+        // is what lets Continue finish an all-ours resolution. Cherry-pick only —
+        // `revert --continue` writes no such advice for the same resolution
+        // (measured), so there is nothing to match on there.
+        if op == "cherry-pick"
+            && (out.stderr.contains("is now empty") || out.stderr.contains("--allow-empty"))
+        {
+            let skip = run_git_mutating_raw(
+                state,
+                repo_path,
+                &["cherry-pick", "--skip"],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            if skip.code == 0 {
+                return Ok(());
+            }
+            return Err(
+                classify_failure(repo_path, op, &[], skip.code, skip.full_failure_text()).await,
+            );
+        }
         // Empty baseline, unlike every other site: a refused `--continue` reports
         // the paths the operation the CALLER named is already paused on, so they
         // are attributable by construction rather than by having just appeared.
@@ -443,10 +466,12 @@ pub struct CherryPickRangeResult {
 
 /// Copies the given commits (oldest-first) onto `target_branch`, then leaves
 /// you on that branch. Commits whose changes already exist there are skipped
-/// rather than erroring. If any pick fails — conflict, timeout, unreadable
-/// repo — the batch is rolled back: the target branch is reset to its prior tip
-/// and you return to where you started. Each rollback step is best-effort; when
-/// one fails the returned error names what was left behind and how to recover.
+/// rather than erroring. A single commit that conflicts stops on `target_branch`
+/// with the pick in progress, for the conflict banner to continue or abort.
+/// Every other failure (and any failure in a multi-commit batch) is rolled back:
+/// the target branch is reset to its prior tip and you return to where you
+/// started. Each rollback step is best-effort; when one fails the returned error
+/// names what was left behind and how to recover.
 #[tauri::command]
 pub async fn git_cherry_pick_onto(
     state: State<'_, AppState>,
@@ -507,6 +532,16 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
     // runners only while held (see `run_git_mutating`).
     let lock = state.repo_lock(repo_path).await;
     let guard = lock.lock().await;
+
+    // Ahead of the tree check because it can't stand in for this one: a pick paused
+    // with its conflicts staged has a CLEAN tree, so the only refusal left would be
+    // git's own raw "cannot switch branch while cherry-picking" (measured, git
+    // 2.51.1). Shares `op_state`'s detection, like the rebase-edit guard.
+    if op_in_progress(repo_path).await {
+        return Err(AppError::InvalidArgument(
+            "a rebase, merge, cherry-pick or revert is already in progress — finish or abort it from the banner first".into(),
+        ));
+    }
 
     // The failure path hard-resets `target` to its prior tip, which would discard
     // uncommitted work when target is the current branch — refuse first.
@@ -591,9 +626,14 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
 
         let mut applied = 0usize;
         let mut skipped = 0usize;
-        // Every pick failure class — conflict, timeout, IO — leaves through the one
-        // rollback funnel below, so none of them exits with HEAD on `target` unless
-        // the rollback itself fails, which the error then says.
+        // The pre-op unmerged set for `classify_failure` below. `ensure_clean_tree`
+        // already refused a dirty tree, so this reads empty — kept real for the same
+        // reason `git_cherry_pick_core` reads it: a baseline is never assumed.
+        let already_unmerged = unmerged_paths(repo_path).await;
+        // Every failure class that reaches this leaves through the one rollback funnel
+        // below, so none of them exits with HEAD on `target` unless the rollback itself
+        // fails, which the error then says. The exception returns before it: a
+        // single-commit conflict, which stops for the user instead.
         let mut failure: Option<(String, AppError)> = None;
         'picks: for hash in hashes {
             // Raw plus an explicit code check, never a mutating runner: this loop
@@ -625,13 +665,31 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
                 skipped += 1;
                 continue;
             }
-            failure = Some((
-                hash.clone(),
+            // A lone commit that conflicts stops here instead of rolling back:
+            // CHERRY_PICK_HEAD survives for the conflict banner's Continue/Abort, and
+            // resolving on `target` is where the user wants to end up anyway — the same
+            // place a manual checkout-and-pick would have left them. A batch keeps the
+            // rollback (git's sequencer resume is not wired up), and so does a
+            // single-commit failure that added no conflict.
+            let err = if hashes.len() == 1 {
+                classify_failure(
+                    repo_path,
+                    "cherry-pick",
+                    &already_unmerged,
+                    out.code,
+                    out.full_failure_text(),
+                )
+                .await
+            } else {
                 AppError::Git {
                     code: out.code,
                     stderr: out.full_failure_text(),
-                },
-            ));
+                }
+            };
+            if matches!(err, AppError::Conflict { .. }) {
+                return Err(err);
+            }
+            failure = Some((hash.clone(), err));
             break 'picks;
         }
 
@@ -694,17 +752,28 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
                     "The cherry-pick failed and its automatic rollback also failed.\n{target_branch} may still carry the commits applied so far; its tip before this run was {target_tip}.\nRun git cherry-pick --abort if a pick is still in progress, or git reset --hard {target_tip} on {target_branch} to restore it."
                 )
             };
+            // Only a good reset retires git's hints: it cleared the pick state, so
+            // the report's `--continue` / `--abort` advice is stale. A FAILED reset
+            // leaves a pick that may still be in progress, which is why the recovery
+            // line above points the user at `--abort` on purpose.
+            let stale_hints = if reset_ok {
+                "\nThe rollback has already run, so git's continue/abort hints above no longer apply."
+            } else {
+                ""
+            };
             let short = &hash[..hash.len().min(7)];
             return Err(match err {
                 AppError::Git { code, stderr } if rolled_back => AppError::Git {
                     code,
                     stderr: format!(
-                        "The cherry-pick was rolled back — {target_branch} is unchanged.\nPick {short} failed, usually a conflict; nothing from this batch was kept.\n{stderr}"
+                        "The cherry-pick was rolled back — {target_branch} is unchanged.\nPick {short} failed, usually a conflict; nothing from this batch was kept.\n{stderr}{stale_hints}"
                     ),
                 },
                 AppError::Git { code, stderr } => AppError::Git {
                     code,
-                    stderr: format!("{recovery}\nThe failing pick was {short}.\n{stderr}"),
+                    stderr: format!(
+                        "{recovery}\nThe failing pick was {short}.\n{stderr}{stale_hints}"
+                    ),
                 },
                 other if rolled_back => other,
                 // Timeout carries only a u64 and GitNotFound carries nothing, so a
@@ -4952,14 +5021,19 @@ mod tests {
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
     }
 
+    /// A BATCH keeps the rollback — git's sequencer resume isn't wired up, so the
+    /// half-applied batch has nowhere to go but back.
     #[tokio::test]
-    async fn cherry_pick_onto_conflict_rolls_back_and_returns_home() {
+    async fn cherry_pick_onto_batch_conflict_rolls_back_and_returns_home() {
         let (dir, repo) = setup_repo("pick-onto-conflict").await;
         git(&repo, &["branch", "target"]).await;
         git(&repo, &["checkout", "-b", "feature"]).await;
-        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        // The first pick applies cleanly; the second touches the file target
+        // diverged on, so the batch fails partway through.
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
         let c1 = rev(&repo, "HEAD").await;
-        // Diverge target on the same file so the pick can't apply.
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c2 = rev(&repo, "HEAD").await;
         git(&repo, &["checkout", "target"]).await;
         commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
         let target_tip = rev(&repo, "HEAD").await;
@@ -4967,7 +5041,7 @@ mod tests {
         let feature_tip = rev(&repo, "HEAD").await;
 
         let state = AppState::default();
-        match cherry_pick_onto(&state, &repo, &[c1], "target").await {
+        match cherry_pick_onto(&state, &repo, &[c1, c2], "target").await {
             Err(AppError::Git { stderr, .. }) => {
                 assert_verdict_shape(&stderr, "was rolled back");
                 assert!(
@@ -4981,6 +5055,14 @@ mod tests {
                         && stderr.contains("CONFLICT (content): Merge conflict in a.txt"),
                     "the verdict must carry git's diagnostic AND its file list: {stderr}"
                 );
+                // git's report ends in --continue/--abort hints that the rollback has
+                // already invalidated, so the message must retire them last.
+                assert!(
+                    stderr
+                        .trim_end()
+                        .ends_with("git's continue/abort hints above no longer apply."),
+                    "the rolled-back verdict must retire git's own hints: {stderr}"
+                );
             }
             Ok(_) => panic!("the conflicting pick must fail"),
             Err(e) => panic!("expected a Git error, got {e}"),
@@ -4993,12 +5075,193 @@ mod tests {
             git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
             "feature"
         );
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
         let status = git(&repo, &["status", "--porcelain"]).await;
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
     }
 
-    /// The rollback must run for every failure class, not just a conflict — a
-    /// killed pick otherwise leaves HEAD on the target mid-cherry-pick.
+    /// One commit that conflicts STOPS on the target instead of rolling back: the
+    /// dialog is the app's only route to "send this commit to another branch", so a
+    /// rollback would dead-end the user in a terminal.
+    #[tokio::test]
+    async fn cherry_pick_onto_single_conflict_pauses_on_the_target() {
+        let (dir, repo) = setup_repo("pick-onto-single-conflict").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c1 = rev(&repo, "HEAD").await;
+        // Diverge target on the same file so the pick can't apply.
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let target_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "feature"]).await;
+        let feature_tip = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        match cherry_pick_onto(&state, &repo, &[c1], "target").await {
+            Err(AppError::Conflict { op, paths, report }) => {
+                assert_eq!(op, "cherry-pick", "the banner's copy table keys on this");
+                assert_eq!(paths, vec!["a.txt".to_string()]);
+                assert!(
+                    report.contains("could not apply")
+                        && report.contains("CONFLICT (content): Merge conflict in a.txt"),
+                    "the report must carry git's diagnostic AND its file list: {report}"
+                );
+            }
+            Ok(_) => panic!("the conflicting pick must fail"),
+            Err(e) => panic!("expected the structured conflict, got {e:?}"),
+        }
+        // No rollback ran: the pick is still in progress, on the target branch, with
+        // the target's own tip intact and the source branch untouched.
+        assert!(
+            op_state(&repo).await.unwrap().cherry_picking,
+            "the paused pick must be visible to the conflict banner"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
+            "target",
+            "resolving happens where the commit is going"
+        );
+        assert_eq!(rev(&repo, "target").await, target_tip);
+        assert_eq!(rev(&repo, "feature").await, feature_tip);
+        // A paused op is a finished journal record, not an interrupted one — the
+        // recovery banner must not offer to undo a pick the user is still resolving.
+        assert!(
+            crate::oplog::git_oplog_check(repo.clone())
+                .await
+                .unwrap()
+                .is_empty(),
+            "a paused pick must leave no pending journal entry"
+        );
+    }
+
+    /// A pick paused with its conflicts staged has a CLEAN tree, so `ensure_clean_tree`
+    /// waves a second run through: without the in-progress guard the user meets git's
+    /// raw "cannot switch branch while cherry-picking" instead of the app's own
+    /// refusal, and the resolution they staged is one `cherry-pick <hash>` away from
+    /// being replaced by fresh conflict stages (measured, git 2.51.1).
+    #[tokio::test]
+    async fn cherry_pick_onto_refuses_while_a_pick_is_in_progress() {
+        let (dir, repo) = setup_repo("pick-onto-reentry").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c1 = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let target_tip = rev(&repo, "HEAD").await;
+
+        // Pause a pick on target and resolve it all-ours, which stages a resolution
+        // AND leaves the tree clean.
+        let state = AppState::default();
+        assert!(cherry_pick_onto(&state, &repo, std::slice::from_ref(&c1), "target")
+            .await
+            .is_err());
+        git(&repo, &["checkout", "--ours", "a.txt"]).await;
+        git(&repo, &["add", "a.txt"]).await;
+        let staged = git(&repo, &["ls-files", "--unmerged"]).await;
+        assert!(
+            staged.trim().is_empty(),
+            "the fixture must start from a RESOLVED index: {staged}"
+        );
+        let tracked = git(&repo, &["status", "--porcelain", "--untracked-files=no"]).await;
+        assert!(
+            tracked.trim().is_empty(),
+            "and from a clean tree, or the guard under test isn't the one refusing: {tracked}"
+        );
+
+        match cherry_pick_onto(&state, &repo, &[c1], "target").await {
+            Err(AppError::InvalidArgument(msg)) => {
+                assert!(
+                    msg.contains("already in progress"),
+                    "the refusal must name the in-flight op: {msg}"
+                );
+            }
+            Ok(_) => panic!("a second pick must be refused while one is in progress"),
+            Err(e) => panic!("expected the app's own refusal, got {e:?}"),
+        }
+        // The staged resolution and the paused pick both survive untouched.
+        assert!(
+            git(&repo, &["ls-files", "--unmerged"]).await.trim().is_empty(),
+            "the refusal must not re-conflict the resolved index"
+        );
+        assert!(op_state(&repo).await.unwrap().cherry_picking);
+        assert_eq!(rev(&repo, "target").await, target_tip);
+    }
+
+    /// `classify_failure`'s pass-through arm: a pick that fails WITHOUT adding a
+    /// conflict is still a plain `AppError::Git`, so a single commit takes the
+    /// rollback exactly as it did before the stop arm existed. A merge commit
+    /// without `-m` is the cheapest such failure.
+    #[tokio::test]
+    async fn cherry_pick_onto_rolls_back_a_single_non_conflict_failure() {
+        let (dir, repo) = setup_repo("pick-onto-merge-commit").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        git(&repo, &["checkout", "-b", "side"]).await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        git(&repo, &["checkout", "feature"]).await;
+        git(&repo, &["merge", "--no-ff", "-m", "merge side", "side"]).await;
+        let merge_commit = rev(&repo, "HEAD").await;
+        let feature_tip = merge_commit.clone();
+        let target_tip = rev(&repo, "target").await;
+
+        let state = AppState::default();
+        match cherry_pick_onto(&state, &repo, &[merge_commit], "target").await {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_verdict_shape(&stderr, "was rolled back");
+                assert!(
+                    stderr.contains("is a merge but no -m option was given"),
+                    "git's own reason must survive the pass-through: {stderr}"
+                );
+            }
+            Ok(_) => panic!("cherry-picking a merge commit without -m must fail"),
+            Err(e) => panic!("expected the pass-through Git error, got {e:?}"),
+        }
+        assert_eq!(rev(&repo, "target").await, target_tip);
+        assert_eq!(rev(&repo, "HEAD").await, feature_tip);
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+    }
+
+    /// Continue on an all-ours resolution: the pick has nothing left to commit, so
+    /// git refuses `--continue` and asks for `--skip` (measured, git 2.51.1). The
+    /// banner's Continue has to take that escape, or the state P1's pause makes
+    /// routine dead-ends in the UI.
+    #[tokio::test]
+    async fn op_continue_finishes_a_cherry_pick_emptied_by_its_resolution() {
+        let (dir, repo) = setup_repo("continue-empty-pick").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c1 = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let target_tip = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        assert!(cherry_pick_onto(&state, &repo, &[c1], "target")
+            .await
+            .is_err());
+        git(&repo, &["checkout", "--ours", "a.txt"]).await;
+        git(&repo, &["add", "a.txt"]).await;
+
+        op_continue(&state, &repo, "cherry-pick")
+            .await
+            .expect("continue must finish a pick emptied by its own resolution");
+        assert!(
+            !op_state(&repo).await.unwrap().cherry_picking,
+            "the escape must leave nothing in progress"
+        );
+        // Nothing was committed: the resolution kept the target's own content.
+        assert_eq!(rev(&repo, "HEAD").await, target_tip);
+        let status = git(&repo, &["status", "--porcelain"]).await;
+        assert!(status.trim().is_empty(), "tree should be clean: {status}");
+    }
+
+    /// Only a CONFLICT stops on the target; every other failure class still rolls
+    /// back, single commit included — a killed pick otherwise leaves HEAD on the
+    /// target with nothing for the user to resolve.
     #[tokio::test]
     async fn cherry_pick_onto_rolls_back_when_a_pick_fails_non_git() {
         let (dir, repo) = setup_repo("pick-onto-nongit").await;

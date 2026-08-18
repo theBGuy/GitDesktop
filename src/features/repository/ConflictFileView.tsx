@@ -6,6 +6,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
 import { hasConflictMarkers } from "@/lib/ai/conflict-prompt";
 import { openWithDefault, openWithProgram } from "@/lib/git/api";
+import type { ConflictSides } from "@/lib/git/conflict";
 import {
   type ConflictChoice,
   parseConflictSegments,
@@ -26,6 +27,87 @@ import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
 
 const baseName = (path: string) => path.split("/").pop() || path;
+
+/** Which side has no version at this path, when exactly one of them does — the
+ *  modify/delete shape. `null` for a content conflict (both sides present) and
+ *  when both are absent, neither of which is about a removal to accept. */
+function deletedSide(sides: ConflictSides): "ours" | "theirs" | null {
+  const ourGone = sides.ours == null;
+  if (ourGone === (sides.theirs == null)) return null;
+  return ourGone ? "ours" : "theirs";
+}
+
+/** The notice per removing side. "Removed" rather than "deleted": a side that
+ *  renamed the file away also has no version at this path. */
+const DELETION_COPY = {
+  ours: {
+    lead: "The current branch removed this file; the incoming change edited it (below).",
+    takesDeletion: "Accept all current",
+    keepsFile: "Accept all incoming",
+  },
+  theirs: {
+    lead: "The incoming change removed this file; the current branch edited it (below).",
+    takesDeletion: "Accept all incoming",
+    keepsFile: "Accept all current",
+  },
+} as const;
+
+/**
+ * What a conflicted file shows when the parser found no regions to resolve: a
+ * side with no version at this path, an empty file, or markers it can't trust.
+ * Each keeps the header's whole-file actions as the way through.
+ */
+function ConflictFallback({
+  path,
+  sides,
+}: {
+  path: string;
+  sides: ConflictSides;
+}) {
+  // The index stages decide first: a modify/delete leaves the SURVIVING side's
+  // content in the tree, marker-free, so the parser's null here means a removal
+  // to accept rather than markers it failed on. Ordered ahead of the empty-file
+  // check, which is a heuristic and would swallow a surviving side that is empty.
+  const deleted = deletedSide(sides);
+  if (deleted !== null) {
+    const copy = DELETION_COPY[deleted];
+    return (
+      <>
+        <p className="border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
+          {copy.lead} <span className="font-medium">{copy.takesDeletion}</span>{" "}
+          takes the deletion,{" "}
+          <span className="font-medium">{copy.keepsFile}</span> keeps the file.
+        </p>
+        <HighlightedCode path={path} content={sides.working || " "} />
+      </>
+    );
+  }
+
+  if (sides.working.trim() === "") {
+    // A both-deleted (or empty) conflict — nothing to merge as text.
+    return (
+      <p className="p-4 text-xs text-muted-foreground">
+        This file was deleted on one or both sides — there's nothing to merge.
+        Take a side with <span className="font-medium">Accept all current</span>{" "}
+        / <span className="font-medium">incoming</span>, or open it in your
+        editor.
+      </p>
+    );
+  }
+
+  // Couldn't parse the markers cleanly (malformed or ambiguous, e.g. a bare
+  // 7-char marker inside the content) — show the raw file so nothing is hidden,
+  // and keep the whole-file actions in the header.
+  return (
+    <>
+      <p className="border-b bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
+        Couldn't cleanly parse the conflict markers in this file. Resolve it
+        with the header actions or in your editor.
+      </p>
+      <HighlightedCode path={path} content={sides.working} />
+    </>
+  );
+}
 
 /**
  * The conflicted-file editor: renders the file with git's conflict markers
@@ -172,27 +254,7 @@ export function ConflictFileView({
             editor.
           </p>
         ) : segments === null ? (
-          file.data.working.trim() === "" ? (
-            // A both-deleted (or empty) conflict — nothing to merge as text.
-            <p className="p-4 text-xs text-muted-foreground">
-              This file was deleted on one or both sides — there's nothing to
-              merge. Take a side with{" "}
-              <span className="font-medium">Accept all current</span> /{" "}
-              <span className="font-medium">incoming</span>, or open it in your
-              editor.
-            </p>
-          ) : (
-            // Couldn't parse the markers cleanly (malformed or ambiguous, e.g. a
-            // bare 7-char marker inside the content) — show the raw file so
-            // nothing is hidden, and keep the whole-file actions in the header.
-            <>
-              <p className="border-b bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
-                Couldn't cleanly parse the conflict markers in this file.
-                Resolve it with the header actions or in your editor.
-              </p>
-              <HighlightedCode path={path} content={file.data.working} />
-            </>
-          )
+          <ConflictFallback path={path} sides={file.data} />
         ) : (
           segments.map((seg, idx) => {
             if (seg.kind === "context") {

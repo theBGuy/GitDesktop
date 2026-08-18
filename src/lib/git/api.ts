@@ -440,9 +440,11 @@ export interface CherryPickRangeResult {
 }
 
 /** Copies `hashes` (oldest-first) onto `targetBranch` and leaves you there.
- *  A failed pick rolls `targetBranch` back to its prior tip and returns you
- *  to your starting branch; the error says when either rollback step failed
- *  and how to recover. */
+ *  A single commit that conflicts stops on `targetBranch` with the pick in
+ *  progress, for the conflict banner to continue or abort. Every other failure
+ *  (and any failure in a multi-commit batch) rolls `targetBranch` back to its
+ *  prior tip and returns you to your starting branch; the error says when
+ *  either rollback step failed and how to recover. */
 export const gitCherryPickOnto = (
   repoPath: string,
   hashes: string[],

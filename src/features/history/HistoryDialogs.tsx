@@ -27,7 +27,8 @@ import {
   useResetToCommit,
 } from "@/lib/git/queries";
 import { refNameWarning } from "@/lib/git/ref-name";
-import { toastError } from "@/lib/toast";
+import { isAppError } from "@/lib/tauri/invoke";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 
 const onError = (e: unknown) => toastError(e);
@@ -189,6 +190,7 @@ export function CherryPickOntoDialog({
   const cherryPickOnto = useCherryPickOnto(repoPath);
   const destId = useId();
   const shownHashes = useRetained(hashes);
+  const count = shownHashes?.length ?? 0;
   function run() {
     if (!hashes || !branch) return;
     const target = branch;
@@ -210,7 +212,17 @@ export function CherryPickOntoDialog({
           onDone();
         },
         onError: (e) => {
-          onError(e);
+          // A paused pick leaves you on the destination branch and closes this
+          // dialog, so the toast is the only place left that can say where you
+          // are; the generic summary names the operation, never the branch.
+          if (isAppError(e) && e.kind === "conflict") {
+            toastErrorWithNote(
+              e,
+              `You're now on ${target} — resolve the conflicts there, then continue the cherry-pick.`,
+            );
+          } else {
+            onError(e);
+          }
           onClose();
         },
       },
@@ -227,11 +239,14 @@ export function CherryPickOntoDialog({
         <DialogHeader>
           <DialogTitle>Cherry-pick to branch</DialogTitle>
           <DialogDescription>
-            {shownHashes && shownHashes.length > 1
-              ? `Copies these ${shownHashes.length} commits onto the chosen branch and switches to it. `
+            {count > 1
+              ? `Copies these ${count} commits onto the chosen branch and switches to it. `
               : "Copies this commit onto the chosen branch and switches to it. "}
             They stay on {currentBranch ?? "this branch"} too. Commits already
-            present are skipped; any failure rolls the batch back automatically.
+            present are skipped;{" "}
+            {count > 1
+              ? "any failure rolls the whole batch back automatically."
+              : "the cherry-pick pauses on the destination branch, where you can resolve the conflict and continue; any other failure rolls it back automatically."}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">

@@ -66,6 +66,30 @@ async fn stage_blob(repo: &str, stage: u8, path: &str) -> AppResult<Option<Strin
     Ok((out.code == 0).then(|| out.stdout_lossy()))
 }
 
+/// The unmerged index stages present for `spec` (1 = base, 2 = ours, 3 = theirs).
+/// Empty when the path isn't conflicted at all.
+///
+/// One `ls-files -u` spawn answers for every stage and returns only mode/sha/stage
+/// metadata; `stage_blob` costs the same spawn but materializes the whole blob
+/// (up to the 256 KB cap, binary bytes included) just to test for presence.
+async fn unmerged_stages(repo: &str, spec: &str) -> AppResult<Vec<u8>> {
+    let out = run_git(Some(repo), &["ls-files", "-u", "--", spec], DEFAULT_TIMEOUT).await?;
+    Ok(out
+        .stdout_lossy()
+        .lines()
+        // `<mode> <sha> <stage>\t<path>` — read the stage from the metadata half
+        // only, so a path containing whitespace can't shift the field index.
+        .filter_map(|line| {
+            line.split('\t')
+                .next()?
+                .split_whitespace()
+                .nth(2)?
+                .parse()
+                .ok()
+        })
+        .collect())
+}
+
 /// Whether the path matches any of the user's AI-ignore `exclude` patterns —
 /// the gate that decides whether a conflicted file's contents go to a model.
 ///
@@ -151,8 +175,9 @@ pub async fn git_resolve_conflict(
 /// Resolves a whole conflicted file by taking one side outright: `side` is
 /// "ours" (current branch / HEAD) or "theirs" (incoming). `git checkout
 /// --ours/--theirs` writes that side's version to the working tree, then `git
-/// add` stages it (marks resolved). Works for binary conflicts too, where a
-/// text merge is impossible.
+/// add` stages it (marks resolved). When the chosen side has no version at this
+/// path — it deleted or renamed the file away — `git rm` takes that removal
+/// instead. Works for binary conflicts too, where a text merge is impossible.
 #[tauri::command]
 pub async fn git_checkout_conflict_side(
     state: State<'_, AppState>,
@@ -170,26 +195,52 @@ pub(crate) async fn git_checkout_conflict_side_core(
     side: String,
 ) -> AppResult<()> {
     validate_rel_path(&path)?;
-    let flag = match side.as_str() {
-        "ours" => "--ours",
-        "theirs" => "--theirs",
+    let (flag, stage) = match side.as_str() {
+        "ours" => ("--ours", 2u8),
+        "theirs" => ("--theirs", 3u8),
         _ => {
             return Err(AppError::InvalidArgument(format!(
                 "invalid conflict side: {side}"
             )))
         }
     };
-    // Literal pathspec on both steps: a `[slug]`-style path would otherwise take
+    // Literal pathspec on every step: a `[slug]`-style path would otherwise take
     // this side for its glob-siblings too, silently resolving conflicts the user
     // never opened.
     let spec = crate::git::pathspec::literal(&path);
 
-    // One hold across checkout→add: between the two a concurrent stage or discard can
-    // rewrite the working-tree file, and the `add` would then stage THAT content as
-    // the user's chosen side. Lock-free runners only while held (see
-    // `run_git_mutating`).
+    // One hold across the stage read and checkout→add: between them a concurrent
+    // stage or discard can rewrite the working-tree file, and the `add` would then
+    // stage THAT content as the user's chosen side. Lock-free runners only while
+    // held (see `run_git_mutating`).
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
+
+    // A side that removed the file (deleted it, or renamed it away) has no stage
+    // entry, and `checkout --ours|--theirs` then exits 1 ("does not have our
+    // version"), so taking that side means `git rm` — which needs no `-f` on an
+    // unmerged path, whatever the working copy holds (measured, git 2.51.1).
+    // Gated on the path being unmerged RIGHT NOW: on an already-resolved path
+    // `git rm` exits 0 and deletes the file, turning a stale second click into
+    // data loss.
+    let stages = unmerged_stages(&repo_path, &spec).await?;
+    if !stages.is_empty() && !stages.contains(&stage) {
+        run_git(Some(&repo_path), &["rm", "--", &spec], DEFAULT_TIMEOUT).await?;
+        return Ok(());
+    }
+    // Nothing unmerged and nothing on disk: an accept landing after this path was
+    // already resolved AS A REMOVAL. `checkout` would exit 1 on the missing
+    // pathspec and put raw git text in a toast, so settle for the state the user
+    // asked for. Positive knowledge of absence only — a resolved path whose file
+    // still exists keeps today's harmless checkout no-op.
+    if stages.is_empty()
+        && matches!(
+            tokio::fs::try_exists(Path::new(&repo_path).join(&path)).await,
+            Ok(false)
+        )
+    {
+        return Ok(());
+    }
 
     run_git(
         Some(&repo_path),
@@ -426,6 +477,200 @@ mod tests {
             !staged.contains("src/app/s/page.tsx"),
             "the glob-sibling was staged: {staged}"
         );
+    }
+
+    async fn git_ok(repo: &str, args: &[&str]) {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap();
+    }
+
+    async fn stdout_of(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    /// Builds a real modify/delete conflict on `path`: one side deletes the file
+    /// while the other modifies it, so the deleting side has NO index stage.
+    /// `deleted_by` is "ours" (the current branch) or "theirs" (the merged one).
+    async fn modify_delete_repo(
+        tag: &str,
+        path: &str,
+        deleted_by: &str,
+    ) -> (tempfile::TempDir, String) {
+        let (dir, repo) = temp_repo(tag);
+        git_ok(&repo, &["init"]).await;
+        git_ok(&repo, &["config", "user.email", "t@t"]).await;
+        git_ok(&repo, &["config", "user.name", "t"]).await;
+        let file = Path::new(&repo).join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "base\n").unwrap();
+        // A file neither branch touches, so the deleting side still commits a
+        // non-empty tree.
+        std::fs::write(Path::new(&repo).join("keep.txt"), "keep\n").unwrap();
+        git_ok(&repo, &["add", "."]).await;
+        git_ok(&repo, &["commit", "-m", "base"]).await;
+
+        git_ok(&repo, &["checkout", "-b", "feature"]).await;
+        if deleted_by == "theirs" {
+            git_ok(&repo, &["rm", "-q", "--", path]).await;
+        } else {
+            std::fs::write(&file, "theirs\n").unwrap();
+            git_ok(&repo, &["add", "--", path]).await;
+        }
+        git_ok(&repo, &["commit", "-m", "feature"]).await;
+
+        git_ok(&repo, &["checkout", "-"]).await;
+        if deleted_by == "ours" {
+            git_ok(&repo, &["rm", "-q", "--", path]).await;
+        } else {
+            std::fs::write(&file, "ours\n").unwrap();
+            git_ok(&repo, &["add", "--", path]).await;
+        }
+        git_ok(&repo, &["commit", "-m", "ours"]).await;
+
+        // The merge is expected to conflict (non-zero exit), so run it raw.
+        run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        (dir, repo)
+    }
+
+    /// Asserts the fixture really is a modify/delete: `present` survives as an
+    /// index stage and `missing` does not.
+    async fn assert_modify_delete(repo: &str, path: &str, present: u8, missing: u8) {
+        let stages = stdout_of(repo, &["ls-files", "-u"]).await;
+        assert!(
+            stages.contains(&format!(" {present}\t{path}")),
+            "stage {present} should survive: {stages}"
+        );
+        assert!(
+            !stages.contains(&format!(" {missing}\t{path}")),
+            "stage {missing} should be absent: {stages}"
+        );
+    }
+
+    /// Asserts the path is fully resolved AND gone — no unmerged stages, no index
+    /// entry, no working file.
+    async fn assert_deleted_and_resolved(repo: &str, path: &str) {
+        let unmerged = stdout_of(repo, &["ls-files", "-u"]).await;
+        assert!(
+            unmerged.trim().is_empty(),
+            "conflict left behind: {unmerged}"
+        );
+        let tracked = stdout_of(repo, &["ls-files", "--", path]).await;
+        assert!(tracked.trim().is_empty(), "still in the index: {tracked}");
+        assert!(
+            !Path::new(repo).join(path).exists(),
+            "the working file survived the deletion"
+        );
+    }
+
+    /// Accept-all-current when OUR side deleted the file: `checkout --ours` can't
+    /// serve a side with no stage, so taking it has to mean taking the deletion.
+    /// Reverting the deletion arm turns this red — the core call errors instead.
+    #[tokio::test]
+    async fn accept_current_takes_the_deletion_when_our_side_deleted() {
+        let (_dir, repo) = modify_delete_repo("md-ours", "file.txt", "ours").await;
+        assert_modify_delete(&repo, "file.txt", 3, 2).await;
+
+        let state = AppState::default();
+        git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "ours".into())
+            .await
+            .unwrap();
+
+        assert_deleted_and_resolved(&repo, "file.txt").await;
+    }
+
+    /// The mirror: accept-all-incoming when THEIR side deleted the file. Here the
+    /// deletion is also a staged change, since HEAD still carries the file.
+    #[tokio::test]
+    async fn accept_incoming_takes_the_deletion_when_their_side_deleted() {
+        let (_dir, repo) = modify_delete_repo("md-theirs", "file.txt", "theirs").await;
+        assert_modify_delete(&repo, "file.txt", 2, 3).await;
+
+        let state = AppState::default();
+        git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "theirs".into())
+            .await
+            .unwrap();
+
+        assert_deleted_and_resolved(&repo, "file.txt").await;
+        let staged = stdout_of(&repo, &["diff", "--cached", "--name-status"]).await;
+        assert!(staged.contains("D\tfile.txt"), "deletion staged: {staged}");
+    }
+
+    /// The other half of a modify/delete: taking the side that KEPT the file still
+    /// goes through checkout, so the deletion arm must not swallow it.
+    #[tokio::test]
+    async fn modify_delete_keeps_the_file_when_the_surviving_side_is_taken() {
+        let (_dir, repo) = modify_delete_repo("md-keep", "file.txt", "ours").await;
+        // Pins the fixture: a typo in `deleted_by` would silently build the mirror
+        // and leave this test asserting the wrong direction.
+        assert_modify_delete(&repo, "file.txt", 3, 2).await;
+
+        let state = AppState::default();
+        git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "theirs".into())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&repo).join("file.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "theirs\n"
+        );
+        let unmerged = stdout_of(&repo, &["ls-files", "-u"]).await;
+        assert!(
+            unmerged.trim().is_empty(),
+            "conflict left behind: {unmerged}"
+        );
+    }
+
+    /// The guard on the deletion arm: `git rm` exits 0 and DELETES an
+    /// already-resolved path (measured, git 2.51.1), so a second accept on a file
+    /// whose conflict is gone must stay the harmless no-op it is today.
+    #[tokio::test]
+    async fn a_resolved_path_is_never_removed_by_a_second_accept() {
+        let (_dir, repo) = conflicted_repo("md-double-fire", "file.txt", &[]).await;
+        let state = AppState::default();
+        git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "ours".into())
+            .await
+            .unwrap();
+
+        // The stale second click: same side, conflict already gone.
+        git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "ours".into())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&repo).join("file.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "ours\n",
+            "the resolved file survives a repeat accept"
+        );
+    }
+
+    /// The aftermath of a taken removal: no stages left AND no file, so the
+    /// checkout path would exit 1 on a pathspec matching nothing and hand the user
+    /// raw git text. A repeat accept has to settle instead.
+    #[tokio::test]
+    async fn a_second_accept_after_a_taken_removal_is_a_no_op() {
+        let (_dir, repo) = modify_delete_repo("md-repeat", "file.txt", "ours").await;
+        let state = AppState::default();
+        git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "ours".into())
+            .await
+            .unwrap();
+        assert_deleted_and_resolved(&repo, "file.txt").await;
+
+        // Both sides, since either button is reachable in the header.
+        git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "ours".into())
+            .await
+            .unwrap();
+        git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "theirs".into())
+            .await
+            .unwrap();
+        assert_deleted_and_resolved(&repo, "file.txt").await;
     }
 
     #[tokio::test]

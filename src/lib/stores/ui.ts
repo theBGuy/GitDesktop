@@ -162,12 +162,22 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   commitAiGenerated: false,
   amendingHash: null,
   activeDraftKey: null,
+  draftKeyRemaps: {},
 };
 
 /** Key a commit draft so each repo + branch keeps its own message. A git branch
  *  name can't contain a colon, so the key stays unambiguous. */
 export function commitDraftKey(repoPath: string, branch: string): string {
   return `${repoPath}:${branch}`;
+}
+
+/** Where the draft captured under `key` lives now, following branch renames.
+ *  Remaps are collapsed on write, so one lookup covers a chain of renames. */
+export function resolveDraftKey(
+  remaps: Record<string, string>,
+  key: string | null,
+): string | null {
+  return key === null ? null : (remaps[key] ?? key);
 }
 
 function isEmptyDraft(d: CommitDraft): boolean {
@@ -276,6 +286,10 @@ interface UiState {
    *  The live commit fields above mirror the entry for `activeDraftKey`. */
   commitDrafts: Record<string, CommitDraft>;
   activeDraftKey: string | null;
+  /** Draft keys a branch rename moved: captured key -> where that draft lives now.
+   *  Lets a generation started before the rename recognise its own draft after it;
+   *  a genuine branch switch or a repo switch clears the whole record. */
+  draftKeyRemaps: Record<string, string>;
 
   openRepo: (info: RepoInfo) => void;
   closeRepo: () => void;
@@ -374,6 +388,14 @@ interface UiState {
   /** Point the live commit fields at `key`'s saved draft (load on repo/branch
    *  switch). The previous draft is already mirrored in `commitDrafts`. */
   loadCommitDraft: (key: string) => void;
+  /** Carry a commit draft across a branch rename: moves its `commitDrafts` entry
+   *  and, when the renamed branch owns the live fields, retargets `activeDraftKey`
+   *  so nothing in flight is orphaned by the new name. */
+  migrateCommitDraft: (
+    repoPath: string,
+    fromBranch: string,
+    toBranch: string,
+  ) => void;
 }
 
 export const useUiStore = create<UiState>()((set, get) => {
@@ -451,6 +473,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     amendingHash: null,
     commitDrafts: {},
     activeDraftKey: null,
+    draftKeyRemaps: {},
 
     openRepo: (info) =>
       startViewTransition(() =>
@@ -634,18 +657,22 @@ export const useUiStore = create<UiState>()((set, get) => {
       }),
     restoreCommitDraft: (draft, key) =>
       set((s) => {
+        // `key` is captured before the commit is awaited, so a rename landing in
+        // between must restore where that draft lives now — the same identity
+        // seam the generation guard resolves through.
+        const target = resolveDraftKey(s.draftKeyRemaps, key);
         const result: Partial<UiState> = {};
         // Put the message back into the draft it belonged to.
-        if (key) {
+        if (target) {
           const drafts = { ...s.commitDrafts };
-          if (isEmptyDraft(draft)) delete drafts[key];
-          else drafts[key] = draft;
+          if (isEmptyDraft(draft)) delete drafts[target];
+          else drafts[target] = draft;
           result.commitDrafts = drafts;
         }
         // Only touch the live fields if that draft is still the active one —
         // if the user switched branches mid-commit, leave their current draft
         // alone (the restored message reappears when they switch back).
-        if (s.activeDraftKey === key) {
+        if (s.activeDraftKey === target) {
           result.commitTitle = draft.title;
           result.commitBody = draft.body;
           result.commitCoAuthors = draft.coAuthors;
@@ -666,12 +693,57 @@ export const useUiStore = create<UiState>()((set, get) => {
         const d = s.commitDrafts[key] ?? EMPTY_COMMIT_DRAFT;
         return {
           activeDraftKey: key,
+          // A real switch retires the rename record: anything it was keeping
+          // alive is bound to the key we're leaving, so it can't apply here.
+          draftKeyRemaps: {},
           commitTitle: d.title,
           commitBody: d.body,
           commitCoAuthors: d.coAuthors,
           commitAiGenerated: d.aiGenerated,
           amendingHash: d.amendingHash,
         };
+      }),
+    migrateCommitDraft: (repoPath, fromBranch, toBranch) =>
+      set((s) => {
+        const oldKey = commitDraftKey(repoPath, fromBranch);
+        const newKey = commitDraftKey(repoPath, toBranch);
+        if (oldKey === newKey) return {};
+        const result: Partial<UiState> = {};
+        const moved = s.commitDrafts[oldKey];
+        const retargeting = s.activeDraftKey === oldKey;
+        // A draft already sitting under the new name belongs to a branch that no
+        // longer answers to it, so the state carried across the rename wins —
+        // including an empty one, which must leave no entry for the live fields
+        // (about to point here) to contradict.
+        if (moved || (retargeting && s.commitDrafts[newKey])) {
+          const drafts = { ...s.commitDrafts };
+          delete drafts[oldKey];
+          if (moved) drafts[newKey] = moved;
+          else delete drafts[newKey];
+          result.commitDrafts = drafts;
+        }
+        if (retargeting) {
+          result.activeDraftKey = newKey;
+          // Collapse existing remaps onto the new key so a chain of renames stays
+          // one lookup deep, and drop any that become identities.
+          const remaps: Record<string, string> = {};
+          for (const [from, to] of Object.entries(s.draftKeyRemaps)) {
+            const next = to === oldKey ? newKey : to;
+            if (next !== from) remaps[from] = next;
+          }
+          remaps[oldKey] = newKey;
+          result.draftKeyRemaps = remaps;
+        } else if (s.activeDraftKey === newKey && moved) {
+          // The status poll can flip the key to the new name before this runs,
+          // which blanks the live fields; put the carried-over draft back into
+          // them so the rename never costs the user their message.
+          result.commitTitle = moved.title;
+          result.commitBody = moved.body;
+          result.commitCoAuthors = moved.coAuthors;
+          result.commitAiGenerated = moved.aiGenerated;
+          result.amendingHash = moved.amendingHash;
+        }
+        return result;
       }),
   };
 });

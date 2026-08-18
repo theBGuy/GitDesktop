@@ -147,10 +147,20 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const currentBranch = status.data?.branch?.name ?? null;
   // Agent-session branches (`gd/session/*`) are app-internal — never offer them
   // as a cherry-pick target (it would switch to and cherry-pick onto one), like
-  // ComparePanel / BranchSwitcher.
-  const targetBranches = (branches.data ?? []).filter(
+  // ComparePanel / BranchSwitcher. Archived branches are hidden here for the same
+  // reason they are hidden elsewhere: they were archived to get them out of the way.
+  const pickOntoCandidates = (branches.data ?? []).filter(
     (b) => !b.isCurrent && !b.name.startsWith("gd/session/"),
   );
+  const targetBranches = pickOntoCandidates.filter((b) => !b.archived);
+  const noPickOntoTargets = targetBranches.length === 0;
+  // Why cherry-pick-to-branch is unavailable — in particular the case a repo full of
+  // (archived) branches makes look like a bug: every candidate is archived, and the
+  // remedy lives in the branch switcher rather than here.
+  const pickOntoDisabledHint =
+    pickOntoCandidates.length > 0
+      ? " (all other branches are archived — unarchive one first)"
+      : " (no other branches)";
 
   const branchForm = useAppForm({
     ...createRefFromCommitFormOpts,
@@ -549,10 +559,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       return (
         <>
           <ContextMenuItem
-            disabled={targetBranches.length === 0}
+            disabled={noPickOntoTargets}
             onClick={() => openCherryPickOnto(commit.hash)}
           >
             Cherry-pick {selected.size} commits to branch…
+            {noPickOntoTargets && pickOntoDisabledHint}
           </ContextMenuItem>
           <ContextMenuItem disabled={!canSquash} onClick={openSquash}>
             Squash {selected.size} commits…
@@ -645,10 +656,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           Cherry-pick commit
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={targetBranches.length === 0}
+          disabled={noPickOntoTargets}
           onClick={() => openCherryPickOnto(commit.hash)}
         >
           Cherry-pick to branch…
+          {noPickOntoTargets && pickOntoDisabledHint}
         </ContextMenuItem>
         <ContextMenuItem
           disabled={!canEditHistory}

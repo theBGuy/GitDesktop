@@ -1219,6 +1219,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const div = divByName.get(branch.name);
     const canUpdate = Boolean(defaultName) && branch.name !== defaultName;
     const deletionBlocked = isDeletionBlocked(rulesConfig, branch.name);
+    // Archiving hides a branch from the branch surfaces, so it's refused for the
+    // branch you're on and for the default branch. Unarchiving is never refused —
+    // an archived branch can be checked out, and this is its only way back.
+    const archiveLabel = branch.archived ? "Unarchive" : "Archive";
+    // Best-effort by design: a null `defaultName` (still loading, or unresolvable)
+    // drops the default-branch guard rather than disabling Archive everywhere.
+    const archiveBlockedReason = (() => {
+      if (branch.archived) return null;
+      if (branch.isCurrent) return "current branch";
+      if (branch.name === defaultName) return "default branch";
+      return null;
+    })();
     // The worktree (other than the active checkout) this branch occupies, when
     // any — the Delete worktree… item gates on it (git refuses to remove the
     // main working tree).
@@ -1546,10 +1558,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             Copy branch name
           </ContextMenuItem>
           <ContextMenuItem
-            disabled={branch.isCurrent}
+            disabled={archiveBlockedReason !== null}
             onClick={() => setArchived(branch.name, !branch.archived)}
           >
-            {branch.archived ? "Unarchive" : "Archive"}
+            {archiveBlockedReason === null
+              ? archiveLabel
+              : `${archiveLabel} (${archiveBlockedReason})`}
           </ContextMenuItem>
           <ContextMenuSeparator />
           {inWorktree && (
