@@ -52,12 +52,6 @@ const REFSPEC_ALLOWLIST = [
       "Bitbucket REST path, not a git refspec — every segment is encode_query_value'd",
   },
   {
-    file: "git/remote.rs",
-    fn: "branch_has_reflog",
-    rationale:
-      "read-only `reflog exists` probe (never a refspec); the name is either git_push_core's branch, validated with validate_ref_name at the arm entry, or `symbolic-ref --short` output — git's own ref name",
-  },
-  {
     file: "git/branches.rs",
     fn: "git_default_branch",
     rationale: "interpolates only the fixed literals main/master",
@@ -117,6 +111,12 @@ const REFSPEC_ALLOWLIST = [
     file: "git/remote.rs",
     fn: "publish_refspec",
     rationale: "the publish-refspec chokepoint; callers validate the branch",
+  },
+  {
+    file: "git/remote.rs",
+    fn: "branch_has_reflog",
+    rationale:
+      "read-only `reflog exists` probe (never a refspec); the name is either git_push_core's branch, validated with validate_ref_name at the arm entry, or `symbolic-ref --short` output — git's own ref name",
   },
   {
     file: "git/remote.rs",
