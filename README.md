@@ -211,11 +211,12 @@ save, so apps updating from that release show the notes you just wrote.
 
 Fetch, pull, and push, with the ahead/behind counts shown right on the Push
 and Pull buttons. Pull is `--ff-only`, and divergence routes to a guarded
-force push with `--force-with-lease --force-if-includes`. When a repo has
-an `upstream` remote, the Pull menu adds **Update from upstream**: one
-click fetches upstream and brings your branch up to date (fast-forward when
-it can, a merge commit when cleanly diverged, the conflict editor
-otherwise), for keeping a fork current.
+force push with `--force-with-lease --force-if-includes` (lease-only on
+Git releases older than 2.30). When a repo has an `upstream` remote, the
+Pull menu adds **Update from upstream**: one click fetches upstream and
+brings your branch up to date (fast-forward when it can, a merge commit
+when cleanly diverged, the conflict editor otherwise), for keeping a fork
+current.
 **Auto-fetch** (on by default) quietly runs a background `git fetch` on an
 interval while the window is focused, so the behind-count and incoming
 commits stay current without pressing Fetch; it never pulls or merges, and

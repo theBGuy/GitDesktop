@@ -26,6 +26,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{app_err, ensure_not_flag, json_result, GitDesktopMcp, SESSION_BRANCH_PREFIX};
+use crate::git::remote::PushGuard;
 
 /// Refuses a branch name that names a GitDesktop agent-session branch, with an
 /// actionable error. Pure string logic (no repo access) so it's unit-testable.
@@ -836,13 +837,15 @@ impl GitDesktopMcp {
         description = "Force-push the current branch to its remote in the bound repository, using \
                        --force-with-lease --force-if-includes (refuses to overwrite remote work \
                        that isn't already incorporated into your local branch, even when a \
-                       background fetch has updated the remote-tracking ref). Rewrites the remote \
-                       branch. Requires --allow-git-write AND --allow-destructive.",
+                       background fetch has updated the remote-tracking ref; on a Git older than \
+                       2.30, or a branch with no reflog for the check to read, the push falls back \
+                       to the lease alone). Rewrites the remote branch. Requires --allow-git-write \
+                       AND --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
-        crate::git::remote::git_push_core(
+        let guard = crate::git::remote::git_push_core(
             &self.state,
             self.repo.clone(),
             false,
@@ -853,7 +856,18 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
-        ok_text("force-pushed (with lease + if-includes)")
+        // The tool's result text names the guarantee the push ACTUALLY ran under —
+        // a static "with lease + if-includes" overclaims on either fallback.
+        ok_text(match guard {
+            PushGuard::LeaseAndIncludes => "force-pushed (with lease + if-includes)",
+            PushGuard::LeaseOnlyOldGit => {
+                "force-pushed (with lease; this Git predates --force-if-includes)"
+            }
+            PushGuard::LeaseOnlyNoReflog => {
+                "force-pushed (with lease; the branch has no reflog for --force-if-includes to \
+                 check)"
+            }
+        })
     }
 
     #[tool(

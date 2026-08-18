@@ -415,7 +415,7 @@ tracked file and blames the one you choose as it is now.
 
 > History-rewriting actions (reset, Edit history, squash) only ever touch **unpushed**
 > commits, and a push of rewritten history becomes a safe
-> **force-with-lease --force-if-includes** push (see
+> **force-with-lease --force-if-includes** push (the second flag needs Git 2.30+ — see
 > *Syncing & conflicts*).`,
   },
   {
@@ -658,7 +658,8 @@ If your local history was rewritten (for example, after amending a commit that w
 already pushed), GitDesktop detects the divergence and turns Push into a **confirmed
 force push using \`--force-with-lease --force-if-includes\`** — which refuses to overwrite
 work someone else pushed unless your branch already includes it, even when auto-fetch has
-already updated your view of the remote.
+already updated your view of the remote. On a Git older than 2.30, or a branch with no
+reflog for the check to read, the push falls back to \`--force-with-lease\` alone.
 
 ## Resolving conflicts
 

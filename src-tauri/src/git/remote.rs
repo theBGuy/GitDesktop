@@ -516,6 +516,23 @@ pub async fn git_push(
         remote_branch,
     )
     .await
+    // The guard is an in-process detail; the IPC contract stays `void`.
+    .map(|_| ())
+}
+
+/// Which guarantee a completed push actually ran under. Only meaningful for a
+/// FORCE push: a non-force push has no lease to degrade, and reports
+/// [`PushGuard::LeaseAndIncludes`] as the neutral value.
+#[derive(Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)] // the shared `Lease` prefix IS the shared guarantee
+pub(crate) enum PushGuard {
+    /// `--force-with-lease --force-if-includes`, the intended pair.
+    LeaseAndIncludes,
+    /// This git predates `--force-if-includes` (2.30) — the lease alone.
+    LeaseOnlyOldGit,
+    /// The branch has no reflog for `--force-if-includes` to walk, so the check
+    /// could never pass — the lease alone.
+    LeaseOnlyNoReflog,
 }
 
 /// `remote_branch` names the DESTINATION branch when it differs from the local one
@@ -530,7 +547,7 @@ pub(crate) async fn git_push_core(
     branch: Option<String>,
     remote: Option<String>,
     remote_branch: Option<String>,
-) -> AppResult<()> {
+) -> AppResult<PushGuard> {
     if remote_branch.is_some() && (branch.is_none() || remote.is_none()) {
         return Err(AppError::InvalidArgument(
             "remote branch requires an explicit branch and remote".to_string(),
@@ -630,7 +647,7 @@ pub(crate) async fn git_push_core(
     let cred = crate::forge::credential_config_for_remote(&repo_path, &cred_remote).await?;
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     match run_git_mutating_with_creds(state, &repo_path, &cred, &argv, NETWORK_TIMEOUT).await {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(PushGuard::LeaseAndIncludes),
         Err(AppError::Git { stderr, .. })
             if argv.contains(&FORCE_IF_INCLUDES) && is_unknown_push_option(&stderr) =>
         {
@@ -639,7 +656,28 @@ pub(crate) async fn git_push_core(
             // can't push twice; it degrades to the lease alone.
             let retry = without_force_if_includes(&argv);
             run_git_mutating_with_creds(state, &repo_path, &cred, &retry, NETWORK_TIMEOUT).await?;
-            Ok(())
+            Ok(PushGuard::LeaseOnlyOldGit)
+        }
+        Err(AppError::Git { code, stderr })
+            if argv.contains(&FORCE_IF_INCLUDES) && stderr.contains(IF_INCLUDES_REJECTION) =>
+        {
+            // The flag proves inclusion by walking the local branch's reflog, so
+            // with no reflog it can never pass: an amend with the remote left
+            // untouched is rejected (measured) under core.logAllRefUpdates=false.
+            // The lease still guards the retry — at worst, pre-change behavior.
+            // Left standing on purpose: a PRESENT reflog with expired entries
+            // (gc.reflogExpire), and a cross-name push colliding with a stale
+            // local branch named like the destination (git walks THAT branch's
+            // reflog — measured); neither can prove inclusion, so both reject.
+            let Some(b) = pushed_branch(&repo_path, branch.as_deref()).await else {
+                return Err(AppError::Git { code, stderr });
+            };
+            if branch_has_reflog(&repo_path, &b).await {
+                return Err(AppError::Git { code, stderr });
+            }
+            let retry = without_force_if_includes(&argv);
+            run_git_mutating_with_creds(state, &repo_path, &cred, &retry, NETWORK_TIMEOUT).await?;
+            Ok(PushGuard::LeaseOnlyNoReflog)
         }
         Err(other) => Err(other),
     }
@@ -650,11 +688,48 @@ pub(crate) async fn git_push_core(
 /// satisfy the lease on a teammate's unseen work. Git 2.30+.
 const FORCE_IF_INCLUDES: &str = "--force-if-includes";
 
-/// Whether git's stderr says it rejected an unknown command-line option — for a
-/// push, the signal that this git predates `--force-if-includes` (2.30). Matched
-/// case-insensitively on git's phrasings plus the `usage: git push` banner it
-/// prints on an option error; a real rejection reads "failed to push some refs"
-/// and never matches.
+/// git's per-ref reason when `--force-if-includes` finds the remote tip missing
+/// from the local branch's reflog — verbatim from `! [rejected] … (…)`.
+const IF_INCLUDES_REJECTION: &str = "remote ref updated since checkout";
+
+/// The local branch a push targeted: the caller's explicit name, else HEAD's own
+/// branch. `None` on a detached HEAD (and on a spawn failure) — no branch means
+/// no reflog to reason about, so callers must not retry. Git itself walks the
+/// local ref named after the DESTINATION when one exists (measured); the source
+/// name probed here covers the app's same-name default — see the arm's comment.
+async fn pushed_branch(repo_path: &str, branch: Option<&str>) -> Option<String> {
+    if let Some(b) = branch {
+        return Some(b.to_string());
+    }
+    let out = run_git_raw(
+        Some(repo_path),
+        &["symbolic-ref", "--short", "-q", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    (out.code == 0)
+        .then(|| out.stdout_lossy().trim().to_string())
+        .filter(|b| !b.is_empty())
+}
+
+/// Whether `refs/heads/<branch>` has a reflog (`git reflog exists`, exit 0/1). An
+/// unrunnable probe counts as "has one": the degrading retry only fires on
+/// positive proof that `--force-if-includes` had nothing to walk.
+async fn branch_has_reflog(repo_path: &str, branch: &str) -> bool {
+    run_git_raw(
+        Some(repo_path),
+        &["reflog", "exists", &format!("refs/heads/{branch}")],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .map_or(true, |out| out.code == 0)
+}
+
+/// Whether git rejected an unknown command-line option — for a push, the signal
+/// that this git predates `--force-if-includes` (2.30). The matched text is the
+/// runner's `full_failure_text`, which can carry remote-relayed lines, so a
+/// server-echoed phrase triggers the retry too; that only degrades to the lease.
 fn is_unknown_push_option(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("unknown switch")
@@ -802,7 +877,7 @@ mod tests {
         build_push_args, cache_get, cache_invalidate, cache_put, git_pull_core, git_push_core,
         git_remote_remove_core, is_auth_class_failure, is_unknown_push_option,
         parse_upstream_tracking, publish_refspec, resolve_push_target, run_git_mutating_with_creds,
-        without_force_if_includes,
+        without_force_if_includes, PushGuard,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -1295,6 +1370,151 @@ mod tests {
         assert_eq!(
             without_force_if_includes(&["push", "-u", "origin", "HEAD"]),
             vec!["push", "-u", "origin", "HEAD"]
+        );
+    }
+
+    /// Set up a bare origin seeded with one commit on `main`, and return the temp
+    /// guard, the base dir, and the origin's path plus its `file://` URL.
+    async fn seeded_origin(tag: &str) -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+        let (guard, base) = temp_base(tag);
+        let origin = base.join("origin.git");
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let base_s = base.to_string_lossy().into_owned();
+        let work_s = work.to_string_lossy().into_owned();
+        let url = format!("file://{}", origin.to_string_lossy().replace('\\', "/"));
+
+        run(&base_s, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        init_repo(&work_s, "a.txt").await;
+        run(&work_s, &["branch", "-M", "main"]).await;
+        run(&work_s, &["remote", "add", "origin", &url]).await;
+        run(&work_s, &["push", "-q", "-u", "origin", "main"]).await;
+        (guard, base, origin.to_string_lossy().into_owned(), url)
+    }
+
+    /// The gap `--force-if-includes` closes, driven end to end: a plain `fetch`
+    /// alone satisfies the bare lease, so with the lease only, clone1's amend would
+    /// clobber a commit clone2 pushed and clone1 never integrated. Integrating it
+    /// (`pull --rebase`) is what lets the same force push land.
+    #[tokio::test]
+    async fn force_push_refuses_fetched_but_unintegrated_remote_work() {
+        let (_guard, base, origin_s, url) = seeded_origin("if-includes").await;
+        let base_s = base.to_string_lossy().into_owned();
+
+        for name in ["clone1", "clone2"] {
+            run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, name]).await;
+            let c = base.join(name).to_string_lossy().into_owned();
+            run(&c, &["config", "core.autocrlf", "false"]).await;
+            run(&c, &["config", "user.email", "t@t.local"]).await;
+            run(&c, &["config", "user.name", "T"]).await;
+        }
+        let clone1 = base.join("clone1");
+        let clone2 = base.join("clone2");
+        let clone1_s = clone1.to_string_lossy().into_owned();
+        let clone2_s = clone2.to_string_lossy().into_owned();
+
+        // clone2 lands a commit of its own on the shared branch.
+        std::fs::write(clone2.join("b.txt"), "theirs\n").unwrap();
+        run(&clone2_s, &["add", "-A"]).await;
+        run(&clone2_s, &["commit", "-qm", "from clone2"]).await;
+        run(&clone2_s, &["push", "-q"]).await;
+        let theirs = run(&clone2_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        // clone1 only FETCHES it — the whole point: that alone used to satisfy the
+        // lease. Its amend adds a NEW file so the later replay stays conflict-free.
+        run(&clone1_s, &["fetch", "-q"]).await;
+        std::fs::write(clone1.join("c.txt"), "mine\n").unwrap();
+        run(&clone1_s, &["add", "-A"]).await;
+        run(&clone1_s, &["commit", "-q", "--amend", "-m", "amended seed"]).await;
+
+        let state = AppState::default();
+        let err = git_push_core(&state, clone1_s.clone(), false, true, None, None, None)
+            .await
+            .expect_err("a merely-fetched remote commit must not be clobbered");
+        assert!(matches!(err, AppError::Git { .. }), "expected a git error, got {err:?}");
+        assert_eq!(
+            run(&origin_s, &["rev-parse", "refs/heads/main"]).await.trim(),
+            theirs,
+            "clone2's commit is still origin's tip"
+        );
+
+        // Integrating the remote work unblocks the very same push.
+        run(&clone1_s, &["pull", "--rebase", "-q"]).await;
+        assert_eq!(
+            git_push_core(&state, clone1_s.clone(), false, true, None, None, None)
+                .await
+                .expect("an integrated branch force-pushes"),
+            PushGuard::LeaseAndIncludes
+        );
+        let landed = run(&origin_s, &["ls-tree", "--name-only", "refs/heads/main"]).await;
+        assert!(
+            landed.contains("b.txt") && landed.contains("c.txt"),
+            "both sides' work is on the new tip: {landed}"
+        );
+    }
+
+    /// `--force-if-includes` walks the local branch's REFLOG, so a repo with
+    /// reflogs off rejects every force push — even with the remote untouched and
+    /// nothing to clobber. The push must still land, degraded to the lease alone
+    /// and reported as such.
+    #[tokio::test]
+    async fn force_push_falls_back_to_the_lease_when_the_branch_has_no_reflog() {
+        let (_guard, base, origin_s, url) = seeded_origin("no-reflog").await;
+        let base_s = base.to_string_lossy().into_owned();
+
+        // Reflogs off at CLONE time: set afterwards, `.git/logs/` already exists and
+        // the check would pass. This is `git clone`'s OWN `-c`, which writes the key
+        // into the new repo's config — git's one-shot `-c` (before the subcommand)
+        // would not persist, and the first ref update would re-enable reflogs.
+        run(
+            &base_s,
+            &[
+                "-c",
+                "core.autocrlf=false",
+                "clone",
+                "-q",
+                "-c",
+                "core.logAllRefUpdates=false",
+                &url,
+                "nolog",
+            ],
+        )
+        .await;
+        let clone = base.join("nolog");
+        let clone_s = clone.to_string_lossy().into_owned();
+        run(&clone_s, &["config", "core.autocrlf", "false"]).await;
+        run(&clone_s, &["config", "user.email", "t@t.local"]).await;
+        run(&clone_s, &["config", "user.name", "T"]).await;
+
+        // Rewrite the tip; the remote is untouched, so the lease has no complaint.
+        std::fs::write(clone.join("c.txt"), "mine\n").unwrap();
+        run(&clone_s, &["add", "-A"]).await;
+        run(&clone_s, &["commit", "-q", "--amend", "-m", "amended seed"]).await;
+        let amended = run(&clone_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+        // The discriminating state, in the retry gate's own terms — asserted AFTER
+        // the amend, since a ref update would otherwise create the reflog.
+        assert!(
+            run_git(
+                Some(&clone_s),
+                &["reflog", "exists", "refs/heads/main"],
+                DEFAULT_TIMEOUT
+            )
+            .await
+            .is_err(),
+            "the fixture's branch must have no reflog for the flag to walk"
+        );
+
+        let state = AppState::default();
+        assert_eq!(
+            git_push_core(&state, clone_s.clone(), false, true, None, None, None)
+                .await
+                .expect("a no-reflog rejection is spurious; the push must still land"),
+            PushGuard::LeaseOnlyNoReflog
+        );
+        assert_eq!(
+            run(&origin_s, &["rev-parse", "refs/heads/main"]).await.trim(),
+            amended,
+            "the amended commit is origin's tip"
         );
     }
 
