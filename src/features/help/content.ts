@@ -849,11 +849,11 @@ Where the head is also behind its base, the refusal says so in the same breath a
 **Update branch** stays on the strip, so a blocked pull request never loses the route
 to updating it.
 
-**Merge** stays available throughout. A repository admin, or anyone a ruleset lists as
-a bypass actor, can merge a blocked pull request, and GitDesktop can't tell from here
-whether that's you, so the decision stays yours. If the forge does refuse the merge,
-the notice carries that same line beside the forge's own words. This reads GitHub's
-rules, so it's **GitHub** only.
+**Merge** stays available throughout. Whoever holds bypass permission on those rules
+can merge anyway, and nothing GitDesktop can read from here says whether you're one of
+them — so the button stays live and the call stays yours. If the forge does refuse the
+merge, the notice carries that same line beside the forge's own words. This reads
+GitHub's rules, so it's **GitHub** only.
 
 ## Maintaining a pull request from a fork
 

@@ -440,6 +440,77 @@ test("a comment naming full_failure_text does not disarm the check", () => {
   assert.equal(hits[0].fn, "commented");
 });
 
+test("a chain of stderr aliases is followed to its shaping", () => {
+  // One hop lands on a bare ident that matches none of the shaping tests, which
+  // reads as correctly shaped — so the walk has to continue.
+  const src = [
+    "async fn chained_bad(out: GitOutput) -> AppError {",
+    "    let raw = out.stderr;",
+    "    let report = raw;",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+    "async fn chained_ok(out: GitOutput) -> AppError {",
+    "    let raw = out.full_failure_text();",
+    "    let report = raw;",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => h.fn),
+    ["chained_bad"],
+  );
+  assert.match(hits[0].fix, /full_failure_text/);
+});
+
+test("a cycle of stderr aliases fails closed", () => {
+  const src = [
+    "async fn looped(out: GitOutput) -> AppError {",
+    "    let first = second;",
+    "    let second = first;",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: first,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.match(hits[0].fix, /cannot resolve/);
+});
+
+test("a stderr field beyond a six-line constructor is still read", () => {
+  // Brace balance, not a line count: rustfmt and a long field list push the
+  // field down, and a window that ends first reads as "no stderr field".
+  const src = [
+    "async fn padded(out: GitOutput) -> AppError {",
+    "    AppError::Git {",
+    "        // one",
+    "        // two",
+    "        // three",
+    "        // four",
+    "        // five",
+    "        // six",
+    "        // seven",
+    "        code: out.code,",
+    "        stderr: out.stderr,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "padded");
+});
+
 test("stderr-only check does not scan test modules", () => {
   // A renaming pattern (`stderr: text`) is indistinguishable from an
   // unresolvable field, and only tests carry them — they assert on these shapes

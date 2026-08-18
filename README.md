@@ -281,8 +281,8 @@ PR (comments and all) in one click.
 - **Blocked by branch protection** (GitHub): a PR that merges cleanly but
   whose base branch rules aren't satisfied gets its own strip line, naming
   the required checks still outstanding (four, then *and N more*).
-  **Merge** stays available (a ruleset's bypass actors can still merge), and
-  a refused merge repeats the same line beside the forge's own message.
+  **Merge** stays available (whoever holds bypass permission can merge anyway),
+  and a refused merge repeats the same line beside the forge's own message.
 - **Local PR merges**: a merge **pre-shows conflicts** and lets you resolve
   them in the in-app editor, in an isolated worktree that never touches your
   working tree, then **Finish** or **Abort**.

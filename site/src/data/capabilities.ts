@@ -93,7 +93,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Clean up branches in bulk — archive or delete stale ones in one sweep, including branches a pull request merged",
+      "Clean up branches in bulk — archive or delete stale ones in one sweep, including branches merged through a pull request",
     highlight: true,
   },
   {

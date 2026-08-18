@@ -208,6 +208,21 @@ fn strip_scheme(trimmed: &str) -> &str {
     }
 }
 
+/// The flow-collection nesting depth after `text`, counting bracket characters
+/// only — no value is read. A trailing comment is dropped first so a stray `{`
+/// in prose can't wedge the scanner open across the rest of the section.
+fn flow_depth_after(depth: usize, text: &str) -> usize {
+    let code = text
+        .char_indices()
+        .find(|&(i, c)| c == '#' && text[..i].ends_with(char::is_whitespace))
+        .map_or(text, |(i, _)| &text[..i]);
+    code.chars().fold(depth, |d, c| match c {
+        '{' | '[' => d + 1,
+        '}' | ']' => d.saturating_sub(1),
+        _ => d,
+    })
+}
+
 /// The host a line at host-key indent declares, if it declares one. Whatever
 /// follows the colon is a value — an anchor, alias, flow map, or comment — and
 /// is never inspected, so any `key:`-shaped line names a host except the YAML
@@ -239,6 +254,7 @@ fn hosts_from_config(text: &str) -> Vec<String> {
     let mut hosts = Vec::new();
     let mut in_hosts = false;
     let mut key_indent: Option<usize> = None;
+    let mut flow_depth = 0usize;
     for line in text.lines() {
         let content = line.trim_end();
         let trimmed = content.trim_start();
@@ -250,13 +266,22 @@ fn hosts_from_config(text: &str) -> Vec<String> {
             in_hosts = indent == 0 && is_hosts_header(trimmed);
             continue;
         }
+        // A line continuing an open flow collection is value text whatever its
+        // indent, so it is never a key and never ends the section.
+        if flow_depth > 0 {
+            flow_depth = flow_depth_after(flow_depth, trimmed);
+            continue;
+        }
         // Any top-level key (or a dedent past the host level) ends the section.
         if indent == 0 {
             break;
         }
         let level = *key_indent.get_or_insert(indent);
         if indent > level {
-            continue; // a host's own sub-keys (token, api_host, …)
+            // A host's own sub-keys (token, api_host, …) — not hosts, but their
+            // values can open a flow collection that wraps onto later lines.
+            flow_depth = flow_depth_after(flow_depth, trimmed);
+            continue;
         }
         if indent < level {
             break;
@@ -264,7 +289,29 @@ fn hosts_from_config(text: &str) -> Vec<String> {
         if let Some(host) = host_from_key_line(trimmed) {
             hosts.push(host);
         }
+        flow_depth = flow_depth_after(flow_depth, trimmed);
     }
+    hosts
+}
+
+/// The hosts of the first readable config in `paths`, plus `env_host` when set,
+/// with the canonical non-GitLab hosts dropped. The env-free core of
+/// [`known_hosts`]: every environment read lives in that wrapper, so this stays
+/// testable without mutating process-global state.
+async fn known_hosts_from(paths: &[PathBuf], env_host: Option<&str>) -> Vec<String> {
+    let mut hosts = Vec::new();
+    for path in paths {
+        if let Ok(text) = tokio::fs::read_to_string(path).await {
+            hosts = hosts_from_config(&text);
+            break;
+        }
+    }
+    if let Some(host) = env_host.and_then(normalize_host) {
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts.retain(|h| h != "github.com" && h != "bitbucket.org");
     hosts
 }
 
@@ -273,22 +320,8 @@ fn hosts_from_config(text: &str) -> Vec<String> {
 /// are never claimed, whatever the config says. Missing/unreadable config →
 /// just the env var (or empty), so the GitHub default stays authoritative.
 pub async fn known_hosts() -> Vec<String> {
-    let mut hosts = Vec::new();
-    for path in glab_config_paths() {
-        if let Ok(text) = tokio::fs::read_to_string(&path).await {
-            hosts = hosts_from_config(&text);
-            break;
-        }
-    }
-    if let Ok(env_host) = std::env::var("GITLAB_HOST") {
-        if let Some(host) = normalize_host(&env_host) {
-            if !hosts.contains(&host) {
-                hosts.push(host);
-            }
-        }
-    }
-    hosts.retain(|h| h != "github.com" && h != "bitbucket.org");
-    hosts
+    let env_host = std::env::var("GITLAB_HOST").ok();
+    known_hosts_from(&glab_config_paths(), env_host.as_deref()).await
 }
 
 /// Runs glab, treating any non-zero exit as an error carrying glab's stderr
@@ -398,7 +431,7 @@ pub async fn run_glab_ex(
 
 #[cfg(test)]
 mod known_hosts_tests {
-    use super::{hosts_from_config, known_hosts, normalize_host};
+    use super::{hosts_from_config, known_hosts_from, normalize_host};
 
     /// Table driver: `(label, config, expected hosts)`.
     fn check(cases: &[(&str, &str, &[&str])]) {
@@ -516,8 +549,23 @@ hosts:
                 &["gitlab.example.com"],
             ),
             (
-                "a wrapped flow map's continuation is a value fragment, not a key",
-                "hosts:\n  gitlab.example.com: {token: abc,\n  def456, user: someone}\n",
+                "a wrapped flow map's continuation lines are values, not keys",
+                "hosts:\n  gitlab.example.com: {token: secret,\n  api_host: https://gitlab.example.com}\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "a sub-key's flow value wrapping onto later lines",
+                "hosts:\n  gitlab.example.com:\n    custom_headers: {a: [1,\n  b: 2]}\n  other.example.com:\n",
+                &["gitlab.example.com", "other.example.com"],
+            ),
+            (
+                "a brace in a trailing comment must not wedge the section open",
+                "hosts:\n  gitlab.example.com: # a { brace\n  other.example.com:\n",
+                &["gitlab.example.com", "other.example.com"],
+            ),
+            (
+                "a mis-indented value fragment is not a key",
+                "hosts:\n  gitlab.example.com: >\n  a folded, continued: line\n",
                 &["gitlab.example.com"],
             ),
             (
@@ -608,33 +656,47 @@ hosts:
         ]);
     }
 
-    #[tokio::test]
-    async fn known_hosts_never_claims_github_or_bitbucket() {
+    /// A config.yml in a throwaway dir, returned as the candidate-path list
+    /// `known_hosts_from` takes — the seam that keeps this off process env.
+    fn fixture_paths(body: &str) -> (tempfile::TempDir, Vec<std::path::PathBuf>) {
         let dir = tempfile::Builder::new()
             .prefix("gd-glab-cfg")
             .tempdir()
             .expect("tempdir");
-        std::fs::write(
-            dir.path().join("config.yml"),
-            "hosts:\n  github.com:\n  bitbucket.org:\n  gitlab.example.com:\n",
-        )
-        .expect("write config");
-        // SAFETY: GLAB_CONFIG_DIR/GITLAB_HOST are read only by `known_hosts`, and
-        // no other test drives it. GLAB_CONFIG_DIR is exclusive when set, so this
-        // pins the read to the fixture instead of the developer's real config.
-        // Both are snapshotted and restored: this process may have inherited them.
-        let prior_dir = std::env::var_os("GLAB_CONFIG_DIR");
-        let prior_host = std::env::var_os("GITLAB_HOST");
-        std::env::set_var("GLAB_CONFIG_DIR", dir.path());
-        std::env::remove_var("GITLAB_HOST");
-        let hosts = known_hosts().await;
-        match prior_dir {
-            Some(d) => std::env::set_var("GLAB_CONFIG_DIR", d),
-            None => std::env::remove_var("GLAB_CONFIG_DIR"),
-        }
-        if let Some(h) = prior_host {
-            std::env::set_var("GITLAB_HOST", h);
-        }
-        assert_eq!(hosts, vec!["gitlab.example.com"]);
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, body).expect("write config");
+        (dir, vec![path])
+    }
+
+    #[tokio::test]
+    async fn known_hosts_never_claims_github_or_bitbucket() {
+        let (_dir, paths) =
+            fixture_paths("hosts:\n  github.com:\n  bitbucket.org:\n  gitlab.example.com:\n");
+        assert_eq!(
+            known_hosts_from(&paths, None).await,
+            vec!["gitlab.example.com"]
+        );
+        // GITLAB_HOST joins the list but is filtered by the same rule.
+        assert_eq!(
+            known_hosts_from(&paths, Some("https://GitLab.Other.dev:8443")).await,
+            vec!["gitlab.example.com", "gitlab.other.dev"]
+        );
+        assert_eq!(
+            known_hosts_from(&paths, Some("github.com")).await,
+            vec!["gitlab.example.com"]
+        );
+    }
+
+    #[tokio::test]
+    async fn known_hosts_falls_back_past_unreadable_candidates() {
+        let (_dir, paths) = fixture_paths("hosts:\n  gitlab.example.com:\n");
+        let mut candidates = vec![std::path::PathBuf::from("no-such-dir/config.yml")];
+        candidates.extend(paths);
+        assert_eq!(
+            known_hosts_from(&candidates, None).await,
+            vec!["gitlab.example.com"]
+        );
+        // No readable config at all → just the env host, so GitHub stays default.
+        assert!(known_hosts_from(&[], None).await.is_empty());
     }
 }

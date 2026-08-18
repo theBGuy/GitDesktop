@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { ghBranchRequiredChecks } from "@/lib/git/api";
 import type { ForgeProvider, PrCheckOut, RemoteLens } from "@/lib/git/types";
-import { checkPresentation } from "./ChecksRollup";
+import { checkPresentation } from "./check-presentation";
 
 /**
  * The status-check contexts a pull request's BASE branch requires, read from

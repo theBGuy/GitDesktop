@@ -116,7 +116,7 @@ function MergedCheckLine({
       }
     >
       {paused
-        ? "Waiting for a connection to check which branches a pull request merged…"
+        ? "Waiting for a connection to check which branches were merged through a pull request…"
         : "Checking which branches are merged…"}
     </p>
   );

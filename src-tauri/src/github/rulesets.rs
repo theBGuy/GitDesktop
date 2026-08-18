@@ -148,23 +148,43 @@ fn required_check_contexts(rules: &Value) -> Vec<String> {
     out
 }
 
+/// A branch name made safe for the `rules/branches/{branch}` path. gh parses the URL
+/// with Go's `url.Parse`, where a raw `#` opens a FRAGMENT — `master#x` reads
+/// `master`'s rules, naming another branch's checks — and a bare `%` fails the parse.
+/// `/` stays raw on purpose: the endpoint takes the rest of the path as the branch, so
+/// `release/1.0` must survive intact. That is why `encode_query_value` is the wrong
+/// tool here — it emits `%2F`.
+fn escape_branch_path(branch: &str) -> String {
+    // `%` first: escaping it second would rewrite the `%` of the `%23` just written.
+    branch.replace('%', "%25").replace('#', "%23")
+}
+
 /// The status-check contexts the branch's active rules require, for the pull-request
 /// view's blocked-merge line. `/rules/branches` aggregates every ruleset that applies
 /// and answers `[]` for a readable branch under no rules. A branch the token can't
-/// read is an Err, like every other `run_gh` non-zero exit; the caller may treat that
-/// the same as empty, but it is not reported as empty here.
+/// read — or a name the ref gate refuses — is an Err, like every other `run_gh`
+/// non-zero exit; the caller may treat that as empty, but it is not reported as empty.
 #[tauri::command]
 pub async fn gh_branch_required_checks(
     repo_path: String,
     branch: String,
     lens: Option<String>,
 ) -> AppResult<Vec<String>> {
+    // Both guards are needed: the ref gate rejects refspec metacharacters but permits
+    // `#`/`%`, which are legal in a git ref and special in a URL.
+    crate::git::branches::validate_branch_name(&branch)?;
     // The lens slug, not the origin one: a fork PR's base branch — and its rules —
     // live in the repo the PR targets.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
-        &["api", &format!("repos/{slug}/rules/branches/{branch}")],
+        &[
+            "api",
+            &format!(
+                "repos/{slug}/rules/branches/{}",
+                escape_branch_path(&branch)
+            ),
+        ],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
@@ -236,6 +256,21 @@ mod tests {
             {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}
         ]"#;
         assert_eq!(contexts(raw), vec!["build", "test"]);
+    }
+
+    #[test]
+    fn escapes_only_what_go_url_parse_would_misread() {
+        // Measured against `gh api`: `…/branches/master#x` returns MASTER's rules (the
+        // `#` opened a fragment), and `…/branches/master%x` fails url.Parse outright.
+        assert_eq!(escape_branch_path("feat#2"), "feat%232");
+        assert_eq!(escape_branch_path("100%done"), "100%25done");
+        // A name that already reads like an escape is data, not an escape.
+        assert_eq!(escape_branch_path("v%23"), "v%2523");
+        // Order proof: `#` first would re-escape the `%` of its own `%23`.
+        assert_eq!(escape_branch_path("a#b%c"), "a%23b%25c");
+        // `/` rides raw — the endpoint matches the rest of the path as the branch.
+        assert_eq!(escape_branch_path("release/1.0"), "release/1.0");
+        assert_eq!(escape_branch_path("master"), "master");
     }
 
     #[test]

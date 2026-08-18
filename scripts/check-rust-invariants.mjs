@@ -403,8 +403,10 @@ export function checkSyncCommands(file, _src, lines, hits) {
 // An `AppError::Git { … }` whose `stderr:` field is built from stderr alone.
 // The verdict is read from the FIELD VALUE as an expression, never from the
 // surrounding text: a comment naming `full_failure_text` must not disarm the
-// check, and a value that only names a binding is chased to that binding's
-// initializer, so substituting `.stderr` into it later is still caught.
+// check, and a value that only names a binding is chased through its
+// initializers, so substituting `.stderr` anywhere along that chain is caught.
+// The constructor is delimited by brace balance, not a line count — every
+// fail-open this check has had came from a scan that ended too early.
 //
 // Requiring a `stderr:` FIELD is what keeps destructuring out — `{ stderr, .. }`
 // binds a name, it does not assign one. A pattern that RENAMES (`stderr: a_err`)
@@ -439,6 +441,42 @@ export function testModuleStart(lines) {
   return idx === -1 ? Number.POSITIVE_INFINITY : idx;
 }
 
+/** Index of a char literal's closing quote at `i`, or -1 when the `'` opens a
+ *  LIFETIME (`&'a str`, `State<'_, AppState>`) instead. Rust reuses the
+ *  character, and reading a lifetime as an open quote swallows the rest of the
+ *  scan as string content — silently, and as a pass. */
+function charLiteralEnd(text, i) {
+  const m = /^'(?:\\u\{[0-9a-fA-F]*\}|\\.|[^\\'])'/.exec(text.slice(i, i + 24));
+  return m ? i + m[0].length - 1 : -1;
+}
+
+/** The body of the `{ … }` opening at `openIdx`, brace-balanced. Rustfmt and a
+ *  long field expression can push `stderr:` arbitrarily far down a constructor,
+ *  and a fixed line window that ends before it reads as "no stderr field" — a
+ *  pass, on the shape most likely to be wrong. */
+export function braceBody(text, openIdx) {
+  let depth = 0;
+  for (let i = openIdx; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      for (i++; i < text.length && text[i] !== '"'; i++) {
+        if (text[i] === "\\") i++;
+      }
+      continue;
+    }
+    if (c === "'") {
+      const end = charLiteralEnd(text, i);
+      if (end >= 0) i = end;
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return text.slice(openIdx + 1, i);
+  }
+  // Unbalanced (a truncated file): hand back the remainder rather than nothing,
+  // so a `stderr:` below still gets read.
+  return text.slice(openIdx + 1);
+}
+
 /** The `stderr:` field's value expression, or null when the text has no such
  *  field. Scans to the `,` or `}` that closes the field at bracket depth 0,
  *  skipping string literals so a `format!("…{stderr}")` brace cannot end it. */
@@ -446,22 +484,24 @@ export function stderrFieldValue(text) {
   const at = /\bstderr\s*:/.exec(text);
   if (!at) return null;
   let depth = 0;
-  let quote = null;
   let out = "";
   for (let i = at.index + at[0].length; i < text.length; i++) {
     const c = text[i];
-    if (quote) {
-      out += c;
-      if (c === "\\") {
-        out += text[i + 1] ?? "";
-        i++;
-      } else if (c === quote) quote = null;
+    if (c === '"') {
+      const start = i;
+      for (i++; i < text.length && text[i] !== '"'; i++) {
+        if (text[i] === "\\") i++;
+      }
+      out += text.slice(start, i + 1);
       continue;
     }
-    if (c === '"' || c === "'") {
-      quote = c;
-      out += c;
-      continue;
+    if (c === "'") {
+      const end = charLiteralEnd(text, i);
+      if (end >= 0) {
+        out += text.slice(i, end + 1);
+        i = end;
+        continue;
+      }
     }
     if ("([{".includes(c)) depth++;
     else if (")]".includes(c)) depth--;
@@ -498,28 +538,40 @@ export function bindingInitializer(lines, fromIdx, name) {
   return null;
 }
 
-/** The fix a stderr field value earns, or null when it is correctly shaped. */
+/** The fix a stderr field value earns, or null when it is correctly shaped.
+ *
+ *  Follows a chain of bare-ident aliases (`let stderr = out.stderr; let report =
+ *  stderr; … stderr: report`), because stopping after one hop lands on a value
+ *  none of the shaping tests match — which reads as correctly shaped. The
+ *  seen-set bounds the walk and makes a mutually-recursive pair fail closed,
+ *  like every other step the checker cannot resolve. */
 function stderrValueVerdict(value, lines, ctorIdx) {
-  if (FULL_FAILURE_TEXT_RE.test(value)) return null;
-  if (SUBSTITUTING_RE.test(value)) return SUBSTITUTION_FIX;
-  if (STDERR_READ_RE.test(value)) return STDERR_ONLY_FIX;
-  if (!BARE_IDENT_RE.test(value)) return null;
-  const init = bindingInitializer(lines, ctorIdx, value);
-  if (init === null) return UNRESOLVED_FIX;
-  if (FULL_FAILURE_TEXT_RE.test(init)) return null;
-  if (SUBSTITUTING_RE.test(init)) return SUBSTITUTION_FIX;
-  if (STDERR_READ_RE.test(init)) return STDERR_ONLY_FIX;
-  return null;
+  const seen = new Set();
+  for (let expr = value; ; ) {
+    if (FULL_FAILURE_TEXT_RE.test(expr)) return null;
+    if (SUBSTITUTING_RE.test(expr)) return SUBSTITUTION_FIX;
+    if (STDERR_READ_RE.test(expr)) return STDERR_ONLY_FIX;
+    if (!BARE_IDENT_RE.test(expr)) return null;
+    if (seen.has(expr)) return UNRESOLVED_FIX;
+    seen.add(expr);
+    const init = bindingInitializer(lines, ctorIdx, expr);
+    if (init === null) return UNRESOLVED_FIX;
+    // The initializer is captured to end-of-statement, so the `;` (and anything
+    // rustfmt put after it) has to come off before the next hop can be an ident.
+    expr = init.split(";")[0].trim();
+  }
 }
 
-export function checkStderrOnlyGitError(file, src, lines, hits) {
+export function checkStderrOnlyGitError(file, _src, lines, hits) {
   const code = stripComments(lines);
+  const codeSrc = code.join("\n");
   const limit = testModuleStart(lines);
   GIT_CTOR_RE.lastIndex = 0;
-  for (let m = GIT_CTOR_RE.exec(src); m; m = GIT_CTOR_RE.exec(src)) {
-    const line = src.slice(0, m.index).split("\n").length;
+  for (let m = GIT_CTOR_RE.exec(codeSrc); m; m = GIT_CTOR_RE.exec(codeSrc)) {
+    const line = codeSrc.slice(0, m.index).split("\n").length;
     if (line - 1 >= limit) continue;
-    const value = stderrFieldValue(code.slice(line - 1, line + 5).join("\n"));
+    const open = m.index + m[0].length - 1;
+    const value = stderrFieldValue(braceBody(codeSrc, open));
     if (value === null) continue;
     const fix = stderrValueVerdict(value, code, line - 1);
     if (fix === null) continue;

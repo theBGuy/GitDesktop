@@ -3085,8 +3085,9 @@ export const ghRulesetGet = (repoPath: string, id: number) =>
   invoke<RulesetFull>("gh_ruleset_get", { repoPath, id });
 
 /** The status-check contexts a branch's active rules require. Empty for a readable
- *  branch under no rules; a branch this token can't read rejects, which a caller
- *  showing a fallback may treat as empty. GitHub only. */
+ *  branch under no rules; a branch this token can't read — or a name the backend's
+ *  ref gate refuses — rejects, which a caller showing a fallback may treat as
+ *  empty. GitHub only. */
 export const ghBranchRequiredChecks = (
   repoPath: string,
   branch: string,
