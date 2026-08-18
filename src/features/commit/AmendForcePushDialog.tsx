@@ -57,8 +57,9 @@ export function AmendForcePushDialog({
             This commit is already on {upstream ?? "the remote"}. Amending
             rewrites it, so your branch and the remote will diverge and you'll
             need to force push to update it. GitDesktop force pushes with
-            --force-with-lease (it won't overwrite work others pushed since),
-            but it still rewrites the branch's history.
+            --force-with-lease and --force-if-includes (it won't overwrite
+            others' work your branch doesn't include), but it still rewrites the
+            branch's history.
           </DialogDescription>
         </DialogHeader>
         <label className="flex cursor-pointer items-center gap-2 text-xs">

@@ -414,7 +414,8 @@ The **Blame file…** command (from the command palette) opens a fuzzy picker of
 tracked file and blames the one you choose as it is now.
 
 > History-rewriting actions (reset, Edit history, squash) only ever touch **unpushed**
-> commits, and a push of rewritten history becomes a safe **force-with-lease** push (see
+> commits, and a push of rewritten history becomes a safe
+> **force-with-lease --force-if-includes** push (see
 > *Syncing & conflicts*).`,
   },
   {
@@ -655,8 +656,9 @@ when the repo was last fetched. Turn it off, or change the interval, under
 
 If your local history was rewritten (for example, after amending a commit that was
 already pushed), GitDesktop detects the divergence and turns Push into a **confirmed
-force push using \`--force-with-lease\`** — which refuses to clobber work someone else
-pushed in the meantime.
+force push using \`--force-with-lease --force-if-includes\`** — which refuses to overwrite
+work someone else pushed unless your branch already includes it, even when auto-fetch has
+already updated your view of the remote.
 
 ## Resolving conflicts
 

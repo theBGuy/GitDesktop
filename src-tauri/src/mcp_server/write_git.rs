@@ -834,9 +834,10 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Force-push the current branch to its remote in the bound repository, using \
-                       --force-with-lease (refuses to clobber remote work that arrived after your \
-                       last fetch). Rewrites the remote branch. Requires --allow-git-write AND \
-                       --allow-destructive.",
+                       --force-with-lease --force-if-includes (refuses to overwrite remote work \
+                       that isn't already incorporated into your local branch, even when a \
+                       background fetch has updated the remote-tracking ref). Rewrites the remote \
+                       branch. Requires --allow-git-write AND --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {
@@ -852,7 +853,7 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
-        ok_text("force-pushed (with lease)")
+        ok_text("force-pushed (with lease + if-includes)")
     }
 
     #[tool(

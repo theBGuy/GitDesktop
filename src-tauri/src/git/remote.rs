@@ -552,8 +552,11 @@ pub(crate) async fn git_push_core(
             }
             let mut a = vec!["push".to_string()];
             if force {
-                // refuses to clobber remote work that arrived after our last fetch
+                // The pair refuses to clobber remote work this branch hasn't
+                // integrated: a bare lease is satisfied by ANY fetch, and the app
+                // auto-fetches in the background.
                 a.push("--force-with-lease".to_string());
+                a.push(FORCE_IF_INCLUDES.to_string());
             }
             if set_upstream {
                 a.extend(["-u", "origin", "HEAD"].map(str::to_string));
@@ -625,15 +628,46 @@ pub(crate) async fn git_push_core(
         }
     };
     let cred = crate::forge::credential_config_for_remote(&repo_path, &cred_remote).await?;
-    run_git_mutating_with_creds(
-        state,
-        &repo_path,
-        &cred,
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
-        NETWORK_TIMEOUT,
-    )
-    .await?;
-    Ok(())
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    match run_git_mutating_with_creds(state, &repo_path, &cred, &argv, NETWORK_TIMEOUT).await {
+        Ok(_) => Ok(()),
+        Err(AppError::Git { stderr, .. })
+            if argv.contains(&FORCE_IF_INCLUDES) && is_unknown_push_option(&stderr) =>
+        {
+            // git < 2.30 doesn't know `--force-if-includes`. Unknown options are
+            // rejected while parsing argv, before any network I/O, so this retry
+            // can't push twice; it degrades to the lease alone.
+            let retry = without_force_if_includes(&argv);
+            run_git_mutating_with_creds(state, &repo_path, &cred, &retry, NETWORK_TIMEOUT).await?;
+            Ok(())
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Companion to `--force-with-lease`: git refuses the push unless the remote tip
+/// is already incorporated into the local branch, so a background fetch can't
+/// satisfy the lease on a teammate's unseen work. Git 2.30+.
+const FORCE_IF_INCLUDES: &str = "--force-if-includes";
+
+/// Whether git's stderr says it rejected an unknown command-line option — for a
+/// push, the signal that this git predates `--force-if-includes` (2.30). Matched
+/// case-insensitively on git's phrasings plus the `usage: git push` banner it
+/// prints on an option error; a real rejection reads "failed to push some refs"
+/// and never matches.
+fn is_unknown_push_option(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("unknown switch")
+        || lower.contains("unknown option")
+        || lower.contains("usage: git push")
+}
+
+/// The push argv minus `--force-if-includes`, everything else kept in order.
+fn without_force_if_includes<'a>(argv: &[&'a str]) -> Vec<&'a str> {
+    argv.iter()
+        .copied()
+        .filter(|a| *a != FORCE_IF_INCLUDES)
+        .collect()
 }
 
 /// Parse one `for-each-ref … --format=%(refname)%00%(upstream:short)%00%(upstream:remotename)%00%(upstream:track)`
@@ -705,7 +739,8 @@ fn resolve_push_target<'a>(
 ///
 /// Refspecs are fully qualified so a branch named `+x`/`-x` can't be read as a
 /// force/delete indicator; the remote is only ever the bare `push <remote>` arg.
-/// `force` prepends `--force-with-lease` before the refspec in every arm.
+/// `force` prepends `--force-with-lease --force-if-includes` before the refspec in
+/// every arm.
 #[allow(clippy::too_many_arguments)] // one flat arg per decision-table input
 fn build_push_args(
     branch: &str,
@@ -721,6 +756,7 @@ fn build_push_args(
     let mut args = vec!["push".to_string()];
     if force {
         args.push("--force-with-lease".to_string());
+        args.push(FORCE_IF_INCLUDES.to_string());
     }
     if let Some(rb) = remote_branch {
         // Destination named outright: never `-u` and never the tracking-derived
@@ -764,8 +800,9 @@ pub(crate) fn publish_refspec(branch: &str) -> String {
 mod tests {
     use super::{
         build_push_args, cache_get, cache_invalidate, cache_put, git_pull_core, git_push_core,
-        git_remote_remove_core, is_auth_class_failure, parse_upstream_tracking, publish_refspec,
-        resolve_push_target, run_git_mutating_with_creds,
+        git_remote_remove_core, is_auth_class_failure, is_unknown_push_option,
+        parse_upstream_tracking, publish_refspec, resolve_push_target, run_git_mutating_with_creds,
+        without_force_if_includes,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -1180,12 +1217,13 @@ mod tests {
 
     #[test]
     fn push_force_flag_precedes_refspec_args() {
-        // --force-with-lease sits right after `push`, before the refspec.
+        // The force pair sits right after `push`, before the refspec.
         assert_eq!(
             build_push_args("feature", "origin/feat", "origin", false, false, true, None, None),
             vec![
                 "push",
                 "--force-with-lease",
+                "--force-if-includes",
                 "origin",
                 "refs/heads/feature:refs/heads/feat"
             ]
@@ -1195,6 +1233,7 @@ mod tests {
             vec![
                 "push",
                 "--force-with-lease",
+                "--force-if-includes",
                 "-u",
                 "origin",
                 "refs/heads/feature:refs/heads/feature"
@@ -1204,16 +1243,58 @@ mod tests {
 
     #[test]
     fn push_force_flag_precedes_refspec_on_requested_remote() {
-        // Force + a requested non-tracked remote: `--force-with-lease` still sits
-        // right after `push`, then the bare remote, then the fully-qualified refspec.
+        // Force + a requested non-tracked remote: the force pair still sits right
+        // after `push`, then the bare remote, then the fully-qualified refspec.
         assert_eq!(
             build_push_args("feature", "origin/feat", "origin", false, false, true, Some("upstream"), None),
             vec![
                 "push",
                 "--force-with-lease",
+                "--force-if-includes",
                 "upstream",
                 "refs/heads/feature:refs/heads/feature"
             ]
+        );
+    }
+
+    #[test]
+    fn unknown_push_option_matches_gits_phrasings_only() {
+        assert!(is_unknown_push_option("error: unknown option `force-if-includes'"));
+        assert!(is_unknown_push_option(
+            "fatal: unknown switch `force-if-includes'"
+        ));
+        assert!(is_unknown_push_option(
+            "usage: git push [<options>] [<repository> [<refspec>...]]"
+        ));
+        // A real rejection must NOT trigger the pre-2.30 retry.
+        assert!(!is_unknown_push_option(
+            " ! [rejected]        feature -> feature (stale info)\nerror: failed to push some refs to 'C:/temp/remote.git'"
+        ));
+    }
+
+    #[test]
+    fn strip_removes_only_the_if_includes_flag() {
+        assert_eq!(
+            without_force_if_includes(&[
+                "push",
+                "--force-with-lease",
+                "--force-if-includes",
+                "-u",
+                "origin",
+                "refs/heads/feature:refs/heads/feature",
+            ]),
+            vec![
+                "push",
+                "--force-with-lease",
+                "-u",
+                "origin",
+                "refs/heads/feature:refs/heads/feature"
+            ]
+        );
+        // Nothing to strip: the argv survives untouched.
+        assert_eq!(
+            without_force_if_includes(&["push", "-u", "origin", "HEAD"]),
+            vec!["push", "-u", "origin", "HEAD"]
         );
     }
 
@@ -1276,7 +1357,13 @@ mod tests {
         // `force` keeps its position ahead of the target, as in every other arm.
         assert_eq!(
             build_push_args("local", "", "", false, false, true, Some("fork"), Some("contrib")),
-            vec!["push", "--force-with-lease", "fork", "refs/heads/local:refs/heads/contrib"]
+            vec![
+                "push",
+                "--force-with-lease",
+                "--force-if-includes",
+                "fork",
+                "refs/heads/local:refs/heads/contrib"
+            ]
         );
     }
 
