@@ -189,11 +189,11 @@ hint: See the 'Note about fast-forwards' in 'git push --help' for details.
 
 The two checks differ in kind. The lease asks whether the remote is
 where you last saw it — a question about your bookkeeping, and any
-fetch answers it for you. `--force-if-includes` asks whether the
-remote's tip is part of the history you're pushing — a question
-about the work, one a fetch can't answer for you. Neither can a
-cherry-picked copy of the commit: the check walks your branch's
-reflog looking for the remote tip itself, not a lookalike.
+fetch answers it for you. `--force-if-includes` asks whether your
+branch has ever contained the remote's tip — a question about the
+work, one a fetch can't answer for you. Neither can a cherry-picked
+copy of the commit: the check walks your branch's reflog looking
+for the remote tip itself, not a lookalike.
 
 The flag is easy to make permanent for a repository:
 
