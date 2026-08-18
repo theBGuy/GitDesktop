@@ -42,10 +42,9 @@ HEAD is now at 812aeba Expand usage docs (#12)
 That created a *linked worktree*: a second working tree in its own
 folder, attached to the repository you ran the command from.
 `-b fix-crash` cuts the branch, `../hotfix` is where the checkout
-goes, and `origin/main` is the base (fetch first, so the fix starts
-from the `main` the remote has, not your clone's stale copy). The
-tracking line is ordinary branching-from-a-remote behavior; nothing
-about it is worktree-specific.
+goes, and `origin/main` is the base (fetch first, so it sits at the
+remote's tip when you branch off it). The tracking line is ordinary
+branching-from-a-remote behavior; nothing about it is worktree-specific.
 
 "Attached" is the key word. This is not a second clone. There is one
 object database, one set of branches, one config, one list of
@@ -68,10 +67,10 @@ things that make up "the repository" exist once.
 
 ## The fix, without the dance
 
-Open `../hotfix` in a second editor window, make the fix, and commit
-it over there. A fresh worktree checks out tracked files only, so
-ignored things like `node_modules` and build output start absent;
-this one-line fix doesn't miss them:
+A fresh worktree checks out tracked files only, so ignored files
+like `node_modules` and build output start absent; this one-line
+fix doesn't need them. Open `../hotfix` in a second editor window,
+make the fix, and commit it over there:
 
 ```sh
 $ git -C ../hotfix commit -am "fix: guard null payload"
