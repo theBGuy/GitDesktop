@@ -31,17 +31,18 @@ hint: use 'git pull' before pushing again.
 hint: See the 'Note about fast-forwards' in 'git push --help' for details.
 ```
 
-Git says you're behind. You're not: the amend replaced 289a64d with
-002ba27, so the commit the remote is standing on no longer appears in
-your history, and no fast-forward can get there from here. The hint's
-advice would bring your own replaced commit back. What you want
-is for the remote to take the new version, and that means some
-kind of force.
+Git says you're behind. Only by the numbers: the one commit you're
+missing is 289a64d, the commit the amend replaced with 002ba27. That
+commit no longer appears in your history, so no fast-forward can get
+there from here. The hint's advice would bring your own replaced
+commit back. What you want is for the remote to take the new version,
+and that means some kind of force.
 
 ## What `--force` costs
 
 The branch is shared, though, and shared branches have a meanwhile.
-While you were amending, your teammate pushed tests. In their clone:
+While you were staring at that rejection, your teammate pushed
+tests. In their clone:
 
 ```sh
 $ git commit -m "Add limiter tests"
@@ -62,9 +63,11 @@ To …/origin.git
  + ee31f16...002ba27 feature -> feature (forced update)
 ```
 
-The `+` is Git's only acknowledgment that this push replaced history
-instead of adding to it. The tests commit, ee31f16, is no longer on
-the branch. On your teammate's side, the disappearance looks like one
+The `(forced update)` tag, the leading `+`, the three-dot range
+where a fast-forward prints two — that one line is all the
+acknowledgment Git gives that this push replaced history instead
+of adding to it. The tests commit, ee31f16, is no longer on the
+branch. On your teammate's side, the disappearance looks like one
 marker in their next fetch:
 
 ```sh
@@ -196,14 +199,15 @@ not a lookalike.
 The flag is easy to make permanent:
 
 ```sh
-$ git config push.useForceIfIncludes true
+git config push.useForceIfIncludes true
 ```
 
 After that, every `--force-with-lease` carries the check by itself.
-Two caveats: the flag needs Git 2.30 (December 2020) or newer, and
-the exact form `--force-with-lease=feature:<sha>` turns the check
-off — name a precise expectation and Git assumes you know
-something it doesn't.
+Three caveats: the flag needs Git 2.30 (December 2020) or newer; the
+check reads your branch's reflog, so with none to read it refuses
+every force push, integrated or not; and the exact form
+`--force-with-lease=feature:<sha>` turns the check off — name a
+precise expectation and Git assumes you know something it doesn't.
 
 ## When it refuses
 
@@ -258,9 +262,11 @@ more than a bare lease can enforce.
 
 So the fix adds `--force-if-includes` to every force-push path in
 the app, its assistant's included; on a Git too old to know the
-flag, the push retries without it instead of failing. The confirm
-dialog's wording changed to match what Git actually enforces: a
-force push will not overwrite work your branch doesn't include.
+flag, or a branch with no reflog for the check to read, the push
+retries with the lease alone instead of failing. The confirm
+dialog's wording changed to match what Git actually enforces:
+where the check runs, a force push will not overwrite work your
+branch doesn't include.
 
 A force push promises that nobody built on what it deletes. Make Git
 check the promise.
