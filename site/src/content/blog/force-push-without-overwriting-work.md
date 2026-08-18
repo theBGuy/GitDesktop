@@ -166,7 +166,7 @@ To …/origin.git
 ```
 
 Forced update. The push that was just refused would now go through,
-taking cab8c4e, the tests, with it (the range's other commit,
+taking cab8c4e, the tests, with it (the fetch line's other end,
 9f74736, is your own pushed commit, the one the amend replaced).
 What changed sides was a fetch you may not even have run yourself.
 VS Code fetches on a timer if you let it. So does my own Git client.
@@ -253,10 +253,10 @@ prove you don't mean it by accident.
 ## Or don't do any of this
 
 The demo above doubled as a bug report against my own client.
-[GitDesktop](/features/) force pushes with `--force-with-lease`, and
-it also auto-fetches every ten minutes by default so your
+[GitDesktop](/features/) force pushed with `--force-with-lease`
+alone, and it auto-fetches every ten minutes by default so your
 behind-counts stay current without pressing Fetch. That combination
-is the fetch that breaks it, running on a schedule: the app was
+was the fetch that breaks it, running on a schedule: the app was
 refreshing its own lease on a timer, and its confirm dialog promised
 more than a bare lease can enforce.
 

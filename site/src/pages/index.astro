@@ -675,10 +675,11 @@ const forges = [
           </p>
         </div>
         <div class="min-w-0">
-          <h3 class="text-ink"><code class="text-ink">--force-with-lease</code> by default.</h3>
+          <h3 class="text-ink"><code class="text-ink">--force-with-lease --force-if-includes</code> by default.</h3>
           <p class="mt-2 max-w-[48ch] text-sm leading-relaxed text-muted">
             Divergence routes to a guarded force push, never a plain
-            <code class="text-ink">--force</code>; pull is <code class="text-ink">--ff-only</code>.
+            <code class="text-ink">--force</code> — on Git 2.30+ the pair refuses to overwrite
+            work your branch doesn't include; pull is <code class="text-ink">--ff-only</code>.
           </p>
         </div>
         <div class="min-w-0">
@@ -820,7 +821,7 @@ const forges = [
       <p data-reveal style="transition-delay:80ms" class="mx-auto mt-6 max-w-[48ch] leading-relaxed text-body">
         Free, open source, and local. Fast enough to live in, careful enough to trust
         with your work: discards are recoverable and pushes use
-        <code class="text-ink">--force-with-lease</code>.
+        <code class="text-ink">--force-with-lease --force-if-includes</code> by default.
       </p>
       <div
         data-reveal
