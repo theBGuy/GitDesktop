@@ -91,8 +91,8 @@ $ git log --oneline -3
 
 Their tests are gone from their own branch now. The rebase saw a
 rewritten upstream and treated every commit the old upstream contained,
-theirs included, as rewritten away on purpose. What's left of the work
-lives in their reflog and nowhere else:
+theirs included, as rewritten away on purpose. What's left of the
+work is no longer on any branch; only their reflog still names it:
 
 ```sh
 $ git reflog -4
@@ -116,9 +116,9 @@ To …/origin.git
    002ba27..aa305f5  feature -> feature
 ```
 
-Two people's time, one commit that briefly existed only in a reflog.
-That is the price of `--force` on a shared branch, in the *good*
-case, the one where somebody noticed.
+Two people's time, one commit that briefly had no name left but a
+reflog entry. That is the price of `--force` on a shared branch, in
+the *good* case, the one where somebody noticed.
 
 ## The lease
 
@@ -190,30 +190,30 @@ hint: See the 'Note about fast-forwards' in 'git push --help' for details.
 The two checks differ in kind. The lease asks whether the remote is
 where you last saw it — a question about your bookkeeping, and any
 fetch answers it for you. `--force-if-includes` asks whether the
-remote's tip is part of the history you're pushing — a question about
-the work, and only integrating that commit answers it. A fetch can't
-fake the answer. Neither can a cherry-picked copy of the commit:
-the check walks your branch's reflog looking for the remote tip
-itself, not a lookalike.
+remote's tip is part of the history you're pushing — a question
+about the work, one a fetch can't answer for you. Neither can a
+cherry-picked copy of the commit: the check walks your branch's
+reflog looking for the remote tip itself, not a lookalike.
 
-The flag is easy to make permanent:
+The flag is easy to make permanent for a repository:
 
 ```sh
 git config push.useForceIfIncludes true
 ```
 
-After that, every `--force-with-lease` carries the check by itself.
-Three caveats: the flag needs Git 2.30 (December 2020) or newer; the
-check reads your branch's reflog, so with none to read it refuses
-every force push, integrated or not; and the exact form
-`--force-with-lease=feature:<sha>` turns the check off — name a
-precise expectation and Git assumes you know something it doesn't.
+After that, every `--force-with-lease` there carries the check by
+itself, and `--global` widens it to every repository. Three caveats:
+`--force-if-includes` needs Git 2.30 (December 2020) or newer; with
+no reflog to walk, the check refuses every force push, integrated
+or not; and the exact form `--force-with-lease=feature:<sha>` turns
+the check off — name a precise expectation and Git assumes you know
+something it doesn't.
 
 ## When it refuses
 
-A refusal from `--force-if-includes` is information: someone built on
-the commit you rewrote. Look at the remote before touching the
-force flags again:
+A refusal from `--force-if-includes` almost always means one
+thing: someone built on the commit you rewrote. Look at the remote
+before touching the force flags again:
 
 ```sh
 $ git log --oneline -1 origin/feature
@@ -261,7 +261,7 @@ refreshing its own lease on a timer, and its confirm dialog promised
 more than a bare lease can enforce.
 
 So the fix adds `--force-if-includes` to every force-push path in
-the app, its assistant's included; on a Git too old to know the
+the app, including the assistant's; on a Git too old to know the
 flag, or a branch with no reflog for the check to read, the push
 retries with the lease alone instead of failing. The confirm
 dialog's wording changed to match what Git actually enforces:
