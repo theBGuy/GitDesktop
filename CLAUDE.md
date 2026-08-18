@@ -113,6 +113,9 @@ reader-facing prose — `README.md`, `changelog.d/` fragments, the in-app guide
   ("the key insight…", "here's the part that…").
 - **Antithesis budget**: keep "X, not Y" where the contrast IS the technical
   point; cut reflex uses.
+- **Flagged words**: the blog section's flagged-word list applies to these
+  surfaces too; code comments exempt. The list lives only in the blog bullet,
+  so additions stay a one-place edit.
 
 The in-app guide's back-catalogue predates this rule and gets swept as its own
 change; new or edited guide sections follow it now.

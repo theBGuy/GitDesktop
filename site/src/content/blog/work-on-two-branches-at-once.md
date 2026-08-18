@@ -43,8 +43,9 @@ That created a *linked worktree*: a second working tree in its own
 folder, attached to the repository you ran the command from.
 `-b fix-crash` cuts the branch, `../hotfix` is where the checkout
 goes, and `origin/main` is the base (fetch first, so the fix starts
-from what's actually deployed). The tracking line is ordinary
-branching-from-a-remote behavior, nothing worktree-specific.
+from the `main` the remote has, not your clone's stale copy). The
+tracking line is ordinary branching-from-a-remote behavior; nothing
+about it is worktree-specific.
 
 "Attached" is the key word. This is not a second clone. There is one
 object database, one set of branches, one config, one list of
@@ -68,7 +69,9 @@ things that make up "the repository" exist once.
 ## The fix, without the dance
 
 Open `../hotfix` in a second editor window, make the fix, and commit
-it over there:
+it over there. A fresh worktree checks out tracked files only, so
+ignored things like `node_modules` and build output start absent;
+this one-line fix doesn't miss them:
 
 ```sh
 $ git -C ../hotfix commit -am "fix: guard null payload"
@@ -85,12 +88,13 @@ $ git status --short
 ```
 
 Look where the last three commands ran: in your original checkout, the
-seat you never left. The commit was made in `../hotfix`, yet `feature`
-could already see it: not fetched, not copied, just there, because
-there is only one repository. The push works from either folder for
-the same reason. And your own working tree sat out the whole thing:
-the same modified file, the same untracked notes, the dev server still
-warm. Open a PR for `fix-crash` and get back to the rework.
+seat you never left. The commit was made in `../hotfix`, yet from the
+`feature` seat it was already there: not fetched, not copied, just
+there, because there is only one repository. The push works from
+either folder for the same reason. And your own working tree sat out
+the whole thing: the same modified file, the same untracked notes,
+the dev server still warm. Open a PR for `fix-crash` and get back
+to the rework.
 
 ## One branch, one checkout
 
@@ -114,12 +118,12 @@ out anywhere, and the same reason `git branch -D` declines to delete
 a branch a worktree is using; in every case the error names the
 folder to go look at. When you want the files without any branch
 question at all, add the worktree with `--detach` — a checkout
-pinned to a commit, no branch involved, the throwaway form that
-post leaned on.
+pinned to a commit, no branch involved.
 
 ## The stash is shared too
 
-The stash list is a ref, and refs belong to the repository:
+The stash list is a ref, and it belongs to the repository, not to
+any one checkout:
 
 ```sh
 $ git stash push -m "parser rework, half done"
