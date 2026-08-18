@@ -411,7 +411,7 @@ export function checkSyncCommands(file, _src, lines, hits) {
 // Requiring a `stderr:` FIELD is what keeps destructuring out — `{ stderr, .. }`
 // binds a name, it does not assign one. A pattern that RENAMES (`stderr: a_err`)
 // still looks like a field, and its binding resolves to nothing; those live in
-// test code, which this check does not scan (see `testModuleStart`).
+// test code, which this check skips by span (see `testModuleSpans`).
 const GIT_CTOR_RE = /AppError::Git\s*\{/g;
 const STDERR_READ_RE = /\b[A-Za-z_]\w*\s*\.\s*stderr\b/;
 const BARE_IDENT_RE = /^[A-Za-z_]\w*$/;
@@ -440,8 +440,11 @@ const UNRESOLVED_FIX =
  *  statics, functions and even `if let` blocks (`app_store.rs`), whose next
  *  brace would otherwise be read as a module body. */
 export function testModuleSpans(text) {
+  // Outer attributes may sit between the gate and the module
+  // (`#[cfg(test)] #[allow(…)] mod tests {`); only whitespace separates them, so
+  // tolerating a run of them cannot skip over an intervening ITEM.
   const attr =
-    /#\[cfg\(\s*(?:all\(\s*)?test\b[^\]]*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{/g;
+    /#\[cfg\(\s*(?:all\(\s*)?test\b[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{/g;
   const spans = [];
   for (let m = attr.exec(text); m; m = attr.exec(text)) {
     const open = m.index + m[0].length - 1;
@@ -462,10 +465,23 @@ function charLiteralEnd(text, i) {
 }
 
 /** Index of the closing delimiter of the string or char literal starting at `i`,
- *  or -1 when the character opens neither. An unterminated string ends at the
- *  text, so a scan can never run past its own input. */
+ *  or -1 when the character opens neither.
+ *
+ *  A RAW literal (`r"…"`, `br#"…"#`) ends at a quote followed by its own hash
+ *  count and honors no escapes at all, so it needs its own branch: the
+ *  escape-aware scan walks straight past the closing quote of
+ *  `r"\\?\"` (`git/worktree.rs`) and reads the rest of the file as string
+ *  content. `b"…"` / `c"…"` are NOT raw and stay on the escape-aware branch.
+ *  An unterminated literal ends at the text, so a scan can never run past its
+ *  own input. */
 function literalEnd(text, i) {
   if (text[i] === "'") return charLiteralEnd(text, i);
+  const raw = /^(?:b|c)?r(#*)"/.exec(text.slice(i, i + 16));
+  if (raw) {
+    const close = `"${raw[1]}`;
+    const at = text.indexOf(close, i + raw[0].length);
+    return at === -1 ? text.length - 1 : at + close.length - 1;
+  }
   if (text[i] !== '"') return -1;
   for (let j = i + 1; j < text.length; j++) {
     if (text[j] === "\\") j++;

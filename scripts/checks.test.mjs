@@ -548,6 +548,43 @@ test("a `stderr:` inside a string literal does not answer for the real field", (
   assert.match(hits[0].fix, /full_failure_text/);
 });
 
+test("a raw string literal does not swallow the rest of a constructor", () => {
+  // `r"\\?\"` ends at its own quote — raw literals honor no escapes — but an
+  // escape-aware scan reads the trailing backslash as escaping that quote and
+  // consumes everything after it, so the real field is never reached.
+  const src = [
+    "async fn raw_in_ctor(out: GitOutput) -> AppError {",
+    "    AppError::Git {",
+    String.raw`        code: parse(r"\\?\"),`,
+    "        stderr: out.stderr,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "raw_in_ctor");
+});
+
+test("an attribute-decorated test module is still recognized as a span", () => {
+  // The gate and the `mod` can be separated by outer attributes; missing the
+  // span reads every renaming pattern inside it as an unresolvable field.
+  const src = [
+    "#[cfg(test)]",
+    "#[allow(clippy::too_many_lines)]",
+    "mod tests {",
+    "    fn renamed(e: &AppError) {",
+    "        if let AppError::Git { code: c, stderr: text } = e {",
+    "            drop((c, text));",
+    "        }",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(hits, []);
+});
+
 test("test modules are skipped by SPAN, so production code after one is scanned", () => {
   // A renaming pattern (`stderr: text`) is indistinguishable from an
   // unresolvable field, and only tests carry them. Cutting the scan at the
