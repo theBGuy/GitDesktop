@@ -357,7 +357,7 @@ export const capabilities: Capability[] = [
     highlight: true,
   },
   { group: "Repository & workspace", label: "Manage tracked & ignored files" },
-  { group: "Repository & workspace", label: "--force-with-lease by default" },
+  { group: "Repository & workspace", label: "--force-with-lease --force-if-includes by default" },
   {
     group: "Repository & workspace",
     label: "Auto-fetch — quiet background sync, never auto-pulls",
