@@ -359,7 +359,7 @@ export const capabilities: Capability[] = [
   { group: "Repository & workspace", label: "Manage tracked & ignored files" },
   {
     group: "Repository & workspace",
-    label: "--force-with-lease --force-if-includes by default",
+    label: "--force-with-lease + --force-if-includes (Git 2.30+) by default",
   },
   {
     group: "Repository & workspace",
