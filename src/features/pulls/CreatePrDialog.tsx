@@ -44,12 +44,8 @@ import {
   providerLabel,
   type RemoteLens,
 } from "@/lib/git/types";
-import {
-  eventToBinding,
-  formatBinding,
-  SUBMIT_HINT,
-} from "@/lib/hotkeys/binding";
-import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
+import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
 import {
   useLensGate,
@@ -600,12 +596,13 @@ export function CreatePrDialog({
     );
   }
   // Context-sensitive reuse of the `generate-commit-message` binding while this
-  // dialog is open — never a hardcoded chord. null = explicitly unbound.
-  const generateBinding =
-    useEffectiveBindings().get("generate-commit-message") ?? null;
-  const generateHint = generateBinding
-    ? ` (${formatBinding(generateBinding)})`
-    : "";
+  // dialog is open. `run` is undefined with AI off — no Generate surface, so
+  // the chord falls through instead of being swallowed for nothing.
+  const generateChord = useGenerateChord({
+    enabled: !generating && !nothingToMerge,
+    run: aiEnabled ? runGenerate : undefined,
+  });
+  const generateHint = generateChord.hint;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -632,20 +629,15 @@ export function CreatePrDialog({
             }
             return;
           }
-          // The generate-commit-message chord runs this dialog's own Generate while
-          // it's open — only when AI is on and the chord is bound. ALWAYS swallow it
-          // so it can't reach the global listener and generate a commit message
-          // behind the dialog; run Generate only when its button would be enabled.
-          // While generating we swallow but DON'T cancel — an accidental repeat must
-          // never abort an in-flight generation.
-          if (
-            aiEnabled &&
-            generateBinding !== null &&
-            eventToBinding(e) === generateBinding
-          ) {
-            e.preventDefault();
-            if (!generating && !nothingToMerge) runGenerate();
-          }
+          // The generate chord runs this dialog's own Generate while it's open.
+          // While that Generate exists it swallows the chord on every match,
+          // enabled or not, so it can't reach the global listener and generate a
+          // commit message behind the dialog. With Hide-AI on there's no
+          // Generate here at all and the chord falls through instead — harmless,
+          // because the same flag leaves CommitBox's global handler DISABLED
+          // (the listener only ever runs an enabled one), and off the Changes
+          // tab CommitBox is unmounted and registers nothing.
+          generateChord.onKeyDown(e);
         }}
       >
         <form

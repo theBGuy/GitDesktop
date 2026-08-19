@@ -55,13 +55,13 @@ import {
   useBranchDiffFiles,
   useCompareBranches,
   useConflictPreview,
+  useDefaultBranch,
   useForgeStatus,
   useMergeLocalPr,
   useRepoStatus,
   useUpdateBranchFrom,
 } from "@/lib/git/queries";
-import { formatBinding } from "@/lib/hotkeys/binding";
-import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
+import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
@@ -228,13 +228,9 @@ export function LocalPrView({
   // The edit dialog's in-flight generation belongs to the PR it was started on; the
   // cancel is imperative, so it rides an effect rather than the block above.
   useCancelOnIdentityChange(id, prGen.cancel);
-  // Context-sensitive reuse of the generate-commit-message binding (mod+g by
-  // default) for the Edit dialog's chord + button hint — a rebinding drives both.
-  const generateBinding =
-    useEffectiveBindings().get("generate-commit-message") ?? null;
-  const generateHint = generateBinding
-    ? ` (${formatBinding(generateBinding)})`
-    : "";
+  // The generate-commit-message binding's title suffix. The chord itself lives in
+  // EditTitleBodyDialog; this is only the label, so a rebinding drives both.
+  const generateHint = useGenerateChordHint();
 
   const comparison = useCompareBranches(
     repoPath,
@@ -287,6 +283,7 @@ export function LocalPrView({
     pr?.head ?? "",
     pr?.status === "open",
   );
+  const defaultBranch = useDefaultBranch(repoPath);
 
   if (!pr) {
     return (
@@ -298,6 +295,14 @@ export function LocalPrView({
   // Commits on `base` that `head` lacks — i.e. how far the PR's head branch has
   // fallen behind base. Non-empty ⇒ offer GitHub's "Update branch".
   const behind = comparison.data?.behind ?? [];
+  // A promotion pull request (main → staging): the HEAD is this repository's
+  // default branch, so it stays permanently behind its base and "Update branch"
+  // would merge the base back INTO the default branch, inverting the flow. The
+  // head-is-default shape is the whole test — a topology probe false-positives on
+  // stacked pull requests. staging → production has the same inversion and is not
+  // covered.
+  const promotionLike =
+    Boolean(defaultBranch.data) && pr.head === defaultBranch.data;
 
   // AI title+description generation — shared by the Edit dialog's Generate button
   // and its mod+g chord. Verbatim the button's prior onClick body. `pr` is aliased
@@ -452,9 +457,10 @@ export function LocalPrView({
     );
   }
 
-  // A calm status block above the Merge button: up to two INDEPENDENT lines —
-  // the in-memory conflict prediction, and (when merging is currently blocked)
-  // the visible reason it's disabled. The reason is shown here because a
+  // A calm status block above the Merge button: up to three INDEPENDENT lines —
+  // the in-memory conflict prediction, the promotion note that stands in for the
+  // Update branch button this shape hides, and (when merging is currently
+  // blocked) the visible reason it's disabled. The reason is shown here because a
   // disabled <Button>'s `title` never surfaces a tooltip (the repo's
   // explain-disabled-actions gotcha).
   function renderMergeStatus() {
@@ -505,10 +511,32 @@ export function LocalPrView({
       </div>
     ) : null;
 
-    if (!prediction && !reason) return null;
+    // Names the direction the work travels, in place of the Update branch button
+    // this arm hides. The count is true and stays visible; only the implied
+    // catch-up goes away. The gap does NOT close on merge — merging the head into
+    // the base ADDS a commit the head lacks — so the copy says it needs no closing.
+    const promotion =
+      promotionLike && behind.length > 0 ? (
+        <div className="flex items-start gap-1.5 text-muted-foreground">
+          <InfoIcon className="mt-px size-3.5 shrink-0" />
+          <span className="min-w-0">
+            <span className="font-mono">{pr.base}</span> has {behind.length}{" "}
+            commit{behind.length === 1 ? "" : "s"}{" "}
+            <span className="font-mono">{pr.head}</span> doesn't.{" "}
+            <span className="font-mono">{pr.head}</span> is the repository's
+            default branch, so this gap is expected and doesn't need closing.
+            Updating the branch would merge{" "}
+            <span className="font-mono">{pr.base}</span> back into{" "}
+            <span className="font-mono">{pr.head}</span>.
+          </span>
+        </div>
+      ) : null;
+
+    if (!prediction && !reason && !promotion) return null;
     return (
       <div className="space-y-1 border-t px-3 py-1.5 text-xs">
         {prediction}
+        {promotion}
         {reason}
       </div>
     );
@@ -1002,7 +1030,7 @@ export function LocalPrView({
                 branch) so the branch catches up; the repo-scoped invalidation
                 then refreshes the comparison (behind → 0, this button hides)
                 and the conflict preview. */}
-            {behind.length > 0 && (
+            {behind.length > 0 && !promotionLike && (
               <Button
                 variant="outline"
                 size="sm"

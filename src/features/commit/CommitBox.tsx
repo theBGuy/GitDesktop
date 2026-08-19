@@ -14,7 +14,8 @@ import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
 import { useCommit, useRepoStatus } from "@/lib/git/queries";
 import { formatBinding } from "@/lib/hotkeys/binding";
-import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import { quickTransition } from "@/lib/motion";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { commitDraftKey, useUiStore } from "@/lib/stores/ui";
@@ -75,6 +76,11 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
     generate,
     aiEnabled && aiConfigured && stagedCount > 0 && !generating,
   );
+  // Both button hints read the effective bindings rather than the defaults, so
+  // a Settings → Keyboard rebind shows up here; null = the user unbound it and
+  // there is no shortcut to name.
+  const commitBinding = useEffectiveBindings().get("commit") ?? null;
+  const generateHint = useGenerateChordHint();
 
   function doCommit() {
     const commitTitle = title.trim();
@@ -229,7 +235,7 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
                     size="sm"
                     disabled={stagedCount === 0}
                     reason="Stage changes to generate a commit message"
-                    title="Generate commit message with AI"
+                    title={`Generate commit message with AI${generateHint}`}
                     onClick={generate}
                   >
                     <SparkleIcon data-icon="inline-start" />
@@ -266,7 +272,7 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
                   ? "Stage changes to commit"
                   : null
           }
-          title={formatBinding("mod+enter")}
+          title={commitBinding ? formatBinding(commitBinding) : undefined}
           onClick={doCommit}
         >
           {commit.isPending && <Spinner data-icon="inline-start" />}

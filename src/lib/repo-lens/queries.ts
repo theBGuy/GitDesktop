@@ -1,4 +1,8 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useCallback } from "react";
 import { toast } from "sonner";
 import { useForgeStatus, useRemotes, useRemoteUrl } from "@/lib/git/queries";
@@ -39,26 +43,68 @@ export function useRepoLens(repo: string): RemoteLens {
   return gate && raw === "upstream" ? "upstream" : "origin";
 }
 
-/** A setter for the persisted lens. It writes the query cache synchronously (so
- *  the UI flips instantly), persists to disk (fire-and-forget with an error
- *  toast), and clears any REMOTE PR/issue selection so a selected number can't
- *  silently point at a different repo's item. No-op when the lens is unchanged. */
+/**
+ * Point a repo at `lens`: write the query cache synchronously (so the UI flips
+ * instantly), optionally persist to disk (fire-and-forget with an error toast),
+ * and — when asked — clear any REMOTE PR/issue selection so a selected number
+ * can't silently point at a different repo's item. No-op when the lens is
+ * unchanged.
+ *
+ * Synchronous by contract, so a caller can apply the lens and navigate in the
+ * same turn. That means the gate ({@link useLensGate}, an async pair of reads)
+ * isn't consulted: the raw preference is written fail-open. Safe by
+ * construction — {@link useRepoLens} re-gates on every read, so a repo that
+ * isn't a fork keeps resolving to "origin" whatever is stored.
+ *
+ * A cache MISS is unknown, never "origin". The cache is cold for any repo the
+ * window hasn't opened this session (and after gc), while disk may hold
+ * "upstream" — so defaulting the read would let a target of "origin"
+ * short-circuit as a no-op and leave the stored value to win once it loads,
+ * opening the wrong pull request. Only a HOT cache that already matches skips
+ * the write; a cold write is cache-only when `persist` is false, which still
+ * settles the session (`lensKey` never goes stale) without touching disk.
+ *
+ * `persist` separates the two callers. The switcher is the user CHOOSING a
+ * lens, so it writes disk. A navigation only needs the view to land on the
+ * right pull request — rewriting the stored preference from a notification
+ * click would outlive the visit and change what every later session opens on.
+ *
+ * `clearSelections` is false for a navigation that selects its own PR right
+ * after (clearing would fight it) and true for the switcher, whose whole point
+ * is to drop a selection minted under the old lens.
+ */
+export function applyRepoLens(
+  queryClient: QueryClient,
+  repo: string,
+  lens: RemoteLens,
+  { clearSelections, persist }: { clearSelections: boolean; persist: boolean },
+): void {
+  const current = queryClient.getQueryData<RemoteLens>(lensKey(repo));
+  if (current !== undefined && current === lens) return;
+  queryClient.setQueryData(lensKey(repo), lens);
+  if (persist) {
+    void saveRepoLens(repo, lens).catch(() => {
+      toast.error("Couldn't save the fork/upstream view preference.");
+    });
+  }
+  if (!clearSelections) return;
+  // A remote number selected under the old lens would resolve against the
+  // wrong repo — drop it. Local + Jira selections are lens-independent.
+  const ui = useUiStore.getState();
+  if (ui.selectedPr?.kind === "remote") ui.selectPr(null);
+  if (ui.selectedIssue?.kind === "remote") ui.selectIssue(null);
+}
+
+/** The switcher's setter — {@link applyRepoLens} with the selection clears and
+ *  the disk write on, since this path is the user choosing the lens. */
 export function useSetRepoLens(repo: string) {
   const queryClient = useQueryClient();
   return useCallback(
     (lens: RemoteLens) => {
-      const current =
-        queryClient.getQueryData<RemoteLens>(lensKey(repo)) ?? "origin";
-      if (current === lens) return;
-      queryClient.setQueryData(lensKey(repo), lens);
-      void saveRepoLens(repo, lens).catch(() => {
-        toast.error("Couldn't save the fork/upstream view preference.");
+      applyRepoLens(queryClient, repo, lens, {
+        clearSelections: true,
+        persist: true,
       });
-      // A remote number selected under the old lens would resolve against the
-      // wrong repo — drop it. Local + Jira selections are lens-independent.
-      const ui = useUiStore.getState();
-      if (ui.selectedPr?.kind === "remote") ui.selectPr(null);
-      if (ui.selectedIssue?.kind === "remote") ui.selectIssue(null);
     },
     [queryClient, repo],
   );

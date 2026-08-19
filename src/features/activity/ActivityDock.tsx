@@ -14,6 +14,7 @@ import {
   XCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { ElapsedTime } from "@/components/elapsed-time";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
@@ -26,8 +27,10 @@ import {
 } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
 import { displayLogin } from "@/lib/git/bot-login";
+import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { PrSection } from "@/lib/pulls/pr-section";
+import { applyRepoLens } from "@/lib/repo-lens/queries";
 import {
   type AppNotification,
   clearAllNotifications,
@@ -165,6 +168,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   const tasks = useReviewTasks();
   const notifs = useNotifications();
   const repoPath = useUiStore((s) => s.repoPath);
+  const queryClient = useQueryClient();
   const openPr = useUiStore((s) => s.openPr);
   const openRun = useUiStore((s) => s.openRun);
   const openAgentTab = useUiStore((s) => s.openAgentTab);
@@ -186,12 +190,38 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
     markNotificationRead(n.id);
     const t = n.target;
     if (t?.type === "pr") {
+      // Land under the lens the event happened under — a fork's two lenses
+      // surface different pull requests at the same ref. Session-only
+      // (`persist: false`): a click is navigation, not a choice of lens, so the
+      // switcher's stored preference is what later sessions still open on.
+      // Only for REMOTE rows — a local PR is lens-independent, so applying one
+      // there would be a side effect its navigation never implied. Hydrated
+      // rows are untrusted, so narrow the stored value the way the lens reader
+      // does; a row from before the field existed carries none and keeps
+      // today's behavior (whichever lens the repo already sits on). No
+      // selection clears — the same call selects this PR.
+      let applyLens: (() => void) | undefined;
+      if (t.kind === "remote" && t.lens !== undefined) {
+        const lens: RemoteLens = t.lens === "upstream" ? "upstream" : "origin";
+        applyLens = () =>
+          applyRepoLens(queryClient, n.repoPath, lens, {
+            clearSelections: false,
+            persist: false,
+          });
+      }
       openPr({
         kind: t.kind,
         repoPath: n.repoPath,
         repoName: n.repoName,
         ref: t.ref,
         section: KIND_SECTION[n.kind as NotificationKind] ?? null,
+        // Hydrated rows are untrusted here too — a non-string can't address a
+        // review card, so it reads as "no reveal" rather than travelling on.
+        reviewId: typeof t.reviewId === "string" ? t.reviewId : null,
+        // Run inside openPr's view-transition callback, so the lens and the
+        // selection reach the same commit; applied here it would land a render
+        // early and fetch the new lens against the OLD number.
+        beforeSelect: applyLens,
       });
     } else if (t?.type === "run") {
       openRun({ repoPath: n.repoPath, repoName: n.repoName, runId: t.runId });

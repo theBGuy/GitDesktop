@@ -58,6 +58,7 @@ import {
   useTagList,
 } from "@/lib/git/queries";
 import type { CommitSummary } from "@/lib/git/types";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -246,11 +247,32 @@ export function CreateReleaseDialog({
     });
   }
 
+  // The generate chord drives the AI item only — never the From-GitHub one, and
+  // it never opens the dropdown. Mounted on DialogContent, not the <form>: the X
+  // close button is a form SIBLING inside the Popup. The swallow is
+  // unconditional so the chord can't reach the global generate-commit-message
+  // action behind the dialog; while generating it swallows but DOESN'T cancel.
+  const generateChord = useGenerateChord({
+    enabled: aiEnabled && Boolean(tagTrimmed) && !busyGenerating,
+    run: generateWithAi,
+  });
+  // The chord's shortcut belongs on the item it drives; with AI off that item is
+  // disabled and says why instead.
+  const aiNotesHintTitle = generateChord.hint
+    ? `Summarize with AI${generateChord.hint}`
+    : undefined;
+  const aiNotesTitle = aiEnabled
+    ? aiNotesHintTitle
+    : "Enable AI in Settings first.";
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* A fixed height (not a cap): release bodies routinely run thousands of
           lines, so the notes editor claims the dialog's whole spare height. */}
-      <DialogContent className="flex h-[85vh] flex-col sm:max-w-2xl">
+      <DialogContent
+        className="flex h-[85vh] flex-col sm:max-w-2xl"
+        onKeyDown={generateChord.onKeyDown}
+      >
         <form
           className="flex min-h-0 flex-1 flex-col gap-4"
           onSubmit={(e) => {
@@ -445,11 +467,7 @@ export function CreateReleaseDialog({
                         )}
                         <DropdownMenuItem
                           disabled={!aiEnabled}
-                          title={
-                            aiEnabled
-                              ? undefined
-                              : "Enable AI in Settings first."
-                          }
+                          title={aiNotesTitle}
                           onClick={generateWithAi}
                         >
                           Summarize with AI

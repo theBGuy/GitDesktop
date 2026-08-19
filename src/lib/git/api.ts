@@ -24,6 +24,7 @@ import type {
   Branch,
   BranchComparison,
   BranchDivergence,
+  BranchRewriteStatus,
   BranchStats,
   CodeFreqPoint,
   Collaborator,
@@ -425,8 +426,14 @@ export const gitDiscardUntrackedLines = (
   lines: number[],
 ) => invoke<void>("git_discard_untracked_lines", { repoPath, path, lines });
 
-export const gitReset = (repoPath: string, hash: string) =>
-  invoke<void>("git_reset", { repoPath, hash });
+/** Moves the branch pointer to `hash`. `"mixed"` (the default) keeps every
+ *  working-tree change; `"hard"` rewrites the working tree too and is refused
+ *  outright while tracked changes are outstanding. */
+export const gitReset = (
+  repoPath: string,
+  hash: string,
+  mode?: "mixed" | "hard",
+) => invoke<void>("git_reset", { repoPath, hash, mode: mode ?? null });
 
 export const gitCheckoutCommit = (repoPath: string, hash: string) =>
   invoke<void>("git_checkout_commit", { repoPath, hash });
@@ -926,6 +933,33 @@ export const gitRebaseOnto = (
 
 export const gitBranchDivergence = (repoPath: string, base: string) =>
   invoke<BranchDivergence[]>("git_branch_divergence", { repoPath, base });
+
+/** Whether `branch`'s upstream was rewritten under it, and what a reset to that
+ *  upstream would cost. Read-only (rev-parse / rev-list only). */
+export const gitBranchRewriteStatus = (repoPath: string, branch: string) =>
+  invoke<BranchRewriteStatus>("git_branch_rewrite_status", {
+    repoPath,
+    branch,
+  });
+
+/** Points `branch` at its upstream's tip without checking it out. Refuses when
+ *  the branch is checked out anywhere (naming the worktree, or pointing at the
+ *  sync controls for the current branch — that arm takes {@link gitReset} in
+ *  `"hard"` mode, which moves the working tree too).
+ *
+ *  `expectedTip` is the sha the caller measured and showed the user: the backend
+ *  re-resolves the upstream and refuses if it has moved since, so a background
+ *  fetch during the confirmation can't redirect the reset. */
+export const gitBranchResetToUpstream = (
+  repoPath: string,
+  branch: string,
+  expectedTip: string,
+) =>
+  invoke<void>("git_branch_reset_to_upstream", {
+    repoPath,
+    branch,
+    expectedTip,
+  });
 
 export interface MergePair {
   base: string;

@@ -11,8 +11,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { required, useAppForm, withForm } from "@/lib/form";
-import { eventToBinding, SUBMIT_HINT } from "@/lib/hotkeys/binding";
-import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
+import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { toastError } from "@/lib/toast";
 
 /** Shared form shape so the hook's `useAppForm` and the `withForm` dialog agree. */
@@ -118,11 +118,14 @@ export const EditTitleBodyDialog = withForm({
     generateDisabled,
     belowBody,
   }) {
-    // Context-sensitive reuse of the `generate-commit-message` binding (mod+g by
-    // default) while this dialog is open — never a hardcoded chord, so a
-    // Settings → Keyboard rebinding drives it. null = explicitly unbound.
-    const generateBinding =
-      useEffectiveBindings().get("generate-commit-message") ?? null;
+    // Context-sensitive reuse of the `generate-commit-message` binding while
+    // this dialog is open. This dialog is shared with the ISSUE views, which
+    // pass no `onGenerate` (they have no Generate) — the chord then falls
+    // through untouched instead of being swallowed for nothing.
+    const generateChord = useGenerateChord({
+      enabled: !generating && !generateDisabled,
+      run: onGenerate,
+    });
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent
@@ -135,11 +138,13 @@ export const EditTitleBodyDialog = withForm({
           // handler misses a chord pressed with focus on the X, which would then
           // leak to the global commit / generate-commit-message actions behind the
           // dialog. Capturing on the Popup covers the X and every field, so the
-          // UNCONDITIONAL preventDefault is what actually contains each chord.
-          //
-          // This dialog is shared with the ISSUE views, which pass no `onGenerate`
-          // (they have no Generate) — so the generate chord only arms when a
-          // consumer opts in, and otherwise falls through untouched.
+          // preventDefault here is what actually contains each chord: mod+enter
+          // unconditionally, and the generate chord on every match for as long as
+          // the consumer HAS a Generate. A consumer that passes no `onGenerate`
+          // (the issue views) lets it fall through untouched, which is safe:
+          // the only global handler is CommitBox's, and it runs nothing unless
+          // it is both mounted (Changes tab only) and enabled (never under
+          // Hide-AI) — the listener runs the newest ENABLED handler or none.
           onKeyDown={(e) => {
             if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
               e.preventDefault();
@@ -148,20 +153,7 @@ export const EditTitleBodyDialog = withForm({
               if (!generating) form.handleSubmit();
               return;
             }
-            // Run this consumer's Generate only when it has a Generate surface and
-            // the chord is bound. ALWAYS swallow it then: without this the chord
-            // would fire the global generate-commit-message action behind the
-            // dialog. Run Generate only when its button would be enabled; while
-            // generating we swallow but DON'T cancel (an accidental repeat must not
-            // abort a running generation).
-            if (
-              onGenerate &&
-              generateBinding !== null &&
-              eventToBinding(e) === generateBinding
-            ) {
-              e.preventDefault();
-              if (!generating && !generateDisabled) onGenerate();
-            }
+            generateChord.onKeyDown(e);
           }}
         >
           {/* min-w-0: DialogContent is a grid; without this the form's content

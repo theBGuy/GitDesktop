@@ -213,7 +213,10 @@ Fetch, pull, and push, with the ahead/behind counts shown right on the Push
 and Pull buttons. Pull is `--ff-only`, and divergence routes to a guarded
 force push with `--force-with-lease --force-if-includes` (lease-only on
 Git releases older than 2.30, or when the branch has no reflog for the
-check to read). When a repo has an `upstream` remote, the Pull menu adds
+check to read). When the *remote* itself was rewritten (a server-side
+rebase) and every local commit already landed there under new ids, the
+Pull menu offers a confirmed **Reset to _origin/…_** that lines the two
+up instead. When a repo has an `upstream` remote, the Pull menu adds
 **Update from upstream**: one click fetches upstream and brings your
 branch up to date (fast-forward when it can, a merge commit when cleanly
 diverged, the conflict editor otherwise), for keeping a fork current.

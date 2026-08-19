@@ -1057,7 +1057,11 @@ export function usePrDetails(
   return useQuery({
     ...prDetailsOptions(repo, number ?? 0, lens),
     enabled: number !== null,
-    placeholderData: keepPreviousDataForRepo(repo),
+    // The lens segment is an IDENTITY axis: a fork's two lenses surface different
+    // pull requests at the same number, so a cross-lens placeholder paints the
+    // wrong PR. A number change deliberately KEEPS the previous PR's data — the
+    // dimmed switch beat that RemotePrView's detailsStale gates compensate for.
+    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
 
@@ -1270,7 +1274,9 @@ export function usePrDiff(
   return useQuery({
     ...prDiffOptions(repo, number ?? 0, lens),
     enabled: number !== null,
-    placeholderData: keepPreviousDataForRepo(repo),
+    // Lens axis mirrors usePrDetails; the number axis stays placeholder-served so
+    // RemotePrView's diffStale keeps gating the Files tab during a PR switch.
+    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
 
@@ -3445,6 +3451,15 @@ export function useResetToCommit(repo: string) {
   return useRepoMutation(repo, (hash: string) => api.gitReset(repo, hash));
 }
 
+/** Moves the CURRENT branch and the working tree to `hash`. The backend refuses
+ *  outright while tracked changes are outstanding, so the caller's confirm can
+ *  promise a clean tree is required rather than pre-flighting one. */
+export function useHardResetToCommit(repo: string) {
+  return useRepoMutation(repo, (hash: string) =>
+    api.gitReset(repo, hash, "hard"),
+  );
+}
+
 export function useCheckoutCommit(repo: string) {
   return useRepoMutation(repo, (hash: string) =>
     api.gitCheckoutCommit(repo, hash),
@@ -4099,6 +4114,53 @@ export function useBranchDivergence(
 export function useUpdateBranchFrom(repo: string) {
   return useRepoMutation(repo, (args: { branch: string; base: string }) =>
     api.gitUpdateBranchFrom(repo, args.branch, args.base),
+  );
+}
+
+/**
+ * Whether a diverged branch's upstream was rewritten under it (a remote rebase
+ * or force-push), and what a reset to that upstream would cost.
+ *
+ * LAZY on purpose: `enabled` must stay false unless a surface is actually facing
+ * a diverged branch, so the ordinary in-sync path spawns no git. Keyed under the
+ * repo, so the whole-subtree invalidation every fetch/pull/push mutation already
+ * runs refreshes it. Local rev-list reads only — `networkMode: "always"` keeps
+ * an offline OS from parking the query into a permanent pending state, matching
+ * {@link useBranchDivergence}.
+ */
+export function useBranchRewriteStatus(
+  repo: string,
+  branch: string | null,
+  opts: { enabled: boolean },
+) {
+  return useQuery({
+    ...branchRewriteStatusOptions(repo, branch ?? ""),
+    enabled: opts.enabled && Boolean(branch),
+  });
+}
+
+/** The one options object behind {@link useBranchRewriteStatus}. Exported so an
+ *  IMPERATIVE probe — a palette action that has to decide before it acts, with no
+ *  render to hang a hook on — reads and caches exactly what the hook would, rather
+ *  than a second spelling that can drift from it. */
+export function branchRewriteStatusOptions(repo: string, branch: string) {
+  return {
+    queryKey: ["repo", repo, "rewrite-status", branch] as const,
+    queryFn: () => api.gitBranchRewriteStatus(repo, branch),
+    staleTime: 30_000,
+    networkMode: "always" as const,
+  };
+}
+
+/** Points a NON-current branch at its upstream's tip, refusing if that upstream
+ *  moved away from `expectedTip` since the caller measured it. The current branch
+ *  takes {@link useHardResetToCommit} instead — only that moves the working tree
+ *  with it. */
+export function useBranchResetToUpstream(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { branch: string; expectedTip: string }) =>
+      api.gitBranchResetToUpstream(repo, args.branch, args.expectedTip),
   );
 }
 

@@ -632,6 +632,10 @@ async function run(
                   type: "pr",
                   kind: event.target.type,
                   ref: targetRef(event),
+                  // Automations run against the fork's own PRs: the poll that
+                  // feeds them pins the origin slug deliberately, so the
+                  // click-through lands there too.
+                  lens: "origin",
                 },
               }),
           // This run's stopped dock row; passing a dismissed key is safe (resetReview

@@ -16,13 +16,17 @@ import { required, useAppForm } from "@/lib/form";
 import { useCreateBranch } from "@/lib/git/queries";
 import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { toastError } from "@/lib/toast";
 import {
   BaseBranchCombobox,
   useHasBaseOptions,
   useSeedBase,
 } from "./BaseBranchCombobox";
-import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
+import {
+  GenerateBranchNameButton,
+  useBranchNameGenerateAction,
+} from "./GenerateBranchNameButton";
 import {
   type CommittedNameSource,
   useGenerateBranchName,
@@ -148,6 +152,28 @@ export function CreateBranchDialog({
     if (open) seedOnOpen();
   }, [open]);
 
+  // One generate pair for the button and the chord — see
+  // `useBranchNameGenerateAction`.
+  const generateAction = useBranchNameGenerateAction({
+    gen: branchNameGen,
+    aiEnabled,
+    aiConfigured,
+    hasChanges,
+    headExists,
+    entries,
+    recentBranches: allBranchNames,
+    nameTarget: "new-branch",
+    committedFallback: baseIsHead ? committedFallback : null,
+    onName: (name) => createForm.setFieldValue("name", name),
+  });
+  // This dialog opens from the header over any tab, including Changes where the
+  // global generate-commit-message action is live — so the chord is swallowed
+  // here whether or not it can generate, and never reaches the commit box.
+  const generateChord = useGenerateChord({
+    enabled: generateAction.enabled,
+    run: generateAction.run,
+  });
+
   return (
     <Dialog
       open={open}
@@ -156,7 +182,7 @@ export function CreateBranchDialog({
         else closeDialog();
       }}
     >
-      <DialogContent>
+      <DialogContent onKeyDown={generateChord.onKeyDown}>
         <form
           // min-w-0: DialogContent is display:grid, so this grid item must be
           // allowed to shrink below its content — otherwise a long base branch
@@ -205,19 +231,18 @@ export function CreateBranchDialog({
           </createForm.AppField>
           <GenerateBranchNameButton
             gen={branchNameGen}
+            action={generateAction}
+            hint={generateChord.hint}
             aiEnabled={aiEnabled}
             aiConfigured={aiConfigured}
             hasChanges={hasChanges}
             headExists={headExists}
-            entries={entries}
-            recentBranches={allBranchNames}
             nameTarget="new-branch"
             committedFallback={baseIsHead ? committedFallback : null}
             // Resolved by definition when the fallback can't apply — the button
             // explains the picked base instead of waiting on a lookup it won't use.
             committedStatus={baseIsHead ? committedStatus : "ready"}
             basedElsewhere={baseIsHead ? null : createBase}
-            onName={(name) => createForm.setFieldValue("name", name)}
             onSetupAi={() => {
               closeDialog();
               onOpenSettings("ai");

@@ -78,6 +78,36 @@ export interface RemoteBranch {
   lastCommitDate: string;
 }
 
+/**
+ * Evidence for telling a server-side REWRITE of a branch's upstream (a remote
+ * rebase or force-push — GitHub's "Update branch → rebase") apart from ordinary
+ * two-sided divergence. The two want opposite remedies, so the app measures
+ * rather than guesses.
+ *
+ * `remoteRewritten` answers one narrow question: is the upstream tip absent from
+ * this branch's own reflog. That is NOT proof of a rewrite on its own — ordinary
+ * divergence looks identical — so only the pair `remoteRewritten === true &&
+ * localOnly === 0` (nothing local lacks a patch-twin upstream) may unlock a
+ * reset-to-upstream offer. `null` means nothing was provable and every surface
+ * must render exactly what it renders without this data.
+ */
+export interface BranchRewriteStatus {
+  remoteRewritten: boolean | null;
+  /** Commits on the branch with no patch-equivalent upstream — exactly the work
+   *  a reset to the upstream would destroy. */
+  localOnly: number;
+  /** Commits on the upstream with no patch-equivalent locally. */
+  remoteOnly: number;
+  /** Commits matched by patch id. Counts BOTH sides of each pair, so a clean
+   *  N-commit rebase reports `2 * N` — never render it as a commit count. */
+  patchEqual: number;
+  /** The upstream's short name (e.g. `origin/feature`). */
+  upstream: string | null;
+  /** The upstream tip's sha — a confirmed reset targets this commit, so it can
+   *  only land on the state the user was shown. */
+  upstreamTip: string | null;
+}
+
 /** A local branch's ahead/behind counts vs. the default branch. */
 export interface BranchDivergence {
   name: string;
@@ -452,6 +482,10 @@ export interface PrPollInfo {
   /** Login of the latest review's author — used to suppress a "new review"
    *  notification for your own review. GitHub only ("" elsewhere in v1). */
   lastReviewAuthor: string;
+  /** Node id of the latest review — the same id its card carries in the detail
+   *  view, so a review notification can land on that card. GitHub only ("" for
+   *  GitLab/Bitbucket in v1). */
+  lastReviewId: string;
   /** Logins currently requested to review — you newly appearing here fires a
    *  "review requested" notification. GitHub only (empty elsewhere in v1). */
   reviewRequests: string[];

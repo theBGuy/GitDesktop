@@ -11,7 +11,8 @@ import {
   GitPullRequestIcon,
   TreeStructureIcon,
 } from "@phosphor-icons/react";
-import { useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime } from "@/components/relative-time";
@@ -36,9 +37,12 @@ import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import { forgeDetectForkPrForBranch } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import {
+  branchRewriteStatusOptions,
   forgeFeatureReady,
   useBranchDivergence,
   useBranches,
+  useBranchResetToUpstream,
+  useBranchRewriteStatus,
   useCheckoutBranch,
   useCheckoutRemoteBranch,
   useCompareBranches,
@@ -47,6 +51,7 @@ import {
   useDeleteRemoteBranch,
   useDiscardAll,
   useForgeStatus,
+  useHardResetToCommit,
   useMergeBranch,
   usePrList,
   usePush,
@@ -84,6 +89,7 @@ import {
   useSaveSettings,
   useSettings,
 } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
 import {
   isWorktreePromoting,
@@ -193,6 +199,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const rebaseBranch = useRebaseBranch(repoPath);
   const rebaseOnto = useRebaseOnto(repoPath);
   const updateBranchFrom = useUpdateBranchFrom(repoPath);
+  const resetToUpstream = useBranchResetToUpstream(repoPath);
+  const hardReset = useHardResetToCommit(repoPath);
   const push = usePush(repoPath);
   const remotes = useRemotes(repoPath);
   const setBranchArchived = useSetBranchArchived(repoPath);
@@ -319,6 +327,42 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     () => new Map((divergence.data ?? []).map((d) => [d.name, d] as const)),
     [divergence.data],
   );
+
+  // The row whose context menu is open, when that row is DIVERGED from its own
+  // upstream — the only case worth several rev-list spawns. One slot is enough:
+  // a context menu is singular, so the probe follows whichever row was opened
+  // last and every other row renders as it always has.
+  const [rewriteProbe, setRewriteProbe] = useState<string | null>(null);
+  const rewrite = useBranchRewriteStatus(repoPath, rewriteProbe, {
+    enabled: rewriteProbe !== null,
+  });
+  const queryClient = useQueryClient();
+
+  // Warm those probes when the POPOVER opens, so a right-click a moment later
+  // paints its final identity instead of the disabled waiting slot swapping
+  // under the pointer. The probe is fast enough locally that the swap lands
+  // AFTER the menu paints, which reads as a flash; the only way to remove it is
+  // to have the answer before the menu exists. The waiting slot stays as the
+  // fallback for a genuinely slow probe.
+  //
+  // A newline-joined signature, not the array: `allBranches` gets a new identity
+  // on every branches refetch, and this must re-run when the diverged SET
+  // changes, not when its container does. Git forbids control characters in a
+  // ref name, so `\n` can't appear inside one.
+  const divergedSignature = allBranches
+    .filter((b) => b.upstreamAhead > 0 && b.upstreamBehind > 0)
+    .map((b) => b.name)
+    .join("\n");
+  useEffect(() => {
+    if (!open || divergedSignature === "") return;
+    for (const name of divergedSignature.split("\n")) {
+      // `prefetchQuery` honors the options' staleTime, so a still-fresh entry
+      // costs nothing and a reopen inside 30s spawns no git at all.
+      void queryClient.prefetchQuery(
+        branchRewriteStatusOptions(repoPath, name),
+      );
+    }
+  }, [open, divergedSignature, repoPath, queryClient]);
 
   // Per-branch PR badge: remote PRs (open + closed, the latter carrying merged)
   // fetched while the menu OR the cleanup dialog is open AND the repo's forge
@@ -976,6 +1020,40 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
   }
 
+  // The remedy for a branch whose upstream already carries its changes under
+  // other ids: point the branch back at that upstream instead of merging it in,
+  // which would duplicate them. `tip` is the sha the status was measured against,
+  // so a confirmed reset can only land where the copy said it would. The current
+  // branch takes the hard reset (its working tree moves too); every other branch
+  // is a ref move, which is why it works even from another checkout.
+  async function doResetToUpstream(branch: Branch, tip: string) {
+    const base = branch.upstream;
+    if (!base) return;
+    setOpen(false);
+    const treeNote = branch.isCurrent
+      ? ` Your files are rewritten to match, so commit or stash any uncommitted changes first.`
+      : "";
+    const n = branch.upstreamAhead;
+    const alreadyThere =
+      n === 1
+        ? `The only commit on ${branch.name} is already on ${base} under a different id`
+        : `All ${n} commits on ${branch.name} are already on ${base} under different ids`;
+    const ok = await useConfirm.getState().ask({
+      title: `Reset ${branch.name} to ${base}?`,
+      body: `${alreadyThere}, so no unique work is lost. ${branch.name} moves to ${base}'s tip.${treeNote}`,
+      confirmLabel: `Reset to ${base}`,
+      confirmVariant: "destructive",
+    });
+    if (!ok) return;
+    const done = {
+      onSuccess: () => toast.success(`Reset ${branch.name} to ${base}`),
+      onError,
+    };
+    if (branch.isCurrent) hardReset.mutate(tip, done);
+    else
+      resetToUpstream.mutate({ branch: branch.name, expectedTip: tip }, done);
+  }
+
   // Push a branch's ref without checking it out — the outbound counterpart of
   // doUpdateFromUpstream. Whether this publishes (-u) or plain pushes is decided
   // backend-side from the branch's tracking state. The publish arms pass an
@@ -1026,6 +1104,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     rebaseOnto.isPending ||
     push.isPending ||
     updateBranchFrom.isPending ||
+    resetToUpstream.isPending ||
+    hardReset.isPending ||
     switchAutostash.isPending ||
     recovery.pending;
 
@@ -1138,12 +1218,42 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     Boolean(defaultName && defaultName !== currentName && !busy),
   );
   const defaultBranchRow = allBranches.find((b) => b.name === defaultName);
+  // The palette's own route to the same merge the row menu offers — so it needs
+  // the same refusal. There is no row rendered here to hang the probe's hook on,
+  // so it runs ON INVOCATION against the hook's own cached options: a diverged
+  // default pays one probe (usually a cache hit), and every other default spawns
+  // nothing at all.
+  async function updateDefaultFromUpstream() {
+    const row = defaultBranchRow;
+    if (!row?.upstream || row.upstreamGone) return;
+    if (row.upstreamAhead > 0 && row.upstreamBehind > 0) {
+      const status = await queryClient
+        .fetchQuery(branchRewriteStatusOptions(repoPath, row.name))
+        .catch(() => null);
+      // `patchEqual > 0` is strong evidence, not proof — two sides can apply the
+      // same patch independently. It only WITHHOLDS the merge, so a false read
+      // costs an explained no-op, never a duplicated history.
+      if (status?.remoteRewritten === true && status.patchEqual > 0) {
+        // The remedy has to match what the row actually offers: only the
+        // nothing-unique case gets a reset item there. With local-only commits
+        // the row shows a disabled update and no reset, so point at the pull that
+        // keeps them.
+        const remedy =
+          status.localOnly === 0
+            ? `Open the branch menu and use the ${row.name} row's reset instead.`
+            : `Switch to ${row.name} and use Pull with rebase — it keeps the ${status.localOnly} commit${status.localOnly === 1 ? "" : "s"} only ${row.name} has.`;
+        toast.warning(
+          `${row.upstream} already carries ${row.name}'s changes under different ids — merging it in would duplicate them.`,
+          { description: remedy, duration: 10000 },
+        );
+        return;
+      }
+    }
+    doUpdateFromUpstream(row.name, row.upstream);
+  }
   useHotkeyAction(
     "update-default-from-upstream",
-    () =>
-      defaultBranchRow?.upstream &&
-      !defaultBranchRow.upstreamGone &&
-      doUpdateFromUpstream(defaultBranchRow.name, defaultBranchRow.upstream),
+    () => void updateDefaultFromUpstream(),
     Boolean(defaultBranchRow?.upstream) &&
       !defaultBranchRow?.upstreamGone &&
       !busy,
@@ -1287,8 +1397,57 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           a === "origin" ? -1 : b === "origin" ? 1 : a.localeCompare(b),
         )
       : [];
+    // Upstream classification, for this row only while ITS menu is open. An
+    // upstream that already carries this branch's changes under other ids makes
+    // "Update from <upstream>" harmful: merging it back in duplicates them, and
+    // in a throwaway worktree it can't even run against a branch checked out
+    // elsewhere.
+    const rowDiverged = branch.upstreamAhead > 0 && branch.upstreamBehind > 0;
+    const rowProbeOpen = rowDiverged && rewriteProbe === branch.name;
+    // `isFetching` matters as much as the name match: a repo-wide invalidation
+    // leaves the previous answer served while the refetch is in flight, and that
+    // answer is the evidence a destructive confirm would quote.
+    const rowRewrite =
+      rowProbeOpen && !rewrite.isFetching ? rewrite.data : undefined;
+    // The verdict for the OPEN menu hasn't landed. This slot must never hold an
+    // ENABLED item that changes meaning underneath a pointer already aimed at it:
+    // the probe resolves a beat after the menu paints, and a merge silently
+    // becoming a destructive reset at the same coordinates is the context-menu
+    // TOCTOU class. So the slot waits, disabled, and only ever becomes enabled
+    // wearing its FINAL identity. An ERRORED probe is not pending — it falls
+    // through to the ordinary item, the same fail-safe an unprovable status takes.
+    const rowProbePending =
+      rowProbeOpen &&
+      !rewrite.isError &&
+      (rewrite.isFetching || rewrite.data === undefined);
+    // The pair, never the reflog verdict alone: offering a reset while unique
+    // local work exists would destroy it.
+    const resetTip =
+      rowRewrite?.remoteRewritten === true && rowRewrite.localOnly === 0
+        ? rowRewrite.upstreamTip
+        : null;
+    // Patch twins upstream AND commits without one: a reset would destroy the
+    // latter, and a merge would bring the twinned changes back in beside the
+    // copies already there. `patchEqual > 0` is strong evidence, not proof — two
+    // sides can apply the same patch independently, or cherry-pick both ways,
+    // with no rewrite involved. That is why this arm only WITHHOLDS an action:
+    // its failure direction is inaction, which the row's other items cover.
+    const rowMixedRewrite =
+      rowRewrite?.remoteRewritten === true &&
+      rowRewrite.localOnly > 0 &&
+      rowRewrite.patchEqual > 0;
     return (
-      <ContextMenu key={branch.name}>
+      <ContextMenu
+        key={branch.name}
+        onOpenChange={(menuOpen) => {
+          if (menuOpen) setRewriteProbe(rowDiverged ? branch.name : null);
+          // Functional, not a captured read: right-clicking a second row closes
+          // this menu in the SAME tick the other one opens, and a batched
+          // comparison against the pre-update value would clear the new row's
+          // probe on the way out.
+          else setRewriteProbe((cur) => (cur === branch.name ? null : cur));
+        }}
+      >
         <ContextMenuTrigger
           render={
             <button
@@ -1521,18 +1680,53 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 </ContextMenuItem>
               )}
               {/* Pull the branch's own upstream in without switching — the star
-                  use case is the default branch after a PR merged upstream. */}
-              {branch.upstream && branch.upstreamBehind > 0 && (
-                <ContextMenuItem
-                  disabled={busy}
-                  onClick={() =>
-                    branch.upstream &&
-                    doUpdateFromUpstream(branch.name, branch.upstream)
+                  use case is the default branch after a PR merged upstream. An
+                  upstream that already carries this branch's changes under other
+                  ids replaces it: merging there duplicates them rather than
+                  syncing. The waiting arm comes FIRST so the slot can never be
+                  enabled while its identity is still in flight. */}
+              {branch.upstream &&
+                branch.upstreamBehind > 0 &&
+                (() => {
+                  const base = branch.upstream;
+                  // No onClick at all, not merely `disabled`: a pointer already
+                  // aimed here when the menu painted must be a hard no-op.
+                  if (rowProbePending) {
+                    return (
+                      <ContextMenuItem disabled>
+                        Update from {base} (checking the remote…)
+                      </ContextMenuItem>
+                    );
                   }
-                >
-                  Update from {branch.upstream}
-                </ContextMenuItem>
-              )}
+                  if (resetTip) {
+                    const holder = worktreeByBranch.get(branch.name);
+                    return (
+                      <ContextMenuItem
+                        disabled={busy || inWorktree}
+                        onClick={() => void doResetToUpstream(branch, resetTip)}
+                      >
+                        Reset to {base}…
+                        {inWorktree && ` (checked out in ${holder})`}
+                      </ContextMenuItem>
+                    );
+                  }
+                  if (rowMixedRewrite) {
+                    return (
+                      <ContextMenuItem disabled>
+                        Update from {base} ({base} already carries these changes
+                        under different ids — a merge would duplicate them)
+                      </ContextMenuItem>
+                    );
+                  }
+                  return (
+                    <ContextMenuItem
+                      disabled={busy}
+                      onClick={() => doUpdateFromUpstream(branch.name, base)}
+                    >
+                      Update from {base}
+                    </ContextMenuItem>
+                  );
+                })()}
               {/* Sync-out below sync-in. Push a branch's ref to origin without
                   checking it out — works even when the branch is checked out in
                   another worktree, since a push touches refs, never a working

@@ -89,11 +89,13 @@ const ARM_MESSAGE: Record<
   Exclude<PrMergeabilityArm, null>,
   (ctx: {
     base: string;
+    head: string;
     provider: ForgeProvider | null | undefined;
     behindBy: number;
     predictedClean: boolean;
     forgeUnreachable: boolean;
     blockedRequirements: string[];
+    promotionLike: boolean;
   }) => ReactNode
 > = {
   conflicting: ({ base, provider }) => (
@@ -147,10 +149,13 @@ const ARM_MESSAGE: Record<
   // The behind clause rides along in the `behind` arm's own words, because the update
   // controls come with it — a bare refusal beside an Update branch button would leave
   // the button unexplained.
-  blocked: ({ base, behindBy, blockedRequirements }) => (
+  blocked: ({ base, behindBy, blockedRequirements, promotionLike }) => (
     <>
       {blockedMergeLine(blockedRequirements)}
-      {behindBy > 0 ? (
+      {/* The behind clause exists to explain the Update controls beside it, so it
+          goes wherever they go: on a promotion pull request they'd invert the
+          flow, and a count with no route out would read as a demand. */}
+      {behindBy > 0 && !promotionLike ? (
         <>
           {` It is also ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
           <span className="font-mono">{base}</span>
@@ -159,13 +164,34 @@ const ARM_MESSAGE: Record<
       ) : null}
     </>
   ),
-  behind: ({ base, behindBy }) => (
-    <>
-      {`This branch is ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
-      <span className="font-mono">{base}</span>
-      {"."}
-    </>
-  ),
+  // A promotion pull request (main → staging) is permanently behind its base by
+  // design, and "update the branch" would merge the base back into the default
+  // branch. Say which direction the work is going instead of implying a catch-up.
+  // The gap does NOT close on merge — merging the head into the base ADDS a
+  // commit the head lacks — so the copy says it needs no closing.
+  behind: ({ base, head, behindBy, promotionLike }) =>
+    promotionLike ? (
+      <>
+        <span className="font-mono">{base}</span>
+        {` has ${behindBy} commit${behindBy === 1 ? "" : "s"} that `}
+        <span className="font-mono">{head}</span>
+        {" doesn't. "}
+        <span className="font-mono">{head}</span>
+        {
+          " is the repository's default branch, so this gap is expected and doesn't need closing. Updating the branch would merge "
+        }
+        <span className="font-mono">{base}</span>
+        {" back into "}
+        <span className="font-mono">{head}</span>
+        {"."}
+      </>
+    ) : (
+      <>
+        {`This branch is ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
+        <span className="font-mono">{base}</span>
+        {"."}
+      </>
+    ),
 };
 
 /**
@@ -177,6 +203,8 @@ const ARM_MESSAGE: Record<
 export function PrMergeabilityBanner({
   arm,
   base,
+  head,
+  promotionLike,
   provider,
   forkBlocked,
   hasResolveWorktree,
@@ -199,6 +227,12 @@ export function PrMergeabilityBanner({
 }: {
   arm: PrMergeabilityArm;
   base: string;
+  head: string;
+  /** The head IS this repository's default branch, so the pull request promotes
+   *  it somewhere (main → staging). Updating such a branch would merge the base
+   *  back into the default branch, inverting the flow — so the behind arm keeps
+   *  its true count and drops the action. */
+  promotionLike: boolean;
   provider: ForgeProvider | null | undefined;
   /** The head branch lives in another repository, so there's nowhere to push. */
   forkBlocked: boolean;
@@ -283,6 +317,12 @@ export function PrMergeabilityBanner({
   })();
   const updateDisabledReason =
     updateBlockedReason ?? (updateBusy ? updateBusyReason : undefined);
+  // "Update branch" doesn't say which way the commits travel; the tooltip does.
+  // The caret gets its own wording rather than this one — its menu holds the
+  // REBASE variant, which rewrites rather than merges (and names that in its own
+  // confirm), so borrowing the button's label there would misdescribe it.
+  const updateOperation = `Merges ${base} into ${head}`;
+  const updateOptionsLabel = "Other ways to update this branch";
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">
@@ -298,11 +338,13 @@ export function PrMergeabilityBanner({
         <span className="min-w-0">
           {ARM_MESSAGE[arm]({
             base,
+            head,
             provider,
             behindBy,
             predictedClean,
             forgeUnreachable,
             blockedRequirements,
+            promotionLike,
           })}
         </span>
       </span>
@@ -364,61 +406,64 @@ export function PrMergeabilityBanner({
           route to the update along with it would be a refusal the app never intended. */}
       {(arm === "behind" ||
         arm === "updating" ||
-        (arm === "blocked" && behindBy > 0)) && (
-        <div className="flex items-center gap-1.5">
-          <DisabledReasonButton
-            variant="ghost"
-            size="xs"
-            disabled={updateDisabled}
-            reason={updateDisabledReason}
-            onClick={onUpdateBranch}
-          >
-            {/* The `updating` arm already spins in the sentence — one progress mark
+        (arm === "blocked" && behindBy > 0)) &&
+        !promotionLike && (
+          <div className="flex items-center gap-1.5">
+            <DisabledReasonButton
+              variant="ghost"
+              size="xs"
+              disabled={updateDisabled}
+              reason={updateDisabledReason}
+              title={updateOperation}
+              onClick={onUpdateBranch}
+            >
+              {/* The `updating` arm already spins in the sentence — one progress mark
                 per strip, so the button only carries the momentary holds. */}
-            {updateBusy && arm !== "updating" && (
-              <Spinner data-icon="inline-start" />
-            )}
-            Update branch
-          </DisabledReasonButton>
-          {/* A span-wrapped `render` would swallow the caret's disabled state — the
+              {updateBusy && arm !== "updating" && (
+                <Spinner data-icon="inline-start" />
+              )}
+              Update branch
+            </DisabledReasonButton>
+            {/* A span-wrapped `render` would swallow the caret's disabled state — the
               vendored Button's `pointer-events-none` routes the click to the span,
               which IS the trigger — so a refused update renders no trigger at all. */}
-          {updateDisabled ? (
-            <span className="inline-flex" title={updateDisabledReason}>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Update branch options"
-                disabled
-              >
-                <CaretDownIcon />
-              </Button>
-            </span>
-          ) : (
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label="Update branch options"
-                  />
-                }
-              >
-                <CaretDownIcon />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-48">
-                <DropdownMenuItem
-                  disabled={updateDisabled}
-                  onClick={onUpdateWithRebase}
+            {updateDisabled ? (
+              <span className="inline-flex" title={updateDisabledReason}>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="Update branch options"
+                  disabled
                 >
-                  Update with rebase…
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
-      )}
+                  <CaretDownIcon />
+                </Button>
+              </span>
+            ) : (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label="Update branch options"
+                      title={updateOptionsLabel}
+                    />
+                  }
+                >
+                  <CaretDownIcon />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="min-w-48">
+                  <DropdownMenuItem
+                    disabled={updateDisabled}
+                    onClick={onUpdateWithRebase}
+                  >
+                    Update with rebase…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
+        )}
 
       {(arm === "unknown" || arm === "unreachable") && (
         <div className="flex items-center gap-1.5">

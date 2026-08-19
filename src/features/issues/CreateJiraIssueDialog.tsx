@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { required, useAppForm } from "@/lib/form";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraCreateIssue, useJiraIssueTypes } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
 import { useAiEnabled } from "@/lib/settings/queries";
@@ -130,9 +131,34 @@ export function CreateJiraIssueDialog({
       ? "Select an issue type to create the issue"
       : null;
 
+  // Shared by the Draft-with-AI button and the generate chord below.
+  function runGenerate() {
+    generate({
+      notes,
+      repoName,
+      onResult: (d) => {
+        if (d.title) form.setFieldValue("summary", d.title);
+        form.setFieldValue("body", d.body);
+      },
+    });
+  }
+  // The generate chord drafts this issue while the dialog is open. It's mounted
+  // on DialogContent, not the <form>: the X close button is a form SIBLING
+  // inside the Popup, so a form-level handler would miss a chord pressed with
+  // focus on X. The swallow is unconditional so it can't reach the global
+  // generate-commit-message action behind the dialog; while generating it
+  // swallows but DOESN'T cancel.
+  const generateChord = useGenerateChord({
+    enabled: aiEnabled && !generating && notes.trim() !== "",
+    run: runGenerate,
+  });
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+      <DialogContent
+        className="flex max-h-[85vh] flex-col sm:max-w-2xl"
+        onKeyDown={generateChord.onKeyDown}
+      >
         <form
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
@@ -238,18 +264,8 @@ export function CreateJiraIssueDialog({
                         variant="outline"
                         size="xs"
                         disabled={!notes.trim()}
-                        onClick={() =>
-                          generate({
-                            notes,
-                            repoName,
-                            onResult: (d) => {
-                              if (d.title)
-                                form.setFieldValue("summary", d.title);
-                              form.setFieldValue("body", d.body);
-                            },
-                          })
-                        }
-                        title="Expand your notes into a structured issue with AI"
+                        onClick={runGenerate}
+                        title={`Expand your notes into a structured issue with AI${generateChord.hint}`}
                       >
                         <SparkleIcon data-icon="inline-start" />
                         Draft with AI

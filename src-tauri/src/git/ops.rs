@@ -394,23 +394,55 @@ fn remove_lines(content: &str, drop: &std::collections::HashSet<u32>) -> String 
         .collect()
 }
 
-/// Mixed reset: moves the branch pointer, keeps the working tree.
+/// Moves the branch pointer to `hash`. `mode` is `"mixed"` (the default — the
+/// working tree keeps every change) or `"hard"`, which rewrites the working tree
+/// too and is therefore refused while tracked changes are outstanding: `--hard`
+/// discards them with no stash and no reflog entry to recover from.
+///
+/// `--hard` also refuses mid-operation. A paused merge/rebase/pick/revert can sit
+/// on a CLEAN tree (the sequencer's own state lives in `.git`, not the tree), so
+/// the dirty check alone would let a reset strand those markers and leave the
+/// repo claiming an operation whose commits have moved out from under it.
+///
+/// Worktree-correct without extra work: every spawn runs with `repo_path` as its
+/// cwd, so a linked worktree resets ITS own HEAD and ITS own tree.
 #[tauri::command]
 pub async fn git_reset(
     state: State<'_, AppState>,
     repo_path: String,
     hash: String,
+    mode: Option<String>,
 ) -> AppResult<()> {
-    git_reset_core(&state, repo_path, hash).await
+    git_reset_core(&state, repo_path, hash, mode).await
 }
 
 pub(crate) async fn git_reset_core(
     state: &AppState,
     repo_path: String,
     hash: String,
+    mode: Option<String>,
 ) -> AppResult<()> {
     validate_hash(&hash)?;
-    run_git_mutating(state, &repo_path, &["reset", "--mixed", &hash], DEFAULT_TIMEOUT).await?;
+    let hard = match mode.as_deref() {
+        None | Some("mixed") => false,
+        Some("hard") => true,
+        Some(other) => {
+            return Err(AppError::InvalidArgument(format!(
+                "unknown reset mode: {other}"
+            )))
+        }
+    };
+    if hard {
+        ensure_clean_tree(&repo_path).await?;
+        if op_state(&repo_path).await?.mid_op() {
+            return Err(AppError::InvalidArgument(
+                "an operation is still in progress — finish or abort it before resetting"
+                    .into(),
+            ));
+        }
+    }
+    let flag = if hard { "--hard" } else { "--mixed" };
+    run_git_mutating(state, &repo_path, &["reset", flag, &hash], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -4610,6 +4642,150 @@ mod tests {
         git(&repo, &["add", "a.txt"]).await;
         assert!(ensure_clean_tree(&repo).await.is_err());
 
+    }
+
+    /// Working-tree content with line endings normalized: an ambient
+    /// `core.autocrlf=true` (the Windows default) materializes committed `\n` as
+    /// `\r\n`, which would false-fail every content assertion below.
+    fn tree_text(dir: &std::path::Path, file: &str) -> String {
+        std::fs::read_to_string(dir.join(file))
+            .unwrap()
+            .replace("\r\n", "\n")
+    }
+
+    /// `--hard` mode moves HEAD *and* rewrites the working tree; `--mixed` (the
+    /// default every existing caller gets) moves the pointer alone.
+    #[tokio::test]
+    async fn reset_hard_moves_the_tree_and_mixed_leaves_it() {
+        let (dir, repo) = setup_repo("reset-hard").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let state = AppState::default();
+
+        // Default mode: the pointer rewinds, the file keeps the newer content.
+        git_reset_core(&state, repo.clone(), base.clone(), None)
+            .await
+            .expect("mixed reset succeeds");
+        assert_eq!(rev(&repo, "HEAD").await, base);
+        assert_eq!(
+            tree_text(dir.path(), "a.txt"),
+            "v1\n",
+            "a mixed reset must not touch the working tree"
+        );
+
+        // Hard mode from a clean tree: both move.
+        git(&repo, &["reset", "--hard", &tip]).await;
+        git_reset_core(&state, repo.clone(), base.clone(), Some("hard".into()))
+            .await
+            .expect("hard reset succeeds");
+        assert_eq!(rev(&repo, "HEAD").await, base);
+        assert_eq!(
+            tree_text(dir.path(), "a.txt"),
+            "v0\n",
+            "a hard reset rewrites the working tree to the target commit"
+        );
+    }
+
+    /// The guard that makes `--hard` safe to offer: uncommitted tracked work is a
+    /// typed refusal, not a discarded file. The second half is the destruction
+    /// control — the same `reset --hard` run WITHOUT the guard eats the edit, so
+    /// the refusal is provably what saved it.
+    #[tokio::test]
+    async fn reset_hard_refuses_a_dirty_tree_and_leaves_it_untouched() {
+        let (dir, repo) = setup_repo("reset-hard-dirty").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        std::fs::write(dir.path().join("a.txt"), "uncommitted work\n").unwrap();
+        let state = AppState::default();
+
+        let err = git_reset_core(&state, repo.clone(), base.clone(), Some("hard".into()))
+            .await
+            .expect_err("a dirty tree must refuse a hard reset");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("uncommitted changes")),
+            "the refusal must name the remedy, got {err:?}"
+        );
+        assert_eq!(
+            tree_text(dir.path(), "a.txt"),
+            "uncommitted work\n",
+            "the edit survives"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, tip, "and HEAD never moved");
+
+        // Destruction control: git itself has no such scruples.
+        git(&repo, &["reset", "--hard", &base]).await;
+        assert_eq!(
+            tree_text(dir.path(), "a.txt"),
+            "v0\n",
+            "an unguarded hard reset destroys exactly what the refusal protects"
+        );
+    }
+
+    /// A paused sequencer sits on a CLEAN tree, so the dirty check alone lets a
+    /// hard reset through and strands the operation's markers. The op-state guard
+    /// is what refuses it.
+    #[tokio::test]
+    async fn reset_hard_refuses_while_an_operation_is_in_progress() {
+        let (dir, repo) = setup_repo("reset-hard-midop").await;
+        let base = rev(&repo, "HEAD").await;
+        let start = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+        git(&repo, &["switch", &start]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+        // A conflicting merge leaves MERGE_HEAD standing.
+        let _ = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "feature"],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        assert!(
+            op_state(&repo).await.unwrap().merging,
+            "fixture must leave a merge in progress"
+        );
+        // Resolve back to HEAD's own content so the index matches it and the tree
+        // reads CLEAN — this is the whole point: only the operation marker is left
+        // to refuse, so a pass here can't be the dirty check doing the work.
+        git(&repo, &["checkout", "--ours", "--", "a.txt"]).await;
+        git(&repo, &["add", "a.txt"]).await;
+        assert!(
+            ensure_clean_tree(&repo).await.is_ok(),
+            "fixture must leave a CLEAN tree, or this test proves nothing new"
+        );
+
+        let state = AppState::default();
+        let tip = rev(&repo, "HEAD").await;
+        let err = git_reset_core(&state, repo.clone(), base.clone(), Some("hard".into()))
+            .await
+            .expect_err("a mid-operation hard reset must refuse");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("in progress")),
+            "got {err:?}"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, tip, "HEAD never moved");
+        assert!(
+            op_state(&repo).await.unwrap().merging,
+            "and the operation's markers are still there to finish or abort"
+        );
+    }
+
+    /// An unrecognized mode is rejected before any git runs, so a typo can never
+    /// silently degrade to the destructive arm — or to the harmless one.
+    #[tokio::test]
+    async fn reset_rejects_an_unknown_mode() {
+        let (_dir, repo) = setup_repo("reset-mode").await;
+        let base = rev(&repo, "HEAD").await;
+        let state = AppState::default();
+        let err = git_reset_core(&state, repo, base, Some("keep".into()))
+            .await
+            .expect_err("unknown modes are refused");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("keep")),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]

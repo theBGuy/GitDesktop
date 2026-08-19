@@ -550,7 +550,9 @@ export const ACTIONS = [
   },
   {
     id: "generate-commit-message",
-    label: "Generate commit message (AI)",
+    // The id is persisted in user rebindings, so it keeps its commit-box origin;
+    // the chord now drives whatever Generate surface is on screen.
+    label: "Generate with AI",
     category: "Changes",
     defaultBinding: "mod+g",
   },

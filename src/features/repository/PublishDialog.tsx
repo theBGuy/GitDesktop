@@ -15,6 +15,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { required, useAppForm } from "@/lib/form";
 import { useBbWorkspaces, usePublishRepo } from "@/lib/git/queries";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { useGenerateRepoDescription } from "../repo-settings/useGenerateRepoDescription";
@@ -147,9 +148,36 @@ export function PublishDialog({
     if (open && isBitbucket) seedWorkspace(defaultWorkspace);
   }, [open, isBitbucket, defaultWorkspace]);
 
+  // Shared by the Generate button and the generate chord below.
+  function runGenerate() {
+    descGen.generate({
+      repoName: nameVal.trim() || defaultName,
+      onResult: ({ description, topics }) => {
+        if (description) {
+          form.setFieldValue("description", description);
+        }
+        // Bitbucket has no topics field — drop that arm.
+        if (!isBitbucket && topics.length) {
+          form.setFieldValue("topics", topics.join(" "));
+        }
+      },
+    });
+  }
+  // This dialog opens from the header over any tab, including Changes where the
+  // global generate-commit-message action is live — so the chord is swallowed
+  // here whether or not it can generate. Mounted on DialogContent, not the
+  // <form>: the X close button is a form SIBLING inside the Popup.
+  const generateChord = useGenerateChord({
+    enabled: aiEnabled && !descGen.generating,
+    run: runGenerate,
+  });
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] flex-col">
+      <DialogContent
+        className="flex max-h-[85vh] flex-col"
+        onKeyDown={generateChord.onKeyDown}
+      >
         <form
           className="flex min-h-0 flex-col gap-4"
           onSubmit={(e) => {
@@ -236,24 +264,11 @@ export function PublishDialog({
                     type="button"
                     variant="ghost"
                     size="xs"
-                    onClick={() =>
-                      descGen.generate({
-                        repoName: nameVal.trim() || defaultName,
-                        onResult: ({ description, topics }) => {
-                          if (description) {
-                            form.setFieldValue("description", description);
-                          }
-                          // Bitbucket has no topics field — drop that arm.
-                          if (!isBitbucket && topics.length) {
-                            form.setFieldValue("topics", topics.join(" "));
-                          }
-                        },
-                      })
-                    }
+                    onClick={runGenerate}
                     title={
                       isBitbucket
-                        ? "Suggest a description from the README with AI"
-                        : "Suggest a description + topics from the README with AI"
+                        ? `Suggest a description from the README with AI${generateChord.hint}`
+                        : `Suggest a description + topics from the README with AI${generateChord.hint}`
                     }
                   >
                     <SparkleIcon data-icon="inline-start" />

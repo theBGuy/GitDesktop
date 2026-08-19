@@ -24,6 +24,7 @@ import {
   useUpdateRepoSettings,
 } from "@/lib/git/queries";
 import type { Branch, RepoSettings, RepoSettingsInput } from "@/lib/git/types";
+import { usePublishGenerateAction } from "@/lib/hotkeys/useGenerateChord";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -232,6 +233,23 @@ function GeneralForm({
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  // Shared by the Generate button and the settings dialog's generate chord,
+  // which this publishes to — the shell owns the chord because it owns the
+  // DialogContent every section renders inside.
+  function runGenerate() {
+    descGen.generate({
+      repoName,
+      onResult: ({ description, topics }) => {
+        if (description) set("description", description);
+        if (topics.length) set("topics", normalizeTopics(topics));
+      },
+    });
+  }
+  const { hint: generateHint } = usePublishGenerateAction(
+    aiEnabled && aiConfigured && !descGen.generating,
+    runGenerate,
+  );
+
   const mergeValid =
     form.allowSquashMerge || form.allowMergeCommit || form.allowRebaseMerge;
   const dirty = JSON.stringify(form) !== JSON.stringify(base);
@@ -281,15 +299,8 @@ function GeneralForm({
               type="button"
               variant="ghost"
               size="xs"
-              onClick={() =>
-                descGen.generate({
-                  repoName,
-                  onResult: ({ description, topics }) => {
-                    if (description) set("description", description);
-                    if (topics.length) set("topics", normalizeTopics(topics));
-                  },
-                })
-              }
+              title={`Suggest a description + topics from the README with AI${generateHint}`}
+              onClick={runGenerate}
             >
               <SparkleIcon data-icon="inline-start" />
               Generate

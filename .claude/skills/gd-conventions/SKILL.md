@@ -96,6 +96,15 @@ dialog.
   chips, the discussion upvote chip) take the SAME contract from the shared
   `useDisabledReason` hook + `ARIA_DISABLED_CLASS`
   (`src/lib/use-disabled-reason.ts`) — never hand-rolled.
+- The AI-generate chord in a dialog goes through `useGenerateChord`
+  (`src/lib/hotkeys/useGenerateChord.ts`) — never a hand-rolled handler. Its
+  invariants: effective-binding read (null = fully inert), `eventToBinding`
+  match, `preventDefault` before `enabled` on any surface WITH a generator,
+  run only under the visible button's gate, swallow-don't-cancel while
+  generating, handler mounted on `DialogContent` (the X close is a form
+  sibling). The hook returns the `hint` string so buttons can't forget it.
+  Recorded exception: surfaces with several per-row generators and no
+  focused-row concept (Edit history's reword buttons) carry no chord.
 - Worktree actions gate on in-flight removal/promote state: menu items disable
   with the parenthetical reason riding the label (a disabled menu item can't
   carry a tooltip), and mutation choke points re-check at fire time —
@@ -155,6 +164,14 @@ clickables add `cursor-pointer` at the call site (vendored Button sets none).
 
 - **Large ints over IPC:** snowflake/`u64` ids lose precision as JS numbers —
   serialize as strings end-to-end.
+- **Advisory probes fail SAFE toward inaction:** a probe whose verdict can
+  unlock a destructive offer (`BranchRewriteStatus` is the model) returns
+  "unknown" on ANY failed sub-probe — never a defaulted count — and callers
+  render exactly what they render without the data. The unlock condition
+  must rest on measured evidence (e.g. rewrite = reflog miss AND
+  patch-twins present — strong evidence, not proof; the failure direction
+  stays inaction), and the destructive action targets the measured sha,
+  never a re-resolved ref.
 - **GraphQL nullability:** fields without `!` deserialize into `Option<T>`;
   never `unwrap_or_default()` a `from_value`; confirm a field exists before
   querying it.

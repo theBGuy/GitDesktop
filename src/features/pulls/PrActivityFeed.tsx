@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
 import { RelativeTime } from "@/components/relative-time";
 import {
   AuthorAvatar,
@@ -121,6 +121,40 @@ export function usePrThreadClaims(
 }
 
 /**
+ * A feed row carrying its review's id. `data-review-id` is a DOM contract the
+ * reveal seam reads; the row also scrolls ITSELF via a layout effect on its own
+ * ref, so a row that only just mounted still lands — no frame racing — and then
+ * clears the request through `onRevealed`.
+ */
+function ReviewAnchor({
+  reviewId,
+  revealTarget,
+  onRevealed,
+  className,
+  children,
+}: {
+  reviewId: string;
+  revealTarget: boolean;
+  onRevealed?: () => void;
+  className?: string;
+  children: ReactNode;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!revealTarget) return;
+    const node = rootRef.current;
+    if (!node) return;
+    node.scrollIntoView({ block: "nearest", behavior: "auto" });
+    onRevealed?.();
+  }, [revealTarget, onRevealed]);
+  return (
+    <div ref={rootRef} data-review-id={reviewId} className={className}>
+      {children}
+    </div>
+  );
+}
+
+/**
  * The remote PR's merged activity feed: reviews + comments + commits + timeline
  * events, date-sorted oldest→newest. Each source maps to a {date, sortKey, node}
  * entry so the sort is provider-neutral; adjacent commit entries coalesce into
@@ -144,6 +178,8 @@ export function PrActivityFeed({
   disabledReason,
   revealThreadId,
   setRevealThreadId,
+  revealReviewId,
+  onReviewRevealed,
   setSection,
   onSelectCommit,
   canWrite,
@@ -177,6 +213,11 @@ export function PrActivityFeed({
   disabledReason: string | undefined;
   revealThreadId: string | null;
   setRevealThreadId: (threadId: string | null) => void;
+  /** The review a notification's click-through asked to land on; that row scrolls
+   *  itself. Null (and always so off GitHub, which mints no review ids). */
+  revealReviewId?: string | null;
+  /** Cleared by the row once it has scrolled itself into view for a reveal. */
+  onReviewRevealed?: () => void;
   /** Bring the Conversation tab forward — see the "View thread" handler. */
   setSection: (section: "conversation") => void;
   /** Drill into a commit from a grouped push row. */
@@ -244,6 +285,10 @@ export function PrActivityFeed({
   // A stale APPROVED/CHANGES_REQUESTED review (dated before the newest
   // commit) gets a warning marker after its card.
   for (const r of renderedReviews) {
+    // GitLab/Bitbucket reviews carry an EMPTY id, so equality alone would let a
+    // blank request claim every one of them at once; a reveal request is always
+    // a real GitHub node id.
+    const revealTarget = !!revealReviewId && revealReviewId === r.id;
     // A wrapper review renders as a compact row instead of an empty
     // "commented" card, with a jump link when its thread was fetched.
     if (wrapperReviewIds.has(r.id)) {
@@ -255,8 +300,11 @@ export function PrActivityFeed({
         date: r.date,
         sortKey: 1,
         node: (
-          <div
+          <ReviewAnchor
             key={`reply-wrap-${r.id || `${r.author}-${r.date}`}`}
+            reviewId={r.id}
+            revealTarget={revealTarget}
+            onRevealed={onReviewRevealed}
             className="flex items-start gap-2 text-xs"
           >
             <AuthorAvatar login={r.author} avatarUrl={r.authorAvatarUrl} />
@@ -289,7 +337,7 @@ export function PrActivityFeed({
                 </span>
               )}
             </div>
-          </div>
+          </ReviewAnchor>
         ),
       });
       continue;
@@ -315,7 +363,12 @@ export function PrActivityFeed({
       date: r.date,
       sortKey: 1,
       node: (
-        <div key={`review-${r.id || `${r.author}-${r.date}`}`}>
+        <ReviewAnchor
+          key={`review-${r.id || `${r.author}-${r.date}`}`}
+          reviewId={r.id}
+          revealTarget={revealTarget}
+          onRevealed={onReviewRevealed}
+        >
           <Thread
             thread={r}
             onQuote={
@@ -352,7 +405,7 @@ export function PrActivityFeed({
               />
             </div>
           )}
-        </div>
+        </ReviewAnchor>
       ),
     });
   }

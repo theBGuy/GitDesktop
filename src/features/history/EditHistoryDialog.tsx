@@ -31,6 +31,7 @@ import {
   useUnpushedMessages,
 } from "@/lib/git/queries";
 import type { CommitSummary } from "@/lib/git/types";
+import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
@@ -120,6 +121,7 @@ export function EditHistoryDialog({
   // mirrors it for the async completion callback (which fires after streaming).
   const [genHash, setGenHash] = useState<string | null>(null);
   const genHashRef = useLatestRef(genHash);
+  const aiEnabled = useAiEnabled();
   const ai = useGenerateSquashMessage(repoPath, (message) => {
     const h = genHashRef.current;
     if (h) setOverrides((o) => ({ ...o, [h]: message }));
@@ -319,7 +321,8 @@ export function EditHistoryDialog({
                         }))
                       }
                     />
-                    {row.action === "reword" &&
+                    {aiEnabled &&
+                      row.action === "reword" &&
                       (ai.generating && genHash === row.hash ? (
                         <Button
                           type="button"

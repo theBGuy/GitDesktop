@@ -55,6 +55,11 @@ import {
   type Webhook,
   type WebhookInput,
 } from "@/lib/git/types";
+import {
+  GenerateActionContext,
+  useGenerateActionSink,
+  useGenerateChord,
+} from "@/lib/hotkeys/useGenerateChord";
 import { quickTransition } from "@/lib/motion";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -336,12 +341,30 @@ export function RepoSettingsDialog({
       ? undefined
       : SECTION_BODIES[activeSection][provider];
 
+  // The generate chord belongs to whichever section is showing a Generate
+  // affordance — only the General sections have one, and they publish it here,
+  // keyed by the section they mounted under so the crossfade's outgoing section
+  // can't answer the chord (see `useGenerateActionSink`).
+  // The swallow below is unconditional whatever the active section: this dialog
+  // opens over any tab, including Changes where the global
+  // generate-commit-message action is live, so a chord that leaked would write
+  // a commit message behind the dialog. `enabled: true` is that swallow; the
+  // published action's own gate decides whether anything actually runs.
+  const generate = useGenerateActionSink(activeSection);
+  const generateChord = useGenerateChord({
+    enabled: true,
+    run: generate.runPublished,
+  });
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* Fixed, calm height so switching sections never resizes the dialog; the
           body column scrolls (overflow-y-auto) so a long form / many webhooks
           stay contained while the rail stays put. Caps to 85vh on short screens. */}
-      <DialogContent className="flex h-150 max-h-[85vh] flex-col sm:max-w-3xl">
+      <DialogContent
+        className="flex h-150 max-h-[85vh] flex-col sm:max-w-3xl"
+        onKeyDown={generateChord.onKeyDown}
+      >
         <DialogHeader>
           <DialogTitle>Repository settings</DialogTitle>
           <DialogDescription>
@@ -374,7 +397,9 @@ export function RepoSettingsDialog({
                 exit={{ opacity: 0 }}
                 transition={reduceMotion ? { duration: 0 } : quickTransition}
               >
-                {Body && <Body repoPath={repoPath} open={open} />}
+                <GenerateActionContext value={generate.sink}>
+                  {Body && <Body repoPath={repoPath} open={open} />}
+                </GenerateActionContext>
                 {activeSection === "danger" && (
                   <DangerZone
                     repoPath={repoPath}

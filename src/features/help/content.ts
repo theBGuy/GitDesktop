@@ -477,7 +477,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   Run it with uncommitted changes and it offers to stash them, rebase, and put them back
   (see *Stash and reapply*).
 - **Update a branch from its own upstream** without switching to it: when a branch is
-  behind the remote it tracks, its context menu offers **Update from _origin/…_**. This
+  behind the remote it tracks, its context menu offers **Update from _origin/…_**. If the
+  remote was rewritten (a rebase or force-push) and every commit here already landed
+  upstream under new ids, the item becomes a confirmed **Reset to _origin/…_** instead —
+  and when you still have commits of your own on top of a proven rewrite, the update is
+  disabled with the reason, since a merge would duplicate the rewritten history. This
   is the "just merged a PR — bring the default branch current before I switch back" flow;
   every branch's row shows its own push/pull state (↑/↓ vs. its upstream) after a fetch, so
   the branches with commits to pull are visible at a glance, and *Update default branch from
@@ -668,6 +672,11 @@ already updated your view of the remote. On a Git older than 2.30, or a branch w
 reflog for the check to read, the push falls back to \`--force-with-lease\` alone, and the
 success toast says so. When the remote has moved since your last look, the blocked
 push explains it in plain words, with Git's full output one click away under **Details**.
+And when it's the **remote** that was rewritten (a server-side rebase, like GitHub's
+*Update branch → rebase*) and every commit of yours already landed upstream under new
+ids, the force-push confirmation warns that pushing would put the old history back,
+and the Pull menu offers a confirmed **Reset to _origin/…_** that lines the two up
+instead.
 
 ## Resolving conflicts
 
@@ -828,7 +837,11 @@ too — no default shortcut, so give it one in **Settings → Keyboard**.
 
 When an open pull request merges cleanly but its base has moved on since, that same
 strip reads **This branch is N commits behind \`main\`**, and **Update branch** brings
-the head up to date on the forge — a merge of the base into it. GitHub runs that update
+the head up to date on the forge — a merge of the base into it. One exception: on a
+**promotion** pull request (one whose head is the repository's default branch, like
+\`main\` → \`staging\`) that gap is expected and doesn't need closing, so the strip says
+so and **Update branch** is withheld, since it would merge the base back into your
+default branch. GitHub runs that update
 as a background job, so the strip switches to **GitHub is updating this branch from
 \`main\`…** — controls disabled, the reason on hover — and holds there until a fresh
 comparison shows the head caught up, which is when the confirmation arrives. If GitHub
@@ -860,7 +873,8 @@ base branch's protection rules.**
 
 Where the head is also behind its base, the refusal says so in the same breath and
 **Update branch** stays on the strip, so a blocked pull request never loses the route
-to updating it.
+to updating it — except on a promotion pull request, where the update stays withheld
+for the same reason as above.
 
 **Merge** stays available throughout. Whoever holds bypass permission on those rules
 can merge anyway, and nothing GitDesktop can read from here says whether you're one of
@@ -1004,8 +1018,10 @@ deliberate, documented decision isn't re-flagged. Notes present here also ground
 select, so you can **retarget** a pull request at a different branch without recreating it —
 on GitHub, GitLab, and Bitbucket alike. On a **stacked GitHub** pull request that select is
 disabled, since the stack decides what each member targets: dissolve the stack first (see
-*Stacked pull requests* below) and the base is yours to change again.{{ai}} While a PR dialog
-is open, {{kbd:generate-commit-message}} runs its **Generate** for you.{{/ai}}
+*Stacked pull requests* below) and the base is yours to change again.{{ai}} While a
+dialog with a single **Generate** button is open (pull request, branch, issue draft,
+release notes, squash message, script, publish, or repo settings),
+{{kbd:generate-commit-message}} runs that dialog's own Generate for you.{{/ai}}
 
 ## GitLab merge requests
 
@@ -1095,8 +1111,9 @@ default shortcut, so give them one in **Settings → Keyboard** if you want them
 On **GitHub**, merging is **stack-aware**: merging a stacked pull request merges it *and*
 every still-open pull request below it, bottom-up, as a single operation, so the stack
 lands in dependency order without you walking it by hand — or, when the base branch uses a
-**merge queue**, is handed to the queue and lands when it clears, the head branch left in
-place for it. Before you confirm, the merge dialog **spells out the full scope of the
+**merge queue**, is handed to the queue and lands when it clears, the head branch left
+in place for it — a **Queued to merge** chip stays on the pull request until it lands,
+for the rest of the session. Before you confirm, the merge dialog **spells out the full scope of the
 merge** — naming each pull request it will merge, in the order they'll go in, whenever it
 has the list.
 
@@ -2160,7 +2177,8 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
   {{kbd:delete-branch}} delete · {{kbd:update-from-default}} update from default ·
   {{kbd:stash-all}} stash all.
 - **Changes:** {{kbd:commit}} commit{{ai}} · {{kbd:generate-commit-message}} generate
-  commit message{{/ai}} · {{kbd:undo-commit}} undo last commit.
+  with AI (the open dialog's Generate when one is up){{/ai}} · {{kbd:undo-commit}} undo
+  last commit.
 - **Pull requests:** {{kbd:create-pr}} create pull request.
 {{ai}}- **Agent:** {{kbd:agent-toggle-terminal}} toggle the session terminal.
 {{/ai}}
@@ -2205,8 +2223,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump
   to it, arrow-key through the list, and clear items or mark all read. A
-  pull-request entry opens that PR on the tab its event happened on, so a new
-  comment or approval lands on **Conversation**.{{ai}} A review still running shows
+  pull-request entry opens that PR on the tab its event happened on, under the
+  fork/upstream view it belongs to, so a new comment or approval lands on
+  **Conversation** — and a review entry scrolls to the review itself.{{ai}} A review still running shows
   a live **elapsed timer** so you can see how long it's taken. When an
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and

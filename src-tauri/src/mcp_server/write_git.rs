@@ -827,7 +827,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
         ensure_not_flag(&args.sha, "sha")?;
-        crate::git::ops::git_reset_core(&self.state, self.repo.clone(), args.sha.clone())
+        crate::git::ops::git_reset_core(&self.state, self.repo.clone(), args.sha.clone(), None)
             .await
             .map_err(app_err)?;
         ok_text(format!("reset to {}", args.sha))

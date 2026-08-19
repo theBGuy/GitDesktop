@@ -686,6 +686,282 @@ pub async fn git_branch_divergence(
     Ok(result)
 }
 
+/// Evidence for telling a server-side REWRITE of a branch's upstream (GitHub's
+/// "Update branch → rebase", any remote rebase or force-push) apart from ordinary
+/// two-sided divergence — the two need OPPOSITE remedies, so the app must not
+/// guess.
+///
+/// `remote_rewritten` answers one narrow question: is the upstream tip absent
+/// from this branch's own reflog, i.e. has the branch ever literally been AT it.
+/// That is a membership test over the same reflog `--force-if-includes` walks,
+/// but a weaker question than the flag's — the flag asks whether the remote tip
+/// is REACHABLE from some reflog entry, so a branch that saw the tip and then
+/// merged or rebased past it satisfies the flag and fails this test. Those
+/// shapes land on the ordinary-divergence arms, which is the safe direction.
+///
+/// It is NOT proof of a rewrite on its own either — ordinary divergence looks
+/// identical (measured). Only paired with `local_only == 0` (no local commit
+/// lacks a patch-twin upstream) does it describe the shape a rewrite produces,
+/// and only that pair may drive a reset-to-upstream offer.
+///
+/// `None` means nothing was provable — no upstream, no reflog, or any failed
+/// probe — and callers MUST then render exactly what they render without this
+/// data. The inverse of [`branch_has_reflog`](crate::git::remote)'s fail-safe on
+/// purpose: there, an unrunnable probe must not unlock a degraded push; here, it
+/// must not unlock a destructive offer.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchRewriteStatus {
+    /// `Some(true)` = the upstream tip is not in the branch's reflog.
+    pub remote_rewritten: Option<bool>,
+    /// Commits on the branch with NO patch-equivalent upstream — exactly the work
+    /// a reset to the upstream would destroy.
+    pub local_only: u32,
+    /// Commits on the upstream with no patch-equivalent locally.
+    pub remote_only: u32,
+    /// Commits `--cherry-mark` matched by patch id. It counts BOTH sides' members
+    /// of each pair (measured, git 2.51.1), so a clean N-commit rebase reports
+    /// `2 * N` — user-facing copy must not present it as a commit count.
+    pub patch_equal: u32,
+    /// The upstream's short name (e.g. `origin/feature`).
+    pub upstream: Option<String>,
+    /// The upstream tip's sha. A confirmed reset targets THIS commit rather than
+    /// re-resolving the ref, so it can only ever land on the state the user was
+    /// shown — and it keeps `git_reset`'s hex-only validator intact.
+    pub upstream_tip: Option<String>,
+}
+
+impl BranchRewriteStatus {
+    /// The "nothing provable" answer — every arm that can't complete a probe.
+    fn unknown() -> Self {
+        Self {
+            remote_rewritten: None,
+            local_only: 0,
+            remote_only: 0,
+            patch_equal: 0,
+            upstream: None,
+            upstream_tip: None,
+        }
+    }
+}
+
+/// Classifies a diverged branch against its upstream. Read-only: every spawn is
+/// a `rev-parse`/`rev-list`, so this is safe to call from a menu-open path.
+#[tauri::command]
+pub async fn git_branch_rewrite_status(
+    repo_path: String,
+    branch: String,
+) -> AppResult<BranchRewriteStatus> {
+    branch_rewrite_status(&repo_path, &branch).await
+}
+
+pub(crate) async fn branch_rewrite_status(
+    repo_path: &str,
+    branch: &str,
+) -> AppResult<BranchRewriteStatus> {
+    validate_branch_name(branch)?;
+    let upstream_rev = format!("{branch}@{{upstream}}");
+
+    // No upstream at all → nothing to compare against. `rev-parse` exits non-zero
+    // and writes its own diagnostic; that is a normal answer here, not a failure.
+    let short = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--abbrev-ref", &upstream_rev],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if short.code != 0 {
+        return Ok(BranchRewriteStatus::unknown());
+    }
+    let upstream = short.stdout_lossy().trim().to_string();
+    if upstream.is_empty() {
+        return Ok(BranchRewriteStatus::unknown());
+    }
+
+    let tip_out = run_git_raw(
+        Some(repo_path),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{upstream_rev}^{{commit}}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if tip_out.code != 0 {
+        return Ok(BranchRewriteStatus::unknown());
+    }
+    let tip = tip_out.stdout_lossy().trim().to_string();
+    if tip.is_empty() {
+        return Ok(BranchRewriteStatus::unknown());
+    }
+
+    // Symmetric difference with patch-id matching: left = branch-only, right =
+    // upstream-only, third = the patch-equal commits `--cherry-mark` paired off.
+    let counts = run_git_raw(
+        Some(repo_path),
+        &[
+            "rev-list",
+            "--left-right",
+            "--cherry-mark",
+            "--count",
+            &format!("{branch}...{upstream_rev}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if counts.code != 0 {
+        return Ok(BranchRewriteStatus::unknown());
+    }
+    let Some((local_only, remote_only, patch_equal)) =
+        parse_cherry_counts(&counts.stdout_lossy())
+    else {
+        return Ok(BranchRewriteStatus::unknown());
+    };
+
+    // `--walk-reflogs` lists the commit each of the branch's reflog entries names.
+    // A branch with no reflog (core.logAllRefUpdates=false, or an expired one)
+    // yields nothing to walk, which cannot distinguish anything — verdict stays
+    // `None` rather than reading absence as a rewrite.
+    let reflog = run_git_raw(
+        Some(repo_path),
+        &["rev-list", "--walk-reflogs", branch],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let reflog_text = reflog.stdout_lossy();
+    let mut entries = reflog_text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let remote_rewritten = if reflog.code != 0 {
+        None
+    } else {
+        let mut seen = false;
+        let contains = entries.any(|l| {
+            seen = true;
+            l == tip
+        });
+        // `any` short-circuits, so a hit leaves `seen` true; a miss walked the
+        // whole list and `seen` distinguishes "no entries" from "not found".
+        if contains {
+            Some(false)
+        } else if seen {
+            Some(true)
+        } else {
+            None
+        }
+    };
+
+    Ok(BranchRewriteStatus {
+        remote_rewritten,
+        local_only,
+        remote_only,
+        patch_equal,
+        upstream: Some(upstream),
+        upstream_tip: Some(tip),
+    })
+}
+
+/// Parses `rev-list --left-right --cherry-mark --count`'s reply into
+/// `(local_only, remote_only, patch_equal)`.
+///
+/// ALL THREE or nothing. A per-field default would fabricate `local_only == 0`,
+/// which is half of the pair that unlocks the destructive reset offer — the one
+/// value this must never invent, so an unreadable line answers `None` and the
+/// whole status degrades to "nothing provable".
+fn parse_cherry_counts(text: &str) -> Option<(u32, u32, u32)> {
+    let mut nums = text.split_whitespace();
+    let mut next = || nums.next()?.parse::<u32>().ok();
+    Some((next()?, next()?, next()?))
+}
+
+/// Points a branch at its upstream's tip (`git branch -f`), the remedy when the
+/// remote rewrote it and nothing local is unique. Never touches a working tree,
+/// so it is the NON-current-branch half of the reset story; the current branch
+/// goes through `git_reset` in `--hard` mode, which moves the tree too.
+///
+/// Refused with the holding worktree named when the branch is checked out
+/// ANYWHERE — a linked worktree or this checkout itself: git refuses both, but
+/// only after the caller has already framed the action as available.
+///
+/// `expected_tip` is the sha the caller measured and showed the user. The
+/// upstream is re-resolved here and must still be at it, so a background fetch
+/// that moved the ref while the confirmation sat open turns into a refusal
+/// rather than a silent reset onto a state nobody approved.
+#[tauri::command]
+pub async fn git_branch_reset_to_upstream(
+    state: State<'_, AppState>,
+    repo_path: String,
+    branch: String,
+    expected_tip: String,
+) -> AppResult<()> {
+    branch_reset_to_upstream(&state, &repo_path, &branch, &expected_tip).await
+}
+
+pub(crate) async fn branch_reset_to_upstream(
+    state: &AppState,
+    repo_path: &str,
+    branch: &str,
+    expected_tip: &str,
+) -> AppResult<()> {
+    validate_branch_name(branch)?;
+    crate::git::history::validate_hash(expected_tip)?;
+    let upstream_rev = format!("{branch}@{{upstream}}");
+    let tip_out = run_git_raw(
+        Some(repo_path),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{upstream_rev}^{{commit}}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if tip_out.code != 0 {
+        return Err(AppError::InvalidArgument(format!(
+            "{branch} has no upstream branch to reset to."
+        )));
+    }
+    let tip = tip_out.stdout_lossy().trim().to_string();
+    if tip != expected_tip {
+        return Err(AppError::InvalidArgument(format!(
+            "{branch}'s upstream moved since this was measured — reopen the branch \
+             menu to see where it stands now."
+        )));
+    }
+
+    // Pre-mutation guards: git refuses both of these itself, but only after the
+    // user has confirmed a destructive action, and its wording names neither
+    // remedy. The linked-worktree probe excludes THIS checkout, so the current
+    // branch takes its own arm.
+    if let Some(path) = worktree_holding_branch(repo_path, branch).await {
+        return Err(AppError::Command(format!(
+            "{branch} is checked out in the worktree at {path} — switch that worktree \
+             to another branch (or remove it) before resetting {branch}."
+        )));
+    }
+    let current = run_git_raw(
+        Some(repo_path),
+        &["symbolic-ref", "--short", "-q", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if current.code == 0 && current.stdout_lossy().trim() == branch {
+        return Err(AppError::Command(format!(
+            "{branch} is checked out here — use Reset to {branch}'s upstream from the \
+             sync controls, which moves your working tree with it."
+        )));
+    }
+    run_git_mutating(
+        state,
+        repo_path,
+        &["branch", "-f", "--", branch, &tip],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Updates `branch` with the latest commits from `base` WITHOUT switching to it, so
 /// the user's working tree — and any watchers (vite, `tsc --watch`) — never change.
 ///
@@ -894,9 +1170,10 @@ fn unique_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_create_branch_args, git_branches, git_create_branch_core, git_default_branch,
-        git_rename_branch_core, parse_upstream_track, update_branch_from, validate_branch_name,
-        validate_ref_name,
+        branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args, git_branches,
+        git_create_branch_core, git_default_branch, git_rename_branch_core, parse_cherry_counts,
+        parse_upstream_track, update_branch_from, validate_branch_name, validate_ref_name,
+        BranchRewriteStatus,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -1395,5 +1672,447 @@ mod tests {
             None,
             "and is gone under the old one"
         );
+    }
+
+    // --- Rewrite-aware divergence (`git_branch_rewrite_status`). ---
+
+    /// Builds the shape a server-side rebase leaves behind and returns the local
+    /// clone's path: a bare `remote`, a `server` clone that rebases `feature` onto
+    /// an advanced `main` and force-pushes it, and a `local` clone that has the
+    /// PRE-rebase commits on `feature` plus a fetched view of the rewritten
+    /// upstream. `local/feature` ends up 2 ahead / 3 behind `origin/feature`, with
+    /// both of its commits patch-equal to the rewritten pair.
+    async fn server_rebase_fixture(base: &std::path::Path) -> String {
+        let remote_s = base.join("remote").to_string_lossy().into_owned();
+        run_git(
+            None,
+            &["init", "-q", "--bare", "-b", "main", &remote_s],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .expect("init bare remote");
+
+        let server = base.join("server");
+        let server_s = server.to_string_lossy().into_owned();
+        run_git(None, &["clone", "-q", &remote_s, &server_s], DEFAULT_TIMEOUT)
+            .await
+            .expect("clone server");
+        run(&server_s, &["config", "user.email", "t@t.local"]).await;
+        run(&server_s, &["config", "user.name", "T"]).await;
+        std::fs::write(server.join("seed.txt"), "seed\n").unwrap();
+        run(&server_s, &["add", "-A"]).await;
+        run(&server_s, &["commit", "-qm", "seed"]).await;
+        run(&server_s, &["push", "-q", "origin", "main"]).await;
+
+        let local = base.join("local");
+        let local_s = local.to_string_lossy().into_owned();
+        run(&remote_s, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        run_git(None, &["clone", "-q", &remote_s, &local_s], DEFAULT_TIMEOUT)
+            .await
+            .expect("clone local");
+        run(&local_s, &["config", "user.email", "t@t.local"]).await;
+        run(&local_s, &["config", "user.name", "T"]).await;
+        run(&local_s, &["switch", "-qc", "feature"]).await;
+        for n in ["one", "two"] {
+            std::fs::write(local.join(format!("{n}.txt")), format!("{n}\n")).unwrap();
+            run(&local_s, &["add", "-A"]).await;
+            run(&local_s, &["commit", "-qm", &format!("feat {n}")]).await;
+        }
+        run(&local_s, &["push", "-q", "-u", "origin", "feature"]).await;
+
+        // The server advances main, rebases feature onto it, and force-pushes —
+        // GitHub's "Update branch → rebase" in miniature.
+        run(&server_s, &["fetch", "-q", "origin"]).await;
+        std::fs::write(server.join("main.txt"), "main moved\n").unwrap();
+        run(&server_s, &["add", "-A"]).await;
+        run(&server_s, &["commit", "-qm", "main moves"]).await;
+        run(&server_s, &["push", "-q", "origin", "main"]).await;
+        run(&server_s, &["switch", "-qc", "feature", "origin/feature"]).await;
+        run(&server_s, &["rebase", "-q", "main"]).await;
+        run(&server_s, &["push", "-q", "--force", "origin", "feature"]).await;
+
+        run(&local_s, &["fetch", "-q", "origin"]).await;
+        local_s
+    }
+
+    /// The motivating case: the remote rebased this branch. Nothing local is
+    /// unique (both commits have patch-twins upstream) and the rewritten upstream
+    /// tip was never in the branch's reflog, so the verdict is a rewrite and a
+    /// reset-to-upstream is safe to offer.
+    #[tokio::test]
+    async fn rewrite_status_detects_a_server_side_rebase() {
+        let (_base, base) = temp_base("rewrite-server-rebase");
+        let local_s = server_rebase_fixture(&base).await;
+
+        let st = branch_rewrite_status(&local_s, "feature")
+            .await
+            .expect("status resolves");
+        assert_eq!(
+            st.remote_rewritten,
+            Some(true),
+            "the rewritten upstream tip is absent from the branch's reflog"
+        );
+        assert_eq!(
+            st.local_only, 0,
+            "every local commit has a patch-equivalent upstream — nothing unique to lose"
+        );
+        assert_eq!(
+            st.remote_only, 1,
+            "only the commit the server added to main is genuinely remote-only"
+        );
+        // `--cherry-mark` counts BOTH members of each matched pair.
+        assert_eq!(st.patch_equal, 4, "two commits matched on two sides");
+        assert_eq!(st.upstream.as_deref(), Some("origin/feature"));
+        assert_eq!(
+            st.upstream_tip.as_deref(),
+            Some(run(&local_s, &["rev-parse", "origin/feature"]).await.trim()),
+            "the tip a confirmed reset would land on"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the reflog containment probe. The rewrite verdict must
+    /// come from the reflog walk and nothing else: with the branch's reflog removed,
+    /// the same fixture — identical counts — must stop claiming a rewrite rather
+    /// than fall back to inferring one from `local_only == 0`.
+    #[tokio::test]
+    async fn rewrite_status_without_a_reflog_refuses_to_guess() {
+        let (_base, base) = temp_base("rewrite-no-reflog");
+        let local_s = server_rebase_fixture(&base).await;
+        std::fs::remove_file(
+            std::path::Path::new(&local_s)
+                .join(".git")
+                .join("logs")
+                .join("refs")
+                .join("heads")
+                .join("feature"),
+        )
+        .expect("drop the branch reflog");
+
+        let st = branch_rewrite_status(&local_s, "feature")
+            .await
+            .expect("status resolves");
+        assert_eq!(
+            st.remote_rewritten, None,
+            "no reflog to walk proves nothing — the UI must stay ordinary"
+        );
+        assert_eq!(
+            (st.local_only, st.remote_only),
+            (0, 1),
+            "the counts are unchanged, so only the reflog can be driving the verdict"
+        );
+    }
+
+    /// A commit made locally AFTER the rewrite lands is unique work: `local_only`
+    /// must rise above zero so the UI withholds the reset offer.
+    #[tokio::test]
+    async fn rewrite_status_counts_genuinely_local_commits() {
+        let (_base, base) = temp_base("rewrite-local-work");
+        let local_s = server_rebase_fixture(&base).await;
+        std::fs::write(
+            std::path::Path::new(&local_s).join("mine.txt"),
+            "unique\n",
+        )
+        .unwrap();
+        run(&local_s, &["add", "-A"]).await;
+        run(&local_s, &["commit", "-qm", "my own work"]).await;
+
+        let st = branch_rewrite_status(&local_s, "feature")
+            .await
+            .expect("status resolves");
+        assert_eq!(
+            st.local_only, 1,
+            "the new commit has no patch-twin upstream — resetting would destroy it"
+        );
+        assert_eq!(st.remote_rewritten, Some(true));
+    }
+
+    /// The discriminating positive case: a branch whose reflog DOES hold the
+    /// upstream tip (it was created there and only moved forward). Without this,
+    /// a probe that answered "rewritten" for every branch with a reflog would go
+    /// unnoticed — the rewrite tests alone can't tell the two apart.
+    #[tokio::test]
+    async fn rewrite_status_clears_a_branch_that_has_seen_its_upstream() {
+        let (_base, base) = temp_base("rewrite-seen-upstream");
+        let local_s = server_rebase_fixture(&base).await;
+        // Adopt the rewritten upstream, then commit on top: the branch is now
+        // plainly ahead, and its reflog holds the current upstream tip.
+        run(&local_s, &["reset", "-q", "--hard", "origin/feature"]).await;
+        std::fs::write(
+            std::path::Path::new(&local_s).join("after.txt"),
+            "after\n",
+        )
+        .unwrap();
+        run(&local_s, &["add", "-A"]).await;
+        run(&local_s, &["commit", "-qm", "after the rebase"]).await;
+
+        let st = branch_rewrite_status(&local_s, "feature")
+            .await
+            .expect("status resolves");
+        assert_eq!(
+            st.remote_rewritten,
+            Some(false),
+            "the upstream tip is in this branch's reflog — nothing was rewritten under it"
+        );
+        assert_eq!((st.local_only, st.remote_only), (1, 0));
+    }
+
+    /// ORDINARY divergence — a teammate pushed while you committed, no rewrite
+    /// anywhere. The reflog verdict reads `Some(true)` here too (you have never
+    /// been at that remote tip), which is exactly why no surface may treat the
+    /// verdict alone as a rewrite: what separates the two is `patchEqual`, zero
+    /// here and non-zero whenever commits were actually replayed.
+    #[tokio::test]
+    async fn rewrite_status_says_true_for_ordinary_divergence_with_no_twins() {
+        let (_base, base) = temp_base("rewrite-ordinary");
+        let local_s = server_rebase_fixture(&base).await;
+        // Start from a synced state, then diverge for real: one commit each side
+        // of `feature`, touching different files so nothing is patch-equal.
+        run(&local_s, &["reset", "-q", "--hard", "origin/feature"]).await;
+        let server_s = base.join("server").to_string_lossy().into_owned();
+        std::fs::write(base.join("server").join("theirs.txt"), "theirs\n").unwrap();
+        run(&server_s, &["add", "-A"]).await;
+        run(&server_s, &["commit", "-qm", "their work"]).await;
+        run(&server_s, &["push", "-q", "origin", "feature"]).await;
+        std::fs::write(
+            std::path::Path::new(&local_s).join("mine.txt"),
+            "mine\n",
+        )
+        .unwrap();
+        run(&local_s, &["add", "-A"]).await;
+        run(&local_s, &["commit", "-qm", "my work"]).await;
+        run(&local_s, &["fetch", "-q", "origin"]).await;
+
+        let st = branch_rewrite_status(&local_s, "feature")
+            .await
+            .expect("status resolves");
+        assert_eq!(
+            st.remote_rewritten,
+            Some(true),
+            "an unseen remote tip reads the same whether or not anything was rewritten"
+        );
+        assert_eq!((st.local_only, st.remote_only), (1, 1));
+        assert_eq!(
+            st.patch_equal, 0,
+            "no patch twins — the discriminator between this and a rewrite"
+        );
+    }
+
+    /// A branch with no upstream has nothing to be rewritten against, and the
+    /// answer must be the same "nothing provable" shape as a failed probe.
+    #[tokio::test]
+    async fn rewrite_status_without_an_upstream_is_unknown() {
+        let (_base, base) = temp_base("rewrite-no-upstream");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["switch", "-qc", "solo"]).await;
+
+        let st = branch_rewrite_status(&repo_s, "solo")
+            .await
+            .expect("status resolves");
+        assert_eq!(st.remote_rewritten, None);
+        assert_eq!(st.upstream, None);
+        assert_eq!(st.upstream_tip, None);
+    }
+
+    /// The wire names the TS `BranchRewriteStatus` mirror reads. `rename_all` does
+    /// NOT cover a struct's fields by inheritance from anywhere else, so the
+    /// camelCase keys are pinned here or the frontend reads `undefined` silently.
+    #[test]
+    fn rewrite_status_serializes_to_the_camel_case_wire_shape() {
+        let json = serde_json::to_string(&BranchRewriteStatus {
+            remote_rewritten: Some(true),
+            local_only: 0,
+            remote_only: 1,
+            patch_equal: 4,
+            upstream: Some("origin/feature".into()),
+            upstream_tip: Some("abc123".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"remoteRewritten":true,"localOnly":0,"remoteOnly":1,"patchEqual":4,"upstream":"origin/feature","upstreamTip":"abc123"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&BranchRewriteStatus::unknown()).unwrap(),
+            r#"{"remoteRewritten":null,"localOnly":0,"remoteOnly":0,"patchEqual":0,"upstream":null,"upstreamTip":null}"#
+        );
+    }
+
+    /// The non-current-branch remedy moves the ref and leaves the working tree —
+    /// and the branch you are actually on — untouched.
+    #[tokio::test]
+    async fn reset_to_upstream_moves_an_idle_branch() {
+        let (_base, base) = temp_base("reset-upstream-idle");
+        let local_s = server_rebase_fixture(&base).await;
+        // Step off `feature` so it is idle; `main` tracks origin/main already.
+        run(&local_s, &["switch", "-q", "main"]).await;
+        let target = run(&local_s, &["rev-parse", "origin/feature"])
+            .await
+            .trim()
+            .to_string();
+        let head_before = run(&local_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        let state = AppState::default();
+        branch_reset_to_upstream(&state, &local_s, "feature", &target)
+            .await
+            .expect("reset succeeds");
+
+        assert_eq!(
+            run(&local_s, &["rev-parse", "feature"]).await.trim(),
+            target,
+            "the branch now points at the upstream tip"
+        );
+        assert_eq!(
+            run(&local_s, &["rev-parse", "HEAD"]).await.trim(),
+            head_before,
+            "the checked-out branch never moved"
+        );
+    }
+
+    /// The pre-mutation guard: a branch checked out in ANOTHER worktree can't be
+    /// force-updated, and the refusal has to name the worktree holding it.
+    #[tokio::test]
+    async fn reset_to_upstream_refuses_and_names_the_holding_worktree() {
+        let (_base, base) = temp_base("reset-upstream-worktree");
+        let local_s = server_rebase_fixture(&base).await;
+        run(&local_s, &["switch", "-q", "main"]).await;
+        let wt = base.join("wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&local_s, &["worktree", "add", "--quiet", &wt_s, "feature"]).await;
+        let before = run(&local_s, &["rev-parse", "feature"]).await.trim().to_string();
+        let target = run(&local_s, &["rev-parse", "origin/feature"])
+            .await
+            .trim()
+            .to_string();
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &local_s, "feature", &target)
+            .await
+            .expect_err("a branch held by a worktree can't be reset");
+        let AppError::Command(msg) = &err else {
+            panic!("expected an actionable Command error, got {err:?}");
+        };
+        // The PATH, not the word "worktree": the message has to be actionable, and
+        // asserting the noun would pass on a message that never says where.
+        assert!(
+            msg.contains("feature")
+                && crate::git::worktree::normalize_wt_path(msg)
+                    .contains(&crate::git::worktree::normalize_wt_path(&wt_s)),
+            "the refusal must name the branch and the holding worktree's path: {msg}"
+        );
+        assert_eq!(
+            run(&local_s, &["rev-parse", "feature"]).await.trim(),
+            before,
+            "and the branch must not have moved"
+        );
+
+        let _ = run_git(
+            Some(&local_s),
+            &["worktree", "remove", "--force", &wt_s],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+    }
+
+    /// The stale-evidence guard. A background fetch can move the upstream while
+    /// the confirmation sits open, and `branch -f` would then land somewhere the
+    /// user never saw — so the measured sha has to survive a re-resolve.
+    #[tokio::test]
+    async fn reset_to_upstream_refuses_a_tip_that_moved_since_it_was_measured() {
+        let (_base, base) = temp_base("reset-upstream-moved");
+        let local_s = server_rebase_fixture(&base).await;
+        run(&local_s, &["switch", "-q", "main"]).await;
+        let measured = run(&local_s, &["rev-parse", "origin/feature"])
+            .await
+            .trim()
+            .to_string();
+        let before = run(&local_s, &["rev-parse", "feature"]).await.trim().to_string();
+
+        // The server pushes again; a background fetch picks it up mid-dialog.
+        let server_s = base.join("server").to_string_lossy().into_owned();
+        std::fs::write(base.join("server").join("later.txt"), "later\n").unwrap();
+        run(&server_s, &["add", "-A"]).await;
+        run(&server_s, &["commit", "-qm", "later work"]).await;
+        run(&server_s, &["push", "-q", "origin", "feature"]).await;
+        run(&local_s, &["fetch", "-q", "origin"]).await;
+        assert_ne!(
+            run(&local_s, &["rev-parse", "origin/feature"]).await.trim(),
+            measured,
+            "fixture must actually move the upstream for this to discriminate"
+        );
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &local_s, "feature", &measured)
+            .await
+            .expect_err("a moved upstream must refuse");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("moved")),
+            "the refusal must say the upstream moved, got {err:?}"
+        );
+        assert_eq!(
+            run(&local_s, &["rev-parse", "feature"]).await.trim(),
+            before,
+            "and the branch must not have moved"
+        );
+    }
+
+    /// The self-checkout arm of the same guard: `branch -f` can't touch the branch
+    /// you are ON, and the refusal has to point at the surface that CAN.
+    #[tokio::test]
+    async fn reset_to_upstream_refuses_the_branch_checked_out_here() {
+        let (_base, base) = temp_base("reset-upstream-current");
+        let local_s = server_rebase_fixture(&base).await;
+        // `feature` is the checked-out branch of this very repo path.
+        let target = run(&local_s, &["rev-parse", "origin/feature"])
+            .await
+            .trim()
+            .to_string();
+        let before = run(&local_s, &["rev-parse", "feature"]).await.trim().to_string();
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &local_s, "feature", &target)
+            .await
+            .expect_err("the current branch can't take a ref-only reset");
+        let AppError::Command(msg) = &err else {
+            panic!("expected an actionable Command error, got {err:?}");
+        };
+        assert!(
+            msg.contains("feature") && msg.contains("sync controls"),
+            "the refusal must name the branch and the surface that handles it: {msg}"
+        );
+        assert_eq!(
+            run(&local_s, &["rev-parse", "feature"]).await.trim(),
+            before,
+            "and the branch must not have moved"
+        );
+    }
+
+    /// A malformed (but exit-0) counts line must NOT default to zeros: `local_only
+    /// == 0` is half the pair that unlocks the destructive reset offer, so a
+    /// fabricated one is the worst answer this type can give. Every shape that
+    /// isn't three integers has to answer `None`, which the caller turns into the
+    /// whole "nothing provable" status.
+    #[test]
+    fn cherry_counts_parse_is_all_three_or_nothing() {
+        assert_eq!(parse_cherry_counts("0\t3\t4\n"), Some((0, 3, 4)));
+        assert_eq!(parse_cherry_counts(" 1 2 3 "), Some((1, 2, 3)));
+        // A trailing field is ignored — git prints exactly three.
+        assert_eq!(parse_cherry_counts("1\t2\t3\t9"), Some((1, 2, 3)));
+        for bad in [
+            "",                 // empty (a silenced failure)
+            "0\t3",             // truncated — the fabrication risk
+            "not-a-number",     // wrong shape entirely
+            "0\tx\t4",          // one unreadable field
+            "-1\t2\t3",         // negative can't be a u32 count
+            "0\t3\t",           // trailing separator, third field missing
+        ] {
+            assert_eq!(
+                parse_cherry_counts(bad),
+                None,
+                "{bad:?} must not yield counts"
+            );
+        }
     }
 }

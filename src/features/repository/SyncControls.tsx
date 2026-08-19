@@ -38,7 +38,9 @@ import {
   useLastFetchedAt,
 } from "@/lib/git/auto-fetch";
 import {
+  useBranchRewriteStatus,
   useFetchRemote,
+  useHardResetToCommit,
   usePull,
   usePush,
   useRemotes,
@@ -52,6 +54,7 @@ import {
 } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useSettings } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
@@ -127,11 +130,47 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // The BranchSwitcher alongside already surfaces the detached state.
   const detached = Boolean(head?.detached);
   const canUpdateUpstream = hasUpstreamRemote && !detached;
+  // Only a diverged branch has anything to classify, so the probe (several
+  // rev-list spawns) never runs on the ordinary in-sync path.
+  const rewrite = useBranchRewriteStatus(repoPath, head?.name ?? null, {
+    enabled: diverged && !detached,
+  });
+  // `isFetching` matters as much as `diverged`: a repo-wide invalidation keeps
+  // serving the previous answer while the refetch is in flight, and that answer
+  // is the evidence a destructive confirm would quote.
+  const rewriteData =
+    diverged && !rewrite.isFetching ? rewrite.data : undefined;
+  // The reflog verdict ALONE matches ordinary divergence too; only paired with
+  // "no local commit lacks a patch-twin upstream" does it describe an upstream
+  // that already carries this branch's work — and offering a reset while unique
+  // work exists would destroy it.
+  const remoteRebased =
+    rewriteData?.remoteRewritten === true &&
+    rewriteData.localOnly === 0 &&
+    Boolean(rewriteData.upstreamTip);
+  // Patch twins upstream AND commits without one: a reset would destroy the
+  // latter, a merge would re-import the former beside the copies already there.
+  // `patchEqual > 0` is strong evidence, not proof — two sides can apply the same
+  // patch independently, or cherry-pick both ways, with no rewrite involved. This
+  // arm only WITHHOLDS the merge, so its failure direction is inaction.
+  const mixedRewrite =
+    rewriteData?.remoteRewritten === true &&
+    rewriteData.localOnly > 0 &&
+    rewriteData.patchEqual > 0;
+  // Commits a force push would keep and a reset would drop. This is NOT
+  // rewrite-proof on its own — it counts the same under ordinary divergence,
+  // where the advice it carries is equally correct.
+  const localAtRisk =
+    rewriteData?.remoteRewritten === true ? rewriteData.localOnly : 0;
+  // True only where the status actually measured commits on the other side.
+  const remoteAhead = rewriteData?.remoteOnly ?? 0;
+  const hardReset = useHardResetToCommit(repoPath);
   const busy =
     fetchRemote.isPending ||
     pull.isPending ||
     push.isPending ||
     updateUpstream.isPending ||
+    hardReset.isPending ||
     detecting ||
     recovery.pending;
   const onError = (e: unknown) => toastError(e);
@@ -201,11 +240,29 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     behindCount > 0
       ? `Pull — ${behindCount} commit${behindCount === 1 ? "" : "s"} to pull from ${head?.upstream}`
       : undefined;
+  // The two diverged arms are computed up front rather than folded in as extra
+  // ternary levels: an upstream that already HOLDS these commits under other ids
+  // makes the standing "rebase or merge" advice duplicate them.
+  const attachedPushDescription = remoteRebased
+    ? `${pushLabel} — ${head?.upstream} already has your commits under different ids; force pushing would replace them with your copies`
+    : aheadLabel;
+  const divergedPullDescription = (() => {
+    if (remoteRebased)
+      return `Pull — ${head?.upstream} already has your commits under different ids; use "Reset to ${head?.upstream}" from the Pull menu`;
+    // A merge here re-imports the twinned changes beside the copies already
+    // upstream, so the menu's merge item is disabled and the advice narrows.
+    if (mixedRewrite)
+      return `Pull — ${head?.upstream} already has some of your commits under different ids and you have ${localAtRisk} it doesn't; use Pull with rebase from the menu`;
+    return `Pull — branch has diverged (${behindCount} commit${behindCount === 1 ? "" : "s"} behind ${head?.upstream}); use Pull with rebase or merge from the menu`;
+  })();
+  // One wording for the refusal, shared by the disabled menu item and the tooltip
+  // the branch menu shows for the same shape.
+  const mergeDuplicatesReason = `${head?.upstream} already carries these changes under different ids — a merge would duplicate them. Use Pull with rebase.`;
   const pushDescription = detached
     ? `${pushLabel} — you're on a detached HEAD; check out a branch to push`
-    : aheadLabel;
+    : attachedPushDescription;
   const pullDescription = diverged
-    ? `Pull — branch has diverged (${behindCount} commit${behindCount === 1 ? "" : "s"} behind ${head?.upstream}); use Pull with rebase or merge from the menu`
+    ? divergedPullDescription
     : detached
       ? "Pull — you're on a detached HEAD; check out a branch to pull"
       : head?.upstreamGone
@@ -305,6 +362,38 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           toast.success(`Merged ${ref} into your branch.`);
         }
       },
+      onError,
+    });
+  }
+
+  // The remedy when the upstream already carries this branch's commits under
+  // other ids and nothing local is unique: move the branch (and the working tree)
+  // onto the upstream tip the status was measured against, so the two match again
+  // with every commit intact.
+  async function doResetToUpstream() {
+    const branch = head?.name;
+    const upstream = head?.upstream;
+    const tip = rewriteData?.upstreamTip;
+    if (!branch || !upstream || !tip) return;
+    // The count is `ahead` rather than the status's patchEqual, which tallies
+    // both sides of every matched pair; localOnly === 0 is what shows all of them
+    // landed upstream.
+    const alreadyThere =
+      aheadCount === 1
+        ? `The only commit on ${branch} is already on ${upstream} under a different id`
+        : `All ${aheadCount} commits on ${branch} are already on ${upstream} under different ids`;
+    const ok = await useConfirm.getState().ask({
+      title: `Reset ${branch} to ${upstream}?`,
+      body: `${alreadyThere}. Resetting moves ${branch} to ${upstream}'s tip and rewrites your files to match, so no unique work is lost. Uncommitted changes block the reset — commit or stash them first.`,
+      confirmLabel: `Reset to ${upstream}`,
+      confirmVariant: "destructive",
+    });
+    if (!ok) return;
+    // HEAD can move while the dialog sits open; the captured branch is the only
+    // one the confirmation described.
+    if (headNameRef.current !== branch) return;
+    hardReset.mutate(tip, {
+      onSuccess: () => toast.success(`Reset ${branch} to ${upstream}`),
       onError,
     });
   }
@@ -478,9 +567,27 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                   <DropdownMenuItem onClick={() => doPull("rebase")}>
                     Pull with rebase
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => doPull("merge")}>
-                    Pull with merge
+                  {/* Disabled with the reason IN the label: a disabled menu item
+                      surfaces no tooltip, and the branch menu states the same
+                      refusal the same way. */}
+                  <DropdownMenuItem
+                    disabled={mixedRewrite}
+                    title={mixedRewrite ? mergeDuplicatesReason : undefined}
+                    onClick={() => doPull("merge")}
+                  >
+                    {mixedRewrite
+                      ? `Pull with merge (${head?.upstream} already carries these changes under different ids)`
+                      : "Pull with merge"}
                   </DropdownMenuItem>
+                  {/* Offered only once the probe has measured an upstream that
+                      carries every one of these commits, with no unique local
+                      work; every other divergence keeps the two pull items
+                      alone. */}
+                  {remoteRebased && (
+                    <DropdownMenuItem onClick={() => void doResetToUpstream()}>
+                      Reset to {head?.upstream}…
+                    </DropdownMenuItem>
+                  )}
                 </>
               )}
               {canUpdateUpstream && (
@@ -543,6 +650,34 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
               even work a background fetch has already seen.
             </DialogDescription>
           </DialogHeader>
+          {/* The measured arms — both state what the counts SHOW, never how the
+              upstream came to look that way (a rebase, a force push and a
+              cherry-pick all leave patch twins). `localAtRisk` counts the work
+              only this branch has, for which a rebasing pull (not a force push)
+              is the remedy — equally true under ordinary divergence. Neither arm
+              renders while the probe is unresolved. */}
+          {remoteRebased && (
+            <p className="text-muted-foreground text-sm">
+              {head?.upstream} already carries every commit on your branch under
+              different ids. Force pushing would replace them with your copies;
+              "Reset to {head?.upstream}" in the Pull menu keeps the same work
+              and matches the remote instead.
+            </p>
+          )}
+          {localAtRisk > 0 && (
+            <p className="text-muted-foreground text-sm">
+              {localAtRisk} commit{localAtRisk === 1 ? "" : "s"} exist
+              {localAtRisk === 1 ? "s" : ""} only on your branch
+              {/* Only asserted where the counts actually found commits on the
+                  other side — an amended tip plus one new local commit leaves
+                  `remoteOnly` at zero, and the clause would be false. */}
+              {remoteAhead > 0
+                ? `, and ${head?.upstream} has ${remoteAhead} commit${remoteAhead === 1 ? "" : "s"} yours doesn't`
+                : ""}
+              . Pull with rebase keeps yours and replays them on top of{" "}
+              {head?.upstream}.
+            </p>
+          )}
           <DialogFooter>
             <Button
               variant="outline"

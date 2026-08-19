@@ -21,17 +21,29 @@ export type BranchNameTarget =
    *  commits describe it — the working tree belongs to someone else. */
   | "other-branch";
 
+/** The working tree belongs to the checked-out branch, so it can only name a
+ *  new branch or that branch itself. */
+function usesWorkingTree(nameTarget: BranchNameTarget): boolean {
+  return nameTarget !== "other-branch";
+}
+
+/** The one generate pair the button and the host dialog's generate chord both
+ *  consume — see {@link useBranchNameGenerateAction}. */
+export interface BranchNameGenerateAction {
+  /** Starts the generation with the sources `nameTarget` says apply. */
+  run: () => void;
+  /** Whether generating is possible right now — the button's enabled state, and
+   *  the only gate the chord may run under. */
+  enabled: boolean;
+}
+
 /**
- * The "✧ Generate from changes" affordance shared by the create- and
- * rename-branch dialogs: suggests a branch name from the working-tree changes
- * (when they describe the branch being named) — or, failing that, from that
- * branch's committed work (`committedFallback`) — or points the user at AI
- * setup when no provider is connected. Renders nothing when AI is disabled.
- * The host dialog owns the generation stream (`gen`) so it can block its own
- * submit while a name is still being generated; the button decides only which
- * name sources apply (`nameTarget`) and where the name lands (`onName`).
+ * Derives the branch-name generation — its prompt sources and its enabled
+ * gate — once per host dialog, so the Generate button and the dialog's generate
+ * chord can't drift apart on either. The dialog owns the stream (`gen`) so it
+ * can block its own submit while a name is still generating.
  */
-export function GenerateBranchNameButton({
+export function useBranchNameGenerateAction({
   gen,
   aiEnabled,
   aiConfigured,
@@ -41,12 +53,8 @@ export function GenerateBranchNameButton({
   recentBranches,
   nameTarget,
   committedFallback,
-  committedStatus,
-  basedElsewhere,
   onName,
-  onSetupAi,
 }: {
-  /** Owned by the host dialog — see {@link BranchNameGenerator}. */
   gen: BranchNameGenerator;
   aiEnabled: boolean;
   aiConfigured: boolean;
@@ -55,6 +63,70 @@ export function GenerateBranchNameButton({
   entries: FileEntry[];
   /** Existing branch names, used as a naming-convention reference (capped). */
   recentBranches: string[];
+  nameTarget: BranchNameTarget;
+  committedFallback: CommittedNameSource | null;
+  onName: (name: string) => void;
+}): BranchNameGenerateAction {
+  const useWorkingTree = usesWorkingTree(nameTarget);
+  return {
+    enabled:
+      aiEnabled &&
+      aiConfigured &&
+      !gen.generating &&
+      headExists &&
+      ((useWorkingTree && hasChanges) || committedFallback !== null),
+    run: () =>
+      gen.generate({
+        entries,
+        recentBranches: recentBranches.slice(0, 20),
+        useWorkingTree,
+        // Only when naming the very branch those commits sit on.
+        workingTreeSubjects:
+          nameTarget === "checked-out-branch"
+            ? (committedFallback?.subjects ?? [])
+            : [],
+        committedFallback,
+        onName,
+      }),
+  };
+}
+
+/**
+ * The "✧ Generate from changes" affordance shared by the create- and
+ * rename-branch dialogs: suggests a branch name from the working-tree changes
+ * (when they describe the branch being named) — or, failing that, from that
+ * branch's committed work (`committedFallback`) — or points the user at AI
+ * setup when no provider is connected. Renders nothing when AI is disabled.
+ * The host dialog owns the generation stream (`gen`) so it can block its own
+ * submit while a name is still being generated, and hands down the `action` it
+ * shares with its generate chord; the button adds only the explanatory copy for
+ * why generating is (or isn't) available.
+ */
+export function GenerateBranchNameButton({
+  gen,
+  action,
+  hint,
+  aiEnabled,
+  aiConfigured,
+  hasChanges,
+  headExists,
+  nameTarget,
+  committedFallback,
+  committedStatus,
+  basedElsewhere,
+  onSetupAi,
+}: {
+  /** Owned by the host dialog — see {@link BranchNameGenerator}. */
+  gen: BranchNameGenerator;
+  /** Shared with the host dialog's generate chord — see
+   *  {@link useBranchNameGenerateAction}. */
+  action: BranchNameGenerateAction;
+  /** The generate chord's " (Ctrl+G)" hint; "" when it's unbound. */
+  hint: string;
+  aiEnabled: boolean;
+  aiConfigured: boolean;
+  hasChanges: boolean;
+  headExists: boolean;
   /** What the name must describe — see {@link BranchNameTarget}. */
   nameTarget: BranchNameTarget;
   /** The committed work of the branch being named, vs the default branch. Null
@@ -70,17 +142,12 @@ export function GenerateBranchNameButton({
    *  none of that work), and the disabled state must say THAT rather than
    *  claim there's no committed work. Null whenever the fallback does apply. */
   basedElsewhere: string | null;
-  onName: (name: string) => void;
   /** Close the host dialog and open AI settings. */
   onSetupAi: () => void;
 }) {
   if (!aiEnabled) return null;
-  // The working tree belongs to the checked-out branch, so it can only name a
-  // new branch or that branch itself.
-  const useWorkingTree = nameTarget !== "other-branch";
+  const useWorkingTree = usesWorkingTree(nameTarget);
   const fromWorkingTree = useWorkingTree && hasChanges;
-  const canGenerate =
-    headExists && (fromWorkingTree || committedFallback !== null);
   const reason = !headExists
     ? "Make your first commit before branching from changes"
     : fromWorkingTree
@@ -127,24 +194,13 @@ export function GenerateBranchNameButton({
           variant="ghost"
           size="xs"
           className="text-muted-foreground"
-          disabled={!canGenerate}
-          // `reason` doubles as the enabled-state hint ("Suggest a name from…").
-          reason={canGenerate ? null : reason}
-          title={reason}
-          onClick={() =>
-            gen.generate({
-              entries,
-              recentBranches: recentBranches.slice(0, 20),
-              useWorkingTree,
-              // Only when naming the very branch those commits sit on.
-              workingTreeSubjects:
-                nameTarget === "checked-out-branch"
-                  ? (committedFallback?.subjects ?? [])
-                  : [],
-              committedFallback,
-              onName,
-            })
-          }
+          disabled={!action.enabled}
+          // `reason` doubles as the enabled-state hint ("Suggest a name from…"),
+          // which is where the chord belongs — a disabled button's shortcut does
+          // nothing, so it isn't offered.
+          reason={action.enabled ? null : reason}
+          title={action.enabled ? `${reason}${hint}` : reason}
+          onClick={action.run}
         >
           <SparkleIcon data-icon="inline-start" />
           Generate from changes

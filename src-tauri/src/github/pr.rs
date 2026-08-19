@@ -2496,6 +2496,10 @@ pub struct PrPollInfo {
     /// Login of the most recent review's author — same self-suppression as
     /// `last_comment_author`. GitHub only; "" elsewhere.
     pub last_review_author: String,
+    /// Node id of the most recent review — the SAME `PRR_` id the detail view's
+    /// review rows carry, so a review notification can land on that row. GitHub
+    /// only; "" elsewhere.
+    pub last_review_id: String,
     /// Logins currently requested to review this PR — the poller notifies you
     /// when you newly appear here. GitHub only; empty for GitLab/Bitbucket.
     pub review_requests: Vec<String>,
@@ -2512,6 +2516,16 @@ pub struct PrPollInfo {
     pub created_at: String,
 }
 
+/// The poller's projection. Separate from its caller so a test can assert what
+/// it asks for: every `PrPollInfo` field the frontend keys a notification on has
+/// to be selected here, and a silently dropped selection reads as "no event".
+/// Both embeds are validated by the caller before they reach this.
+fn pr_poll_query(owner: &str, name: &str) -> String {
+    format!(
+        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequests(first:30, states:[OPEN, CLOSED, MERGED], orderBy:{{field:UPDATED_AT, direction:DESC}}){{ nodes{{ number title url state isDraft createdAt headRefName baseRefName author{{login}} reviewDecision comments(last:1){{ totalCount nodes{{ author{{ login }} }} }} reviews(last:1){{ totalCount nodes{{ id author{{ login }} }} }} reviewRequests(first:20){{ nodes{{ requestedReviewer{{ ... on User{{ login }} }} }} }} commits(last:1){{ nodes{{ commit{{ oid statusCheckRollup{{ state }} }} }} }} }} }} }} }}"#
+    )
+}
+
 /// Lightweight snapshot of the repo's recently-updated PRs for the
 /// notification poller — one GraphQL round trip including the check rollup
 /// (reliable on old gh, unlike `pr list --json statusCheckRollup`).
@@ -2526,9 +2540,7 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
     validate_graphql_embed(owner, "repository owner")?;
     validate_graphql_embed(name, "repository name")?;
 
-    let query = format!(
-        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequests(first:30, states:[OPEN, CLOSED, MERGED], orderBy:{{field:UPDATED_AT, direction:DESC}}){{ nodes{{ number title url state isDraft createdAt headRefName baseRefName author{{login}} reviewDecision comments(last:1){{ totalCount nodes{{ author{{ login }} }} }} reviews(last:1){{ totalCount nodes{{ author{{ login }} }} }} reviewRequests(first:20){{ nodes{{ requestedReviewer{{ ... on User{{ login }} }} }} }} commits(last:1){{ nodes{{ commit{{ oid statusCheckRollup{{ state }} }} }} }} }} }} }} }}"#
-    );
+    let query = pr_poll_query(owner, name);
     let out = run_gh(
         Some(&repo_path),
         &["api", "graphql", "-f", &format!("query={query}")],
@@ -2570,6 +2582,7 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
                 .and_then(|x| x.as_u64())
                 .unwrap_or(0),
             last_review_author: str_at(n, "/reviews/nodes/0/author/login"),
+            last_review_id: str_at(n, "/reviews/nodes/0/id"),
             review_requests: n
                 .pointer("/reviewRequests/nodes")
                 .and_then(|x| x.as_array())
@@ -5593,7 +5606,8 @@ mod tests {
         apply_stack_join, classify_merge_async, external_items_from_thread_nodes,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message, host_from_url,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
-        parse_auth_accounts, parse_pr_url_repo, pr_edit_args, pull_stack_ref, real_check_time,
+        parse_auth_accounts, parse_pr_url_repo, pr_edit_args, pr_poll_query, pull_stack_ref,
+        real_check_time,
         real_time_or_empty, reconstruct_pr_diff, reject_upstream_create_metadata,
         rest_comment_to_out, rest_commit_to_out, rest_pull_to_pr_info, rest_review_to_out,
         rollup_state_to_ci, scrape_pr_ref, split_commit_message, stack_members_from,
@@ -5602,7 +5616,8 @@ mod tests {
         GhPrRestComment,
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
-        GhMergeabilityRow, PrMergeability, PrStackInfo, PrStackMember, PrTimelineEventOut,
+        GhMergeabilityRow, PrMergeability, PrPollInfo, PrStackInfo, PrStackMember,
+        PrTimelineEventOut,
         batch_check_present, oid_outside_origin_graph, select_fork_pr_match, validate_branch,
         ForkPrMatch, RawForkPr, RawLogin, RawPr,
     };
@@ -6431,6 +6446,75 @@ mod tests {
             !list.contains(&"mergeable") && !list.contains(&"mergeStateStatus"),
             "got: {PR_LIST_FIELDS}"
         );
+    }
+
+    /// A review notification carries the review's node id so the click-through
+    /// lands on that review's card, and the id can only come from the poll's own
+    /// `reviews(last:1)` slice — dropping it degrades silently to a PR-level jump.
+    #[test]
+    fn poll_query_requests_the_latest_review_id() {
+        let q = pr_poll_query("owner", "repo");
+        let after = q
+            .split_once("reviews(last:1)")
+            .expect("the poll must select the latest review")
+            .1;
+        // Up to the next sibling selection, so the assertion can't be satisfied
+        // by an `id` somewhere else in the query.
+        let selection = after
+            .split_once("reviewRequests")
+            .expect("reviewRequests follows the reviews selection")
+            .0;
+        assert!(
+            selection.contains(" id "),
+            "reviews nodes must select `id`, got: {selection}"
+        );
+    }
+
+    /// The poll payload is read field-by-field in TypeScript, where a renamed or
+    /// dropped key reads as `undefined` and silently disables a notification
+    /// branch. Pin the wire names the frontend keys on; the struct literal makes a
+    /// future field a compile error here rather than a silent omission.
+    #[test]
+    fn poll_info_serializes_camel_case_wire_names() {
+        let info = PrPollInfo {
+            number: 7,
+            title: "t".into(),
+            url: "u".into(),
+            state: "OPEN".into(),
+            is_draft: false,
+            author: "a".into(),
+            review_decision: "APPROVED".into(),
+            checks_state: "SUCCESS".into(),
+            head_sha: "deadbeef".into(),
+            comment_count: 1,
+            last_comment_author: "c".into(),
+            review_count: 2,
+            last_review_author: "r".into(),
+            last_review_id: "PRR_kwDO".into(),
+            review_requests: vec!["v".into()],
+            head_ref_name: "topic".into(),
+            base_ref_name: "main".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let v = serde_json::to_value(info).expect("PrPollInfo serializes");
+        for key in [
+            "isDraft",
+            "reviewDecision",
+            "checksState",
+            "headSha",
+            "commentCount",
+            "lastCommentAuthor",
+            "reviewCount",
+            "lastReviewAuthor",
+            "lastReviewId",
+            "reviewRequests",
+            "headRefName",
+            "baseRefName",
+            "createdAt",
+        ] {
+            assert!(v.get(key).is_some(), "{key} missing from: {v}");
+        }
+        assert_eq!(v.get("lastReviewId").and_then(|x| x.as_str()), Some("PRR_kwDO"));
     }
 
     #[test]

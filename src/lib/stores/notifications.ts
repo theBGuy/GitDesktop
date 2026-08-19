@@ -1,5 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { create } from "zustand";
+import type { RemoteLens } from "@/lib/git/types";
 import { storeName } from "@/lib/test-mode";
 
 /** Semantic tone for a notification's glyph — paired with an icon + word in the
@@ -37,7 +38,21 @@ export type NotificationKind =
 /** How clicking a notification routes. Data only — the surface maps it to the UI
  *  store's atomic navigation actions, so this module stays free of view logic. */
 export type NotificationTarget =
-  | { type: "pr"; kind: "remote" | "local"; ref: string }
+  | {
+      type: "pr";
+      kind: "remote" | "local";
+      ref: string;
+      /** The origin|upstream lens the event happened under — a fork's two lenses
+       *  surface DIFFERENT pull requests at the same `ref`, so without it the
+       *  click-through lands on whichever lens the repo currently sits on.
+       *  Absent on rows persisted before this field existed; a consumer narrows
+       *  the hydrated value rather than trusting it. */
+      lens?: RemoteLens;
+      /** The review the event is about (a GitHub `PRR_` node id), so the landing
+       *  view can scroll to that review's card. Absent for non-review events and
+       *  off GitHub. */
+      reviewId?: string;
+    }
   | { type: "run"; runId: number }
   | { type: "agent" }
   | { type: "repo" };

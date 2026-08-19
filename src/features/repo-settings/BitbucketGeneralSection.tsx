@@ -23,6 +23,7 @@ import type {
   BitbucketRepoSettingsInput,
   Branch,
 } from "@/lib/git/types";
+import { usePublishGenerateAction } from "@/lib/hotkeys/useGenerateChord";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -123,6 +124,22 @@ function BitbucketGeneralForm({
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  // Shared by the Generate button and the settings dialog's generate chord,
+  // which this publishes to — the shell owns the chord because it owns the
+  // DialogContent every section renders inside.
+  function runGenerate() {
+    descGen.generate({
+      repoName,
+      onResult: ({ description }) => {
+        if (description) set("description", description);
+      },
+    });
+  }
+  const { hint: generateHint } = usePublishGenerateAction(
+    aiEnabled && aiConfigured && !descGen.generating,
+    runGenerate,
+  );
+
   const dirty = JSON.stringify(form) !== JSON.stringify(base);
 
   // Keep the current default selectable even if that branch isn't local; drop
@@ -171,14 +188,8 @@ function BitbucketGeneralForm({
               type="button"
               variant="ghost"
               size="xs"
-              onClick={() =>
-                descGen.generate({
-                  repoName,
-                  onResult: ({ description }) => {
-                    if (description) set("description", description);
-                  },
-                })
-              }
+              title={`Suggest a description from the README with AI${generateHint}`}
+              onClick={runGenerate}
             >
               <SparkleIcon data-icon="inline-start" />
               Generate

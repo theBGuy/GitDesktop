@@ -22,7 +22,9 @@ import {
 } from "@/lib/git/api";
 import { useRewriteCommits } from "@/lib/git/queries";
 import type { RewriteStep } from "@/lib/git/types";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { loadSettings } from "@/lib/settings/api";
+import { useAiEnabled } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 
 /**
@@ -120,12 +122,24 @@ export function SquashDialog({
   onDone: () => void;
 }) {
   const rewrite = useRewriteCommits(repoPath);
+  const aiEnabled = useAiEnabled();
   const ai = useGenerateSquashMessage(repoPath, (message) =>
     form.setFieldValue("message", message),
   );
   // The squash step is oldest-first, so its last hash is the run's tip;
   // diffing base..tip yields exactly the changes the new commit will hold.
   const runHead = steps.find((s) => s.hashes.length > 1)?.hashes.at(-1);
+  // The generate chord writes the squashed message while this dialog is open.
+  // Mounted on DialogContent so it also covers the X close button (a form
+  // SIBLING inside the Popup); the swallow is unconditional so it can't reach
+  // the global generate-commit-message action behind the dialog, and while
+  // generating it swallows but DOESN'T cancel.
+  const generateChord = useGenerateChord({
+    enabled: aiEnabled && !ai.generating && Boolean(runHead),
+    run: () => {
+      if (runHead) ai.generate(base, runHead);
+    },
+  });
 
   const form = useAppForm({
     defaultValues: { message: defaultMessage },
@@ -148,7 +162,7 @@ export function SquashDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent onKeyDown={generateChord.onKeyDown}>
         <form
           className="space-y-4"
           onSubmit={(e) => {
@@ -176,34 +190,35 @@ export function SquashDialog({
             )}
           </form.AppField>
           <DialogFooter className="sm:items-center">
-            {ai.generating ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="mr-auto"
-                onClick={ai.cancel}
-              >
-                <XIcon data-icon="inline-start" />
-                Cancel
-              </Button>
-            ) : (
-              // `runHead` is the collapsing step's tip, so without it there's no
-              // range to diff.
-              <DisabledReasonButton
-                type="button"
-                variant="outline"
-                size="sm"
-                wrapperClassName="mr-auto"
-                disabled={!runHead}
-                title="Generate the commit message with AI"
-                reason="Nothing to generate from — this squash has no run of commits to combine"
-                onClick={() => runHead && ai.generate(base, runHead)}
-              >
-                <SparkleIcon data-icon="inline-start" />
-                Generate
-              </DisabledReasonButton>
-            )}
+            {aiEnabled &&
+              (ai.generating ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mr-auto"
+                  onClick={ai.cancel}
+                >
+                  <XIcon data-icon="inline-start" />
+                  Cancel
+                </Button>
+              ) : (
+                // `runHead` is the collapsing step's tip, so without it there's no
+                // range to diff.
+                <DisabledReasonButton
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  wrapperClassName="mr-auto"
+                  disabled={!runHead}
+                  title={`Generate the commit message with AI${generateChord.hint}`}
+                  reason="Nothing to generate from — this squash has no run of commits to combine"
+                  onClick={() => runHead && ai.generate(base, runHead)}
+                >
+                  <SparkleIcon data-icon="inline-start" />
+                  Generate
+                </DisabledReasonButton>
+              ))}
             <Button
               type="button"
               variant="outline"

@@ -363,6 +363,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Repository & workspace",
+    label:
+      "Rewrite-aware divergence — a server-rebased branch gets a confirmed Reset to origin/…",
+  },
+  {
+    group: "Repository & workspace",
     label: "Auto-fetch — quiet background sync, never auto-pulls",
     highlight: true,
   },

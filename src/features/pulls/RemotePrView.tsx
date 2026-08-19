@@ -70,10 +70,11 @@ import {
 import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
-import type {
-  MergeStrategy,
-  MinimizeReason,
-  RemotePrResolveHandle,
+import {
+  gitFetch,
+  type MergeStrategy,
+  type MinimizeReason,
+  type RemotePrResolveHandle,
 } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
@@ -83,6 +84,7 @@ import {
   PIPELINE_IN_FLIGHT,
   prDiffOptions,
   prUpdateBranchKeys,
+  repoKeys,
   TRIAGE_ACCESS_ITEM_REASON,
   triageAccessReason,
   useAbortRemotePrResolve,
@@ -149,8 +151,8 @@ import {
   providerLabel,
   type RemoteLens,
 } from "@/lib/git/types";
-import { formatBinding } from "@/lib/hotkeys/binding";
-import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import {
@@ -161,7 +163,7 @@ import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
-import { useUiStore } from "@/lib/stores/ui";
+import { queuedMergeKey, useUiStore } from "@/lib/stores/ui";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useRetained } from "@/lib/use-retained";
@@ -488,6 +490,10 @@ export function RemotePrView({
   // whichever ReviewThreadList owns it; that list reveals the (possibly
   // resolved/collapsed) thread and clears this via onRevealed.
   const [revealThreadId, setRevealThreadId] = useState<string | null>(null);
+  // The review card a notification asked to land on. Deliberately its OWN state
+  // rather than a read of the store hint: the hint is handed over only once this
+  // view's details are real (below), long after the sub-tab hint has settled.
+  const [revealReviewId, setRevealReviewId] = useState<string | null>(null);
   // Activity-timeline events (force-pushes, labels, state changes, review requests,
   // approvals) interleaved into the Conversation feed; provider-neutral via the
   // backend's `forge_pr_timeline`. Fetch only while Conversation is showing AND a
@@ -501,8 +507,30 @@ export function RemotePrView({
   );
   const pendingPrSection = useUiStore((s) => s.pendingPrSection);
   const setPendingPrSection = useUiStore((s) => s.setPendingPrSection);
+  const pendingReviewId = useUiStore((s) => s.pendingReviewId);
+  const setPendingReviewId = useUiStore((s) => s.setPendingReviewId);
   const selectedPr = useUiStore((s) => s.selectedPr);
   const selectPr = useUiStore((s) => s.selectPr);
+  // Merge-queue record for THIS pull request. The forge reports the queue once,
+  // in the merge outcome, and nothing fetchable carries it afterwards, so the
+  // store is the only source and the PR leaving OPEN is the only retraction.
+  const queuedKey = queuedMergeKey(repoPath, number);
+  const mergeQueued = useUiStore((s) => Boolean(s.queuedMerges[queuedKey]));
+  const markMergeQueued = useUiStore((s) => s.markMergeQueued);
+  const clearMergeQueued = useUiStore((s) => s.clearMergeQueued);
+  // Details are authoritative once they land: a merged or closed pull request is
+  // out of the queue however it got there. The placeholder gate is what makes the
+  // retraction safe — `queuedKey` follows the `number` prop immediately while
+  // `details` still serves the PREVIOUS pull request, so switching away to a
+  // merged one and back would otherwise read ITS state against THIS key and drop
+  // the record for good. Same gate on the chip below, so both read one truth.
+  const queuedDetailsReady = !details.isPlaceholderData;
+  const prState = details.data?.state;
+  useEffect(() => {
+    if (!queuedDetailsReady) return;
+    if (mergeQueued && prState !== undefined && prState !== "OPEN")
+      clearMergeQueued(queuedKey);
+  }, [queuedDetailsReady, mergeQueued, prState, queuedKey, clearMergeQueued]);
   // Whether this view owns the current selection. Several hint/palette paths
   // gate on it so a still-mounted lagging view (deferredPr) can't answer first.
   const isSelectedPr =
@@ -928,6 +956,15 @@ export function RemotePrView({
       // reports throughout, so the refetch above would land on a gave-up arm. The head
       // just moved: the question is new again, and the ladder has to start over with it.
       mergeability.retry();
+      // The remote head moved, so the local repo's tracking refs and ahead/behind
+      // counts are stale — the same background catch-up the merge path runs. Not
+      // awaited and silent: the update already landed, and a fetch failure toast
+      // would misreport it (the header's Fetch stays the manual fallback).
+      void gitFetch(repoPath)
+        .then(() =>
+          queryClient.invalidateQueries({ queryKey: repoKeys.all(repoPath) }),
+        )
+        .catch(() => undefined);
       toast.success(`Branch updated from ${awaited.base}.`);
       return;
     }
@@ -955,6 +992,29 @@ export function RemotePrView({
     (details.data?.crossRepository && details.data.maintainerCanModify === false
       ? "The contributor hasn't allowed edits from maintainers."
       : undefined);
+
+  // A promotion pull request: the HEAD is this repository's default branch, so the
+  // work flows main → staging and the head is permanently behind its base by
+  // design. "Update branch" there merges the base back INTO the default branch,
+  // inverting the flow — so every route to it is demoted below, and the behind
+  // copy names the direction instead of asking for a catch-up.
+  //
+  // Head-is-default is the whole test on purpose: a topology probe false-positives
+  // on stacked pull requests, which this app first-classes, and `allowUpdateBranch`
+  // is absent for non-push viewers (serde-defaulting to false), so gating on it
+  // would delete the behind banner for every read-only viewer. This shape is the
+  // reported one and both inputs are already held. A staging → production pull
+  // request has the same inversion and is NOT covered.
+  //
+  // `crossRepository` is what keeps the name comparison honest: `headRefName` is
+  // UNQUALIFIED, so a contribution from someone's fork whose head is THEIR `main`
+  // matches our default branch by name alone — an ordinary pull request that would
+  // otherwise lose Update branch and gain copy about a promotion that isn't one.
+  const promotionLike =
+    !!details.data?.headRefName &&
+    !!defaultBranch.data &&
+    details.data.headRefName === defaultBranch.data &&
+    !details.data.crossRepository;
 
   // The banner's arm: server truth, then the local prediction where the forge has
   // none, then the resume offer — the resolve worktree is only worth its own line
@@ -1025,6 +1085,7 @@ export function RemotePrView({
   // the latch.
   const canUpdateBranch =
     (bannerArm === "behind" || (bannerArm === "blocked" && behindBy > 0)) &&
+    !promotionLike &&
     updateBlockedReason === undefined &&
     !updateBranch.isPending;
 
@@ -1111,7 +1172,11 @@ export function RemotePrView({
     if (
       updateBlockedReason !== undefined ||
       updateBranch.isPending ||
-      updatingBranch
+      updatingBranch ||
+      // A promotion pull request would merge the base back INTO the default
+      // branch. The demotion has to live here too, or it is only as good as the
+      // surfaces that happen to read `canUpdateBranch`.
+      promotionLike
     )
       return;
     if (rebase) {
@@ -1155,6 +1220,14 @@ export function RemotePrView({
     string | null
   >(null);
   const [mergeOpen, setMergeOpen] = useState(false);
+  // The cleanup note a queued merge came back with (a head-branch deletion that
+  // failed), carried on the chip's tooltip. Keyed so it can never paint onto
+  // another pull request; the queue record itself lives in the store, which is
+  // why the chip survives a switch away and back while this detail doesn't.
+  const [queuedWarning, setQueuedWarning] = useState<{
+    key: string;
+    text: string;
+  } | null>(null);
   const [mergeStrategy, setMergeStrategy] = useState<MergeStrategy>("merge");
   const [deleteBranch, setDeleteBranch] = useState(false);
   // Whether the open merge dialog is arming auto-merge (vs merging now) — set by
@@ -1245,13 +1318,9 @@ export function RemotePrView({
   });
   const prGen = useGeneratePrDescription(repoPath);
   const composerRef = useRef<MarkdownEditorHandle>(null);
-  // Context-sensitive reuse of the generate-commit-message binding (mod+g by
-  // default) for the Edit dialog's chord + button hint — a rebinding drives both.
-  const generateBinding =
-    useEffectiveBindings().get("generate-commit-message") ?? null;
-  const generateHint = generateBinding
-    ? ` (${formatBinding(generateBinding)})`
-    : "";
+  // The generate-commit-message binding's title suffix. The chord itself lives in
+  // EditTitleBodyDialog; this is only the label, so a rebinding drives both.
+  const generateHint = useGenerateChordHint();
 
   const onError = (e: unknown) => toastError(e);
 
@@ -1511,6 +1580,15 @@ export function RemotePrView({
             toast.success(
               outcome.cleanupWarning ?? `Merge queued for #${number}`,
             );
+            // The toast is gone in seconds and nothing fetchable carries queue
+            // state, so record it: the chip below is the only lasting sign the
+            // merge is waiting rather than done.
+            markMergeQueued(queuedKey);
+            setQueuedWarning(
+              outcome.cleanupWarning
+                ? { key: queuedKey, text: outcome.cleanupWarning }
+                : null,
+            );
           } else {
             toast.success(`Merged #${number}`);
             // Merged for real; a cleanupWarning here means only the post-merge
@@ -1572,7 +1650,9 @@ export function RemotePrView({
   // and a local branch RULE can block deleting the head (so it's disabled with a
   // reason, mirroring the switcher's Delete menu item). Name-keyed against this
   // repo's default — the common same-repo case; a fork PR whose head is
-  // coincidentally named like our default is an accepted v1 over-hide.
+  // coincidentally named like our default is an accepted v1 over-hide — which is
+  // why this stays the bare comparison and NOT `promotionLike`, whose same-repo
+  // term exists to refuse exactly that match.
   const headIsDefault =
     pr != null &&
     defaultBranch.data != null &&
@@ -1721,6 +1801,43 @@ export function RemotePrView({
   // close, so one opened mid-switch would write the previous PR's members under
   // the new number. Their triggers disable on a reason, so this rides that seam.
   const pickerReason = triageReason ?? staleReason;
+  // A review notification's click-through, taken over from the store only once
+  // the rendered details are THIS pull request's: a scroll fired against
+  // placeholder rows lands on another PR's cards. The Conversation feed owns the
+  // anchors, so the handoff waits for that sub-tab too — the hinted tab arrives
+  // through `pendingPrSection` in its own commit.
+  //
+  // Details alone aren't enough: threads decide which reviews claim inline
+  // blocks and the timeline interleaves rows ABOVE the target, so either landing
+  // afterwards would push a scrolled-to card back off screen. Waiting for all
+  // three to settle (an ERROR settles too — the feed renders what it has) keeps
+  // this to one attempt against the finished layout. A DISABLED timeline (no
+  // provider resolved yet) is neither, so the reveal waits and fires once the
+  // probe answers; if it never does, the request simply lapses.
+  const revealInputsSettled =
+    details.isSuccess &&
+    !detailsStale &&
+    (reviewThreads.isSuccess || reviewThreads.isError) &&
+    (timeline.isSuccess || timeline.isError);
+  useEffect(() => {
+    if (pendingReviewId === null || !isSelectedPr) return;
+    if (!revealInputsSettled || section !== "conversation") return;
+    setRevealReviewId(pendingReviewId);
+    setPendingReviewId(null);
+  }, [
+    pendingReviewId,
+    setPendingReviewId,
+    isSelectedPr,
+    revealInputsSettled,
+    section,
+  ]);
+  // Exactly one attempt. Child layout effects run before this one, so the target
+  // row has already scrolled itself if it rendered; a review with no visible body
+  // and no state renders no row at all, and dropping the request is the fail-soft
+  // there — never a retry loop or a jump to the top of the feed.
+  useLayoutEffect(() => {
+    if (revealReviewId !== null) setRevealReviewId(null);
+  }, [revealReviewId]);
 
   if (details.isPending) {
     return (
@@ -2375,6 +2492,8 @@ export function RemotePrView({
       <PrMergeabilityBanner
         arm={bannerArm}
         base={pr.baseRefName}
+        head={pr.headRefName}
+        promotionLike={promotionLike}
         provider={provider}
         forkBlocked={!!pr.crossRepository}
         hasResolveWorktree={resolveWorktree !== null}
@@ -2558,6 +2677,8 @@ export function RemotePrView({
                 disabledReason={triageItemReason ?? staleReason}
                 revealThreadId={revealThreadId}
                 setRevealThreadId={setRevealThreadId}
+                revealReviewId={revealReviewId}
+                onReviewRevealed={() => setRevealReviewId(null)}
                 setSection={setSection}
                 // Drill into the commit via the Commits-tab machinery
                 // (selectedCommitOid → PrCommitDetail).
@@ -2934,6 +3055,24 @@ export function RemotePrView({
             >
               Convert to draft
             </DisabledReasonButton>
+          )}
+          {/* The merge is in the forge's queue, not landed. Same icon + words
+              shape as the auto-merge chip below (not color-alone), and it stands
+              until the pull request itself leaves OPEN — read behind the same
+              placeholder gate as the retraction, so a lagging `details` can't
+              blank the chip during a PR switch. */}
+          {mergeQueued && isOpenPr && queuedDetailsReady && (
+            <span
+              className="flex items-center gap-1 text-xs text-info"
+              title={
+                queuedWarning?.key === queuedKey
+                  ? queuedWarning.text
+                  : "Merges when the queue reaches it"
+              }
+            >
+              <ClockCountdownIcon className="size-3.5 shrink-0" />
+              Queued to merge
+            </span>
           )}
           {/* Auto-merge armed indicator + cancel (GitLab-only) — sits on the left,
               opposite Close/Merge. Not color-alone: icon + words. */}

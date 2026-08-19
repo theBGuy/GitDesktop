@@ -377,11 +377,15 @@ async function notifyReviewDone(
       subtitle,
       repoPath: target.repoPath,
       repoName: target.repoName,
-      target: { type: "pr", kind: target.kind, ref: target.ref },
+      target: {
+        type: "pr",
+        kind: target.kind,
+        ref: target.ref,
+        lens: target.lens,
+      },
       // The lens is in the dedupe key because a fork's origin and upstream PRs share
       // a number: without it, two reviews settling in the same window collapse into
-      // one notification. (The `target` above carries no lens, so the click-through
-      // still lands on whichever lens the repo is currently set to.)
+      // one notification.
       dedupeKey: `review:${target.kind}:${target.repoPath}:${target.lens}:${target.ref}:${ok}`,
     });
     void notifyIfUnfocused(headline, subtitle);

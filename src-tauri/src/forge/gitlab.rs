@@ -746,6 +746,7 @@ fn from_glab_poll_mr(m: GlabPollMr) -> PrPollInfo {
         last_comment_author: String::new(),
         review_count: 0,
         last_review_author: String::new(),
+        last_review_id: String::new(),
         review_requests: Vec::new(),
         head_ref_name: m.source_branch,
         base_ref_name: m.target_branch,

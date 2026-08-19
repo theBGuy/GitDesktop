@@ -161,11 +161,17 @@ export function usePrNotifications(repoPath: string) {
       title: string,
       pr: PrPollInfo,
       dedupeKey: string,
-      // Only events that know an author pass one (pr-opened). No avatar URL in the
-      // poll payload — the row derives it from the login + `ghHost` (bot handles via
-      // the bot-avatar API; initials off GitHub / on failure).
-      authorLogin?: string,
+      opts?: {
+        /** Only events that know an author pass one (pr-opened). No avatar URL in the
+         *  poll payload — the row derives it from the login + `ghHost` (bot handles via
+         *  the bot-avatar API; initials off GitHub / on failure). */
+        authorLogin?: string;
+        /** The review a review-flavored event is about, so the click-through can
+         *  scroll to it. Empty (GitLab/Bitbucket, or an unfetched id) is dropped. */
+        reviewId?: string;
+      },
     ) => {
+      const authorLogin = opts?.authorLogin;
       pushNotification({
         kind,
         tone,
@@ -175,7 +181,15 @@ export function usePrNotifications(repoPath: string) {
         repoName,
         authorLogin,
         authorGhHost: authorLogin ? (ghHost ?? undefined) : undefined,
-        target: { type: "pr", kind: "remote", ref: String(pr.number) },
+        target: {
+          type: "pr",
+          kind: "remote",
+          ref: String(pr.number),
+          // The poll pins the ORIGIN slug (see `gh_pr_poll`), so every event it
+          // reports happened on the fork's own pull requests.
+          lens: "origin",
+          reviewId: opts?.reviewId || undefined,
+        },
         dedupeKey,
       });
       void notifyIfUnfocused(title, pr.title);
@@ -213,7 +227,7 @@ export function usePrNotifications(repoPath: string) {
             `New pull request #${pr.number}`,
             pr,
             `opened:${pr.number}`,
-            pr.author,
+            { authorLogin: pr.author },
           );
         }
         if (old && old.state === "OPEN" && pr.state !== "OPEN") {
@@ -243,6 +257,9 @@ export function usePrNotifications(repoPath: string) {
               : `Changes requested on #${pr.number}`,
             pr,
             `decision:${pr.number}:${pr.reviewDecision}`,
+            // A verdict IS a review — same `reviews(last:1)` source as the plain
+            // "commented" case below, so it lands on the review card too.
+            { reviewId: pr.lastReviewId },
           );
         } else if (
           // A plain "commented" review: count rose, decision unchanged. Skip your
@@ -256,6 +273,7 @@ export function usePrNotifications(repoPath: string) {
             `New review on #${pr.number}`,
             pr,
             `review:${pr.number}:${pr.reviewCount}`,
+            { reviewId: pr.lastReviewId },
           );
         }
         // A SEPARATE event from the review decision above — an independent `if`, not

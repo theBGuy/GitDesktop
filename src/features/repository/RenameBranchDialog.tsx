@@ -13,9 +13,13 @@ import { required, useAppForm } from "@/lib/form";
 import { useRenameBranch } from "@/lib/git/queries";
 import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
-import { GenerateBranchNameButton } from "./GenerateBranchNameButton";
+import {
+  GenerateBranchNameButton,
+  useBranchNameGenerateAction,
+} from "./GenerateBranchNameButton";
 import {
   type BranchNameGenerator,
   type CommittedNameSource,
@@ -134,6 +138,29 @@ export function RenameBranchDialog({
     return () => cancelGenerate();
   }, [target, cancelGenerate]);
 
+  // One generate pair for the button and the chord — see
+  // `useBranchNameGenerateAction`. It rides `guardedGen`, so a chord pressed
+  // during the close fade can't start an uncancellable generation either.
+  const generateAction = useBranchNameGenerateAction({
+    gen: guardedGen,
+    aiEnabled,
+    aiConfigured,
+    hasChanges,
+    headExists,
+    entries,
+    recentBranches: allBranchNames,
+    nameTarget: targetIsCurrent ? "checked-out-branch" : "other-branch",
+    committedFallback: shownCommittedFallback,
+    onName: (name) => renameForm.setFieldValue("name", name),
+  });
+  // This dialog opens from any branch row over any tab, including Changes where
+  // the global generate-commit-message action is live — so the chord is
+  // swallowed here whether or not it can generate.
+  const generateChord = useGenerateChord({
+    enabled: generateAction.enabled,
+    run: generateAction.run,
+  });
+
   return (
     <Dialog
       open={target !== null}
@@ -141,7 +168,7 @@ export function RenameBranchDialog({
         if (!o) closeDialog();
       }}
     >
-      <DialogContent>
+      <DialogContent onKeyDown={generateChord.onKeyDown}>
         <form
           // min-w-0: DialogContent is display:grid, so this grid item must be
           // allowed to shrink below its content — otherwise a long branch name
@@ -176,18 +203,17 @@ export function RenameBranchDialog({
           </renameForm.AppField>
           <GenerateBranchNameButton
             gen={guardedGen}
+            action={generateAction}
+            hint={generateChord.hint}
             aiEnabled={aiEnabled}
             aiConfigured={aiConfigured}
             hasChanges={hasChanges}
             headExists={headExists}
-            entries={entries}
-            recentBranches={allBranchNames}
             nameTarget={targetIsCurrent ? "checked-out-branch" : "other-branch"}
             committedFallback={shownCommittedFallback}
             committedStatus={shownCommittedStatus}
             // Renaming never picks a base — the fallback always applies here.
             basedElsewhere={null}
-            onName={(name) => renameForm.setFieldValue("name", name)}
             onSetupAi={() => {
               closeDialog();
               onOpenSettings("ai");

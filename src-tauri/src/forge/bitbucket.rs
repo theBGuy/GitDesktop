@@ -854,6 +854,7 @@ fn from_bb_poll_pr(p: BbPollPr, viewer_uuid: &str, viewer_login: &str) -> PrPoll
         last_comment_author: String::new(),
         review_count: 0,
         last_review_author: String::new(),
+        last_review_id: String::new(),
         review_requests: Vec::new(),
         head_ref_name,
         base_ref_name,

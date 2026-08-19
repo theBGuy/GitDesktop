@@ -24,6 +24,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { clipTitle } from "@/lib/clip-title";
 import { isMac, isWindows } from "@/lib/hotkeys/binding";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import {
   useDetectedInterpreters,
   useResolvedInterpreter,
@@ -207,6 +208,31 @@ export function TaskDialog({
     if (guess) setInterpreter(guess);
   }
 
+  // Shared by the Generate button, the describe field's Enter key, and the
+  // generate chord.
+  function runGenerate() {
+    scriptGen.generate({
+      description: describe,
+      interpreter,
+      onBody: setBody,
+    });
+  }
+  // The generate chord drives Generate — never Analyze, which documents an
+  // existing script rather than writing one. Mounted on DialogContent so it also
+  // covers the X close button (a SIBLING of the fields inside the Popup); the
+  // swallow is unconditional, including the file-source case where there's no
+  // Generate at all, so it can't reach the global generate-commit-message action
+  // behind the dialog.
+  const generateChord = useGenerateChord({
+    enabled:
+      sourceKind === "inline" &&
+      aiEnabled &&
+      aiConfigured &&
+      describe.trim() !== "" &&
+      !scriptGen.generating,
+    run: runGenerate,
+  });
+
   function runAnalyze() {
     scriptAnalyze.analyze({
       interpreter,
@@ -252,7 +278,10 @@ export function TaskDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent
+        className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
+        onKeyDown={generateChord.onKeyDown}
+      >
         <DialogHeader>
           <DialogTitle>{shownEditing ? "Edit task" : "New task"}</DialogTitle>
           <DialogDescription>
@@ -491,13 +520,11 @@ export function TaskDialog({
                   value={describe}
                   onChange={(e) => setDescribe(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") {
+                    // Same gate as the Generate button and the chord — Enter on
+                    // an empty description would otherwise generate from nothing.
+                    if (e.key === "Enter" && describe.trim() !== "") {
                       e.preventDefault();
-                      scriptGen.generate({
-                        description: describe,
-                        interpreter,
-                        onBody: setBody,
-                      });
+                      runGenerate();
                     }
                   }}
                   placeholder="Describe what the script should do…"
@@ -507,13 +534,8 @@ export function TaskDialog({
                   type="button"
                   variant="outline"
                   disabled={describe.trim() === ""}
-                  onClick={() =>
-                    scriptGen.generate({
-                      description: describe,
-                      interpreter,
-                      onBody: setBody,
-                    })
-                  }
+                  title={`Write the script with AI${generateChord.hint}`}
+                  onClick={runGenerate}
                 >
                   <SparkleIcon data-icon="inline-start" />
                   Generate
