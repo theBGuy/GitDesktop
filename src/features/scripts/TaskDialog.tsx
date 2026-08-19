@@ -534,7 +534,13 @@ export function TaskDialog({
                   type="button"
                   variant="outline"
                   disabled={describe.trim() === ""}
-                  title={`Write the script with AI${generateChord.hint}`}
+                  // The chord is only offered while it would do something — a
+                  // disabled Generate's shortcut is dead too.
+                  title={
+                    describe.trim() !== ""
+                      ? `Write the script with AI${generateChord.hint}`
+                      : "Write the script with AI"
+                  }
                   onClick={runGenerate}
                 >
                   <SparkleIcon data-icon="inline-start" />

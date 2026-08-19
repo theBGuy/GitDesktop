@@ -121,19 +121,18 @@ export function usePrThreadClaims(
 }
 
 /**
- * A feed row carrying its review's id. `data-review-id` is a DOM contract the
- * reveal seam reads; the row also scrolls ITSELF via a layout effect on its own
- * ref, so a row that only just mounted still lands — no frame racing — and then
- * clears the request through `onRevealed`.
+ * A review row that scrolls ITSELF into view when it's the target of a pending
+ * reveal, via a layout effect on its own ref — so a row that only just mounted
+ * still lands, with no frame racing — and then clears the request through
+ * `onRevealed`. The caller decides which row is the target; nothing queries the
+ * DOM for it.
  */
 function ReviewAnchor({
-  reviewId,
   revealTarget,
   onRevealed,
   className,
   children,
 }: {
-  reviewId: string;
   revealTarget: boolean;
   onRevealed?: () => void;
   className?: string;
@@ -148,7 +147,7 @@ function ReviewAnchor({
     onRevealed?.();
   }, [revealTarget, onRevealed]);
   return (
-    <div ref={rootRef} data-review-id={reviewId} className={className}>
+    <div ref={rootRef} className={className}>
       {children}
     </div>
   );
@@ -302,7 +301,6 @@ export function PrActivityFeed({
         node: (
           <ReviewAnchor
             key={`reply-wrap-${r.id || `${r.author}-${r.date}`}`}
-            reviewId={r.id}
             revealTarget={revealTarget}
             onRevealed={onReviewRevealed}
             className="flex items-start gap-2 text-xs"
@@ -365,7 +363,6 @@ export function PrActivityFeed({
       node: (
         <ReviewAnchor
           key={`review-${r.id || `${r.author}-${r.date}`}`}
-          reviewId={r.id}
           revealTarget={revealTarget}
           onRevealed={onReviewRevealed}
         >

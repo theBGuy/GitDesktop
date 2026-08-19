@@ -352,6 +352,11 @@ export function RemotePrView({
     canSubmitReview,
   } = usePrCapabilities(forge.data, provider, writeAccess.data);
   const details = usePrDetails(repoPath, number, lens);
+  // Every handler that refuses while the rendered PR is the previous one reads
+  // this, so each of their entry points can hold too rather than sit enabled and
+  // do nothing. Declared up here beside `details` because the gates that need it
+  // (the update-branch derivation among them) run well before the strip does.
+  const detailsStale = details.isPlaceholderData;
   const prDiff = usePrDiff(repoPath, number, lens);
   const setAssignees = useSetPrAssignees(repoPath, lens);
   const setReviewers = useSetPrReviewers(repoPath, lens);
@@ -1010,11 +1015,18 @@ export function RemotePrView({
   // UNQUALIFIED, so a contribution from someone's fork whose head is THEIR `main`
   // matches our default branch by name alone — an ordinary pull request that would
   // otherwise lose Update branch and gain copy about a promotion that isn't one.
+  //
+  // `lens === "origin"` for the same reason from the other side: `useDefaultBranch`
+  // reads ORIGIN's default with no lens parameter, while `details` follows the
+  // lens, so on the upstream lens the two names describe different repositories.
+  // An upstream-lens promotion pull request therefore keeps today's behavior —
+  // a recorded limitation, like staging → production.
   const promotionLike =
     !!details.data?.headRefName &&
     !!defaultBranch.data &&
     details.data.headRefName === defaultBranch.data &&
-    !details.data.crossRepository;
+    !details.data.crossRepository &&
+    lens === "origin";
 
   // The banner's arm: server truth, then the local prediction where the forge has
   // none, then the resume offer — the resolve worktree is only worth its own line
@@ -1083,8 +1095,19 @@ export function RemotePrView({
   // block it: the strip's sentence changes, the affordance does not. Neither arm
   // needs an `updating` term — both sit below it. The submitting window precedes
   // the latch.
+  // `!detailsStale` is REDUNDANT today and kept deliberately. Every route is
+  // already covered: the hotkey below ANDs its own `!details.isPlaceholderData`,
+  // the banner's controls ride `updateBusy` (which includes `detailsStale`), and
+  // `runUpdateBranch` early-returns on placeholder data. It sits here because this
+  // is the named "can update" predicate, and the term it guards is a real one —
+  // `promotionLike` reads `details`, which serves the PREVIOUS pull request
+  // through a switch, while `behindBy` comes from the divergence query, which has
+  // no placeholder and caches per number. A consumer added later without its own
+  // staleness gate would otherwise inherit exactly that window on exactly the pull
+  // requests the demotion exists to protect.
   const canUpdateBranch =
     (bannerArm === "behind" || (bannerArm === "blocked" && behindBy > 0)) &&
+    !detailsStale &&
     !promotionLike &&
     updateBlockedReason === undefined &&
     !updateBranch.isPending;
@@ -1757,10 +1780,6 @@ export function RemotePrView({
         ? `${approval.approvedBy.length} of ${approval.approvalsRequired} approvals`
         : `${approval.approvedBy.length} approval${approval.approvedBy.length === 1 ? "" : "s"}`
       : null;
-  // Every handler that refuses while the rendered PR is the previous one reads
-  // this, so each of their entry points can hold too rather than sit enabled and
-  // do nothing.
-  const detailsStale = details.isPlaceholderData;
   // What a control that holds through the switch says, in one wording. It ranks
   // BELOW any permission or read-error reason wherever both hold: those never
   // lift on their own and are the ones still true once the switch lands.

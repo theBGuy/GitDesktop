@@ -404,6 +404,18 @@ fn remove_lines(content: &str, drop: &std::collections::HashSet<u32>) -> String 
 /// the dirty check alone would let a reset strand those markers and leave the
 /// repo claiming an operation whose commits have moved out from under it.
 ///
+/// Both `--hard` guards and the reset itself run under ONE `repo_lock` hold, so
+/// no OTHER CALLER IN THIS PROCESS can dirty the tree or start a merge between the
+/// checks and a rewrite that has no stash and no reflog to recover from. That is
+/// the whole reach of the guarantee: a separate MCP-server process holds its own
+/// lock, and no lock constrains a terminal git or an editor writing files. That
+/// means the
+/// lock-free `run_git` for the reset — `run_git_mutating` re-acquires the same
+/// non-reentrant mutex and deadlocks — trading away its one-shot index.lock retry,
+/// the same bargain `git_stash_all_core` and the cherry-pick compound make. The
+/// `--mixed` arm keeps `run_git_mutating`: it has no guards to protect, so there
+/// is no check-then-act window and the retry is worth more than a hold.
+///
 /// Worktree-correct without extra work: every spawn runs with `repo_path` as its
 /// cwd, so a linked worktree resets ITS own HEAD and ITS own tree.
 #[tauri::command]
@@ -432,17 +444,32 @@ pub(crate) async fn git_reset_core(
             )))
         }
     };
-    if hard {
-        ensure_clean_tree(&repo_path).await?;
-        if op_state(&repo_path).await?.mid_op() {
-            return Err(AppError::InvalidArgument(
-                "an operation is still in progress — finish or abort it before resetting"
-                    .into(),
-            ));
-        }
+    if !hard {
+        run_git_mutating(
+            state,
+            &repo_path,
+            &["reset", "--mixed", &hash],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        return Ok(());
     }
-    let flag = if hard { "--hard" } else { "--mixed" };
-    run_git_mutating(state, &repo_path, &["reset", flag, &hash], DEFAULT_TIMEOUT).await?;
+    // One hold across both guards and the rewrite — see this function's doc for
+    // why the runner inside it must be the lock-free one.
+    let lock = state.repo_lock(&repo_path).await;
+    let _guard = lock.lock().await;
+    ensure_clean_tree(&repo_path).await?;
+    if op_state(&repo_path).await?.mid_op() {
+        return Err(AppError::InvalidArgument(
+            "an operation is still in progress — finish or abort it before resetting".into(),
+        ));
+    }
+    run_git(
+        Some(&repo_path),
+        &["reset", "--hard", &hash],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
     Ok(())
 }
 

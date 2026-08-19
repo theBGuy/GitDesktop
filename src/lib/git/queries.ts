@@ -1772,7 +1772,11 @@ export function useIssueDetails(
   return useQuery({
     ...issueDetailsOptions(repo, number ?? 0, lens),
     enabled: number !== null,
-    placeholderData: keepPreviousDataForRepo(repo),
+    // Lens is an IDENTITY axis, like the PR details twin: a fork's two lenses
+    // number their issues independently, so matching on repo alone would serve
+    // the other lens's issue under this one's number. The number axis stays out
+    // — a switch between issues keeps the previous one painted by design.
+    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
 

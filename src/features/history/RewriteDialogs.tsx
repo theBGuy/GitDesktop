@@ -211,7 +211,13 @@ export function SquashDialog({
                   size="sm"
                   wrapperClassName="mr-auto"
                   disabled={!runHead}
-                  title={`Generate the commit message with AI${generateChord.hint}`}
+                  // The chord is only offered while it would do something — a
+                  // disabled Generate's shortcut is dead too.
+                  title={
+                    runHead
+                      ? `Generate the commit message with AI${generateChord.hint}`
+                      : "Generate the commit message with AI"
+                  }
                   reason="Nothing to generate from — this squash has no run of commits to combine"
                   onClick={() => runHead && ai.generate(base, runHead)}
                 >

@@ -12,7 +12,7 @@ import {
   TreeStructureIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime } from "@/components/relative-time";
@@ -141,6 +141,12 @@ const secondaryClickCapitalized =
  *  dialog's merged badge. The open list keeps the default so it goes on sharing a
  *  cache entry with the session PR audit. */
 const CLOSED_PR_SCAN_LIMIT = 100;
+
+/** How many diverged rows get their rewrite status warmed when the popover opens.
+ *  The prefetch exists to keep a right-click from painting a slot whose identity
+ *  is still in flight; each entry costs several rev-list spawns, so it is capped
+ *  rather than run per branch. Rows past the cap fall back to the waiting slot. */
+const MAX_REWRITE_PREFETCH = 4;
 
 interface BranchPr {
   state: PrAuditState;
@@ -290,6 +296,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   const head = status.data?.branch;
   const currentName = head?.name ?? null;
+  // The live branch name, readable AFTER an await. A handler's closure still holds
+  // the `currentName` of the render that created it, and `status.data` read inside
+  // one is that same render's snapshot — neither can tell whether HEAD moved
+  // during a confirmation the user left open. Same ref pattern SyncControls uses
+  // to guard its reset. Load-bearing for `git reset --hard`, which carries no
+  // branch identity: it rewrites whatever HEAD points at now.
+  const currentNameRef = useRef(currentName);
+  useEffect(() => {
+    currentNameRef.current = currentName;
+  }, [currentName]);
   const currentLabel = head?.detached
     ? `detached @ ${head.oid?.slice(0, 7) ?? "?"}`
     : (currentName ?? "…");
@@ -349,8 +365,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // on every branches refetch, and this must re-run when the diverged SET
   // changes, not when its container does. Git forbids control characters in a
   // ref name, so `\n` can't appear inside one.
+  //
+  // Capped: each entry is several rev-list spawns, and a repo where many branches
+  // are BOTH ahead and behind would otherwise fan out one probe per branch on
+  // every popover open. The rows past the cap keep the waiting slot, which is
+  // exactly what it is for. Four covers the ordinary 0-2 and leaves headroom
+  // without turning an open into a burst.
   const divergedSignature = allBranches
     .filter((b) => b.upstreamAhead > 0 && b.upstreamBehind > 0)
+    .slice(0, MAX_REWRITE_PREFETCH)
     .map((b) => b.name)
     .join("\n");
   useEffect(() => {
@@ -1049,8 +1072,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       onSuccess: () => toast.success(`Reset ${branch.name} to ${base}`),
       onError,
     };
-    if (branch.isCurrent) hardReset.mutate(tip, done);
-    else
+    if (branch.isCurrent) {
+      // The confirmation above spans an await, and HEAD can move under it — an
+      // out-of-app `git switch`, or the app's own checkout. `reset --hard` names
+      // no branch, so a moved HEAD would rewrite whatever is checked out NOW to a
+      // tip measured for a branch the user is no longer on. The ref reads live;
+      // the captured name is the only branch the confirmation described. Says so
+      // rather than returning quietly: the user just confirmed a destructive
+      // action, and silence there reads as "it worked". Wording kept in step with
+      // the sync controls' twin.
+      if (currentNameRef.current !== branch.name) {
+        toast.info("HEAD moved while the dialog was open — nothing was reset.");
+        return;
+      }
+      hardReset.mutate(tip, done);
+    } else
       resetToUpstream.mutate({ branch: branch.name, expectedTip: tip }, done);
   }
 

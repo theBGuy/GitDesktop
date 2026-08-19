@@ -235,7 +235,13 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
                     size="sm"
                     disabled={stagedCount === 0}
                     reason="Stage changes to generate a commit message"
-                    title={`Generate commit message with AI${generateHint}`}
+                    // The chord is only offered while it would do something — a
+                    // disabled Generate's shortcut is dead too.
+                    title={
+                      stagedCount > 0
+                        ? `Generate commit message with AI${generateHint}`
+                        : "Generate commit message with AI"
+                    }
                     onClick={generate}
                   >
                     <SparkleIcon data-icon="inline-start" />

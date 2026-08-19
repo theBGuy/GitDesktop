@@ -1031,10 +1031,31 @@ export function LocalPrView({
                 then refreshes the comparison (behind → 0, this button hides)
                 and the conflict preview. */}
             {behind.length > 0 && !promotionLike && (
-              <Button
+              <DisabledReasonButton
                 variant="outline"
                 size="sm"
-                disabled={updateBranchFrom.isPending || recovery.pending}
+                // `promotionLike` reads false while `useDefaultBranch` is still
+                // resolving, so an enabled button there is a demotion that hasn't
+                // decided yet. Held, not hidden: a control that vanishes and
+                // reappears is worse than one that says what it's waiting on.
+                //
+                // PENDING only, never `!isSuccess`: a FAILED read would otherwise
+                // disable the button forever behind a "checking…" that is no longer
+                // true. An error falls open to the ordinary button instead — the
+                // same direction the rest of this feature takes, where an
+                // unprovable answer means today's behavior rather than a
+                // withheld one. (The query is never `enabled: false`, so `isPending`
+                // here can only mean in-flight.)
+                disabled={
+                  updateBranchFrom.isPending ||
+                  recovery.pending ||
+                  defaultBranch.isPending
+                }
+                reason={
+                  defaultBranch.isPending
+                    ? "Checking which branch is the default…"
+                    : undefined
+                }
                 title={`Merge ${pr.base} into ${pr.head} to catch it up`}
                 onClick={() =>
                   updateBranchFrom.mutate(
@@ -1066,7 +1087,7 @@ export function LocalPrView({
               >
                 <ArrowClockwiseIcon data-icon="inline-start" />
                 Update branch
-              </Button>
+              </DisabledReasonButton>
             )}
             <DropdownMenu>
               {/* A natively-disabled Button swallows `title`, so the refusal
@@ -1193,7 +1214,13 @@ export function LocalPrView({
               size="xs"
               disabled={ahead.length === 0}
               onClick={runGenerate}
-              title={`Generate the title and description with AI${generateHint}`}
+              // The chord is only offered while it would do something — a
+              // disabled Generate's shortcut is dead too.
+              title={
+                ahead.length > 0
+                  ? `Generate the title and description with AI${generateHint}`
+                  : "Generate the title and description with AI"
+              }
             >
               <SparkleIcon data-icon="inline-start" />
               Generate

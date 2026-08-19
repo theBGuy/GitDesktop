@@ -837,12 +837,8 @@ too — no default shortcut, so give it one in **Settings → Keyboard**.
 
 When an open pull request merges cleanly but its base has moved on since, that same
 strip reads **This branch is N commits behind \`main\`**, and **Update branch** brings
-the head up to date on the forge — a merge of the base into it. One exception: on a
-**promotion** pull request (one whose head is the repository's default branch, like
-\`main\` → \`staging\`) that gap is expected and doesn't need closing, so the strip says
-so and **Update branch** is withheld, since it would merge the base back into your
-default branch. GitHub runs that update
-as a background job, so the strip switches to **GitHub is updating this branch from
+the head up to date on the forge — a merge of the base into it. GitHub runs that
+update as a background job, so the strip switches to **GitHub is updating this branch from
 \`main\`…** — controls disabled, the reason on hover — and holds there until a fresh
 comparison shows the head caught up, which is when the confirmation arrives. If GitHub
 is still working by the time GitDesktop stops watching, a notice says so and the strip
@@ -859,6 +855,11 @@ conflict, an unfinished resolution, a merge the base branch's rules are blocking
 a mergeability answer the app couldn't read. **Update pull request branch** is in the
 command palette ({{kbd:command-palette}}) too — no default shortcut, so give it one in
 **Settings → Keyboard**.
+
+One exception: on a **promotion** pull request (one whose head is the repository's
+default branch, like \`main\` → \`staging\`) the gap is expected and doesn't need
+closing, so the strip says so and **Update branch** is withheld — it would merge
+the base back into your default branch.
 
 ## Blocked by branch protection
 
@@ -1113,9 +1114,9 @@ every still-open pull request below it, bottom-up, as a single operation, so the
 lands in dependency order without you walking it by hand — or, when the base branch uses a
 **merge queue**, is handed to the queue and lands when it clears, the head branch left
 in place for it — a **Queued to merge** chip stays on the pull request until it lands,
-for the rest of the session. Before you confirm, the merge dialog **spells out the full scope of the
-merge** — naming each pull request it will merge, in the order they'll go in, whenever it
-has the list.
+for the rest of the session. Before you confirm, the merge dialog **spells out
+the full scope of the merge** — naming each pull request it will merge, in the
+order they'll go in, whenever it has the list.
 
 ## Bitbucket PRs
 

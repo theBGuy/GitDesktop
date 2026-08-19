@@ -393,7 +393,13 @@ export function CreateLocalPrDialog({
                         size="xs"
                         disabled={sameBranch || ahead.length === 0}
                         onClick={runGenerate}
-                        title={`Generate the title and description with AI${generateHint}`}
+                        // The chord is only offered while it would do something —
+                        // a disabled Generate's shortcut is dead too.
+                        title={
+                          !(sameBranch || ahead.length === 0)
+                            ? `Generate the title and description with AI${generateHint}`
+                            : "Generate the title and description with AI"
+                        }
                       >
                         <SparkleIcon data-icon="inline-start" />
                         Generate

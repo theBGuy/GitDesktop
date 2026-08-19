@@ -945,7 +945,13 @@ export function CreatePrDialog({
                         size="xs"
                         disabled={nothingToMerge}
                         onClick={runGenerate}
-                        title={`Generate the title and description with AI${generateHint}`}
+                        // The chord is only offered while it would do something —
+                        // a disabled Generate's shortcut is dead too.
+                        title={
+                          !nothingToMerge
+                            ? `Generate the title and description with AI${generateHint}`
+                            : "Generate the title and description with AI"
+                        }
                       >
                         <SparkleIcon data-icon="inline-start" />
                         Generate

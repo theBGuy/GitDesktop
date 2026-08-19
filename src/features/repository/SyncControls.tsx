@@ -390,8 +390,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     });
     if (!ok) return;
     // HEAD can move while the dialog sits open; the captured branch is the only
-    // one the confirmation described.
-    if (headNameRef.current !== branch) return;
+    // one the confirmation described. Says so rather than returning quietly: the
+    // user just confirmed a destructive action, and silence reads as "it worked".
+    // Wording kept in step with the branch menu's twin.
+    if (headNameRef.current !== branch) {
+      toast.info("HEAD moved while the dialog was open — nothing was reset.");
+      return;
+    }
     hardReset.mutate(tip, {
       onSuccess: () => toast.success(`Reset ${branch} to ${upstream}`),
       onError,

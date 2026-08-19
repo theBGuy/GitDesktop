@@ -265,7 +265,13 @@ export function CreateJiraIssueDialog({
                         size="xs"
                         disabled={!notes.trim()}
                         onClick={runGenerate}
-                        title={`Expand your notes into a structured issue with AI${generateChord.hint}`}
+                        // The chord is only offered while it would do something —
+                        // a disabled Generate's shortcut is dead too.
+                        title={
+                          notes.trim()
+                            ? `Expand your notes into a structured issue with AI${generateChord.hint}`
+                            : "Expand your notes into a structured issue with AI"
+                        }
                       >
                         <SparkleIcon data-icon="inline-start" />
                         Draft with AI

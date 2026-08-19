@@ -277,9 +277,18 @@ pub(crate) async fn git_rename_branch_core(
 /// Best-effort: a `worktree list` failure yields `None` and lets git's own error
 /// speak. The `repo_path` checkout is excluded so deleting its *current* branch
 /// isn't misreported here (that path pre-switches, and git errors clearly if not).
+///
+/// The self-exclusion compares CANONICALIZED spellings (the #152 helper, same as
+/// `ops::path_is_under`): git's porcelain prints the resolved path, so a caller
+/// holding macOS's `/var/…` symlink or a Windows 8.3 short name (`RUNNER~1`)
+/// would otherwise fail to recognize its OWN checkout and report the branch as
+/// held by a "linked" worktree that is really this one — sending the caller to
+/// the wrong remedy. A path that no longer resolves falls back to the raw
+/// spelling, so the normalize-only compare stays as a second chance; either
+/// match excludes, which can only ever remove a false positive.
 async fn worktree_holding_branch(repo_path: &str, name: &str) -> Option<String> {
     use crate::git::ops::{parse_worktree_branches, parse_worktree_paths};
-    use crate::git::worktree::normalize_wt_path;
+    use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
     let listed = run_git(
         Some(repo_path),
         &["worktree", "list", "--porcelain"],
@@ -289,12 +298,15 @@ async fn worktree_holding_branch(repo_path: &str, name: &str) -> Option<String> 
     .ok()?;
     let porcelain = listed.stdout_lossy();
     let self_norm = normalize_wt_path(repo_path);
+    let self_canon = canonical_wt_path(repo_path);
+    let is_self =
+        |p: &str| normalize_wt_path(p) == self_norm || canonical_wt_path(p) == self_canon;
     // Both parsers emit one entry per `worktree …` stanza in the same list order,
     // so the zip is length-safe and pairs each worktree's path with its branch.
     parse_worktree_paths(&porcelain)
         .into_iter()
         .zip(parse_worktree_branches(&porcelain))
-        .find(|(path, branch)| branch == name && normalize_wt_path(path) != self_norm)
+        .find(|(path, branch)| branch == name && !is_self(path))
         .map(|(path, _)| path)
 }
 
@@ -704,11 +716,13 @@ pub async fn git_branch_divergence(
 /// lacks a patch-twin upstream) does it describe the shape a rewrite produces,
 /// and only that pair may drive a reset-to-upstream offer.
 ///
-/// `None` means nothing was provable — no upstream, no reflog, or any failed
-/// probe — and callers MUST then render exactly what they render without this
-/// data. The inverse of [`branch_has_reflog`](crate::git::remote)'s fail-safe on
-/// purpose: there, an unrunnable probe must not unlock a degraded push; here, it
-/// must not unlock a destructive offer.
+/// `None` means nothing was provable — no upstream, no reflog, any failed probe,
+/// or a divergence too large to walk (a probe that SUCCEEDED but whose answer is
+/// out of the range these surfaces serve) — and callers MUST then render exactly
+/// what they render without this data. The inverse of
+/// [`branch_has_reflog`](crate::git::remote)'s fail-safe on purpose: there, an
+/// unrunnable probe must not unlock a degraded push; here, it must not unlock a
+/// destructive offer.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchRewriteStatus {
@@ -732,7 +746,12 @@ pub struct BranchRewriteStatus {
 }
 
 impl BranchRewriteStatus {
-    /// The "nothing provable" answer — every arm that can't complete a probe.
+    /// The zeroed, verdict-less shape. It is what the PRE-VERDICT arms return —
+    /// the ones that bail before any count exists (no upstream, unresolvable tip,
+    /// unreadable or oversized counts). A sub-probe that fails AFTER the counts
+    /// land does NOT come here: the reflog arm keeps its real counts and only
+    /// leaves `remote_rewritten: None` (pinned by
+    /// `rewrite_status_without_a_reflog_refuses_to_guess`).
     fn unknown() -> Self {
         Self {
             remote_rewritten: None,
@@ -797,6 +816,37 @@ pub(crate) async fn branch_rewrite_status(
         return Ok(BranchRewriteStatus::unknown());
     }
 
+    let range = format!("{branch}...{upstream_rev}");
+
+    // Cheap size gate BEFORE the patch-id walk: `--cherry-mark` computes a patch id
+    // for every commit on both sides, which means diffing each one, where a plain
+    // left/right count only walks the graph.
+    //
+    // The two bounds are ASYMMETRIC because they answer different questions, and a
+    // single sum-based bound gets the motivating case wrong: "Update branch →
+    // rebase" on a branch forked far back leaves a handful of local commits against
+    // a huge remote side (3 local vs ~253 remote is the reported shape), which a
+    // combined 200 would refuse — disabling the feature exactly where it exists to
+    // help. So the LOCAL side alone carries the copy bound, since it is the N in
+    // "all N commits are already upstream", and the remote side is allowed to be
+    // enormous.
+    let sizes = run_git_raw(
+        Some(repo_path),
+        &["rev-list", "--left-right", "--count", &range],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if sizes.code != 0 {
+        return Ok(BranchRewriteStatus::unknown());
+    }
+    if divergence_out_of_range(
+        &sizes.stdout_lossy(),
+        MAX_LOCAL_COMMITS_FOR_COPY,
+        MAX_CHERRY_MARK_TOTAL,
+    ) {
+        return Ok(BranchRewriteStatus::unknown());
+    }
+
     // Symmetric difference with patch-id matching: left = branch-only, right =
     // upstream-only, third = the patch-equal commits `--cherry-mark` paired off.
     let counts = run_git_raw(
@@ -806,7 +856,7 @@ pub(crate) async fn branch_rewrite_status(
             "--left-right",
             "--cherry-mark",
             "--count",
-            &format!("{branch}...{upstream_rev}"),
+            &range,
         ],
         DEFAULT_TIMEOUT,
     )
@@ -859,6 +909,36 @@ pub(crate) async fn branch_rewrite_status(
         upstream: Some(upstream),
         upstream_tip: Some(tip),
     })
+}
+
+/// Commits on the LOCAL side past which this probe stops being useful. Purely a
+/// UI bound: it is the N in the confirm's "all N commits are already upstream",
+/// and a branch carrying that many unique commits wants a rebase, not a one-click
+/// reset. The REMOTE side is deliberately unbounded here — a branch forked far
+/// back sits hundreds of commits behind by construction, which says nothing about
+/// whether its own handful of commits were replayed.
+const MAX_LOCAL_COMMITS_FOR_COPY: u32 = 200;
+
+/// Total two-sided divergence past which the patch-id walk is refused on COST
+/// alone — nothing to do with the copy. `--cherry-mark` diffs every commit on both
+/// sides; this caps that work for a pathological range while staying far above any
+/// shape the feature actually serves.
+const MAX_CHERRY_MARK_TOTAL: u32 = 1000;
+
+/// Whether a plain `rev-list --left-right --count` reply is outside the range this
+/// probe will walk: more than `max_local` commits on the LOCAL side (a copy bound)
+/// or more than `max_total` across both (a cost bound). An unreadable reply answers
+/// `true` — the caller turns that into the no-verdict shape, the same "never guess"
+/// direction that governs [`parse_cherry_counts`].
+fn divergence_out_of_range(text: &str, max_local: u32, max_total: u32) -> bool {
+    let mut nums = text.split_whitespace();
+    let mut next = || nums.next()?.parse::<u32>().ok();
+    match (next(), next()) {
+        (Some(left), Some(right)) => {
+            left > max_local || left.saturating_add(right) > max_total
+        }
+        _ => true,
+    }
 }
 
 /// Parses `rev-list --left-right --cherry-mark --count`'s reply into
@@ -1170,10 +1250,10 @@ fn unique_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args, git_branches,
-        git_create_branch_core, git_default_branch, git_rename_branch_core, parse_cherry_counts,
-        parse_upstream_track, update_branch_from, validate_branch_name, validate_ref_name,
-        BranchRewriteStatus,
+        branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args,
+        divergence_out_of_range, git_branches, git_create_branch_core, git_default_branch,
+        git_rename_branch_core, parse_cherry_counts, parse_upstream_track, update_branch_from,
+        validate_branch_name, validate_ref_name, BranchRewriteStatus,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -1996,10 +2076,27 @@ mod tests {
         };
         // The PATH, not the word "worktree": the message has to be actionable, and
         // asserting the noun would pass on a message that never says where.
+        //
+        // Compared against the path GIT reports, not the fixture's own spelling of
+        // it: a Windows runner hands out 8.3 temp paths (`RUNNER~1`) and macOS
+        // tempdirs sit behind the `/var` → `/private/var` symlink, so the two are
+        // routinely different spellings of one directory. The message quotes git's
+        // spelling, so that is what an exact containment check has to use — and the
+        // canonical compare below proves it IS this fixture's worktree.
+        let porcelain = run(&local_s, &["worktree", "list", "--porcelain"]).await;
+        let reported = crate::git::ops::parse_worktree_paths(&porcelain)
+            .into_iter()
+            .zip(crate::git::ops::parse_worktree_branches(&porcelain))
+            .find(|(_, b)| b == "feature")
+            .map(|(p, _)| p)
+            .expect("git lists a worktree holding feature");
+        assert_eq!(
+            crate::git::worktree::canonical_wt_path(&reported),
+            crate::git::worktree::canonical_wt_path(&wt_s),
+            "fixture sanity: git's worktree IS the one this test created"
+        );
         assert!(
-            msg.contains("feature")
-                && crate::git::worktree::normalize_wt_path(msg)
-                    .contains(&crate::git::worktree::normalize_wt_path(&wt_s)),
+            msg.contains("feature") && msg.contains(&reported),
             "the refusal must name the branch and the holding worktree's path: {msg}"
         );
         assert_eq!(
@@ -2058,6 +2155,44 @@ mod tests {
         );
     }
 
+    /// REGRESSION GUARD for the CI-only failure: the caller's spelling of the repo
+    /// path and git's differ, so a normalize-only self-exclusion doesn't recognize
+    /// this checkout and reports the branch as held by a "linked" worktree that is
+    /// really this one — the wrong remedy.
+    ///
+    /// The divergence comes from passing the CANONICALIZED path while git reports
+    /// its own spelling. That discriminates on Windows, where `canonicalize` adds
+    /// the `\\?\` verbatim prefix and `normalize_wt_path` leaves it in place
+    /// (locally verified: reverting the self-exclusion to normalize-only fails this
+    /// test right here). On macOS and Linux it does NOT discriminate — canonical is
+    /// the same side git already resolves to, so both spellings agree and this
+    /// degrades to a duplicate of the test above. Inconclusive-by-platform, so the
+    /// assertion is on the ARM rather than on any path string.
+    #[tokio::test]
+    async fn reset_to_upstream_recognizes_its_own_checkout_under_another_spelling() {
+        let (_base, base) = temp_base("reset-upstream-spelling");
+        let local_s = server_rebase_fixture(&base).await;
+        let target = run(&local_s, &["rev-parse", "origin/feature"])
+            .await
+            .trim()
+            .to_string();
+        // The same directory, spelled the way the OS resolves it.
+        let resolved = std::fs::canonicalize(&local_s).expect("repo resolves");
+        let resolved_s = resolved.to_string_lossy().into_owned();
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &resolved_s, "feature", &target)
+            .await
+            .expect_err("feature is checked out in this very repo");
+        let AppError::Command(msg) = &err else {
+            panic!("expected an actionable Command error, got {err:?}");
+        };
+        assert!(
+            msg.contains("sync controls"),
+            "must take the checked-out-HERE arm, not the linked-worktree one: {msg}"
+        );
+    }
+
     /// The self-checkout arm of the same guard: `branch -f` can't touch the branch
     /// you are ON, and the refusal has to point at the surface that CAN.
     #[tokio::test]
@@ -2112,6 +2247,51 @@ mod tests {
                 parse_cherry_counts(bad),
                 None,
                 "{bad:?} must not yield counts"
+            );
+        }
+    }
+
+    /// The size gate in front of the patch-id walk, both arms. Building a real
+    /// fixture at these scales costs far more than the seam is worth, so the
+    /// thresholds are pinned on the parse that reads them; the spawn feeding it is
+    /// a plain `rev-list --left-right --count`, whose two-integer shape this
+    /// mirrors. An unreadable reply must gate OUT, matching the "never guess"
+    /// direction the counts parse takes.
+    ///
+    /// The asymmetry is the point: a big REMOTE side must stay admissible, because
+    /// that is the motivating shape (a branch forked far back, rebased by the
+    /// remote) — a combined bound would refuse exactly the case the feature exists
+    /// for.
+    #[test]
+    fn divergence_gate_bounds_the_local_side_for_copy_and_the_sum_for_cost() {
+        // The reported scenario: 3 local commits, ~253 remote. Must be ADMITTED.
+        assert!(
+            !divergence_out_of_range("3\t253", 200, 1000),
+            "a far-forked branch the remote rebased is the motivating case, not an \
+             excluded one"
+        );
+        assert!(!divergence_out_of_range("200\t800", 200, 1000), "both at the limits runs");
+        assert!(!divergence_out_of_range("0\t0", 200, 1000), "in sync runs");
+
+        // Copy bound: the LOCAL side is the N in "all N commits are already upstream".
+        assert!(
+            divergence_out_of_range("201\t0", 200, 1000),
+            "one local commit past the copy bound gates out"
+        );
+        // Cost bound: the sum alone, regardless of how one-sided it is.
+        assert!(
+            divergence_out_of_range("1\t1000", 200, 1000),
+            "one commit past the total cost bound gates out"
+        );
+        assert!(
+            !divergence_out_of_range("1\t999", 200, 1000),
+            "and just inside it still runs"
+        );
+
+        for bad in ["", "x\t1", "12", "not a count"] {
+            assert!(
+                divergence_out_of_range(bad, 200, 1000),
+                "{bad:?} is unreadable and must gate out"
             );
         }
     }

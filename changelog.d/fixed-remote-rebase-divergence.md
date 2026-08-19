@@ -6,4 +6,7 @@
   force-push confirmation warns that pushing would put the old history back.
   With commits of your own on top, the confirmation counts what's at stake and
   points at **Pull with rebase**, and the merge routes that would duplicate the
-  rewritten history stand down with the reason.
+  rewritten history stand down with the reason. When Git can't confirm the
+  rewrite (no reflog to read, say), the usual divergence controls stay exactly
+  as they are and no reset is offered. And once GitHub finishes an **Update
+  branch**, a background fetch brings the header's counts current.
