@@ -1879,7 +1879,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                                 isRemoving && "cursor-default",
                               )}
                               onClick={() => {
-                                if (isRemoving) return;
+                                if (refuseWhileLeaving(w.path, isRemoving))
+                                  return;
                                 setOpen(false);
                                 openWorktree(w.path);
                               }}
@@ -1916,6 +1917,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                           <ContextMenuItem
                             disabled={isRemoving}
                             onClick={() => {
+                              if (refuseWhileLeaving(w.path, isRemoving))
+                                return;
                               setOpen(false);
                               openWorktree(w.path);
                             }}

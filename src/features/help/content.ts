@@ -588,9 +588,10 @@ already in use. The **branch switcher** knows this too: a branch that's checked 
 another worktree is badged, and choosing it offers to open that worktree instead of failing
 with a checkout error. You can also **Delete worktree…** straight from that badged branch's
 context menu (disabled when the badge points at the main workspace, which can't be
-removed) — the branch stays, and its **Delete…** item un-disables once the worktree
-is gone. When you're in a linked worktree the switcher reminds you that a branch checkout
-lands *there* (not the main workspace) and offers a one-click **Open main workspace**, and its
+removed, and while that worktree's removal is already running) — the branch stays, and
+its **Delete…** item un-disables once the worktree is gone. When you're in a linked
+worktree the switcher reminds you that a branch checkout lands *there* (not the
+main workspace) and offers a one-click **Open main workspace**, and its
 **Worktrees** section jumps you straight to any other worktree — no detour through a
 checked-out branch. Each of those rows carries the worktree management actions on its
 context menu — **Open worktree**, **Copy path**, **Rename…**, **Lock…**/**Unlock**,
@@ -665,7 +666,7 @@ force push using \`--force-with-lease --force-if-includes\`** — which refuses 
 work someone else pushed unless your branch already includes it, even when auto-fetch has
 already updated your view of the remote. On a Git older than 2.30, or a branch with no
 reflog for the check to read, the push falls back to \`--force-with-lease\` alone, and the
-confirmation toast says so. When the remote has moved since your last look, the blocked
+success toast says so. When the remote has moved since your last look, the blocked
 push explains it in plain words, with Git's full output one click away under **Details**.
 
 ## Resolving conflicts

@@ -5447,6 +5447,45 @@ mod tests {
         assert_eq!(record.error, None);
     }
 
+    /// The commit route's gate, from the other side: a pick concluded OUTSIDE the app
+    /// leaves its record paused by design, and every ordinary commit afterwards must
+    /// leave it alone. Without the was-picking gate the widest close route would flip
+    /// whatever stale record the repo still holds on the user's next unrelated commit.
+    #[tokio::test]
+    async fn an_ordinary_commit_leaves_a_stale_paused_record_alone() {
+        let (dir, repo, _target_tip) = setup_paused_pick("commit-leaves-stale-record").await;
+        git(&repo, &["cherry-pick", "--abort"]).await;
+        assert!(
+            !op_state(&repo).await.unwrap().cherry_picking,
+            "the out-of-app abort must have ended the pick"
+        );
+        assert_eq!(
+            pick_record(&repo).await.status,
+            "paused",
+            "nothing in-app closed it, so the record is the stale one this pins"
+        );
+
+        std::fs::write(dir.path().join("unrelated.txt"), "unrelated\n").unwrap();
+        git(&repo, &["add", "unrelated.txt"]).await;
+        let state = AppState::default();
+        crate::git::commit::git_commit_core(
+            &state,
+            repo.clone(),
+            "an unrelated change".to_string(),
+            None,
+            false,
+        )
+        .await
+        .expect("an ordinary commit must succeed");
+
+        let record = pick_record(&repo).await;
+        assert_eq!(
+            record.status, "paused",
+            "no pick was in progress, so this commit concluded nothing"
+        );
+        assert!(record.finished_at.is_none());
+    }
+
     /// Only a CONFLICT stops on the target; every other failure class still rolls
     /// back, single commit included — a killed pick otherwise leaves HEAD on the
     /// target with nothing for the user to resolve.

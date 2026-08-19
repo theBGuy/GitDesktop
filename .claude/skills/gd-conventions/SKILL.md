@@ -178,6 +178,11 @@ clickables add `cursor-pointer` at the call site (vendored Button sets none).
   (`oplog.rs` `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`:
   env override outranks the `cfg!(test)` temp arm; both ship in release) —
   a new store module mirrors one of these, never resolves app-data bare.
+  Concurrency: `oplog.rs` holds a process-LOCAL mutex per store mutation,
+  `review_notes.rs` relies on atomic whole-file replace — NEITHER serializes
+  across processes, and the MCP server writes both stores, so every write
+  stays best-effort/last-writer-wins; a new store module picks its shape
+  deliberately, never assuming a lock covers the other process.
 - **Forge gating:** per-action `Implemented` flags. Shared-with-GitHub
   controls gate on `canWrite || forgeFeatureReady` (GitHub must be zero-diff);
   provider-only controls gate on `forgeFeatureReady` alone with the flag

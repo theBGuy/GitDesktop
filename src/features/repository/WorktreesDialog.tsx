@@ -121,8 +121,7 @@ export function WorktreesDialog({
   );
 }
 
-// ----------------------------------------------------------------- list mode
-
+/** List mode: every worktree as a row, its actions on a removal-gated menu. */
 function WorktreeList({
   repoPath,
   open,
@@ -164,7 +163,10 @@ function WorktreeList({
 
   async function handleOpen(w: UserWorktree) {
     if (normPath(w.path) === activeNorm) return; // already here
-    if (removingPaths.has(w.path)) return; // its folder is going away
+    // Its folder is on its way out. Not just the removal entry: a promote gaps
+    // it on both ends — the claim lands before markRemoval, and the tail runs
+    // on past the delete with nothing left in `removingPaths`.
+    if (refuseWhileLeaving(w.path, removingPaths.has(w.path))) return;
     await openWorktree(w.path);
     onClose();
   }
@@ -514,11 +516,10 @@ function RowTags({
   );
 }
 
-// --------------------------------------------------------------- rename worktree
-
 /** A disabled menu item can't carry a tooltip, so its blocking reason rides the
  *  label. A removal in progress outranks the other reasons — the worktree is on
- *  its way out, whatever else is true of it. */
+ *  its way out, whatever else is true of it. Shared with the branch switcher's
+ *  worktree rows and its badged-branch Delete item, not just this manager. */
 export function worktreeItemLabel(
   label: string,
   isRemoving: boolean,
@@ -529,11 +530,12 @@ export function worktreeItemLabel(
 }
 
 /** Refuses an action on a worktree that's on its way out, at the moment it would
- *  fire: the menu that opened the dialog can outlive the state that disabled it,
+ *  fire: the UI that offered the action can outlive the state that disabled it,
  *  and a promote's claim never re-renders anything. Returns true when the caller
- *  must not start its mutation. These callers never asked for the removal, so the
- *  wording states the state rather than the store's "already" (a duplicate
- *  attempt, correct only where the store refuses one). */
+ *  must not proceed — mutations and open/switch navigations alike. These callers
+ *  never asked for the removal, so the wording states the state rather than the
+ *  store's "already" (a duplicate attempt, correct only where the store refuses
+ *  one). */
 export function refuseWhileLeaving(path: string, removing: boolean): boolean {
   if (removing) {
     toast.info("This worktree is being removed.");
@@ -546,6 +548,8 @@ export function refuseWhileLeaving(path: string, removing: boolean): boolean {
   return false;
 }
 
+/** Renames (moves) a worktree's folder. Shared by the manager and the branch
+ *  switcher; refuses at submit while the worktree is being removed or promoted. */
 export function RenameWorktreeDialog({
   repoPath,
   worktree,
@@ -646,8 +650,8 @@ export function RenameWorktreeDialog({
   );
 }
 
-// ----------------------------------------------------------------- lock worktree
-
+/** Locks a worktree (with an optional reason). Shared by the manager and the
+ *  branch switcher; refuses at submit while it's being removed or promoted. */
 export function LockWorktreeDialog({
   repoPath,
   worktree,
@@ -732,8 +736,7 @@ export function LockWorktreeDialog({
   );
 }
 
-// ---------------------------------------------------------------- create mode
-
+/** Create mode: the add-a-worktree form this dialog swaps to. */
 function CreateWorktree({
   repoPath,
   onCancel,

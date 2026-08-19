@@ -62,7 +62,8 @@ const STORE_FILE: &str = "review-notes.json";
 /// Pure resolution of the store's base directory, in precedence order (mirroring
 /// [`crate::oplog::resolve_store_base`]):
 /// 1. a non-empty `GD_REVIEW_NOTES_DIR` override — the escape hatch for headless/test
-///    callers;
+///    callers. Unlike the oplog (Rust-only), this store has a GUI reader that does NOT
+///    honor the override, so an override splits Rust writer from GUI reader;
 /// 2. under `cfg!(test)`, a temp subdir, so no in-crate test can write the user's real
 ///    store (the rename migration runs for real under `cargo test`);
 /// 3. otherwise the real app-data dir (`dirs::data_dir()/<identifier>`), mirroring

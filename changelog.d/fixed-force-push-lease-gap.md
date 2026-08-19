@@ -3,4 +3,4 @@
   background fetch has already brought it into your remote-tracking refs
   (which is enough to satisfy the lease alone). On a Git older than 2.30,
   or a branch without a reflog for the check to read, pushes keep the
-  previous lease-only guard, and the confirmation toast says so.
+  lease-only guard, and the success toast says so.
