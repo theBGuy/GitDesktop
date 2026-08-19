@@ -1034,18 +1034,10 @@ export function LocalPrView({
               <DisabledReasonButton
                 variant="outline"
                 size="sm"
-                // `promotionLike` reads false while `useDefaultBranch` is still
-                // resolving, so an enabled button there is a demotion that hasn't
-                // decided yet. Held, not hidden: a control that vanishes and
-                // reappears is worse than one that says what it's waiting on.
-                //
-                // PENDING only, never `!isSuccess`: a FAILED read would otherwise
-                // disable the button forever behind a "checking…" that is no longer
-                // true. An error falls open to the ordinary button instead — the
-                // same direction the rest of this feature takes, where an
-                // unprovable answer means today's behavior rather than a
-                // withheld one. (The query is never `enabled: false`, so `isPending`
-                // here can only mean in-flight.)
+                // `promotionLike` reads false until `useDefaultBranch` resolves, so
+                // the button holds rather than deciding early. PENDING only (the
+                // query is never disabled): a FAILED read falls open to the ordinary
+                // button instead of disabling forever behind a stale "checking…".
                 disabled={
                   updateBranchFrom.isPending ||
                   recovery.pending ||

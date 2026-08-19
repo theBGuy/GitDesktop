@@ -405,16 +405,18 @@ fn remove_lines(content: &str, drop: &std::collections::HashSet<u32>) -> String 
 /// repo claiming an operation whose commits have moved out from under it.
 ///
 /// Both `--hard` guards and the reset itself run under ONE `repo_lock` hold, so
-/// no OTHER CALLER IN THIS PROCESS can dirty the tree or start a merge between the
-/// checks and a rewrite that has no stash and no reflog to recover from. That is
-/// the whole reach of the guarantee: a separate MCP-server process holds its own
-/// lock, and no lock constrains a terminal git or an editor writing files. That
-/// means the
-/// lock-free `run_git` for the reset — `run_git_mutating` re-acquires the same
-/// non-reentrant mutex and deadlocks — trading away its one-shot index.lock retry,
-/// the same bargain `git_stash_all_core` and the cherry-pick compound make. The
-/// `--mixed` arm keeps `run_git_mutating`: it has no guards to protect, so there
-/// is no check-then-act window and the retry is worth more than a hold.
+/// no other caller in THIS PROCESS can dirty the tree or start a merge between the
+/// checks and a rewrite that has no stash and no reflog to recover from. That
+/// means the lock-free `run_git` for the reset — `run_git_mutating` re-acquires
+/// the same non-reentrant mutex and deadlocks — trading away its one-shot
+/// index.lock retry, the same bargain `git_stash_all_core` and the cherry-pick
+/// compound make. The `--mixed` arm keeps `run_git_mutating`: it has no guards to
+/// protect, so there is no check-then-act window and the retry is worth more than
+/// a hold.
+///
+/// The hold's reach ends at this process, as `run_git_mutating`'s own doc says: a
+/// separate MCP-server process holds its own lock, and no lock constrains a
+/// terminal git or an editor writing files.
 ///
 /// Worktree-correct without extra work: every spawn runs with `repo_path` as its
 /// cwd, so a linked worktree resets ITS own HEAD and ITS own tree.

@@ -519,13 +519,16 @@ export function RemotePrView({
   // Merge-queue record for THIS pull request. The forge reports the queue once,
   // in the merge outcome, and nothing fetchable carries it afterwards, so the
   // store is the only source and the PR leaving OPEN is the only retraction.
-  const queuedKey = queuedMergeKey(repoPath, number);
+  // Keyed on the same repo+number+LENS identity `divergenceIdentity` uses: the
+  // lens flips while this view stays mounted, and origin and upstream can both
+  // have a pull request numbered 7.
+  const queuedKey = queuedMergeKey(repoPath, number, lens);
   const mergeQueued = useUiStore((s) => Boolean(s.queuedMerges[queuedKey]));
   const markMergeQueued = useUiStore((s) => s.markMergeQueued);
   const clearMergeQueued = useUiStore((s) => s.clearMergeQueued);
   // Details are authoritative once they land: a merged or closed pull request is
   // out of the queue however it got there. The placeholder gate is what makes the
-  // retraction safe — `queuedKey` follows the `number` prop immediately while
+  // retraction safe — `queuedKey` follows the number and lens immediately while
   // `details` still serves the PREVIOUS pull request, so switching away to a
   // merged one and back would otherwise read ITS state against THIS key and drop
   // the record for good. Same gate on the chip below, so both read one truth.
@@ -1095,16 +1098,10 @@ export function RemotePrView({
   // block it: the strip's sentence changes, the affordance does not. Neither arm
   // needs an `updating` term — both sit below it. The submitting window precedes
   // the latch.
-  // `!detailsStale` is REDUNDANT today and kept deliberately. Every route is
-  // already covered: the hotkey below ANDs its own `!details.isPlaceholderData`,
-  // the banner's controls ride `updateBusy` (which includes `detailsStale`), and
-  // `runUpdateBranch` early-returns on placeholder data. It sits here because this
-  // is the named "can update" predicate, and the term it guards is a real one —
-  // `promotionLike` reads `details`, which serves the PREVIOUS pull request
-  // through a switch, while `behindBy` comes from the divergence query, which has
-  // no placeholder and caches per number. A consumer added later without its own
-  // staleness gate would otherwise inherit exactly that window on exactly the pull
-  // requests the demotion exists to protect.
+  // `promotionLike` reads placeholder-served `details` while `behindBy` comes from
+  // the per-number divergence cache, so a stale render can show the old PR's
+  // verdict. Redundant today (every route gates staleness itself) — kept so this
+  // named predicate stays self-sufficient for the next consumer.
   const canUpdateBranch =
     (bannerArm === "behind" || (bannerArm === "blocked" && behindBy > 0)) &&
     !detailsStale &&
@@ -2529,7 +2526,15 @@ export function RemotePrView({
         updateBlockedReason={updateBlockedReason}
         // Busy-shaped, not a reason — the banner supplies its own words for the wait,
         // which now spans GitHub's whole queued update rather than one CLI call.
-        updateBusy={updateBranch.isPending || updatingBranch || detailsStale}
+        // `defaultBranch.isPending` rides along because `promotionLike` reads false
+        // until it resolves: holding is the only way the demotion can't be raced.
+        // A FAILED read is deliberately not held (see LocalPrView's twin).
+        updateBusy={
+          updateBranch.isPending ||
+          updatingBranch ||
+          detailsStale ||
+          defaultBranch.isPending
+        }
         updateSubmitting={updateBranch.isPending}
         onResolve={() => runResolve(false)}
         onResolveWithAi={() => runResolve(true)}

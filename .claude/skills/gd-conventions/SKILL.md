@@ -170,8 +170,8 @@ clickables add `cursor-pointer` at the call site (vendored Button sets none).
   count PRESENTED AS MEASURED: the pre-verdict shape zeroes the counts, and
   the null verdict is what makes them unreadable (every consumer gates on
   the verdict first). Callers render exactly what they render without the
-  data. The unlock condition
-  must rest on measured evidence (e.g. rewrite = reflog miss AND
+  data. The unlock condition must rest on measured evidence (e.g. rewrite =
+  reflog miss AND
   patch-twins present — strong evidence, not proof; the failure direction
   stays inaction), and the destructive action targets the measured sha,
   never a re-resolved ref.

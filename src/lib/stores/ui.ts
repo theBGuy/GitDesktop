@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { CommitAuthor, RepoInfo } from "@/lib/git/types";
+import type { CommitAuthor, RemoteLens, RepoInfo } from "@/lib/git/types";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import { startViewTransition } from "@/lib/view-transition";
 
@@ -143,9 +143,9 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   compareBranch: null,
   localPrCreate: null,
   selectedPr: null,
-  // queuedMerges deliberately survives this reset: its keys embed the repoPath,
-  // so entries can't leak across repos, and clearing here would kill the
-  // queued-merge chip's promised session persistence on any repo round-trip.
+  // queuedMerges deliberately survives this reset: its keys embed the repoPath
+  // (and lens), so entries can't leak across repos, and clearing here would kill
+  // the queued-merge chip's promised session persistence on any repo round-trip.
   pendingPrSection: null,
   pendingReviewId: null,
   selectedIssue: null,
@@ -169,11 +169,21 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   draftKeyRemaps: {},
 };
 
-/** Key a queued merge per repo + pull request. Opaque (never parsed back), and
- *  collision-free because the suffix is always digits: a path that itself ends
- *  in `#<digits>` still can't produce another pair's key. */
-export function queuedMergeKey(repoPath: string, number: number): string {
-  return `${repoPath}#${number}`;
+/** Key a queued merge by the SAME identity the PR view uses — repo + number +
+ *  lens. The lens is part of it because a fork's origin and upstream can both
+ *  carry a pull request numbered 7, and the view flips lens while staying
+ *  mounted: without it, one lens's chip shows on the other, and the
+ *  clear-on-non-OPEN effect deletes the other's record.
+ *
+ *  Opaque (never parsed back) and collision-free read from the RIGHT: the lens is
+ *  a fixed two-value enum and the number is digits, so neither trailing segment
+ *  can contain `#` however exotic the path in front of them is. */
+export function queuedMergeKey(
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+): string {
+  return `${repoPath}#${number}#${lens}`;
 }
 
 /** Key a commit draft so each repo + branch keeps its own message. A git branch
