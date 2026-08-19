@@ -44,6 +44,7 @@ import {
   useTransferRepo,
 } from "@/lib/git/queries";
 import { type ForgeProvider, providerLabel } from "@/lib/git/types";
+import { clearRepoLensCache } from "@/lib/repo-lens/queries";
 import { deleteRepoLens } from "@/lib/repo-lens/store";
 import { settingsKeys, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -415,6 +416,7 @@ function ArchiveAction({
  *  never fakes the persisted `isFork` provenance (that reflects GitHub-side
  *  truth and only changes via re-probe). */
 function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
+  const queryClient = useQueryClient();
   const remotes = useRemotes(repoPath);
   const removeRemote = useRemoveRemote(repoPath);
   const [confirming, setConfirming] = useState(false);
@@ -441,8 +443,12 @@ function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
                     onSuccess: () => {
                       // Hygiene: the persisted "upstream" lens no longer applies.
                       // Fire-and-forget — the lens read safe-defaults to origin,
-                      // so a failure here is harmless.
+                      // so a failure here is harmless. The CACHED lens drops with
+                      // it: its key sits outside the repo subtree this mutation
+                      // invalidates, so re-adding upstream in the same session
+                      // would otherwise resurrect the preference just deleted.
                       deleteRepoLens(repoPath).catch(() => undefined);
+                      clearRepoLensCache(queryClient, repoPath);
                       // Removing upstream collapses the lens to origin, so a still-
                       // selected remote number would resolve against the other repo.
                       // Same clears `useSetRepoLens` does on an explicit lens flip.

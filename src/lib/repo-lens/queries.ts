@@ -49,11 +49,11 @@ export function useRepoLens(repo: string): RemoteLens {
 }
 
 /**
- * Point a repo at `lens`: write the query cache synchronously (so the UI flips
- * instantly), optionally persist to disk (fire-and-forget with an error toast),
+ * Point a repo at `lens`: persist it to disk when asked (fire-and-forget with an
+ * error toast), write the query cache synchronously so the UI flips instantly,
  * and — when asked — clear any REMOTE PR/issue selection so a selected number
- * can't silently point at a different repo's item. No-op when the lens is
- * unchanged.
+ * can't silently point at a different repo's item. A lens the cache already
+ * holds is a UI no-op; the disk write is decided separately, below.
  *
  * Synchronous by contract, so a caller can apply the lens and navigate in the
  * same turn. That means the gate ({@link useLensGate}, an async pair of reads)
@@ -61,24 +61,31 @@ export function useRepoLens(repo: string): RemoteLens {
  * construction — {@link useRepoLens} re-gates on every read, so a repo that
  * isn't a fork keeps resolving to "origin" whatever is stored.
  *
- * A cache MISS is unknown, never "origin". The cache is cold for any repo the
- * window hasn't opened this session (and after gc), while disk may hold
- * "upstream" — so defaulting the read would let a target of "origin"
- * short-circuit as a no-op and leave the stored value to win once it loads,
- * opening the wrong pull request. Only a HOT cache that already matches skips
- * the write; a cold write is cache-only when `persist` is false, which still
- * settles the session without touching disk — {@link lensKey} sits outside the
- * ["repo", …] subtree, so no repo mutation's invalidation can refetch it back
- * to the stored value.
- *
  * `persist` separates the two callers. The switcher is the user CHOOSING a
  * lens, so it writes disk. A navigation only needs the view to land on the
  * right pull request — rewriting the stored preference from a notification
  * click would outlive the visit and change what every later session opens on.
  *
+ * INVARIANT from that split: cache and disk DIVERGE by design once a navigation
+ * applies a session-only lens, so persistence must never key off cache
+ * equality. A switcher choice matching the cached value is exactly the case
+ * where disk still holds the other one — hence the unconditional write, which
+ * is safe because `saveRepoLens` is idempotent.
+ *
+ * The cache write keeps its own short-circuit, and a cache MISS is unknown
+ * there, never "origin": the cache is cold for any repo the window hasn't
+ * opened this session (and after gc), while disk may hold "upstream" — so
+ * defaulting the read would let a target of "origin" skip the write and leave
+ * the stored value to win once it loads, opening the wrong pull request. A
+ * cache-only write still settles the session — {@link lensKey} sits outside the
+ * ["repo", …] subtree, so no repo mutation's invalidation can refetch it back
+ * to the stored value.
+ *
  * `clearSelections` is false for a navigation that selects its own PR right
  * after (clearing would fight it) and true for the switcher, whose whole point
- * is to drop a selection minted under the old lens.
+ * is to drop a selection minted under the old lens. It rides the cache
+ * short-circuit: a re-select of the lens already showing must not drop the
+ * user's selection.
  */
 export function applyRepoLens(
   queryClient: QueryClient,
@@ -86,14 +93,16 @@ export function applyRepoLens(
   lens: RemoteLens,
   { clearSelections, persist }: { clearSelections: boolean; persist: boolean },
 ): void {
-  const current = queryClient.getQueryData<RemoteLens>(lensKey(repo));
-  if (current !== undefined && current === lens) return;
-  queryClient.setQueryData(lensKey(repo), lens);
+  // Ahead of the cache short-circuit, never behind it: an explicit choice has to
+  // reach disk even when the cache already shows that lens.
   if (persist) {
     void saveRepoLens(repo, lens).catch(() => {
       toast.error("Couldn't save the fork/upstream view preference.");
     });
   }
+  const current = queryClient.getQueryData<RemoteLens>(lensKey(repo));
+  if (current !== undefined && current === lens) return;
+  queryClient.setQueryData(lensKey(repo), lens);
   if (!clearSelections) return;
   // A remote number selected under the old lens would resolve against the
   // wrong repo — drop it. Local + Jira selections are lens-independent.
@@ -115,6 +124,18 @@ export function useSetRepoLens(repo: string) {
     },
     [queryClient, repo],
   );
+}
+
+/** Drop a repo's CACHED lens back to "origin" — the companion to the store's
+ *  `deleteRepoLens` for the detach path. Because {@link lensKey} sits outside
+ *  the ["repo", …] subtree, no mutation's invalidation reconciles the cache with
+ *  the deleted disk entry: without this, re-adding the upstream remote in the
+ *  same session would resurrect the preference the delete dropped. */
+export function clearRepoLensCache(
+  queryClient: QueryClient,
+  repo: string,
+): void {
+  queryClient.setQueryData<RemoteLens>(lensKey(repo), "origin");
 }
 
 /** Parse "owner/repo" from a remote's URL (both `https://host/owner/repo(.git)`
