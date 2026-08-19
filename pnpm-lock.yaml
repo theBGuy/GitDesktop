@@ -240,7 +240,7 @@ importers:
     devDependencies:
       sharp:
         specifier: ^0.35.3
-        version: 0.35.3(@types/node@24.13.1)
+        version: 0.35.3(@types/node@24.13.3)
 
 packages:
 
@@ -8825,7 +8825,7 @@ snapshots:
       '@img/sharp-win32-x64': 0.34.5
     optional: true
 
-  sharp@0.35.3(@types/node@24.13.1):
+  sharp@0.35.3(@types/node@24.13.3):
     dependencies:
       '@img/colour': 1.1.0
       detect-libc: 2.1.2
@@ -8856,7 +8856,7 @@ snapshots:
       '@img/sharp-win32-arm64': 0.35.3
       '@img/sharp-win32-ia32': 0.35.3
       '@img/sharp-win32-x64': 0.35.3
-      '@types/node': 24.13.1
+      '@types/node': 24.13.3
 
   shebang-command@2.0.0:
     dependencies:
