@@ -341,8 +341,8 @@ function WorktreeRow({
         role="option"
         aria-selected={highlighted}
         // Not `disabled`: the current row must stay focusable so arrow-key nav
-        // can move through it. onOpen already no-ops on the current worktree
-        // and on one being removed.
+        // can move through it. onOpen already no-ops on the current worktree,
+        // and refuses one that's being removed or promoted.
         aria-disabled={isCurrent || isRemoving || undefined}
         data-wt-path={path}
         onFocus={onFocus}
