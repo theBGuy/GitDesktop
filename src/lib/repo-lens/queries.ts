@@ -10,7 +10,12 @@ import type { RemoteLens } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { loadRepoLens, saveRepoLens } from "./store";
 
-const lensKey = (repo: string) => ["repo", repo, "lens"] as const;
+// Deliberately OUTSIDE the ["repo", …] subtree (like `useRepoIdentity`'s key):
+// every repo mutation invalidates that whole prefix, and an invalidation
+// refetches an active query whatever its staleTime — which would re-read disk
+// and overwrite a session-only lens applied by a navigation, repainting the
+// other lens's pull request under the selected number.
+const lensKey = (repo: string) => ["repo-lens", repo] as const;
 
 /** The raw persisted lens for a repo, unfiltered by the gate. Prefer
  *  {@link useRepoLens} in surfaces — this exists so the setter and the switcher
@@ -62,7 +67,9 @@ export function useRepoLens(repo: string): RemoteLens {
  * short-circuit as a no-op and leave the stored value to win once it loads,
  * opening the wrong pull request. Only a HOT cache that already matches skips
  * the write; a cold write is cache-only when `persist` is false, which still
- * settles the session (`lensKey` never goes stale) without touching disk.
+ * settles the session without touching disk — {@link lensKey} sits outside the
+ * ["repo", …] subtree, so no repo mutation's invalidation can refetch it back
+ * to the stored value.
  *
  * `persist` separates the two callers. The switcher is the user CHOOSING a
  * lens, so it writes disk. A navigation only needs the view to land on the

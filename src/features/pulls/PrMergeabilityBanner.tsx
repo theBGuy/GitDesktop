@@ -216,6 +216,7 @@ export function PrMergeabilityBanner({
   blockedRequirements,
   updateBlockedReason,
   updateBusy,
+  updateAwaitingDefault,
   updateSubmitting,
   onResolve,
   onResolveWithAi,
@@ -256,6 +257,10 @@ export function PrMergeabilityBanner({
   /** Why updating the branch is refused, if it is; undefined = allowed. */
   updateBlockedReason: string | undefined;
   updateBusy: boolean;
+  /** The slice of `updateBusy` spent waiting on the default-branch read the
+   *  promotion demotion depends on — it gets its own wording, since the generic
+   *  busy line would claim the pull request is still loading. */
+  updateAwaitingDefault: boolean;
   /** The update call itself is in flight — the slice of `updateBusy` before the forge
    *  has even accepted the job. */
   updateSubmitting: boolean;
@@ -303,14 +308,17 @@ export function PrMergeabilityBanner({
   const updateDisabled = updateBusy || updateBlockedReason !== undefined;
   // The busy hold now spans the forge's whole queued update, so a silent disabled
   // control would leave the user waiting on nothing they can read. Each cause gets its
-  // own words: the queued job, the call that hasn't been accepted yet, and the
-  // PR-switch window are three different waits.
+  // own words: the queued job, the call that hasn't been accepted yet, the
+  // default-branch read this action's promotion check depends on, and the
+  // PR-switch window are four different waits.
   const updateBusyReason = (() => {
     switch (true) {
       case arm === "updating":
         return `${providerLabel(provider)} is still updating this branch.`;
       case updateSubmitting:
         return "Submitting the update…";
+      case updateAwaitingDefault:
+        return "Checking which branch is the default…";
       default:
         return PR_SWITCH_LOADING_REASON;
     }

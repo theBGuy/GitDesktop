@@ -166,15 +166,14 @@ clickables add `cursor-pointer` at the call site (vendored Button sets none).
   serialize as strings end-to-end.
 - **Advisory probes fail SAFE toward inaction:** a probe whose verdict can
   unlock a destructive offer (`BranchRewriteStatus` is the model) keeps its
-  VERDICT "unknown" on any failed sub-probe — and never ships a defaulted
-  count PRESENTED AS MEASURED: the pre-verdict shape zeroes the counts, and
+  VERDICT "unknown" on any failed sub-probe, and never ships a defaulted
+  count PRESENTED AS MEASURED — the pre-verdict shape zeroes the counts, and
   the null verdict is what makes them unreadable (every consumer gates on
   the verdict first). Callers render exactly what they render without the
   data. The unlock condition must rest on measured evidence (e.g. rewrite =
-  reflog miss AND
-  patch-twins present — strong evidence, not proof; the failure direction
-  stays inaction), and the destructive action targets the measured sha,
-  never a re-resolved ref.
+  reflog miss AND patch-twins present — strong evidence, not proof; the
+  failure direction stays inaction), and the destructive action targets the
+  measured sha, never a re-resolved ref.
 - **GraphQL nullability:** fields without `!` deserialize into `Option<T>`;
   never `unwrap_or_default()` a `from_value`; confirm a field exists before
   querying it.

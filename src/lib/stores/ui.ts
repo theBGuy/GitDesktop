@@ -140,12 +140,12 @@ const EMPTY_COMMIT_DRAFT: CommitDraft = {
  *  same set openRepo / openPr reset, hoisted so the run/agent navigations
  *  stay in lockstep. Staying in the same repo keeps the user's other selections. */
 const CROSS_REPO_RESET: Partial<UiState> = {
+  // Absent on purpose: `queuedMerges` keys embed the repoPath (and lens), so
+  // entries can't leak across repos, and clearing here would kill the queued-merge
+  // chip's promised session persistence on any repo round-trip.
   compareBranch: null,
   localPrCreate: null,
   selectedPr: null,
-  // queuedMerges deliberately survives this reset: its keys embed the repoPath
-  // (and lens), so entries can't leak across repos, and clearing here would kill
-  // the queued-merge chip's promised session persistence on any repo round-trip.
   pendingPrSection: null,
   pendingReviewId: null,
   selectedIssue: null,
@@ -606,7 +606,10 @@ export const useUiStore = create<UiState>()((set, get) => {
     // Atomic (a follow-up set() would be clobbered); rationale in the compareCommitHash doc.
     setCompareBranch: (branch) =>
       set({ compareBranch: branch, compareCommitHash: null }),
-    selectPr: (pr) => set({ selectedPr: pr }),
+    // Clears any armed reveal in the SAME set (openPr's atomicity): a review
+    // request belongs to the PR the notification opened, and picking another
+    // from the list would leave it armed to fire on a later return to that one.
+    selectPr: (pr) => set({ selectedPr: pr, pendingReviewId: null }),
     setPendingPrSection: (section) => set({ pendingPrSection: section }),
     setPendingReviewId: (reviewId) => set({ pendingReviewId: reviewId }),
     selectIssue: (issue) => set({ selectedIssue: issue }),

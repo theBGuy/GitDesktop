@@ -1031,6 +1031,15 @@ export function RemotePrView({
     !details.data.crossRepository &&
     lens === "origin";
 
+  // `promotionLike` is hard-false until the default branch resolves, so an update
+  // started in that window races the demotion. Every entry point holds on this —
+  // the banner via `updateBusy`, the hotkey via `canUpdateBranch`, and
+  // `runUpdateBranch` itself — but ONLY on the origin lens, where the comparison
+  // could change the answer; elsewhere `promotionLike` is false by design and a
+  // hold would buy nothing. A FAILED read is deliberately not held: it falls open,
+  // matching LocalPrView's twin.
+  const defaultBranchSettling = lens === "origin" && defaultBranch.isPending;
+
   // The banner's arm: server truth, then the local prediction where the forge has
   // none, then the resume offer — the resolve worktree is only worth its own line
   // when there's nothing more urgent to say about the merge. `updating` outranks
@@ -1106,6 +1115,7 @@ export function RemotePrView({
     (bannerArm === "behind" || (bannerArm === "blocked" && behindBy > 0)) &&
     !detailsStale &&
     !promotionLike &&
+    !defaultBranchSettling &&
     updateBlockedReason === undefined &&
     !updateBranch.isPending;
 
@@ -1195,8 +1205,11 @@ export function RemotePrView({
       updatingBranch ||
       // A promotion pull request would merge the base back INTO the default
       // branch. The demotion has to live here too, or it is only as good as the
-      // surfaces that happen to read `canUpdateBranch`.
-      promotionLike
+      // surfaces that happen to read `canUpdateBranch` — and it has to include
+      // the window where the demotion hasn't been decided yet, or a fast hotkey
+      // slips through with `promotionLike` still false.
+      promotionLike ||
+      defaultBranchSettling
     )
       return;
     if (rebase) {
@@ -2526,15 +2539,15 @@ export function RemotePrView({
         updateBlockedReason={updateBlockedReason}
         // Busy-shaped, not a reason — the banner supplies its own words for the wait,
         // which now spans GitHub's whole queued update rather than one CLI call.
-        // `defaultBranch.isPending` rides along because `promotionLike` reads false
-        // until it resolves: holding is the only way the demotion can't be raced.
-        // A FAILED read is deliberately not held (see LocalPrView's twin).
         updateBusy={
           updateBranch.isPending ||
           updatingBranch ||
           detailsStale ||
-          defaultBranch.isPending
+          defaultBranchSettling
         }
+        // The one wait the generic busy wording would misdescribe, so it gets its
+        // own arm rather than claiming the pull request is still loading.
+        updateAwaitingDefault={defaultBranchSettling}
         updateSubmitting={updateBranch.isPending}
         onResolve={() => runResolve(false)}
         onResolveWithAi={() => runResolve(true)}
