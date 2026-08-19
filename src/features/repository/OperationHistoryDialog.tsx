@@ -4,6 +4,7 @@ import {
   GitBranchIcon,
   GitCommitIcon,
   GitMergeIcon,
+  PauseCircleIcon,
   PencilSimpleIcon,
   ProhibitIcon,
   WarningCircleIcon,
@@ -43,6 +44,7 @@ const STATUS_META: Record<
   { label: string; Icon: IconType; tone: string }
 > = {
   pending: { label: "Pending", Icon: ClockIcon, tone: "text-warning" },
+  paused: { label: "Paused", Icon: PauseCircleIcon, tone: "text-warning" },
   done: { label: "Done", Icon: CheckCircleIcon, tone: "text-success" },
   failed: {
     label: "Failed",

@@ -44,7 +44,8 @@ use crate::error::{AppError, AppResult};
 const APP_IDENTIFIER: &str = "com.thebguy.gitdesktop";
 /// The store filename.
 const STORE_FILE: &str = "opslog.json";
-/// Keep at most this many entries per repo (never evicting a `"pending"` one).
+/// Keep at most this many entries per repo (never evicting a `"pending"` or
+/// `"paused"` one).
 const HISTORY_CAP: usize = 50;
 
 /// A single journaled operation. `#[serde(rename_all = "camelCase")]` freezes the
@@ -58,7 +59,9 @@ pub struct OpLogEntry {
     pub op: String,
     /// Human summary, e.g. `"Squash-merge feature → main"`.
     pub label: String,
-    /// `"pending"` | `"done"` | `"failed"` | `"dismissed"`.
+    /// `"pending"` | `"done"` | `"failed"` | `"dismissed"` | `"paused"`.
+    /// `"paused"` = handed to the user mid-op (a stopped cherry-pick), so it is
+    /// neither in-flight nor finished until they continue or abort it.
     pub status: String,
     /// `now_iso()` captured at [`begin`].
     pub started_at: String,
@@ -220,20 +223,22 @@ fn insert_pending(repo: &str, entry: &OpLogEntry) -> AppResult<()> {
     write_store(&path, &store)
 }
 
-/// Drop oldest non-`"pending"` entries until `list.len() <= HISTORY_CAP`. A
-/// `"pending"` entry (possibly an in-flight op) is never evicted, so the cap is a
-/// soft ceiling that a burst of concurrent pending ops can legitimately exceed.
+/// Drop oldest evictable entries until `list.len() <= HISTORY_CAP`. An unfinished
+/// entry is never evicted — `"pending"` may be an in-flight op, and `"paused"` is a
+/// live handle [`close_paused_pick`] still needs — so the cap is a soft ceiling that
+/// a burst of concurrent unfinished ops can legitimately exceed.
 fn cap_history(list: &mut Vec<Value>) {
     if list.len() <= HISTORY_CAP {
         return;
     }
-    // Iterate oldest-first (end of the newest-first vec) and remove non-pending
+    // Iterate oldest-first (end of the newest-first vec) and remove finished entries
     // until at or under the cap.
     let mut i = list.len();
     while list.len() > HISTORY_CAP && i > 0 {
         i -= 1;
-        let is_pending = list[i].get("status").and_then(Value::as_str) == Some("pending");
-        if !is_pending {
+        let status = list[i].get("status").and_then(Value::as_str);
+        let unfinished = matches!(status, Some("pending") | Some("paused"));
+        if !unfinished {
             list.remove(i);
         }
     }
@@ -265,6 +270,52 @@ where
     };
     mutate(obj);
     write_store(&path, &store)
+}
+
+/// How a paused op ended, once the user acted on it — see [`close_paused_pick`].
+pub(crate) enum PausedOutcome {
+    /// Continued to completion in-app.
+    Continued,
+    /// Abandoned in-app.
+    Aborted,
+}
+
+/// Mark an entry as handed to the user: no `finishedAt` (the op hasn't ended) and no
+/// `error` (the conflict lives in the banner, and the history dialog's error line
+/// gates on `"failed"`). Both are written explicitly so the shape holds whatever the
+/// record carried before.
+fn apply_pause(obj: &mut Map<String, Value>) {
+    obj.insert("status".to_string(), Value::String("paused".to_string()));
+    obj.insert("finishedAt".to_string(), Value::Null);
+    obj.insert("error".to_string(), Value::Null);
+}
+
+/// Close a paused entry at its terminal disposition. An abort is journaled `"failed"`
+/// with the same wording [`crate::git::ops::git_abort_local_pr_merge`] uses, so the
+/// history dialog reads one sentence for a user-abandoned op.
+fn apply_close(obj: &mut Map<String, Value>, outcome: &PausedOutcome, now: String) {
+    let (status, error) = match outcome {
+        PausedOutcome::Continued => ("done", Value::Null),
+        PausedOutcome::Aborted => ("failed", Value::String("aborted by user".to_string())),
+    };
+    obj.insert("status".to_string(), Value::String(status.to_string()));
+    obj.insert("finishedAt".to_string(), Value::String(now));
+    obj.insert("error".to_string(), error);
+}
+
+/// The id of the NEWEST `"paused"` cherry-pick entry in `entries`, if any. Sorts in
+/// place (the caller owns a store copy), so callers may pass unsorted store order.
+fn newest_paused_pick(entries: &mut [Value]) -> Option<String> {
+    sort_newest_first(entries);
+    entries
+        .iter()
+        .find(|e| {
+            e.get("op").and_then(Value::as_str) == Some("cherry_pick_onto")
+                && e.get("status").and_then(Value::as_str) == Some("paused")
+        })
+        .and_then(|e| e.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// The newest pending op is genuinely interrupted UNLESS the repo is back in a
@@ -313,7 +364,9 @@ fn reconcile(
         return Ok(Vec::new());
     };
 
-    // Indices of pending entries, newest-first by startedAt.
+    // Indices of pending entries, newest-first by startedAt. Strictly `"pending"`:
+    // a `"paused"` op was handed to the user and is owned by the conflict banner,
+    // never a recovery candidate.
     let mut pending_idx: Vec<usize> = list
         .iter()
         .enumerate()
@@ -426,6 +479,49 @@ pub async fn finish(repo: &str, id: &Option<String>, error: Option<String>) {
     });
     if let Err(e) = result {
         eprintln!("gitdesktop: opslog finish failed (op unaffected): {e}");
+    }
+}
+
+/// Best-effort: if `id` is `Some`, flip that entry to `"paused"` — the op did not
+/// end, it was handed to the user to resolve, so it is neither a failure nor a
+/// recovery candidate until [`close_paused_pick`] closes it. Swallow+log like
+/// [`finish`].
+pub(crate) async fn pause(repo: &str, id: &Option<String>) {
+    let Some(id) = id else {
+        return;
+    };
+    if let Err(e) = mutate_entry(repo, id, apply_pause) {
+        eprintln!("gitdesktop: opslog pause failed (op unaffected): {e}");
+    }
+}
+
+/// Best-effort: close `repo`'s newest `"paused"` cherry-pick entry now that the user
+/// has ended the pick in-app. No paused entry → no-op.
+///
+/// The handle is the newest paused record, not the specific pick: a pick ended
+/// outside the app (a terminal `git cherry-pick --abort`) leaves its record
+/// `"paused"`, and a later in-app continue or abort of any cherry-pick is what will
+/// close it — the same best-effort posture the journal takes for out-of-app work.
+pub(crate) async fn close_paused_pick(repo: &str, outcome: PausedOutcome) {
+    let now = now_iso();
+    let found = store_path().and_then(|path| {
+        let mut entries = {
+            let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+            let store = read_store(&path)?;
+            repo_entries(&store, repo)
+        };
+        Ok(newest_paused_pick(&mut entries))
+    });
+    let id = match found {
+        Ok(Some(id)) => id,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("gitdesktop: opslog paused lookup failed (op unaffected): {e}");
+            return;
+        }
+    };
+    if let Err(e) = mutate_entry(repo, &id, |obj| apply_close(obj, &outcome, now)) {
+        eprintln!("gitdesktop: opslog close failed (op unaffected): {e}");
     }
 }
 
@@ -741,9 +837,9 @@ mod tests {
     }
 
     #[test]
-    fn cap_never_evicts_a_pending_entry() {
-        // A newest-first list: 1 old pending at the very end, then 60 done entries.
-        // Capping to 50 must drop oldest done entries but keep the pending one.
+    fn cap_never_evicts_an_unfinished_entry() {
+        // A newest-first list: 60 done entries, then the two oldest unfinished ones.
+        // Capping to 50 must drop oldest done entries but keep both of those.
         let mut list: Vec<Value> = Vec::new();
         for i in 0..60 {
             list.push(json!({
@@ -752,10 +848,16 @@ mod tests {
                 "startedAt": format!("2026-02-{:02}T00:00:00.000Z", i + 1),
             }));
         }
-        // The oldest entry (last in newest-first order) is pending.
+        // The oldest entries (last in newest-first order) are still open.
         list.push(json!({
             "id": "old-pending",
             "status": "pending",
+            "startedAt": "2026-01-02T00:00:00.000Z",
+        }));
+        list.push(json!({
+            "id": "old-paused",
+            "op": "cherry_pick_onto",
+            "status": "paused",
             "startedAt": "2026-01-01T00:00:00.000Z",
         }));
         cap_history(&mut list);
@@ -765,6 +867,136 @@ mod tests {
             list.iter().any(|e| e["id"] == "old-pending"),
             "the pending entry must never be evicted by the cap"
         );
+        assert!(
+            list.iter().any(|e| e["id"] == "old-paused"),
+            "evicting a paused entry would lose the handle the close helper needs"
+        );
+    }
+
+    /// Build a wire record for a `cherry_pick_onto` entry at `status`.
+    fn pick_record(id: &str, started_at: &str, status: &str) -> Value {
+        json!({
+            "id": id,
+            "op": "cherry_pick_onto",
+            "label": "Cherry-pick abc1234 → target",
+            "status": status,
+            "startedAt": started_at,
+            "finishedAt": null,
+            "originalRef": "feature",
+            "originalSha": "abc123",
+            "preOpTip": "def456",
+            "error": null,
+        })
+    }
+
+    #[test]
+    fn pause_marks_the_entry_without_finishing_it() {
+        let (_tmp, path) = tmp_store();
+        let repo = r"C:\repo\one";
+        let mut rec = pick_record("pick-1", "2026-01-01T00:00:00.000Z", "pending");
+        // Seed the fields pause must clear, so the assertions below can't pass by
+        // the record having arrived clean.
+        let obj = rec.as_object_mut().unwrap();
+        obj.insert("finishedAt".into(), json!("2026-01-02T00:00:00.000Z"));
+        obj.insert("error".into(), json!("stale"));
+        let mut store = Map::new();
+        store.insert(repo.to_string(), Value::Array(vec![rec]));
+        write_store(&path, &store).unwrap();
+
+        let mut s = read_store(&path).unwrap();
+        apply_pause(s[repo].as_array_mut().unwrap()[0].as_object_mut().unwrap());
+        write_store(&path, &s).unwrap();
+
+        let back = read_store(&path).unwrap();
+        let entry = &back[repo][0];
+        assert_eq!(entry["status"], "paused");
+        assert_eq!(
+            entry["finishedAt"],
+            Value::Null,
+            "a paused op has not ended, so it has no finish time"
+        );
+        assert_eq!(entry["error"], Value::Null);
+        // And it still parses, or the history dialog's from_value filter drops it.
+        let parsed: OpLogEntry = serde_json::from_value(entry.clone()).unwrap();
+        assert_eq!(parsed.status, "paused");
+        assert!(parsed.finished_at.is_none());
+    }
+
+    #[test]
+    fn close_targets_the_newest_paused_pick() {
+        let (_tmp, path) = tmp_store();
+        let repo = r"C:\repo\one";
+        let mut store = Map::new();
+        store.insert(
+            repo.to_string(),
+            Value::Array(vec![
+                pick_record("old-paused", "2026-01-01T00:00:00.000Z", "paused"),
+                pick_record("new-paused", "2026-01-03T00:00:00.000Z", "paused"),
+                pick_record("later-done", "2026-01-04T00:00:00.000Z", "done"),
+            ]),
+        );
+        write_store(&path, &store).unwrap();
+
+        let mut entries = repo_entries(&read_store(&path).unwrap(), repo);
+        let id = newest_paused_pick(&mut entries).expect("the paused pick must be found");
+        assert_eq!(id, "new-paused", "a newer finished entry is not the handle");
+
+        let mut s = read_store(&path).unwrap();
+        {
+            let list = s.get_mut(repo).unwrap().as_array_mut().unwrap();
+            let obj = list
+                .iter_mut()
+                .find(|e| e["id"] == id)
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            apply_close(
+                obj,
+                &PausedOutcome::Aborted,
+                "2026-01-05T00:00:00.000Z".to_string(),
+            );
+        }
+        write_store(&path, &s).unwrap();
+
+        let back = read_store(&path).unwrap();
+        let list = back[repo].as_array().unwrap();
+        let closed = list.iter().find(|e| e["id"] == "new-paused").unwrap();
+        assert_eq!(closed["status"], "failed");
+        assert_eq!(closed["error"], "aborted by user");
+        assert_eq!(closed["finishedAt"], "2026-01-05T00:00:00.000Z");
+        // Only the newest is closed: an older paused record is not this op's.
+        let untouched = list.iter().find(|e| e["id"] == "old-paused").unwrap();
+        assert_eq!(untouched["status"], "paused");
+    }
+
+    #[test]
+    fn close_continued_marks_done_without_an_error() {
+        let mut rec = pick_record("pick-1", "2026-01-01T00:00:00.000Z", "paused");
+        apply_close(
+            rec.as_object_mut().unwrap(),
+            &PausedOutcome::Continued,
+            "2026-01-02T00:00:00.000Z".to_string(),
+        );
+        assert_eq!(rec["status"], "done");
+        assert_eq!(rec["finishedAt"], "2026-01-02T00:00:00.000Z");
+        assert_eq!(rec["error"], Value::Null);
+    }
+
+    #[test]
+    fn close_is_a_no_op_without_a_paused_pick() {
+        // A finished pick and another op's paused entry: neither is a pick handle,
+        // so the close helper must find nothing to flip.
+        let mut entries = vec![
+            pick_record("done-pick", "2026-01-02T00:00:00.000Z", "done"),
+            json!({
+                "id": "paused-merge",
+                "op": "merge_local_pr",
+                "status": "paused",
+                "startedAt": "2026-01-03T00:00:00.000Z",
+            }),
+        ];
+        assert!(newest_paused_pick(&mut entries).is_none());
+        assert!(newest_paused_pick(&mut Vec::new()).is_none());
     }
 
     #[test]

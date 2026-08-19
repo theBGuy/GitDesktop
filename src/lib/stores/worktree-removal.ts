@@ -127,6 +127,14 @@ const promotingMains = new Set<string>();
  *  screen that never started. */
 const promotingWorktrees = new Set<string>();
 
+/** True while a promote has claimed this worktree. A FIRE-TIME check only:
+ *  {@link promotingWorktrees} is deliberately not store state, so nothing
+ *  re-renders when it changes — call this where a mutation would start, never
+ *  to decide what a component paints. */
+export function isWorktreePromoting(path: string): boolean {
+  return promotingWorktrees.has(normPath(path));
+}
+
 // `_set` unused: every write goes through the module-level helpers below, so a
 // runner that outlives its dialog reaches state the same way the starters do.
 export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(

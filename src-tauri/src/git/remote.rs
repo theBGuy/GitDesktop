@@ -505,7 +505,7 @@ pub async fn git_push(
     branch: Option<String>,
     remote: Option<String>,
     remote_branch: Option<String>,
-) -> AppResult<()> {
+) -> AppResult<PushGuard> {
     git_push_core(
         &state,
         repo_path,
@@ -516,14 +516,18 @@ pub async fn git_push(
         remote_branch,
     )
     .await
-    // The guard is an in-process detail; the IPC contract stays `void`.
-    .map(|_| ())
 }
 
 /// Which guarantee a completed push actually ran under. Only meaningful for a
 /// FORCE push: a non-force push has no lease to degrade, and reports
 /// [`PushGuard::LeaseAndIncludes`] as the neutral value.
-#[derive(Debug, PartialEq)]
+///
+/// Crosses the IPC boundary as `git_push`'s return value, so the caller's
+/// success toast can name a degraded guarantee instead of overclaiming. The
+/// camelCase wire strings mirror the `PushGuard` union in `src/lib/git/api.ts`
+/// and are pinned by `push_guard_serializes_to_the_camel_case_wire_values`.
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 #[allow(clippy::enum_variant_names)] // the shared `Lease` prefix IS the shared guarantee
 pub(crate) enum PushGuard {
     /// `--force-with-lease --force-if-includes`, the intended pair.
@@ -877,7 +881,7 @@ mod tests {
         build_push_args, cache_get, cache_invalidate, cache_put, git_pull_core, git_push_core,
         git_remote_remove_core, is_auth_class_failure, is_unknown_push_option,
         parse_upstream_tracking, publish_refspec, resolve_push_target, run_git_mutating_with_creds,
-        without_force_if_includes, PushGuard,
+        without_force_if_includes, IF_INCLUDES_REJECTION, PushGuard,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -1392,6 +1396,93 @@ mod tests {
         (guard, base, origin.to_string_lossy().into_owned(), url)
     }
 
+    /// git's per-ref reason when `--force-with-lease` finds the remote-tracking ref
+    /// behind the real remote — verbatim from `! [rejected] … (…)`. The prod-side
+    /// twin is [`IF_INCLUDES_REJECTION`]; this one only ever appears in git's report.
+    const STALE_LEASE_REJECTION: &str = "stale info";
+
+    /// Assert git's failure report still carries a `! [rejected] … (<reason>)` line
+    /// — the exact shape `PUSH_REJECTION_SUMMARIES` (src/lib/error-summary.ts)
+    /// anchors on to turn a blocked force push into one human line. Keep the two
+    /// lists in step: a reason git renames goes back to raw stderr in the toast.
+    fn assert_rejection_reason(report: &str, reason: &str) {
+        let marked = format!("({reason})");
+        assert!(
+            report
+                .lines()
+                .any(|l| l.trim_start().starts_with("! [rejected]") && l.contains(&marked)),
+            "git no longer emits `! [rejected] … {marked}` — the frontend summary is now blind \
+             to this rejection. Actual report:\n{report}"
+        );
+    }
+
+    /// The bare lease's own refusal, driven end to end: with the remote moved and
+    /// never fetched, the remote-tracking ref is stale and git rejects before
+    /// `--force-if-includes` has anything to say. Canary for the frontend's
+    /// `(stale info)` marker — the counterpart of
+    /// `refusal_stderr_still_matches_the_frontend_markers` (autostash.rs).
+    #[tokio::test]
+    async fn force_push_rejection_stderr_still_matches_the_frontend_markers() {
+        let (_guard, base, origin_s, url) = seeded_origin("stale-info").await;
+        let base_s = base.to_string_lossy().into_owned();
+
+        for name in ["clone1", "clone2"] {
+            run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, name]).await;
+            let c = base.join(name).to_string_lossy().into_owned();
+            run(&c, &["config", "core.autocrlf", "false"]).await;
+            run(&c, &["config", "user.email", "t@t.local"]).await;
+            run(&c, &["config", "user.name", "T"]).await;
+        }
+        let clone1 = base.join("clone1");
+        let clone2 = base.join("clone2");
+        let clone1_s = clone1.to_string_lossy().into_owned();
+        let clone2_s = clone2.to_string_lossy().into_owned();
+
+        // clone2 moves the shared branch; clone1 never learns of it, so its
+        // remote-tracking ref — the lease's expectation — is stale.
+        std::fs::write(clone2.join("b.txt"), "theirs\n").unwrap();
+        run(&clone2_s, &["add", "-A"]).await;
+        run(&clone2_s, &["commit", "-qm", "from clone2"]).await;
+        run(&clone2_s, &["push", "-q"]).await;
+        let theirs = run(&clone2_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        std::fs::write(clone1.join("c.txt"), "mine\n").unwrap();
+        run(&clone1_s, &["add", "-A"]).await;
+        run(&clone1_s, &["commit", "-q", "--amend", "-m", "amended seed"]).await;
+
+        let state = AppState::default();
+        let err = git_push_core(&state, clone1_s.clone(), false, true, None, None, None)
+            .await
+            .expect_err("a stale lease must not clobber the remote");
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected a git error, got {err:?}")
+        };
+        assert_rejection_reason(stderr, STALE_LEASE_REJECTION);
+        assert_eq!(
+            run(&origin_s, &["rev-parse", "refs/heads/main"]).await.trim(),
+            theirs,
+            "clone2's commit is still origin's tip"
+        );
+    }
+
+    /// The wire values the TS `PushGuard` union (src/lib/git/api.ts) mirrors: the
+    /// success toast keys on these exact strings, so a variant rename that skips
+    /// the mirror would silently stop reporting a degraded force push.
+    #[test]
+    fn push_guard_serializes_to_the_camel_case_wire_values() {
+        for (guard, wire) in [
+            (PushGuard::LeaseAndIncludes, "leaseAndIncludes"),
+            (PushGuard::LeaseOnlyOldGit, "leaseOnlyOldGit"),
+            (PushGuard::LeaseOnlyNoReflog, "leaseOnlyNoReflog"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&guard).unwrap(),
+                serde_json::Value::String(wire.to_string()),
+                "{guard:?} must stay on the wire as {wire:?}"
+            );
+        }
+    }
+
     /// The gap `--force-if-includes` closes, driven end to end: a plain `fetch`
     /// alone satisfies the bare lease, so with the lease only, clone1's amend would
     /// clobber a commit clone2 pushed and clone1 never integrated. Integrating it
@@ -1431,7 +1522,10 @@ mod tests {
         let err = git_push_core(&state, clone1_s.clone(), false, true, None, None, None)
             .await
             .expect_err("a merely-fetched remote commit must not be clobbered");
-        assert!(matches!(err, AppError::Git { .. }), "expected a git error, got {err:?}");
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected a git error, got {err:?}")
+        };
+        assert_rejection_reason(stderr, IF_INCLUDES_REJECTION);
         assert_eq!(
             run(&origin_s, &["rev-parse", "refs/heads/main"]).await.trim(),
             theirs,

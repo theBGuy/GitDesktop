@@ -405,7 +405,8 @@ export interface OpLogEntry {
   op: "merge_local_pr" | "cherry_pick_onto" | "rewrite_commits" | "rebase_edit";
   /** Human label, e.g. "Squash-merge feature → main". */
   label: string;
-  status: "pending" | "done" | "failed" | "dismissed";
+  /** "paused" = handed to you mid-op (a stopped cherry-pick), neither in-flight nor finished. */
+  status: "pending" | "done" | "failed" | "dismissed" | "paused";
   /** ISO timestamp the op started. */
   startedAt: string;
   /** ISO timestamp the op finished, or null while still open. */

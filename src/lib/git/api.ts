@@ -791,6 +791,17 @@ export const gitSwitchAutostash = (
     reapply,
   });
 
+/** Which guarantee a completed push actually ran under (mirrors the Rust
+ *  `PushGuard` in git/remote.rs). Only meaningful when `force` is set: a
+ *  non-force push has no lease to degrade and reports the neutral
+ *  `"leaseAndIncludes"`. The two `leaseOnly*` values mean the push landed with
+ *  `--force-with-lease` alone, so a caller announcing it must not claim the
+ *  stronger `--force-if-includes` protection. */
+export type PushGuard =
+  | "leaseAndIncludes"
+  | "leaseOnlyOldGit"
+  | "leaseOnlyNoReflog";
+
 /** `remoteBranch` names the DESTINATION branch when it differs from the local
  *  one (pushing back to a fork PR's head); it requires both `branch` and
  *  `remote`, and never sets upstream. */
@@ -802,7 +813,7 @@ export const gitPush = (
   remote?: string,
   remoteBranch?: string,
 ) =>
-  invoke<void>("git_push", {
+  invoke<PushGuard>("git_push", {
     repoPath,
     setUpstream,
     force,

@@ -56,7 +56,11 @@ import {
 import type { UserWorktree } from "@/lib/git/worktree";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
-import { useWorktreeRemovals } from "@/lib/stores/worktree-removal";
+import {
+  isWorktreePromoting,
+  useIsRemovingWorktree,
+  useWorktreeRemovals,
+} from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
@@ -314,13 +318,8 @@ function WorktreeRow({
 }) {
   const { path, branch, isMain, isDetached, isLocked, lockReason } = worktree;
 
-  // A disabled menu item can't carry a tooltip, so its blocking reason rides the
-  // label. A removal in progress outranks the other reasons — the worktree is on
-  // its way out, whatever else is true of it.
-  const itemLabel = (label: string, otherReason?: string) => {
-    if (isRemoving) return `${label} (removal in progress)`;
-    return otherReason ? `${label} (${otherReason})` : label;
-  };
+  const itemLabel = (label: string, otherReason?: string) =>
+    worktreeItemLabel(label, isRemoving, otherReason);
   const openTitle = isCurrent ? "Current worktree" : "Open this worktree";
 
   return (
@@ -517,6 +516,36 @@ function RowTags({
 
 // --------------------------------------------------------------- rename worktree
 
+/** A disabled menu item can't carry a tooltip, so its blocking reason rides the
+ *  label. A removal in progress outranks the other reasons — the worktree is on
+ *  its way out, whatever else is true of it. */
+export function worktreeItemLabel(
+  label: string,
+  isRemoving: boolean,
+  otherReason?: string,
+): string {
+  if (isRemoving) return `${label} (removal in progress)`;
+  return otherReason ? `${label} (${otherReason})` : label;
+}
+
+/** Refuses an action on a worktree that's on its way out, at the moment it would
+ *  fire: the menu that opened the dialog can outlive the state that disabled it,
+ *  and a promote's claim never re-renders anything. Returns true when the caller
+ *  must not start its mutation. These callers never asked for the removal, so the
+ *  wording states the state rather than the store's "already" (a duplicate
+ *  attempt, correct only where the store refuses one). */
+export function refuseWhileLeaving(path: string, removing: boolean): boolean {
+  if (removing) {
+    toast.info("This worktree is being removed.");
+    return true;
+  }
+  if (isWorktreePromoting(path)) {
+    toast.info("This worktree is being promoted.");
+    return true;
+  }
+  return false;
+}
+
 export function RenameWorktreeDialog({
   repoPath,
   worktree,
@@ -527,6 +556,7 @@ export function RenameWorktreeDialog({
   onClose: () => void;
 }) {
   const move = useMoveUserWorktree(repoPath);
+  const removing = useIsRemovingWorktree(repoPath, worktree?.path);
   const { parent, name: currentName } = splitPath(worktree?.path ?? "");
   const [name, setName] = useState(currentName);
 
@@ -539,6 +569,7 @@ export function RenameWorktreeDialog({
 
   function handleRename() {
     if (!worktree || !trimmed || unchanged || invalid) return;
+    if (refuseWhileLeaving(worktree.path, removing)) return;
     move.mutate(
       { from: worktree.path, to: newPath },
       {
@@ -587,12 +618,23 @@ export function RenameWorktreeDialog({
           </span>
         </form>
 
+        {/* A disabled button can't carry a tooltip; the reason goes on screen. */}
+        {removing && (
+          <p className="text-xs text-muted-foreground">
+            This worktree is being removed, so it can't be renamed.
+          </p>
+        )}
+
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={move.isPending}>
-            Cancel
+            {/* Nothing here can call the removal off, so "Cancel" would promise
+                more than closing this dialog does. */}
+            {removing ? "Close" : "Cancel"}
           </Button>
           <Button
-            disabled={!trimmed || unchanged || invalid || move.isPending}
+            disabled={
+              !trimmed || unchanged || invalid || move.isPending || removing
+            }
             onClick={handleRename}
           >
             {move.isPending && <Spinner data-icon="inline-start" />}
@@ -616,10 +658,12 @@ export function LockWorktreeDialog({
   onClose: () => void;
 }) {
   const lock = useLockUserWorktree(repoPath);
+  const removing = useIsRemovingWorktree(repoPath, worktree?.path);
   const [reason, setReason] = useState("");
 
   function handleLock() {
     if (!worktree) return;
+    if (refuseWhileLeaving(worktree.path, removing)) return;
     lock.mutate(
       { path: worktree.path, reason: reason.trim() || undefined },
       {
@@ -665,11 +709,20 @@ export function LockWorktreeDialog({
           />
         </form>
 
+        {/* A disabled button can't carry a tooltip; the reason goes on screen. */}
+        {removing && (
+          <p className="text-xs text-muted-foreground">
+            This worktree is being removed, so it can't be locked.
+          </p>
+        )}
+
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={lock.isPending}>
-            Cancel
+            {/* Nothing here can call the removal off, so "Cancel" would promise
+                more than closing this dialog does. */}
+            {removing ? "Close" : "Cancel"}
           </Button>
-          <Button onClick={handleLock} disabled={lock.isPending}>
+          <Button onClick={handleLock} disabled={lock.isPending || removing}>
             {lock.isPending && <Spinner data-icon="inline-start" />}
             Lock
           </Button>

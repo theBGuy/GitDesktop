@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
+import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { COLD_START_NO_GH, COLD_START_NO_GIT } from "@/lib/test-mode";
@@ -3821,19 +3822,32 @@ export function useStashCount(repo: string) {
 }
 
 export function useRenameBranch(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: { oldName: string; newName: string }) =>
       api.gitRenameBranch(repo, args.oldName, args.newName),
     {
-      // Re-key the branch's commit draft before the status refetch reports the new
-      // name, so the draft (and any generation streaming into it) survives.
-      // Renames from outside the app (MCP, a terminal `git branch -m`) have no such
-      // hook and still lose the draft when the ambient poll flips the key.
-      onSuccess: (_data, args) =>
+      onSuccess: (_data, args) => {
+        // Re-key the branch's commit draft before the status refetch reports the new
+        // name, so the draft (and any generation streaming into it) survives.
+        // Renames from outside the app (MCP, a terminal `git branch -m`) have no such
+        // hook and still lose the draft when the ambient poll flips the key.
         useUiStore
           .getState()
-          .migrateCommitDraft(repo, args.oldName, args.newName),
+          .migrateCommitDraft(repo, args.oldName, args.newName);
+        // The backend moved the branch's reviewer note on disk as part of the rename;
+        // reload the in-memory store BEFORE invalidating (the focus bridge's pattern in
+        // App.tsx) so the Create-PR dialog reads the note under the new name without
+        // waiting for a focus cycle. Fire-and-forget — this callback must stay sync.
+        void reloadReviewNotes()
+          .then(() =>
+            queryClient.invalidateQueries({ queryKey: ["review-notes"] }),
+          )
+          .catch(() => {
+            // Best-effort: a failed reload just leaves the last known state.
+          });
+      },
     },
   );
 }

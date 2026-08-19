@@ -219,6 +219,12 @@ pub(crate) async fn git_commit_core(
     body: Option<String>,
     amend: bool,
 ) -> AppResult<CommitResult> {
+    // git's own conflict advice offers `git commit` as the way to conclude a
+    // cherry-pick, and the commit box has no mid-op gate, so this route ends picks
+    // that never reach `op_continue`. The probe is stat-level because every commit
+    // pays it, and the journal read below runs only when a pick really was stopped.
+    let was_cherry_picking = crate::git::ops::cherry_pick_marker_present(&repo_path);
+
     let mut args = vec!["commit"];
     if amend {
         args.push("--amend");
@@ -237,6 +243,14 @@ pub(crate) async fn git_commit_core(
             code: commit.code,
             stderr: commit.full_failure_text(),
         });
+    }
+    // The widest of the close routes, and the loosest: this is also the MCP commit
+    // tool's choke point, and ANY commit that clears a `CHERRY_PICK_HEAD` fires it —
+    // so a plain unjournaled `cherry-pick` resolved here closes whatever paused
+    // record the repo still holds, which is only the right one while no stale record
+    // predates it.
+    if was_cherry_picking && !crate::git::ops::cherry_pick_marker_present(&repo_path) {
+        crate::oplog::close_paused_pick(&repo_path, crate::oplog::PausedOutcome::Continued).await;
     }
     let out = run_git(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
     Ok(CommitResult {

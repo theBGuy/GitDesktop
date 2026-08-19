@@ -139,6 +139,47 @@ const DIRTY_TREE_MARKERS = [
   "cannot rebase: your index contains uncommitted changes",
 ];
 
+/** Force-push rejections whose reason git prints ONLY inside its per-ref
+ *  `! [rejected]        main -> main (<reason>)` line — everything above and
+ *  below that line is the remote URL and a generic "failed to push some refs",
+ *  which is what a raw summary would otherwise show. Anchored to that line
+ *  shape and matched case-sensitively, since the same blob echoes branch names
+ *  and URLs. The leading space is optional: the Rust layer trims the whole
+ *  report, so the line loses its indent whenever nothing precedes it.
+ *
+ *  Only the two guarded-force reasons are mapped. A plain non-fast-forward
+ *  rejection (`(non-fast-forward)`, `(fetch first)`) means the branch is simply
+ *  behind — different advice, and git's own hint already reads plainly — so it
+ *  keeps its raw presentation.
+ *
+ *  Paired with the Rust canaries
+ *  `force_push_rejection_stderr_still_matches_the_frontend_markers` and
+ *  `force_push_refuses_fetched_but_unintegrated_remote_work` (git/remote.rs),
+ *  which re-run real rejections and assert these reasons still hold — keep the
+ *  two lists in step. */
+const PUSH_REJECTION_SUMMARIES: readonly (readonly [RegExp, string])[] = [
+  // The bare lease refused: the remote-tracking ref no longer describes the
+  // remote, so git can't tell what the push would destroy. The advice has to
+  // reach past a bare fetch — that satisfies the lease but leaves
+  // `--force-if-includes` to reject the retry with the reason below.
+  [
+    /^[ \t]*! \[rejected\][^\n]*\(stale info\)/m,
+    "Force push blocked — the remote moved since your last fetch. Fetch and review the new commits, then bring them into your branch before pushing.",
+  ],
+  // `--force-if-includes` refused: the remote tip was fetched but never merged
+  // or rebased into this branch, so pushing would drop it.
+  [
+    /^[ \t]*! \[rejected\][^\n]*\(remote ref updated since checkout\)/m,
+    "Force push blocked — the remote has commits your branch hasn't incorporated. Pull them in, then push again.",
+  ],
+];
+
+/** The humanized line for a blocked force push, or null when the text carries
+ *  no mapped rejection reason. */
+function pushRejectionSummary(text: string): string | null {
+  return PUSH_REJECTION_SUMMARIES.find(([m]) => m.test(text))?.[1] ?? null;
+}
+
 /** The `git` kind is the only one carrying a stderr blob distinct from its
  *  message; every other kind folds its detail into `message` itself. */
 function gitStderr(e: AppError): string {
@@ -288,9 +329,12 @@ export function presentError(e: unknown): ErrorPresentation {
       ROLLBACK_VERDICTS.some((v) => verdictLine.includes(v));
     const isConflict =
       !rolledBack && CONFLICT_MARKERS.some((m) => m.test(combined));
+    // A rejection reason is read from the COMBINED text: it rides the `stderr`
+    // blob, which the fall-through below deliberately never reads.
     const summary = isConflict
       ? conflictSummary(combined)
-      : firstMeaningfulLine(message) || label;
+      : (pushRejectionSummary(combined) ??
+        (firstMeaningfulLine(message) || label));
 
     const distinctStderr = stderr !== "" && !message.includes(stderr);
     const long =

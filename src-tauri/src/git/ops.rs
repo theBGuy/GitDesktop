@@ -86,6 +86,37 @@ async fn absolute_git_dir(repo: &str) -> Option<std::path::PathBuf> {
     (!dir.is_empty()).then(|| std::path::PathBuf::from(dir))
 }
 
+/// Whether `CHERRY_PICK_HEAD` is present, resolved without spawning git — for the
+/// commit path, which pays this on EVERY commit and must not grow a `rev-parse`
+/// child for it. Anything unreadable answers "no pick", never an error.
+///
+/// A linked worktree or submodule replaces `.git` with a one-line `gitdir:` pointer
+/// to the dir holding ITS markers, and that path may be relative to the tree holding
+/// the `.git` file — always for a submodule (`gitdir: ../.git/modules/<name>`), and
+/// for a worktree under `worktree.useRelativePaths` / `--relative-paths`
+/// (`gitdir: ../<main>/.git/worktrees/<name>`); measured, git 2.51.1. Joining on the
+/// repo path resolves those and leaves an absolute pointer untouched.
+///
+/// Narrower than [`op_state`] on purpose: it answers only "is a single-commit pick
+/// stopped here", the state `cherry-pick <hash>` leaves and `git commit` clears. The
+/// sequencer-only pick (`cherry-pick -n`, no marker) is deliberately outside it.
+pub(crate) fn cherry_pick_marker_present(repo: &str) -> bool {
+    let repo_root = Path::new(repo);
+    let dot_git = repo_root.join(".git");
+    let git_dir = match std::fs::metadata(&dot_git) {
+        Ok(meta) if meta.is_dir() => dot_git,
+        Ok(_) => match std::fs::read_to_string(&dot_git) {
+            Ok(text) => match text.trim().strip_prefix("gitdir:") {
+                Some(dir) => repo_root.join(dir.trim()),
+                None => return false,
+            },
+            Err(_) => return false,
+        },
+        Err(_) => return false,
+    };
+    git_dir.join("CHERRY_PICK_HEAD").exists()
+}
+
 /// True when an interactive rebase is paused at an `edit` instruction (the last
 /// executed todo line is `edit`/`e`), as opposed to a conflict.
 fn rebase_stopped_for_edit(git_dir: &Path) -> bool {
@@ -224,19 +255,27 @@ pub async fn git_op_abort(
     repo_path: String,
     op: String,
 ) -> AppResult<()> {
-    validate_op(&op)?;
-    let out = run_git_mutating_raw(
-        &state,
-        &repo_path,
-        &[op.as_str(), "--abort"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+    op_abort(&state, &repo_path, &op).await
+}
+
+/// Testable core of [`git_op_abort`] — takes a plain `&AppState` so real-repo tokio
+/// tests can drive it.
+pub(crate) async fn op_abort(state: &AppState, repo_path: &str, op: &str) -> AppResult<()> {
+    validate_op(op)?;
+    let out = run_git_mutating_raw(state, repo_path, &[op, "--abort"], DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
         return Err(AppError::Git {
             code: out.code,
             stderr: out.full_failure_text(),
         });
+    }
+    // Closes the stop arm's paused record as the user's own abandonment. The verdict
+    // is only right for the record this abort actually ended: a pick concluded
+    // outside the app leaves a stale paused record that this call would close as
+    // "aborted by user" instead — the accepted cost of keying on the newest paused
+    // record rather than an op id.
+    if op == "cherry-pick" {
+        crate::oplog::close_paused_pick(repo_path, crate::oplog::PausedOutcome::Aborted).await;
     }
     Ok(())
 }
@@ -291,6 +330,10 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
             )
             .await?;
             if skip.code == 0 {
+                // The skip ended the pick just as a commit would, so the journal's
+                // paused record closes here too.
+                crate::oplog::close_paused_pick(repo_path, crate::oplog::PausedOutcome::Continued)
+                    .await;
                 return Ok(false);
             }
             return Err(
@@ -301,6 +344,14 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
         // the paths the operation the CALLER named is already paused on, so they
         // are attributable by construction rather than by having just appeared.
         return Err(classify_failure(repo_path, op, &[], out.code, out.full_failure_text()).await);
+    }
+    // A cherry-pick that reaches here is over, so a `cherry_pick_onto` record the
+    // stop arm left "paused" is closed as done. This is one of the two in-app routes
+    // that end a pick — the commit box is the other, and closes it too. A pick
+    // concluded from a terminal leaves its record paused until a later in-app
+    // continue or abort of any pick closes it.
+    if op == "cherry-pick" {
+        crate::oplog::close_paused_pick(repo_path, crate::oplog::PausedOutcome::Continued).await;
     }
     Ok(true)
 }
@@ -799,12 +850,20 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
     // journal's app-data I/O so it doesn't extend the hold.
     drop(guard);
 
-    crate::oplog::finish(
-        repo_path,
-        &op_id,
-        result.as_ref().err().map(|e| e.to_string()),
-    )
-    .await;
+    // The stop arm handed the pick to the user rather than ending it, so its record
+    // is "paused", not "failed". `AppError::Conflict` leaves this funnel only from
+    // that arm (every other class routes through the rollback below it), so matching
+    // on the variant needs no `hashes.len()` gate.
+    if matches!(result, Err(AppError::Conflict { .. })) {
+        crate::oplog::pause(repo_path, &op_id).await;
+    } else {
+        crate::oplog::finish(
+            repo_path,
+            &op_id,
+            result.as_ref().err().map(|e| e.to_string()),
+        )
+        .await;
+    }
     result
 }
 
@@ -5129,8 +5188,9 @@ mod tests {
         );
         assert_eq!(rev(&repo, "target").await, target_tip);
         assert_eq!(rev(&repo, "feature").await, feature_tip);
-        // A paused op is a finished journal record, not an interrupted one — the
-        // recovery banner must not offer to undo a pick the user is still resolving.
+        // A paused op is never a PENDING journal record, so reconcile can't read it
+        // as interrupted — the recovery banner must not offer to undo a pick the
+        // user is still resolving.
         assert!(
             crate::oplog::git_oplog_check(repo.clone())
                 .await
@@ -5138,6 +5198,53 @@ mod tests {
                 .is_empty(),
             "a paused pick must leave no pending journal entry"
         );
+        // The history dialog must not call it "Failed": the deliberate handoff is a
+        // pause, and the op has not ended, so it carries no finish time.
+        let record = pick_record(&repo).await;
+        assert_eq!(record.status, "paused");
+        assert!(
+            record.finished_at.is_none(),
+            "a paused op has not finished: {:?}",
+            record.finished_at
+        );
+    }
+
+    /// The repo's newest journaled `cherry_pick_onto` entry.
+    async fn pick_record(repo: &str) -> crate::oplog::OpLogEntry {
+        crate::oplog::git_oplog_list(repo.to_string())
+            .await
+            .expect("the journal must be readable")
+            .into_iter()
+            .find(|e| e.op == "cherry_pick_onto")
+            .expect("the pick must be journaled")
+    }
+
+    /// Pause a single-commit pick of `feature`'s edit onto `target`, both diverged on
+    /// `a.txt`, and hand back the repo dir plus the target's tip. The shared fixture
+    /// behind every paused-record test.
+    async fn setup_paused_pick(marker: &str) -> (tempfile::TempDir, String, String) {
+        let (dir, repo) = setup_repo(marker).await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c1 = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let target_tip = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        assert!(
+            cherry_pick_onto(&state, &repo, &[c1], "target")
+                .await
+                .is_err(),
+            "the fixture's pick must conflict"
+        );
+        assert_eq!(
+            pick_record(&repo).await.status,
+            "paused",
+            "the fixture must start from a paused journal record"
+        );
+        (dir, repo, target_tip)
     }
 
     /// A pick paused with its conflicts staged has a CLEAN tree, so `ensure_clean_tree`
@@ -5235,22 +5342,11 @@ mod tests {
     /// routine dead-ends in the UI.
     #[tokio::test]
     async fn op_continue_finishes_a_cherry_pick_emptied_by_its_resolution() {
-        let (dir, repo) = setup_repo("continue-empty-pick").await;
-        git(&repo, &["branch", "target"]).await;
-        git(&repo, &["checkout", "-b", "feature"]).await;
-        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
-        let c1 = rev(&repo, "HEAD").await;
-        git(&repo, &["checkout", "target"]).await;
-        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
-        let target_tip = rev(&repo, "HEAD").await;
-
-        let state = AppState::default();
-        assert!(cherry_pick_onto(&state, &repo, &[c1], "target")
-            .await
-            .is_err());
+        let (_dir, repo, target_tip) = setup_paused_pick("continue-empty-pick").await;
         git(&repo, &["checkout", "--ours", "a.txt"]).await;
         git(&repo, &["add", "a.txt"]).await;
 
+        let state = AppState::default();
         let recorded = op_continue(&state, &repo, "cherry-pick")
             .await
             .expect("continue must finish a pick emptied by its own resolution");
@@ -5266,28 +5362,39 @@ mod tests {
         assert_eq!(rev(&repo, "HEAD").await, target_tip);
         let status = git(&repo, &["status", "--porcelain"]).await;
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
+        // The skip ended the op, so its paused journal record closes too.
+        assert_eq!(pick_record(&repo).await.status, "done");
+    }
+
+    /// Aborting a paused pick closes its record as the user's own abandonment, in the
+    /// same words the local-PR merge abort uses.
+    #[tokio::test]
+    async fn op_abort_closes_the_paused_pick_record_as_aborted() {
+        let (_dir, repo, target_tip) = setup_paused_pick("abort-closes-record").await;
+
+        let state = AppState::default();
+        op_abort(&state, &repo, "cherry-pick")
+            .await
+            .expect("aborting a paused pick must succeed");
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+        assert_eq!(rev(&repo, "HEAD").await, target_tip);
+
+        let record = pick_record(&repo).await;
+        assert_eq!(record.status, "failed");
+        assert_eq!(record.error.as_deref(), Some("aborted by user"));
+        assert!(record.finished_at.is_some());
     }
 
     /// The sibling arm: a resolution that keeps content of its own DOES commit, so
-    /// the same call answers true and the banner says the pick continued.
+    /// the same call answers true and the banner says the pick continued — and the
+    /// paused journal record closes with it.
     #[tokio::test]
     async fn op_continue_reports_a_recorded_commit_for_a_resolved_cherry_pick() {
-        let (dir, repo) = setup_repo("continue-resolved-pick").await;
-        git(&repo, &["branch", "target"]).await;
-        git(&repo, &["checkout", "-b", "feature"]).await;
-        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
-        let c1 = rev(&repo, "HEAD").await;
-        git(&repo, &["checkout", "target"]).await;
-        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
-        let target_tip = rev(&repo, "HEAD").await;
-
-        let state = AppState::default();
-        assert!(cherry_pick_onto(&state, &repo, &[c1], "target")
-            .await
-            .is_err());
+        let (dir, repo, target_tip) = setup_paused_pick("continue-resolved-pick").await;
         std::fs::write(dir.path().join("a.txt"), "merged\n").unwrap();
         git(&repo, &["add", "a.txt"]).await;
 
+        let state = AppState::default();
         let recorded = op_continue(&state, &repo, "cherry-pick")
             .await
             .expect("a resolved pick must continue");
@@ -5298,6 +5405,46 @@ mod tests {
             target_tip,
             "the resolution must have landed as a commit"
         );
+        let record = pick_record(&repo).await;
+        assert_eq!(record.status, "done");
+        assert!(
+            record.finished_at.is_some(),
+            "a closed record must carry its finish time"
+        );
+        assert_eq!(record.error, None, "a continued pick is not a failure");
+    }
+
+    /// git's own conflict advice offers `git commit`, and the commit box has no
+    /// mid-op gate, so a paused pick can be concluded without `--continue` ever
+    /// running. The journal must close its record on that route too, or the next
+    /// in-app abort of any pick reads the stale record as "aborted by user".
+    /// (Exercises `git::commit::git_commit_core`; the fixture lives here.)
+    #[tokio::test]
+    async fn a_commit_closes_the_paused_cherry_pick_record() {
+        let (dir, repo, target_tip) = setup_paused_pick("commit-closes-record").await;
+        std::fs::write(dir.path().join("a.txt"), "merged\n").unwrap();
+        git(&repo, &["add", "a.txt"]).await;
+
+        let state = AppState::default();
+        crate::git::commit::git_commit_core(
+            &state,
+            repo.clone(),
+            "resolve the pick".to_string(),
+            None,
+            false,
+        )
+        .await
+        .expect("the commit box must be able to conclude a resolved pick");
+        assert!(
+            !op_state(&repo).await.unwrap().cherry_picking,
+            "the commit must have concluded the pick"
+        );
+        assert_ne!(rev(&repo, "HEAD").await, target_tip);
+
+        let record = pick_record(&repo).await;
+        assert_eq!(record.status, "done");
+        assert!(record.finished_at.is_some());
+        assert_eq!(record.error, None);
     }
 
     /// Only a CONFLICT stops on the target; every other failure class still rolls
@@ -5662,6 +5809,79 @@ mod tests {
         );
 
         git(&repo, &["worktree", "remove", "--force", &link]).await;
+    }
+
+    /// The commit path's spawn-free probe has to follow the one-line `gitdir:`
+    /// pointer a linked worktree leaves in place of `.git`, or a pick paused in a
+    /// worktree would close no journal record when the commit box concludes it.
+    #[tokio::test]
+    async fn cherry_pick_marker_probe_follows_a_worktrees_gitdir_pointer() {
+        let (dir, repo) = setup_repo("worktree-pick-marker").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+        let c1 = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+        let tip = rev(&repo, "HEAD").await;
+
+        let link_dir = tempfile::Builder::new()
+            .prefix("gd-rewrite-worktree-pick-")
+            .tempdir()
+            .expect("create temp dir");
+        let link = link_dir.path().join("linked").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "--detach", &link, &tip]).await;
+        assert!(
+            !cherry_pick_marker_present(&link),
+            "nothing is picking in the fresh worktree"
+        );
+
+        let pick = run_git_raw(Some(&link), &["cherry-pick", &c1], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(pick.code, 0, "the pick inside the worktree should conflict");
+        assert!(
+            cherry_pick_marker_present(&link),
+            "the worktree's own CHERRY_PICK_HEAD must be found through its gitdir pointer"
+        );
+        assert!(
+            !cherry_pick_marker_present(&repo),
+            "and the main checkout has no pick of its own"
+        );
+
+        git(&repo, &["worktree", "remove", "--force", &link]).await;
+    }
+
+    /// The same probe against a RELATIVE `gitdir:` pointer, which a submodule always
+    /// writes (`gitdir: ../.git/modules/<name>`) and a worktree writes under
+    /// `worktree.useRelativePaths` (`gitdir: ../<main>/.git/worktrees/<name>`) — both
+    /// shapes measured, git 2.51.1. Resolving one against the process CWD instead of
+    /// the tree holding the `.git` file would answer "no pick" and silently skip the
+    /// close. The pointer is written by hand: a live submodule needs a second repo
+    /// plus `protocol.file.allow`, and `--relative-paths` needs git >= 2.48, which
+    /// the CI matrix's runners don't all carry.
+    #[test]
+    fn cherry_pick_marker_probe_resolves_a_relative_gitdir_pointer() {
+        let tmp = tempfile::Builder::new()
+            .prefix("gd-relative-gitdir-")
+            .tempdir()
+            .expect("create temp dir");
+        let tree = tmp.path().join("tree");
+        let real_git_dir = tmp.path().join("real/.git/modules/mod");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&real_git_dir).unwrap();
+        std::fs::write(tree.join(".git"), "gitdir: ../real/.git/modules/mod\n").unwrap();
+        let repo = tree.to_string_lossy().into_owned();
+
+        assert!(
+            !cherry_pick_marker_present(&repo),
+            "no marker file, no pick — the pointer alone proves nothing"
+        );
+        std::fs::write(real_git_dir.join("CHERRY_PICK_HEAD"), "deadbeef\n").unwrap();
+        assert!(
+            cherry_pick_marker_present(&repo),
+            "a relative pointer resolves against the tree holding the .git file"
+        );
     }
 
     /// Conflicted revert / cherry-pick / rebase all split ONE report across both

@@ -524,13 +524,13 @@ can safely preview and recover work you thought was gone.
 **Operation history** (in the branch ⋮ menu, or the command palette) opens a
 journal of the *risky* operations GitDesktop runs — local PR merges, cherry-picks, history
 edits, and interactive rebases — each recorded with the exact branch and commit it started
-from, and whether it finished, failed, or is still pending. If one of these operations is
-interrupted (a crash or a restart mid-op), a calm recovery line appears above the **Changes**
-list naming what was interrupted and the state it started from. That notice only informs — it
-never resets or continues anything on its own (the git-native **Continue**/**Abort** for an
-in-progress merge, rebase, cherry-pick, or revert live in the conflict bar right above it);
-from it you can open this history, jump to **Recover lost work** to rescue any orphaned
-changes, or dismiss the notice.
+from, and whether it finished, failed, is paused on conflicts, or is still pending. If one
+of these operations is interrupted (a crash or a restart mid-op), a calm recovery line
+appears above the **Changes** list naming what was interrupted and the state it started
+from. That notice only informs — it never resets or continues anything on its own (the
+git-native **Continue**/**Abort** for an in-progress merge, rebase, cherry-pick, or revert
+live in the conflict bar right above it); from it you can open this history, jump to
+**Recover lost work** to rescue any orphaned changes, or dismiss the notice.
 
 ## Compare
 
@@ -595,8 +595,8 @@ lands *there* (not the main workspace) and offers a one-click **Open main worksp
 checked-out branch. Each of those rows carries the worktree management actions on its
 context menu — **Open worktree**, **Copy path**, **Rename…**, **Lock…**/**Unlock**,
 **Promote to main workspace…**, **Delete worktree…** — with the ones a row doesn't support
-(the main workspace, a detached checkout, a locked worktree) hidden or disabled with the
-reason in the label. **Open main workspace** and
+(the main workspace, a detached checkout, a locked worktree, one being removed) hidden or
+disabled with the reason in the label. **Open main workspace** and
 **Promote this worktree to main workspace** are in the command palette too.
 
 A repository's local pull requests, issues, review history, and per-repo settings are shared
@@ -664,7 +664,9 @@ already pushed), GitDesktop detects the divergence and turns Push into a **confi
 force push using \`--force-with-lease --force-if-includes\`** — which refuses to overwrite
 work someone else pushed unless your branch already includes it, even when auto-fetch has
 already updated your view of the remote. On a Git older than 2.30, or a branch with no
-reflog for the check to read, the push falls back to \`--force-with-lease\` alone.
+reflog for the check to read, the push falls back to \`--force-with-lease\` alone, and the
+confirmation toast says so. When the remote has moved since your last look, the blocked
+push explains it in plain words, with Git's full output one click away under **Details**.
 
 ## Resolving conflicts
 

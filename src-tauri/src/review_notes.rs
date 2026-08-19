@@ -23,7 +23,8 @@
 //!
 //! We resolve it here with the SAME `dirs::data_dir()` the Tauri path layer uses, joined with
 //! the identifier (reusing [`crate::local_prs::APP_IDENTIFIER`]) — so the two processes always
-//! agree on the file.
+//! agree on the file. A `GD_REVIEW_NOTES_DIR` override and a `cfg(test)` temp dir precede that
+//! resolution; see [`resolve_store_base`].
 //!
 //! ## Shape
 //!
@@ -58,13 +59,50 @@ use crate::local_prs::APP_IDENTIFIER;
 /// The store filename the GUI's reviewer-notes store writes.
 const STORE_FILE: &str = "review-notes.json";
 
-/// Resolve the absolute path of the `review-notes.json` the frontend store writes.
-/// Mirrors `tauri-plugin-store` v2's `BaseDirectory::AppData` resolution
-/// (`dirs::data_dir()/<identifier>`) — see the module contract and [`crate::local_prs`].
+/// Pure resolution of the store's base directory, in precedence order (mirroring
+/// [`crate::oplog::resolve_store_base`]):
+/// 1. a non-empty `GD_REVIEW_NOTES_DIR` override — the escape hatch for headless/test
+///    callers;
+/// 2. under `cfg!(test)`, a temp subdir, so no in-crate test can write the user's real
+///    store (the rename migration runs for real under `cargo test`);
+/// 3. otherwise the real app-data dir (`dirs::data_dir()/<identifier>`), mirroring
+///    `tauri-plugin-store` v2's `BaseDirectory::AppData` — see the module contract.
+///
+/// No filesystem side effects — `atomic_write` creates the parent at write time.
+fn resolve_store_base(gd_review_notes_dir: Option<&str>, is_test: bool) -> AppResult<PathBuf> {
+    match gd_review_notes_dir {
+        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
+        _ if is_test => Ok(std::env::temp_dir().join("gd-review-notes-test")),
+        _ => {
+            let data = dirs::data_dir().ok_or_else(|| {
+                AppError::Command("could not resolve the app-data directory".to_string())
+            })?;
+            Ok(data.join(APP_IDENTIFIER))
+        }
+    }
+}
+
+/// Absolute path of the `review-notes.json` the frontend store writes —
+/// `<store base>/review-notes.json`; see [`resolve_store_base`] for how the base is chosen.
 pub(crate) fn store_path() -> AppResult<PathBuf> {
-    let data = dirs::data_dir()
-        .ok_or_else(|| AppError::Command("could not resolve the app-data directory".to_string()))?;
-    Ok(data.join(APP_IDENTIFIER).join(STORE_FILE))
+    let base = resolve_store_base(
+        std::env::var("GD_REVIEW_NOTES_DIR").ok().as_deref(),
+        cfg!(test),
+    )?;
+    Ok(base.join(STORE_FILE))
+}
+
+/// The note stored for `repo`'s `branch`, read through [`store_path`] — the seam-aware
+/// reader an end-to-end test asserts on. Test-only; production readers are the GUI's.
+#[cfg(test)]
+pub(crate) fn note_body(repo: &str, branch: &str) -> Option<String> {
+    let store = read_store(&store_path().ok()?).ok()?;
+    store
+        .get(repo)?
+        .get(branch)?
+        .get("body")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Read the whole store file as a JSON object. A missing file is an empty object;
@@ -151,6 +189,56 @@ fn upsert_branch(store: &mut Map<String, Value>, repo: &str, branch: &str, body:
     }
 }
 
+/// Carry `from`'s reviewer note over to `to` under `repo`, so a renamed branch keeps its
+/// deposit. `repo` is the worktree-stable identity key ([`crate::git::repo::repo_identity`]).
+///
+/// The note record moves verbatim (unknown fields included) and its `savedAt` is left alone —
+/// a rename is not a re-save. Nothing is written when there is nothing to migrate.
+pub(crate) fn rename_branch(repo: &str, from: &str, to: &str) -> AppResult<()> {
+    let path = store_path()?;
+    rename_at(&path, repo, from, to)
+}
+
+/// The pure store logic behind [`rename_branch`], taking an explicit path so tests can drive
+/// it against a temp file without touching the real app-data store.
+fn rename_at(path: &Path, repo: &str, from: &str, to: &str) -> AppResult<()> {
+    // A same-name rename has nothing to migrate, so skip the redundant rewrite of the file.
+    if from == to {
+        return Ok(());
+    }
+    let mut store = read_store(path)?;
+    if !move_branch(&mut store, repo, from, to) {
+        // Nothing to migrate: leave the file (which may not even exist) untouched.
+        return Ok(());
+    }
+    write_store(path, &store)
+}
+
+/// Move `from`'s note onto `to` within `repo`'s map, dropping the repo key if that empties it.
+/// Returns whether anything changed, so the caller can skip the write entirely.
+fn move_branch(store: &mut Map<String, Value>, repo: &str, from: &str, to: &str) -> bool {
+    let Some(entry) = store.get_mut(repo) else {
+        return false;
+    };
+    let Some(branches) = entry.as_object_mut() else {
+        return false;
+    };
+    let changed = match branches.remove(from) {
+        Some(note) => {
+            branches.insert(to.to_string(), note);
+            true
+        }
+        // Nothing carried over, so a note already under the new name is stale: `git branch -m`
+        // refuses an existing target, so that note belongs to a branch that no longer answers
+        // to the name (the commit-draft rule, `migrateCommitDraft` in src/lib/stores/ui.ts).
+        None => branches.remove(to).is_some(),
+    };
+    if changed && branches.is_empty() {
+        store.remove(repo);
+    }
+    changed
+}
+
 /// Remove `branch` from `repo`'s map, and drop the repo key entirely if that leaves it empty.
 fn clear_branch(store: &mut Map<String, Value>, repo: &str, branch: &str) {
     let Some(entry) = store.get_mut(repo) else {
@@ -184,15 +272,57 @@ mod tests {
     }
 
     #[test]
-    fn store_path_is_under_identifier_and_named() {
+    fn store_path_avoids_the_real_store_under_test() {
+        // This runs in a cfg(test) build, so `store_path` takes arm 2 (temp subdir)
+        // UNLESS a GD_REVIEW_NOTES_DIR override is present in the environment. Branch on
+        // the var rather than mutating process env (which would race parallel tests).
         let path = store_path().unwrap();
-        // …/com.thebguy.gitdesktop/review-notes.json
         assert!(path.ends_with(STORE_FILE), "path: {}", path.display());
-        assert!(
-            path.to_string_lossy().contains(APP_IDENTIFIER),
-            "path: {}",
-            path.display()
+        match std::env::var("GD_REVIEW_NOTES_DIR").ok().filter(|d| !d.is_empty()) {
+            Some(dir) => {
+                // Override wins even under test: path is under the override dir.
+                assert!(
+                    path.starts_with(&dir),
+                    "override path {path:?} should be under {dir}"
+                );
+            }
+            None => {
+                // The real store must NOT be reachable from an in-crate test.
+                assert!(
+                    path.starts_with(std::env::temp_dir()),
+                    "test store {path:?} should be under the temp dir"
+                );
+                assert!(
+                    !path.components().any(|c| c.as_os_str() == APP_IDENTIFIER),
+                    "test store {path:?} must not contain the real app-data segment {APP_IDENTIFIER}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn store_path_honors_gd_review_notes_dir_override() {
+        // Drive the pure resolver directly — deterministic + parallel-safe (no
+        // process-env mutation).
+        // 1. An explicit override wins regardless of the test flag.
+        let over = resolve_store_base(Some("C:/tmp/x"), true).unwrap();
+        assert_eq!(over, PathBuf::from("C:/tmp/x"));
+        let over_nontest = resolve_store_base(Some("C:/tmp/x"), false).unwrap();
+        assert_eq!(over_nontest, PathBuf::from("C:/tmp/x"));
+        // An empty override is ignored (falls through to the next arm).
+        assert_eq!(
+            resolve_store_base(Some(""), true).unwrap(),
+            std::env::temp_dir().join("gd-review-notes-test")
         );
+        // 2. No override + test → the temp subdir.
+        assert_eq!(
+            resolve_store_base(None, true).unwrap(),
+            std::env::temp_dir().join("gd-review-notes-test")
+        );
+        // 3. No override + non-test → the real app-data dir, so the production path
+        //    stays …/com.thebguy.gitdesktop/review-notes.json, unchanged by the seam.
+        let real = resolve_store_base(None, false).unwrap();
+        assert_eq!(real, dirs::data_dir().unwrap().join(APP_IDENTIFIER));
     }
 
     #[test]
@@ -312,6 +442,120 @@ mod tests {
         // Our repo now has both the sibling branch and the new one.
         assert_eq!(back[repo]["sibling"]["body"], "sib");
         assert_eq!(back[repo]["feature"]["body"], "new note");
+    }
+
+    #[test]
+    fn rename_moves_the_note_to_the_new_branch() {
+        let (_tmp, path) = tmp_store();
+        let repo = "C:/repo/one/.git";
+        set_at(&path, repo, "feature", "look at the migration").unwrap();
+        set_at(&path, repo, "other", "note B").unwrap();
+
+        rename_at(&path, repo, "feature", "feature-renamed").unwrap();
+
+        let back = read_store(&path).unwrap();
+        assert!(back[repo].get("feature").is_none(), "{back:?}");
+        assert_eq!(back[repo]["feature-renamed"]["body"], "look at the migration");
+        // The sibling branch is untouched.
+        assert_eq!(back[repo]["other"]["body"], "note B");
+    }
+
+    #[test]
+    fn rename_overwrites_a_note_sitting_under_the_new_name() {
+        let (_tmp, path) = tmp_store();
+        let repo = "C:/repo/one/.git";
+        set_at(&path, repo, "feature", "carried over").unwrap();
+        set_at(&path, repo, "taken", "stale").unwrap();
+
+        rename_at(&path, repo, "feature", "taken").unwrap();
+
+        let back = read_store(&path).unwrap();
+        assert_eq!(back[repo]["taken"]["body"], "carried over");
+        assert_eq!(back[repo].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rename_without_a_source_note_drops_a_stale_target_note() {
+        let (_tmp, path) = tmp_store();
+        let repo = "C:/repo/one/.git";
+        set_at(&path, repo, "taken", "stale").unwrap();
+        set_at(&path, repo, "other", "note B").unwrap();
+
+        // "feature" never had a note, so the one under the claimed name is stale.
+        rename_at(&path, repo, "feature", "taken").unwrap();
+
+        let back = read_store(&path).unwrap();
+        assert!(back[repo].get("taken").is_none(), "{back:?}");
+        assert_eq!(back[repo]["other"]["body"], "note B");
+    }
+
+    #[test]
+    fn stale_target_delete_that_empties_the_map_drops_the_repo_key() {
+        let (_tmp, path) = tmp_store();
+        let repo = "C:/repo/one/.git";
+        set_at(&path, repo, "taken", "stale").unwrap();
+
+        rename_at(&path, repo, "feature", "taken").unwrap();
+
+        let back = read_store(&path).unwrap();
+        assert!(back.get(repo).is_none(), "repo key should be gone: {back:?}");
+        assert!(back.is_empty());
+    }
+
+    #[test]
+    fn rename_with_nothing_to_migrate_writes_nothing() {
+        let (_tmp, path) = tmp_store();
+        let repo = "C:/repo/one/.git";
+        // No store file at all: an unnoted branch's rename must not create one.
+        rename_at(&path, repo, "feature", "feature-renamed").unwrap();
+        assert!(!path.exists(), "no store file should have been created");
+
+        // A store holding only other repos/branches is left byte-identical.
+        set_at(&path, "C:/repo/other/.git", "main", "keep me").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        rename_at(&path, repo, "feature", "feature-renamed").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_same_name_rename_leaves_the_note_alone() {
+        let (_tmp, path) = tmp_store();
+        let repo = "C:/repo/one/.git";
+        set_at(&path, repo, "feature", "keep me").unwrap();
+
+        rename_at(&path, repo, "feature", "feature").unwrap();
+
+        let back = read_store(&path).unwrap();
+        assert_eq!(back[repo]["feature"]["body"], "keep me");
+    }
+
+    #[test]
+    fn rename_preserves_unknown_fields_on_the_moved_and_sibling_notes() {
+        let (_tmp, path) = tmp_store();
+        let other_repo = "C:/repo/other/.git";
+        let repo = "C:/repo/one/.git";
+        let mut store = Map::new();
+        store.insert(
+            other_repo.to_string(),
+            json!({ "main": { "body": "keep me", "savedAt": "2026-01-01T00:00:00.000Z", "futureField": 7 } }),
+        );
+        store.insert(
+            repo.to_string(),
+            json!({ "feature": { "body": "moved", "savedAt": "2026-01-02T00:00:00.000Z", "futureField": 9 } }),
+        );
+        write_store(&path, &store).unwrap();
+
+        rename_at(&path, repo, "feature", "feature-renamed").unwrap();
+
+        let back = read_store(&path).unwrap();
+        // The record moves verbatim — unknown field and original savedAt included.
+        assert_eq!(back[repo]["feature-renamed"]["futureField"], 9);
+        assert_eq!(
+            back[repo]["feature-renamed"]["savedAt"],
+            "2026-01-02T00:00:00.000Z"
+        );
+        // The other repo's note (and its unknown field) is untouched.
+        assert_eq!(back[other_repo]["main"]["futureField"], 7);
     }
 
     #[test]

@@ -257,6 +257,17 @@ pub(crate) async fn git_rename_branch_core(
         DEFAULT_TIMEOUT,
     )
     .await?;
+    // Carry the branch's reviewer note over to the new name, keyed by the same identity
+    // the MCP deposit path uses. Strictly after the `?` and best-effort: the rename has
+    // already happened, so a store failure must never be reported as a failed rename.
+    // This is the one seam both in-app renames share (the GUI command and the MCP
+    // `rename_branch` tool); a terminal `git branch -m` has no hook, the same accepted
+    // gap as the commit-draft migration. Cold-start test mode is out of reach too — the
+    // GUI aliases its store file there (`storeName` in src/lib/test-mode.ts).
+    let identity = crate::git::repo::repo_identity(&repo_path).await;
+    if let Err(e) = crate::review_notes::rename_branch(&identity, &old_name, &new_name) {
+        eprintln!("gitdesktop: reviewer-note rename failed (branch renamed anyway): {e}");
+    }
     Ok(())
 }
 
@@ -884,7 +895,8 @@ fn unique_suffix() -> String {
 mod tests {
     use super::{
         build_create_branch_args, git_branches, git_create_branch_core, git_default_branch,
-        parse_upstream_track, update_branch_from, validate_branch_name, validate_ref_name,
+        git_rename_branch_core, parse_upstream_track, update_branch_from, validate_branch_name,
+        validate_ref_name,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -1341,6 +1353,47 @@ mod tests {
         assert!(
             crate::git::ops::op_state(&repo_s).await.unwrap().merging,
             "the merge is left in progress for the conflict banner to finish"
+        );
+    }
+
+    /// End-to-end: a real `branch -m` through the core carries the branch's reviewer
+    /// note to the new name. Both the deposit and the assertion go through
+    /// `review_notes::store_path`, whose cfg(test) arm keeps them off the developer's
+    /// real store; the identity key is this fixture's own git dir, so the shared test
+    /// store file can't collide with another test's entries.
+    #[tokio::test]
+    async fn rename_carries_the_reviewer_note_to_the_new_branch() {
+        let (_base, base) = temp_base("rename-review-note");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["branch", "feature"]).await;
+
+        let identity = crate::git::repo::repo_identity(&repo_s).await;
+        crate::review_notes::set(&identity, "feature", "look at the migration")
+            .expect("deposit the note");
+
+        let state = AppState::default();
+        git_rename_branch_core(&state, repo_s.clone(), "feature".into(), "renamed".into())
+            .await
+            .expect("rename succeeds");
+
+        assert!(
+            run(&repo_s, &["branch", "--list", "renamed"])
+                .await
+                .contains("renamed"),
+            "the branch itself was renamed"
+        );
+        assert_eq!(
+            crate::review_notes::note_body(&identity, "renamed").as_deref(),
+            Some("look at the migration"),
+            "the note reads back under the new name"
+        );
+        assert_eq!(
+            crate::review_notes::note_body(&identity, "feature"),
+            None,
+            "and is gone under the old one"
         );
     }
 }

@@ -27,7 +27,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
-import { forgeDetectForkPrForBranch, type PullMode } from "@/lib/git/api";
+import {
+  forgeDetectForkPrForBranch,
+  type PullMode,
+  type PushGuard,
+} from "@/lib/git/api";
 import {
   useAutoFetch,
   useFetchStatusStore,
@@ -53,6 +57,21 @@ import { toastError } from "@/lib/toast";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { PublishRepoControl, usePublishProviders } from "./PublishRepoControl";
 import { useStashReapplyRecovery } from "./useStashReapplyRecovery";
+
+/** What a force push fell back to, for the guarantees weaker than the intended
+ *  `--force-with-lease --force-if-includes` pair. TOTAL on purpose: a new
+ *  `PushGuard` variant has to fail the typecheck here rather than ship the bare
+ *  "Force pushed" this table exists to stop overclaiming. Same two reasons the
+ *  MCP `force_push` tool reports (mcp_server/write_git.rs) — keep the wording in
+ *  step. */
+const FORCE_PUSH_DEGRADED: Record<PushGuard, string | undefined> = {
+  // The intended pair is what the plain confirmation already means.
+  leaseAndIncludes: undefined,
+  leaseOnlyOldGit:
+    "Protected by the lease alone: this Git predates --force-if-includes.",
+  leaseOnlyNoReflog:
+    "Protected by the lease alone: the branch has no reflog for --force-if-includes to check.",
+};
 
 export function SyncControls({ repoPath }: { repoPath: string }) {
   const status = useRepoStatus(repoPath);
@@ -294,8 +313,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     push.mutate(
       { setUpstream: !hasUpstream, force },
       {
-        onSuccess: () => {
-          if (force) toast.success("Force pushed");
+        onSuccess: (guard) => {
+          // Only a force push has a guarantee to report, and only the two
+          // degraded values say more than the plain confirmation does.
+          if (force)
+            toast.success("Force pushed", {
+              description: FORCE_PUSH_DEGRADED[guard],
+            });
           setForceConfirmOpen(false);
         },
         onError: (e) => {

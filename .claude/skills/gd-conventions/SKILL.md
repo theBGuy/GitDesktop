@@ -96,6 +96,13 @@ dialog.
   chips, the discussion upvote chip) take the SAME contract from the shared
   `useDisabledReason` hook + `ARIA_DISABLED_CLASS`
   (`src/lib/use-disabled-reason.ts`) — never hand-rolled.
+- Worktree actions gate on in-flight removal/promote state: menu items disable
+  with the parenthetical reason riding the label (a disabled menu item can't
+  carry a tooltip), and mutation choke points re-check at fire time —
+  `useIsRemovingWorktree`/`useWorktreeRemovals` for render,
+  `refuseWhileLeaving` (WorktreesDialog.tsx) plus `isWorktreePromoting`
+  (worktree-removal store; fire-time only, deliberately non-reactive) for the
+  refusal toast.
 - Per-variant copy/labels/glyphs are `Record` lookups, never ternary chains:
   an exact union discriminant gets a total `Record` (compiler
   exhaustiveness); a wide wire string gets `Partial<Record>` + explicit
@@ -166,7 +173,11 @@ clickables add `cursor-pointer` at the call site (vendored Button sets none).
   pushes via `build_push_args` (git/remote.rs) — never construct an inline
   refspec or re-derive the validation.
 - **Rust tests never read the real settings store** — use the
-  `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`).
+  `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
+  app-data modules carry their own seams with the opposite arm order
+  (`oplog.rs` `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`:
+  env override outranks the `cfg!(test)` temp arm; both ship in release) —
+  a new store module mirrors one of these, never resolves app-data bare.
 - **Forge gating:** per-action `Implemented` flags. Shared-with-GitHub
   controls gate on `canWrite || forgeFeatureReady` (GitHub must be zero-diff);
   provider-only controls gate on `forgeFeatureReady` alone with the flag
