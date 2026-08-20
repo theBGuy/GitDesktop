@@ -24,6 +24,7 @@ import type {
   Branch,
   BranchComparison,
   BranchDivergence,
+  BranchRequiredRules,
   BranchRewriteStatus,
   BranchStats,
   CodeFreqPoint,
@@ -1408,6 +1409,9 @@ export const forgeReconnect = (args: {
   provider: "github" | "gitlab";
   host: string;
   mode: "login" | "refresh";
+  /** Extra OAuth scopes (`gh auth refresh -s …`) — GitHub `refresh` only; the
+   *  backend rejects them elsewhere rather than dropping them. */
+  scopes?: string[];
   onEvent: (event: ReconnectEvent) => void;
 }): Promise<void> => {
   const channel = new Channel<ReconnectEvent>();
@@ -1417,6 +1421,7 @@ export const forgeReconnect = (args: {
     provider: args.provider,
     host: args.host,
     mode: args.mode,
+    scopes: args.scopes ?? null,
     onEvent: channel,
   });
 };
@@ -3136,15 +3141,20 @@ export const ghRulesetsList = (repoPath: string) =>
 export const ghRulesetGet = (repoPath: string, id: number) =>
   invoke<RulesetFull>("gh_ruleset_get", { repoPath, id });
 
-/** The status-check contexts a branch's active rules require. Empty for a readable
- *  branch under no rules; a branch this token can't read — or a name the backend's
- *  ref gate refuses — rejects, which a caller showing a fallback may treat as
- *  empty. GitHub only. */
+/** What a branch's active rules require — check contexts and any approving-review
+ *  count. Empty for a readable branch under no rules; a branch this token can't read —
+ *  or a name the backend's ref gate refuses — rejects, which a caller showing a
+ *  fallback may treat as empty. GitHub only. */
 export const ghBranchRequiredChecks = (
   repoPath: string,
   branch: string,
   lens: RemoteLens,
-) => invoke<string[]>("gh_branch_required_checks", { repoPath, branch, lens });
+) =>
+  invoke<BranchRequiredRules>("gh_branch_required_checks", {
+    repoPath,
+    branch,
+    lens,
+  });
 
 export const ghRulesetCreate = (
   repoPath: string,

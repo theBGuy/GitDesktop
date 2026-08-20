@@ -31,6 +31,11 @@
 //! helper guarded by [`OPLOG_LOCK`] held across read→mutate→write: `atomic_write`
 //! gives torn-file safety, the lock gives lost-update safety — both are needed. The
 //! lock is never held across an `.await`.
+//!
+//! The mutex only covers THIS process, and `gitdesktop mcp` runs the same binary as a
+//! second writer, so each guarded helper also takes the cross-process
+//! [`crate::store_lock`] inside the mutex — cheap intra-process serialization first,
+//! then the OS-level file lock (which fails open, as this journal must).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -59,9 +64,11 @@ pub struct OpLogEntry {
     pub op: String,
     /// Human summary, e.g. `"Squash-merge feature → main"`.
     pub label: String,
-    /// `"pending"` | `"done"` | `"failed"` | `"dismissed"` | `"paused"`.
+    /// `"pending"` | `"done"` | `"failed"` | `"dismissed"` | `"paused"` | `"concluded"`.
     /// `"paused"` = handed to the user mid-op (a stopped cherry-pick), so it is
-    /// neither in-flight nor finished until they continue or abort it.
+    /// neither in-flight nor finished until they continue or abort it;
+    /// `"concluded"` = that pick ended outside the app, so the journal knows only
+    /// that it is over (see [`conclude_stale_pauses`]).
     pub status: String,
     /// `now_iso()` captured at [`begin`].
     pub started_at: String,
@@ -210,6 +217,7 @@ fn insert_pending(repo: &str, entry: &OpLogEntry) -> AppResult<()> {
         .map_err(|e| AppError::Command(format!("serialize opslog entry: {e}")))?;
     let path = store_path()?;
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
 
     let key = existing_key(&store, repo).unwrap_or_else(|| repo.to_string());
@@ -226,7 +234,9 @@ fn insert_pending(repo: &str, entry: &OpLogEntry) -> AppResult<()> {
 /// Drop oldest evictable entries until `list.len() <= HISTORY_CAP`. An unfinished
 /// entry is never evicted — `"pending"` may be an in-flight op, and `"paused"` is a
 /// live handle [`close_paused_pick`] still needs — so the cap is a soft ceiling that
-/// a burst of concurrent unfinished ops can legitimately exceed.
+/// a burst of concurrent unfinished ops can legitimately exceed. `"concluded"` is
+/// deliberately OUTSIDE that set: a pick that ended outside the app is over, so its
+/// record ages out like any other finished one.
 fn cap_history(list: &mut Vec<Value>) {
     if list.len() <= HISTORY_CAP {
         return;
@@ -252,6 +262,7 @@ where
 {
     let path = store_path()?;
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
     let Some(key) = existing_key(&store, repo) else {
         return Ok(());
@@ -341,21 +352,87 @@ fn is_interrupted(
     mid_op || tree_dirty || !on_home
 }
 
-/// Reconcile `repo`'s pending entries against real git state, persist, and return
-/// the still-`"pending"` entries newest-first (0 or 1). `mid_op` = a merge,
-/// cherry-pick, rebase or revert is currently in progress ([`RepoOpState::mid_op`]);
+/// Conclude every STALE `"paused"` cherry-pick record in `list` — one whose pick was
+/// finished or abandoned OUTSIDE the app (a terminal `git cherry-pick
+/// --continue`/`--abort`), which otherwise leaves the record paused forever: immortal
+/// under [`cap_history`], a live handle [`close_paused_pick`] misattributes to the
+/// next in-app pick, and a permanent lie in Operation history.
+///
+/// The verdict is deliberately narrower than `mid_op`: a concurrent merge or rebase
+/// says nothing about a pick. It comes from TWO reads, and either one saying "a pick
+/// is live" spares the records. `cherry_picking` is the caller's earlier op-state
+/// read, which by the time we hold the lock is two git subprocesses old — a pick that
+/// paused in that window would have its brand-new record concluded permanently, and
+/// the user's later Continue/Abort would then find no handle to close. So
+/// `pick_in_progress` re-probes under the lock and is authoritative for that
+/// direction; it must answer whether `CHERRY_PICK_HEAD` exists for THIS repo, which
+/// is exactly the marker a paused (single-hash) pick leaves.
+///
+/// Residual, accepted: git can finish an in-app continue between that probe and
+/// [`close_paused_pick`]'s own locked RMW, so a check landing in those few
+/// milliseconds concludes the record first and the close then no-ops. Both run
+/// in-process and the window is order-of-ms; the cost is one history row reading
+/// "Ended outside the app" for a pick that ended inside it.
+///
+/// ALL stale records are concluded, not just the pre-newest ones — leaving any behind
+/// keeps the close-handle misattribution alive.
+///
+/// Status-write ONLY: the journal never mutates git to "recover" (module contract), and
+/// `finishedAt` stays null because a reconcile observes THAT the op ended, never when.
+/// Answers whether anything changed, so a no-op check doesn't rewrite the file.
+fn conclude_stale_pauses(
+    list: &mut [Value],
+    cherry_picking: bool,
+    pick_in_progress: impl Fn() -> bool,
+) -> bool {
+    fn is_paused_pick(entry: &Value) -> bool {
+        entry.get("status").and_then(Value::as_str) == Some("paused")
+            // Every paused record is a cherry-pick today; asserting the op keeps the
+            // verdict honest if another op ever learns to pause.
+            && entry.get("op").and_then(Value::as_str) == Some("cherry_pick_onto")
+    }
+
+    // Probe only when there is something to conclude — the common check touches no
+    // filesystem beyond the store it already read.
+    if !list.iter().any(is_paused_pick) {
+        return false;
+    }
+    if cherry_picking || pick_in_progress() {
+        return false;
+    }
+    let mut changed = false;
+    for entry in list.iter_mut() {
+        if !is_paused_pick(entry) {
+            continue;
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("status".to_string(), Value::String("concluded".to_string()));
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Reconcile `repo`'s entries against real git state, persist, and return the
+/// still-`"pending"` entries newest-first (0 or 1). `mid_op` = a merge, cherry-pick,
+/// rebase or revert is currently in progress ([`RepoOpState::mid_op`]);
 /// `tree_dirty` = tracked changes are present (catches a mid-squash interrupt
-/// git_op_state can't see); `current_branch` = the branch HEAD is on now. Guarded
-/// by [`OPLOG_LOCK`].
+/// git_op_state can't see); `current_branch` = the branch HEAD is on now;
+/// `cherry_picking` and the `pick_in_progress` re-probe gate the stale-pause arm
+/// alone, and the probe runs INSIDE the lock (see [`conclude_stale_pauses`]).
+/// Guarded by [`OPLOG_LOCK`] plus the cross-process store lock.
 fn reconcile(
     repo: &str,
     mid_op: bool,
     tree_dirty: bool,
     current_branch: &str,
+    cherry_picking: bool,
+    pick_in_progress: impl Fn() -> bool,
 ) -> AppResult<Vec<OpLogEntry>> {
     let path = store_path()?;
     let now = now_iso();
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
     let Some(key) = existing_key(&store, repo) else {
         return Ok(Vec::new());
@@ -364,9 +441,13 @@ fn reconcile(
         return Ok(Vec::new());
     };
 
+    let mut changed = conclude_stale_pauses(list, cherry_picking, pick_in_progress);
+
     // Indices of pending entries, newest-first by startedAt. Strictly `"pending"`:
-    // a `"paused"` op was handed to the user and is owned by the conflict banner,
-    // never a recovery candidate.
+    // a live `"paused"` op was handed to the user and is owned by the conflict
+    // banner, never a recovery candidate — and a concluded one is over, so neither
+    // may reach this function's RETURN value (the recovery banner renders every
+    // returned entry as "Interrupted").
     let mut pending_idx: Vec<usize> = list
         .iter()
         .enumerate()
@@ -385,39 +466,41 @@ fn reconcile(
         sb.cmp(sa)
     });
 
-    if pending_idx.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // The genuinely-interrupted op, if any: the NEWEST pending, but only when the
-    // repo isn't back in a clean, on-home state (see `is_interrupted`). git permits
-    // only one such op at a time, so at most one entry is genuinely interrupted;
-    // every other pending must have completed (a newer op started, or the repo is
-    // clean) — `finish` just never wrote "done".
-    let keep_pending = pending_idx.first().copied().filter(|&i| {
-        is_interrupted(
-            mid_op,
-            tree_dirty,
-            current_branch,
-            list[i].get("originalRef").and_then(Value::as_str),
-        )
-    });
-    for &idx in &pending_idx {
-        if Some(idx) == keep_pending {
-            continue;
+    let results: Vec<OpLogEntry> = if pending_idx.is_empty() {
+        Vec::new()
+    } else {
+        changed = true;
+        // The genuinely-interrupted op, if any: the NEWEST pending, but only when the
+        // repo isn't back in a clean, on-home state (see `is_interrupted`). git permits
+        // only one such op at a time, so at most one entry is genuinely interrupted;
+        // every other pending must have completed (a newer op started, or the repo is
+        // clean) — `finish` just never wrote "done".
+        let keep_pending = pending_idx.first().copied().filter(|&i| {
+            is_interrupted(
+                mid_op,
+                tree_dirty,
+                current_branch,
+                list[i].get("originalRef").and_then(Value::as_str),
+            )
+        });
+        for &idx in &pending_idx {
+            if Some(idx) == keep_pending {
+                continue;
+            }
+            if let Some(obj) = list[idx].as_object_mut() {
+                obj.insert("status".to_string(), Value::String("done".to_string()));
+                obj.insert("finishedAt".to_string(), Value::String(now.clone()));
+            }
         }
-        if let Some(obj) = list[idx].as_object_mut() {
-            obj.insert("status".to_string(), Value::String("done".to_string()));
-            obj.insert("finishedAt".to_string(), Value::String(now.clone()));
-        }
+        keep_pending
+            .and_then(|idx| serde_json::from_value(list[idx].clone()).ok())
+            .into_iter()
+            .collect()
+    };
+
+    if changed {
+        write_store(&path, &store)?;
     }
-
-    let results: Vec<OpLogEntry> = keep_pending
-        .and_then(|idx| serde_json::from_value(list[idx].clone()).ok())
-        .into_iter()
-        .collect();
-
-    write_store(&path, &store)?;
     Ok(results)
 }
 
@@ -498,31 +581,45 @@ pub(crate) async fn pause(repo: &str, id: &Option<String>) {
 /// Best-effort: close `repo`'s newest `"paused"` cherry-pick entry now that the user
 /// has ended the pick in-app. No paused entry → no-op.
 ///
-/// The handle is the newest paused record, not the specific pick: a pick ended
-/// outside the app (a terminal `git cherry-pick --abort`) leaves its record
-/// `"paused"`, and a later in-app continue or abort of any cherry-pick is what will
-/// close it — the same best-effort posture the journal takes for out-of-app work.
+/// The handle is the newest paused record, not the specific pick, so it can only be
+/// as accurate as the store is current: [`conclude_stale_pauses`] retires the records
+/// of picks ended outside the app on the next [`git_oplog_check`], which is what keeps
+/// one of those from standing in as this op's handle.
 pub(crate) async fn close_paused_pick(repo: &str, outcome: PausedOutcome) {
-    let now = now_iso();
-    let found = store_path().and_then(|path| {
-        let mut entries = {
-            let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
-            let store = read_store(&path)?;
-            repo_entries(&store, repo)
-        };
-        Ok(newest_paused_pick(&mut entries))
-    });
-    let id = match found {
-        Ok(Some(id)) => id,
-        Ok(None) => return,
-        Err(e) => {
-            eprintln!("gitdesktop: opslog paused lookup failed (op unaffected): {e}");
-            return;
-        }
-    };
-    if let Err(e) = mutate_entry(repo, &id, |obj| apply_close(obj, &outcome, now)) {
+    if let Err(e) = close_newest_paused_pick(repo, &outcome, now_iso()) {
         eprintln!("gitdesktop: opslog close failed (op unaffected): {e}");
     }
+}
+
+/// The lookup AND the status write under ONE acquisition of both locks. Splitting
+/// them (find the handle, release, re-take to mutate) lets two concurrent closes
+/// resolve the same newest-paused id and both write it — the second overwriting the
+/// first's disposition.
+fn close_newest_paused_pick(repo: &str, outcome: &PausedOutcome, now: String) -> AppResult<()> {
+    let path = store_path()?;
+    let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
+    let mut store = read_store(&path)?;
+    let Some(key) = existing_key(&store, repo) else {
+        return Ok(());
+    };
+    let Some(list) = store.get_mut(&key).and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    // Resolve the handle on a copy: `newest_paused_pick` sorts what it is given, and
+    // the stored order is the file's own (readers sort for themselves).
+    let Some(id) = newest_paused_pick(&mut list.clone()) else {
+        return Ok(());
+    };
+    let Some(obj) = list
+        .iter_mut()
+        .find(|e| e.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    apply_close(obj, outcome, now);
+    write_store(&path, &store)
 }
 
 /// The `preOpTip` a [`begin`] recorded for `id` — the ref position the operation
@@ -575,6 +672,11 @@ pub async fn git_oplog_check(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
     // `op_in_progress`, whose Err arm answers `true` — that would manufacture an
     // interrupt from a failed read, which the two probes below refuse to do.
     let mid_op = state.mid_op();
+    // The stale-pause verdict keys on the pick flag ALONE, not `mid_op` — see
+    // `conclude_stale_pauses`. This read goes stale across the two git subprocesses
+    // below, so `reconcile` re-probes the marker under the lock; this one only
+    // short-circuits.
+    let cherry_picking = state.cherry_picking;
     // A squash-merge leaves none of those markers, so git_op_state alone misses a
     // mid-squash interrupt. Corroborate with a *tracked*-dirty check (untracked is
     // allowed — mirrors ensure_clean_tree) + the current branch.
@@ -594,7 +696,15 @@ pub async fn git_oplog_check(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
     .await
     .map(|o| o.stdout_lossy().trim().to_string())
     .unwrap_or_default();
-    reconcile(&repo_path, mid_op, tree_dirty, &current_branch)
+    reconcile(
+        &repo_path,
+        mid_op,
+        tree_dirty,
+        &current_branch,
+        cherry_picking,
+        // FS-only (no subprocess), so it is cheap to run while holding the store lock.
+        || crate::git::ops::cherry_pick_marker_present(&repo_path),
+    )
 }
 
 /// Set the entry with `id` under `repo` to `status = "dismissed"` and persist.
@@ -1034,5 +1144,250 @@ mod tests {
         let store = read_store(&path).unwrap();
         let entries = repo_entries(&store, r"C:\nope");
         assert!(entries.is_empty());
+    }
+
+    // ── Stale-pause reconcile ────────────────────────────────────────────────
+    //
+    // These drive `reconcile`/`git_oplog_check` for real, so they go through
+    // `store_path()` — the cfg(test) arm, a temp file no in-crate test may leave the
+    // developer's real store for. The file is shared with every other test in the
+    // binary, so each seeds a repo key of its own and mutates under the same locks
+    // production takes.
+
+    /// Replace `repo`'s entries in the seam-resolved store, as one locked RMW.
+    fn seed_entries(repo: &str, entries: Vec<Value>) {
+        let path = store_path().unwrap();
+        let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _store_lock = crate::store_lock::lock_store(&path);
+        let mut store = read_store(&path).unwrap();
+        store.insert(repo.to_string(), Value::Array(entries));
+        write_store(&path, &store).unwrap();
+    }
+
+    /// `repo`'s record `id`, straight off disk — under both locks, so the read can't
+    /// land inside another test's (or process's) atomic rename over the file.
+    fn stored_entry(repo: &str, id: &str) -> Value {
+        let path = store_path().unwrap();
+        let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _store_lock = crate::store_lock::lock_store(&path);
+        let store = read_store(&path).unwrap();
+        repo_entries(&store, repo)
+            .into_iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("record {id} must still be in the store"))
+    }
+
+    async fn git(repo: &str, args: &[&str]) -> String {
+        crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+            .stdout_lossy()
+    }
+
+    async fn commit(repo: &str, dir: &Path, file: &str, content: &str, msg: &str) {
+        std::fs::write(dir.join(file), content).unwrap();
+        git(repo, &["add", "."]).await;
+        git(repo, &["commit", "-m", msg]).await;
+    }
+
+    /// A repo left mid-cherry-pick on a content conflict: `target` and `feature` both
+    /// edited `a.txt`, so picking feature's commit onto target stops for the user.
+    async fn setup_conflicting_pick(marker: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-oplog-{marker}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        git(&repo, &["init"]).await;
+        git(&repo, &["config", "user.email", "t@t"]).await;
+        git(&repo, &["config", "user.name", "t"]).await;
+        commit(&repo, dir.path(), "a.txt", "base\n", "base").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let pick = git(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        git(&repo, &["checkout", "target"]).await;
+        commit(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        // Conflicts by construction, so git exits nonzero and leaves the pick open.
+        let _ = crate::git::runner::run_git(
+            Some(&repo),
+            &["cherry-pick", &pick],
+            crate::git::runner::DEFAULT_TIMEOUT,
+        )
+        .await;
+        assert!(
+            crate::git::ops::git_op_state(repo.clone())
+                .await
+                .unwrap()
+                .cherry_picking,
+            "the fixture must leave a pick in progress"
+        );
+        (dir, repo)
+    }
+
+    /// A pick concluded OUTSIDE the app leaves its record `"paused"` — nothing in-app
+    /// ever closes it, so it was cap-immortal, a handle the next in-app close would
+    /// misattribute, and a permanent lie in the history dialog. The next check must
+    /// retire it, WITHOUT leaking it into the return value (the recovery banner
+    /// renders every returned entry as "Interrupted").
+    #[tokio::test]
+    async fn a_stale_paused_pick_is_concluded_by_the_next_check() {
+        let (_dir, repo) = setup_conflicting_pick("stale-pause").await;
+        seed_entries(
+            &repo,
+            vec![pick_record(
+                "stale-pick",
+                "2026-01-01T00:00:00.000Z",
+                "paused",
+            )],
+        );
+        // The terminal route the app has no hook for.
+        git(&repo, &["cherry-pick", "--abort"]).await;
+
+        let returned = git_oplog_check(repo.clone()).await.unwrap();
+        assert!(
+            returned.is_empty(),
+            "a concluded record must never reach the recovery banner: {returned:?}"
+        );
+        let entry = stored_entry(&repo, "stale-pick");
+        assert_eq!(entry["status"], "concluded");
+        assert_eq!(
+            entry["finishedAt"],
+            Value::Null,
+            "a reconcile observes THAT the op ended, never when"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the arm above: a pick the user is still resolving reads
+    /// `cherry_picking == true`, and its record is the live handle `close_paused_pick`
+    /// needs — concluding it would break every in-app continue/abort.
+    #[tokio::test]
+    async fn a_live_paused_pick_is_never_concluded() {
+        let (_dir, repo) = setup_conflicting_pick("live-pause").await;
+        seed_entries(
+            &repo,
+            vec![pick_record(
+                "live-pick",
+                "2026-01-01T00:00:00.000Z",
+                "paused",
+            )],
+        );
+
+        let returned = git_oplog_check(repo.clone()).await.unwrap();
+        assert!(returned.is_empty(), "a pause is not an interrupt");
+        assert_eq!(
+            stored_entry(&repo, "live-pick")["status"],
+            "paused",
+            "a pick still in progress keeps its record"
+        );
+    }
+
+    /// The check's `git_op_state` read is two git subprocesses old by the time
+    /// `reconcile` holds the lock, so a pick that pauses in that window arrives with
+    /// the flag reading FALSE. Concluding then would retire a record the user's
+    /// Continue/Abort still needs — the marker re-probe, taken under the lock, is what
+    /// overrules the stale flag.
+    #[tokio::test]
+    async fn a_pick_that_started_after_the_state_read_is_not_concluded() {
+        let (_dir, repo) = setup_conflicting_pick("post-read-pause").await;
+        seed_entries(
+            &repo,
+            vec![pick_record(
+                "raced-pick",
+                "2026-01-01T00:00:00.000Z",
+                "paused",
+            )],
+        );
+
+        // `cherry_picking: false` is the stale pre-race read; the pick is live NOW.
+        let returned = reconcile(&repo, false, false, "target", false, || {
+            crate::git::ops::cherry_pick_marker_present(&repo)
+        })
+        .unwrap();
+
+        assert!(returned.is_empty());
+        assert_eq!(
+            stored_entry(&repo, "raced-pick")["status"],
+            "paused",
+            "the locked re-probe must overrule the stale op-state read"
+        );
+    }
+
+    #[test]
+    fn every_stale_paused_pick_is_concluded_in_one_pass() {
+        let repo = r"C:\oplog\two-stale-pauses";
+        seed_entries(
+            repo,
+            vec![
+                pick_record("older-paused", "2026-01-01T00:00:00.000Z", "paused"),
+                pick_record("newer-paused", "2026-01-02T00:00:00.000Z", "paused"),
+                // Not a pick: the op guard must leave it alone.
+                json!({
+                    "id": "paused-merge",
+                    "op": "merge_local_pr",
+                    "status": "paused",
+                    "startedAt": "2026-01-03T00:00:00.000Z",
+                }),
+            ],
+        );
+
+        let returned = reconcile(repo, false, false, "main", false, || false).unwrap();
+        assert!(returned.is_empty());
+        // Sparing the newest would leave `close_paused_pick` a stale handle to
+        // misattribute the user's next in-app pick to.
+        for id in ["older-paused", "newer-paused"] {
+            assert_eq!(stored_entry(repo, id)["status"], "concluded", "{id}");
+        }
+        assert_eq!(stored_entry(repo, "paused-merge")["status"], "paused");
+    }
+
+    #[test]
+    fn the_pending_arm_is_untouched_by_the_paused_one() {
+        let repo = r"C:\oplog\pending-beside-a-stale-pause";
+        seed_entries(
+            repo,
+            vec![
+                pending_record("interrupted-merge", "2026-01-03T00:00:00.000Z"),
+                pick_record("stale-pick", "2026-01-01T00:00:00.000Z", "paused"),
+            ],
+        );
+
+        // A merge is mid-flight — which is why the pause verdict reads
+        // `cherry_picking` and not repo-wide `mid_op`: this merge says nothing about
+        // whether a cherry-pick ended.
+        let returned = reconcile(repo, true, false, "feature", false, || false).unwrap();
+        assert_eq!(returned.len(), 1, "{returned:?}");
+        assert_eq!(returned[0].id, "interrupted-merge");
+        assert_eq!(returned[0].status, "pending");
+        assert_eq!(stored_entry(repo, "stale-pick")["status"], "concluded");
+    }
+
+    #[test]
+    fn cap_evicts_a_concluded_entry() {
+        // The flip of `cap_never_evicts_an_unfinished_entry`: a pick that ended
+        // outside the app is over, so its record ages out like any finished one —
+        // which is what stops a stale pause from starving the cap forever.
+        let mut list: Vec<Value> = (0..60)
+            .map(|i| {
+                json!({
+                    "id": format!("done-{i}"),
+                    "status": "done",
+                    "startedAt": format!("2026-02-{:02}T00:00:00.000Z", i + 1),
+                })
+            })
+            .collect();
+        list.push(json!({
+            "id": "old-concluded",
+            "op": "cherry_pick_onto",
+            "status": "concluded",
+            "startedAt": "2026-01-01T00:00:00.000Z",
+        }));
+        cap_history(&mut list);
+
+        assert!(list.len() <= HISTORY_CAP);
+        assert!(
+            !list.iter().any(|e| e["id"] == "old-concluded"),
+            "a concluded record is finished, so the cap must be able to evict it"
+        );
     }
 }

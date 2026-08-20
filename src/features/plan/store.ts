@@ -228,7 +228,14 @@ export const usePlanStore = create<PlanState>((set, get) => {
         : hasQuestions
           ? "Plan ready — answer its questions"
           : "Plan ready";
-      void notify(headline, label);
+      // Hiding AI features mutes the OS ping — a hidden feature must not tap you
+      // on the shoulder. The inbox row below still lands (the dock filters it at
+      // render time), and a settings read that fails falls through to notifying.
+      void loadSettings()
+        .catch(() => null)
+        .then((s) => {
+          if (!s?.hideAi) void notify(headline, label);
+        });
       pushNotification({
         kind: "plan-done",
         tone: failed ? "danger" : hasQuestions ? "warning" : "success",

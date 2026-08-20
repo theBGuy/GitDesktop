@@ -186,7 +186,10 @@ function ModelPicker({
           items={models}
           inputValue={value.model}
           onInputValueChange={(model) => onChange({ ...value, model })}
-          value={models.includes(value.model) ? value.model : null}
+          // UNCLAMPED on purpose: Base UI syncs the input to the selected item's
+          // label as the popup finishes closing, and a null selection syncs it
+          // to "" — clamping to the catalog would wipe a typed id on close.
+          value={value.model || null}
           onValueChange={(model) => {
             if (model) onChange({ ...value, model });
           }}

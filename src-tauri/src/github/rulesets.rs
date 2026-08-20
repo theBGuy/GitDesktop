@@ -148,6 +148,36 @@ fn required_check_contexts(rules: &Value) -> Vec<String> {
     out
 }
 
+/// The approving reviews the branch's `pull_request` rules demand, or `None` when no
+/// such rule names a count. The MAXIMUM across rules: several rulesets may each set a
+/// count and GitHub enforces the strictest. A count of zero is "no approvals required"
+/// — the same thing as an absent rule to a reader, so it reads as `None` rather than
+/// "0 approving reviews".
+fn required_approving_reviews(rules: &Value) -> Option<u32> {
+    rules
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|rule| rule.get("type").and_then(Value::as_str) == Some("pull_request"))
+        .filter_map(|rule| {
+            rule.pointer("/parameters/required_approving_review_count")
+                .and_then(Value::as_u64)
+        })
+        .max()
+        .filter(|n| *n > 0)
+        .map(|n| n as u32)
+}
+
+/// What the base branch's active rules demand of a pull request, for the blocked-merge
+/// line. Approvals ride alongside the check contexts because the PR's own check rollup
+/// can never name them — nothing in it corresponds to a review requirement.
+#[derive(Serialize, Default, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchRequiredRules {
+    pub contexts: Vec<String>,
+    pub required_approving_review_count: Option<u32>,
+}
+
 /// A branch name made safe for the `rules/branches/{branch}` path. gh parses the URL
 /// with Go's `url.Parse`, where a raw `#` opens a FRAGMENT — `master#x` reads
 /// `master`'s rules, naming another branch's checks — and a bare `%` fails the parse.
@@ -159,17 +189,18 @@ fn escape_branch_path(branch: &str) -> String {
     branch.replace('%', "%25").replace('#', "%23")
 }
 
-/// The status-check contexts the branch's active rules require, for the pull-request
-/// view's blocked-merge line. `/rules/branches` aggregates every ruleset that applies
-/// and answers `[]` for a readable branch under no rules. A branch the token can't
-/// read — or a name the ref gate refuses — is an Err, like every other `run_gh`
-/// non-zero exit; the caller may treat that as empty, but it is not reported as empty.
+/// What the branch's active rules require, for the pull-request view's blocked-merge
+/// line. `/rules/branches` aggregates every ruleset that applies and answers `[]` for a
+/// readable branch under no rules. A branch the token can't read — or a name the ref
+/// gate refuses — is an Err, like every other `run_gh` non-zero exit; the caller may
+/// treat that as empty, but it is not reported as empty. One response feeds both the
+/// contexts and the approvals count — the approvals rule rides the same payload.
 #[tauri::command]
 pub async fn gh_branch_required_checks(
     repo_path: String,
     branch: String,
     lens: Option<String>,
-) -> AppResult<Vec<String>> {
+) -> AppResult<BranchRequiredRules> {
     // Both guards are needed: the ref gate rejects refspec metacharacters but permits
     // `#`/`%`, which are legal in a git ref and special in a URL.
     crate::git::branches::validate_branch_name(&branch)?;
@@ -190,7 +221,10 @@ pub async fn gh_branch_required_checks(
     .await?;
     let rules: Value = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse the branch rules: {e}")))?;
-    Ok(required_check_contexts(&rules))
+    Ok(BranchRequiredRules {
+        contexts: required_check_contexts(&rules),
+        required_approving_review_count: required_approving_reviews(&rules),
+    })
 }
 
 /// Flips only `enforcement` (the reversible soft-off). PUT is a full replace, so
@@ -229,6 +263,63 @@ mod tests {
 
     fn contexts(raw: &str) -> Vec<String> {
         required_check_contexts(&serde_json::from_str::<Value>(raw).expect("valid JSON"))
+    }
+
+    fn approvals(raw: &str) -> Option<u32> {
+        required_approving_reviews(&serde_json::from_str::<Value>(raw).expect("valid JSON"))
+    }
+
+    #[test]
+    fn reads_the_approvals_count_the_same_payload_already_carries() {
+        // The `pull_request` rule rides the very response the contexts come from, so
+        // naming approvals costs no second call.
+        let raw = r#"[
+            {"type":"pull_request","parameters":{"required_approving_review_count":2,"dismiss_stale_reviews_on_push":true}},
+            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}
+        ]"#;
+        assert_eq!(approvals(raw), Some(2));
+        assert_eq!(contexts(raw), vec!["build"]);
+    }
+
+    #[test]
+    fn the_strictest_rule_wins_and_no_requirement_reads_as_none() {
+        assert_eq!(
+            approvals(
+                r#"[
+                    {"type":"pull_request","parameters":{"required_approving_review_count":1}},
+                    {"type":"pull_request","parameters":{"required_approving_review_count":3}}
+                ]"#
+            ),
+            Some(3)
+        );
+        // Absent rule, absent field, a zero count, and shapes the endpoint never
+        // promised all mean "no approvals to name" — never a fabricated 0.
+        for raw in [
+            "[]",
+            r#"[{"type":"required_status_checks","parameters":{"required_status_checks":[]}}]"#,
+            r#"[{"type":"pull_request"}]"#,
+            r#"[{"type":"pull_request","parameters":{}}]"#,
+            r#"[{"type":"pull_request","parameters":{"required_approving_review_count":0}}]"#,
+            r#"[{"type":"pull_request","parameters":{"required_approving_review_count":"two"}}]"#,
+            r#"{"message":"Not Found"}"#,
+        ] {
+            assert_eq!(approvals(raw), None, "raw: {raw}");
+        }
+    }
+
+    #[test]
+    fn the_rules_shape_serializes_camel_case() {
+        // The frontend reads `requiredApprovingReviewCount`; an absent count must
+        // travel as an explicit null rather than vanishing from the object.
+        let json = serde_json::to_string(&BranchRequiredRules {
+            contexts: vec!["build".into()],
+            required_approving_review_count: None,
+        })
+        .expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"contexts":["build"],"requiredApprovingReviewCount":null}"#
+        );
     }
 
     #[test]

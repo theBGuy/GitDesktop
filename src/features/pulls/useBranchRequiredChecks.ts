@@ -4,12 +4,13 @@ import type { ForgeProvider, PrCheckOut, RemoteLens } from "@/lib/git/types";
 import { checkPresentation } from "./check-presentation";
 
 /**
- * The status-check contexts a pull request's BASE branch requires, read from
- * GitHub's active rules for that branch. Never polls, and it is enabled only where
- * the answer is about to be shown — the read exists to name what a blocked merge is
- * waiting on. It can still refetch on the usual triggers (focus, reconnect, remount)
- * once stale, so the caller's gate carries the <Activity> term too. An empty answer
- * is the honest one for a branch with no rules this viewer can see.
+ * What a pull request's BASE branch requires — status-check contexts and any
+ * approving-review count — read from GitHub's active rules for that branch. Never
+ * polls, and it is enabled only where the answer is about to be shown: the read
+ * exists to name what a blocked merge is waiting on. It can still refetch on the
+ * usual triggers (focus, reconnect, remount) once stale, so the caller's gate
+ * carries the <Activity> term too. An empty answer is the honest one for a branch
+ * with no rules this viewer can see.
  */
 export function useBranchRequiredChecks(
   repo: string,

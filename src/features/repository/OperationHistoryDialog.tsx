@@ -1,4 +1,5 @@
 import {
+  ArrowSquareOutIcon,
   CheckCircleIcon,
   ClockIcon,
   GitBranchIcon,
@@ -54,6 +55,13 @@ const STATUS_META: Record<
   dismissed: {
     label: "Dismissed",
     Icon: ProhibitIcon,
+    tone: "text-muted-foreground",
+  },
+  // A cherry-pick finished or abandoned in a terminal: over, but the journal never
+  // saw how it ended, so it reads as neither Done nor Failed.
+  concluded: {
+    label: "Ended outside the app",
+    Icon: ArrowSquareOutIcon,
     tone: "text-muted-foreground",
   },
 };

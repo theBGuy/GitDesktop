@@ -167,6 +167,13 @@ clickables add `cursor-pointer` at the call site (vendored Button sets none).
   per-toggle auto-save; a single discrete select may apply-on-change.
 - Repo-content config features (FUNDING.yml, CODEOWNERS, …) scaffold the
   local file for the user to commit — never write repo content via an API.
+- A mutation whose host can unmount mid-flight (a dialog closable by Esc / ✕ /
+  backdrop, a keyed remount) rides `await mutateAsync` continuations, never
+  `.mutate(vars, { onSuccess, onError })` — react-query drops per-call
+  callbacks when the observer unmounts, so the toast, navigation, or cleanup
+  that lived in them silently never runs. The house idiom is `form.ts`'s
+  awaited-submit convention (`SquashDialog` in
+  `src/features/history/RewriteDialogs.tsx` is the reference).
 
 ## Rust / Tauri conventions
 
@@ -205,11 +212,17 @@ clickables add `cursor-pointer` at the call site (vendored Button sets none).
   (`oplog.rs` `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`:
   env override outranks the `cfg!(test)` temp arm; both ship in release) —
   a new store module mirrors one of these, never resolves app-data bare.
-  Concurrency: `oplog.rs` holds a process-LOCAL mutex per store mutation,
-  `review_notes.rs` relies on atomic whole-file replace — NEITHER serializes
-  across processes, and the MCP server writes both stores, so every write
-  stays best-effort/last-writer-wins; a new store module picks its shape
-  deliberately, never assuming a lock covers the other process.
+  Concurrency: the MCP server is a second writing process, so both stores'
+  read→modify→writes take the cross-process file lock in `store_lock.rs` (a
+  `create_new` lock file beside the store, stale-evicted, fail-open) on top of
+  their own in-process guards — `oplog.rs` its `OPLOG_LOCK` mutex,
+  `review_notes.rs` its `notes_lock()` mutex — with the atomic whole-file
+  replace underneath both (torn-file safety, not lost-update safety). The GUI's
+  review-notes writes route through the locked `review_notes_set_branch` /
+  `review_notes_delete_branch` Tauri commands rather than the plugin store
+  (cold-start test mode is the one exception: it aliases the store file and
+  has no second writer). A NEW store module with more than one process
+  writing adopts `store_lock` — don't assume last-writer-wins is acceptable.
 - **Forge gating:** per-action `Implemented` flags. Shared-with-GitHub
   controls gate on `canWrite || forgeFeatureReady` (GitHub must be zero-diff);
   provider-only controls gate on `forgeFeatureReady` alone with the flag

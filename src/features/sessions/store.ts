@@ -142,6 +142,11 @@ export interface PendingTask {
   agent?: "claude" | "codex" | "copilot" | "opencode";
   /** "" = the account default model. */
   model?: string;
+  /** The agent `model` was chosen for. Recorded separately because `agent` is
+   *  absent when unpicked (so a Default-agent change during the round trip is
+   *  followed), which would otherwise leave the restore unable to tell a model
+   *  that still fits from one aimed at the agent the user just moved away from. */
+  modelAgent?: "claude" | "codex" | "copilot" | "opencode";
   /** "" = Auto. */
   effort?: string;
   mode?: "single" | "ensemble";
@@ -364,7 +369,14 @@ async function runTurn(
       "Agent session";
     const failed = t.status === "error";
     const headline = failed ? "Agent failed" : "Agent finished";
-    void notify(headline, label);
+    // Hiding AI features mutes the OS ping — a hidden feature must not tap you
+    // on the shoulder. The inbox row below still lands (the dock filters it at
+    // render time), and a settings read that fails falls through to notifying.
+    void loadSettings()
+      .catch(() => null)
+      .then((s) => {
+        if (!s?.hideAi) void notify(headline, label);
+      });
     pushNotification({
       kind: "agent-done",
       tone: failed ? "danger" : "success",

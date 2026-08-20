@@ -285,11 +285,14 @@ PR (comments and all) in one click.
   worktree and nothing else, and an unfinished resolution is offered back as
   **Continue resolving**. Fork PRs are excluded, since their head lives in
   another repository.
-- **Blocked by branch protection** (GitHub): a PR that merges cleanly but
-  whose base branch rules aren't satisfied gets its own strip line, naming
-  the required checks still outstanding (four, then *and N more*).
-  **Merge** stays available (whoever holds bypass permission can merge anyway),
-  and a refused merge repeats the same line beside the forge's own message.
+- **Blocked by branch protection**: a PR that merges cleanly but whose rules
+  refuse it gets its own strip line naming the reason. On **GitHub** that's
+  the required checks still outstanding (four, then *and N more*) plus the
+  approving-review count the rules demand; on **GitLab** it's the blocking
+  reason itself — approval, pipeline, unresolved discussions, and the rest of
+  its detailed merge statuses. **Merge** stays available (whoever holds bypass
+  permission can merge anyway), and a refused merge repeats the same line
+  beside the forge's own message.
 - **Local PR merges**: a merge **pre-shows conflicts** and lets you resolve
   them in the in-app editor, in an isolated worktree that never touches your
   working tree, then **Finish** or **Abort**.
@@ -919,8 +922,10 @@ review via its subscription login. The full list is under
     picked.
 - **Keys**: kept in the OS keychain (Windows Credential Manager, macOS
   Keychain, libsecret). **Hide AI** (Settings → General) hides the AI
-  surfaces and pauses your automations while keeping your config; rules
-  start firing again when you turn AI features back on.
+  surfaces (finished AI activity in the dock and notification inbox
+  included), mutes AI desktop notifications, and pauses your automations
+  while keeping your config; rules start firing again when you turn AI
+  features back on.
 
 ## Updates
 

@@ -28,6 +28,7 @@ mod review_notes;
 mod secrets;
 mod sessions;
 mod state;
+mod store_lock;
 mod tray;
 
 use state::AppState;
@@ -242,6 +243,8 @@ pub fn run() {
             oplog::git_oplog_list,
             oplog::git_oplog_check,
             oplog::git_oplog_dismiss,
+            review_notes::review_notes_set_branch,
+            review_notes::review_notes_delete_branch,
             automation_claims::claim_automation_run,
             automation_claims::release_automation_claim,
             automation_claims::touch_automation_claim,

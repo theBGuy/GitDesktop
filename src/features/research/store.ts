@@ -305,7 +305,14 @@ export const useResearchStore = create<ResearchState>((set, get) => {
         return;
       const label = run.origin?.topic?.trim() || "Research";
       const headline = failed ? "Research failed" : "Research ready";
-      void notify(headline, label);
+      // Hiding AI features mutes the OS ping — a hidden feature must not tap you
+      // on the shoulder. The inbox row below still lands (the dock filters it at
+      // render time), and a settings read that fails falls through to notifying.
+      void loadSettings()
+        .catch(() => null)
+        .then((s) => {
+          if (!s?.hideAi) void notify(headline, label);
+        });
       pushNotification({
         kind: "research-done",
         tone: failed ? "danger" : "success",

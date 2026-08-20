@@ -361,7 +361,7 @@ async function notifyReviewDone(
   error?: string,
 ): Promise<void> {
   try {
-    const { notifications } = await loadSettings();
+    const { notifications, hideAi } = await loadSettings();
     if (!notifications.reviews) return;
     const label = mode === "security" ? "security audit" : "review";
     const headline = ok ? `AI ${label} ready` : `AI ${label} failed`;
@@ -388,7 +388,10 @@ async function notifyReviewDone(
       // one notification.
       dedupeKey: `review:${target.kind}:${target.repoPath}:${target.lens}:${target.ref}:${ok}`,
     });
-    void notifyIfUnfocused(headline, subtitle);
+    // Hiding AI features mutes the OS ping (a hidden feature must not tap you on
+    // the shoulder) but never the inbox record above — the dock filters that at
+    // render time, so the history is whole again when AI is shown.
+    if (!hideAi) void notifyIfUnfocused(headline, subtitle);
   } catch {
     // best-effort — a missed notification must never affect the review
   }

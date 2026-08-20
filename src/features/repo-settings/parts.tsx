@@ -6,6 +6,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { highlightJson } from "@/features/diff/shiki-highlighter";
 import { copyText } from "@/lib/clipboard";
 import { useActiveGhHost } from "@/lib/git/host";
+import { useGhScopes } from "@/lib/git/queries";
+import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 
 /**
@@ -35,13 +37,12 @@ export function AsyncListBody({
   /** Skeleton size, sized to roughly match each section's row height. */
   skeletonClassName?: string;
   errorTitle?: string;
-  /** Renders the standard "needs a broader scope — run `gh auth refresh -s <scope>`"
-   *  note in the error card. */
+  /** Renders the standard "needs a broader scope" note in the error card — with a
+   *  reconnect button when the sign-in is a refreshable classic token. */
   errorScope?: string;
   /** A custom hint node in the error card, for sections without a single scope. */
   errorHint?: ReactNode;
 }) {
-  const host = useActiveGhHost();
   if (loading) {
     return (
       <div className="space-y-2">
@@ -57,16 +58,7 @@ export function AsyncListBody({
         {error instanceof Error && (
           <p className="mt-1 text-muted-foreground">{error.message}</p>
         )}
-        {errorScope && (
-          <p className="mt-2 text-muted-foreground">
-            If this is a permissions error, your GitHub sign-in may need a
-            broader scope — run{" "}
-            <span className="font-mono">
-              gh auth refresh -h {host} -s {errorScope}
-            </span>{" "}
-            and reopen this dialog.
-          </p>
-        )}
+        {errorScope && <ScopeErrorHint scope={errorScope} />}
         {errorHint && (
           <div className="mt-2 text-muted-foreground">{errorHint}</div>
         )}
@@ -81,6 +73,59 @@ export function AsyncListBody({
     );
   }
   return <div className="space-y-2">{children}</div>;
+}
+
+/**
+ * The scope note inside an async list's error card, in `ScopeRefreshHint`'s
+ * grammar. The reconnect button only appears for a classic OAuth/PAT sign-in
+ * actually missing `scope` (the same gate that hint applies): this card also
+ * renders for "not signed in" and for failures that aren't about permissions at
+ * all, where a refresh is the wrong move — those keep the command text alone.
+ * The lead names the scope because one open dialog can show several of these
+ * cards, each wanting a different one. Lives in its own component so the
+ * token-scopes probe runs on the error path only, not from every healthy list.
+ */
+function ScopeErrorHint({ scope }: { scope: string }) {
+  const host = useActiveGhHost();
+  const scopes = useGhScopes(host);
+  const openReconnect = useUiStore((s) => s.openReconnect);
+  const canRefresh =
+    scopes.data?.classic === true && !scopes.data.scopes.includes(scope);
+  return (
+    <div className="mt-2 text-muted-foreground">
+      <p>
+        If this is a permissions error, your GitHub sign-in may be missing the{" "}
+        <span className="font-mono">{scope}</span> scope.
+      </p>
+      {canRefresh && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={() =>
+              openReconnect({
+                provider: "github",
+                host,
+                mode: "refresh",
+                scopes: [scope],
+              })
+            }
+          >
+            Reconnect GitHub…
+          </Button>
+        </div>
+      )}
+      {/* The reopen only applies to the copied command: the button's flow
+          invalidates this list itself, so its card refetches in place. */}
+      <p className="mt-2">
+        {canRefresh ? "Or run" : "Run"}{" "}
+        <span className="font-mono">
+          gh auth refresh --hostname {host} -s {scope}
+        </span>{" "}
+        in a terminal, then reopen this dialog.
+      </p>
+    </div>
+  );
 }
 
 /**

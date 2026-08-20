@@ -31,16 +31,19 @@ import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
+import { useAiEnabled } from "@/lib/settings/queries";
 import {
+  AI_NOTIFICATION_KINDS,
   type AppNotification,
   clearAllNotifications,
   clearNotification,
+  clearNotifications,
   markAllNotificationsRead,
   markNotificationRead,
+  markNotificationsRead,
   type NotificationKind,
   type NotificationTone,
   useNotifications,
-  useUnreadCount,
 } from "@/lib/stores/notifications";
 import {
   cancelReview,
@@ -76,17 +79,19 @@ export function ActivityStrip() {
   const activityOpen = useUiStore((s) => s.activityOpen);
   const tasks = useReviewTasks();
   const notifs = useNotifications();
+  const aiEnabled = useAiEnabled();
   // The header dock already covers the repo view; the strip only fills in for
   // the header-less screens — when there's something to reach, OR when the
   // palette / hotkey opened the popover (so the bell + its empty state are
   // reachable even with an empty inbox on the welcome/settings/help screens).
   if (view === "repo") return null;
   const live = liveTasks(tasks);
-  const stopped = stoppedTasks(tasks);
+  const stopped = stoppedTasks(tasks, aiEnabled);
+  const visible = visibleNotifications(notifs, aiEnabled);
   if (
     live.length === 0 &&
     stopped.length === 0 &&
-    notifs.length === 0 &&
+    visible.length === 0 &&
     !activityOpen
   ) {
     return null;
@@ -107,22 +112,46 @@ function liveTasks(tasks: ReviewTask[]): ReviewTask[] {
 
 /** Stopped automation runs — cancelled or failed rows that carry a `rerun`. The
  *  `rerun` presence is the discriminator: a manual panel run also reaches
- *  "cancelled"/"error" but never carries one, so it's kept out of the dock. */
-function stoppedTasks(tasks: ReviewTask[]): ReviewTask[] {
+ *  "cancelled"/"error" but never carries one, so it's kept out of the dock.
+ *
+ *  Every row here is an AI automation review by construction, so hiding AI
+ *  features empties the zone outright. Live rows are NOT filtered — they hold the
+ *  only Cancel an in-flight automation run has, so they stay until they settle. */
+function stoppedTasks(tasks: ReviewTask[], aiEnabled: boolean): ReviewTask[] {
+  if (!aiEnabled) return [];
   return tasks.filter(
     (t) => (t.phase === "cancelled" || t.phase === "error") && t.rerun,
   );
 }
 
+/** The inbox rows this dock shows. Hiding AI features drops AI-minted kinds from
+ *  the render only — the records keep accruing, so the history is intact when AI
+ *  is shown again. A kind the set doesn't name renders (hydrated rows from an
+ *  older build are untrusted, and a forge event must never be mistaken for AI). */
+function visibleNotifications(
+  notifs: AppNotification[],
+  aiEnabled: boolean,
+): AppNotification[] {
+  if (aiEnabled) return notifs;
+  return notifs.filter((n) => !AI_NOTIFICATION_KINDS.has(n.kind));
+}
+
 function ActivityBell({ variant }: { variant: "header" | "strip" }) {
   const tasks = useReviewTasks();
-  const unread = useUnreadCount();
+  const notifs = useNotifications();
+  const aiEnabled = useAiEnabled();
   // Open state lives in the UI store so the command palette / a hotkey can
   // toggle it (only one mount — header or strip — is on screen at a time).
   const open = useUiStore((s) => s.activityOpen);
   const setOpen = useUiStore((s) => s.setActivityOpen);
+  // The badge counts what the panel will actually show: a hidden AI row must not
+  // send the user to an inbox where the unread it promised isn't there.
+  const unread = visibleNotifications(notifs, aiEnabled).reduce(
+    (n, i) => (i.read ? n : n + 1),
+    0,
+  );
   const live = liveTasks(tasks).length;
-  const stopped = stoppedTasks(tasks).length;
+  const stopped = stoppedTasks(tasks, aiEnabled).length;
 
   const label = `Activity & notifications${
     unread > 0 ? ` · ${unread} unread` : ""
@@ -172,11 +201,13 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   const openPr = useUiStore((s) => s.openPr);
   const openRun = useUiStore((s) => s.openRun);
   const openAgentTab = useUiStore((s) => s.openAgentTab);
+  const aiEnabled = useAiEnabled();
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const live = liveTasks(tasks);
-  const stopped = stoppedTasks(tasks);
+  const stopped = stoppedTasks(tasks, aiEnabled);
+  const visible = visibleNotifications(notifs, aiEnabled);
   // Queue position per lane (local + cloud run independently), FIFO by seq.
   const queuePos = new Map<string, number>();
   for (const isLocal of [true, false]) {
@@ -234,8 +265,8 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   // Keyboard delete: focus the neighbour that takes this row's place (next, else
   // previous) so arrow-key flow survives a delete instead of dropping to <body>.
   const handleDelete = (id: string) => {
-    const idx = notifs.findIndex((n) => n.id === id);
-    const nextId = notifs[idx + 1]?.id ?? notifs[idx - 1]?.id ?? null;
+    const idx = visible.findIndex((n) => n.id === id);
+    const nextId = visible[idx + 1]?.id ?? visible[idx - 1]?.id ?? null;
     clearNotification(id);
     setFocusedId(nextId);
     if (nextId) {
@@ -248,11 +279,24 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   };
 
   const onListKeyDown = listKeyboardNav({
-    items: notifs,
-    activeIndex: focusedId ? notifs.findIndex((n) => n.id === focusedId) : -1,
+    items: visible,
+    activeIndex: focusedId ? visible.findIndex((n) => n.id === focusedId) : -1,
     onActivate: (n) => setFocusedId(n.id),
     rowKey: (n) => n.id,
   });
+
+  // Bulk actions reach only what's on screen: while AI rows are hidden they run
+  // id-scoped, so pressing Clear all can't wipe history the user can't see. With
+  // nothing filtered out the blanket store actions stay, which also catch a row
+  // that arrived between this render and the click.
+  const markAllVisibleRead = () => {
+    if (aiEnabled) markAllNotificationsRead();
+    else markNotificationsRead(visible.map((n) => n.id));
+  };
+  const clearAllVisible = () => {
+    if (aiEnabled) clearAllNotifications();
+    else clearNotifications(visible.map((n) => n.id));
+  };
 
   return (
     <>
@@ -301,32 +345,25 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
 
       <div className="flex items-center justify-between px-3 py-2">
         <span className="text-xs font-medium">Notifications</span>
-        {notifs.length > 0 && (
+        {visible.length > 0 && (
           <div className="-mr-1 flex items-center gap-0.5">
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={() => markAllNotificationsRead()}
-            >
+            <Button variant="ghost" size="xs" onClick={markAllVisibleRead}>
               Mark all read
             </Button>
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={() => clearAllNotifications()}
-            >
+            <Button variant="ghost" size="xs" onClick={clearAllVisible}>
               Clear all
             </Button>
           </div>
         )}
       </div>
 
-      {notifs.length === 0 ? (
+      {visible.length === 0 ? (
         <div className="px-3 pt-1 pb-6 text-center">
           <p className="text-xs font-medium">You're all caught up</p>
           <p className="mt-1 text-[11px] text-muted-foreground">
-            Finished reviews, PR activity, checks, and completed runs show up
-            here so you never miss one.
+            {aiEnabled
+              ? "Finished reviews, PR activity, checks, and completed runs show up here so you never miss one."
+              : "PR activity, checks, and completed runs show up here so you never miss one."}
           </p>
         </div>
       ) : (
@@ -335,7 +372,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
           className="max-h-80 overflow-y-auto outline-none"
           onKeyDown={onListKeyDown}
         >
-          {notifs.map((n) => (
+          {visible.map((n) => (
             <NotificationRow
               key={n.id}
               n={n}

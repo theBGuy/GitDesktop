@@ -619,6 +619,78 @@ pub struct PrMergeOutcome {
     pub queued: bool,
 }
 
+/// Drops the trailing ` (<path>)` go-gh appends to a GraphQL error message — the
+/// mutation path is GitHub's plumbing, not something a reader acts on.
+///
+/// A GraphQL path is one token (`mergePullRequest`, `a.b.0`), so a parenthetical
+/// holding a SPACE is the author's own aside and survives. And go-gh joins several
+/// errors into one line (`m1 (p1), m2 (p2)`), where dropping only the last would leave
+/// the first inline and read as mangled — so a message carrying more than one
+/// path-shaped parenthetical rides through whole.
+fn strip_graphql_path(msg: &str) -> &str {
+    let msg = msg.trim();
+    let mut found: Option<(usize, usize)> = None;
+    let mut count = 0usize;
+    let mut cursor = 0usize;
+    while let Some(rel) = msg[cursor..].find(" (") {
+        let open = cursor + rel;
+        let inner = open + " (".len();
+        let Some(rel_close) = msg[inner..].find(')') else {
+            break;
+        };
+        let close = inner + rel_close;
+        if !msg[inner..close].is_empty() && !msg[inner..close].contains(' ') {
+            count += 1;
+            found = Some((open, close));
+        }
+        cursor = close + 1;
+    }
+    match found {
+        Some((open, close)) if count == 1 && close + 1 == msg.len() => msg[..open].trim_end(),
+        _ => msg,
+    }
+}
+
+/// A refused `gh pr merge`, in the app's own words — `None` for any stderr that isn't
+/// one of the shapes below, so an unrecognized failure still surfaces gh's raw text.
+///
+/// Matching is per LINE, which is what drops gh's advice lines (`--auto`, `--admin`,
+/// `gh pr checkout …` — flags and a flow this app doesn't offer) instead of showing
+/// them. Within a line the reason is matched as a substring: cli/cli writes it as
+/// `<FailureIcon> Pull request <owner>/<repo>#<n> is not mergeable: <reason>.`
+/// (`pkg/cmd/pr/merge/merge.go`, `canMerge` + `blockedReason`), so the anchor sits
+/// after a prefix that carries the repo slug and the PR number. A GraphQL refusal is
+/// GitHub's own sentence, which go-gh formats as `GraphQL: <message> (<path>)`.
+fn classify_gh_merge_refusal(stderr: &str) -> Option<String> {
+    const GRAPHQL: &str = "GraphQL: ";
+    for line in stderr.lines() {
+        let line = line.trim();
+        if line.contains("is not mergeable: the base branch policy prohibits the merge") {
+            return Some(
+                "GitHub is blocking this merge — branch protections aren't satisfied yet."
+                    .to_string(),
+            );
+        }
+        if line.contains("is not mergeable: the head branch is not up to date") {
+            return Some(
+                "The branch is behind its base — update the branch, then merge.".to_string(),
+            );
+        }
+        if line.contains("is not mergeable: the merge commit cannot be cleanly created") {
+            return Some(
+                "The branch has conflicts with its base — resolve them, then merge.".to_string(),
+            );
+        }
+        if let Some(idx) = line.find(GRAPHQL) {
+            let msg = strip_graphql_path(&line[idx + GRAPHQL.len()..]);
+            if !msg.is_empty() {
+                return Some(msg.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Merges the PR with the given strategy ("merge"/"squash"/"rebase"). With
 /// `delete_branch`, only the *remote* head branch is removed — local branch and
 /// HEAD are untouched.
@@ -659,12 +731,23 @@ pub async fn gh_pr_merge(
     let queued = if gh_pr_is_stacked(&repo_path, &slug, number).await {
         gh_pr_merge_async(&repo_path, &slug, number, &strategy).await? == StackedMergeResult::Queued
     } else {
-        run_gh(
+        let out = run_gh_raw(
             Some(&repo_path),
             &["pr", "merge", &n, method, "--repo", &slug],
             GH_NETWORK_TIMEOUT,
         )
         .await?;
+        if out.code != 0 {
+            // Raw rather than `run_gh` only so the refusal can be reworded: gh's own
+            // blob advises `--auto`/`--admin`/`gh pr checkout`, none of which this app
+            // offers. Every unrecognized failure keeps `run_gh`'s exact fallback.
+            let raw = out.stderr.trim();
+            return Err(AppError::Gh(match classify_gh_merge_refusal(&out.stderr) {
+                Some(message) => message,
+                None if raw.is_empty() => format!("gh exited with code {}", out.code),
+                None => raw.to_string(),
+            }));
+        }
         false
     };
     // Merge accepted: from here a cleanup failure is a warning on success, never an error.
@@ -5603,7 +5686,8 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_stack_join, classify_merge_async, external_items_from_thread_nodes,
+        apply_stack_join, classify_gh_merge_refusal, classify_merge_async,
+        external_items_from_thread_nodes,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message, host_from_url,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
         parse_auth_accounts, parse_pr_url_repo, pr_edit_args, pr_poll_query, pull_stack_ref,
@@ -5623,6 +5707,97 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+
+    /// The three blobs `gh pr merge` writes to stderr when it refuses, assembled from
+    /// cli/cli `pkg/cmd/pr/merge/merge.go` — `canMerge` writes the `is not mergeable`
+    /// line plus the advice lines, `blockedReason` supplies the reason text. Fixtures
+    /// rather than a live gh: reproducing them needs a protected repo, a stale branch
+    /// and a conflicted one. The failure icon is a plain `X` under `NO_COLOR`
+    /// (`iostreams::ColorScheme::FailureIcon`), which the runner sets.
+    #[test]
+    fn classifies_the_merge_refusals_gh_writes() {
+        let blocked = "X Pull request theBGuy/GitDesktop#12 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.\n";
+        assert_eq!(
+            classify_gh_merge_refusal(blocked).as_deref(),
+            Some("GitHub is blocking this merge — branch protections aren't satisfied yet.")
+        );
+
+        let behind = "X Pull request theBGuy/GitDesktop#12 is not mergeable: the head branch is not up to date with the base branch.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.\n";
+        assert_eq!(
+            classify_gh_merge_refusal(behind).as_deref(),
+            Some("The branch is behind its base — update the branch, then merge.")
+        );
+
+        let dirty = "X Pull request theBGuy/GitDesktop#12 is not mergeable: the merge commit cannot be cleanly created.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nRun the following to resolve the merge conflicts locally:\n  gh pr checkout 12 && git fetch origin master && git merge origin/master\n";
+        assert_eq!(
+            classify_gh_merge_refusal(dirty).as_deref(),
+            Some("The branch has conflicts with its base — resolve them, then merge.")
+        );
+
+        // The advice never survives into the rewritten message — it names flags and a
+        // checkout flow the app doesn't offer.
+        for raw in [blocked, behind, dirty] {
+            let message = classify_gh_merge_refusal(raw).expect("classified");
+            assert!(!message.contains("--auto"), "{message}");
+            assert!(!message.contains("--admin"), "{message}");
+            assert!(!message.contains("gh pr checkout"), "{message}");
+        }
+    }
+
+    /// go-gh formats a GraphQL refusal as `GraphQL: <message> (<path>)`
+    /// (`pkg/api/errors.go`). GitHub's own sentence is the useful part; the mutation
+    /// path is plumbing.
+    #[test]
+    fn passes_a_graphql_refusal_through_without_its_plumbing() {
+        assert_eq!(
+            classify_gh_merge_refusal(
+                "GraphQL: Pull Request is not mergeable (mergePullRequest)\n"
+            )
+            .as_deref(),
+            Some("Pull Request is not mergeable")
+        );
+        // No path element — nothing to strip.
+        assert_eq!(
+            classify_gh_merge_refusal("GraphQL: Base branch was modified\n").as_deref(),
+            Some("Base branch was modified")
+        );
+        // go-gh joins multiple errors with ", " and gives each its own path. Stripping
+        // only the trailing one would leave `m1 (p1)` inline beside a bare `m2`, so the
+        // whole line rides through as GitHub composed it.
+        assert_eq!(
+            classify_gh_merge_refusal(
+                "GraphQL: Pull Request is not mergeable (mergePullRequest), Base branch was modified (mergePullRequest)\n"
+            )
+            .as_deref(),
+            Some(
+                "Pull Request is not mergeable (mergePullRequest), Base branch was modified (mergePullRequest)"
+            )
+        );
+        // A parenthetical with a space in it is prose, not a path — a GraphQL path is
+        // always one token, so the aside is kept.
+        assert_eq!(
+            classify_gh_merge_refusal(
+                "GraphQL: Base branch was modified (review and try the merge again)\n"
+            )
+            .as_deref(),
+            Some("Base branch was modified (review and try the merge again)")
+        );
+    }
+
+    /// Fail-open control: an unrecognized failure must classify to nothing, so the
+    /// caller surfaces gh's raw stderr rather than an invented reason.
+    #[test]
+    fn leaves_an_unrecognized_merge_failure_alone() {
+        for raw in [
+            "",
+            "   \n\n",
+            "gh: Not Found (HTTP 404)\n",
+            "X Cannot use `-d` or `--delete-branch` when merge queue enabled\n",
+            "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com\n",
+        ] {
+            assert_eq!(classify_gh_merge_refusal(raw), None, "raw: {raw:?}");
+        }
+    }
 
     /// Both PR branches ride a push refspec, so every character that could
     /// reshape one is refused before any remote work: `:` would retarget the

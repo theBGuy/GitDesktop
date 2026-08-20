@@ -6,9 +6,17 @@ import {
   UsersThreeIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
-import { type ReactNode, useId, useMemo, useRef } from "react";
+import { type ReactNode, useId, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from "@/components/ui/combobox";
 import {
   Popover,
   PopoverContent,
@@ -59,9 +67,9 @@ export function modelsForAgent(agent: AgentKind): string[] {
   }
 }
 
-// "" (account default) maps to a non-empty sentinel for the Select value.
-const DEFAULT_MODEL = "default";
-
+/** The model for a run: the agent's suggestions are searchable, and any other id
+ *  typed here reaches the CLI verbatim (custom providers publish ids no static
+ *  list can carry). `""` is the account default and shows the placeholder. */
 export function ModelPicker({
   value,
   onChange,
@@ -71,41 +79,48 @@ export function ModelPicker({
   onChange: (m: string) => void;
   models: string[];
 }) {
-  // Base UI renders the raw value in the trigger unless the labels are passed as
-  // `items`. Derived per render because the model set varies by agent, and the
-  // popup below renders from it too so the two can never drift.
-  const items = useMemo(
-    () => ({
-      [DEFAULT_MODEL]: "Default model",
-      ...Object.fromEntries(models.map((m) => [m, m])),
-    }),
-    [models],
-  );
-
   return (
-    <Select
-      items={items}
-      value={value || DEFAULT_MODEL}
-      onValueChange={(v) => onChange(v === DEFAULT_MODEL ? "" : String(v))}
+    <Combobox
+      items={models}
+      // The input text is the source of truth — a typed id needs no match.
+      inputValue={value}
+      onInputValueChange={(model) => onChange(model)}
+      // UNCLAMPED on purpose: Base UI syncs the input to the selected item's
+      // label as the popup finishes closing, and a null selection syncs it to
+      // "" — clamping to the suggestion list would wipe a typed id on close.
+      value={value || null}
+      onValueChange={(model) => {
+        if (model) onChange(model);
+      }}
+      openOnInputClick
     >
-      <SelectTrigger
-        size="sm"
+      {/* Composer-toolbar weight: quiet until focus, matching the sibling
+          Select-based pickers on the same row. */}
+      <ComboboxInput
         aria-label="Agent model"
-        className="w-auto border-0 text-muted-foreground shadow-none hover:bg-muted dark:bg-transparent"
-      >
-        <SelectValue />
-      </SelectTrigger>
-      {/* Models come from a narrow (w-auto) trigger, so the default
-          `w-(--anchor-width)` popup clips long ids (e.g. `opencode/…`). Let it
-          size to its content instead, capped so it can't run off-screen. */}
-      <SelectContent className="w-fit max-w-sm">
-        {Object.entries(items).map(([model, label]) => (
-          <SelectItem key={model} value={model}>
-            {label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+        placeholder="Default model"
+        // Long ids outrun the capped width with the caret hiding the tail, and
+        // an input has no truncation tooltip of its own.
+        title={value || undefined}
+        className="h-7 w-auto max-w-44 min-w-28 border-transparent text-muted-foreground hover:bg-muted dark:bg-transparent"
+      />
+      {/* The input is narrow, so the default `w-(--anchor-width)` popup clips
+          long ids (e.g. `opencode/…`). Size to content, capped on-screen. */}
+      <ComboboxContent className="w-fit max-w-sm">
+        <ComboboxEmpty>
+          No matching models — the typed id is used as-is
+        </ComboboxEmpty>
+        {/* Render FUNCTION, not static rows: only this form maps the store's
+            filtered items, so static children would never narrow as you type. */}
+        <ComboboxList>
+          {(model: string) => (
+            <ComboboxItem key={model} value={model}>
+              <span className="truncate font-mono">{model}</span>
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
   );
 }
 

@@ -179,6 +179,7 @@ import { PrActivityFeed, usePrThreadClaims } from "./PrActivityFeed";
 import { PrCommitDetail } from "./PrCommitDetail";
 import {
   blockedMergeLine,
+  gitlabBlockedLine,
   PR_SWITCH_LOADING_REASON,
   type PrMergeabilityArm,
   PrMergeabilityBanner,
@@ -936,11 +937,18 @@ export function RemotePrView({
     previewEnabled && conflictPreview.data?.status === "clean";
   // GitHub reports a PR the base branch's rules are refusing as MERGEABLE with a
   // BLOCKED merge-state — the merge itself is clean, the rules are the refusal.
-  // GitLab/Bitbucket `detail` values are not interpreted here.
   const blockedByRules =
     provider === "github" &&
     serverState === "mergeable" &&
     mergeability.data?.detail === "BLOCKED";
+  // GitLab's twin: the merge is clean and `detailed_merge_status` (or the free-form
+  // `merge_error` that outranks it) names the rule refusing it. Null whenever the
+  // detail names nothing worth a line, which is what keeps the arm off. Bitbucket has
+  // no mergeability to interpret and is deliberately absent from both.
+  const gitlabBlockedNote =
+    provider === "gitlab" && serverState === "mergeable"
+      ? gitlabBlockedLine(mergeability.data?.detail ?? "")
+      : null;
   const behindBy = divergenceEnabled ? (divergence.data?.behindBy ?? 0) : 0;
   // Same gate as `behindBy` — a disabled divergence query keeps serving its last value,
   // and a latch left armed on one PR must never paint onto the next.
@@ -1073,7 +1081,7 @@ export function RemotePrView({
       // rides a settled "mergeable" answer, which neither `checking` nor
       // `unreachable` can be true of. It does outrank `behind` — rules the base is
       // enforcing are more pressing than a base that has merely moved on.
-      case blockedByRules:
+      case blockedByRules || gitlabBlockedNote !== null:
         return "blocked";
       case behindBy > 0:
         return "behind";
@@ -1086,8 +1094,10 @@ export function RemotePrView({
   // synchronously, so the arm can be "blocked" while the base ref and checks belong to
   // the last one. Naming that PR's checks, or reading rules for its base, would both
   // be wrong.
+  // `blockedByRules` and not merely the arm: the rules read below is a GitHub command,
+  // and the arm now also fires for GitLab, which names its own reason.
   const blockedDetailsReady =
-    bannerArm === "blocked" && !details.isPlaceholderData;
+    bannerArm === "blocked" && blockedByRules && !details.isPlaceholderData;
   // The base branch's required checks, read only for the arm that names them. The
   // repoTab term is the <Activity> gate every sibling read here carries: a hidden
   // subtree still refetches, and this one would respawn `gh` on every focus regain.
@@ -1101,11 +1111,16 @@ export function RemotePrView({
   // banner never waits on the join to say that the merge is blocked.
   const blockedRequirements = blockedDetailsReady
     ? unmetRequiredChecks(
-        requiredChecks.data ?? [],
+        requiredChecks.data?.contexts ?? [],
         details.data?.checks ?? [],
         providerKey,
       )
     : [];
+  // Approvals ride the same read; nothing in the PR's checks could name them, so they
+  // are reported as a requirement rather than joined into the unmet list.
+  const blockedApprovals = blockedDetailsReady
+    ? (requiredChecks.data?.requiredApprovingReviewCount ?? null)
+    : null;
   // `blocked` outranks `behind` on the ladder, so a PR that is both would otherwise
   // lose every route to the update (button, caret, hotkey, palette) while the rules
   // block it: the strip's sentence changes, the affordance does not. Neither arm
@@ -1650,11 +1665,16 @@ export function RemotePrView({
           setMergeOpen(false);
         },
         onError: (e) => {
-          // The forge's own refusal text advises flags this app doesn't offer, so
-          // where the rules are the known reason, say which requirement is unmet
-          // alongside it — the same line the strip is already showing.
+          // Where the rules are the known reason, say which requirement is unmet
+          // alongside the refusal — the same line the strip is already showing, and
+          // on GitLab the only place the reason is worded at all (the backend's
+          // message deliberately doesn't duplicate this table).
           if (bannerArm === "blocked")
-            toastErrorWithNote(e, blockedMergeLine(blockedRequirements));
+            toastErrorWithNote(
+              e,
+              gitlabBlockedNote ??
+                blockedMergeLine(blockedRequirements, blockedApprovals),
+            );
           else onError(e);
           setMergeOpen(false);
         },
@@ -2568,6 +2588,8 @@ export function RemotePrView({
         forgeUnreachable={forgeUnreachable}
         behindBy={behindBy}
         blockedRequirements={blockedRequirements}
+        blockedApprovals={blockedApprovals}
+        blockedReason={gitlabBlockedNote}
         updateBlockedReason={updateBlockedReason}
         // Busy-shaped, not a reason — the banner supplies its own words for the wait,
         // which now spans GitHub's whole queued update rather than one CLI call.

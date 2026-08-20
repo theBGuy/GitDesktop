@@ -2555,6 +2555,47 @@ pub async fn merge_mr(
     merge_mr_inner(repo_path, number, strategy, delete_branch, sha, false).await
 }
 
+/// The HTTP status behind a failed `glab api` call. glab writes either
+/// `glab: <message> (HTTP <code>)` when the error body carried a `message`, or a bare
+/// `glab: HTTP <code>` when it didn't (`internal/commands/api/api.go`). Read from the
+/// LAST `HTTP ` in the text: GitLab's own message often opens with the code too, and
+/// only the trailing one is glab's.
+fn glab_http_status(stderr: &str) -> Option<u16> {
+    const MARK: &str = "HTTP ";
+    let idx = stderr.rfind(MARK)?;
+    stderr[idx + MARK.len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+/// A refused merge PUT, in the app's own words — `None` for anything else, so an
+/// unrecognized failure still surfaces glab's raw text. Only two of the statuses the
+/// merge endpoint documents are reworded: `405 Method Not Allowed` ("The merge request
+/// cannot merge") and `409` ("SHA does not match HEAD of source branch") — GitLab's
+/// `doc/api/merge_requests.md`, "Merge a merge request".
+///
+/// `arming_auto_merge` holds the 405 arm back as the conservative choice, NOT a
+/// documented distinction: arming rides the same endpoint and the same status table,
+/// and whether a finished head pipeline answers 405 there is unverified. Falling open
+/// to glab's own text on that path risks a worse message, never a wrong claim.
+///
+/// The 405 message deliberately doesn't name WHICH requirement is unmet: the
+/// mergeability read owns that wording, and the refusal toast carries its line as a
+/// note — one place for the reasons, not two that can drift.
+fn classify_gl_merge_refusal(stderr: &str, arming_auto_merge: bool) -> Option<String> {
+    match glab_http_status(stderr)? {
+        405 if !arming_auto_merge => Some(
+            "GitLab is blocking this merge — the merge request isn't in a mergeable state yet."
+                .to_string(),
+        ),
+        409 => Some("The merge request changed while merging — refresh and retry.".to_string()),
+        _ => None,
+    }
+}
+
 /// The shared body behind `merge_mr` and `auto_merge_mr` — same endpoint, same
 /// strategy validation, same `sha` guard. The only difference is the extra
 /// `merge_when_pipeline_succeeds` flag, so both wrappers can't drift apart.
@@ -2628,7 +2669,25 @@ async fn merge_mr_inner(
         args.push("-f");
         args.push("merge_when_pipeline_succeeds=true");
     }
-    run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    let out = run_glab_raw(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    if out.code != 0 {
+        // Raw rather than `run_glab` only so a documented refusal can be reworded;
+        // everything else keeps `run_glab`'s exact fallback.
+        let raw = out.stderr.trim();
+        return Err(AppError::Glab(
+            match classify_gl_merge_refusal(&out.stderr, when_pipeline_succeeds) {
+                Some(message) => message,
+                None if raw.is_empty() => format!("glab exited with code {}", out.code),
+                None => raw.to_string(),
+            },
+        ));
+    }
+    // GitLab can also refuse in a body with a ZERO exit — the shape that makes a cancel
+    // look successful, and nothing about it is specific to that endpoint. A body without
+    // the error marker is success, whatever else it holds.
+    if let Some(message) = service_error_message(&out.stdout_lossy()) {
+        return Err(AppError::Glab(message));
+    }
     Ok(())
 }
 
@@ -9106,6 +9165,91 @@ mod tests {
         // A plain success-ish body and empty input are NOT errors.
         assert_eq!(service_error_message(r#"{"iid": 6}"#), None);
         assert_eq!(service_error_message(""), None);
+    }
+
+    /// The merge PUT gets the same envelope treatment as the cancel: a refusal can
+    /// ride a zero exit, and the success body is the MR object, which carries no
+    /// marker and must stay success. The message/status pair is the one GitLab
+    /// documents for a failed merge (`422 Branch cannot be merged`).
+    #[test]
+    fn a_merge_put_that_exits_zero_still_reports_an_error_envelope() {
+        assert_eq!(
+            service_error_message(
+                r#"{"message":"Branch cannot be merged","status":"error","http_status":422}"#
+            )
+            .as_deref(),
+            Some("Branch cannot be merged")
+        );
+        assert_eq!(
+            service_error_message(
+                r#"{"iid":7,"state":"merged","detailed_merge_status":"mergeable","merge_commit_sha":"abc"}"#
+            ),
+            None
+        );
+    }
+
+    /// glab's two stderr forms for an API failure, pinned as fixtures: with a server
+    /// `message` it writes `glab: <message> (HTTP <code>)`, without one a bare
+    /// `glab: HTTP <code>` (`internal/commands/api/api.go`).
+    #[test]
+    fn reads_the_status_glab_reports_for_a_failed_call() {
+        assert_eq!(
+            glab_http_status("glab: 405 Method Not Allowed (HTTP 405)\n"),
+            Some(405)
+        );
+        assert_eq!(glab_http_status("glab: HTTP 409\n"), Some(409));
+        // The trailing occurrence is glab's; a code inside the server message is not.
+        assert_eq!(
+            glab_http_status("glab: 404 Project Not Found (HTTP 403)\n"),
+            Some(403)
+        );
+        assert_eq!(glab_http_status("could not resolve host\n"), None);
+        assert_eq!(glab_http_status(""), None);
+    }
+
+    /// Only the two statuses GitLab documents for the merge endpoint are reworded —
+    /// 405 for an MR that can't be merged, 409 for a `sha` that no longer matches the
+    /// source head. Everything else falls open to glab's own text.
+    #[test]
+    fn classifies_the_documented_merge_refusals() {
+        assert_eq!(
+            classify_gl_merge_refusal("glab: 405 Method Not Allowed (HTTP 405)\n", false)
+                .as_deref(),
+            Some(
+                "GitLab is blocking this merge — the merge request isn't in a mergeable state yet."
+            )
+        );
+        assert_eq!(
+            classify_gl_merge_refusal(
+                "glab: SHA does not match HEAD of source branch (HTTP 409)\n",
+                false
+            )
+            .as_deref(),
+            Some("The merge request changed while merging — refresh and retry.")
+        );
+        // Arming rides the same endpoint and status table, so a 405 there may mean a
+        // race rather than a blocked merge. Unverified either way — that arm keeps
+        // glab's own wording rather than risking a wrong claim.
+        assert_eq!(
+            classify_gl_merge_refusal("glab: 405 Method Not Allowed (HTTP 405)\n", true),
+            None
+        );
+        // The stale-sha guard means the same thing whichever wrapper armed it.
+        assert!(classify_gl_merge_refusal("glab: HTTP 409\n", true).is_some());
+    }
+
+    /// Fail-open control: an unrecognized failure classifies to nothing, so the caller
+    /// surfaces glab's raw stderr rather than an invented reason.
+    #[test]
+    fn leaves_an_unrecognized_merge_failure_alone() {
+        for raw in [
+            "",
+            "glab: 401 Unauthorized (HTTP 401)\n",
+            "glab: HTTP 500\n",
+            "could not resolve host gitlab.example.com\n",
+        ] {
+            assert_eq!(classify_gl_merge_refusal(raw, false), None, "raw: {raw:?}");
+        }
     }
 
     #[tokio::test]

@@ -165,40 +165,37 @@ export function EditHistoryDialog({
   }
 
   const busy = rewrite.isPending || rebaseEdit.isPending;
-  function apply() {
+  // Awaited rather than per-call mutation callbacks: this dialog is mounted
+  // conditionally, so closing it mid-rewrite would drop the outcome — including
+  // the hand-off to the Changes tab that the paused rebase depends on.
+  async function apply() {
     if (plan.error || !plan.changed) return;
     if (plan.hasEdit) {
       // Resumable path: starts a real rebase that pauses at the first Edit —
       // the conflict/op banner in Changes takes it from there.
-      rebaseEdit.mutate(
-        { base, steps: plan.steps },
-        {
-          onSuccess: () => {
-            toast.success("Rebase started — paused to edit a commit");
-            onOpenChange(false);
-            setRepoTab("changes");
-            onDone();
-          },
-          onError: (e) => toastError(e),
-        },
-      );
+      try {
+        await rebaseEdit.mutateAsync({ base, steps: plan.steps });
+        toast.success("Rebase started — paused to edit a commit");
+        onOpenChange(false);
+        setRepoTab("changes");
+        onDone();
+      } catch (e) {
+        toastError(e);
+      }
       return;
     }
-    rewrite.mutate(
-      { base, steps: plan.steps },
-      {
-        onSuccess: () => {
-          toast.success(
-            plan.resultCount === 1
-              ? "History rewritten into one commit"
-              : `History rewritten — ${plan.resultCount} commits`,
-          );
-          onOpenChange(false);
-          onDone();
-        },
-        onError: (e) => toastError(e),
-      },
-    );
+    try {
+      await rewrite.mutateAsync({ base, steps: plan.steps });
+      toast.success(
+        plan.resultCount === 1
+          ? "History rewritten into one commit"
+          : `History rewritten — ${plan.resultCount} commits`,
+      );
+      onOpenChange(false);
+      onDone();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

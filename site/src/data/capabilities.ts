@@ -166,7 +166,7 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
-      "A merge blocked by branch protection names the required checks still unmet (GitHub)",
+      "A blocked merge names why — unmet checks & required approvals (GitHub), the blocking reason (GitLab)",
   },
   {
     group: "Pull requests & review",
@@ -581,7 +581,8 @@ export const capabilities: Capability[] = [
   {
     group: "AI · agents & sessions",
     ai: true,
-    label: "Delegate a task to a Claude, Codex, Copilot or opencode agent",
+    label:
+      "Delegate a task to a Claude, Codex, Copilot or opencode agent — searchable model picker, any typed id accepted",
     highlight: true,
   },
   {

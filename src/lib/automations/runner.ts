@@ -648,7 +648,12 @@ async function run(
             event.kind === "commit" ? event.hash : targetRef(event)
           }:${action}`,
         });
-        void notifyIfUnfocused(`AI ${label} failed`, subtitle);
+        // Re-read rather than trust the run-start snapshot: hiding AI mid-run
+        // mutes the OS ping, while the inbox row above still records the failure
+        // (the dock filters that at render time, so no history is lost).
+        if (!(await loadSettings().catch(() => null))?.hideAi) {
+          void notifyIfUnfocused(`AI ${label} failed`, subtitle);
+        }
       }
       // Persist a "Failed" stopped row (keeping its Re-run) instead of removing it.
       handle.fail(message);
@@ -1021,6 +1026,11 @@ async function deliver(
   notify: boolean,
 ): Promise<void> {
   const label = modeLabel(mode);
+  // Whether this delivery may ping the OS. Read fresh, not from the run-start
+  // snapshot: hiding AI while a run is in flight mutes its ping, and the in-app
+  // toast + inbox row below still land (the dock filters those at render time).
+  // A settings-read failure counts as shown — delivery must never fail on it.
+  const osPing = notify && !(await loadSettings().catch(() => null))?.hideAi;
 
   if (event.kind === "commit") {
     // Commits have no comment surface — keep the result in-session and let
@@ -1041,7 +1051,7 @@ async function deliver(
         onClick: () => useAutomationResults.getState().setOpen(result.id),
       },
     });
-    if (notify) {
+    if (osPing) {
       void notifyIfUnfocused(
         `AI ${label} ready`,
         `${event.hash.slice(0, 7)} — ${event.title}`,
@@ -1067,7 +1077,7 @@ async function deliver(
       queryKey: ["repo", event.repoPath, "pr", "origin", event.target.number],
     });
     toast.success(`AI ${label} posted on #${event.target.number}`);
-    if (notify) {
+    if (osPing) {
       void notifyIfUnfocused(
         `AI ${label} posted on #${event.target.number}`,
         event.title,
@@ -1100,7 +1110,7 @@ async function deliver(
     queryKey: ["local-prs", event.repoPath],
   });
   toast.success(`AI ${label} added to "${pr.title}"`);
-  if (notify) {
+  if (osPing) {
     void notifyIfUnfocused(`AI ${label} finished`, `Local PR "${pr.title}"`);
   }
 }

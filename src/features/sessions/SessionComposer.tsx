@@ -199,6 +199,12 @@ export function SessionComposer({
   const settings = useSettings();
   const [draft, setDraft] = useState("");
   const [startModel, setStartModel] = useState("");
+  // The agent `startModel` was chosen for; null = nothing chosen yet. Any model
+  // id is accepted (custom providers publish ids no suggestion list carries), so
+  // list membership can't decide whether a model still fits the agent.
+  const [startModelAgent, setStartModelAgent] = useState<AgentKind | null>(
+    null,
+  );
   const [startEffort, setStartEffort] = useState("");
   // An explicit pick for a NEW session; null = follow the Settings default.
   // Derived during render — no effect — so settings arriving late can't clobber
@@ -206,12 +212,10 @@ export function SessionComposer({
   const [startAgentPick, setStartAgentPick] = useState<AgentKind | null>(null);
   const startAgent: AgentKind =
     startAgentPick ?? defaultAgentKind(settings.data);
-  // A model picked for one agent isn't in another's list; "" = the account default.
+  // A model belongs to the agent it was chosen for; "" = the account default.
   // Derived, so every path that can move the agent — the picker, a stash restore,
-  // settings landing — drops a model the new agent can't run.
-  const startModelForAgent = modelsForAgent(startAgent).includes(startModel)
-    ? startModel
-    : "";
+  // settings landing — drops a model that agent wasn't given.
+  const startModelForAgent = startModelAgent === startAgent ? startModel : "";
   // MCP servers opted into for a NEW session. null = "use the default" (every
   // enabled registry server); a concrete array once the user picks. Frozen at
   // turn 1, so it only matters before a session exists.
@@ -256,7 +260,10 @@ export function SessionComposer({
   const models = modelsForAgent(agent);
   const onModel = session
     ? (m: string) => setModel(session.id, m)
-    : setStartModel;
+    : (m: string) => {
+        setStartModel(m);
+        setStartModelAgent(startAgent);
+      };
   // Effort is changeable mid-session (like model). Mapped per-CLI in Rust (Codex
   // config, Copilot/opencode flags, Claude thinking keyword).
   const effort = session ? session.effort : startEffort;
@@ -317,7 +324,13 @@ export function SessionComposer({
     if (pendingTask.isolation !== undefined)
       setStartIsolation(pendingTask.isolation);
     if (pendingTask.agent !== undefined) setStartAgentPick(pendingTask.agent);
-    if (pendingTask.model !== undefined) setStartModel(pendingTask.model);
+    if (pendingTask.model !== undefined) {
+      setStartModel(pendingTask.model);
+      // `modelAgent` is the record's own answer; `agent` is the fallback for a
+      // handoff that set a model without one. Absent from both = nothing pins the
+      // model, so it's released rather than re-aimed at whatever agent now applies.
+      setStartModelAgent(pendingTask.modelAgent ?? pendingTask.agent ?? null);
+    }
     if (pendingTask.effort !== undefined) setStartEffort(pendingTask.effort);
     if (pendingTask.mode !== undefined) setMode(pendingTask.mode);
     if (pendingTask.mcpServers !== undefined)
@@ -479,6 +492,9 @@ export function SessionComposer({
       isolation: startIsolation ?? undefined,
       agent: startAgentPick ?? undefined,
       model: startModel,
+      // Pinned even when the agent isn't: the model has to come back knowing
+      // which agent it was for, or the restore can't tell it still fits.
+      modelAgent: startModelAgent ?? undefined,
       effort: startEffort,
       mode,
       // Verbatim: null here MEANS "follow the default set", so it must survive.
@@ -951,6 +967,7 @@ export function SessionComposer({
                   onChange={(a) => {
                     setStartAgentPick(a);
                     setStartModel(""); // model lists differ between agents
+                    setStartModelAgent(null);
                     setStartMcp(null); // re-derive the new agent's default servers
                   }}
                 />

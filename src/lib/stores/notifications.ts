@@ -35,6 +35,20 @@ export type NotificationKind =
   | "research-done"
   | "plan-done";
 
+/** The kinds minted by AI producers. The activity dock's render filter and the
+ *  OS-ping gates both read this set, so a new AI producer can't drift out of the
+ *  Hide-AI story. `review-requested` is deliberately absent — it is a forge event
+ *  (a human asked you to review), not AI output. Widened to `string` on read
+ *  because {@link AppNotification.kind} is untrusted: an unlisted kind shows. */
+export const AI_NOTIFICATION_KINDS: ReadonlySet<string> =
+  new Set<NotificationKind>([
+    "review-ready",
+    "review-failed",
+    "agent-done",
+    "research-done",
+    "plan-done",
+  ]);
+
 /** How clicking a notification routes. Data only — the surface maps it to the UI
  *  store's atomic navigation actions, so this module stays free of view logic. */
 export type NotificationTarget =
@@ -175,7 +189,9 @@ interface NotifState {
   push: (n: AppNotification) => void;
   markRead: (id: string) => void;
   markAllRead: () => void;
+  markManyRead: (ids: string[]) => void;
   remove: (id: string) => void;
+  removeMany: (ids: string[]) => void;
   clearAll: () => void;
 }
 
@@ -201,7 +217,27 @@ const useNotifStore = create<NotifState>()((set) => ({
         ? { items: s.items.map((i) => (i.read ? i : { ...i, read: true })) }
         : {},
     ),
+  // Both `*Many` variants keep `markAllRead`'s no-op-when-nothing-changes shape:
+  // returning the same array skips the persist subscription's disk write.
+  markManyRead: (ids) =>
+    set((s) => {
+      const wanted = new Set(ids);
+      return s.items.some((i) => !i.read && wanted.has(i.id))
+        ? {
+            items: s.items.map((i) =>
+              i.read || !wanted.has(i.id) ? i : { ...i, read: true },
+            ),
+          }
+        : {};
+    }),
   remove: (id) => set((s) => ({ items: s.items.filter((i) => i.id !== id) })),
+  removeMany: (ids) =>
+    set((s) => {
+      const wanted = new Set(ids);
+      return s.items.some((i) => wanted.has(i.id))
+        ? { items: s.items.filter((i) => !wanted.has(i.id)) }
+        : {};
+    }),
   clearAll: () => set((s) => (s.items.length > 0 ? { items: [] } : {})),
 }));
 
@@ -292,13 +328,6 @@ export function useNotifications(): AppNotification[] {
   return useNotifStore((s) => s.items);
 }
 
-/** Unread count for the anchor badge. */
-export function useUnreadCount(): number {
-  return useNotifStore((s) =>
-    s.items.reduce((n, i) => (i.read ? n : n + 1), 0),
-  );
-}
-
 /** Repo display name from its path (the folder basename). The detector sites
  *  have the path but not always the canonical name; the basename matches how
  *  `RepoInfo.name` is derived and is enough for the row label + navigation. */
@@ -315,3 +344,10 @@ export const clearNotification = (id: string): void =>
   useNotifStore.getState().remove(id);
 export const clearAllNotifications = (): void =>
   useNotifStore.getState().clearAll();
+/** Id-scoped twins of the two "all" actions, for a surface that renders a SUBSET
+ *  of the inbox (the dock while AI rows are hidden): a bulk action there must
+ *  reach only what the user can see, leaving the rest of the history intact. */
+export const markNotificationsRead = (ids: string[]): void =>
+  useNotifStore.getState().markManyRead(ids);
+export const clearNotifications = (ids: string[]): void =>
+  useNotifStore.getState().removeMany(ids);

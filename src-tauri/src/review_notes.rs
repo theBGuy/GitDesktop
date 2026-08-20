@@ -3,9 +3,12 @@
 //! **Reviewer notes are GitDesktop's own app-data deposits** — no forge or remote writes
 //! are involved. An agent session deposits a per-branch note ("Notes for reviewers") keyed
 //! by repo + branch; the GUI later seeds its Create-PR dialog's "Notes for reviewers" field
-//! from this store. The GUI persists them via the Tauri Store plugin (`src/lib/…`); this
-//! module is the headless mirror the MCP server (which has NO `AppHandle`) uses to write the
-//! SAME file. It is a leaner parallel of [`crate::local_issues`] / [`crate::local_prs`] — see
+//! from this store. This module owns every WRITE to that file: the MCP server (which has NO
+//! `AppHandle`) calls [`set`] directly, and the GUI routes through
+//! [`review_notes_set_branch`]/[`review_notes_delete_branch`] so both processes mutate under
+//! one [`crate::store_lock`]. The GUI still READS through the Tauri Store plugin
+//! (`src/lib/review-notes/store.ts`), reloading after each write.
+//! It is a leaner parallel of [`crate::local_issues`] / [`crate::local_prs`] — see
 //! either for the full storage-dir / Value-round-trip / statelessness contract, which applies
 //! identically here (only the store filename and the record shape differ).
 //!
@@ -50,6 +53,7 @@
 //! read → modify → atomic write. We never cache across calls.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::{Map, Value};
 
@@ -58,6 +62,17 @@ use crate::local_prs::APP_IDENTIFIER;
 
 /// The store filename the GUI's reviewer-notes store writes.
 const STORE_FILE: &str = "review-notes.json";
+
+/// Guards the whole read-modify-write of the shared store file within THIS process
+/// (mirroring [`crate::oplog`]'s `OPLOG_LOCK`). It sits OUTSIDE the cross-process
+/// file lock deliberately: same-process serialization is exact and free, where the
+/// file lock fails open after its retry budget — so two concurrent handlers in one
+/// process must not be relying on it. Never held across an `.await`: every fn it
+/// wraps is synchronous.
+fn notes_lock() -> &'static Mutex<()> {
+    static NOTES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    NOTES_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Pure resolution of the store's base directory, in precedence order (mirroring
 /// [`crate::oplog::resolve_store_base`]):
@@ -154,7 +169,38 @@ fn now_iso() -> String {
 /// when the empty-body rule cleared the deposit.
 pub fn set(repo: &str, branch: &str, body: &str) -> AppResult<bool> {
     let path = store_path()?;
+    // Hold both locks across the whole read→modify→write: the GUI and the
+    // `gitdesktop mcp` server both write this file, and an unlocked RMW drops whichever
+    // note lost the race (see [`crate::store_lock`]; acquisition fails open, which is
+    // why the exact in-process mutex goes outside it).
+    let _guard = notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = crate::store_lock::lock_store(&path);
     set_at(&path, repo, branch, body)
+}
+
+/// Save (or clear) the GUI's reviewer note for `branch`, taking the same
+/// cross-process lock the MCP writer takes. The GUI's plugin-store writer keeps a
+/// per-process cache the MCP server's writes are invisible to, so its whole
+/// read→modify→write runs here instead. An empty or whitespace-only `body` clears
+/// the deposit; the answer is whether a note was saved (see [`set`]).
+#[tauri::command]
+pub async fn review_notes_set_branch(
+    repo_path: String,
+    branch: String,
+    body: String,
+) -> AppResult<bool> {
+    let identity = crate::git::repo::repo_identity(&repo_path).await;
+    set(&identity, &branch, &body)
+}
+
+/// Remove the GUI's reviewer note for `branch` — the consume-on-open path behind the
+/// Create-PR dialogs — through [`set`]'s empty-body clear, so both write routes share
+/// one locked implementation. A branch with no note is a harmless no-op.
+#[tauri::command]
+pub async fn review_notes_delete_branch(repo_path: String, branch: String) -> AppResult<()> {
+    let identity = crate::git::repo::repo_identity(&repo_path).await;
+    set(&identity, &branch, "")?;
+    Ok(())
 }
 
 /// The pure store logic behind [`set`], taking an explicit path so tests can drive it against
@@ -198,6 +244,10 @@ fn upsert_branch(store: &mut Map<String, Value>, repo: &str, branch: &str, body:
 /// a rename is not a re-save. Nothing is written when there is nothing to migrate.
 pub(crate) fn rename_branch(repo: &str, from: &str, to: &str) -> AppResult<()> {
     let path = store_path()?;
+    // Same lock pair as [`set`]: the read→move→write must not interleave with a
+    // concurrent deposit, which would resurrect the old branch name's note.
+    let _guard = notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = crate::store_lock::lock_store(&path);
     rename_at(&path, repo, from, to)
 }
 

@@ -13,6 +13,7 @@ import {
   AgentPicker,
   ComposerOptions,
   ModelPicker,
+  modelsForAgent,
 } from "@/features/sessions/AgentPickers";
 import { AgentTranscript } from "@/features/sessions/AgentTranscript";
 import { selectSession } from "@/features/sessions/agentSelect";
@@ -20,7 +21,6 @@ import { useSessionsStore } from "@/features/sessions/store";
 import { type AgentKind, defaultAgentKind } from "@/lib/ai/agent";
 import { formatUsd } from "@/lib/ai/cost";
 import { extractPlanQuestions } from "@/lib/ai/prompt";
-import { MODEL_SUGGESTIONS } from "@/lib/ai/providers";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useSettings } from "@/lib/settings/queries";
@@ -34,13 +34,6 @@ import {
   useActivePlanRun,
   usePlanStore,
 } from "./store";
-
-const MODELS: Record<AgentKind, string[]> = {
-  claude: MODEL_SUGGESTIONS["claude-cli"],
-  codex: MODEL_SUGGESTIONS["codex-cli"],
-  copilot: MODEL_SUGGESTIONS["copilot-cli"],
-  opencode: MODEL_SUGGESTIONS["opencode-cli"],
-};
 
 /**
  * The read-only planning canvas — peer of the session canvas in the agent
@@ -121,10 +114,13 @@ export function PlanComposer({
   const [agentPick, setAgentPick] = useState<AgentKind | null>(null);
   const agent: AgentKind = agentPick ?? defaultAgentKind(settings.data);
   const [model, setModel] = useState("");
+  // The agent `model` was chosen for; null = nothing chosen yet. Any model id is
+  // accepted, so list membership can't decide whether one still fits the agent.
+  const [modelAgent, setModelAgent] = useState<AgentKind | null>(null);
   const [effort, setEffort] = useState("");
-  // A model picked for one agent isn't in another's list; "" = the account
-  // default. Derived, so a default-agent change drops a model it can't run.
-  const modelForAgent = MODELS[agent].includes(model) ? model : "";
+  // A model belongs to the agent it was chosen for; "" = the account default.
+  // Derived, so a default-agent change drops a model that agent wasn't given.
+  const modelForAgent = modelAgent === agent ? model : "";
 
   const planningIssue = Boolean(seed?.issueTitle || seed?.issueBody);
   const canPlan = goal.trim().length > 0 || planningIssue;
@@ -195,12 +191,16 @@ export function PlanComposer({
               onChange={(a) => {
                 setAgentPick(a);
                 setModel("");
+                setModelAgent(null);
               }}
             />
             <ModelPicker
               value={modelForAgent}
-              onChange={setModel}
-              models={MODELS[agent]}
+              onChange={(m) => {
+                setModel(m);
+                setModelAgent(agent);
+              }}
+              models={modelsForAgent(agent)}
             />
             <ComposerOptions effort={effort} onEffort={setEffort} />
             <div className="ml-auto flex items-center gap-2">

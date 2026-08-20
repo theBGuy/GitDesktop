@@ -2744,9 +2744,11 @@ export function useAccountsHealth() {
 
 /** Refresh everything a successful reconnect can change: the accounts-health list,
  *  every repo's forge-status (a dead session flips a repo back to ready) and
- *  forge-session-health, the gh-accounts list (which account is active), and the
- *  gh token scopes (a reconnect can grant new ones). Call from a reconnect's
- *  `finished: ok` handler. */
+ *  forge-session-health, the gh-accounts list (which account is active), the gh
+ *  token scopes (a reconnect can grant new ones), and the repo-settings lists a
+ *  scope hint sends users here from — secrets, variables and webhooks all fail
+ *  closed on a missing scope, so their error cards must retry the call themselves.
+ *  Call from a reconnect's `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {
   const queryClient = useQueryClient();
   return useCallback(() => {
@@ -2755,10 +2757,14 @@ export function useInvalidateAfterReconnect() {
     // Partial key: covers every host variant of useGhScopes' key.
     queryClient.invalidateQueries({ queryKey: ["gh", "token-scopes"] });
     queryClient.invalidateQueries({
+      // Partial keys with a repo path in slot 1, so match on the axis instead.
       predicate: (q) =>
         q.queryKey[0] === "repo" &&
         (q.queryKey[2] === "forge-status" ||
-          q.queryKey[2] === "forge-session-health"),
+          q.queryKey[2] === "forge-session-health" ||
+          q.queryKey[2] === "secrets" ||
+          q.queryKey[2] === "variables" ||
+          q.queryKey[2] === "webhooks"),
     });
   }, [queryClient]);
 }

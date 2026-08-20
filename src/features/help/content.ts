@@ -533,8 +533,10 @@ can safely preview and recover work you thought was gone.
 **Operation history** (in the branch ⋮ menu, or the command palette) opens a
 journal of the *risky* operations GitDesktop runs — local PR merges, cherry-picks, history
 edits, and interactive rebases — each recorded with the exact branch and commit it started
-from, and whether it finished, failed, is paused on conflicts, or is still pending. If one
-of these operations is interrupted (a crash or a restart mid-op), a calm recovery line
+from, and whether it finished, failed, is paused on conflicts, is still pending, or
+**ended outside the app** (a cherry-pick you continued or aborted in a terminal, which the
+journal only knows is over). If one of these operations is interrupted (a crash or a
+restart mid-op), a calm recovery line
 appears above the **Changes** list naming what was interrupted and the state it started
 from. That notice only informs — it never resets or continues anything on its own (the
 git-native **Continue**/**Abort** for an in-progress merge, rebase, cherry-pick, or revert
@@ -879,25 +881,38 @@ merge the base back into the head.
 
 ## Blocked by branch protection
 
-A pull request can merge cleanly and still be refused. **GitHub** reports one as
-blocked while the base branch's rules go unmet, and the strip says so, naming what is
-outstanding: **Merge is blocked — waiting on: build, fragment.** GitDesktop asks
-GitHub what that branch requires and matches it against the checks on this pull
-request, counting one as outstanding when it has failed, is still running, or has
-never reported. Four are named, then *and N more*. Wherever the specific
-requirements can't be named, the line falls back to **Merge is blocked by the
-base branch's protection rules.**
+A pull request can merge cleanly and still be refused, and the strip names the reason
+on both **GitHub** and **GitLab**.
 
-Where the head is also behind its base, the refusal says so in the same breath and
-**Update branch** stays on the strip, so a blocked pull request never loses the route
-to updating it — except on a promotion pull request, where the update stays withheld
-for the same reason as above.
+On **GitHub** the refusal is the base branch's rules going unmet, and the line names
+what is outstanding: **Merge is blocked — waiting on: build, fragment.** GitDesktop
+asks GitHub what that branch requires and matches it against the checks on this pull
+request, counting one as outstanding when it has failed, is still running, or has
+never reported. Four are named, then *and N more*. Where the rules also require
+approving reviews, the count rides along: **The rules also require 2 approving
+reviews.** Wherever the specific requirements can't be named, the line falls back to
+**Merge is blocked by the base branch's protection rules.**
+
+On **GitLab** the project's own answer supplies the reason, in the app's words:
+**Merge is blocked — needs approval before it can merge**, **the pipeline must pass
+first**, **the pipeline is still running**, **all discussions must be resolved
+first**, **a reviewer requested changes**, **it needs a rebase first**, or the rest of
+GitLab's detailed merge statuses (external status checks, security policies, locked
+paths and LFS files, a required Jira reference, a title pattern, a scheduled merge
+time, another merge request blocking this one). A reason GitLab words itself is shown
+as GitLab wrote it, and one this app hasn't learned yet is spelled out rather than
+shown as a raw token.
+
+On **GitHub**, where the behind count is read, a head that is also behind its base
+gets that in the same breath and **Update branch** stays on the strip, so a blocked
+pull request never loses the route to updating it — except on a promotion pull
+request, where the update stays withheld for the same reason as above.
 
 **Merge** stays available throughout. Whoever holds bypass permission on those rules
 can merge anyway, and nothing GitDesktop can read from here says whether you're one of
 them — so the button stays live and the call stays yours. If the forge does refuse the
-merge, the notice carries that same line beside the forge's own words. This reads
-GitHub's rules, so it's **GitHub** only.
+merge, the notice carries that same line beside the forge's own words. **Bitbucket**
+publishes no mergeability of its own, so no blocked line arms there.
 
 ## Maintaining a pull request from a fork
 
@@ -1793,7 +1808,10 @@ to an implementing session**.
 
 **Delegate** starts a write-capable session. Describe the task, pick the **agent** (it
 opens on your **Settings → AI** default agent), **model**, and **reasoning effort**
-(Low / Medium / High / Max), and send. The agent works in an **isolated git worktree**
+(Low / Medium / High / Max), and send. The model box (the same one on research and plan
+runs) filters its suggestions as you type and takes any model id you type, so a custom
+provider's models work without being on the list; leave it empty for your account's
+default. The agent works in an **isolated git worktree**
 — a throwaway branch (\`gd/session/…\`) that never touches your working tree — and
 commits a **checkpoint** each turn. It works in the open: the conversation shows a
 **step-by-step transcript** of each file it reads, edits, searches, and command it
@@ -2070,9 +2088,10 @@ notes**, and **repository descriptions**.
   (the file, its folder, or its file type — or a multi-selection) appends to
   \`.gitdesktop/aiignore\`, creating it if needed — an anchored line (\`/src/config.ts\`,
   \`/vendor/\`) for exactly the file or folder you picked.
-- **Hide AI** (Settings → General) hides the AI surfaces and pauses your automations —
-  nothing new runs or posts while it's on. Your configuration and rules are kept, and
-  automations start again when you turn AI features back on.
+- **Hide AI** (Settings → General) hides the AI surfaces (finished AI activity in the
+  activity dock and notification inbox included), mutes AI desktop notifications, and
+  pauses your automations — nothing new runs or posts while it's on. Your configuration
+  and rules are kept, and automations start again when you turn AI features back on.
 
 ## Automations
 
@@ -2220,9 +2239,10 @@ there's an equivalent.`,
 
 Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 
-- **General** — hide AI features (which also pauses your automations until you show them
-  again — your rules are kept), keep running in the **system tray** on close (so
-  background work continues; launching the app again while it's running —
+- **General** — hide AI features (which also hides finished AI activity in the activity
+  dock and notification inbox, mutes AI desktop notifications, and pauses your automations
+  until you show them again — your rules are kept), keep running in the **system tray** on
+  close (so background work continues; launching the app again while it's running —
   tray-hidden or not — focuses the existing window), **automatically fetch from your
   remotes** (a background fetch on an interval you pick — it never pulls, merges, or
   changes your files), **automatically stash and reapply on pull, merge, rebase, and branch

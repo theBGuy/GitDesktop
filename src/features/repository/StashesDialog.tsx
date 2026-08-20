@@ -133,7 +133,7 @@ export function StashesDialog({
     setConfirmApply({ index, pop, message: stash.message, date: stash.date });
   }
 
-  function runApply() {
+  async function runApply() {
     if (!confirmApply) return;
     const { index, pop, message, date } = confirmApply;
     setConfirmApply(null);
@@ -147,14 +147,12 @@ export function StashesDialog({
       toast.info("The stash list changed — nothing was applied.");
       return;
     }
-    apply.mutate(
-      { index, pop },
-      {
-        onSuccess: () =>
-          toast.success(pop ? "Stash applied and dropped" : "Stash applied"),
-        onError,
-      },
-    );
+    try {
+      await apply.mutateAsync({ index, pop });
+      toast.success(pop ? "Stash applied and dropped" : "Stash applied");
+    } catch (e) {
+      onError(e);
+    }
   }
 
   const applyPrompt = shownApply ? stashApplyPrompt(shownApply) : null;
@@ -317,18 +315,16 @@ export function StashesDialog({
               <Button
                 variant="destructive"
                 disabled={drop.isPending}
-                onClick={() => {
+                onClick={async () => {
                   if (confirmDrop === null) return;
-                  drop.mutate(confirmDrop, {
-                    onSuccess: () => {
-                      setConfirmDrop(null);
-                      toast.success("Stash dropped");
-                    },
-                    onError: (e) => {
-                      setConfirmDrop(null);
-                      onError(e);
-                    },
-                  });
+                  try {
+                    await drop.mutateAsync(confirmDrop);
+                    setConfirmDrop(null);
+                    toast.success("Stash dropped");
+                  } catch (e) {
+                    setConfirmDrop(null);
+                    onError(e);
+                  }
                 }}
               >
                 {drop.isPending && <Spinner data-icon="inline-start" />}
@@ -370,18 +366,22 @@ function RecoverableView({
   // loaded, assume dirty so the confirm is never skipped by a first-paint race.
   const dirty = status.data ? status.data.entries.length > 0 : true;
 
-  function restoreSha(sha: string) {
-    restore.mutate(sha, {
-      onSuccess: () => toast.success("Restored to working tree"),
-      onError,
-    });
+  // Awaited: a view swap or a dialog close unmounts this mid-restore, and
+  // per-call mutation callbacks don't survive that — the outcome would be lost.
+  async function restoreSha(sha: string) {
+    try {
+      await restore.mutateAsync(sha);
+      toast.success("Restored to working tree");
+    } catch (e) {
+      onError(e);
+    }
   }
 
   function onRestoreClick(sha: string) {
     if (dirty) {
       setConfirmRestore(sha);
     } else {
-      restoreSha(sha);
+      void restoreSha(sha);
     }
   }
 
@@ -476,7 +476,7 @@ function RecoverableView({
           if (confirmRestore === null) return;
           const sha = confirmRestore;
           setConfirmRestore(null);
-          restoreSha(sha);
+          void restoreSha(sha);
         }}
       />
     </div>

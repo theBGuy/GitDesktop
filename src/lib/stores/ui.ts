@@ -117,6 +117,9 @@ export interface ReconnectTarget {
   provider: "github" | "gitlab";
   host: string;
   mode: "login" | "refresh";
+  /** Extra OAuth scopes to request alongside the ones already granted. GitHub
+   *  `refresh` only — the backend refuses them on any other arm. */
+  scopes?: string[];
 }
 
 /** An in-progress commit message, persisted per repo + branch. */

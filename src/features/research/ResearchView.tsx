@@ -225,10 +225,13 @@ export function ResearchComposer({
   const [agentPick, setAgentPick] = useState<AgentKind | null>(null);
   const agent: AgentKind = agentPick ?? defaultAgentKind(settings.data);
   const [model, setModel] = useState("");
+  // The agent `model` was chosen for; null = nothing chosen yet. Any model id is
+  // accepted, so list membership can't decide whether one still fits the agent.
+  const [modelAgent, setModelAgent] = useState<AgentKind | null>(null);
   const [effort, setEffort] = useState("");
-  // A model picked for one agent isn't in another's list; "" = the account
-  // default. Derived, so a default-agent change drops a model it can't run.
-  const modelForAgent = modelsForAgent(agent).includes(model) ? model : "";
+  // A model belongs to the agent it was chosen for; "" = the account default.
+  // Derived, so a default-agent change drops a model that agent wasn't given.
+  const modelForAgent = modelAgent === agent ? model : "";
 
   const canRun = topic.trim().length > 0;
   const copy = INTENT_COPY[depth];
@@ -280,11 +283,15 @@ export function ResearchComposer({
               onChange={(a) => {
                 setAgentPick(a);
                 setModel(""); // model lists differ between agents
+                setModelAgent(null);
               }}
             />
             <ModelPicker
               value={modelForAgent}
-              onChange={setModel}
+              onChange={(m) => {
+                setModel(m);
+                setModelAgent(agent);
+              }}
               models={modelsForAgent(agent)}
             />
             <ComposerOptions effort={effort} onEffort={setEffort} />

@@ -224,14 +224,39 @@ fn flow_depth_after(depth: usize, text: &str) -> usize {
     })
 }
 
+/// The key and value of a `key: value` line. A QUOTED key is unquoted here,
+/// before any colon is looked for: YAML puts a colon inside the quotes (a port,
+/// a scheme), where splitting at the first colon cuts the key in half and bakes a
+/// quote into the hostname. An unbalanced quote yields None — the module's bias is
+/// never to drop a host, but a line whose quoting is broken has no readable key,
+/// and a corrupted entry (a junk account row Settings then probes) is worse than
+/// one dropped hand-mangled line. Both readers of a key line share this split, so
+/// a well-formed key ends in the same place for host extraction and for flow-depth
+/// tracking. None means BOTH stand down: an unbalanced-quote line that also opens a
+/// flow map has its depth left untracked, so its wrapped continuation can still be
+/// scanned as a key — accepted, since only triple-mangled input reaches it.
+///
+/// Quote handling is YAML-spec-grounded (a reader unquotes keys) rather than
+/// glab-source-verified: glab's own writer never emits a quoted key, so only a
+/// hand-edited config reaches this branch.
+fn split_key_value(trimmed: &str) -> Option<(&str, &str)> {
+    if let Some(quote) = trimmed.chars().next().filter(|c| matches!(c, '\'' | '"')) {
+        let rest = &trimmed[quote.len_utf8()..];
+        let end = rest.find(quote)?;
+        let after = rest[end + quote.len_utf8()..].trim_start();
+        return Some((&rest[..end], after.strip_prefix(':')?));
+    }
+    // Unquoted: the FIRST colon, scheme term included — without it a
+    // `https://host: {…}` line splits at the scheme and its flow map goes unseen,
+    // so the wrapped continuation is read back as a host key.
+    strip_scheme(trimmed).split_once(':')
+}
+
 /// The flow-collection depth a key line OPENS. Zero unless its value BEGINS with
 /// `{`/`[` — that is the only place YAML starts a flow collection, so a bracket
 /// inside a plain scalar (`token: abc[def`) must not latch the scanner shut.
 fn flow_open_depth(trimmed: &str) -> usize {
-    // The same key/value split `host_from_key_line` uses, scheme term included:
-    // without it a `https://host: {…}` line splits at the scheme and its flow map
-    // goes unseen, so the wrapped continuation is read back as a host key.
-    let Some((_, value)) = strip_scheme(trimmed).split_once(':') else {
+    let Some((_, value)) = split_key_value(trimmed) else {
         return 0;
     };
     let value = value.trim_start();
@@ -249,16 +274,13 @@ fn flow_open_depth(trimmed: &str) -> usize {
 /// comma is never a hostname and is refused: that is the one shape a stray value
 /// fragment (a mis-indented flow continuation) could otherwise arrive in.
 fn host_from_key_line(trimmed: &str) -> Option<String> {
-    let key = strip_scheme(trimmed).split_once(':')?.0.trim();
+    let key = split_key_value(trimmed)?.0.trim();
     if key == "<<" || key.contains(char::is_whitespace) || key.contains(',') {
         return None;
     }
-    // Quotes around a key are YAML syntax; left on they bake into the hostname.
-    let unquoted = ['\'', '"']
-        .iter()
-        .find_map(|q| key.strip_prefix(*q)?.strip_suffix(*q))
-        .unwrap_or(key);
-    normalize_host(unquoted)
+    // A quoted key arrives already unquoted; `normalize_host` strips whatever
+    // scheme, port, or path the quotes were protecting.
+    normalize_host(key)
 }
 
 /// The host keys of the `hosts:` section of a glab config.yml. A minimal line
@@ -649,6 +671,31 @@ hosts:
             (
                 "quoted keys",
                 "hosts:\n  \"gitlab.example.com\":\n  'other.example.com':\n",
+                &["gitlab.example.com", "other.example.com"],
+            ),
+            (
+                "a port inside the quotes — the colon is the key's, not a separator",
+                "hosts:\n  \"gitlab.example.com:8443\":\n    token: secret\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "a scheme inside the quotes",
+                "hosts:\n  \"https://gitlab.example.com\":\n    token: secret\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "single quotes carry a port too",
+                "hosts:\n  'gitlab.example.com:443':\n",
+                &["gitlab.example.com"],
+            ),
+            (
+                "an unbalanced quote has no readable key — skip the line",
+                "hosts:\n  \"gitlab.example.com:\n  other.example.com:\n",
+                &["other.example.com"],
+            ),
+            (
+                "a quoted key opening a wrapped flow map",
+                "hosts:\n  \"gitlab.example.com:8443\": {token: secret,\n  api_host: x}\n  other.example.com:\n",
                 &["gitlab.example.com", "other.example.com"],
             ),
         ]);

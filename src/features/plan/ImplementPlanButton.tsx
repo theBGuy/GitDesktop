@@ -6,20 +6,13 @@ import {
   AgentPicker,
   EffortPicker,
   ModelPicker,
+  modelsForAgent,
 } from "@/features/sessions/AgentPickers";
 import { clearAgentSelection } from "@/features/sessions/agentSelect";
 import { useSessionsStore } from "@/features/sessions/store";
 import { type AgentKind, extractContextPack } from "@/lib/ai/agent";
 import { buildImplementPrompt } from "@/lib/ai/prompt";
-import { MODEL_SUGGESTIONS } from "@/lib/ai/providers";
 import { type PlanRun, usePlanStore } from "./store";
-
-const MODELS: Record<AgentKind, string[]> = {
-  claude: MODEL_SUGGESTIONS["claude-cli"],
-  codex: MODEL_SUGGESTIONS["codex-cli"],
-  copilot: MODEL_SUGGESTIONS["copilot-cli"],
-  opencode: MODEL_SUGGESTIONS["opencode-cli"],
-};
 
 /**
  * The plan's primary action: start a write-capable agent session that implements
@@ -83,7 +76,7 @@ export function ImplementPlanButton({ run }: { run: PlanRun }) {
               <ModelPicker
                 value={model}
                 onChange={setModel}
-                models={MODELS[agent]}
+                models={modelsForAgent(agent)}
               />
               <EffortPicker value={effort} onChange={setEffort} />
             </div>

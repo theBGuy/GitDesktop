@@ -171,11 +171,24 @@ function WorktreeList({
     onClose();
   }
 
-  function handleUnlock(w: UserWorktree) {
-    unlock.mutate(w.path, {
-      onSuccess: () => toast.success("Worktree unlocked"),
-      onError: toastError,
-    });
+  // Awaited, not per-call callbacks: react-query drops those when the dialog
+  // unmounts mid-flight, so the outcome would never reach the user.
+  async function handleUnlock(w: UserWorktree) {
+    try {
+      await unlock.mutateAsync(w.path);
+      toast.success("Worktree unlocked");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleRepair() {
+    try {
+      await repair.mutateAsync(undefined);
+      toast.success("Worktree links repaired");
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -237,12 +250,7 @@ function WorktreeList({
             className="text-muted-foreground sm:mr-auto"
             disabled={repair.isPending}
             title="Re-link worktrees after moving or renaming the repository folder"
-            onClick={() =>
-              repair.mutate(undefined, {
-                onSuccess: () => toast.success("Worktree links repaired"),
-                onError: toastError,
-              })
-            }
+            onClick={handleRepair}
           >
             {repair.isPending ? (
               <Spinner data-icon="inline-start" />
@@ -571,19 +579,18 @@ export function RenameWorktreeDialog({
   // move into another folder) — keep this a simple in-place rename.
   const invalid = /[\\/]/.test(trimmed);
 
-  function handleRename() {
+  // Awaited: this dialog is remounted by a `key` flip and unmounts on close, and
+  // per-call mutation callbacks don't survive that — the outcome would be lost.
+  async function handleRename() {
     if (!worktree || !trimmed || unchanged || invalid) return;
     if (refuseWhileLeaving(worktree.path, removing)) return;
-    move.mutate(
-      { from: worktree.path, to: newPath },
-      {
-        onSuccess: () => {
-          toast.success(`Renamed to ${trimmed}`);
-          onClose();
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await move.mutateAsync({ from: worktree.path, to: newPath });
+      toast.success(`Renamed to ${trimmed}`);
+      onClose();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -601,7 +608,7 @@ export function RenameWorktreeDialog({
           className="grid grid-cols-[auto_1fr] items-center gap-x-3 text-xs"
           onSubmit={(e) => {
             e.preventDefault();
-            handleRename();
+            void handleRename();
           }}
         >
           <label htmlFor="wt-rename" className="text-muted-foreground">
@@ -665,19 +672,19 @@ export function LockWorktreeDialog({
   const removing = useIsRemovingWorktree(repoPath, worktree?.path);
   const [reason, setReason] = useState("");
 
-  function handleLock() {
+  async function handleLock() {
     if (!worktree) return;
     if (refuseWhileLeaving(worktree.path, removing)) return;
-    lock.mutate(
-      { path: worktree.path, reason: reason.trim() || undefined },
-      {
-        onSuccess: () => {
-          toast.success("Worktree locked");
-          onClose();
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await lock.mutateAsync({
+        path: worktree.path,
+        reason: reason.trim() || undefined,
+      });
+      toast.success("Worktree locked");
+      onClose();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -696,7 +703,7 @@ export function LockWorktreeDialog({
           className="grid grid-cols-[auto_1fr] items-center gap-x-3 text-xs"
           onSubmit={(e) => {
             e.preventDefault();
-            handleLock();
+            void handleLock();
           }}
         >
           <label htmlFor="wt-lock-reason" className="text-muted-foreground">
@@ -786,22 +793,19 @@ function CreateWorktree({
         : "Pick a branch and folder to continue."
       : "";
 
-  function handleCreate() {
-    add.mutate(
-      {
+  async function handleCreate() {
+    try {
+      await add.mutateAsync({
         path: effectivePath,
         branch,
         newBranch: source === "new",
         baseRef: source === "new" ? base : undefined,
-      },
-      {
-        onSuccess: () => {
-          toast.success(`Worktree created on ${branch}`);
-          onCreated();
-        },
-        onError: toastError,
-      },
-    );
+      });
+      toast.success(`Worktree created on ${branch}`);
+      onCreated();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

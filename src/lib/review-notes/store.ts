@@ -1,6 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { repoIdentity } from "@/lib/git/repo-identity";
-import { storeName } from "@/lib/test-mode";
+import { invoke } from "@/lib/tauri/invoke";
+import { COLD_START, storeName } from "@/lib/test-mode";
 
 /** A per-branch "Notes for reviewers" deposit, keyed by the repo's
  *  worktree-stable identity then the branch name. Written (out-of-process) by
@@ -33,8 +34,8 @@ function getStore(): Promise<Store> {
 // reload the SAME pre-flush disk snapshot — autoSave persists on a ~100ms
 // debounce, so the first write isn't on disk yet — and the later write drops
 // the earlier one's change (a lost update; the settings-store write-race rule).
-// Running them one at a time, plus the force-save in writeBranch, guarantees
-// each reload sees a current snapshot.
+// Running them one at a time, plus the force-save in `writeBranchToStore`,
+// guarantees each reload sees a current snapshot.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -76,7 +77,44 @@ async function keyFor(repo: string): Promise<string> {
   return repoIdentity(repo);
 }
 
+/** Write `branch`'s note (or clear it with `note === null`) for `repo`. The write
+ *  runs in Rust, under the cross-process lock the MCP server's writer also takes —
+ *  the plugin store's cache is per-process, so a GUI write through it can drop a
+ *  concurrent MCP deposit. Reads stay on the plugin store, so pull the file back in
+ *  afterwards. */
 async function writeBranch(
+  repo: string,
+  branch: string,
+  note: ReviewNote | null,
+): Promise<void> {
+  // Cold-start test mode aliases the GUI's store FILE (`coldstart-review-notes.json`,
+  // `storeName`) while the Rust command always writes the real one, so routing there
+  // would leak throwaway onboarding state into the user's own notes. That mode has no
+  // second writer to race, so it keeps the plugin-store path.
+  if (COLD_START) {
+    return writeBranchToStore(await keyFor(repo), branch, note);
+  }
+  if (note === null) {
+    await invoke<void>("review_notes_delete_branch", {
+      repoPath: repo,
+      branch,
+    });
+  } else {
+    // The Rust writer stamps its own savedAt — a save is a save, whatever the
+    // caller's record said.
+    await invoke<boolean>("review_notes_set_branch", {
+      repoPath: repo,
+      branch,
+      body: note.body,
+    });
+  }
+  // `reloadRaw`, not the serialized `reloadReviewNotes`: we are already inside a
+  // serialized op, and queueing behind it would wait on ourselves.
+  await reloadRaw();
+}
+
+/** The legacy plugin-store write, still the cold-start path (see [`writeBranch`]). */
+async function writeBranchToStore(
   key: string,
   branch: string,
   note: ReviewNote | null,
@@ -118,9 +156,10 @@ export async function deleteReviewNote(
   branch: string,
 ): Promise<void> {
   return serialize(async () => {
-    // Fresh disk state first, so we don't drop a concurrent external MCP write.
+    // Fresh disk state first. Only the cold-start plugin-store path needs it — its
+    // in-memory copy would otherwise clobber an external write. The Rust route reads
+    // the file itself, under the lock.
     await reloadRaw();
-    const key = await keyFor(repo);
-    await writeBranch(key, branch, null);
+    await writeBranch(repo, branch, null);
   });
 }

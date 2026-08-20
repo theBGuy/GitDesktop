@@ -770,33 +770,123 @@ impl Drop for ReconnectGuard {
     }
 }
 
+/// A reconnect host must be a bare hostname: no port, no scheme, no path. Narrow
+/// on purpose — the value becomes a `--hostname` argument, and the CLIs key their
+/// stored credentials by exactly this spelling.
+fn valid_reconnect_host(host: &str) -> bool {
+    !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+/// The most extra scopes one reconnect may request — a scope hint asks for one, and
+/// a caller sending a long list is malformed rather than ambitious.
+const MAX_RECONNECT_SCOPES: usize = 4;
+
+/// The argv for a reconnect child, pure so the flag spelling and the scope rules are
+/// pinned by tests rather than by a live CLI. `scopes` ride a GitHub *refresh* only:
+/// that is the one gh flow that widens an existing token's grants (`gh auth refresh
+/// -s <scope>`), while `auth login` re-runs the whole OAuth flow and glab has no
+/// equivalent — so a scope arriving on any other arm is refused, never dropped
+/// silently, since dropping it would hand back a session still missing the scope.
+fn reconnect_args(
+    provider: &str,
+    mode: &str,
+    host: &str,
+    scopes: &[String],
+) -> AppResult<Vec<String>> {
+    if !scopes.is_empty() {
+        if provider != "github" || mode != "refresh" {
+            return Err(AppError::InvalidArgument(
+                "scopes apply only to a GitHub refresh".into(),
+            ));
+        }
+        if scopes.len() > MAX_RECONNECT_SCOPES {
+            return Err(AppError::InvalidArgument(format!(
+                "too many scopes: {}",
+                scopes.len()
+            )));
+        }
+        // `[a-z0-9_:]+` — the whole shape of an OAuth scope (`repo`,
+        // `admin:repo_hook`, `delete_repo`); anything else can't be one.
+        if let Some(bad) = scopes.iter().find(|s| {
+            s.is_empty()
+                || !s
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == ':')
+        }) {
+            return Err(AppError::InvalidArgument(format!("invalid scope: {bad}")));
+        }
+    }
+    let mut args: Vec<String> = match (provider, mode) {
+        ("github", "refresh") => vec!["auth", "refresh", "--hostname", host],
+        ("github", _) => vec![
+            "auth",
+            "login",
+            "--hostname",
+            host,
+            "--web",
+            "--skip-ssh-key",
+            "--git-protocol",
+            "https",
+        ],
+        // glab has no `refresh` subcommand — login re-runs OAuth in both modes.
+        ("gitlab", _) => vec!["auth", "login", "--hostname", host, "--web"],
+        ("bitbucket", _) => {
+            return Err(AppError::InvalidArgument(
+                "Reconnect Bitbucket in Settings → Accounts.".into(),
+            ))
+        }
+        (other, _) => {
+            return Err(AppError::InvalidArgument(format!(
+                "unknown provider: {other}"
+            )))
+        }
+    }
+    .into_iter()
+    .map(String::from)
+    .collect();
+    for scope in scopes {
+        args.push("-s".to_string());
+        args.push(scope.clone());
+    }
+    Ok(args)
+}
+
 /// A cancellable `gh`/`glab` re-auth driver. Spawns the device-flow login/refresh
 /// child, streams its stdout+stderr as sanitized `ReconnectEvent`s, and resolves when
 /// the child exits or is cancelled. `session_id` is a frontend uuid; `mode` is
 /// `"login"` | `"refresh"`; `provider` is `github` | `gitlab` (Bitbucket has no CLI
-/// reconnect — it errors).
+/// reconnect — it errors). `scopes` widen a GitHub refresh (see `reconnect_args`).
+///
+/// gh refreshes the host's ACTIVE account: on a multi-account host the granted scopes
+/// land on whichever account `gh auth switch` last selected, not necessarily the one
+/// whose missing scope prompted the call.
 #[tauri::command]
 pub async fn forge_reconnect(
     session_id: String,
     provider: String,
     host: String,
     mode: String,
+    scopes: Option<Vec<String>>,
     on_event: Channel<ReconnectEvent>,
 ) -> AppResult<()> {
     // ── Validate every input before spawning anything ──
     if !valid_session_id(&session_id) {
         return Err(AppError::InvalidArgument("invalid session id".into()));
     }
-    if host.is_empty()
-        || !host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-    {
+    if !valid_reconnect_host(&host) {
         return Err(AppError::InvalidArgument(format!("invalid host: {host}")));
     }
     if !matches!(mode.as_str(), "login" | "refresh") {
         return Err(AppError::InvalidArgument(format!("invalid mode: {mode}")));
     }
+    // Built before registering: a rejected provider/scope must not seed a registry
+    // entry, and the build is sync — nothing can race in ahead of the registration.
+    let args = reconnect_args(&provider, &mode, &host, scopes.as_deref().unwrap_or(&[]))?;
+    let is_github = provider == "github";
+    let bin_names: &[&str] = if is_github { &["gh"] } else { &["glab"] };
 
     // Register BEFORE the async resolve+spawn so a cancel racing ahead of them is
     // captured (see `register_reconnect`). The guard unregisters on every exit path
@@ -805,52 +895,6 @@ pub async fn forge_reconnect(
         session_id: session_id.clone(),
         notify: register_reconnect(&session_id),
     };
-
-    let (bin_names, args): (&[&str], Vec<String>) = match provider.as_str() {
-        "github" => {
-            let args = match mode.as_str() {
-                "refresh" => vec![
-                    "auth".to_string(),
-                    "refresh".to_string(),
-                    "--hostname".to_string(),
-                    host.clone(),
-                ],
-                // login
-                _ => vec![
-                    "auth".to_string(),
-                    "login".to_string(),
-                    "--hostname".to_string(),
-                    host.clone(),
-                    "--web".to_string(),
-                    "--skip-ssh-key".to_string(),
-                    "--git-protocol".to_string(),
-                    "https".to_string(),
-                ],
-            };
-            (&["gh"], args)
-        }
-        "gitlab" => (
-            &["glab"],
-            vec![
-                "auth".to_string(),
-                "login".to_string(),
-                "--hostname".to_string(),
-                host.clone(),
-                "--web".to_string(),
-            ],
-        ),
-        "bitbucket" => {
-            return Err(AppError::InvalidArgument(
-                "Reconnect Bitbucket in Settings → Accounts.".into(),
-            ))
-        }
-        other => {
-            return Err(AppError::InvalidArgument(format!(
-                "unknown provider: {other}"
-            )))
-        }
-    };
-    let is_github = provider == "github";
 
     let Some(binary) = crate::agent::resolve_named(bin_names, None).await else {
         return Err(if is_github {
@@ -1694,5 +1738,107 @@ mod tests {
         assert!(!valid_session_id("short")); // < 8
         assert!(!valid_session_id("has space in it here")); // space
         assert!(!valid_session_id(&"a".repeat(65))); // > 64
+    }
+
+    // ── reconnect argv seam ──
+    fn args_of(provider: &str, mode: &str, scopes: &[&str]) -> Vec<String> {
+        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
+        reconnect_args(provider, mode, "github.com", &scopes).unwrap()
+    }
+
+    #[test]
+    fn reconnect_args_per_provider_and_mode() {
+        assert_eq!(
+            args_of("github", "refresh", &[]),
+            ["auth", "refresh", "--hostname", "github.com"]
+        );
+        assert_eq!(
+            args_of("github", "login", &[]),
+            [
+                "auth",
+                "login",
+                "--hostname",
+                "github.com",
+                "--web",
+                "--skip-ssh-key",
+                "--git-protocol",
+                "https"
+            ]
+        );
+        // glab has no refresh — both modes are the same `--web` login.
+        for mode in ["login", "refresh"] {
+            assert_eq!(
+                args_of("gitlab", mode, &[]),
+                ["auth", "login", "--hostname", "github.com", "--web"]
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_args_emit_repeated_scope_flags() {
+        assert_eq!(
+            args_of("github", "refresh", &["admin:repo_hook", "delete_repo"]),
+            [
+                "auth",
+                "refresh",
+                "--hostname",
+                "github.com",
+                "-s",
+                "admin:repo_hook",
+                "-s",
+                "delete_repo"
+            ]
+        );
+    }
+
+    #[test]
+    fn reconnect_args_reject_scopes_off_the_github_refresh_arm() {
+        let scopes = vec!["repo".to_string()];
+        // Refused, never silently dropped — a dropped scope hands back a session
+        // still missing it.
+        assert!(reconnect_args("github", "login", "github.com", &scopes).is_err());
+        assert!(reconnect_args("gitlab", "login", "gitlab.com", &scopes).is_err());
+        assert!(reconnect_args("gitlab", "refresh", "gitlab.com", &scopes).is_err());
+    }
+
+    #[test]
+    fn reconnect_args_reject_malformed_scopes() {
+        let bad = [
+            "Repo",           // uppercase
+            "read-org",       // dash
+            "repo workflow",  // space
+            "",               // empty
+            "repo;rm -rf /",  // shell-ish
+            "--reset-scopes", // a flag posing as a scope
+        ];
+        for scope in bad {
+            assert!(
+                reconnect_args("github", "refresh", "github.com", &[scope.to_string()]).is_err(),
+                "scope should be refused: {scope:?}"
+            );
+        }
+        let too_many: Vec<String> = (0..MAX_RECONNECT_SCOPES + 1)
+            .map(|i| format!("scope{i}"))
+            .collect();
+        assert!(reconnect_args("github", "refresh", "github.com", &too_many).is_err());
+        let at_cap = &too_many[..MAX_RECONNECT_SCOPES];
+        assert!(reconnect_args("github", "refresh", "github.com", at_cap).is_ok());
+    }
+
+    #[test]
+    fn reconnect_args_reject_unsupported_providers() {
+        assert!(reconnect_args("bitbucket", "login", "bitbucket.org", &[]).is_err());
+        assert!(reconnect_args("codeberg", "login", "codeberg.org", &[]).is_err());
+    }
+
+    #[test]
+    fn reconnect_host_grammar_stays_bare() {
+        assert!(valid_reconnect_host("github.com"));
+        assert!(valid_reconnect_host("gitlab.example-corp.com"));
+        assert!(!valid_reconnect_host("")); // empty
+        assert!(!valid_reconnect_host("gitlab.example.com:8443")); // port
+        assert!(!valid_reconnect_host("https://gitlab.example.com")); // scheme
+        assert!(!valid_reconnect_host("gitlab.example.com/path")); // path
+        assert!(!valid_reconnect_host("host --flag")); // argv injection
     }
 }

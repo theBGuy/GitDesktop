@@ -435,8 +435,10 @@ export interface OpLogEntry {
   op: "merge_local_pr" | "cherry_pick_onto" | "rewrite_commits" | "rebase_edit";
   /** Human label, e.g. "Squash-merge feature → main". */
   label: string;
-  /** "paused" = handed to you mid-op (a stopped cherry-pick), neither in-flight nor finished. */
-  status: "pending" | "done" | "failed" | "dismissed" | "paused";
+  /** "paused" = handed to you mid-op (a stopped cherry-pick), neither in-flight nor
+   *  finished. "concluded" = that pick ended outside the app, so the journal knows
+   *  only that it is over (no finish time). */
+  status: "pending" | "done" | "failed" | "dismissed" | "paused" | "concluded";
   /** ISO timestamp the op started. */
   startedAt: string;
   /** ISO timestamp the op finished, or null while still open. */
@@ -1410,6 +1412,16 @@ export interface RulesetFull {
   conditions?: { ref_name?: { include?: string[]; exclude?: string[] } };
   bypass_actors?: unknown[];
   rules?: { type: string; parameters?: Record<string, unknown> }[];
+}
+
+/** What a branch's active rules demand of a pull request, aggregated across every
+ *  ruleset that applies. GitHub only. */
+export interface BranchRequiredRules {
+  /** Required status-check contexts, in GitHub's own order and deduplicated. */
+  contexts: string[];
+  /** Approving reviews the rules require; `null` when no rule names a count. The
+   *  PR's check rollup can never carry this — nothing in it names reviews. */
+  requiredApprovingReviewCount: number | null;
 }
 
 /** A "Code security and analysis" toggle. */

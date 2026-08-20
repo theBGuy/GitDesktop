@@ -34,15 +34,96 @@ const MAX_REQUIREMENT_NAMES = 4;
 /** The one wording for a merge the base branch's rules are refusing — the strip says
  *  it, and so does the note on a refused merge, so the two can't drift apart. With
  *  nothing named (the rules read failed, or named nothing the app could join) it
- *  still states where things stand rather than going quiet. */
-export function blockedMergeLine(requirements: string[]): string {
+ *  still states where things stand rather than going quiet.
+ *
+ *  `requiredApprovals` gets its own clause rather than joining the waiting-on list:
+ *  that list is what the checks join found UNMET, and the rules payload only says how
+ *  many approvals are required, never how many the pull request has. */
+export function blockedMergeLine(
+  requirements: string[],
+  requiredApprovals?: number | null,
+): string {
+  const approvals =
+    requiredApprovals && requiredApprovals > 0
+      ? `${requiredApprovals} approving review${requiredApprovals === 1 ? "" : "s"}`
+      : null;
   if (requirements.length === 0)
-    return "Merge is blocked by the base branch's protection rules.";
+    return approvals
+      ? `Merge is blocked by the base branch's protection rules, which require ${approvals}.`
+      : "Merge is blocked by the base branch's protection rules.";
   const shown = requirements.slice(0, MAX_REQUIREMENT_NAMES);
   const extra = requirements.length - shown.length;
   const names =
     extra > 0 ? `${shown.join(", ")} and ${extra} more` : shown.join(", ");
-  return `Merge is blocked — waiting on: ${names}.`;
+  const line = `Merge is blocked — waiting on: ${names}.`;
+  return approvals ? `${line} The rules also require ${approvals}.` : line;
+}
+
+/** GitLab's `detailed_merge_status` values that name a rule refusing the merge, said
+ *  in the app's own words. Each maps to the clause after "Merge is blocked — ". The
+ *  values are GitLab's documented enum (18.3); anything absent here either already
+ *  rides the mergeability `state` or is deliberately unarmed (see
+ *  `GITLAB_UNARMED_MERGE_STATUSES`). */
+const GITLAB_BLOCKED_REASONS: Record<string, string> = {
+  not_approved: "needs approval before it can merge",
+  ci_must_pass: "the pipeline must pass first",
+  ci_still_running: "the pipeline is still running",
+  discussions_not_resolved: "all discussions must be resolved first",
+  merge_request_blocked: "it's blocked by another merge request",
+  status_checks_must_pass: "external status checks must pass first",
+  requested_changes: "a reviewer requested changes",
+  need_rebase: "it needs a rebase first",
+  merge_time: "it can't merge before its scheduled time",
+  jira_association_missing: "its title or description must reference a Jira issue",
+  security_policy_violations: "security policies must be satisfied first",
+  locked_paths: "paths locked by other users must be unlocked first",
+  locked_lfs_files: "locked LFS files must be unlocked first",
+  title_regex: "its title doesn't match the project's required pattern",
+};
+
+/** `detailed_merge_status` values that deliberately arm NOTHING — each is either
+ *  already carried by the mergeability state (`mergeable`, the checking family,
+ *  `conflict`, `not_open`), owned by another surface (`draft_status` is the merge
+ *  control's own refusal), or still being computed (`approvals_syncing`,
+ *  `commits_status`). Membership here is the only route to silence: an enum value in
+ *  neither table still renders, humanized (`some_status` → "some status"), and
+ *  free-form `merge_error` prose renders verbatim. */
+const GITLAB_UNARMED_MERGE_STATUSES: ReadonlySet<string> = new Set([
+  "mergeable",
+  "checking",
+  "unchecked",
+  "preparing",
+  "broken_status",
+  "conflict",
+  "draft_status",
+  "not_open",
+  "approvals_syncing",
+  "commits_status",
+]);
+
+/** Ends a line the app didn't write like a sentence. GitLab's prose sometimes carries
+ *  its own terminator and sometimes doesn't, and the blocked arm can append a clause
+ *  straight after this line. */
+function terminated(line: string): string {
+  return /[.!?]$/.test(line) ? line : `${line}.`;
+}
+
+/** The banner's line for a GitLab merge request the project's rules are refusing, or
+ *  `null` when the detail names nothing worth a line.
+ *
+ *  `detail` carries GitLab's `merge_error` when there is one and the
+ *  `detailed_merge_status` enum otherwise, and the backend keeps both raw — so the
+ *  enum lookup is gated on the enum's own shape and free-form prose is shown exactly
+ *  as GitLab wrote it. An enum value this app hasn't learned yet is humanized rather
+ *  than shown as a token: GitLab's word beats silence about a merge that will refuse. */
+export function gitlabBlockedLine(detail: string): string | null {
+  const raw = detail.trim();
+  if (raw === "") return null;
+  if (!/^[a-z_]+$/.test(raw)) return terminated(`Merge is blocked — ${raw}`);
+  if (GITLAB_UNARMED_MERGE_STATUSES.has(raw)) return null;
+  const reason = GITLAB_BLOCKED_REASONS[raw];
+  if (reason) return `Merge is blocked — ${reason}.`;
+  return `Merge is blocked — ${raw.replace(/_/g, " ")}.`;
 }
 
 /** What a control held open through the PR-switch window says. Shared with the view's
@@ -108,6 +189,8 @@ const ARM_MESSAGE: Record<
     predictedClean: boolean;
     forgeUnreachable: boolean;
     blockedRequirements: string[];
+    blockedApprovals: number | null;
+    blockedReason: string | null;
     promotionKind: PromotionKind;
   }) => ReactNode
 > = {
@@ -162,9 +245,18 @@ const ARM_MESSAGE: Record<
   // The behind clause rides along in the `behind` arm's own words, because the update
   // controls come with it — a bare refusal beside an Update branch button would leave
   // the button unexplained.
-  blocked: ({ base, behindBy, blockedRequirements, promotionKind }) => (
+  blocked: ({
+    base,
+    behindBy,
+    blockedRequirements,
+    blockedApprovals,
+    blockedReason,
+    promotionKind,
+  }) => (
     <>
-      {blockedMergeLine(blockedRequirements)}
+      {/* GitLab names its own reason and gets no requirements join — rules and
+          branch protections are a GitHub read, and there is nothing to join it to. */}
+      {blockedReason ?? blockedMergeLine(blockedRequirements, blockedApprovals)}
       {/* The behind clause exists to explain the Update controls beside it, so it
           goes wherever they go: on a promotion pull request they'd invert the
           flow, and a count with no route out would read as a demand. */}
@@ -229,6 +321,8 @@ export function PrMergeabilityBanner({
   forgeUnreachable,
   behindBy,
   blockedRequirements,
+  blockedApprovals,
+  blockedReason,
   updateBlockedReason,
   updateBusy,
   updateAwaitingDefault,
@@ -271,6 +365,13 @@ export function PrMergeabilityBanner({
    *  arm, where an empty list means the app couldn't name any and the line stays
    *  generic. */
   blockedRequirements: string[];
+  /** Approving reviews the base branch's rules require; `null` when the rules name
+   *  no count or the read didn't land. GitHub only, like `blockedRequirements`. */
+  blockedApprovals: number | null;
+  /** The whole blocked sentence, where the provider supplies the reason itself
+   *  (GitLab). Non-null replaces the rules-derived line — the two describe different
+   *  refusals and only one provider can be answering. */
+  blockedReason: string | null;
   /** Why updating the branch is refused, if it is; undefined = allowed. */
   updateBlockedReason: string | undefined;
   updateBusy: boolean;
@@ -373,6 +474,8 @@ export function PrMergeabilityBanner({
             predictedClean,
             forgeUnreachable,
             blockedRequirements,
+            blockedApprovals,
+            blockedReason,
             promotionKind,
           })}
         </span>

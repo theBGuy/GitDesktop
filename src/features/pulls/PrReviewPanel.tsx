@@ -396,11 +396,10 @@ export function PrReviewPanel({
             items={models}
             inputValue={reviewAi?.model ?? ""}
             onInputValueChange={(v) => updateReview({ model: v })}
-            value={
-              reviewAi && models.includes(reviewAi.model)
-                ? reviewAi.model
-                : null
-            }
+            // UNCLAMPED on purpose: Base UI syncs the input to the selected
+            // item's label as the popup finishes closing, and a null selection
+            // syncs it to "" — clamping to the catalog would wipe a typed id.
+            value={reviewAi?.model || null}
             onValueChange={(v) => v && updateReview({ model: v })}
             openOnInputClick
           >
