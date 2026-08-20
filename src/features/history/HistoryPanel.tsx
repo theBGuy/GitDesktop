@@ -32,7 +32,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
 import { copyText } from "@/lib/clipboard";
 import { useAppForm } from "@/lib/form";
-import { gitCommitDetails } from "@/lib/git/api";
+import { gitCommitDetails, gitRecentCommits } from "@/lib/git/api";
 import {
   useBranches,
   useCheckoutCommit,
@@ -55,10 +55,17 @@ import { sanitizeRefName } from "@/lib/git/ref-name";
 import type { CommitSummary, RewriteStep } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
+import {
+  checkoutCommitConfirm,
+  cherryPickCommitConfirm,
+  revertCommitConfirm,
+  UNDO_ROOT_COMMIT_CONFIRM,
+} from "./commit-confirms";
 import { EditHistoryDialog } from "./EditHistoryDialog";
 import {
   CherryPickOntoDialog,
@@ -199,10 +206,31 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       head &&
       (head.upstream === null || head.upstreamGone || head.ahead > 0),
   );
+  // Whether HEAD is a root commit, which sends undo down git's ref-deleting
+  // path. The log walks HEAD's ancestry and only stops paging once a page comes
+  // up short, so a lone loaded commit with no next page means HEAD has no parent.
+  const headIsRoot = log.data?.pages[0]?.length === 1 && !log.hasNextPage;
 
   async function undoLast() {
     if (!lastCommit) return;
+    // Only the root case is lossy enough to ask about: an ordinary undo is gated
+    // to unpushed commits and leaves everything staged.
+    if (
+      headIsRoot &&
+      !(await useConfirm.getState().ask(UNDO_ROOT_COMMIT_CONFIRM))
+    ) {
+      return;
+    }
     try {
+      // The undo names no commit — it always unwinds whatever HEAD is at the
+      // moment it runs — so re-read HEAD across the prompt's await. A commit
+      // landing out of band (another window, a terminal) would otherwise be the
+      // one undone, under a confirmation that described a different commit.
+      const [headNow] = await gitRecentCommits(repoPath, 1);
+      if (headNow?.hash !== lastCommit.hash) {
+        toast.info("The latest commit changed — nothing was undone.");
+        return;
+      }
       const details = await gitCommitDetails(repoPath, lastCommit.hash);
       undoCommit.mutate(undefined, {
         onSuccess: () => {
@@ -217,6 +245,36 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     } catch (e) {
       onError(e);
     }
+  }
+
+  // The confirm sits here rather than on the menu items, so the search menu and
+  // the single-commit menu can't diverge on whether they ask.
+  async function doCheckoutCommit(hash: string) {
+    if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    checkoutCommit.mutate(hash, { onError });
+  }
+
+  async function doRevertCommit(hash: string) {
+    if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    revertCommit.mutate(hash, { onError });
+  }
+
+  // `alreadyApplied` is the one thing the two menus word differently.
+  async function doCherryPick(hash: string, alreadyApplied: string) {
+    const ok = await useConfirm
+      .getState()
+      .ask(cherryPickCommitConfirm(hash, currentBranch));
+    if (!ok) return;
+    cherryPick.mutate(hash, {
+      onSuccess: (applied) => {
+        if (applied) {
+          toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
+        } else {
+          toast.info(alreadyApplied);
+        }
+      },
+      onError,
+    });
   }
 
   useHotkeyAction("undo-commit", undoLast, canUndo && !undoCommit.isPending);
@@ -507,27 +565,18 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       // amend/reset/squash/reorder, which assume contiguous recent history).
       return (
         <>
-          <ContextMenuItem
-            onClick={() => checkoutCommit.mutate(commit.hash, { onError })}
-          >
+          <ContextMenuItem onClick={() => doCheckoutCommit(commit.hash)}>
             Checkout commit
           </ContextMenuItem>
-          <ContextMenuItem
-            onClick={() => revertCommit.mutate(commit.hash, { onError })}
-          >
+          <ContextMenuItem onClick={() => doRevertCommit(commit.hash)}>
             Revert changes in commit
           </ContextMenuItem>
           <ContextMenuItem
             onClick={() =>
-              cherryPick.mutate(commit.hash, {
-                onSuccess: (applied) =>
-                  applied
-                    ? toast.success(`Cherry-picked ${commit.hash.slice(0, 7)}`)
-                    : toast.info(
-                        "Nothing to cherry-pick — already on this branch.",
-                      ),
-                onError,
-              })
+              doCherryPick(
+                commit.hash,
+                "Nothing to cherry-pick — already on this branch.",
+              )
             }
           >
             Cherry-pick commit
@@ -613,14 +662,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         >
           Reset to commit…
         </ContextMenuItem>
-        <ContextMenuItem
-          onClick={() => checkoutCommit.mutate(commit.hash, { onError })}
-        >
+        <ContextMenuItem onClick={() => doCheckoutCommit(commit.hash)}>
           Checkout commit
         </ContextMenuItem>
-        <ContextMenuItem
-          onClick={() => revertCommit.mutate(commit.hash, { onError })}
-        >
+        <ContextMenuItem onClick={() => doRevertCommit(commit.hash)}>
           Revert changes in commit
         </ContextMenuItem>
         <ContextMenuSeparator />
@@ -642,18 +687,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         </ContextMenuItem>
         <ContextMenuItem
           onClick={() =>
-            cherryPick.mutate(commit.hash, {
-              onSuccess: (applied) => {
-                if (applied) {
-                  toast.success(`Cherry-picked ${commit.hash.slice(0, 7)}`);
-                } else {
-                  toast.info(
-                    "Nothing to cherry-pick — these changes are already on this branch.",
-                  );
-                }
-              },
-              onError,
-            })
+            doCherryPick(
+              commit.hash,
+              "Nothing to cherry-pick — these changes are already on this branch.",
+            )
           }
         >
           Cherry-pick commit

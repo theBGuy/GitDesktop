@@ -55,7 +55,7 @@ const PICKER_COPY: Record<
   rebase: {
     title: (c) => `Rebase ${c} onto`,
     description:
-      "Replays your branch's commits on top of the selected branch. Aborted automatically on conflicts.",
+      "Replays your branch's commits on top of the selected branch, each rewritten with a new commit id. Aborted automatically on conflicts.",
     action: "Rebase",
   },
 };

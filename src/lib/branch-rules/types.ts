@@ -48,9 +48,14 @@ export interface NamingPolicy {
 export interface BranchRulesConfig {
   naming: NamingPolicy;
   protections: BranchProtection[];
+  /** fnmatch-style globs for branches whose pull requests PROMOTE work onward
+   *  (a `staging` → `production` PR, say). Their head is behind its base by
+   *  design, so GitDesktop never offers to update them from it. */
+  promotionBranches: string[];
 }
 
 export const EMPTY_BRANCH_RULES: BranchRulesConfig = {
   naming: { enabled: false, pattern: "", hint: "" },
   protections: [],
+  promotionBranches: [],
 };

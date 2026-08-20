@@ -19,7 +19,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import type { AuthStatus } from "@/lib/ai/agent";
 import { copyText } from "@/lib/clipboard";
-import { type ToolStatus, useSystemHealth } from "@/lib/system/health";
+import {
+  cliFloorWarning,
+  type ToolStatus,
+  useSystemHealth,
+} from "@/lib/system/health";
 
 /** Per-tool display metadata. `auth` marks tools that have a login concept;
  *  git (always local) doesn't. */
@@ -96,6 +100,11 @@ function AuthState({ authed }: { authed: AuthStatus }) {
 function ToolRow({ tool }: { tool: ToolStatus }) {
   const meta = TOOL_META[tool.id];
   if (!meta) return null;
+  // An installed-but-too-old tool gets the same install link as a missing one,
+  // since the fix is the same download.
+  const floorWarning = tool.found
+    ? cliFloorWarning(tool.id, tool.version)
+    : null;
   return (
     <li className="flex items-start justify-between gap-3 py-2">
       <div className="min-w-0 space-y-0.5">
@@ -132,18 +141,21 @@ function ToolRow({ tool }: { tool: ToolStatus }) {
             meta.role
           )}
         </p>
+        {floorWarning ? (
+          <p className="text-[11px] text-warning">{floorWarning}</p>
+        ) : null}
       </div>
-      {!tool.found && (
+      {!tool.found || floorWarning ? (
         <Button
           variant="outline"
           size="xs"
           className="shrink-0 cursor-pointer"
           onClick={() => openUrl(meta.install)}
         >
-          Install
+          {tool.found ? "Update" : "Install"}
           <ArrowSquareOutIcon data-icon="inline-end" />
         </Button>
-      )}
+      ) : null}
     </li>
   );
 }
@@ -213,8 +225,8 @@ function useWindowGeometry(): WindowGeo | null {
 
 /**
  * Settings → About: app/OS info plus the status of every external CLI
- * GitDesktop relies on (installed?, version, path, sign-in), with an Install
- * link for any that are missing.
+ * GitDesktop relies on (installed?, version, path, sign-in), with a download
+ * link for any that are missing or too old for a feature that needs them.
  */
 export function AboutSection() {
   const health = useSystemHealth();
@@ -236,7 +248,7 @@ export function AboutSection() {
         <h2 className="text-sm font-semibold">About</h2>
         <p className="mt-1 text-xs text-muted-foreground">
           Your environment and the tools GitDesktop depends on. Several features
-          quietly degrade when a CLI is missing or signed out.
+          quietly degrade when a CLI is missing, outdated, or signed out.
         </p>
       </div>
 

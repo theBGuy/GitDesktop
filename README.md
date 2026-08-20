@@ -175,7 +175,9 @@ PR badge.
   merge/rebase, and jump-to-PR.
 - **Local branch-protection rules**: naming, merge methods, require-PR, and
   force-push rules, shareable via a committed file or importable from
-  GitHub.
+  GitHub. A promotion-branches list marks pull requests from those branches
+  as promotions, so GitDesktop stops offering to update them from their
+  base.
 
 ### History
 
@@ -855,8 +857,10 @@ review via its subscription login. The full list is under
   app/OS/Tauri versions and the status of every CLI GitDesktop uses (git,
   the GitHub & GitLab CLIs, Claude Code, Codex): installed?, version,
   resolved path, and sign-in state, with an Install link for anything
-  that's missing. It also shows a live readout of the window's current
-  position, size, and display (with copy-coords).
+  that's missing. A CLI that's installed but too old for a feature that
+  needs it (git, or the GitHub CLI) gets a warning naming the feature and
+  the version it wants, with an Update link. It also shows a live readout
+  of the window's current position, size, and display (with copy-coords).
 - **Window memory**: GitDesktop reopens at the size and position you left
   it, and maximized if it was, validated against your current monitors so
   an unplugged display can't strand it off-screen. Your layout is saved as

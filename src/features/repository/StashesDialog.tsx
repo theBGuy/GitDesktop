@@ -43,6 +43,40 @@ type FileSource =
   | { kind: "stash"; index: number }
   | { kind: "orphaned"; sha: string };
 
+/** Apply and pop differ only in what becomes of the stash afterward. The pop
+ *  wording matches the branch menu's "Pop latest stash" so the two can't drift. */
+const STASH_APPLY_COPY = {
+  apply: {
+    verb: "Apply",
+    fate: "leaves it in the stash list, so you can apply it again.",
+    confirmLabel: "Apply stash",
+  },
+  pop: {
+    verb: "Pop",
+    fate: "removes it from the stash list. If applying conflicts, the stash is kept.",
+    confirmLabel: "Pop stash",
+  },
+} as const;
+
+/** A pending apply/pop, plus the stash's identity as it was when the prompt
+ *  opened — `stash@{n}` is a SLOT, not an identity. */
+interface PendingApply {
+  index: number;
+  pop: boolean;
+  message: string;
+  date: string;
+}
+
+const stashApplyPrompt = ({ index, pop }: PendingApply) => {
+  const slot = `stash@{${index}}`;
+  const copy = STASH_APPLY_COPY[pop ? "pop" : "apply"];
+  return {
+    title: `${copy.verb} ${slot}?`,
+    body: `Applies ${slot} to your working tree and ${copy.fate}`,
+    confirmLabel: copy.confirmLabel,
+  };
+};
+
 /**
  * Browse the stash stack: pick a stash, see the files it holds, inspect each
  * one's diff, then apply, pop, or drop it. A "Recoverable" view surfaces
@@ -65,6 +99,12 @@ export function StashesDialog({
   const drop = useStashDrop(repoPath);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [confirmDrop, setConfirmDrop] = useState<number | null>(null);
+  // Apply/pop confirm as a NESTED dialog, like the drop confirm below. The
+  // app-root confirm host is a SIBLING dialog, and Base UI only suppresses a
+  // parent's Escape for dialogs nested in its React tree — Esc over a sibling
+  // would close this dialog underneath it too.
+  const [confirmApply, setConfirmApply] = useState<PendingApply | null>(null);
+  const shownApply = useRetained(confirmApply);
   // The hook's nullish retain condition is load-bearing here rather than a
   // truthiness one: stash@{0} is a valid index.
   const shownDrop = useRetained(confirmDrop);
@@ -86,7 +126,26 @@ export function StashesDialog({
   const busy = apply.isPending || drop.isPending;
   const onError = (e: unknown) => toastError(e);
 
-  function applyStash(index: number, pop: boolean) {
+  function askApply(index: number, pop: boolean) {
+    const stash = list.find((s) => s.index === index);
+    if (!stash) return;
+    setConfirmApply({ index, pop, message: stash.message, date: stash.date });
+  }
+
+  function runApply() {
+    if (!confirmApply) return;
+    const { index, pop, message, date } = confirmApply;
+    setConfirmApply(null);
+    // The list can refetch (or another surface push or drop a stash) while the
+    // prompt is open, sliding a different stash into the confirmed slot. Apply
+    // only the one the prompt described. message + date is the strongest key
+    // StashEntry exposes — two same-second stashes off one HEAD tie, so a sha
+    // on the entry is the real identity if this guard ever needs tightening.
+    const current = list.find((s) => s.index === index);
+    if (!current || current.message !== message || current.date !== date) {
+      toast.info("The stash list changed — nothing was applied.");
+      return;
+    }
     apply.mutate(
       { index, pop },
       {
@@ -96,6 +155,8 @@ export function StashesDialog({
       },
     );
   }
+
+  const applyPrompt = shownApply ? stashApplyPrompt(shownApply) : null;
 
   // Arrow keys walk the stash list, mirroring the app's other lists.
   const onStashesKeyDown = listKeyboardNav({
@@ -198,14 +259,14 @@ export function StashesDialog({
                     variant="outline"
                     size="xs"
                     disabled={busy}
-                    onClick={() => applyStash(effectiveIndex, false)}
+                    onClick={() => askApply(effectiveIndex, false)}
                   >
                     Apply
                   </Button>
                   <Button
                     size="xs"
                     disabled={busy}
-                    onClick={() => applyStash(effectiveIndex, true)}
+                    onClick={() => askApply(effectiveIndex, true)}
                   >
                     Pop
                   </Button>
@@ -220,6 +281,17 @@ export function StashesDialog({
               />
             ) : null}
           </div>
+        )}
+
+        {applyPrompt && (
+          <ConfirmDialog
+            open={confirmApply !== null}
+            onCancel={() => setConfirmApply(null)}
+            title={applyPrompt.title}
+            body={applyPrompt.body}
+            confirmLabel={applyPrompt.confirmLabel}
+            onConfirm={runApply}
+          />
         )}
 
         <Dialog

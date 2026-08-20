@@ -8,7 +8,7 @@
 
 use tauri::State;
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::git::branches::validate_ref_name;
 use crate::git::remote::run_git_with_creds_once;
 use crate::git::runner::{run_git, run_git_raw, GitOutput, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
@@ -63,41 +63,47 @@ async fn autostash_pop(repo: &str) -> AppResult<GitOutput> {
     run_git_raw(Some(repo), &["stash", "pop"], DEFAULT_TIMEOUT).await
 }
 
-/// Shapes a non-zero raw result for the no-stash arm, which reports the plain
-/// command's own failures — so the shaping has to match what those cores now do.
-/// Merge and pull both carry their stdout report into the error (`git_merge_core`,
-/// `run_git_mutating_with_creds`), and the parity tests below pin that. Switch is
-/// the exception in the other direction: a FAILING `git switch` emits no stdout at
-/// all (measured across its refusal modes — stdout there is success-path chatter),
-/// so the combined shaping is identical to stderr alone for it.
-fn git_error(out: GitOutput) -> AppError {
-    AppError::Git {
-        code: out.code,
-        stderr: out.full_failure_text(),
-    }
-}
-
 /// Turns the inner op's result into an outcome, unwinding the autostash when it can
 /// be unwound safely. Never errors on a failed pop — the retained stash is the
 /// user's safety net, and reporting it is the whole point of the outcome enum.
+///
+/// `op_name` is the paused operation the no-stash arm reports — `classify_failure`'s
+/// closed set, spelled as the matching plain core spells it.
 async fn settle(
     repo: &str,
+    op_name: &str,
     stashed: bool,
     reapply: bool,
     op: AppResult<GitOutput>,
 ) -> AppResult<AutostashOutcome> {
-    // Nothing was stashed, so there is nothing to unwind: behave like the plain command.
+    // Nothing was stashed, so there is nothing to unwind: behave like the plain
+    // command, structured error included — the same failure must not report as a
+    // conflict through one entry point and as prose through the other.
     if !stashed {
         let out = op?;
         if out.code != 0 {
-            return Err(git_error(out));
+            // The baseline is empty because every compound refuses mid-op BEFORE
+            // stashing, so nothing was unmerged when the op started (`op_continue`
+            // passes an empty one for its own reason). `full_failure_text` because
+            // merge and pull both carry half their report on stdout, which the
+            // parity tests below pin; switch is the exception in the other direction
+            // — a FAILING `git switch` emits no stdout at all (measured across its
+            // refusal modes), so the combined text is identical to stderr alone.
+            return Err(crate::git::ops::classify_failure(
+                repo,
+                op_name,
+                &[],
+                out.code,
+                out.full_failure_text(),
+            )
+            .await);
         }
         return Ok(AutostashOutcome::NothingStashed);
     }
 
     let failure = match &op {
         Ok(out) if out.code == 0 => None,
-        // Combined, matching the no-stash arm's `git_error` and the plain cores:
+        // Combined, matching the no-stash arm and the plain cores:
         // a substitution reports a conflicted pull's fetch summary alone and says
         // nothing about the conflict, so the stashed and unstashed paths would
         // disagree on the same failure.
@@ -169,6 +175,10 @@ pub(crate) async fn git_pull_autostash_core(
         "merge" => "--no-rebase",
         _ => "--ff-only",
     };
+    // Same label as `git_pull_core`: the operation a conflicted pull pauses is the
+    // mode it RAN. A refused `--ff-only` leaves nothing unmerged, so its label
+    // never surfaces.
+    let paused = if mode == "rebase" { "rebase" } else { "merge" };
     // A read that shells out to git itself — resolve it BEFORE taking the lock.
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
 
@@ -178,7 +188,7 @@ pub(crate) async fn git_pull_autostash_core(
 
     let stashed = autostash_push(&repo_path).await?;
     let op = run_git_with_creds_once(&repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await;
-    settle(&repo_path, stashed, true, op).await
+    settle(&repo_path, paused, stashed, true, op).await
 }
 
 /// Merge `branch` into the current one with the uncommitted changes stashed across
@@ -210,7 +220,7 @@ pub(crate) async fn git_merge_autostash_core(
         DEFAULT_TIMEOUT,
     )
     .await;
-    settle(&repo_path, stashed, true, op).await
+    settle(&repo_path, "merge", stashed, true, op).await
 }
 
 /// Rebase the current branch onto `branch` with the uncommitted changes stashed
@@ -247,7 +257,7 @@ pub(crate) async fn git_rebase_autostash_core(
         DEFAULT_TIMEOUT,
     )
     .await;
-    settle(&repo_path, stashed, true, op).await
+    settle(&repo_path, "rebase", stashed, true, op).await
 }
 
 /// `git rebase --onto <new_base> <old_base>` — replaying only `old_base..HEAD`
@@ -290,7 +300,7 @@ pub(crate) async fn git_rebase_onto_autostash_core(
         DEFAULT_TIMEOUT,
     )
     .await;
-    settle(&repo_path, stashed, true, op).await
+    settle(&repo_path, "rebase", stashed, true, op).await
 }
 
 /// Switch branches with the uncommitted changes stashed across the switch, and
@@ -330,12 +340,18 @@ pub(crate) async fn git_switch_autostash_core(
         None => vec!["switch", &name],
     };
     let op = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await;
-    settle(&repo_path, stashed, reapply, op).await
+    // Unreachable as a label: a refused `git switch` leaves nothing unmerged, so
+    // `classify_failure` always answers with a plain git error here. "merge" is the
+    // closed set's spelling for the only way a checkout could ever pause one.
+    settle(&repo_path, "merge", stashed, reapply, op).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only import: the module's own code shapes every failure through
+    // `classify_failure`, so only the error assertions name the enum.
+    use crate::error::AppError;
 
     async fn git(repo: &str, args: &[&str]) -> String {
         run_git(Some(repo), args, DEFAULT_TIMEOUT)
@@ -1417,7 +1433,7 @@ mod tests {
         )
         .await;
 
-        let outcome = settle(&repo, true, true, op).await.unwrap();
+        let outcome = settle(&repo, "merge", true, true, op).await.unwrap();
         assert!(
             matches!(
                 outcome,
@@ -1443,7 +1459,7 @@ mod tests {
         write(dir.path(), "u.txt", "other\n");
         let op = run_git_raw(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await;
 
-        let outcome = settle(&repo, true, true, op).await.unwrap();
+        let outcome = settle(&repo, "merge", true, true, op).await.unwrap();
         assert!(
             matches!(
                 outcome,
@@ -1503,10 +1519,9 @@ mod tests {
     /// Pull has its own arm below (a different stream split); switch never will,
     /// since a failing `git switch` writes no stdout to lose.
     ///
-    /// The parity is over git's TEXT, not the variant: the plain core names the
-    /// paused operation structurally while this compound reports its own outcome
-    /// enum and shapes the no-stash arm as a plain git error, which the frontend's
-    /// prose markers still classify identically.
+    /// The parity covers the VARIANT as well as git's text: both sides name the
+    /// paused operation structurally, so the frontend cannot tell which entry
+    /// point produced the error.
     #[tokio::test]
     async fn a_conflict_with_nothing_stashed_carries_the_stdout_report() {
         let (dir, repo) = setup_with_feat("plain-parity-conflict").await;
@@ -1535,18 +1550,24 @@ mod tests {
 
         match (&compound, &plain) {
             (
-                AppError::Git { stderr: a_err, .. },
                 AppError::Conflict {
-                    op,
-                    paths,
+                    op: a_op,
+                    paths: a_paths,
+                    report: a_err,
+                },
+                AppError::Conflict {
+                    op: b_op,
+                    paths: b_paths,
                     report: b_err,
                 },
             ) => {
                 assert_eq!(a_err, b_err);
-                assert_eq!(op, "merge");
-                assert_eq!(paths, &vec!["a.txt".to_string()]);
+                assert_eq!(a_op, b_op);
+                assert_eq!(a_op, "merge");
+                assert_eq!(a_paths, b_paths);
+                assert_eq!(a_paths, &vec!["a.txt".to_string()]);
                 // Mirrors the frontend's anchored CONFLICT_MARKERS: without the
-                // stdout backfill both sides carry an empty stderr instead, which
+                // stdout backfill both sides carry an empty report instead, which
                 // renders as "git exited with code 1".
                 assert!(
                     a_err.lines().any(|l| l.starts_with("CONFLICT (")),
@@ -1557,15 +1578,15 @@ mod tests {
                     "and the verdict line that names it a merge: {a_err}"
                 );
             }
-            other => panic!("expected a git error and a conflict, got {other:?}"),
+            other => panic!("expected two conflicts, got {other:?}"),
         }
     }
 
     /// Pull's version of the same parity, on the split that hides the loss: the
     /// fetch summary fills stderr while the merge verdict rides stdout, so an
     /// error carrying stderr alone looks populated and still says nothing about
-    /// the conflict. Both sides must carry the whole report, identically — the
-    /// plain core additionally naming the operation it paused.
+    /// the conflict. Both sides must carry the whole report, identically, and both
+    /// must name the operation they paused.
     #[tokio::test]
     async fn a_conflicted_pull_with_nothing_stashed_carries_the_stdout_report() {
         let (dir, work, clone) = setup_clone("pull-parity-conflict").await;
@@ -1609,16 +1630,22 @@ mod tests {
 
         match (&compound, &plain) {
             (
-                AppError::Git { stderr: a_err, .. },
                 AppError::Conflict {
-                    op,
-                    paths,
+                    op: a_op,
+                    paths: a_paths,
+                    report: a_err,
+                },
+                AppError::Conflict {
+                    op: b_op,
+                    paths: b_paths,
                     report: b_err,
                 },
             ) => {
                 assert_eq!(a_err, b_err);
-                assert_eq!(op, "merge", "a merge-mode pull pauses a merge");
-                assert_eq!(paths, &vec!["a.txt".to_string()]);
+                assert_eq!(a_op, b_op);
+                assert_eq!(a_op, "merge", "a merge-mode pull pauses a merge");
+                assert_eq!(a_paths, b_paths);
+                assert_eq!(a_paths, &vec!["a.txt".to_string()]);
                 assert!(
                     a_err.lines().any(|l| l.starts_with("CONFLICT (")),
                     "the conflict line must reach the frontend: {a_err}"
@@ -1628,7 +1655,7 @@ mod tests {
                     "and the verdict line that names it a merge: {a_err}"
                 );
             }
-            other => panic!("expected a git error and a conflict, got {other:?}"),
+            other => panic!("expected two conflicts, got {other:?}"),
         }
     }
 }

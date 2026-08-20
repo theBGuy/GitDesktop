@@ -7,9 +7,9 @@ import {
 
 /**
  * Combines the repo's shared rules with the user's personal rules into the
- * single config that's actually enforced. Protections are the union of both;
- * the shared team naming policy wins when present, else the personal one
- * applies.
+ * single config that's actually enforced. Protections and promotion branches
+ * are the union of both; the shared team naming policy wins when present, else
+ * the personal one applies.
  */
 export function mergeBranchRules(
   shared: BranchRulesConfig,
@@ -18,6 +18,10 @@ export function mergeBranchRules(
   return {
     naming: shared.naming.enabled ? shared.naming : personal.naming,
     protections: [...shared.protections, ...personal.protections],
+    promotionBranches: [
+      ...shared.promotionBranches,
+      ...personal.promotionBranches,
+    ],
   };
 }
 
@@ -78,6 +82,21 @@ export function protectionsFor(
 ): BranchProtection[] {
   return config.protections.filter(
     (p) => p.pattern.trim() !== "" && matchesGlob(p.pattern.trim(), branch),
+  );
+}
+
+/**
+ * Whether `branch` is configured as a promotion branch — a pull request FROM it
+ * carries work onward rather than catching up, so the update-from-base offer is
+ * withheld. The user's own assertion about this repository, so it needs no
+ * topology check to back it up.
+ */
+export function isPromotionBranch(
+  config: BranchRulesConfig,
+  branch: string,
+): boolean {
+  return config.promotionBranches.some(
+    (p) => p.trim() !== "" && matchesGlob(p.trim(), branch),
   );
 }
 

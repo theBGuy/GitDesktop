@@ -10,8 +10,8 @@ import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
  * The bottom "leave a comment" bar every conversation surface ends with. Fully
  * controlled: the draft lives in CALLER state, keyed there per entity so a
  * switch retains it, which a composer-owned draft could not do. Per-surface
- * extras (Approve, Close, Review…) ride the `actions` slot rather than growing
- * the prop list.
+ * extras (Approve, Close, Review…) ride the `actions`/`leadingActions` slots
+ * rather than growing the prop list.
  */
 export function CommentComposer({
   ref,
@@ -26,6 +26,7 @@ export function CommentComposer({
   reason,
   disabled,
   actions,
+  leadingActions,
 }: {
   /** The editor handle, so a caller can focus/fill the box from elsewhere
    *  (quote reply). */
@@ -48,6 +49,10 @@ export function CommentComposer({
   disabled?: boolean;
   /** Extra buttons rendered after submit, before Clear. */
   actions?: ReactNode;
+  /** Extra buttons rendered before submit — for a surface whose submit is not
+   *  the row's first action. Everything up to that boundary is the caller's to
+   *  lay out, spacers included. */
+  leadingActions?: ReactNode;
 }) {
   const hasDraft = value.trim().length > 0;
   // Only the `busy` hold gets words: an empty draft explains itself, and a reason
@@ -75,6 +80,7 @@ export function CommentComposer({
         textareaClassName="max-h-32 min-h-12 resize-y"
       />
       <div className="flex items-center gap-2">
+        {leadingActions}
         <DisabledReasonButton
           variant="outline"
           size="sm"

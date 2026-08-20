@@ -20,6 +20,7 @@ export function normalizeBranchRules(saved: unknown): BranchRulesConfig {
   const obj = (saved ?? {}) as {
     naming?: Partial<NamingPolicy>;
     protections?: Partial<BranchProtection>[];
+    promotionBranches?: unknown;
   };
   return {
     naming: { ...EMPTY_BRANCH_RULES.naming, ...obj.naming },
@@ -31,6 +32,12 @@ export function normalizeBranchRules(saved: unknown): BranchRulesConfig {
       requirePr: p.requirePr ?? false,
       allowedMergeMethods: p.allowedMergeMethods ?? [...ALL_MERGE_METHODS],
     })),
+    // Typed loosely because the shared file is hand-editable: anything but an
+    // array of strings yields no promotion branches rather than throwing away
+    // the rest of the config.
+    promotionBranches: Array.isArray(obj.promotionBranches)
+      ? obj.promotionBranches.filter((p): p is string => typeof p === "string")
+      : [],
   };
 }
 

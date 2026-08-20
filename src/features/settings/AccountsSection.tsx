@@ -510,7 +510,10 @@ function GitLabAccount() {
         <p className="text-xs text-muted-foreground">
           GitDesktop acts as whichever account is signed in to the GitLab CLI
           (glab) — merge requests, issues, and pushes all use it. Works with
-          gitlab.com and self-managed GitLab hosts alike.
+          gitlab.com and self-managed GitLab hosts alike; signing in from here
+          covers gitlab.com, so for your own instance run{" "}
+          <span className="font-mono">glab auth login --hostname …</span> in a
+          terminal and it appears below.
         </p>
       </div>
 

@@ -191,6 +191,14 @@ export const ACTIONS = [
     category: "Navigation",
     defaultBinding: "mod+f",
   },
+  {
+    id: "focus-comment",
+    label: "Focus the comment box",
+    category: "Navigation",
+    // Palette-only by default: it applies on the conversation surfaces alone, so
+    // it ships without spending a chord. Users can bind a key.
+    defaultBinding: null,
+  },
 
   // Repository
   {

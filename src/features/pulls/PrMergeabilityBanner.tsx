@@ -66,6 +66,19 @@ export type PrMergeabilityArm =
   | "blocked"
   | null;
 
+/** What makes a pull request a promotion — its head is this repository's default
+ *  branch, or a branch the repo's rules name as a promotion branch. `null` for an
+ *  ordinary pull request. */
+export type PromotionKind = "default" | "configured" | null;
+
+/** The clause naming why the head is a promotion — the only words that differ
+ *  between the two kinds, so the rest of the sentence can't drift apart. Shared
+ *  with LocalPrView's inline note for the same reason. */
+export const PROMOTION_REASON: Record<Exclude<PromotionKind, null>, string> = {
+  default: " is the repository's default branch",
+  configured: " is a promotion branch for this repository",
+};
+
 /** Words carry the meaning; the icon and tone only reinforce it. */
 const ARM_ICON: Record<
   Exclude<PrMergeabilityArm, null>,
@@ -95,7 +108,7 @@ const ARM_MESSAGE: Record<
     predictedClean: boolean;
     forgeUnreachable: boolean;
     blockedRequirements: string[];
-    promotionLike: boolean;
+    promotionKind: PromotionKind;
   }) => ReactNode
 > = {
   conflicting: ({ base, provider }) => (
@@ -149,13 +162,13 @@ const ARM_MESSAGE: Record<
   // The behind clause rides along in the `behind` arm's own words, because the update
   // controls come with it — a bare refusal beside an Update branch button would leave
   // the button unexplained.
-  blocked: ({ base, behindBy, blockedRequirements, promotionLike }) => (
+  blocked: ({ base, behindBy, blockedRequirements, promotionKind }) => (
     <>
       {blockedMergeLine(blockedRequirements)}
       {/* The behind clause exists to explain the Update controls beside it, so it
           goes wherever they go: on a promotion pull request they'd invert the
           flow, and a count with no route out would read as a demand. */}
-      {behindBy > 0 && !promotionLike ? (
+      {behindBy > 0 && promotionKind === null ? (
         <>
           {` It is also ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
           <span className="font-mono">{base}</span>
@@ -165,20 +178,22 @@ const ARM_MESSAGE: Record<
     </>
   ),
   // A promotion pull request (main → staging) is permanently behind its base by
-  // design, and "update the branch" would merge the base back into the default
-  // branch. Say which direction the work is going instead of implying a catch-up.
-  // The gap does NOT close on merge — merging the head into the base ADDS a
-  // commit the head lacks — so the copy says it needs no closing.
-  behind: ({ base, head, behindBy, promotionLike }) =>
-    promotionLike ? (
+  // design, and "update the branch" would merge the base back into the head. Say
+  // which direction the work is going instead of implying a catch-up. The gap does
+  // NOT close on merge — merging the head into the base ADDS a commit the head
+  // lacks — so the copy says it needs no closing. Only the reason clause differs
+  // between the two kinds; a configured head is no claim about the default branch.
+  behind: ({ base, head, behindBy, promotionKind }) =>
+    promotionKind !== null ? (
       <>
         <span className="font-mono">{base}</span>
         {` has ${behindBy} commit${behindBy === 1 ? "" : "s"} that `}
         <span className="font-mono">{head}</span>
         {" doesn't. "}
         <span className="font-mono">{head}</span>
+        {PROMOTION_REASON[promotionKind]}
         {
-          " is the repository's default branch, so this gap is expected and doesn't need closing. Updating the branch would merge "
+          ", so this gap is expected and doesn't need closing. Updating the branch would merge "
         }
         <span className="font-mono">{base}</span>
         {" back into "}
@@ -204,7 +219,7 @@ export function PrMergeabilityBanner({
   arm,
   base,
   head,
-  promotionLike,
+  promotionKind,
   provider,
   forkBlocked,
   hasResolveWorktree,
@@ -217,6 +232,7 @@ export function PrMergeabilityBanner({
   updateBlockedReason,
   updateBusy,
   updateAwaitingDefault,
+  updateAwaitingRules,
   updateSubmitting,
   onResolve,
   onResolveWithAi,
@@ -229,11 +245,12 @@ export function PrMergeabilityBanner({
   arm: PrMergeabilityArm;
   base: string;
   head: string;
-  /** The head IS this repository's default branch, so the pull request promotes
-   *  it somewhere (main → staging). Updating such a branch would merge the base
-   *  back into the default branch, inverting the flow — so the behind arm keeps
-   *  its true count and drops the action. */
-  promotionLike: boolean;
+  /** The pull request promotes its head onward (main → staging), because the head
+   *  IS this repository's default branch or the repo's rules name it a promotion
+   *  branch. Updating such a branch would merge the base back into it, inverting
+   *  the flow — so the behind arm keeps its true count and drops the action. The
+   *  two kinds only differ in the words that name the reason. */
+  promotionKind: PromotionKind;
   provider: ForgeProvider | null | undefined;
   /** The head branch lives in another repository, so there's nowhere to push. */
   forkBlocked: boolean;
@@ -261,6 +278,9 @@ export function PrMergeabilityBanner({
    *  promotion demotion depends on — it gets its own wording, since the generic
    *  busy line would claim the pull request is still loading. */
   updateAwaitingDefault: boolean;
+  /** The same wait for the other half of the demotion: the repo's branch rules,
+   *  which name the promotion branches. */
+  updateAwaitingRules: boolean;
   /** The update call itself is in flight — the slice of `updateBusy` before the forge
    *  has even accepted the job. */
   updateSubmitting: boolean;
@@ -308,9 +328,8 @@ export function PrMergeabilityBanner({
   const updateDisabled = updateBusy || updateBlockedReason !== undefined;
   // The busy hold now spans the forge's whole queued update, so a silent disabled
   // control would leave the user waiting on nothing they can read. Each cause gets its
-  // own words: the queued job, the call that hasn't been accepted yet, the
-  // default-branch read this action's promotion check depends on, and the
-  // PR-switch window are four different waits.
+  // own words: the queued job, the call that hasn't been accepted yet, the two reads
+  // this action's promotion check depends on, and the PR-switch window.
   const updateBusyReason = (() => {
     switch (true) {
       case arm === "updating":
@@ -319,6 +338,8 @@ export function PrMergeabilityBanner({
         return "Submitting the update…";
       case updateAwaitingDefault:
         return "Checking which branch is the default…";
+      case updateAwaitingRules:
+        return "Checking this repository's promotion branches…";
       default:
         return PR_SWITCH_LOADING_REASON;
     }
@@ -352,7 +373,7 @@ export function PrMergeabilityBanner({
             predictedClean,
             forgeUnreachable,
             blockedRequirements,
-            promotionLike,
+            promotionKind,
           })}
         </span>
       </span>
@@ -415,7 +436,7 @@ export function PrMergeabilityBanner({
       {(arm === "behind" ||
         arm === "updating" ||
         (arm === "blocked" && behindBy > 0)) &&
-        !promotionLike && (
+        promotionKind === null && (
           <div className="flex items-center gap-1.5">
             <DisabledReasonButton
               variant="ghost"

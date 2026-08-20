@@ -63,6 +63,10 @@ export function BranchRulesDialog({
   const patternInputId = useId();
   const hintInputId = useId();
   const testNameInputId = useId();
+  // Keyed by row position, like the list itself — Add and Remove hand focus to a
+  // neighbour rather than dropping it to the body.
+  const promotionRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const addPromotionRef = useRef<HTMLButtonElement>(null);
 
   const active = scope === "shared" ? shared : personal;
   const saving = scope === "shared" ? saveShared : savePersonal;
@@ -141,6 +145,43 @@ export function BranchRulesDialog({
     }));
   }
 
+  // Promotion branches are bare patterns with no per-entry settings, so they're
+  // edited by position rather than by an id the way protections are. Focus follows
+  // the edit — deferred to after the re-render, since the row being focused doesn't
+  // exist (or has shifted) until then.
+  function addPromotionBranch() {
+    const next = draft.promotionBranches.length;
+    setDraft((d) => ({
+      ...d,
+      promotionBranches: [...d.promotionBranches, ""],
+    }));
+    requestAnimationFrame(() => promotionRefs.current[next]?.focus());
+  }
+
+  function updatePromotionBranch(index: number, pattern: string) {
+    setDraft((d) => ({
+      ...d,
+      promotionBranches: d.promotionBranches.map((p, i) =>
+        i === index ? pattern : p,
+      ),
+    }));
+  }
+
+  function removePromotionBranch(index: number) {
+    const emptied = draft.promotionBranches.length === 1;
+    setDraft((d) => ({
+      ...d,
+      promotionBranches: d.promotionBranches.filter((_, i) => i !== index),
+    }));
+    // The survivors shift down one, so index-1 IS the row above — and index 0 lands
+    // on whichever row took its place. With none left, Add is the nearest control
+    // that outlives the removal.
+    requestAnimationFrame(() => {
+      if (emptied) addPromotionRef.current?.focus();
+      else promotionRefs.current[Math.max(0, index - 1)]?.focus();
+    });
+  }
+
   // Pulls GitHub's branch protection rules into the draft (deduped by pattern),
   // for the user to review and save. Read-only against GitHub.
   async function importFromGitHub() {
@@ -184,6 +225,7 @@ export function BranchRulesDialog({
     });
   }
 
+  const promotionBranches = draft.promotionBranches;
   const namePattern = draft.naming.pattern.trim();
   const testMatches = namePattern !== "" && matchesGlob(namePattern, testName);
 
@@ -418,6 +460,61 @@ export function BranchRulesDialog({
                             ))}
                           </div>
                         </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-medium">Promotion branches</h3>
+                  <Button
+                    ref={addPromotionRef}
+                    variant="outline"
+                    size="xs"
+                    onClick={addPromotionBranch}
+                  >
+                    <PlusIcon data-icon="inline-start" />
+                    Add
+                  </Button>
+                </div>
+                {promotionBranches.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    No promotion branches. Add a pattern (e.g.{" "}
+                    <span className="font-mono">staging</span> or{" "}
+                    <span className="font-mono">release/*</span>) to mark pull
+                    requests from that branch as promotions — GitDesktop won't
+                    offer to update them from their base.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {promotionBranches.map((pattern, i) => (
+                      // Position IS the identity here: the entries are bare
+                      // strings, so two blank rows would share any value-derived
+                      // key. The inputs stay controlled from the array, so a
+                      // removal re-renders the survivors correctly.
+                      <div key={i} className="flex items-center gap-2">
+                        <Input
+                          ref={(el) => {
+                            promotionRefs.current[i] = el;
+                          }}
+                          value={pattern}
+                          onChange={(e) =>
+                            updatePromotionBranch(i, e.target.value)
+                          }
+                          placeholder="staging"
+                          className="font-mono"
+                          aria-label={`Promotion branch pattern ${i + 1}`}
+                        />
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Remove promotion branch ${pattern || i + 1}`}
+                          onClick={() => removePromotionBranch(i)}
+                        >
+                          <TrashIcon />
+                        </Button>
                       </div>
                     ))}
                   </div>

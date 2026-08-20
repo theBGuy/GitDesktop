@@ -66,8 +66,12 @@ import { prOpenEligible } from "@/lib/automations/sync";
 import {
   isDeletionBlocked,
   isMergeMethodAllowed,
+  isPromotionBranch,
 } from "@/lib/branch-rules/match";
-import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
+import {
+  useEffectiveBranchRules,
+  useEffectiveBranchRulesSettling,
+} from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import {
@@ -178,6 +182,7 @@ import {
   PR_SWITCH_LOADING_REASON,
   type PrMergeabilityArm,
   PrMergeabilityBanner,
+  type PromotionKind,
 } from "./PrMergeabilityBanner";
 import { PrReviewPanel } from "./PrReviewPanel";
 import { PrTasksChip, PrTasksSection } from "./PrTasksSection";
@@ -591,6 +596,7 @@ export function RemotePrView({
     if (!availableSections.includes(section)) setSection("conversation");
   }, [availableSections, section, capabilitiesSettled]);
   const rulesConfig = useEffectiveBranchRules(repoPath);
+  const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
   const defaultBranch = useDefaultBranch(repoPath);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   // Commits-tab drill-in: the selected commit's oid, or null for the list. Reset
@@ -1001,43 +1007,41 @@ export function RemotePrView({
       ? "The contributor hasn't allowed edits from maintainers."
       : undefined);
 
-  // A promotion pull request: the HEAD is this repository's default branch, so the
-  // work flows main → staging and the head is permanently behind its base by
-  // design. "Update branch" there merges the base back INTO the default branch,
-  // inverting the flow — so every route to it is demoted below, and the behind
-  // copy names the direction instead of asking for a catch-up.
+  // A promotion pull request: the head carries work onward (main → staging), so it is
+  // permanently behind its base by design and "Update branch" would merge the base
+  // back INTO it, inverting the flow. Either the head IS this repository's default
+  // branch — a topology probe false-positives on stacked pull requests and
+  // `allowUpdateBranch` is absent for non-push viewers, so that name comparison is the
+  // whole test — or the repo's rules name it a promotion branch, which covers
+  // staging → production and the upstream lens.
   //
-  // Head-is-default is the whole test on purpose: a topology probe false-positives
-  // on stacked pull requests, which this app first-classes, and `allowUpdateBranch`
-  // is absent for non-push viewers (serde-defaulting to false), so gating on it
-  // would delete the behind banner for every read-only viewer. This shape is the
-  // reported one and both inputs are already held. A staging → production pull
-  // request has the same inversion and is NOT covered.
-  //
-  // `crossRepository` is what keeps the name comparison honest: `headRefName` is
-  // UNQUALIFIED, so a contribution from someone's fork whose head is THEIR `main`
-  // matches our default branch by name alone — an ordinary pull request that would
-  // otherwise lose Update branch and gain copy about a promotion that isn't one.
-  //
-  // `lens === "origin"` for the same reason from the other side: `useDefaultBranch`
-  // reads ORIGIN's default with no lens parameter, while `details` follows the
-  // lens, so on the upstream lens the two names describe different repositories.
-  // An upstream-lens promotion pull request therefore keeps today's behavior —
-  // a recorded limitation, like staging → production.
-  const promotionLike =
-    !!details.data?.headRefName &&
-    !!defaultBranch.data &&
-    details.data.headRefName === defaultBranch.data &&
-    !details.data.crossRepository &&
-    lens === "origin";
+  // `crossRepository` guards both arms: `headRefName` is UNQUALIFIED, so a fork's own
+  // `main` (or its `staging`) matches by name alone. `lens === "origin"` guards only
+  // the default arm, since `useDefaultBranch` reads ORIGIN's default while `details`
+  // follows the lens; a configured pattern is the user's assertion about the branch
+  // NAMES of this repo's fork family, so it applies on either lens by design.
+  // Default wins the tie, and the kind decides only the words the copy uses.
+  const promotionKind: PromotionKind = (() => {
+    const head = details.data?.headRefName;
+    if (!head || details.data?.crossRepository) return null;
+    switch (true) {
+      case lens === "origin" && head === defaultBranch.data:
+        return "default";
+      case isPromotionBranch(rulesConfig, head):
+        return "configured";
+      default:
+        return null;
+    }
+  })();
+  const promotionLike = promotionKind !== null;
 
-  // `promotionLike` is hard-false until the default branch resolves, so an update
-  // started in that window races the demotion. Every entry point holds on this —
-  // the banner via `updateBusy`, the hotkey via `canUpdateBranch`, and
-  // `runUpdateBranch` itself — but ONLY on the origin lens, where the comparison
-  // could change the answer; elsewhere `promotionLike` is false by design and a
-  // hold would buy nothing. A FAILED read is deliberately not held: it falls open,
-  // matching LocalPrView's twin.
+  // Neither arm can fire until its input lands, so an update started in that window
+  // races the demotion and inverts the flow this feature exists to protect. Every
+  // entry point holds on both — the banner via `updateBusy`, the hotkey via
+  // `canUpdateBranch`, and `runUpdateBranch` itself. The default-branch hold is
+  // origin-only, where the comparison could change the answer; elsewhere that arm is
+  // false by design. A FAILED read is deliberately not held on either: it falls open,
+  // matching LocalPrView's twin, since nothing would arrive to lift the hold.
   const defaultBranchSettling = lens === "origin" && defaultBranch.isPending;
 
   // The banner's arm: server truth, then the local prediction where the forge has
@@ -1116,6 +1120,7 @@ export function RemotePrView({
     !detailsStale &&
     !promotionLike &&
     !defaultBranchSettling &&
+    !rulesSettling &&
     updateBlockedReason === undefined &&
     !updateBranch.isPending;
 
@@ -1203,13 +1208,14 @@ export function RemotePrView({
       updateBlockedReason !== undefined ||
       updateBranch.isPending ||
       updatingBranch ||
-      // A promotion pull request would merge the base back INTO the default
-      // branch. The demotion has to live here too, or it is only as good as the
-      // surfaces that happen to read `canUpdateBranch` — and it has to include
-      // the window where the demotion hasn't been decided yet, or a fast hotkey
-      // slips through with `promotionLike` still false.
+      // A promotion pull request would merge the base back INTO the head. The
+      // demotion has to live here too, or it is only as good as the surfaces that
+      // happen to read `canUpdateBranch` — and it has to include both windows
+      // where the demotion hasn't been decided yet, or a fast hotkey slips
+      // through with `promotionLike` still false.
       promotionLike ||
-      defaultBranchSettling
+      defaultBranchSettling ||
+      rulesSettling
     )
       return;
     if (rebase) {
@@ -1529,6 +1535,16 @@ export function RemotePrView({
     // Captured before the await: posting clears the draft, and the error arm
     // below has to know a comment already went out.
     const withComment = draftRidesStateChange;
+    // Ahead of the riding draft: a cancelled confirm must leave the comment
+    // unposted.
+    const ok = await useConfirm.getState().ask({
+      title: `Close ${prNoun} #${number}?`,
+      body: `Everyone watching is notified and the ${prNoun} leaves the open list. Reopening puts it back, but the notification can't be unsent.${
+        withComment ? " Your draft posts as a comment first." : ""
+      }`,
+      confirmLabel: withComment ? "Close with comment" : `Close ${prNoun}`,
+    });
+    if (!ok) return;
     if (!(await postRidingDraft())) return;
     closePr.mutate(number, {
       // The riding comment posts through `mutateAsync`, which skips the
@@ -2522,7 +2538,7 @@ export function RemotePrView({
         arm={bannerArm}
         base={pr.baseRefName}
         head={pr.headRefName}
-        promotionLike={promotionLike}
+        promotionKind={promotionKind}
         provider={provider}
         forkBlocked={!!pr.crossRepository}
         hasResolveWorktree={resolveWorktree !== null}
@@ -2543,11 +2559,13 @@ export function RemotePrView({
           updateBranch.isPending ||
           updatingBranch ||
           detailsStale ||
-          defaultBranchSettling
+          defaultBranchSettling ||
+          rulesSettling
         }
-        // The one wait the generic busy wording would misdescribe, so it gets its
+        // The two waits the generic busy wording would misdescribe, so each gets its
         // own arm rather than claiming the pull request is still loading.
         updateAwaitingDefault={defaultBranchSettling}
+        updateAwaitingRules={rulesSettling}
         updateSubmitting={updateBranch.isPending}
         onResolve={() => runResolve(false)}
         onResolveWithAi={() => runResolve(true)}

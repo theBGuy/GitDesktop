@@ -354,7 +354,8 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 {{ai}}- **Generate with AI** ({{kbd:generate-commit-message}}) — write the summary and
   description from your staged diff (see *AI & automations*).
 {{/ai}}- After committing, **Undo** ({{kbd:undo-commit}}) reverses the last commit and
-  returns your message to the box.
+  returns your message to the box. Undoing a branch's *first* commit asks first —
+  it has no parent to fall back to, so the branch ref goes with it.
 
 > Discarding an **untracked** file moves it to the recycle bin, so it's recoverable —
 > it isn't deleted outright.`,
@@ -374,8 +375,10 @@ selection to compare a range.
 {{Secondaryclick}} a commit (or use the commit detail view) for:
 
 - **Amend** the most recent commit (reword, or fold in staged changes).
-- **Revert** — create a new commit that undoes a commit's changes.
-- **Cherry-pick** a commit onto the current branch, or **Cherry-pick to branch…** to copy
+- **Revert** — create a new commit that undoes a commit's changes. It asks first, and
+  says that history keeps both commits.
+- **Cherry-pick** a commit onto the current branch (it asks first, and says where the
+  copy lands), or **Cherry-pick to branch…** to copy
   it (or a multi-selection) onto another branch and switch to it. A single commit that
   conflicts pauses on the destination branch so you can resolve it and continue; a
   multi-commit batch rolls back automatically on any failure.
@@ -391,7 +394,8 @@ selection to compare a range.
   amend it in the **Changes** tab (stage and commit/amend as usual), then **Continue** from the
   banner there. A quick **Squash N commits…** is also on the context menu when you select
   adjacent commits.
-- **Create a branch** or **create a tag** at a commit, **check out** a commit, or copy
+- **Create a branch** or **create a tag** at a commit, **check out** a commit (it asks
+  first and explains the detached HEAD you land in), or copy
   its SHA.
 
 ## Commit comments
@@ -512,9 +516,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 ## Stash
 
 **Stash all changes** ({{kbd:stash-all}}) sets your working changes aside; **View
-stashes** lists them to apply, pop, or drop, and **Pop latest stash** restores the most
-recent. Setting changes aside is refused while conflicts are still unresolved, or while a
-merge, rebase, cherry-pick or revert is in progress — finish or abort it first, so a
+stashes** lists them to apply, pop, or drop (each asks first, and the apply and pop
+prompts say whether the stash stays in the list afterwards), and **Pop latest stash**
+restores the most recent. Setting changes aside is refused while conflicts are still
+unresolved, or while a merge, rebase, cherry-pick or revert is in progress — finish or abort it first, so a
 resolution you've already staged can't be swept out of the operation.
 
 **Recover lost work** (in the branch ⋮ menu, or the command palette) opens the
@@ -550,8 +555,10 @@ straight to opening a pull request.
 **Branch rules…** (in the ⋮ menu) sets local protections — naming patterns, blocked
 deletion, allowed merge methods, require-PR, and force-push blocking. They're enforced
 inside the app, can be shared with your team via a committed file, and can be imported
-from a repo's GitHub branch-protection rules. (For server-side enforcement, use **Rules**
-in *Repository settings*.)
+from a repo's GitHub branch-protection rules. The same dialog keeps a **Promotion
+branches** list: a pull request from a branch you name there carries work onward rather
+than catching up, so GitDesktop stops offering to update it from its base. (For
+server-side enforcement, use **Rules** in *Repository settings*.)
 
 ## Worktrees
 
@@ -686,7 +693,9 @@ that names it too (**Finish merge**, **Continue rebase**, **Continue cherry-pick
 **Continue revert**). Select a conflicted file (the \`!\` badge) to open the **conflict
 editor**: each conflict region shows **Current (ours)** over **Incoming (theirs)** with
 **Accept current**, **Accept incoming**, or **Accept both**, and the header adds whole-file
-**Accept all current** / **Accept all incoming** and **Open in editor**. Files mark
+**Accept all current** / **Accept all incoming** and **Open in editor**. Those whole-file
+accepts ask first, since taking a side replaces the file wholesale, conflict regions you
+already settled by hand included. Files mark
 themselves resolved as you go — the \`!\` badge clears — and the finish control stays
 disabled, saying so, until every conflict is resolved. When one side of a conflict removed
 a file, the editor names the removal instead of showing regions, and the same whole-file
@@ -749,6 +758,8 @@ excludes the PR author, whom GitHub won't let you request), flip a PR between
 **draft** and **ready for review** in either direction (a footer **Ready for review** /
 **Convert to draft** pair, also reachable from the command palette),
 **merge** (merge commit, squash, or rebase, with optional branch deletion), and **close**.
+Closing asks first: everyone watching is notified, and reopening puts the pull request
+back but can't unsend that.
 Reviewers who've already reviewed show as read-only chips carrying their verdict — a check
 for **approved**, an X for **requested changes**, a speech bubble for **commented** (icon
 shape plus the word, never color alone) — so a finished review (including Copilot's) stays
@@ -857,9 +868,10 @@ command palette ({{kbd:command-palette}}) too — no default shortcut, so give i
 **Settings → Keyboard**.
 
 One exception: on a **promotion** pull request (one whose head is the repository's
-default branch, like \`main\` → \`staging\`) the gap is expected and doesn't need
-closing, so the strip says so and **Update branch** is withheld — it would merge
-the base back into your default branch.
+default branch, like \`main\` → \`staging\`, or a branch you've listed under
+**Promotion branches** in *Branch rules*, like \`staging\` → \`production\`) the gap
+is expected and doesn't need closing, so the strip says so and **Update branch** is
+withheld — it would merge the base back into the head.
 
 ## Blocked by branch protection
 
@@ -1030,7 +1042,8 @@ Point the app at a **GitLab** repo and the same tab lists its **merge requests**
 closed/merged) next to any local PRs. Open one for the description, comments, commits, and a
 highlighted **diff** (with an **Open on GitLab** link) — and the GitLab MR writes:
 **comment** on it (and **edit** or **delete** your own comments), **close / reopen** it
-(posting your drafted comment alongside, as **request changes** does),
+(closing asks first; either way your drafted comment posts alongside, as
+**request changes** does),
 **edit** its title and description (and **retarget** its target branch),
 **approve / unapprove** it (a reviewer action,
 with the approval count shown inline), **request changes** (the blocking reviewer state —
@@ -1065,8 +1078,8 @@ Compare tab points you at an **existing open MR** from your branch instead of cr
 duplicate. GitLab uses the GitLab
 CLI (\`glab\`) — sign in once from **Settings → Accounts** (or the Pull Requests tab's
 sign-in button), or with \`glab auth login\` in a terminal; no tokens stored. **Self-managed
-GitLab works too**: sign \`glab\` in to your instance (from Accounts, or
-\`glab auth login --hostname …\`) and the app recognizes repositories on that host
+GitLab works too**: sign \`glab\` in to your instance (with \`glab auth login --hostname …\`
+in a terminal) and the app recognizes repositories on that host
 automatically. Its issues, CI pipelines, and
 releases work too (see their sections below).
 
@@ -1268,8 +1281,11 @@ GitLab actions are available.)
 Browse, filter, and open issues in a full view: body, comments, labels, assignees,
 milestone, and reactions. The **funnel** filter is the same searchable author/label
 popup as the PR list. **Create** an issue, comment with the Markdown editor, edit,
-add labels, **close / reopen** (posting your drafted comment alongside), **lock**, and
-**transfer** an issue to another repo.
+add labels, **close / reopen** (closing asks first; either way your drafted comment posts
+alongside), **lock**, and **transfer** an issue to another repo.
+The comment box sits at the bottom of the issue,
+past the side rail, and the command palette's **Focus the comment box** jumps straight
+to it — no default shortcut, so give it one in **Settings → Keyboard**.
 
 - **Sub-issues** — break an issue into a parent/child checklist with completion tracking.
 - **Dependencies** — link issues as blocked-by / blocking.
@@ -1302,7 +1318,8 @@ reads **Create in \<parent\>**.
 Point the app at a **GitLab** repo and the same tab lists its **issues** (open and closed)
 next to any local issues. Open one to read the description and comments — and the GitLab
 issue **writes**: **comment** on the issue (and **edit** or **delete** your own comments),
-**close / reopen** it (posting your drafted comment alongside), **edit** its title and
+**close / reopen** it (closing asks first; either way your drafted comment posts
+alongside), **edit** its title and
 description, **react** with emoji on the description and comments (GitLab's award emoji),
 and set its **assignees**, **labels**, and **milestone** right in the side
 rail. The rail also carries GitLab-unique fields: a **due date** (type a date and
@@ -1332,7 +1349,8 @@ ones. The open / closed / all filter maps to Jira's status **categories** — "T
 "In Progress" issues count as open, and anything in the **Done** category counts as closed
 — while each row still shows its real status name (e.g. *Selected for Development*,
 *In Review*, *Done*). Open an issue to read its **status**, **type**, **priority**,
-**assignee**, and **labels**, plus the Markdown **description** and **comments**. Every
+**assignee**, and **labels**, plus the Markdown **description** and **comments** — the
+command palette's **Focus the comment box** jumps to the composer here too. Every
 issue links out with **View in Jira**.
 
 When the project uses them, issues also show their **agile fields** — **story points** (both
@@ -1410,7 +1428,9 @@ part in GitHub Discussions for the repo. (Discussions must be enabled on the rep
   waiting on.
 - Manage a discussion's lifecycle: **close** (as resolved / outdated / duplicate),
   **reopen**, **lock**, and **delete**. Closing or reopening posts your drafted comment
-  alongside, and the menu item says so while a draft is waiting.
+  alongside, and the menu item says so while a draft is waiting. Closing asks first:
+  everyone watching is notified, and reopening puts the discussion back but can't
+  unsend that.
 - **Create a discussion**, or **create an issue from a discussion** when a thread turns
   into actionable work (the new issue links back to it).`,
   },
@@ -2265,7 +2285,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   terminal the detection doesn't know). These power the "Open in…" actions throughout the app.
 - **About** — app, OS, and component versions, a **health check** for your installed tools
   (Git, the GitHub / GitLab CLIs{{ai}}, and the Claude Code / Codex / Copilot / opencode
-  agents{{/ai}}), and the current window position.
+  agents{{/ai}}) that flags anything missing, or installed but older than a feature needs,
+  with a download link either way, and the current window position.
 
 ## Staying up to date
 

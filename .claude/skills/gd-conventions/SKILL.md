@@ -72,7 +72,9 @@ the same change (`listKeyboardNav` in `src/lib/list-keyboard-nav.ts`) — an
 invariant, not polish. Destructive paths stay behind confirmation via the
 shared `useConfirm`/`ConfirmDialogHost` primitive (`src/lib/stores/confirm.ts`,
 host in `src/components/confirm-dialog-host.tsx`) — never a bespoke confirm
-dialog.
+dialog. Commit-level destructive prompts (checkout, revert, cherry-pick, undo)
+share their wording through `src/features/history/commit-confirms.ts`: a new
+route to one of those ops imports the existing prompt, never re-spells it.
 
 **Command palette.** Any new tab/surface/action needs an ACTIONS entry in
 `src/lib/hotkeys/registry.ts` + `useHotkeyAction` wiring in the same change
@@ -96,6 +98,9 @@ dialog.
   chips, the discussion upvote chip) take the SAME contract from the shared
   `useDisabledReason` hook + `ARIA_DISABLED_CLASS`
   (`src/lib/use-disabled-reason.ts`) — never hand-rolled.
+- A conversation surface's own actions sit before the submit button via
+  `CommentComposer`'s `leadingActions` slot (`actions` renders after submit) —
+  the caller owns the row layout up to that boundary, spacers included.
 - The AI-generate chord in a dialog goes through `useGenerateChord`
   (`src/lib/hotkeys/useGenerateChord.ts`) — never a hand-rolled handler. Its
   invariants: effective-binding read (null = fully inert), `eventToBinding`

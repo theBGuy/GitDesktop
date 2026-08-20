@@ -238,6 +238,10 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Forges & trackers",
+    label: "Self-managed GitLab — any host glab is signed in to",
+  },
+  {
+    group: "Forges & trackers",
     label: "Multiple accounts, switch the active one per host",
   },
   {
@@ -420,6 +424,10 @@ export const capabilities: Capability[] = [
     label: "Edit the Sponsor button (.github/FUNDING.yml)",
   },
   { group: "Admin & settings", label: "Branch-protection rules, locally" },
+  {
+    group: "Admin & settings",
+    label: "Promotion branches — no Update-branch on staging→production PRs",
+  },
   {
     group: "Admin & settings",
     label: "Git hooks manager — husky / pre-commit / lefthook aware",

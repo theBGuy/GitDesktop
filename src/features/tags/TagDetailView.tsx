@@ -28,6 +28,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { checkoutDetachedConfirm } from "@/features/history/commit-confirms";
 import { formatBytes } from "@/features/repository/insights/primitives";
 import { presentError } from "@/lib/error-summary";
 import { UPDATER_MANIFEST_NAME } from "@/lib/git/api";
@@ -197,6 +198,23 @@ export function TagDetailView({
       { tag, assetName },
       { onSuccess: () => toast.success("Asset deleted"), onError },
     );
+  }
+
+  // Checking out a tag detaches HEAD exactly as checking out its commit does, so
+  // it asks the History surface's question with the tag's name in it. The target
+  // sha is read before the prompt, so a tag list refetched under the open dialog
+  // can't redirect the checkout the user confirmed.
+  async function onCheckout() {
+    const target = tagInfo?.target;
+    if (!target) return;
+    const ok = await useConfirm
+      .getState()
+      .ask(checkoutDetachedConfirm("tag", tag));
+    if (!ok) return;
+    checkout.mutate(target, {
+      onSuccess: () => toast.success(`Checked out ${tag}`),
+      onError,
+    });
   }
 
   // ── Release view ───────────────────────────────────────────────────────────
@@ -736,13 +754,7 @@ export function TagDetailView({
           variant="outline"
           size="sm"
           disabled={!tagInfo?.target || checkout.isPending}
-          onClick={() =>
-            tagInfo?.target &&
-            checkout.mutate(tagInfo.target, {
-              onSuccess: () => toast.success(`Checked out ${tag}`),
-              onError,
-            })
-          }
+          onClick={onCheckout}
         >
           Checkout
         </Button>

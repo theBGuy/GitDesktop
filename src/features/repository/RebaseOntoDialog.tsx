@@ -154,7 +154,8 @@ export function RebaseOntoDialog({
           <DialogTitle>Change base of {currentLabel}</DialogTitle>
           <DialogDescription>
             Replay only {currentLabel}'s own commits onto a different branch —
-            for when it was branched off the wrong one. Conflicts appear in the
+            for when it was branched off the wrong one. Each one is rewritten
+            with a new commit id as it replays, and conflicts appear in the
             changes list.
           </DialogDescription>
         </DialogHeader>

@@ -64,3 +64,15 @@ export function useEffectiveBranchRules(repo: string): BranchRulesConfig {
     personal.data ?? EMPTY_BRANCH_RULES,
   );
 }
+
+/**
+ * Whether either scope is still on its FIRST read, so the effective rules stand
+ * in as empty. An action a rule would have refused must hold on this rather than
+ * act on the stand-in. A read that FAILED is not pending: it falls open, since
+ * nothing would ever arrive to lift the hold.
+ */
+export function useEffectiveBranchRulesSettling(repo: string): boolean {
+  const personal = useBranchRules(repo);
+  const shared = useSharedBranchRules(repo);
+  return personal.isPending || shared.isPending;
+}

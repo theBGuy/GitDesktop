@@ -46,8 +46,14 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import { useStashReapplyRecovery } from "@/features/repository/useStashReapplyRecovery";
-import { isMergeMethodAllowed } from "@/lib/branch-rules/match";
-import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
+import {
+  isMergeMethodAllowed,
+  isPromotionBranch,
+} from "@/lib/branch-rules/match";
+import {
+  useEffectiveBranchRules,
+  useEffectiveBranchRulesSettling,
+} from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
 import { gitBranchDiff, type MergeStrategy } from "@/lib/git/api";
 import {
@@ -70,6 +76,7 @@ import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
+import { PROMOTION_REASON, type PromotionKind } from "./PrMergeabilityBanner";
 import { PromoteLocalPrDialog } from "./PromoteLocalPrDialog";
 import { PrReviewPanel } from "./PrReviewPanel";
 import {
@@ -174,6 +181,7 @@ export function LocalPrView({
     if (!availableSections.includes(section)) setSection("conversation");
   }, [availableSections, section]);
   const rulesConfig = useEffectiveBranchRules(repoPath);
+  const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
   const {
     comment,
     setComment,
@@ -295,14 +303,24 @@ export function LocalPrView({
   // Commits on `base` that `head` lacks — i.e. how far the PR's head branch has
   // fallen behind base. Non-empty ⇒ offer GitHub's "Update branch".
   const behind = comparison.data?.behind ?? [];
-  // A promotion pull request (main → staging): the HEAD is this repository's
-  // default branch, so it stays permanently behind its base and "Update branch"
-  // would merge the base back INTO the default branch, inverting the flow. The
-  // head-is-default shape is the whole test — a topology probe false-positives on
-  // stacked pull requests. staging → production has the same inversion and is not
-  // covered.
-  const promotionLike =
-    Boolean(defaultBranch.data) && pr.head === defaultBranch.data;
+  // A promotion pull request (main → staging): the head carries work onward, so it
+  // stays permanently behind its base and "Update branch" would merge the base back
+  // INTO it, inverting the flow. Either the head IS this repository's default branch
+  // — a topology probe would false-positive on stacked pull requests, so that name
+  // comparison is the whole test — or the repo's rules name it a promotion branch,
+  // which is what covers staging → production. Which kind it is decides only the
+  // words the note uses; a configured head is no claim about the default branch.
+  const promotionKind: PromotionKind = (() => {
+    switch (true) {
+      case !!defaultBranch.data && pr.head === defaultBranch.data:
+        return "default";
+      case isPromotionBranch(rulesConfig, pr.head):
+        return "configured";
+      default:
+        return null;
+    }
+  })();
+  const promotionLike = promotionKind !== null;
 
   // AI title+description generation — shared by the Edit dialog's Generate button
   // and its mod+g chord. Verbatim the button's prior onClick body. `pr` is aliased
@@ -516,16 +534,16 @@ export function LocalPrView({
     // catch-up goes away. The gap does NOT close on merge — merging the head into
     // the base ADDS a commit the head lacks — so the copy says it needs no closing.
     const promotion =
-      promotionLike && behind.length > 0 ? (
+      promotionKind !== null && behind.length > 0 ? (
         <div className="flex items-start gap-1.5 text-muted-foreground">
           <InfoIcon className="mt-px size-3.5 shrink-0" />
           <span className="min-w-0">
             <span className="font-mono">{pr.base}</span> has {behind.length}{" "}
             commit{behind.length === 1 ? "" : "s"}{" "}
             <span className="font-mono">{pr.head}</span> doesn't.{" "}
-            <span className="font-mono">{pr.head}</span> is the repository's
-            default branch, so this gap is expected and doesn't need closing.
-            Updating the branch would merge{" "}
+            <span className="font-mono">{pr.head}</span>
+            {PROMOTION_REASON[promotionKind]}, so this gap is expected and
+            doesn't need closing. Updating the branch would merge{" "}
             <span className="font-mono">{pr.base}</span> back into{" "}
             <span className="font-mono">{pr.head}</span>.
           </span>
@@ -1034,20 +1052,27 @@ export function LocalPrView({
               <DisabledReasonButton
                 variant="outline"
                 size="sm"
-                // `promotionLike` reads false until `useDefaultBranch` resolves, so
-                // the button holds rather than deciding early. PENDING only (the
-                // query is never disabled): a FAILED read falls open to the ordinary
+                // `promotionLike` reads false until BOTH its inputs land — the
+                // default branch and the repo's promotion-branch rules — so the
+                // button holds rather than deciding early. PENDING only (neither
+                // query is ever disabled): a FAILED read falls open to the ordinary
                 // button instead of disabling forever behind a stale "checking…".
                 disabled={
                   updateBranchFrom.isPending ||
                   recovery.pending ||
-                  defaultBranch.isPending
+                  defaultBranch.isPending ||
+                  rulesSettling
                 }
-                reason={
-                  defaultBranch.isPending
-                    ? "Checking which branch is the default…"
-                    : undefined
-                }
+                reason={(() => {
+                  switch (true) {
+                    case defaultBranch.isPending:
+                      return "Checking which branch is the default…";
+                    case rulesSettling:
+                      return "Checking this repository's promotion branches…";
+                    default:
+                      return undefined;
+                  }
+                })()}
                 title={`Merge ${pr.base} into ${pr.head} to catch it up`}
                 onClick={() =>
                   updateBranchFrom.mutate(

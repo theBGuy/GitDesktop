@@ -971,9 +971,17 @@ pub async fn search_repos(query: &str, sort: &str, page: u32) -> AppResult<Forge
     })
 }
 
+/// Argv for forking `source` (an `owner/name` nwo) without touching the caller's
+/// working copy. `--clone=false` skips the non-TTY clone prompt; no `--remote` flag
+/// may ever join it — gh 2.88+ rejects `--remote`/`--remote-name` alongside a
+/// repository argument at parse time, before any network call (cli/cli#12375).
+fn fork_args(source: &str) -> Vec<&str> {
+    vec!["repo", "fork", source, "--clone=false"]
+}
+
 /// Fork a GitHub repo by `owner/name` into the caller's account. Idempotent: an
 /// existing fork makes `gh repo fork` exit 0 with an "already exists" note, which we
-/// treat as success. `--clone=false --remote=false` skips the non-TTY clone prompt.
+/// treat as success.
 /// Resolves the real fork nwo with PARENT VERIFICATION (GitHub renames on a
 /// name-collision — `login/name` may be an unrelated pre-existing repo, and the real
 /// fork is `login/name-1`), then polls the fork's commits until it's cloneable
@@ -982,12 +990,7 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     validate_owner(owner)?;
     validate_repo_name(name)?;
     let source = format!("{owner}/{name}");
-    run_gh(
-        None,
-        &["repo", "fork", &source, "--clone=false", "--remote=false"],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?;
+    run_gh(None, &fork_args(&source), GH_NETWORK_TIMEOUT).await?;
     // The fork owner is the signed-in user.
     let login = run_gh(None, &["api", "user", "-q", ".login"], GH_TIMEOUT)
         .await?
@@ -1208,6 +1211,14 @@ mod tests {
         assert!(!gh_stderr_is_404("HTTP 401: Bad credentials"));
         assert!(!gh_stderr_is_404("HTTP 500: Internal Server Error"));
         assert!(!gh_stderr_is_404(""));
+    }
+
+    #[test]
+    fn fork_args_pin_the_argv_without_any_remote_flag() {
+        assert_eq!(fork_args("o/r"), vec!["repo", "fork", "o/r", "--clone=false"]);
+        // gh 2.88+ makes --remote/--remote-name a parse error next to a repo
+        // argument, so no --remote flag may ever join this argv.
+        assert!(!fork_args("o/r").iter().any(|a| a.starts_with("--remote")));
     }
 
     #[test]

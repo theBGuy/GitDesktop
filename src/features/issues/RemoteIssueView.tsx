@@ -71,7 +71,9 @@ import {
   writeAccessReason,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRepoLens } from "@/lib/repo-lens/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
@@ -93,6 +95,13 @@ const LOCK_REASONS: [string, LockReason | null][] = [
   ["Spam", "spam"],
   ["Too heated", "too_heated"],
 ];
+
+/** What the close prompt's title adds per route: GitHub's "not planned" close is
+ *  a different act from a plain one, and only the title says so. */
+const CLOSE_TITLE_QUALIFIER = {
+  completed: "",
+  not_planned: " as not planned",
+} as const;
 
 /**
  * Full read+write view for a GitHub issue: header, description, threaded
@@ -192,7 +201,12 @@ export function RemoteIssueView({
   const transferIssue = useTransferIssue(repoPath, lens);
   const deleteIssue = useDeleteIssue(repoPath, lens);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const selectedIssue = useUiStore((s) => s.selectedIssue);
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
+  // Whether this view owns the current selection: the mounted view lags the
+  // selection through a switch, and only the selected one may answer the palette.
+  const isSelectedIssue =
+    selectedIssue?.kind === "remote" && selectedIssue.id === String(number);
   // Reactions are a shared control (GitLab awards emoji); the fetch is gated so
   // it never fires for a provider whose reactions aren't wired (Bitbucket).
   const canReact = canWrite || forgeFeatureReady(forge.data, "issueReactions");
@@ -252,6 +266,15 @@ export function RemoteIssueView({
   const onError = (e: unknown) => toastError(e);
 
   const issue = details.data;
+
+  // The composer sits below the thread AND the sidebar, so reaching it by Tab
+  // means crossing the whole rail — this is the keyboard route past it. Enabled
+  // only while the box is actually on screen.
+  useHotkeyAction(
+    "focus-comment",
+    () => composerRef.current?.focus(),
+    isSelectedIssue && canComment && !!issue && !details.isError,
+  );
 
   if (details.isPending) {
     return (
@@ -383,6 +406,16 @@ export function RemoteIssueView({
     // Captured before the await: posting clears the draft, and the error arm
     // below has to know a comment already went out.
     const withComment = draftRidesStateChange;
+    // Ahead of the riding draft: a cancelled confirm must leave the comment
+    // unposted.
+    const ok = await useConfirm.getState().ask({
+      title: `Close issue #${number}${CLOSE_TITLE_QUALIFIER[reason]}?`,
+      body: `Everyone watching is notified and the issue leaves the open list. Reopening puts it back, but the notification can't be unsent.${
+        withComment ? " Your draft posts as a comment first." : ""
+      }`,
+      confirmLabel: withComment ? "Close with comment" : "Close issue",
+    });
+    if (!ok) return;
     if (!(await postRidingDraft())) return;
     closeIssue.mutate(
       { number, reason },
@@ -522,12 +555,13 @@ export function RemoteIssueView({
     .filter((n) => !repoQuery || n.toLowerCase().includes(repoQuery))
     .slice(0, 6);
 
-  // The close/reopen arm ends the bottom bar behind a spacer — inside the
-  // composer's action row when commenting is allowed, alone in the bar when the
-  // provider permits state changes but not comments.
+  // The close/reopen arm LEADS the bottom bar in both permission states — inside
+  // the composer's action row (Comment is the primary and stays last), or alone
+  // in the bar when the provider permits state changes but not comments, so
+  // Close keeps the same corner either way. Both call sites supply their own
+  // spacer, so this fragment carries none.
   const stateActions = (
     <>
-      <span className="flex-1" />
       {canChangeState &&
         (isOpen ? (
           <>
@@ -994,46 +1028,6 @@ export function RemoteIssueView({
               )}
             </div>
           </ScrollArea>
-          {/* Comment is allowed after the issue closes too, matching GitHub. On
-              GitLab the composer + close/reopen show, but the GitHub-only
-              close-reason dropdown stays hidden (GitLab has no reasons);
-              Bitbucket has neither, so the whole bar hides. */}
-          {canComment ? (
-            <CommentComposer
-              ref={composerRef}
-              ariaLabel="Leave a comment"
-              placeholder="Leave a comment…"
-              value={compose.value}
-              onChange={compose.set}
-              onSubmit={submitComment}
-              submitLabel="Comment"
-              busy={busy}
-              reason={composerReason}
-              // Clear is site-rendered rather than the shared `onClear` one: the
-              // close/reopen arm follows it, and the shared Clear is `ml-auto`.
-              actions={
-                <>
-                  {compose.value.trim() && (
-                    <DisabledReasonButton
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy}
-                      reason={composerReason}
-                      onClick={() => compose.set("")}
-                      title="Discard this draft (e.g. a quote reply)"
-                    >
-                      Clear
-                    </DisabledReasonButton>
-                  )}
-                  {stateActions}
-                </>
-              }
-            />
-          ) : canChangeState ? (
-            <div className="space-y-2 border-t p-3">
-              <div className="flex items-center gap-2">{stateActions}</div>
-            </div>
-          ) : null}
         </div>
         <IssueSidebar
           // Remounts the rail per issue so its sections' drafts (the uncontrolled
@@ -1059,6 +1053,52 @@ export function RemoteIssueView({
           writeItemReason={writeItemReason}
         />
       </div>
+      {/* Below the thread AND the rail: the conversation is the widest thing on
+          this surface, so the box you write in spans the same width the other
+          conversation surfaces (which have no rail) already get.
+          Comment is allowed after the issue closes too, matching GitHub. On
+          GitLab the composer + close/reopen show, but the GitHub-only
+          close-reason dropdown stays hidden (GitLab has no reasons);
+          Bitbucket has neither, so the whole bar hides. */}
+      {canComment ? (
+        <CommentComposer
+          ref={composerRef}
+          ariaLabel="Leave a comment"
+          placeholder="Leave a comment…"
+          value={compose.value}
+          onChange={compose.set}
+          onSubmit={submitComment}
+          submitLabel="Comment"
+          busy={busy}
+          reason={composerReason}
+          // Close/reopen lead, Comment ends the row where a form's submit is
+          // looked for. Clear is site-rendered rather than the shared `onClear`
+          // one so it sits just left of Comment: the shared Clear is `ml-auto`,
+          // which would put it past the submit button.
+          leadingActions={
+            <>
+              {stateActions}
+              <span className="flex-1" />
+              {compose.value.trim() && (
+                <DisabledReasonButton
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy}
+                  reason={composerReason}
+                  onClick={() => compose.set("")}
+                  title="Discard this draft (e.g. a quote reply)"
+                >
+                  Clear
+                </DisabledReasonButton>
+              )}
+            </>
+          }
+        />
+      ) : canChangeState ? (
+        <div className="space-y-2 border-t p-3">
+          <div className="flex items-center gap-2">{stateActions}</div>
+        </div>
+      ) : null}
 
       <EditTitleBodyDialog
         form={edit.form}

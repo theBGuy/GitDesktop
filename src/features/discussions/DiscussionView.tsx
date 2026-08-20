@@ -72,6 +72,7 @@ import {
 } from "@/lib/git/queries";
 import type { PrThreadOut } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
@@ -456,6 +457,16 @@ export function DiscussionView({
     // Captured before the await: posting clears the draft, and the error arm
     // below has to know a comment already went out.
     const withComment = draftRidesStateChange;
+    // Ahead of the riding draft: a cancelled confirm must leave the comment
+    // unposted.
+    const ok = await useConfirm.getState().ask({
+      title: `Close discussion #${d.number}?`,
+      body: `Everyone watching is notified and the discussion leaves the open list. Reopening puts it back, but the notification can't be unsent.${
+        withComment ? " Your draft posts as a comment first." : ""
+      }`,
+      confirmLabel: withComment ? "Close with comment" : "Close discussion",
+    });
+    if (!ok) return;
     if (!(await postRidingDraft(d.id))) return;
     closeDiscussion.mutate(
       { discussionId: d.id, reason },

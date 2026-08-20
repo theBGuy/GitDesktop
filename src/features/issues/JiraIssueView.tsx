@@ -48,6 +48,7 @@ import { CommentEditor } from "@/features/conversations/CommentEditor";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { JiraIssueSidebar } from "@/features/issues/JiraIssueSidebar";
 import type { ForgeUserRef } from "@/lib/git/types";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { formatHmDelta, isValidJiraDuration } from "@/lib/jira/duration";
 import {
   useJiraAssign,
@@ -1488,6 +1489,7 @@ export function JiraIssueView({
 }) {
   const link = useJiraLink(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const selectedIssue = useUiStore((s) => s.selectedIssue);
   const details = useJiraIssue(repoPath, link.data, issueKey);
   // Per-project write permissions gate every affordance below: permitted →
   // rendered, not-permitted (or a failed probe → every flag `?? false`) →
@@ -1517,6 +1519,19 @@ export function JiraIssueView({
   // remounting its own per-issue drafts.
   const issueIdentity = `${repoPath}#${issueKey}`;
   const compose = useKeyedEntityState(issueIdentity, "");
+  // The composer sits below the thread AND the sidebar, so reaching it by Tab
+  // means crossing the whole rail — this is the keyboard route past it. Enabled
+  // only while the box is actually on screen, and only for the view that owns
+  // the selection (the mounted one lags it through a switch).
+  useHotkeyAction(
+    "focus-comment",
+    () => composerRef.current?.focus(),
+    selectedIssue?.kind === "jira" &&
+      selectedIssue.id === issueKey &&
+      canComment &&
+      !!details.data &&
+      !details.isError,
+  );
 
   // The link resolved to nothing (unlinked, or unlinked while this view was
   // open): the issue query is disabled, so it would otherwise sit on a pending
@@ -1747,24 +1762,6 @@ export function JiraIssueView({
               )}
             </div>
           </ScrollArea>
-
-          {canComment && (
-            <CommentComposer
-              ref={composerRef}
-              ariaLabel="Leave a comment"
-              placeholder="Leave a comment…"
-              value={compose.value}
-              onChange={compose.set}
-              onSubmit={submitComment}
-              onClear={() => compose.set("")}
-              submitLabel="Comment"
-              // A placeholder issue is the previously selected one, so submitting
-              // would comment on it; typing stays live through the window.
-              busy={comment.isPending || detailsStale}
-              reason={composerReason}
-              disabled={comment.isPending}
-            />
-          )}
         </div>
 
         <JiraIssueSidebar
@@ -1789,6 +1786,26 @@ export function JiraIssueView({
           stale={detailsStale}
         />
       </div>
+
+      {/* Below the thread AND the rail: the conversation is the widest thing on
+          this surface, so the box you write in spans the same width. */}
+      {canComment && (
+        <CommentComposer
+          ref={composerRef}
+          ariaLabel="Leave a comment"
+          placeholder="Leave a comment…"
+          value={compose.value}
+          onChange={compose.set}
+          onSubmit={submitComment}
+          onClear={() => compose.set("")}
+          submitLabel="Comment"
+          // A placeholder issue is the previously selected one, so submitting
+          // would comment on it; typing stays live through the window.
+          busy={comment.isPending || detailsStale}
+          reason={composerReason}
+          disabled={comment.isPending}
+        />
+      )}
     </div>
   );
 }

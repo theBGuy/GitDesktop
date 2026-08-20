@@ -32,6 +32,28 @@ fn map_issues_disabled(err: AppError) -> AppError {
     }
 }
 
+/// Whether a gh failure is the "this gh doesn't know that `--json` field" error.
+/// gh validates the field list against its own build before calling the API and
+/// prints `Unknown JSON field: "issueType"` (measured on gh 2.94.0); match the
+/// stable substring case-insensitively like the disabled-issues signature.
+fn is_unknown_json_field(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("unknown json field")
+}
+
+/// Remaps that failure to the version floor it really means, leaving every other
+/// error untouched: [`ISSUE_VIEW_FIELDS`] asks for `issueType`, which gh's field
+/// list gained at v2.94.0, so an older gh rejects the whole read with a dump.
+fn map_gh_too_old(err: AppError) -> AppError {
+    match &err {
+        AppError::Gh(msg) if is_unknown_json_field(msg) => AppError::Gh(
+            "Opening issues needs GitHub CLI 2.94 or newer — this gh doesn't know the fields \
+             GitDesktop requests. Update gh, then retry."
+                .into(),
+        ),
+        _ => err,
+    }
+}
+
 /// An org-defined issue type (Bug/Feature/Task/…). `color` is a GitHub color
 /// NAME (GRAY/BLUE/GREEN/…), mapped to a swatch on the frontend.
 #[derive(Serialize, Deserialize, Clone)]
@@ -286,8 +308,9 @@ pub async fn gh_issue_view(
         run_gh(Some(&repo_path), &view_args, GH_TIMEOUT),
         run_gh(Some(&repo_path), &lock_args, GH_TIMEOUT),
     );
-    // Same disabled-issues remap as `gh_issue_list`.
-    let out = view_res.map_err(map_issues_disabled)?;
+    // Same disabled-issues remap as `gh_issue_list`, plus the version-floor remap:
+    // this read requests fields older gh builds don't have.
+    let out = view_res.map_err(map_issues_disabled).map_err(map_gh_too_old)?;
     let raw: RawIssue = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse gh issue view: {e}")))?;
     // Best-effort: a failed lock lookup just leaves the issue shown as unlocked.
@@ -1343,7 +1366,8 @@ pub fn read_issue_templates(repo_path: String) -> AppResult<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_issues_disabled;
+    use super::{is_issues_disabled, map_gh_too_old};
+    use crate::error::AppError;
 
     #[test]
     fn detects_the_disabled_issues_signature() {
@@ -1363,6 +1387,41 @@ mod tests {
         ));
         assert!(!is_issues_disabled(
             "gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable"
+        ));
+    }
+
+    #[test]
+    fn maps_an_unknown_field_failure_to_the_gh_version_floor() {
+        // gh's own output shape: the rejected field, then its known field list.
+        let err = map_gh_too_old(AppError::Gh(
+            "Unknown JSON field: \"issueType\"\nAvailable fields:\n  assignees\n  author".into(),
+        ));
+        let AppError::Gh(msg) = err else {
+            panic!("expected the Gh variant");
+        };
+        assert_eq!(
+            msg,
+            "Opening issues needs GitHub CLI 2.94 or newer — this gh doesn't know the fields \
+             GitDesktop requests. Update gh, then retry."
+        );
+    }
+
+    #[test]
+    fn leaves_unrelated_view_failures_unchanged() {
+        let err = map_gh_too_old(AppError::Gh(
+            "GraphQL: Could not resolve to an Issue with the number 999.".into(),
+        ));
+        let AppError::Gh(msg) = err else {
+            panic!("expected the Gh variant");
+        };
+        assert_eq!(
+            msg,
+            "GraphQL: Could not resolve to an Issue with the number 999."
+        );
+        // Errors already classified upstream pass through untouched.
+        assert!(matches!(
+            map_gh_too_old(AppError::IssuesDisabled),
+            AppError::IssuesDisabled
         ));
     }
 }

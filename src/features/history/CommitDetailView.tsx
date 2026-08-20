@@ -44,8 +44,14 @@ import {
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useConfirm } from "@/lib/stores/confirm";
 import { toastError } from "@/lib/toast";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
+import {
+  checkoutCommitConfirm,
+  cherryPickCommitConfirm,
+  revertCommitConfirm,
+} from "./commit-confirms";
 import { FileRowActions } from "./FileRowActions";
 import { useAmendWithConfirm } from "./useAmendCommit";
 
@@ -231,6 +237,39 @@ export function CommitDetailView({
     }
   }
 
+  // Each of these asks before it runs, in the same words as the History list's
+  // menu. All three act on the `hash` PROP for the same reason `copyHash` does.
+  async function doCheckoutCommit() {
+    if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    checkoutCommit.mutate(hash, { onError });
+  }
+
+  async function doRevertCommit() {
+    if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    revertCommit.mutate(hash, { onError });
+  }
+
+  // No branch name: this view doesn't subscribe to repo status, and doing so for
+  // one prompt's wording would re-render the diff pane on every status poll.
+  async function doCherryPick() {
+    const ok = await useConfirm
+      .getState()
+      .ask(cherryPickCommitConfirm(hash, null));
+    if (!ok) return;
+    cherryPick.mutate(hash, {
+      onSuccess: (applied) => {
+        if (applied) {
+          toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
+        } else {
+          toast.info(
+            "Nothing to cherry-pick — these changes are already on this branch.",
+          );
+        }
+      },
+      onError,
+    });
+  }
+
   const fileList = files.data;
   // The comments pane's file jumps carry a FORGE-derived path (GitHub's patch),
   // but the sidebar + effectivePath guard come from LOCAL `useCommitFiles`. On a
@@ -328,32 +367,13 @@ export function CommitDetailView({
               >
                 Amend commit…
               </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => checkoutCommit.mutate(hash, { onError })}
-              >
+              <DropdownMenuItem onClick={doCheckoutCommit}>
                 Checkout commit
               </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => revertCommit.mutate(hash, { onError })}
-              >
+              <DropdownMenuItem onClick={doRevertCommit}>
                 Revert changes in commit
               </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() =>
-                  cherryPick.mutate(hash, {
-                    onSuccess: (applied) => {
-                      if (applied) {
-                        toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
-                      } else {
-                        toast.info(
-                          "Nothing to cherry-pick — these changes are already on this branch.",
-                        );
-                      }
-                    },
-                    onError,
-                  })
-                }
-              >
+              <DropdownMenuItem onClick={doCherryPick}>
                 Cherry-pick commit
               </DropdownMenuItem>
               <DropdownMenuSeparator />

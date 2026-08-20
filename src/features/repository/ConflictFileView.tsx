@@ -23,10 +23,36 @@ import {
   useReviewConfigured,
   useSettings,
 } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
 
 const baseName = (path: string) => path.split("/").pop() || path;
+
+/** The whole-file sides, worded as the header buttons word them. */
+const ACCEPT_ALL_COPY = {
+  ours: { side: "current", other: "incoming" },
+  theirs: { side: "incoming", other: "current" },
+} as const;
+
+/** What taking a whole side actually does, given which side (if either) has no
+ *  version at this path. */
+type AcceptAllArm = "content" | "takesDeletion" | "keepsFile";
+
+/** One body per outcome: a modify/delete conflict doesn't "replace" anything —
+ *  the backend runs `git rm` for a removing side and re-checks the file out
+ *  whole for a surviving one. */
+const ACCEPT_ALL_BODY: Record<
+  AcceptAllArm,
+  (name: string, side: string, other: string) => string
+> = {
+  content: (name, side, other) =>
+    `Replaces ${name} with the whole ${side} version, including any conflict regions you already resolved by hand. The ${other} changes to this file are discarded.`,
+  takesDeletion: (name, side, other) =>
+    `The ${side} side removed ${name}, so this deletes the file from your working tree and index. The ${other} side's changes to it are discarded.`,
+  keepsFile: (name, side, other) =>
+    `Keeps ${name} whole as the ${side} side left it, replacing what's in your working tree now. The ${other} side removed the file, and that removal is discarded.`,
+};
 
 /** Which side has no version at this path, when exactly one of them does — the
  *  modify/delete shape. `null` for a content conflict (both sides present) and
@@ -174,7 +200,31 @@ export function ConflictFileView({
     );
   }
 
-  function acceptAll(side: "ours" | "theirs") {
+  async function acceptAll(side: "ours" | "theirs") {
+    // Nothing records which regions were resolved by hand, so every arm warns
+    // unconditionally: taking a side re-checks the file out from the index and
+    // any manual work in it goes with the other side. An unreadable file
+    // (binary, oversized) has no sides to classify and takes the content arm.
+    const copy = ACCEPT_ALL_COPY[side];
+    const name = baseName(path);
+    const deleted = file.data ? deletedSide(file.data) : null;
+    const arm: AcceptAllArm = (() => {
+      switch (true) {
+        case deleted === null:
+          return "content";
+        case deleted === side:
+          return "takesDeletion";
+        default:
+          return "keepsFile";
+      }
+    })();
+    const ok = await useConfirm.getState().ask({
+      title: `Accept all ${copy.side} in ${name}?`,
+      body: ACCEPT_ALL_BODY[arm](name, copy.side, copy.other),
+      confirmLabel: `Accept all ${copy.side}`,
+      confirmVariant: "destructive",
+    });
+    if (!ok) return;
     checkoutSide.mutate(
       { path, side },
       {

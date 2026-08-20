@@ -31,8 +31,8 @@ use crate::github::pr::{
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
 use crate::state::AppState;
 
-/// GitLab via the `glab` CLI. Carries the repo's host (gitlab.com today; a
-/// self-managed host list arrives with the Settings → Accounts work).
+/// GitLab via the `glab` CLI. Carries the repo's resolved host — gitlab.com or any
+/// self-managed host glab is signed in to (detected via `forge::glab::known_hosts`).
 pub struct GitLabForge {
     host: String,
 }
