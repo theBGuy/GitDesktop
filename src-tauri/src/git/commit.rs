@@ -247,8 +247,8 @@ pub(crate) async fn git_commit_core(
     // The widest of the close routes, and the loosest: this is also the MCP commit
     // tool's choke point, and ANY commit that clears a `CHERRY_PICK_HEAD` fires it —
     // so a plain unjournaled `cherry-pick` resolved here closes whatever paused
-    // record the repo still holds, which is only the right one while no stale record
-    // predates it.
+    // record the repo still holds. Wrong only when a stale record predates it, and
+    // only until a `git_oplog_check` that finds no pick in progress retires it.
     if was_cherry_picking && !crate::git::ops::cherry_pick_marker_present(&repo_path) {
         crate::oplog::close_paused_pick(&repo_path, crate::oplog::PausedOutcome::Continued).await;
     }

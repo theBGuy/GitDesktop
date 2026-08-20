@@ -2,6 +2,17 @@ import { useUiStore } from "@/lib/stores/ui";
 import { useForgeStatus } from "./queries";
 
 /**
+ * Whether a host is safe to interpolate into a copyable `gh`/`glab auth …` command —
+ * the same ASCII grammar `forge_reconnect` validates backend-side (alnum, `.`, `-`).
+ * `remote_host` only splits a remote URL on `/` and `:`, so a crafted remote can carry
+ * `;`, `$`, or a space into the host; the executed reconnect flow re-validates, but the
+ * copy-paste command string is guarded here so it can never hand the user shell syntax.
+ */
+export function isReconnectHostSafe(host: string): boolean {
+  return /^[a-zA-Z0-9.-]+$/.test(host);
+}
+
+/**
  * The hosting host of the open repo — "github.com" or an Enterprise server like
  * "github.acme.com" — defaulting to github.com until it's known. Lets avatar
  * URLs, profile links, and gh-command hints resolve on the right host without

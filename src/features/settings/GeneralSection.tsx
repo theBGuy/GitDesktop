@@ -50,8 +50,8 @@ export const GeneralSection = withForm({
             Hides the AI commit-message and pull-request helpers, the AI review
             panel, the AI-related settings sections, and finished AI activity in
             the dock and notification inbox, mutes AI desktop notifications, and
-            pauses your automations. Your provider, API keys, and rules are
-            kept — automations run again once you turn AI features back on.
+            pauses your automations. Your provider, API keys, and rules are kept
+            — automations run again once you turn AI features back on.
           </p>
           {automationsPaused && (
             <p

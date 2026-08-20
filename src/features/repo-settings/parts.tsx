@@ -5,7 +5,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { highlightJson } from "@/features/diff/shiki-highlighter";
 import { copyText } from "@/lib/clipboard";
-import { useActiveGhHost } from "@/lib/git/host";
+import { isReconnectHostSafe, useActiveGhHost } from "@/lib/git/host";
 import { useGhScopes } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
@@ -91,6 +91,9 @@ function ScopeErrorHint({ scope }: { scope: string }) {
   const openReconnect = useUiStore((s) => s.openReconnect);
   const canRefresh =
     scopes.data?.classic === true && !scopes.data.scopes.includes(scope);
+  // A host outside the reconnect grammar never reaches a copyable command string
+  // (shell-syntax injection via a crafted remote) — the generic error card stands.
+  if (!isReconnectHostSafe(host)) return null;
   return (
     <div className="mt-2 text-muted-foreground">
       <p>

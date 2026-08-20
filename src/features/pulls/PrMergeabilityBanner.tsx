@@ -74,7 +74,8 @@ const GITLAB_BLOCKED_REASONS: Record<string, string> = {
   requested_changes: "a reviewer requested changes",
   need_rebase: "it needs a rebase first",
   merge_time: "it can't merge before its scheduled time",
-  jira_association_missing: "its title or description must reference a Jira issue",
+  jira_association_missing:
+    "its title or description must reference a Jira issue",
   security_policy_violations: "security policies must be satisfied first",
   locked_paths: "paths locked by other users must be unlocked first",
   locked_lfs_files: "locked LFS files must be unlocked first",

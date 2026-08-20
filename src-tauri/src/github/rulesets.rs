@@ -162,10 +162,12 @@ fn required_approving_reviews(rules: &Value) -> Option<u32> {
         .filter_map(|rule| {
             rule.pointer("/parameters/required_approving_review_count")
                 .and_then(Value::as_u64)
+                // Out-of-u32-range counts DROP rather than truncate — `as u32` would
+                // turn a nonsense 2^32+1 into a fabricated "1 approving review".
+                .and_then(|n| u32::try_from(n).ok())
         })
-        .max()
         .filter(|n| *n > 0)
-        .map(|n| n as u32)
+        .max()
 }
 
 /// What the base branch's active rules demand of a pull request, for the blocked-merge
@@ -292,6 +294,17 @@ mod tests {
             ),
             Some(3)
         );
+        // The u32 conversion runs per-value, BEFORE the max: an out-of-range nonsense
+        // count drops while its in-range sibling still names the requirement.
+        assert_eq!(
+            approvals(
+                r#"[
+                    {"type":"pull_request","parameters":{"required_approving_review_count":4294967297}},
+                    {"type":"pull_request","parameters":{"required_approving_review_count":3}}
+                ]"#
+            ),
+            Some(3)
+        );
         // Absent rule, absent field, a zero count, and shapes the endpoint never
         // promised all mean "no approvals to name" — never a fabricated 0.
         for raw in [
@@ -301,6 +314,8 @@ mod tests {
             r#"[{"type":"pull_request","parameters":{}}]"#,
             r#"[{"type":"pull_request","parameters":{"required_approving_review_count":0}}]"#,
             r#"[{"type":"pull_request","parameters":{"required_approving_review_count":"two"}}]"#,
+            // Past u32: dropped, never truncated (`as` would fabricate "1" from 2^32+1).
+            r#"[{"type":"pull_request","parameters":{"required_approving_review_count":4294967297}}]"#,
             r#"{"message":"Not Found"}"#,
         ] {
             assert_eq!(approvals(raw), None, "raw: {raw}");

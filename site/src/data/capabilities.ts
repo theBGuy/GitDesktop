@@ -247,7 +247,7 @@ export const capabilities: Capability[] = [
   {
     group: "Forges & trackers",
     label:
-      "Sign in & reconnect in-app — session-expired detection & token-expiry warnings",
+      "Sign in & reconnect in-app — session-expired detection & token-expiry warnings, plus scope hints that reconnect with the needed scope",
   },
   {
     group: "Forges & trackers",

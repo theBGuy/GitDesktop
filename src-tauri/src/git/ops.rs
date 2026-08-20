@@ -271,9 +271,10 @@ pub(crate) async fn op_abort(state: &AppState, repo_path: &str, op: &str) -> App
     }
     // Closes the stop arm's paused record as the user's own abandonment. The verdict
     // is only right for the record this abort actually ended: a pick concluded
-    // outside the app leaves a stale paused record that this call would close as
-    // "aborted by user" instead — the accepted cost of keying on the newest paused
-    // record rather than an op id.
+    // outside the app leaves a stale paused record until the next `git_oplog_check`
+    // that finds no pick in progress retires it via `conclude_stale_pauses` — until
+    // then, this call would close it as "aborted by user" (the accepted cost of
+    // keying on the newest paused record rather than an op id).
     if op == "cherry-pick" {
         crate::oplog::close_paused_pick(repo_path, crate::oplog::PausedOutcome::Aborted).await;
     }
@@ -348,8 +349,8 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
     // A cherry-pick that reaches here is over, so a `cherry_pick_onto` record the
     // stop arm left "paused" is closed as done. This is one of the two in-app routes
     // that end a pick — the commit box is the other, and closes it too. A pick
-    // concluded from a terminal leaves its record paused until a later in-app
-    // continue or abort of any pick closes it.
+    // concluded from a terminal keeps its record paused until the next
+    // `git_oplog_check` that finds no pick in progress retires it.
     if op == "cherry-pick" {
         crate::oplog::close_paused_pick(repo_path, crate::oplog::PausedOutcome::Continued).await;
     }

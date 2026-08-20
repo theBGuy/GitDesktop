@@ -891,7 +891,8 @@ request, counting one as outstanding when it has failed, is still running, or ha
 never reported. Four are named, then *and N more*. Where the rules also require
 approving reviews, the count rides along: **The rules also require 2 approving
 reviews.** Wherever the specific requirements can't be named, the line falls back to
-**Merge is blocked by the base branch's protection rules.**
+**Merge is blocked by the base branch's protection rules.** When only the approval
+count is known it reads **…protection rules, which require 2 approving reviews.**
 
 On **GitLab** the project's own answer supplies the reason, in the app's words:
 **Merge is blocked — needs approval before it can merge**, **the pipeline must pass

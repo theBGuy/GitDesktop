@@ -1,7 +1,7 @@
 import { CopyIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/clipboard";
-import { useActiveGhHost } from "@/lib/git/host";
+import { isReconnectHostSafe, useActiveGhHost } from "@/lib/git/host";
 import { useGhScopes } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
 
@@ -23,6 +23,11 @@ export function ScopeRefreshHint({
   const scopes = useGhScopes(host);
   const openReconnect = useUiStore((s) => s.openReconnect);
   if (!scopes.data?.classic || scopes.data.scopes.includes(scope)) return null;
+  // A host outside the reconnect grammar never reaches a copyable command string
+  // (shell-syntax injection via a crafted remote) — only the command block is
+  // suppressed: the explanation and the button stay, and the button's flow
+  // re-validates the host backend-side, failing loudly rather than silently.
+  const hostSafe = isReconnectHostSafe(host);
   // Spelled as the reconnect flow spawns it (`--hostname`, one `-s` per scope), so
   // the copied command and the button do the same thing.
   const cmd = `gh auth refresh --hostname ${host} -s ${scope}`;
@@ -48,20 +53,26 @@ export function ScopeRefreshHint({
           Reconnect GitHub…
         </Button>
       </div>
-      <p className="mt-2 text-muted-foreground">Or run this, then reopen:</p>
-      <div className="mt-1.5 flex items-center gap-2">
-        <code className="min-w-0 flex-1 truncate rounded bg-muted px-1.5 py-1 font-mono">
-          {cmd}
-        </code>
-        <button
-          type="button"
-          className="shrink-0 cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
-          title="Copy command"
-          onClick={() => copyText(cmd, "Command copied")}
-        >
-          <CopyIcon className="size-3.5" />
-        </button>
-      </div>
+      {hostSafe && (
+        <>
+          <p className="mt-2 text-muted-foreground">
+            Or run this, then reopen:
+          </p>
+          <div className="mt-1.5 flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded bg-muted px-1.5 py-1 font-mono">
+              {cmd}
+            </code>
+            <button
+              type="button"
+              className="shrink-0 cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
+              title="Copy command"
+              onClick={() => copyText(cmd, "Command copied")}
+            >
+              <CopyIcon className="size-3.5" />
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

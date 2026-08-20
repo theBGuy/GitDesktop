@@ -16,6 +16,7 @@ import {
   forgeReconnectCancel,
   openInTerminal,
 } from "@/lib/git/api";
+import { isReconnectHostSafe } from "@/lib/git/host";
 import { useInvalidateAfterReconnect } from "@/lib/git/queries";
 import { providerLabel, type ReconnectEvent } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
@@ -103,8 +104,11 @@ function ReconnectFlow({
   // no `refresh` subcommand — login re-runs OAuth for it in both modes).
   // gh refreshes the host's ACTIVE account, so on a multi-account host the scopes land
   // wherever `gh auth switch` last pointed.
-  const fallbackCommand =
-    isGitHub && mode === "refresh"
+  // Null when the host fails the reconnect grammar, so a crafted remote host can't
+  // put shell syntax into the copyable command (the in-app flow re-validates anyway).
+  const fallbackCommand = !isReconnectHostSafe(host)
+    ? null
+    : isGitHub && mode === "refresh"
       ? `gh auth refresh --hostname ${host}${(scopes ?? []).map((s) => ` -s ${s}`).join("")}`
       : `${isGitHub ? "gh" : "glab"} auth login --hostname ${host} --web`;
 
@@ -299,18 +303,20 @@ function ReconnectFlow({
               </Button>
             )}
           </div>
-          <p className="text-muted-foreground">
-            Or run{" "}
-            <button
-              type="button"
-              className="cursor-pointer font-mono underline underline-offset-2"
-              onClick={() => copyText(fallbackCommand, "Command copied")}
-              title="Copy command"
-            >
-              {fallbackCommand}
-            </button>{" "}
-            in a terminal.
-          </p>
+          {fallbackCommand && (
+            <p className="text-muted-foreground">
+              Or run{" "}
+              <button
+                type="button"
+                className="cursor-pointer font-mono underline underline-offset-2"
+                onClick={() => copyText(fallbackCommand, "Command copied")}
+                title="Copy command"
+              >
+                {fallbackCommand}
+              </button>{" "}
+              in a terminal.
+            </p>
+          )}
         </div>
       )}
     </DialogContent>

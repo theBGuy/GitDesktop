@@ -469,7 +469,6 @@ fn reconcile(
     let results: Vec<OpLogEntry> = if pending_idx.is_empty() {
         Vec::new()
     } else {
-        changed = true;
         // The genuinely-interrupted op, if any: the NEWEST pending, but only when the
         // repo isn't back in a clean, on-home state (see `is_interrupted`). git permits
         // only one such op at a time, so at most one entry is genuinely interrupted;
@@ -490,6 +489,7 @@ fn reconcile(
             if let Some(obj) = list[idx].as_object_mut() {
                 obj.insert("status".to_string(), Value::String("done".to_string()));
                 obj.insert("finishedAt".to_string(), Value::String(now.clone()));
+                changed = true;
             }
         }
         keep_pending
@@ -583,8 +583,8 @@ pub(crate) async fn pause(repo: &str, id: &Option<String>) {
 ///
 /// The handle is the newest paused record, not the specific pick, so it can only be
 /// as accurate as the store is current: [`conclude_stale_pauses`] retires the records
-/// of picks ended outside the app on the next [`git_oplog_check`], which is what keeps
-/// one of those from standing in as this op's handle.
+/// of picks ended outside the app on the next [`git_oplog_check`] that finds no pick
+/// in progress, which is what keeps one from standing in as this op's handle.
 pub(crate) async fn close_paused_pick(repo: &str, outcome: PausedOutcome) {
     if let Err(e) = close_newest_paused_pick(repo, &outcome, now_iso()) {
         eprintln!("gitdesktop: opslog close failed (op unaffected): {e}");
