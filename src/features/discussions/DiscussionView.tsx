@@ -72,6 +72,7 @@ import {
 } from "@/lib/git/queries";
 import type { PrThreadOut } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
@@ -220,6 +221,7 @@ export function DiscussionView({
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   const selectDiscussion = useUiStore((s) => s.selectDiscussion);
+  const selectedDiscussion = useUiStore((s) => s.selectedDiscussion);
 
   const composerRef = useRef<MarkdownEditorHandle>(null);
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
@@ -249,6 +251,15 @@ export function DiscussionView({
 
   const onError = (e: unknown) => toastError(e);
   const d = details.data;
+
+  // The palette's route to the comment box, so reaching it never depends on
+  // tabbing the whole thread. Only the view that owns the selection answers —
+  // the mounted one lags it through a switch.
+  useHotkeyAction(
+    "focus-comment",
+    () => composerRef.current?.focus(),
+    selectedDiscussion?.number === number && !!d && !details.isError,
+  );
 
   if (details.isPending) {
     return (

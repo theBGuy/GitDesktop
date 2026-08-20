@@ -662,7 +662,9 @@ priority, labels, and original/remaining estimates.
 
 Reconnect **GitHub** (`gh`'s device-code flow) and **GitLab**
 (`glab --web`) right from the not-signed-in panels, Settings → Accounts, or
-the palette; no dropping to a terminal (though it stays a fallback).
+the palette; no dropping to a terminal for github.com and gitlab.com (a
+self-managed GitLab host needs `glab auth login --hostname …` once, in a
+terminal).
 GitDesktop tells an **expired-or-revoked session** apart from
 never-signed-in and network blips, badges the affected account with
 one-click **Reconnect**, and **warns before a token lapses**: GitLab and

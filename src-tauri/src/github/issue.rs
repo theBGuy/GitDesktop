@@ -43,6 +43,9 @@ fn is_unknown_json_field(stderr: &str) -> bool {
 /// Remaps that failure to the version floor it really means, leaving every other
 /// error untouched: [`ISSUE_VIEW_FIELDS`] asks for `issueType`, which gh's field
 /// list gained at v2.94.0, so an older gh rejects the whole read with a dump.
+/// The matcher fires on ANY unknown `--json` field while the message names the
+/// 2.94 floor — the same floor `CLI_FLOORS` spells in src/lib/system/health.ts;
+/// a bump moves both strings.
 fn map_gh_too_old(err: AppError) -> AppError {
     match &err {
         AppError::Gh(msg) if is_unknown_json_field(msg) => AppError::Gh(

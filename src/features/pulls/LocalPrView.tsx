@@ -67,6 +67,7 @@ import {
   useRepoStatus,
   useUpdateBranchFrom,
 } from "@/lib/git/queries";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
@@ -292,6 +293,19 @@ export function LocalPrView({
     pr?.status === "open",
   );
   const defaultBranch = useDefaultBranch(repoPath);
+
+  // The palette's route to the comment box. Every term the composer itself is
+  // gated on rides here too: a paused merge takes the whole view over, and the
+  // other sub-tabs have no composer.
+  useHotkeyAction(
+    "focus-comment",
+    () => composerRef.current?.focus(),
+    selectedPr?.kind === "local" &&
+      selectedPr.id === id &&
+      section === "conversation" &&
+      !!pr &&
+      !pr.pendingMerge?.worktreePath,
+  );
 
   if (!pr) {
     return (

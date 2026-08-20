@@ -2285,8 +2285,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   terminal the detection doesn't know). These power the "Open in…" actions throughout the app.
 - **About** — app, OS, and component versions, a **health check** for your installed tools
   (Git, the GitHub / GitLab CLIs{{ai}}, and the Claude Code / Codex / Copilot / opencode
-  agents{{/ai}}) that flags anything missing, or installed but older than a feature needs,
-  with a download link either way, and the current window position.
+  agents{{/ai}}) that flags anything missing (and warns when Git or the GitHub CLI is
+  older than a feature needs), with a download link either way, and the current window
+  position.
 
 ## Staying up to date
 

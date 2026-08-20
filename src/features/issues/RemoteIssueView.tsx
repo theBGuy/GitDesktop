@@ -558,8 +558,8 @@ export function RemoteIssueView({
   // The close/reopen arm LEADS the bottom bar in both permission states — inside
   // the composer's action row (Comment is the primary and stays last), or alone
   // in the bar when the provider permits state changes but not comments, so
-  // Close keeps the same corner either way. Both call sites supply their own
-  // spacer, so this fragment carries none.
+  // Close keeps the same corner either way. The composer call site supplies its
+  // own spacer; the state-only bar left-aligns, so this fragment carries none.
   const stateActions = (
     <>
       {canChangeState &&

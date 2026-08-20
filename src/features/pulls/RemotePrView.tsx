@@ -1884,6 +1884,21 @@ export function RemotePrView({
     if (revealReviewId !== null) setRevealReviewId(null);
   }, [revealReviewId]);
 
+  // The palette's route to the comment box. Every term the composer itself is
+  // gated on rides here too, so the action is offered only where there is a box
+  // to focus: a resolve takes the whole view over, and the other sub-tabs have
+  // no composer.
+  useHotkeyAction(
+    "focus-comment",
+    () => composerRef.current?.focus(),
+    isSelectedPr &&
+      canComment &&
+      section === "conversation" &&
+      !resolve &&
+      !!pr &&
+      !details.isError,
+  );
+
   if (details.isPending) {
     return (
       <div className="space-y-3 p-4">

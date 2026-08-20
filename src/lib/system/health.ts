@@ -30,7 +30,7 @@ export interface SystemHealth {
 const VERSION_TOKEN = /\d+(?:\.\d+)+/;
 
 /** A CLI's version: the numbers that get compared, plus the token as printed. */
-export interface CliVersion {
+interface CliVersion {
   major: number;
   minor: number;
   /** The matched token ("2.45.1"), shown back to the user verbatim. */
@@ -41,7 +41,7 @@ export interface CliVersion {
  *  "git version 2.45.1.windows.1", "git version 2.39.5 (Apple Git-154)",
  *  "gh version 2.94.0 (2026-06-10)", "2.43.0-1ubuntu1.12". A line carrying no
  *  dotted number is null — "unknown", never "too old", so callers fail open. */
-export function parseCliVersion(line: string | null): CliVersion | null {
+function parseCliVersion(line: string | null): CliVersion | null {
   const token = line?.match(VERSION_TOKEN)?.[0];
   if (!token) return null;
   const [major = 0, minor = 0] = token.split(".").map(Number);
@@ -68,7 +68,8 @@ interface CliFloor {
  *  gains `issueType` at v2.94.0 and lacks it through v2.93.0 (cli/cli tags);
  *  git gained `merge-tree --write-tree` in 2.38 and the `rev-parse
  *  --path-format` behind the worktree-stable repo identity in 2.31 (git
- *  release notes). */
+ *  release notes). The gh floor is spelled again in `map_gh_too_old`'s message
+ *  (src-tauri/src/github/issue.rs) — a bump moves both strings. */
 const CLI_FLOORS: Record<string, CliFloor> = {
   gh: {
     major: 2,

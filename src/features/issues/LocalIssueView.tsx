@@ -45,6 +45,7 @@ import { useLocalConversation } from "@/features/conversations/useLocalConversat
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { copyText } from "@/lib/clipboard";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   useDeleteLocalIssue,
   useLocalIssues,
@@ -69,6 +70,7 @@ export function LocalIssueView({
   const update = useUpdateLocalIssue(repoPath);
   const del = useDeleteLocalIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const selectedIssue = useUiStore((s) => s.selectedIssue);
   const ghStatus = useForgeStatus(repoPath);
   // Two independent publish gates: the forge's static issue-create capability
   // and a live per-user Jira permission probe. The Publish affordance shows when
@@ -118,6 +120,14 @@ export function LocalIssueView({
     setPromoteOpen(false);
     edit.setOpen(false);
   }
+
+  // The palette's route to the comment box. Only the view that owns the
+  // selection answers — the mounted one lags it through a switch.
+  useHotkeyAction(
+    "focus-comment",
+    () => composerRef.current?.focus(),
+    selectedIssue?.kind === "local" && selectedIssue.id === id && !!issue,
+  );
 
   if (!issue) {
     return <DiffPlaceholder message="This local issue no longer exists" />;
