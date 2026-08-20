@@ -44,7 +44,8 @@ type FileSource =
   | { kind: "orphaned"; sha: string };
 
 /** Apply and pop differ only in what becomes of the stash afterward. The pop
- *  wording matches the branch menu's "Pop latest stash" so the two can't drift. */
+ *  wording is kept in step BY HAND with the branch menu's "Pop latest stash"
+ *  prompt (BranchSwitcher) — edit both or hoist a shared prompt. */
 const STASH_APPLY_COPY = {
   apply: {
     verb: "Apply",

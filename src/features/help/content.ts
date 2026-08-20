@@ -557,8 +557,10 @@ deletion, allowed merge methods, require-PR, and force-push blocking. They're en
 inside the app, can be shared with your team via a committed file, and can be imported
 from a repo's GitHub branch-protection rules. The same dialog keeps a **Promotion
 branches** list: a pull request from a branch you name there carries work onward rather
-than catching up, so GitDesktop stops offering to update it from its base. (For
-server-side enforcement, use **Rules** in *Repository settings*.)
+than catching up, so GitDesktop stops offering to update it from its base. That applies
+to the repository's own pull requests — one from a fork keeps the update offer even if
+its branch shares the name. (For server-side enforcement, use **Rules** in *Repository
+settings*.)
 
 ## Worktrees
 
@@ -868,11 +870,12 @@ a mergeability answer the app couldn't read. **Update pull request branch** is i
 command palette ({{kbd:command-palette}}) too — no default shortcut, so give it one in
 **Settings → Keyboard**.
 
-One exception: on a **promotion** pull request (one whose head is the repository's
-default branch, like \`main\` → \`staging\`, or a branch you've listed under
-**Promotion branches** in *Branch rules*, like \`staging\` → \`production\`) the gap
-is expected and doesn't need closing, so the strip says so and **Update branch** is
-withheld — it would merge the base back into the head.
+One exception: on a **promotion** pull request from this repository's own branches
+(one whose head is the repository's default branch on the origin view, like
+\`main\` → \`staging\`, or a branch you've listed under **Promotion branches** in
+*Branch rules*, like \`staging\` → \`production\`) the gap is expected and doesn't
+need closing, so the strip says so and **Update branch** is withheld — it would
+merge the base back into the head.
 
 ## Blocked by branch protection
 
