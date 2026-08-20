@@ -92,8 +92,10 @@ function ScopeErrorHint({ scope }: { scope: string }) {
   const canRefresh =
     scopes.data?.classic === true && !scopes.data.scopes.includes(scope);
   // A host outside the reconnect grammar never reaches a copyable command string
-  // (shell-syntax injection via a crafted remote) — the generic error card stands.
-  if (!isReconnectHostSafe(host)) return null;
+  // (shell-syntax injection via a crafted remote) — only the command sentence is
+  // suppressed, matching ScopeRefreshHint: the explanation and button stay, and
+  // the button's flow re-validates the host backend-side, failing loudly.
+  const hostSafe = isReconnectHostSafe(host);
   return (
     <div className="mt-2 text-muted-foreground">
       <p>
@@ -120,13 +122,15 @@ function ScopeErrorHint({ scope }: { scope: string }) {
       )}
       {/* The reopen only applies to the copied command: the button's flow
           invalidates this list itself, so its card refetches in place. */}
-      <p className="mt-2">
-        {canRefresh ? "Or run" : "Run"}{" "}
-        <span className="font-mono">
-          gh auth refresh --hostname {host} -s {scope}
-        </span>{" "}
-        in a terminal, then reopen this dialog.
-      </p>
+      {hostSafe && (
+        <p className="mt-2">
+          {canRefresh ? "Or run" : "Run"}{" "}
+          <span className="font-mono">
+            gh auth refresh --hostname {host} -s {scope}
+          </span>{" "}
+          in a terminal, then reopen this dialog.
+        </p>
+      )}
     </div>
   );
 }
