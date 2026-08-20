@@ -258,7 +258,10 @@ export function DiscussionView({
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    selectedDiscussion?.number === number && !!d && !details.isError,
+    selectedDiscussion?.number === number &&
+      !!d &&
+      !details.isPlaceholderData &&
+      !details.isError,
   );
 
   if (details.isPending) {

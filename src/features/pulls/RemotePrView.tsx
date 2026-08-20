@@ -1896,6 +1896,7 @@ export function RemotePrView({
       section === "conversation" &&
       !resolve &&
       !!pr &&
+      !details.isPlaceholderData &&
       !details.isError,
   );
 

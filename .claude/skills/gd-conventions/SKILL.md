@@ -99,8 +99,11 @@ route to one of those ops imports the existing prompt, never re-spells it.
   `useDisabledReason` hook + `ARIA_DISABLED_CLASS`
   (`src/lib/use-disabled-reason.ts`) — never hand-rolled.
 - A conversation surface's own actions sit before the submit button via
-  `CommentComposer`'s `leadingActions` slot (`actions` renders after submit) —
-  the caller owns the row layout up to that boundary, spacers included.
+  `CommentComposer`'s `leadingActions` slot when submit is the row's last
+  action (the issue views); a surface whose right-slot action is itself a
+  primary (Approve / Review… on the PR views) keeps it in `actions`, which
+  renders after submit — the caller owns the row layout up to that boundary,
+  spacers included.
 - The AI-generate chord in a dialog goes through `useGenerateChord`
   (`src/lib/hotkeys/useGenerateChord.ts`) — never a hand-rolled handler. Its
   invariants: effective-binding read (null = fully inert), `eventToBinding`

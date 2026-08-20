@@ -759,7 +759,8 @@ excludes the PR author, whom GitHub won't let you request), flip a PR between
 **Convert to draft** pair, also reachable from the command palette),
 **merge** (merge commit, squash, or rebase, with optional branch deletion), and **close**.
 Closing asks first: everyone watching is notified, and reopening puts the pull request
-back but can't unsend that.
+back but can't unsend that. The command palette's **Focus the comment box** jumps
+straight to the composer here too.
 Reviewers who've already reviewed show as read-only chips carrying their verdict — a check
 for **approved**, an X for **requested changes**, a speech bubble for **commented** (icon
 shape plus the word, never color alone) — so a finished review (including Copilot's) stays
@@ -1430,7 +1431,7 @@ part in GitHub Discussions for the repo. (Discussions must be enabled on the rep
   **reopen**, **lock**, and **delete**. Closing or reopening posts your drafted comment
   alongside, and the menu item says so while a draft is waiting. Closing asks first:
   everyone watching is notified, and reopening puts the discussion back but can't
-  unsend that.
+  unsend that. The command palette's **Focus the comment box** works here too.
 - **Create a discussion**, or **create an issue from a discussion** when a thread turns
   into actionable work (the new issue links back to it).`,
   },

@@ -1530,6 +1530,7 @@ export function JiraIssueView({
       selectedIssue.id === issueKey &&
       canComment &&
       !!details.data &&
+      !details.isPlaceholderData &&
       !details.isError,
   );
 

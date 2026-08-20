@@ -273,7 +273,11 @@ export function RemoteIssueView({
   useHotkeyAction(
     "focus-comment",
     () => composerRef.current?.focus(),
-    isSelectedIssue && canComment && !!issue && !details.isError,
+    isSelectedIssue &&
+      canComment &&
+      !!issue &&
+      !details.isPlaceholderData &&
+      !details.isError,
   );
 
   if (details.isPending) {
