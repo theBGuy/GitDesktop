@@ -148,7 +148,7 @@ fn read_token_twice(path: &Path) -> Option<String> {
 /// contender can observe the file without its owner. `Ok(true)` = created by us,
 /// `Ok(false)` = someone else holds it.
 fn create_with_token(path: &Path, token: &str) -> std::io::Result<bool> {
-    create_stamped(path, token, |file, token| {
+    create_stamped(path, token, |file| {
         file.write_all(token.as_bytes())?;
         file.flush()
     })
@@ -159,7 +159,7 @@ fn create_with_token(path: &Path, token: &str) -> std::io::Result<bool> {
 fn create_stamped(
     path: &Path,
     token: &str,
-    stamp: impl FnOnce(&mut std::fs::File, &str) -> std::io::Result<()>,
+    stamp: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<bool> {
     if token.is_empty() {
         // The one content this file must never be given deliberately: an empty stamp is
@@ -181,7 +181,7 @@ fn create_stamped(
         // lock. Unstamped, it blocks this store's writers for at most 2× the stale window
         // before [`acquire`]'s escape hatch reclaims it — bounded, where a deleted live
         // lock is an unbounded double grant.
-        Ok(mut file) => stamp(&mut file, token).map(|()| true),
+        Ok(mut file) => stamp(&mut file).map(|()| true),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
         Err(e) => Err(e),
     }
@@ -578,7 +578,7 @@ mod tests {
         let (_tmp, store) = tmp_store();
         let path = lock_path(&store);
 
-        let err = create_stamped(&path, "1:doomed", |_, _| {
+        let err = create_stamped(&path, "1:doomed", |_| {
             Err(std::io::Error::other("the disk filled mid-stamp"))
         })
         .unwrap_err();
