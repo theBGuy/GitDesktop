@@ -36,7 +36,8 @@ const bbSchedulesKey = (repo: string) => ["repo", repo, "bb-schedules"];
  *  in place (a single discrete control, so apply-on-change) and deletes with a
  *  confirm. Cron patterns are QUARTZ format (e.g. "0 0 12 * * ?"). The list can lag
  *  a create by ~1s (server replication), so the created row is patched into the
- *  cache in the create's onSuccess and reconciled by a single delayed refetch. */
+ *  cache by the awaited create's continuation and reconciled by a single
+ *  delayed refetch. */
 export function BitbucketSchedulesSection({
   repoPath,
   open,
@@ -82,16 +83,41 @@ export function BitbucketSchedulesSection({
     }, 2500);
   }
 
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function handleEnablePipelines() {
+    try {
+      await setEnabled.mutateAsync(true);
+      toast.success("Pipelines enabled");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleToggle(uuid: string, next: boolean) {
+    try {
+      await setScheduleEnabled.mutateAsync({ uuid, enabled: next });
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleRemove(uuid: string) {
+    try {
+      await remove.mutateAsync(uuid);
+      toast.success("Schedule deleted");
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   if (config.data && !enabled) {
     return (
       <PipelinesDisabledBanner
         pending={setEnabled.isPending}
-        onEnable={() =>
-          setEnabled.mutate(true, {
-            onSuccess: () => toast.success("Pipelines enabled"),
-            onError: toastError,
-          })
-        }
+        onEnable={handleEnablePipelines}
       />
     );
   }
@@ -139,25 +165,12 @@ export function BitbucketSchedulesSection({
               setScheduleEnabled.isPending &&
               setScheduleEnabled.variables?.uuid === s.uuid
             }
-            onToggle={(next) =>
-              setScheduleEnabled.mutate(
-                { uuid: s.uuid, enabled: next },
-                { onError: toastError },
-              )
-            }
+            onToggle={(next) => handleToggle(s.uuid, next)}
             confirming={confirming === s.uuid}
             pending={remove.isPending}
             onConfirm={() => setConfirming(s.uuid)}
             onCancel={() => setConfirming(null)}
-            onRemove={() =>
-              remove.mutate(s.uuid, {
-                onSuccess: () => {
-                  toast.success("Schedule deleted");
-                  setConfirming(null);
-                },
-                onError: toastError,
-              })
-            }
+            onRemove={() => handleRemove(s.uuid)}
           />
         ))}
       </AsyncListBody>
@@ -272,7 +285,7 @@ function ScheduleForm({
       ? "Enter a Quartz cron pattern."
       : null;
 
-  function submit() {
+  async function submit() {
     const cronPattern = cron.trim();
     const created: BitbucketPipelineSchedule = {
       // The create call returns void, so synthesize a uuid; the reconcile refetch
@@ -284,18 +297,15 @@ function ScheduleForm({
       cronPattern,
       enabled: true,
     };
-    create.mutate(
-      { refName, cronPattern, enabled: true },
-      {
-        onSuccess: () => {
-          onPatch(created);
-          onReconcile();
-          toast.success("Schedule added");
-          onDone();
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await create.mutateAsync({ refName, cronPattern, enabled: true });
+      onPatch(created);
+      onReconcile();
+      toast.success("Schedule added");
+      onDone();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

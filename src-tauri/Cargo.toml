@@ -62,6 +62,10 @@ sha1 = "0.11"
 # would silently un-ignore a file. Test fixtures use it as RAII temp dirs too, so
 # a killed or panicking run leaks nothing.
 tempfile = "3"
+# Canonicalizing the MCP server's `--repo` (mcp_server::McpArgs::parse) so per-repo
+# store keys match the GUI's spelling. dunce over std: `std::fs::canonicalize` returns
+# Windows `\\?\` verbatim paths, which those keys would read as a different repo.
+dunce = "1"
 
 # Desktop-only: the updater plugin doesn't build for mobile.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

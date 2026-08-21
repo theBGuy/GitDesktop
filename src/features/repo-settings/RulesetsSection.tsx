@@ -240,6 +240,30 @@ function RulesetList({
   const del = useDeleteRuleset(repoPath);
   const [confirming, setConfirming] = useState<number | null>(null);
 
+  // Awaited, not per-call callbacks: react-query drops those when this subtree
+  // unmounts mid-flight — closing the dialog or switching the rail's section —
+  // so the outcome would never reach the user.
+  async function handleDelete(id: number) {
+    try {
+      await del.mutateAsync(id);
+      toast.success("Ruleset deleted");
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleEnforcement(
+    id: number,
+    enforcement: RulesetEnforcement,
+  ) {
+    try {
+      await setEnforcement.mutateAsync({ id, enforcement });
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <div className="min-w-0 space-y-3">
       <div className="flex items-center justify-between gap-2">
@@ -286,15 +310,7 @@ function RulesetList({
                   actLabel="Delete"
                   pending={del.isPending}
                   onCancel={() => setConfirming(null)}
-                  onAct={() =>
-                    del.mutate(rs.id, {
-                      onSuccess: () => {
-                        toast.success("Ruleset deleted");
-                        setConfirming(null);
-                      },
-                      onError: toastError,
-                    })
-                  }
+                  onAct={() => handleDelete(rs.id)}
                 />
               ) : (
                 <>
@@ -303,11 +319,7 @@ function RulesetList({
                     value={rs.enforcement}
                     disabled={setEnforcement.isPending}
                     onValueChange={(v) =>
-                      v &&
-                      setEnforcement.mutate(
-                        { id: rs.id, enforcement: v as RulesetEnforcement },
-                        { onError: toastError },
-                      )
+                      v && handleEnforcement(rs.id, v as RulesetEnforcement)
                     }
                   >
                     <SelectTrigger size="sm" className="w-28">
@@ -392,17 +404,16 @@ function RulesetForm({
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setD((p) => ({ ...p, [key]: value }));
 
-  function save() {
+  async function save() {
     const body = draftToBody(d, original);
-    const opts = {
-      onSuccess: () => {
-        toast.success(id != null ? "Ruleset updated" : "Ruleset created");
-        onDone();
-      },
-      onError: toastError,
-    };
-    if (id != null) update.mutate({ id, body }, opts);
-    else create.mutate(body, opts);
+    try {
+      if (id != null) await update.mutateAsync({ id, body });
+      else await create.mutateAsync(body);
+      toast.success(id != null ? "Ruleset updated" : "Ruleset created");
+      onDone();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

@@ -265,7 +265,7 @@ pub(crate) async fn git_rename_branch_core(
     // gap as the commit-draft migration. Cold-start test mode is out of reach too — the
     // GUI aliases its store file there (`storeName` in src/lib/test-mode.ts).
     let identity = crate::git::repo::repo_identity(&repo_path).await;
-    if let Err(e) = crate::review_notes::rename_branch(&identity, &old_name, &new_name) {
+    if let Err(e) = crate::review_notes::rename_branch(&identity, &old_name, &new_name).await {
         eprintln!("gitdesktop: reviewer-note rename failed (branch renamed anyway): {e}");
     }
     Ok(())
@@ -1729,6 +1729,7 @@ mod tests {
 
         let identity = crate::git::repo::repo_identity(&repo_s).await;
         crate::review_notes::set(&identity, "feature", "look at the migration")
+            .await
             .expect("deposit the note");
 
         let state = AppState::default();

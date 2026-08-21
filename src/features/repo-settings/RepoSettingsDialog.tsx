@@ -513,6 +513,36 @@ function WebhookRow({
         : "text-destructive";
   const canTest = hook.events.includes("push") || hook.events.includes("*");
 
+  // Awaited, not per-call callbacks: react-query drops those when this subtree
+  // unmounts mid-flight — closing the dialog or switching the rail's section —
+  // so the outcome would never reach the user.
+  async function handleDelete() {
+    try {
+      await del.mutateAsync(hook.id);
+      toast.success("Webhook removed");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handlePing() {
+    try {
+      await ping.mutateAsync(hook.id);
+      toast.success("Ping sent");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleTest() {
+    try {
+      await test.mutateAsync(hook.id);
+      toast.success("Test event sent");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <div className="rounded-md border p-3 text-xs">
       <div className="flex items-start justify-between gap-2">
@@ -555,12 +585,7 @@ function WebhookRow({
             actLabel="Remove"
             pending={del.isPending}
             onCancel={() => setConfirmingDelete(false)}
-            onAct={() =>
-              del.mutate(hook.id, {
-                onSuccess: () => toast.success("Webhook removed"),
-                onError: toastError,
-              })
-            }
+            onAct={handleDelete}
           />
         ) : (
           <>
@@ -569,12 +594,7 @@ function WebhookRow({
               variant="ghost"
               disabled={ping.isPending}
               title="Send a ping event"
-              onClick={() =>
-                ping.mutate(hook.id, {
-                  onSuccess: () => toast.success("Ping sent"),
-                  onError: toastError,
-                })
-              }
+              onClick={handlePing}
             >
               <BroadcastIcon data-icon="inline-start" />
               Ping
@@ -585,12 +605,7 @@ function WebhookRow({
                 variant="ghost"
                 disabled={test.isPending}
                 title="Trigger a test push event"
-                onClick={() =>
-                  test.mutate(hook.id, {
-                    onSuccess: () => toast.success("Test event sent"),
-                    onError: toastError,
-                  })
-                }
+                onClick={handleTest}
               >
                 <ArrowClockwiseIcon data-icon="inline-start" />
                 Test
@@ -710,6 +725,15 @@ function DeliveryRow({
     ? `${delivery.event}.${delivery.action}`
     : delivery.event;
 
+  async function handleRedeliver() {
+    try {
+      await redeliver.mutateAsync(delivery.id);
+      toast.success("Redelivery queued");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <div className="rounded-md border text-xs">
       <button
@@ -745,12 +769,7 @@ function DeliveryRow({
               size="xs"
               variant="ghost"
               disabled={redeliver.isPending}
-              onClick={() =>
-                redeliver.mutate(delivery.id, {
-                  onSuccess: () => toast.success("Redelivery queued"),
-                  onError: toastError,
-                })
-              }
+              onClick={handleRedeliver}
             >
               {redeliver.isPending ? (
                 <Spinner data-icon="inline-start" />
@@ -828,7 +847,7 @@ function WebhookForm({
     });
   }
 
-  function submit() {
+  async function submit() {
     const input: WebhookInput = {
       url: url.trim(),
       contentType,
@@ -837,15 +856,14 @@ function WebhookForm({
       events: allEvents ? ["*"] : [...events],
       active,
     };
-    const opts = {
-      onSuccess: () => {
-        toast.success(hook ? "Webhook updated" : "Webhook created");
-        onDone();
-      },
-      onError: toastError,
-    };
-    if (hook) update.mutate({ id: hook.id, input }, opts);
-    else create.mutate(input, opts);
+    try {
+      if (hook) await update.mutateAsync({ id: hook.id, input });
+      else await create.mutateAsync(input);
+      toast.success(hook ? "Webhook updated" : "Webhook created");
+      onDone();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

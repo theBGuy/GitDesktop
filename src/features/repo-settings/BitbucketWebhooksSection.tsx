@@ -62,6 +62,19 @@ export function BitbucketWebhooksSection({
   const [editing, setEditing] = useState<BitbucketHook | "new" | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
 
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function handleDelete(uuid: string) {
+    try {
+      await deleteHook.mutateAsync(uuid);
+      toast.success("Webhook deleted");
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   if (editing) {
     return (
       <HookForm
@@ -116,15 +129,7 @@ export function BitbucketWebhooksSection({
                   actLabel="Delete"
                   pending={deleteHook.isPending}
                   onCancel={() => setConfirming(null)}
-                  onAct={() =>
-                    deleteHook.mutate(h.uuid, {
-                      onSuccess: () => {
-                        toast.success("Webhook deleted");
-                        setConfirming(null);
-                      },
-                      onError: toastError,
-                    })
-                  }
+                  onAct={() => handleDelete(h.uuid)}
                 />
               ) : (
                 <>
@@ -189,7 +194,7 @@ function HookForm({
     setEvents((prev) => (on ? [...prev, id] : prev.filter((e) => e !== id)));
   }
 
-  function save() {
+  async function save() {
     // Bitbucket requires the FULL shape on a PUT (a partial 400s), so create
     // and update send identical inputs.
     const input = {
@@ -199,15 +204,14 @@ function HookForm({
       events,
       skipCertVerification,
     };
-    const done = {
-      onSuccess: () => {
-        toast.success(hook ? "Webhook updated" : "Webhook created");
-        onDone();
-      },
-      onError: toastError,
-    };
-    if (hook) update.mutate({ uuid: hook.uuid, input }, done);
-    else create.mutate(input, done);
+    try {
+      if (hook) await update.mutateAsync({ uuid: hook.uuid, input });
+      else await create.mutateAsync(input);
+      toast.success(hook ? "Webhook updated" : "Webhook created");
+      onDone();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

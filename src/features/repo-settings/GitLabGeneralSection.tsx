@@ -197,6 +197,18 @@ function GitLabGeneralForm({
 
   const dirty = JSON.stringify(form) !== JSON.stringify(base);
 
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function handleSave() {
+    try {
+      await update.mutateAsync(form);
+      toast.success("Settings saved");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   // Keep the current default selectable even if that branch isn't local; drop
   // agent-session branches (`gd/session/*`) — they're app-internal.
   const branchNames = branches
@@ -411,12 +423,7 @@ function GitLabGeneralForm({
       <div className="flex items-center justify-end gap-2 border-t pt-3">
         <Button
           disabled={!dirty || update.isPending || descGen.generating}
-          onClick={() =>
-            update.mutate(form, {
-              onSuccess: () => toast.success("Settings saved"),
-              onError: toastError,
-            })
-          }
+          onClick={handleSave}
         >
           {update.isPending && <Spinner data-icon="inline-start" />}
           Save changes

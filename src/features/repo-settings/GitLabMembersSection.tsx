@@ -68,17 +68,36 @@ export function GitLabMembersSection({
 
   const memberRows = members.data ?? [];
 
-  function addMember() {
-    add.mutate(
-      { username: username.trim(), accessLevel: level },
-      {
-        onSuccess: () => {
-          toast.success("Member added");
-          setUsername("");
-        },
-        onError: toastError,
-      },
-    );
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function addMember() {
+    try {
+      await add.mutateAsync({ username: username.trim(), accessLevel: level });
+      toast.success("Member added");
+      setUsername("");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleRole(member: GitLabMember, accessLevel: number) {
+    try {
+      await update.mutateAsync({ userId: member.id, accessLevel });
+      toast.success(`${member.username} is now ${roleLabel(accessLevel)}`);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleRemove(member: GitLabMember) {
+    try {
+      await remove.mutateAsync(member.id);
+      toast.success(`Removed ${member.username}`);
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -92,7 +111,7 @@ export function GitLabMembersSection({
             autoComplete="off"
             spellCheck={false}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && canAdd) addMember();
+              if (e.key === "Enter" && canAdd) void addMember();
             }}
           />
           <Select
@@ -155,31 +174,12 @@ export function GitLabMembersSection({
               active={i === activeIndex}
               onFocus={() => setActiveIndex(i)}
               updating={update.isPending}
-              onRole={(accessLevel) =>
-                update.mutate(
-                  { userId: m.id, accessLevel },
-                  {
-                    onSuccess: () =>
-                      toast.success(
-                        `${m.username} is now ${roleLabel(accessLevel)}`,
-                      ),
-                    onError: toastError,
-                  },
-                )
-              }
+              onRole={(accessLevel) => handleRole(m, accessLevel)}
               confirming={confirming === m.id}
               pending={remove.isPending}
               onConfirm={() => setConfirming(m.id)}
               onCancel={() => setConfirming(null)}
-              onRemove={() =>
-                remove.mutate(m.id, {
-                  onSuccess: () => {
-                    toast.success(`Removed ${m.username}`);
-                    setConfirming(null);
-                  },
-                  onError: toastError,
-                })
-              }
+              onRemove={() => handleRemove(m)}
             />
           ))}
         </div>

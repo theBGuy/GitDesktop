@@ -167,15 +167,22 @@ fn now_iso() -> String {
 /// whitespace-only CLEARS the branch entry (and removes the repo key entirely once its map
 /// empties, so an emptied store stays tidy). Returns `true` when a note was saved, `false`
 /// when the empty-body rule cleared the deposit.
-pub fn set(repo: &str, branch: &str, body: &str) -> AppResult<bool> {
-    let path = store_path()?;
-    // Hold both locks across the whole read→modify→write: the GUI and the
-    // `gitdesktop mcp` server both write this file, and an unlocked RMW drops whichever
-    // note lost the race (see [`crate::store_lock`]; acquisition fails open, which is
-    // why the exact in-process mutex goes outside it).
-    let _guard = notes_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _lock = crate::store_lock::lock_store(&path);
-    set_at(&path, repo, branch, body)
+///
+/// The locked write runs off the async runtime: the cross-process lock blocks its
+/// calling thread for up to the retry budget, which must not park a tokio worker.
+pub async fn set(repo: &str, branch: &str, body: &str) -> AppResult<bool> {
+    let (repo, branch, body) = (repo.to_string(), branch.to_string(), body.to_string());
+    crate::store_lock::locked_store_task(move || {
+        let path = store_path()?;
+        // Hold both locks across the whole read→modify→write: the GUI and the
+        // `gitdesktop mcp` server both write this file, and an unlocked RMW drops
+        // whichever note lost the race (see [`crate::store_lock`]; acquisition fails
+        // open, which is why the exact in-process mutex goes outside it).
+        let _guard = notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = crate::store_lock::lock_store(&path);
+        set_at(&path, &repo, &branch, &body)
+    })
+    .await
 }
 
 /// Save (or clear) the GUI's reviewer note for `branch`, taking the same
@@ -190,7 +197,7 @@ pub async fn review_notes_set_branch(
     body: String,
 ) -> AppResult<bool> {
     let identity = crate::git::repo::repo_identity(&repo_path).await;
-    set(&identity, &branch, &body)
+    set(&identity, &branch, &body).await
 }
 
 /// Remove the GUI's reviewer note for `branch` — the consume-on-open path behind the
@@ -199,7 +206,7 @@ pub async fn review_notes_set_branch(
 #[tauri::command]
 pub async fn review_notes_delete_branch(repo_path: String, branch: String) -> AppResult<()> {
     let identity = crate::git::repo::repo_identity(&repo_path).await;
-    set(&identity, &branch, "")?;
+    set(&identity, &branch, "").await?;
     Ok(())
 }
 
@@ -242,13 +249,18 @@ fn upsert_branch(store: &mut Map<String, Value>, repo: &str, branch: &str, body:
 ///
 /// The note record moves verbatim (unknown fields included) and its `savedAt` is left alone —
 /// a rename is not a re-save. Nothing is written when there is nothing to migrate.
-pub(crate) fn rename_branch(repo: &str, from: &str, to: &str) -> AppResult<()> {
-    let path = store_path()?;
-    // Same lock pair as [`set`]: the read→move→write must not interleave with a
-    // concurrent deposit, which would resurrect the old branch name's note.
-    let _guard = notes_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _lock = crate::store_lock::lock_store(&path);
-    rename_at(&path, repo, from, to)
+pub(crate) async fn rename_branch(repo: &str, from: &str, to: &str) -> AppResult<()> {
+    let (repo, from, to) = (repo.to_string(), from.to_string(), to.to_string());
+    crate::store_lock::locked_store_task(move || {
+        let path = store_path()?;
+        // Same lock pair as [`set`], off the runtime for the same reason: the
+        // read→move→write must not interleave with a concurrent deposit, which would
+        // resurrect the old branch name's note.
+        let _guard = notes_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = crate::store_lock::lock_store(&path);
+        rename_at(&path, &repo, &from, &to)
+    })
+    .await
 }
 
 /// The pure store logic behind [`rename_branch`], taking an explicit path so tests can drive

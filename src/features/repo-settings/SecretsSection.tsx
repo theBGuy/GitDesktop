@@ -196,18 +196,28 @@ function SecretsList({
   const invalid = nameError(name);
   const canAdd = !!name && !!value && !invalid && !set.isPending;
 
-  function add() {
-    set.mutate(
-      { app, env, name: name.trim(), value },
-      {
-        onSuccess: () => {
-          toast.success("Secret saved");
-          setName("");
-          setValue("");
-        },
-        onError: toastError,
-      },
-    );
+  // Awaited, not per-call callbacks: react-query drops those when this subtree
+  // unmounts mid-flight — closing the dialog or switching the rail's section —
+  // so the outcome would never reach the user.
+  async function add() {
+    try {
+      await set.mutateAsync({ app, env, name: name.trim(), value });
+      toast.success("Secret saved");
+      setName("");
+      setValue("");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function remove(secretName: string) {
+    try {
+      await del.mutateAsync({ app, env, name: secretName });
+      toast.success("Secret removed");
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -269,18 +279,7 @@ function SecretsList({
             pending={del.isPending}
             onConfirm={() => setConfirming(s.name)}
             onCancel={() => setConfirming(null)}
-            onDelete={() =>
-              del.mutate(
-                { app, env, name: s.name },
-                {
-                  onSuccess: () => {
-                    toast.success("Secret removed");
-                    setConfirming(null);
-                  },
-                  onError: toastError,
-                },
-              )
-            }
+            onDelete={() => remove(s.name)}
           />
         ))}
       </AsyncListBody>
@@ -307,18 +306,25 @@ function VariablesList({
   const invalid = nameError(name);
   const canAdd = !!name && !invalid && !set.isPending;
 
-  function add() {
-    set.mutate(
-      { env, name: name.trim(), value },
-      {
-        onSuccess: () => {
-          toast.success("Variable saved");
-          setName("");
-          setValue("");
-        },
-        onError: toastError,
-      },
-    );
+  async function add() {
+    try {
+      await set.mutateAsync({ env, name: name.trim(), value });
+      toast.success("Variable saved");
+      setName("");
+      setValue("");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function remove(variableName: string) {
+    try {
+      await del.mutateAsync({ env, name: variableName });
+      toast.success("Variable removed");
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -379,18 +385,7 @@ function VariablesList({
               setName(v.name);
               setValue(v.value);
             }}
-            onDelete={() =>
-              del.mutate(
-                { env, name: v.name },
-                {
-                  onSuccess: () => {
-                    toast.success("Variable removed");
-                    setConfirming(null);
-                  },
-                  onError: toastError,
-                },
-              )
-            }
+            onDelete={() => remove(v.name)}
           />
         ))}
       </AsyncListBody>

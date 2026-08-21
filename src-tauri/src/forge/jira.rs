@@ -1572,7 +1572,7 @@ async fn discover_field_map(
         field_names: Some(names),
         resolved_at: now_iso(),
     };
-    crate::jira_field_maps::put(site, entry.clone());
+    crate::jira_field_maps::put(site, entry.clone()).await;
     Some(entry)
 }
 

@@ -153,8 +153,10 @@ fn write_store(path: &Path, store: &Map<String, Value>) -> AppResult<()> {
 
 /// Compare two repo-path keys for "same repo" tolerantly: normalize separators to
 /// `/` and treat a leading Windows drive letter case-insensitively (`C:` == `c:`).
-/// Mirrors `local_prs.rs`.
-fn same_repo(a: &str, b: &str) -> bool {
+/// Mirrors `local_prs.rs`. `pub(crate)` so a caller holding two spellings of one repo can
+/// tell whether they already resolve to one journal key — junctions, symlinks, 8.3 names
+/// and path-body case are outside this tolerance and need a second probe.
+pub(crate) fn same_repo(a: &str, b: &str) -> bool {
     fn norm(s: &str) -> String {
         let slashed: String = s.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
         let bytes = slashed.as_bytes();
@@ -429,11 +431,34 @@ fn reconcile(
     cherry_picking: bool,
     pick_in_progress: impl Fn() -> bool,
 ) -> AppResult<Vec<OpLogEntry>> {
-    let path = store_path()?;
+    reconcile_at(
+        &store_path()?,
+        repo,
+        mid_op,
+        tree_dirty,
+        current_branch,
+        cherry_picking,
+        pick_in_progress,
+    )
+}
+
+/// The store logic behind [`reconcile`], taking an explicit path so a test can drive it
+/// against a temp file of its own (mirroring [`crate::review_notes`]'s `set_at`). The
+/// shared `cfg(test)` store can't answer whether a check WROTE, only what it left.
+#[allow(clippy::too_many_arguments)]
+fn reconcile_at(
+    path: &Path,
+    repo: &str,
+    mid_op: bool,
+    tree_dirty: bool,
+    current_branch: &str,
+    cherry_picking: bool,
+    pick_in_progress: impl Fn() -> bool,
+) -> AppResult<Vec<OpLogEntry>> {
     let now = now_iso();
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _store_lock = crate::store_lock::lock_store(&path);
-    let mut store = read_store(&path)?;
+    let _store_lock = crate::store_lock::lock_store(path);
+    let mut store = read_store(path)?;
     let Some(key) = existing_key(&store, repo) else {
         return Ok(Vec::new());
     };
@@ -499,7 +524,7 @@ fn reconcile(
     };
 
     if changed {
-        write_store(&path, &store)?;
+        write_store(path, &store)?;
     }
     Ok(results)
 }
@@ -530,7 +555,8 @@ pub async fn begin(
         pre_op_tip: pre_op_tip.map(str::to_string),
         error: None,
     };
-    match insert_pending(repo, &entry) {
+    let repo = repo.to_string();
+    match crate::store_lock::locked_store_task(move || insert_pending(&repo, &entry)).await {
         Ok(()) => Some(id),
         Err(e) => {
             eprintln!("gitdesktop: opslog begin failed (op continues): {e}");
@@ -548,18 +574,22 @@ pub async fn finish(repo: &str, id: &Option<String>, error: Option<String>) {
     };
     let now = now_iso();
     let status = if error.is_some() { "failed" } else { "done" };
-    let result = mutate_entry(repo, id, |obj| {
-        obj.insert("status".to_string(), Value::String(status.to_string()));
-        obj.insert("finishedAt".to_string(), Value::String(now));
-        match &error {
-            Some(msg) => {
-                obj.insert("error".to_string(), Value::String(msg.clone()));
+    let (repo, id) = (repo.to_string(), id.clone());
+    let result = crate::store_lock::locked_store_task(move || {
+        mutate_entry(&repo, &id, |obj| {
+            obj.insert("status".to_string(), Value::String(status.to_string()));
+            obj.insert("finishedAt".to_string(), Value::String(now));
+            match error {
+                Some(msg) => {
+                    obj.insert("error".to_string(), Value::String(msg));
+                }
+                None => {
+                    obj.insert("error".to_string(), Value::Null);
+                }
             }
-            None => {
-                obj.insert("error".to_string(), Value::Null);
-            }
-        }
-    });
+        })
+    })
+    .await;
     if let Err(e) = result {
         eprintln!("gitdesktop: opslog finish failed (op unaffected): {e}");
     }
@@ -573,7 +603,10 @@ pub(crate) async fn pause(repo: &str, id: &Option<String>) {
     let Some(id) = id else {
         return;
     };
-    if let Err(e) = mutate_entry(repo, id, apply_pause) {
+    let (repo, id) = (repo.to_string(), id.clone());
+    let result =
+        crate::store_lock::locked_store_task(move || mutate_entry(&repo, &id, apply_pause)).await;
+    if let Err(e) = result {
         eprintln!("gitdesktop: opslog pause failed (op unaffected): {e}");
     }
 }
@@ -586,7 +619,12 @@ pub(crate) async fn pause(repo: &str, id: &Option<String>) {
 /// of picks ended outside the app on the next [`git_oplog_check`] that finds no pick
 /// in progress, which is what keeps one from standing in as this op's handle.
 pub(crate) async fn close_paused_pick(repo: &str, outcome: PausedOutcome) {
-    if let Err(e) = close_newest_paused_pick(repo, &outcome, now_iso()) {
+    let (repo, now) = (repo.to_string(), now_iso());
+    let result = crate::store_lock::locked_store_task(move || {
+        close_newest_paused_pick(&repo, &outcome, now)
+    })
+    .await;
+    if let Err(e) = result {
         eprintln!("gitdesktop: opslog close failed (op unaffected): {e}");
     }
 }
@@ -628,13 +666,9 @@ fn close_newest_paused_pick(repo: &str, outcome: &PausedOutcome, now: String) ->
 /// (unjournaled op, pruned entry, unreadable store), so callers must treat the
 /// absence as "unknown", never as "unchanged".
 pub(crate) async fn pre_op_tip(repo: &str, id: &Option<String>) -> Option<String> {
-    let id = id.as_ref()?;
-    let path = store_path().ok()?;
-    let entries = {
-        let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
-        let store = read_store(&path).ok()?;
-        repo_entries(&store, repo)
-    };
+    let id = id.as_ref()?.clone();
+    let repo = repo.to_string();
+    let entries = read_repo_entries(repo).await.ok()?;
     entries
         .iter()
         .find(|e| e.get("id").and_then(Value::as_str) == Some(id.as_str()))
@@ -643,16 +677,25 @@ pub(crate) async fn pre_op_tip(repo: &str, id: &Option<String>) -> Option<String
         .map(str::to_string)
 }
 
+/// `repo`'s entries in stored order, read off the async runtime. The read takes no FILE
+/// lock (`atomic_write` already gives it a whole file or none) but it does take
+/// [`OPLOG_LOCK`], which the writers now hold across the store lock's blocking retry — so
+/// a reader on a tokio worker could park behind one for the whole budget.
+async fn read_repo_entries(repo: String) -> AppResult<Vec<Value>> {
+    crate::store_lock::locked_store_task(move || {
+        let path = store_path()?;
+        let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let store = read_store(&path)?;
+        Ok(repo_entries(&store, &repo))
+    })
+    .await
+}
+
 /// Return `repo`'s journal entries newest-first by `startedAt`. Pure store read,
 /// no git access. Missing repo key → `[]`.
 #[tauri::command]
 pub async fn git_oplog_list(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
-    let path = store_path()?;
-    let mut entries = {
-        let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
-        let store = read_store(&path)?;
-        repo_entries(&store, &repo_path)
-    };
+    let mut entries = read_repo_entries(repo_path).await?;
     sort_newest_first(&mut entries);
     Ok(entries
         .into_iter()
@@ -696,24 +739,33 @@ pub async fn git_oplog_check(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
     .await
     .map(|o| o.stdout_lossy().trim().to_string())
     .unwrap_or_default();
-    reconcile(
-        &repo_path,
-        mid_op,
-        tree_dirty,
-        &current_branch,
-        cherry_picking,
-        // FS-only (no subprocess), so it is cheap to run while holding the store lock.
-        || crate::git::ops::cherry_pick_marker_present(&repo_path),
-    )
+    // The store RMW blocks on the cross-process lock's retry budget, so it runs off the
+    // async runtime; the marker re-probe is built inside the job, which keeps it on the
+    // same thread as the lock it must run under.
+    crate::store_lock::locked_store_task(move || {
+        reconcile(
+            &repo_path,
+            mid_op,
+            tree_dirty,
+            &current_branch,
+            cherry_picking,
+            // FS-only (no subprocess), so it is cheap to run while holding the store lock.
+            || crate::git::ops::cherry_pick_marker_present(&repo_path),
+        )
+    })
+    .await
 }
 
 /// Set the entry with `id` under `repo` to `status = "dismissed"` and persist.
 /// Unknown id → `Ok(())` (no-op) — never error the UI.
 #[tauri::command]
 pub async fn git_oplog_dismiss(repo_path: String, id: String) -> AppResult<()> {
-    mutate_entry(&repo_path, &id, |obj| {
-        obj.insert("status".to_string(), Value::String("dismissed".to_string()));
+    crate::store_lock::locked_store_task(move || {
+        mutate_entry(&repo_path, &id, |obj| {
+            obj.insert("status".to_string(), Value::String("dismissed".to_string()));
+        })
     })
+    .await
 }
 
 #[cfg(test)]
@@ -1144,6 +1196,70 @@ mod tests {
         let store = read_store(&path).unwrap();
         let entries = repo_entries(&store, r"C:\nope");
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn same_repo_tolerates_slashes_and_drive_case() {
+        // The key matcher the GUI and the MCP both depend on to land on ONE key per repo
+        // (mirrors `local_prs`'s): separators normalize, the drive letter is
+        // case-insensitive, the rest of the path is not.
+        assert!(same_repo(
+            r"C:\ProjectRepos\demo\harbor",
+            "C:/ProjectRepos/demo/harbor"
+        ));
+        assert!(same_repo(
+            r"C:\ProjectRepos\demo\harbor",
+            r"c:\ProjectRepos\demo\harbor"
+        ));
+        assert!(!same_repo(r"C:\a\b", r"C:\a\c"));
+    }
+
+    #[test]
+    fn existing_key_reuses_a_tolerant_match() {
+        let mut store = Map::new();
+        store.insert(r"C:\repo\one".to_string(), json!([]));
+        // A differently-spelled but same repo reuses the stored key, so a journal write
+        // can't strand a second entry the reader never looks at.
+        assert_eq!(
+            existing_key(&store, "c:/repo/one").as_deref(),
+            Some(r"C:\repo\one")
+        );
+        assert_eq!(existing_key(&store, r"C:\repo\two"), None);
+    }
+
+    /// A reconcile that changes nothing must not rewrite the file: the store is shared
+    /// with a second process, and a needless write is a needless chance to lose its
+    /// concurrent update. The seeded bytes are deliberately NOT what `write_store`
+    /// produces (compact, unsorted), so any write at all — even one that changes no
+    /// record — is visible in the comparison.
+    #[test]
+    fn a_reconcile_with_nothing_to_do_writes_nothing() {
+        let (_tmp, path) = tmp_store();
+        let repo = r"C:\oplog\no-write-pin";
+        let mut store = Map::new();
+        store.insert(
+            repo.to_string(),
+            Value::Array(vec![
+                pick_record("live-pause", "2026-01-01T00:00:00.000Z", "paused"),
+                pending_record("interrupted", "2026-01-02T00:00:00.000Z"),
+            ]),
+        );
+        // Compact, which is NOT what `write_store` emits.
+        let seeded = serde_json::to_string(&Value::Object(store)).unwrap();
+        std::fs::write(&path, seeded.as_bytes()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        // Nothing to do on either arm: a pick is in progress (so the pause stands), and
+        // the pending op is genuinely interrupted (so it stays pending).
+        let returned = reconcile_at(&path, repo, true, true, "feature", true, || true).unwrap();
+        assert_eq!(returned.len(), 1);
+        assert_eq!(returned[0].id, "interrupted");
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a no-op check must leave the file byte-identical"
+        );
     }
 
     // ── Stale-pause reconcile ────────────────────────────────────────────────

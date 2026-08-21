@@ -17,6 +17,11 @@
 //! impl, launch-arg parsing, and the shared helpers + parameter structs. The raw-diff
 //! tools issue `git` directly rather than reusing the structured UI diff commands,
 //! whose quirks an agent shouldn't inherit. Design: docs/mcp-server-tier3.md.
+//!
+//! `--repo` is canonicalized at parse, which RESOLVES junctions and symlinks — so a
+//! client configured with a link path, or a GUI keying its records by one, spells the
+//! repo differently than this server does; [`GitDesktopMcp::raw_repo`] keeps that
+//! spelling as the bridge every per-repo store lookup probes second.
 
 mod generate;
 mod read_forge;
@@ -64,6 +69,12 @@ const GD_COMMENT_FOOTER: &str =
 #[derive(Clone)]
 pub struct GitDesktopMcp {
     repo: String,
+    /// The `--repo` spelling as the client CONFIGURED it, kept only when canonicalization
+    /// changed it. Canonicalizing resolves junctions, symlinks, 8.3 names and case, so a
+    /// session that ran before it did keyed its per-repo records under this spelling
+    /// instead — and `same_repo`'s separator/drive-case tolerance does not bridge those.
+    /// Every per-repo store lookup therefore probes it as a second, legacy key.
+    raw_repo: Option<String>,
     /// Whether the app-data write tools (local PRs AND local issues) are enabled. Off
     /// unless launched with `--allow-write`; when off they stay registered and return a
     /// clear "disabled" error.
@@ -213,6 +224,7 @@ impl GitDesktopMcp {
     ) -> Self {
         Self {
             repo,
+            raw_repo: None,
             allow_write,
             allow_remote_write,
             allow_git_write,
@@ -236,14 +248,24 @@ impl GitDesktopMcp {
         }
     }
 
+    /// Carry the pre-canonicalization `--repo` spelling (see [`Self::raw_repo`]). Kept off
+    /// [`Self::with_options`] so the many test constructors stay five-argument; only the
+    /// real launch path has a raw spelling to hand over.
+    fn with_raw_repo(mut self, raw: Option<String>) -> Self {
+        self.raw_repo = raw;
+        self
+    }
+
     /// The bound repo's working-tree TOPLEVEL, resolved once per process.
     ///
-    /// `--repo` is taken verbatim and may name any directory inside the tree, but
-    /// anything that reads repo-relative names out of git — or joins a fixed
-    /// relative path onto it — has to use the root or it answers about the
-    /// subdirectory instead, quietly. Cached because `repo` never changes after
-    /// construction; only a successful resolution is stored, so a repo that
-    /// becomes readable later is still picked up.
+    /// `--repo` is canonicalized at parse (true case, separators, 8.3 expansion,
+    /// trailing slash, symlinks) so store keys and legacy-key probes see the
+    /// filesystem's own spelling.
+    /// It may still name any directory inside the tree, and anything that reads
+    /// repo-relative names out of git — or joins a fixed relative path onto it —
+    /// has to use the root or it answers about the subdirectory instead, quietly.
+    /// Cached because `repo` never changes after construction; only a successful
+    /// resolution is stored, so a repo that becomes readable later is still picked up.
     pub(super) async fn toplevel(&self) -> crate::error::AppResult<&str> {
         self.toplevel
             .get_or_try_init(|| crate::git::runner::worktree_toplevel(&self.repo))
@@ -326,9 +348,17 @@ impl GitDesktopMcp {
     async fn local_pr_key(&self) -> Result<String, McpError> {
         let identity = crate::git::repo::repo_identity(&self.repo).await;
         // Fold once per session (the server is bound to one repo). The flag is set only
-        // AFTER a successful fold, so a transient failure retries next call.
+        // AFTER a successful fold, so a transient failure retries next call. BOTH
+        // spellings are probed as legacy keys — see [`Self::raw_repo`].
         if !self.consolidated.load(Ordering::Relaxed) {
-            crate::local_prs::consolidate(&identity, &self.repo).map_err(app_err)?;
+            crate::local_prs::consolidate(&identity, &self.repo)
+                .await
+                .map_err(app_err)?;
+            if let Some(raw) = &self.raw_repo {
+                crate::local_prs::consolidate(&identity, raw)
+                    .await
+                    .map_err(app_err)?;
+            }
             self.consolidated.store(true, Ordering::Relaxed);
         }
         Ok(identity)
@@ -342,16 +372,22 @@ impl GitDesktopMcp {
     /// telling the user how to create one in GitDesktop (the same call-time pattern the
     /// Bitbucket-issue tools use — registration stays static).
     async fn jira_link(&self) -> Result<crate::jira_links::JiraLinkEntry, McpError> {
-        crate::jira_links::get_link(&self.repo)
-            .await
-            .map_err(app_err)?
-            .ok_or_else(|| {
-                McpError::invalid_request(
-                    "This repository has no linked Jira project — link one in GitDesktop \
-                     (repo menu → Link Jira project).",
-                    None,
-                )
-            })
+        let mut link = crate::jira_links::get_link(&self.repo).await.map_err(app_err)?;
+        if link.is_none() {
+            // A link stored against the pre-canonicalization spelling — see
+            // [`Self::raw_repo`]. Only consulted when the canonical probe found nothing,
+            // so the current spelling always wins.
+            if let Some(raw) = &self.raw_repo {
+                link = crate::jira_links::get_link(raw).await.map_err(app_err)?;
+            }
+        }
+        link.ok_or_else(|| {
+            McpError::invalid_request(
+                "This repository has no linked Jira project — link one in GitDesktop \
+                 (repo menu → Link Jira project).",
+                None,
+            )
+        })
     }
 }
 
@@ -623,6 +659,7 @@ async fn serve(args: McpArgs) -> Result<(), Box<dyn std::error::Error>> {
         args.allow_git_write,
         args.allow_destructive,
     )
+    .with_raw_repo(args.raw_repo)
     .serve(stdio())
     .await?;
     service.waiting().await?;
@@ -634,6 +671,9 @@ async fn serve(args: McpArgs) -> Result<(), Box<dyn std::error::Error>> {
 /// forge, `--allow-git-write` → local git, `--allow-destructive` → destructive git).
 struct McpArgs {
     repo: String,
+    /// The `--repo` spelling before canonicalization, kept ONLY when it differs — the
+    /// legacy store key a session that predates canonicalization wrote under.
+    raw_repo: Option<String>,
     allow_write: bool,
     allow_remote_write: bool,
     allow_git_write: bool,
@@ -650,7 +690,8 @@ impl McpArgs {
     /// `--allow-destructive`) from an argv iterator; the repo falls back to the
     /// current working directory, matching how reference MCP git servers are
     /// configured. Every flag is off by default, parsing is order-independent, and
-    /// unknown args are ignored.
+    /// unknown args are ignored. The repo path is canonicalized before it is
+    /// returned; parse itself stays infallible.
     fn parse(args: impl Iterator<Item = String>) -> Self {
         let mut repo: Option<String> = None;
         let mut allow_write = false;
@@ -680,8 +721,18 @@ impl McpArgs {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".to_string())
         });
+        // Canonicalize so every per-repo store key and legacy-key probe sees the
+        // filesystem's spelling rather than the client config's. A path that can't be
+        // resolved keeps its raw form, so the server still starts and errors as usual.
+        let canonical = dunce::canonicalize(&repo)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| repo.clone());
+        // The config's own spelling is kept only when canonicalizing moved it — that is
+        // exactly when an older session's records sit under a key this one would miss.
+        let raw_repo = (canonical != repo).then_some(repo);
         Self {
-            repo,
+            repo: canonical,
+            raw_repo,
             allow_write,
             allow_remote_write,
             allow_git_write,
@@ -845,6 +896,75 @@ mod tests {
         assert!(!destructive_only.allow_remote_write);
         assert!(!destructive_only.allow_git_write);
         assert!(destructive_only.allow_destructive);
+    }
+
+    /// A trailing separator is the cheapest spelling difference to pin on every
+    /// platform; on Windows the drive letter's case is the one a client config most
+    /// often carries. Both must land on the filesystem's own spelling.
+    #[test]
+    fn repo_canonicalizes_an_existing_path() {
+        let base = tempfile::Builder::new()
+            .prefix("gd-mcp-repo-canon-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let canonical = dunce::canonicalize(&repo)
+            .expect("canonicalize fixture")
+            .to_string_lossy()
+            .into_owned();
+
+        let trailing = format!("{}{}", repo.to_string_lossy(), std::path::MAIN_SEPARATOR);
+        assert_ne!(
+            trailing, canonical,
+            "fixture must differ from the canonical form"
+        );
+        assert_eq!(parse(&["--repo", trailing.as_str()]).repo, canonical);
+        let joined = format!("--repo={trailing}");
+        assert_eq!(parse(&[joined.as_str()]).repo, canonical);
+        // The spelling canonicalization moved off is kept as the legacy store key an
+        // older session of this same repo would have written under.
+        assert_eq!(
+            parse(&["--repo", trailing.as_str()]).raw_repo.as_deref(),
+            Some(trailing.as_str())
+        );
+        // …and a config already spelling it canonically carries no second key.
+        assert_eq!(parse(&["--repo", canonical.as_str()]).raw_repo, None);
+
+        #[cfg(windows)]
+        {
+            let mut lower_drive = repo.to_string_lossy().into_owned();
+            let drive = lower_drive[..1].to_lowercase();
+            lower_drive.replace_range(..1, &drive);
+            assert_eq!(parse(&["--repo", lower_drive.as_str()]).repo, canonical);
+        }
+    }
+
+    /// A path that doesn't exist can't be canonicalized, and parse can never fail:
+    /// the raw spelling goes downstream, where the normal git errors surface.
+    #[test]
+    fn repo_falls_back_to_the_raw_path_when_unresolvable() {
+        let missing = std::env::temp_dir().join("gd-mcp-no-such-repo-8f3a1c");
+        assert!(!missing.exists(), "fixture path must not exist");
+        let raw = missing.to_string_lossy().into_owned();
+        let args = parse(&["--repo", raw.as_str()]);
+        assert_eq!(args.repo, raw);
+        // Nothing moved, so there is no second spelling to probe — a legacy key equal to
+        // the live one would fold the store onto itself on every call.
+        assert_eq!(args.raw_repo, None);
+    }
+
+    /// The no-`--repo` fallback goes through the same canonicalization. It only
+    /// discriminates when the runner's own cwd is non-canonical (a short name or a
+    /// symlinked parent), so treat it as a contract pin, not a regression net.
+    #[test]
+    fn cwd_fallback_is_canonicalized() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let canonical = dunce::canonicalize(&cwd)
+            .expect("canonicalize cwd")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(parse(&["--allow-write"]).repo, canonical);
     }
 
     /// Constructs a handler with exactly one gate-flag true and asserts ONLY that

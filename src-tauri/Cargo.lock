@@ -1532,6 +1532,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "dirs",
+ "dunce",
  "keyring",
  "os_info",
  "portable-pty",

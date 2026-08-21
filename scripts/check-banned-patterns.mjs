@@ -184,6 +184,16 @@ const HOVER_REVEAL_PAIRS = [
 const SET_QUERY_DATA_RE =
   /setQueryData\s*(?:<[^(]*?>)?\s*\([^;]{0,200},\s*undefined\s*[),]/g;
 
+// A `.mutate(` call in any spelling — the token, not the callbacks object it
+// may carry. Matching the object instead would have to recognize every way one
+// reaches the call: inline literal, hoisted variable (`.mutate(v, opts)` — the
+// shape 5 of the settings sections used, and still live elsewhere under src/),
+// spread, shorthand keys. The token has no such surface, and it costs nothing
+// here because the directory this check applies to has no `.mutate(` calls left
+// at all — every mutation there is awaited. `.mutateAsync(` does not match: the
+// `(` must follow `mutate` directly.
+const MUTATE_CALL_RE = /\.mutate\s*\(/;
+
 // Vendored shadcn/Base UI primitives are off-limits to edit (CLAUDE.md), so a
 // hit inside them could only ever be silenced by an allowlist entry, never
 // fixed. Their CALL SITES — the app code that composes them — stay scanned.
@@ -246,6 +256,17 @@ export const CHECKS = [
     allowlist: [],
     message:
       "setQueryData(key, undefined) is a silent no-op in TanStack v5 — snapshot and restore the previous value instead",
+  },
+  {
+    name: "mutate-in-repo-settings",
+    // Scoped to the settings dialog's own tree, whose sections unmount on BOTH
+    // dialog close and every rail section switch (the keyed crossfade). The
+    // wider app's call sites are a separate tier and are not scanned here.
+    appliesTo: (file) => file.startsWith("src/features/repo-settings/"),
+    scan: perLine(MUTATE_CALL_RE),
+    allowlist: [],
+    message:
+      "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close or rail section switch mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( needs an allowlist entry with rationale",
   },
 ];
 

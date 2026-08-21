@@ -314,6 +314,18 @@ function RenameAction({
     : /^[A-Za-z0-9._-]+$/.test(name.trim());
   const changed = name.trim() !== current;
 
+  // Awaited, not per-call callbacks: react-query drops those when this subtree
+  // unmounts mid-flight — closing the dialog or switching the rail's section —
+  // so the outcome would never reach the user.
+  async function handleRename() {
+    try {
+      await rename.mutateAsync(name.trim());
+      toast.success(copy.toast(name.trim()));
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <Row
       title={isGitLab ? "Rename project" : "Rename repository"}
@@ -331,12 +343,7 @@ function RenameAction({
           variant="outline"
           size="sm"
           disabled={!valid || !changed || rename.isPending}
-          onClick={() =>
-            rename.mutate(name.trim(), {
-              onSuccess: () => toast.success(copy.toast(name.trim())),
-              onError: toastError,
-            })
-          }
+          onClick={handleRename}
         >
           {rename.isPending && <Spinner data-icon="inline-start" />}
           Rename
@@ -364,6 +371,16 @@ function ArchiveAction({
   const noun = isGitLab ? "project" : "repository";
   const nounCap = isGitLab ? "Project" : "Repository";
 
+  async function handleArchive() {
+    try {
+      await setArchived.mutateAsync(!archived);
+      toast.success(archived ? `${nounCap} unarchived` : `${nounCap} archived`);
+      setConfirming(false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <Row
       title={archived ? `Unarchive ${noun}` : `Archive ${noun}`}
@@ -380,17 +397,7 @@ function ArchiveAction({
             actVariant={archived ? "default" : "destructive"}
             pending={setArchived.isPending}
             onCancel={() => setConfirming(false)}
-            onAct={() =>
-              setArchived.mutate(!archived, {
-                onSuccess: () => {
-                  toast.success(
-                    archived ? `${nounCap} unarchived` : `${nounCap} archived`,
-                  );
-                  setConfirming(false);
-                },
-                onError: toastError,
-              })
-            }
+            onAct={handleArchive}
           />
         </div>
       ) : (
@@ -421,6 +428,30 @@ function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
   const removeRemote = useRemoveRemote(repoPath);
   const [confirming, setConfirming] = useState(false);
 
+  async function handleRemoveUpstream() {
+    try {
+      await removeRemote.mutateAsync({ name: "upstream" });
+      // Hygiene: the persisted "upstream" lens no longer applies.
+      // Fire-and-forget — the lens read safe-defaults to origin,
+      // so a failure here is harmless. The CACHED lens drops with
+      // it: its key sits outside the repo subtree this mutation
+      // invalidates, so re-adding upstream in the same session
+      // would otherwise resurrect the preference just deleted.
+      deleteRepoLens(repoPath).catch(() => undefined);
+      clearRepoLensCache(queryClient, repoPath);
+      // Removing upstream collapses the lens to origin, so a still-
+      // selected remote number would resolve against the other repo.
+      // Same clears `useSetRepoLens` does on an explicit lens flip.
+      const ui = useUiStore.getState();
+      if (ui.selectedPr?.kind === "remote") ui.selectPr(null);
+      if (ui.selectedIssue?.kind === "remote") ui.selectIssue(null);
+      toast.success("Upstream remote removed");
+      setConfirming(false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   if (!remotes.data?.includes("upstream")) return null;
 
   return (
@@ -436,33 +467,7 @@ function RemoveUpstreamAction({ repoPath }: { repoPath: string }) {
               actLabel="Remove"
               pending={removeRemote.isPending}
               onCancel={() => setConfirming(false)}
-              onAct={() =>
-                removeRemote.mutate(
-                  { name: "upstream" },
-                  {
-                    onSuccess: () => {
-                      // Hygiene: the persisted "upstream" lens no longer applies.
-                      // Fire-and-forget — the lens read safe-defaults to origin,
-                      // so a failure here is harmless. The CACHED lens drops with
-                      // it: its key sits outside the repo subtree this mutation
-                      // invalidates, so re-adding upstream in the same session
-                      // would otherwise resurrect the preference just deleted.
-                      deleteRepoLens(repoPath).catch(() => undefined);
-                      clearRepoLensCache(queryClient, repoPath);
-                      // Removing upstream collapses the lens to origin, so a still-
-                      // selected remote number would resolve against the other repo.
-                      // Same clears `useSetRepoLens` does on an explicit lens flip.
-                      const ui = useUiStore.getState();
-                      if (ui.selectedPr?.kind === "remote") ui.selectPr(null);
-                      if (ui.selectedIssue?.kind === "remote")
-                        ui.selectIssue(null);
-                      toast.success("Upstream remote removed");
-                      setConfirming(false);
-                    },
-                    onError: toastError,
-                  },
-                )
-              }
+              onAct={handleRemoveUpstream}
             />
           </div>
         ) : (
@@ -557,6 +562,19 @@ function LeaveForkNetworkAction({
     }
   };
 
+  const handleRemoveFork = async () => {
+    try {
+      await removeFork.mutateAsync(undefined);
+      toast.success("Fork relationship removed");
+      setConfirming(false);
+      // Re-probe to flip the persisted badge; the row unmounts
+      // itself once `isFork` reads false.
+      reprobe();
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
   // The provider's own way out of the network: GitLab detaches in-app behind an
   // inline confirm, the others link out to the page that owns the action.
   const forkAction: Record<ForgeProvider, () => ReactNode> = {
@@ -575,18 +593,7 @@ function LeaveForkNetworkAction({
           actLabel="Remove"
           pending={removeFork.isPending}
           onCancel={() => setConfirming(false)}
-          onAct={() =>
-            removeFork.mutate(undefined, {
-              onSuccess: () => {
-                toast.success("Fork relationship removed");
-                setConfirming(false);
-                // Re-probe to flip the persisted badge; the row unmounts
-                // itself once `isFork` reads false.
-                reprobe();
-              },
-              onError: toastError,
-            })
-          }
+          onAct={handleRemoveFork}
         />
       ) : (
         <DangerButton
@@ -655,6 +662,16 @@ function VisibilityAction({
   const copy = DANGER_COPY[provider].visibility;
   const visibilities = isBitbucket ? BB_VISIBILITIES : VISIBILITIES;
 
+  async function handleChangeVisibility() {
+    try {
+      await setVisibility.mutateAsync(target);
+      toast.success(copy.toast(target));
+      setOpen(false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <Row
       title={
@@ -682,15 +699,7 @@ function VisibilityAction({
         confirmLabel="Change visibility"
         disabled={target === info.visibility}
         pending={setVisibility.isPending}
-        onConfirm={() =>
-          setVisibility.mutate(target, {
-            onSuccess: () => {
-              toast.success(copy.toast(target));
-              setOpen(false);
-            },
-            onError: toastError,
-          })
-        }
+        onConfirm={handleChangeVisibility}
       >
         <div className="space-y-1.5">
           <Label htmlFor="visibility-target" className="text-xs">
@@ -735,6 +744,16 @@ function TransferAction({
   const [newOwner, setNewOwner] = useState("");
   const copy = DANGER_COPY[provider].transfer;
 
+  async function handleTransfer() {
+    try {
+      await transfer.mutateAsync({ newOwner: newOwner.trim(), newName: null });
+      toast.success(copy.toast);
+      setOpen(false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   // Bitbucket's REST API can't transfer a repo — send the user to the web
   // admin page instead of offering a form that would only error.
   if (provider === "bitbucket") {
@@ -774,18 +793,7 @@ function TransferAction({
         confirmLabel="Transfer"
         disabled={!newOwner.trim()}
         pending={transfer.isPending}
-        onConfirm={() =>
-          transfer.mutate(
-            { newOwner: newOwner.trim(), newName: null },
-            {
-              onSuccess: () => {
-                toast.success(copy.toast);
-                setOpen(false);
-              },
-              onError: toastError,
-            },
-          )
-        }
+        onConfirm={handleTransfer}
       >
         <div className="space-y-1.5">
           <Label htmlFor="transfer-owner" className="text-xs">
@@ -826,6 +834,21 @@ function DeleteAction({
   const copy = DANGER_COPY[provider].delete;
   const noun = isGitLab ? "project" : "repository";
 
+  async function handleDelete() {
+    try {
+      await del.mutateAsync(undefined);
+      toast.success(copy.toast);
+      setOpen(false);
+      // The remote is gone — re-probe the repo's hosted panels so they
+      // stop showing stale data, and close the settings dialog (it only
+      // offers actions against a repo that no longer exists).
+      queryClient.invalidateQueries({ queryKey: ["repo", repoPath] });
+      onRepoDeleted();
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <Row
       title={`Delete this ${noun}`}
@@ -847,20 +870,7 @@ function DeleteAction({
         confirmPhrase={info.fullName}
         confirmLabel="Delete forever"
         pending={del.isPending}
-        onConfirm={() =>
-          del.mutate(undefined, {
-            onSuccess: () => {
-              toast.success(copy.toast);
-              setOpen(false);
-              // The remote is gone — re-probe the repo's hosted panels so they
-              // stop showing stale data, and close the settings dialog (it only
-              // offers actions against a repo that no longer exists).
-              queryClient.invalidateQueries({ queryKey: ["repo", repoPath] });
-              onRepoDeleted();
-            },
-            onError: toastError,
-          })
-        }
+        onConfirm={handleDelete}
       >
         {!isGitLab && !isBitbucket && (
           <ScopeRefreshHint

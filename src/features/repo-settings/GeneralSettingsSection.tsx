@@ -263,6 +263,18 @@ function GeneralForm({
     ? branchNames
     : [form.defaultBranch, ...branchNames];
 
+  // Awaited, not per-call callbacks: react-query drops those when this subtree
+  // unmounts mid-flight — closing the dialog or switching the rail's section —
+  // so the outcome would never reach the user.
+  async function handleSave() {
+    try {
+      await update.mutateAsync(form);
+      toast.success("Repository settings saved");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <div className="min-w-0 space-y-4">
       <DescriptionField
@@ -548,12 +560,7 @@ function GeneralForm({
           disabled={
             !dirty || !mergeValid || update.isPending || descGen.generating
           }
-          onClick={() =>
-            update.mutate(form, {
-              onSuccess: () => toast.success("Repository settings saved"),
-              onError: toastError,
-            })
-          }
+          onClick={handleSave}
         >
           {update.isPending && <Spinner data-icon="inline-start" />}
           Save changes

@@ -90,17 +90,58 @@ export function CollaboratorsSection({
   const collabRows = collaborators.data ?? [];
   const inviteRows = invitations.data ?? [];
 
-  function addCollaborator() {
-    add.mutate(
-      { username: username.trim(), role },
-      {
-        onSuccess: (pending) => {
-          toast.success(pending ? "Invitation sent" : "Collaborator added");
-          setUsername("");
-        },
-        onError: toastError,
-      },
-    );
+  // Awaited, not per-call callbacks: react-query drops those when this subtree
+  // unmounts mid-flight — closing the dialog or switching the rail's section —
+  // so the outcome would never reach the user.
+  async function addCollaborator() {
+    try {
+      const pending = await add.mutateAsync({
+        username: username.trim(),
+        role,
+      });
+      toast.success(pending ? "Invitation sent" : "Collaborator added");
+      setUsername("");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function setCollaboratorRole(login: string, next: RepoRole) {
+    try {
+      await add.mutateAsync({ username: login, role: next });
+      toast.success(`${login} is now ${next}`);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function removeCollaborator(login: string) {
+    try {
+      await remove.mutateAsync(login);
+      toast.success(`Removed ${login}`);
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function setInvitationRole(id: string, permission: RepoRole) {
+    try {
+      await updateInvite.mutateAsync({ id, permission });
+      toast.success("Invitation updated");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function cancelInvitation(id: string) {
+    try {
+      await cancelInvite.mutateAsync(id);
+      toast.success("Invitation canceled");
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -114,7 +155,7 @@ export function CollaboratorsSection({
             autoComplete="off"
             spellCheck={false}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && canAdd) addCollaborator();
+              if (e.key === "Enter" && canAdd) void addCollaborator();
             }}
           />
           <Select
@@ -189,28 +230,12 @@ export function CollaboratorsSection({
                 roleValue={c.roleName}
                 roleDisabled={add.isPending}
                 roles={roles}
-                onRole={(r) =>
-                  add.mutate(
-                    { username: c.login, role: r },
-                    {
-                      onSuccess: () => toast.success(`${c.login} is now ${r}`),
-                      onError: toastError,
-                    },
-                  )
-                }
+                onRole={(r) => setCollaboratorRole(c.login, r)}
                 confirming={confirming === key}
                 pending={remove.isPending}
                 onConfirm={() => setConfirming(key)}
                 onCancel={() => setConfirming(null)}
-                onRemove={() =>
-                  remove.mutate(c.login, {
-                    onSuccess: () => {
-                      toast.success(`Removed ${c.login}`);
-                      setConfirming(null);
-                    },
-                    onError: toastError,
-                  })
-                }
+                onRemove={() => removeCollaborator(c.login)}
               />
             );
           })}
@@ -254,28 +279,12 @@ export function CollaboratorsSection({
                   roleValue={inv.permission}
                   roleDisabled={updateInvite.isPending}
                   roles={roles}
-                  onRole={(r) =>
-                    updateInvite.mutate(
-                      { id: inv.id, permission: r },
-                      {
-                        onSuccess: () => toast.success("Invitation updated"),
-                        onError: toastError,
-                      },
-                    )
-                  }
+                  onRole={(r) => setInvitationRole(inv.id, r)}
                   confirming={confirming === key}
                   pending={cancelInvite.isPending}
                   onConfirm={() => setConfirming(key)}
                   onCancel={() => setConfirming(null)}
-                  onRemove={() =>
-                    cancelInvite.mutate(inv.id, {
-                      onSuccess: () => {
-                        toast.success("Invitation canceled");
-                        setConfirming(null);
-                      },
-                      onError: toastError,
-                    })
-                  }
+                  onRemove={() => cancelInvitation(inv.id)}
                 />
               );
             })}

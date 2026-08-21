@@ -162,23 +162,27 @@ function FundingForm({
   const setField = (key: string, value: string) =>
     setFields((f) => ({ ...f, [key]: value }));
 
-  function save() {
-    set.mutate(generateFunding(fields), {
-      onSuccess: () =>
-        toast.success("Wrote .github/FUNDING.yml — commit it to publish"),
-      onError: toastError,
-    });
+  // Awaited, not per-call callbacks: react-query drops those when this subtree
+  // unmounts mid-flight — closing the dialog or switching the rail's section —
+  // so the outcome would never reach the user.
+  async function save() {
+    try {
+      await set.mutateAsync(generateFunding(fields));
+      toast.success("Wrote .github/FUNDING.yml — commit it to publish");
+    } catch (e) {
+      toastError(e);
+    }
   }
 
-  function remove() {
+  async function remove() {
     if (!exists) return;
-    del.mutate(undefined, {
-      onSuccess: () => {
-        toast.success("Removed .github/FUNDING.yml — commit it to publish");
-        setConfirmingRemove(false);
-      },
-      onError: toastError,
-    });
+    try {
+      await del.mutateAsync(undefined);
+      toast.success("Removed .github/FUNDING.yml — commit it to publish");
+      setConfirmingRemove(false);
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

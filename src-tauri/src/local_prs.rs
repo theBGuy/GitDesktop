@@ -29,8 +29,20 @@
 //!
 //! The GUI holds this store in memory (`autoSave`), so every call here does a FRESH
 //! read → modify → atomic write. Never write from stale memory.
+//!
+//! ## Concurrency
+//!
+//! Two `gitdesktop mcp` servers can run at once (one per repo, or two on one repo), so
+//! every read-modify-write here holds the in-process [`PRS_LOCK`] and, inside it, the
+//! cross-process [`crate::store_lock`] — cheap exact serialization first, then the
+//! OS-level file lock, which fails open. `atomic_write` gives torn-file safety; the
+//! locks give lost-update safety. Known limit: the GUI writes this store through its own
+//! plugin-store cache and takes neither lock, so a GUI/MCP overlap can still lose an
+//! update — closing that needs the GUI's writes routed through Rust, as `review_notes`
+//! does.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -61,10 +73,46 @@ struct NewLocalPr {
     created_at: String,
 }
 
+/// Guards the whole read-modify-write of the shared store file within THIS process
+/// (mirroring [`crate::oplog`]'s lock). It sits OUTSIDE the cross-process file lock
+/// deliberately: same-process serialization is exact and free, where the file lock fails
+/// open after its retry budget.
+fn prs_lock() -> &'static Mutex<()> {
+    static PRS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    PRS_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// In-process test override, consulted by [`store_path`] before the real app-data
+/// resolution — the ONLY seam a test may use to reach this store, and the reason an
+/// in-crate test can drive the public write fns without touching the developer's own
+/// records. In-process rather than an env var: mutating process env races every other
+/// test's env reads in the same binary (unsound, not merely flaky).
+#[cfg(test)]
+static TEST_STORE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Installs (or clears) the in-process override, returning the previous value so a caller
+/// can restore it. Test-only — [`TEST_STORE_DIR`] does not exist otherwise.
+#[cfg(test)]
+fn swap_test_store_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+    let mut slot = TEST_STORE_DIR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::replace(&mut *slot, dir)
+}
+
 /// Resolve the absolute path of the `local-prs.json` the frontend store writes.
 /// Mirrors `tauri-plugin-store` v2's `BaseDirectory::AppData` resolution
-/// (`dirs::data_dir()/<identifier>`) — see the module contract.
+/// (`dirs::data_dir()/<identifier>`) — see the module contract. Under `cfg(test)` an
+/// installed [`TEST_STORE_DIR`] wins.
 pub fn store_path() -> AppResult<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_STORE_DIR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return Ok(dir.join(STORE_FILE));
+    }
     let data = dirs::data_dir()
         .ok_or_else(|| AppError::Command("could not resolve the app-data directory".to_string()))?;
     Ok(data.join(APP_IDENTIFIER).join(STORE_FILE))
@@ -174,8 +222,32 @@ pub fn get(repo: &str, id: &str) -> AppResult<Value> {
 /// Create a new local PR under `repo` and PREPEND it (matching the GUI). Returns the
 /// created record as a `Value`. The caller is responsible for having validated that
 /// `base`/`head` resolve as branches — this core only touches app data.
-pub fn create(repo: &str, title: &str, body: &str, base: &str, head: &str) -> AppResult<Value> {
+///
+/// The locked write runs off the async runtime: the cross-process lock blocks its calling
+/// thread for up to the retry budget, which must not park a tokio worker.
+pub async fn create(
+    repo: &str,
+    title: &str,
+    body: &str,
+    base: &str,
+    head: &str,
+) -> AppResult<Value> {
+    let (repo, title, body, base, head) = (
+        repo.to_string(),
+        title.to_string(),
+        body.to_string(),
+        base.to_string(),
+        head.to_string(),
+    );
+    crate::store_lock::locked_store_task(move || create_sync(&repo, &title, &body, &base, &head))
+        .await
+}
+
+/// The locked read-modify-write behind [`create`], on the caller's own thread.
+fn create_sync(repo: &str, title: &str, body: &str, base: &str, head: &str) -> AppResult<Value> {
     let path = store_path()?;
+    let _guard = prs_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
     let record = NewLocalPr {
         id: uuid::Uuid::new_v4().to_string(),
@@ -204,14 +276,25 @@ pub fn create(repo: &str, title: &str, body: &str, base: &str, head: &str) -> Ap
 }
 
 /// Locate the PR with `id` inside `repo`'s array and apply `mutate` to it in place,
-/// then persist. `mutate` receives the record as a mutable `Map` so it edits only the
-/// fields it means to — unknown fields on the record survive untouched. Errors if the
-/// repo has no entry or no PR with that id.
-fn mutate_pr<F>(repo: &str, id: &str, mutate: F) -> AppResult<Value>
+/// then persist, off the async runtime (see [`create`]). `mutate` receives the record as
+/// a mutable `Map` so it edits only the fields it means to — unknown fields on the record
+/// survive untouched. Errors if the repo has no entry or no PR with that id.
+async fn mutate_pr<F>(repo: &str, id: &str, mutate: F) -> AppResult<Value>
+where
+    F: FnOnce(&mut Map<String, Value>) -> AppResult<()> + Send + 'static,
+{
+    let (repo, id) = (repo.to_string(), id.to_string());
+    crate::store_lock::locked_store_task(move || mutate_pr_sync(&repo, &id, mutate)).await
+}
+
+/// The locked read-modify-write behind [`mutate_pr`], on the caller's own thread.
+fn mutate_pr_sync<F>(repo: &str, id: &str, mutate: F) -> AppResult<Value>
 where
     F: FnOnce(&mut Map<String, Value>) -> AppResult<()>,
 {
     let path = store_path()?;
+    let _guard = prs_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
     let key = existing_key(&store, repo).ok_or_else(|| {
         AppError::Command(format!("no local PRs found for this repository (id {id})"))
@@ -237,13 +320,13 @@ where
 
 /// Append a comment (`{ id, body, createdAt }`) to the PR with `id` under `repo`.
 /// Returns the updated record.
-pub fn add_comment(repo: &str, id: &str, body: &str) -> AppResult<Value> {
+pub async fn add_comment(repo: &str, id: &str, body: &str) -> AppResult<Value> {
     let comment = serde_json::json!({
         "id": uuid::Uuid::new_v4().to_string(),
         "body": body,
         "createdAt": now_iso(),
     });
-    mutate_pr(repo, id, |pr| {
+    mutate_pr(repo, id, move |pr| {
         let comments = pr
             .entry("comments")
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -253,12 +336,13 @@ pub fn add_comment(repo: &str, id: &str, body: &str) -> AppResult<Value> {
             .push(comment);
         Ok(())
     })
+    .await
 }
 
 /// Set the status of the PR with `id` under `repo` to `"open"` or `"closed"`.
 /// `"merged"` is rejected here — merging is a git operation the MCP server must never
 /// perform (it happens in GitDesktop). Returns the updated record.
-pub fn set_status(repo: &str, id: &str, status: &str) -> AppResult<Value> {
+pub async fn set_status(repo: &str, id: &str, status: &str) -> AppResult<Value> {
     if status != "open" && status != "closed" {
         return Err(AppError::Command(format!(
             "status must be \"open\" or \"closed\" (got \"{status}\"); merging a local PR happens in GitDesktop, not via this server"
@@ -269,14 +353,16 @@ pub fn set_status(repo: &str, id: &str, status: &str) -> AppResult<Value> {
         pr.insert("status".to_string(), Value::String(status));
         Ok(())
     })
+    .await
 }
 
 /// Set the `approved` flag on the PR with `id` under `repo`. Returns the updated record.
-pub fn set_approved(repo: &str, id: &str, approved: bool) -> AppResult<Value> {
+pub async fn set_approved(repo: &str, id: &str, approved: bool) -> AppResult<Value> {
     mutate_pr(repo, id, move |pr| {
         pr.insert("approved".to_string(), Value::Bool(approved));
         Ok(())
     })
+    .await
 }
 
 /// Fold any local-PR records still stored under a legacy checkout-PATH key into the
@@ -288,8 +374,16 @@ pub fn set_approved(repo: &str, id: &str, approved: bool) -> AppResult<Value> {
 /// records (identity's own win) and removes the legacy key. Callers pass `identity` as
 /// the `repo` arg to every other fn here. Idempotent: a no-op once no distinct legacy
 /// key remains.
-pub fn consolidate(identity: &str, legacy: &str) -> AppResult<()> {
+pub async fn consolidate(identity: &str, legacy: &str) -> AppResult<()> {
+    let (identity, legacy) = (identity.to_string(), legacy.to_string());
+    crate::store_lock::locked_store_task(move || consolidate_sync(&identity, &legacy)).await
+}
+
+/// The locked read-modify-write behind [`consolidate`], on the caller's own thread.
+fn consolidate_sync(identity: &str, legacy: &str) -> AppResult<()> {
     let path = store_path()?;
+    let _guard = prs_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
     if fold_legacy_key(&mut store, identity, legacy) {
         write_store(&path, &store)?;
@@ -355,6 +449,61 @@ mod tests {
             .expect("create temp dir");
         let path = dir.path().join("store.json");
         (dir, path)
+    }
+
+    /// The store override is process-wide, so every test that installs one takes this
+    /// lock — as must any future test that drives the public read/write fns. Poisoning is
+    /// ignored: the guarded state is one override slot, not invariant data.
+    static STORE_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    fn store_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+        STORE_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Points the store at `dir` for as long as it's held and restores the prior override
+    /// on drop — panics included, so a failing test can't leave one standing for whichever
+    /// test is next through the lock.
+    struct StoreDirOverride(Option<PathBuf>);
+
+    impl StoreDirOverride {
+        fn set(dir: &Path) -> Self {
+            Self(swap_test_store_dir(Some(dir.to_path_buf())))
+        }
+    }
+
+    impl Drop for StoreDirOverride {
+        fn drop(&mut self) {
+            swap_test_store_dir(self.0.take());
+        }
+    }
+
+    /// The public write path end to end — through `store_path`, both locks, and the
+    /// atomic write — which the pure-logic tests below deliberately bypass. A regression
+    /// that deadlocks or fails open wrongly shows up here, not in them.
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // override installed for the whole body. Sound because each `#[tokio::test]` owns a
+    // current-thread runtime with this one task on it.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn create_then_mutate_round_trips_through_the_locked_path() {
+        let _serialized = store_dir_lock();
+        let (tmp, _unused) = tmp_store();
+        let _override = StoreDirOverride::set(tmp.path());
+        let repo = "C:/local-prs/locked-round-trip/.git";
+
+        let created = create(repo, "Title", "Body", "main", "feature").await.unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+
+        add_comment(repo, &id, "looks good").await.unwrap();
+        let updated = set_status(repo, &id, "closed").await.unwrap();
+        assert_eq!(updated["status"], "closed");
+
+        let back = get(repo, &id).unwrap();
+        assert_eq!(back["title"], "Title");
+        assert_eq!(back["comments"][0]["body"], "looks good");
+        assert_eq!(list(repo).unwrap().len(), 1);
     }
 
     #[test]

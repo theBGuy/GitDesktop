@@ -211,6 +211,29 @@ function DependabotVersionUpdates({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
 
+  // Awaited, not per-call callbacks: react-query drops those when this subtree
+  // unmounts mid-flight — closing the dialog or switching the rail's section —
+  // so the outcome would never reach the user.
+  async function handleRemove() {
+    try {
+      await del.mutateAsync(undefined);
+      toast.success("Removed .github/dependabot.yml — commit it");
+      setConfirmingRemove(false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleCreate(content: string) {
+    try {
+      await set.mutateAsync(content);
+      toast.success("Wrote .github/dependabot.yml — commit it to enable");
+      setDialogOpen(false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   if (config.isLoading) return null;
   const exists = config.data != null;
 
@@ -232,17 +255,7 @@ function DependabotVersionUpdates({
                 actLabel="Remove"
                 pending={del.isPending}
                 onCancel={() => setConfirmingRemove(false)}
-                onAct={() =>
-                  del.mutate(undefined, {
-                    onSuccess: () => {
-                      toast.success(
-                        "Removed .github/dependabot.yml — commit it",
-                      );
-                      setConfirmingRemove(false);
-                    },
-                    onError: toastError,
-                  })
-                }
+                onAct={handleRemove}
               />
             </div>
           ) : (
@@ -270,17 +283,7 @@ function DependabotVersionUpdates({
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         pending={set.isPending}
-        onCreate={(content) =>
-          set.mutate(content, {
-            onSuccess: () => {
-              toast.success(
-                "Wrote .github/dependabot.yml — commit it to enable",
-              );
-              setDialogOpen(false);
-            },
-            onError: toastError,
-          })
-        }
+        onCreate={handleCreate}
       />
     </div>
   );
@@ -427,14 +430,16 @@ function SecurityForm({
     });
   }
 
-  function save() {
+  async function save() {
     const changes = FEATURES.filter((f) => draft[f.key] !== seed[f.key]).map(
       (f) => ({ feature: f.key, enabled: draft[f.key] }),
     );
-    apply.mutate(changes, {
-      onSuccess: () => toast.success("Security settings saved"),
-      onError: toastError,
-    });
+    try {
+      await apply.mutateAsync(changes);
+      toast.success("Security settings saved");
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

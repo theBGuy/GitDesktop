@@ -31,16 +31,23 @@ export function BitbucketEnvironmentsSection({
   const settings = useBbRepoSettings(repoPath, open);
   const webUrl = settings.data?.webUrl;
 
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function handleEnablePipelines() {
+    try {
+      await setEnabled.mutateAsync(true);
+      toast.success("Pipelines enabled");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   if (config.data && !enabled) {
     return (
       <PipelinesDisabledBanner
         pending={setEnabled.isPending}
-        onEnable={() =>
-          setEnabled.mutate(true, {
-            onSuccess: () => toast.success("Pipelines enabled"),
-            onError: toastError,
-          })
-        }
+        onEnable={handleEnablePipelines}
       />
     );
   }

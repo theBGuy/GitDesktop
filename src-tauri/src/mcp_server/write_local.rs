@@ -132,6 +132,7 @@ impl GitDesktopMcp {
             &args.base,
             &args.head,
         )
+        .await
         .map_err(app_err)?;
         json_result(&record)
     }
@@ -147,7 +148,9 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_write()?;
         let repo = self.local_pr_key().await?;
-        let record = crate::local_prs::add_comment(&repo, &args.id, &args.body).map_err(app_err)?;
+        let record = crate::local_prs::add_comment(&repo, &args.id, &args.body)
+            .await
+            .map_err(app_err)?;
         json_result(&record)
     }
 
@@ -163,8 +166,9 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_write()?;
         let repo = self.local_pr_key().await?;
-        let record =
-            crate::local_prs::set_status(&repo, &args.id, &args.status).map_err(app_err)?;
+        let record = crate::local_prs::set_status(&repo, &args.id, &args.status)
+            .await
+            .map_err(app_err)?;
         json_result(&record)
     }
 
@@ -179,8 +183,9 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_write()?;
         let repo = self.local_pr_key().await?;
-        let record =
-            crate::local_prs::set_approved(&repo, &args.id, args.approved).map_err(app_err)?;
+        let record = crate::local_prs::set_approved(&repo, &args.id, args.approved)
+            .await
+            .map_err(app_err)?;
         json_result(&record)
     }
 
@@ -200,6 +205,7 @@ impl GitDesktopMcp {
         let repo = self.local_issue_key().await?;
         let record =
             crate::local_issues::create(&repo, &args.title, args.body.as_deref().unwrap_or(""))
+                .await
                 .map_err(app_err)?;
         json_result(&record)
     }
@@ -216,8 +222,9 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_write()?;
         let repo = self.local_issue_key().await?;
-        let record =
-            crate::local_issues::add_comment(&repo, &args.id, &args.body).map_err(app_err)?;
+        let record = crate::local_issues::add_comment(&repo, &args.id, &args.body)
+            .await
+            .map_err(app_err)?;
         json_result(&record)
     }
 
@@ -234,8 +241,9 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_write()?;
         let repo = self.local_issue_key().await?;
-        let record =
-            crate::local_issues::set_status(&repo, &args.id, &args.status).map_err(app_err)?;
+        let record = crate::local_issues::set_status(&repo, &args.id, &args.status)
+            .await
+            .map_err(app_err)?;
         json_result(&record)
     }
 
@@ -260,7 +268,9 @@ impl GitDesktopMcp {
         // naming it — before any app-data write.
         verify_branch(&self.repo, &args.branch).await?;
         let repo = crate::git::repo::repo_identity(&self.repo).await;
-        let saved = crate::review_notes::set(&repo, &args.branch, &args.body).map_err(app_err)?;
+        let saved = crate::review_notes::set(&repo, &args.branch, &args.body)
+            .await
+            .map_err(app_err)?;
         json_result(&serde_json::json!({ "branch": args.branch, "saved": saved }))
     }
 
@@ -397,7 +407,16 @@ impl GitDesktopMcp {
     /// call — acceptable given how infrequent local-issue mutations are.
     async fn local_issue_key(&self) -> Result<String, McpError> {
         let identity = crate::git::repo::repo_identity(&self.repo).await;
-        crate::local_issues::consolidate(&identity, &self.repo).map_err(app_err)?;
+        crate::local_issues::consolidate(&identity, &self.repo)
+            .await
+            .map_err(app_err)?;
+        // The pre-canonicalization spelling is a second legacy key (see
+        // `GitDesktopMcp::raw_repo`); folding it is idempotent like the first.
+        if let Some(raw) = &self.raw_repo {
+            crate::local_issues::consolidate(&identity, raw)
+                .await
+                .map_err(app_err)?;
+        }
         Ok(identity)
     }
 }

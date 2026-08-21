@@ -29,8 +29,8 @@ function validKey(k: string): boolean {
 /** Bitbucket pipeline variables. A secured variable's value is write-only — the
  *  API never returns it, so secured rows show "Secured — value hidden" (never
  *  faked masked text). The list can lag a write by ~1s (server replication), so
- *  the created/edited row is patched into the cache in the mutation's onSuccess
- *  and reconciled by the invalidation refetch. */
+ *  the created/edited row is patched into the cache by the awaited mutation's
+ *  continuation and reconciled by the invalidation refetch. */
 export function BitbucketVariablesSection({
   repoPath,
   open,
@@ -51,16 +51,23 @@ export function BitbucketVariablesSection({
   const [secured, setSecured] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
 
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function handleEnablePipelines() {
+    try {
+      await setEnabled.mutateAsync(true);
+      toast.success("Pipelines enabled");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   if (config.data && !enabled) {
     return (
       <PipelinesDisabledBanner
         pending={setEnabled.isPending}
-        onEnable={() =>
-          setEnabled.mutate(true, {
-            onSuccess: () => toast.success("Pipelines enabled"),
-            onError: toastError,
-          })
-        }
+        onEnable={handleEnablePipelines}
       />
     );
   }
@@ -102,7 +109,7 @@ export function BitbucketVariablesSection({
     }, 2500);
   }
 
-  function addVariable() {
+  async function addVariable() {
     const created: BitbucketPipelineVariable = {
       // The create call returns void, so synthesize a uuid keyed on the name;
       // the refetch replaces it with the server's real row shortly.
@@ -111,20 +118,27 @@ export function BitbucketVariablesSection({
       value: secured ? null : value,
       secured,
     };
-    create.mutate(
-      { key: key.trim(), value, secured },
-      {
-        onSuccess: () => {
-          patchRow(created);
-          reconcileAfterWrite();
-          toast.success(`Added ${key.trim()}`);
-          setKey("");
-          setValue("");
-          setSecured(false);
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await create.mutateAsync({ key: key.trim(), value, secured });
+      patchRow(created);
+      reconcileAfterWrite();
+      toast.success(`Added ${key.trim()}`);
+      setKey("");
+      setValue("");
+      setSecured(false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleRemove(uuid: string, variableKey: string) {
+    try {
+      await remove.mutateAsync(uuid);
+      toast.success(`Deleted ${variableKey}`);
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -189,15 +203,7 @@ export function BitbucketVariablesSection({
             pending={remove.isPending}
             onConfirm={() => setConfirming(v.uuid)}
             onCancel={() => setConfirming(null)}
-            onRemove={() =>
-              remove.mutate(v.uuid, {
-                onSuccess: () => {
-                  toast.success(`Deleted ${v.key}`);
-                  setConfirming(null);
-                },
-                onError: toastError,
-              })
-            }
+            onRemove={() => handleRemove(v.uuid, v.key)}
           />
         ))}
       </AsyncListBody>
@@ -242,24 +248,25 @@ function VariableRow({
     ? draft.length > 0 || secure !== variable.secured
     : draft !== (variable.value ?? "") || secure !== variable.secured;
 
-  function save() {
-    update.mutate(
-      { uuid: variable.uuid, value: draft, secured: secure },
-      {
-        onSuccess: () => {
-          onPatch({
-            uuid: variable.uuid,
-            key: variable.key,
-            value: secure ? null : draft,
-            secured: secure,
-          });
-          onReconcile();
-          toast.success(`Updated ${variable.key}`);
-          setDraft("");
-        },
-        onError: toastError,
-      },
-    );
+  async function save() {
+    try {
+      await update.mutateAsync({
+        uuid: variable.uuid,
+        value: draft,
+        secured: secure,
+      });
+      onPatch({
+        uuid: variable.uuid,
+        key: variable.key,
+        value: secure ? null : draft,
+        secured: secure,
+      });
+      onReconcile();
+      toast.success(`Updated ${variable.key}`);
+      setDraft("");
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

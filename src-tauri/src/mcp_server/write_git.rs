@@ -348,6 +348,18 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CommitArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
+        // A session that predates canonicalization journaled its paused picks under the
+        // RAW `--repo` spelling, which `git_commit_core`'s close — keyed on the canonical
+        // path — cannot reach. Mirror that close's gate here for the second spelling,
+        // reading the marker BEFORE the commit clears it. Skipped when the two already
+        // resolve to one journal key, which is what keeps this from closing a second
+        // paused record under the same key.
+        let legacy_repo = self
+            .raw_repo
+            .clone()
+            .filter(|raw| !crate::oplog::same_repo(raw, &self.repo));
+        let was_picking =
+            legacy_repo.is_some() && crate::git::ops::cherry_pick_marker_present(&self.repo);
         let result = crate::git::commit::git_commit_core(
             &self.state,
             self.repo.clone(),
@@ -357,6 +369,11 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
+        if was_picking && !crate::git::ops::cherry_pick_marker_present(&self.repo) {
+            if let Some(raw) = legacy_repo {
+                crate::oplog::close_paused_pick(&raw, crate::oplog::PausedOutcome::Continued).await;
+            }
+        }
         json_result(&result)
     }
 

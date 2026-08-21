@@ -77,6 +77,27 @@ export function GitLabProtectedBranchesSection({
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
 
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — a failure would revert silently on refetch.
+  async function handleToggleForcePush(name: string, allowForcePush: boolean) {
+    try {
+      await updateBranch.mutateAsync({ name, allowForcePush });
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleUnprotect(name: string) {
+    try {
+      await unprotect.mutateAsync(name);
+      toast.success(`Unprotected ${name}`);
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   if (editing) {
     return (
       <ProtectBranchForm
@@ -117,24 +138,13 @@ export function GitLabProtectedBranchesSection({
               updateBranch.isPending && updateBranch.variables?.name === b.name
             }
             onToggleForcePush={(allowForcePush) =>
-              updateBranch.mutate(
-                { name: b.name, allowForcePush },
-                { onError: toastError },
-              )
+              handleToggleForcePush(b.name, allowForcePush)
             }
             confirming={confirming === b.name}
             unprotecting={unprotect.isPending}
             onConfirm={() => setConfirming(b.name)}
             onCancel={() => setConfirming(null)}
-            onUnprotect={() =>
-              unprotect.mutate(b.name, {
-                onSuccess: () => {
-                  toast.success(`Unprotected ${b.name}`);
-                  setConfirming(null);
-                },
-                onError: toastError,
-              })
-            }
+            onUnprotect={() => handleUnprotect(b.name)}
           />
         ))}
       </AsyncListBody>
@@ -265,22 +275,19 @@ function ProtectBranchForm({
       ? "This branch already has a protection rule."
       : null;
 
-  function submit() {
-    protectBranch.mutate(
-      {
+  async function submit() {
+    try {
+      await protectBranch.mutateAsync({
         name: trimmed,
         pushAccessLevel: Number(pushLevel),
         mergeAccessLevel: Number(mergeLevel),
         allowForcePush,
-      },
-      {
-        onSuccess: () => {
-          toast.success(`Protected ${trimmed}`);
-          onDone();
-        },
-        onError: toastError,
-      },
-    );
+      });
+      toast.success(`Protected ${trimmed}`);
+      onDone();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

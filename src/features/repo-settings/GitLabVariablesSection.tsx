@@ -57,27 +57,56 @@ export function GitLabVariablesSection({
         : "Keys use only letters, digits, and underscores."
     : null;
 
-  function addVariable() {
-    setVariable.mutate(
-      {
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function addVariable() {
+    try {
+      await setVariable.mutateAsync({
         key: key.trim(),
         value,
         protected: isProtected,
         masked: isMasked,
         create: true,
         scope: "*",
-      },
-      {
-        onSuccess: () => {
-          toast.success(`Added ${key.trim()}`);
-          setKey("");
-          setValue("");
-          setIsProtected(false);
-          setIsMasked(false);
-        },
-        onError: toastError,
-      },
-    );
+      });
+      toast.success(`Added ${key.trim()}`);
+      setKey("");
+      setValue("");
+      setIsProtected(false);
+      setIsMasked(false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleSave(variable: GitLabVariable, newValue: string) {
+    try {
+      await setVariable.mutateAsync({
+        key: variable.key,
+        value: newValue,
+        protected: variable.protected,
+        masked: variable.masked,
+        create: false,
+        scope: variable.environmentScope,
+      });
+      toast.success(`Updated ${variable.key}`);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleRemove(variable: GitLabVariable) {
+    try {
+      await deleteVariable.mutateAsync({
+        key: variable.key,
+        scope: variable.environmentScope,
+      });
+      toast.success(`Deleted ${variable.key}`);
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -145,38 +174,12 @@ export function GitLabVariablesSection({
               key={rowId}
               variable={v}
               saving={setVariable.isPending}
-              onSave={(newValue) =>
-                setVariable.mutate(
-                  {
-                    key: v.key,
-                    value: newValue,
-                    protected: v.protected,
-                    masked: v.masked,
-                    create: false,
-                    scope: v.environmentScope,
-                  },
-                  {
-                    onSuccess: () => toast.success(`Updated ${v.key}`),
-                    onError: toastError,
-                  },
-                )
-              }
+              onSave={(newValue) => handleSave(v, newValue)}
               confirming={confirming === rowId}
               pending={deleteVariable.isPending}
               onConfirm={() => setConfirming(rowId)}
               onCancel={() => setConfirming(null)}
-              onRemove={() =>
-                deleteVariable.mutate(
-                  { key: v.key, scope: v.environmentScope },
-                  {
-                    onSuccess: () => {
-                      toast.success(`Deleted ${v.key}`);
-                      setConfirming(null);
-                    },
-                    onError: toastError,
-                  },
-                )
-              }
+              onRemove={() => handleRemove(v)}
             />
           );
         })}

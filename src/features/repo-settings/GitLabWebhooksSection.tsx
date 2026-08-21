@@ -71,6 +71,28 @@ export function GitLabWebhooksSection({
   const [viewingEvents, setViewingEvents] = useState<GitLabHook | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
 
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function handleDelete(hookId: string) {
+    try {
+      await deleteHook.mutateAsync(hookId);
+      toast.success("Webhook deleted");
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleTest(hookId: string) {
+    try {
+      await testHook.mutateAsync({ hookId, trigger: "push_events" });
+      toast.success("Test event sent");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   if (viewingEvents) {
     return (
       <HookDeliveries
@@ -143,15 +165,7 @@ export function GitLabWebhooksSection({
                   actLabel="Delete"
                   pending={deleteHook.isPending}
                   onCancel={() => setConfirming(null)}
-                  onAct={() =>
-                    deleteHook.mutate(h.id, {
-                      onSuccess: () => {
-                        toast.success("Webhook deleted");
-                        setConfirming(null);
-                      },
-                      onError: toastError,
-                    })
-                  }
+                  onAct={() => handleDelete(h.id)}
                 />
               ) : (
                 <>
@@ -160,15 +174,7 @@ export function GitLabWebhooksSection({
                     variant="ghost"
                     title="Send a test push event"
                     disabled={testHook.isPending}
-                    onClick={() =>
-                      testHook.mutate(
-                        { hookId: h.id, trigger: "push_events" },
-                        {
-                          onSuccess: () => toast.success("Test event sent"),
-                          onError: toastError,
-                        },
-                      )
-                    }
+                    onClick={() => handleTest(h.id)}
                   >
                     <ArrowClockwiseIcon />
                   </Button>
@@ -243,7 +249,7 @@ function HookForm({
     setEvents((prev) => (on ? [...prev, id] : prev.filter((e) => e !== id)));
   }
 
-  function save() {
+  async function save() {
     const input = {
       url: url.trim(),
       // Blank leaves an existing secret unchanged (GitLab never returns it).
@@ -251,15 +257,14 @@ function HookForm({
       enableSslVerification: sslVerify,
       events,
     };
-    const done = {
-      onSuccess: () => {
-        toast.success(hook ? "Webhook updated" : "Webhook created");
-        onDone();
-      },
-      onError: toastError,
-    };
-    if (hook) update.mutate({ hookId: hook.id, input }, done);
-    else create.mutate(input, done);
+    try {
+      if (hook) await update.mutateAsync({ hookId: hook.id, input });
+      else await create.mutateAsync(input);
+      toast.success(hook ? "Webhook updated" : "Webhook created");
+      onDone();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (
@@ -351,6 +356,15 @@ function HookDeliveries({
   const resend = useGlResendHookEvent(repoPath, hook.id);
   const [expanded, setExpanded] = useState<string | null>(null);
 
+  async function handleResend(eventId: string) {
+    try {
+      await resend.mutateAsync(eventId);
+      toast.success("Delivery re-sent");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <div className="min-w-0 space-y-3">
       <div className="flex items-center justify-between gap-2">
@@ -381,12 +395,7 @@ function HookDeliveries({
             expanded={expanded === d.id}
             onToggle={() => setExpanded(expanded === d.id ? null : d.id)}
             resending={resend.isPending}
-            onResend={() =>
-              resend.mutate(d.id, {
-                onSuccess: () => toast.success("Delivery re-sent"),
-                onError: toastError,
-              })
-            }
+            onResend={() => handleResend(d.id)}
           />
         ))}
       </AsyncListBody>

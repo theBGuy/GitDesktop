@@ -109,6 +109,14 @@ fn name_maps() -> &'static Mutex<HashMap<String, HashMap<String, String>>> {
     NAME_MAPS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Guards the whole read-modify-write of the persisted file within THIS process, outside
+/// the cross-process file lock — the [`crate::local_prs`] pairing exactly. Losing a write
+/// here only costs a rediscovery, but a torn interleave would drop another site's entry.
+fn write_lock() -> &'static Mutex<()> {
+    static WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 /// Resolve the absolute path of `jira-field-maps.json` under the app-data dir. Mirrors
 /// [`crate::local_prs::store_path`] (same `dirs::data_dir()/<identifier>` root).
 fn store_path() -> Option<PathBuf> {
@@ -168,20 +176,36 @@ pub fn get(site: &str) -> Option<SiteFieldMap> {
     Some(entry)
 }
 
-/// Persist a discovered map for a site: read → modify → atomic write (the `local_prs`
-/// pattern, tolerant of concurrent GUI/MCP writers), and update the in-process cache. A
-/// write failure is swallowed (best-effort cache) after the in-process cache is set, so a
-/// warm process still answers from memory even if the disk write couldn't land. Never
-/// errors to the caller.
-pub fn put(site: &str, entry: SiteFieldMap) {
+/// Persist a discovered map for a site: read → modify → atomic write under both locks
+/// (the `local_prs` pattern — the GUI and MCP processes both write this file), and update
+/// the in-process cache. A write failure is swallowed (best-effort cache) after the
+/// in-process cache is set, so a warm process still answers from memory even if the disk
+/// write couldn't land. Never errors to the caller.
+///
+/// The cache is warmed FIRST, then the disk write runs off the async runtime: the
+/// cross-process lock blocks its calling thread for up to the retry budget, and this
+/// caller is a GUI Jira request, not a background job.
+pub async fn put(site: &str, entry: SiteFieldMap) {
     if let Ok(mut c) = cache().lock() {
         c.insert(site.to_string(), entry.clone());
     }
+    let site = site.to_string();
+    let _ = crate::store_lock::locked_store_task(move || {
+        put_sync(&site, &entry);
+        Ok(())
+    })
+    .await;
+}
+
+/// The locked read-modify-write behind [`put`], on the caller's own thread.
+fn put_sync(site: &str, entry: &SiteFieldMap) {
     let Some(path) = store_path() else {
         return;
     };
+    let _guard = write_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path);
-    let Ok(value) = serde_json::to_value(&entry) else {
+    let Ok(value) = serde_json::to_value(entry) else {
         return;
     };
     store.insert(site.to_string(), value);

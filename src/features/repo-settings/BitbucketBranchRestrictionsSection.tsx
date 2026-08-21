@@ -76,6 +76,19 @@ export function BitbucketBranchRestrictionsSection({
   >(null);
   const [confirming, setConfirming] = useState<string | null>(null);
 
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function handleRemove(id: string) {
+    try {
+      await remove.mutateAsync(id);
+      toast.success("Restriction deleted");
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   if (editing) {
     return (
       <RestrictionForm
@@ -126,15 +139,7 @@ export function BitbucketBranchRestrictionsSection({
                   actLabel="Delete"
                   pending={remove.isPending}
                   onCancel={() => setConfirming(null)}
-                  onAct={() =>
-                    remove.mutate(r.id, {
-                      onSuccess: () => {
-                        toast.success("Restriction deleted");
-                        setConfirming(null);
-                      },
-                      onError: toastError,
-                    })
-                  }
+                  onAct={() => handleRemove(r.id)}
                 />
               ) : (
                 <>
@@ -196,27 +201,27 @@ function RestrictionForm({
       ? "Enter a whole number between 1 and 10."
       : null;
 
-  function submit() {
+  async function submit() {
     const payloadValue = needsValue ? numValue : null;
-    const done = {
-      onSuccess: () => {
-        toast.success(editing ? "Restriction updated" : "Restriction added");
-        onDone();
-      },
-      onError: toastError,
-    };
-    if (restriction) {
-      update.mutate(
-        {
+    try {
+      if (restriction) {
+        await update.mutateAsync({
           id: restriction.id,
           kind: restriction.kind,
           pattern: trimmed,
           value: payloadValue,
-        },
-        done,
-      );
-    } else {
-      create.mutate({ kind, pattern: trimmed, value: payloadValue }, done);
+        });
+      } else {
+        await create.mutateAsync({
+          kind,
+          pattern: trimmed,
+          value: payloadValue,
+        });
+      }
+      toast.success(editing ? "Restriction updated" : "Restriction added");
+      onDone();
+    } catch (e) {
+      toastError(e);
     }
   }
 

@@ -92,6 +92,22 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
     .filter((n) => !n.startsWith("gd/session/"));
   const canEnable = (mode === "workflow" || !!branch) && !enable.isPending;
 
+  // Awaited, not per-call callbacks: react-query drops those when this subtree
+  // unmounts mid-flight — closing the dialog or switching the rail's section —
+  // so the outcome would never reach the user.
+  async function handleEnable() {
+    try {
+      await enable.mutateAsync({
+        buildType: mode === "workflow" ? "workflow" : "legacy",
+        branch: mode === "branch" ? branch : null,
+        path: mode === "branch" ? path : null,
+      });
+      toast.success("GitHub Pages enabled");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <div className="min-w-0 space-y-3">
       <p className="text-xs text-muted-foreground">
@@ -150,23 +166,7 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
           </div>
         </div>
       )}
-      <Button
-        size="sm"
-        disabled={!canEnable}
-        onClick={() =>
-          enable.mutate(
-            {
-              buildType: mode === "workflow" ? "workflow" : "legacy",
-              branch: mode === "branch" ? branch : null,
-              path: mode === "branch" ? path : null,
-            },
-            {
-              onSuccess: () => toast.success("GitHub Pages enabled"),
-              onError: toastError,
-            },
-          )
-        }
-      >
+      <Button size="sm" disabled={!canEnable} onClick={handleEnable}>
         {enable.isPending && <Spinner data-icon="inline-start" />}
         Enable Pages
       </Button>
@@ -215,6 +215,43 @@ function PagesEnabled({
     : certFailed
       ? "HTTPS certificate provisioning failed — check the domain's DNS configuration"
       : "Waiting for the HTTPS certificate to be issued for this domain";
+
+  async function handleUpdateSource() {
+    try {
+      await update.mutateAsync({ buildType: "legacy", branch, path });
+      toast.success("Source updated");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleSaveDomain() {
+    try {
+      await update.mutateAsync({ cname });
+      toast.success(cname ? "Domain saved" : "Domain removed");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleHttpsEnforced(v: boolean) {
+    try {
+      await update.mutateAsync({ httpsEnforced: v });
+      toast.success("Updated");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleDisable() {
+    try {
+      await disable.mutateAsync(undefined);
+      toast.success("GitHub Pages disabled");
+      setConfirmingDisable(false);
+    } catch (e) {
+      toastError(e);
+    }
+  }
 
   return (
     <div className="min-w-0 space-y-4">
@@ -277,15 +314,7 @@ function PagesEnabled({
               size="sm"
               variant="outline"
               disabled={!sourceChanged || !branch || update.isPending}
-              onClick={() =>
-                update.mutate(
-                  { buildType: "legacy", branch, path },
-                  {
-                    onSuccess: () => toast.success("Source updated"),
-                    onError: toastError,
-                  },
-                )
-              }
+              onClick={handleUpdateSource}
             >
               Update
             </Button>
@@ -309,16 +338,7 @@ function PagesEnabled({
             size="sm"
             variant="outline"
             disabled={cname === pages.cname || update.isPending}
-            onClick={() =>
-              update.mutate(
-                { cname },
-                {
-                  onSuccess: () =>
-                    toast.success(cname ? "Domain saved" : "Domain removed"),
-                  onError: toastError,
-                },
-              )
-            }
+            onClick={handleSaveDomain}
           >
             Save
           </Button>
@@ -343,15 +363,7 @@ function PagesEnabled({
           <Switch
             checked={pages.httpsEnforced}
             disabled={update.isPending || !certReady}
-            onCheckedChange={(v) =>
-              update.mutate(
-                { httpsEnforced: v },
-                {
-                  onSuccess: () => toast.success("Updated"),
-                  onError: toastError,
-                },
-              )
-            }
+            onCheckedChange={handleHttpsEnforced}
           />
         </span>
       </label>
@@ -364,15 +376,7 @@ function PagesEnabled({
             actLabel="Disable Pages"
             pending={disable.isPending}
             onCancel={() => setConfirmingDisable(false)}
-            onAct={() =>
-              disable.mutate(undefined, {
-                onSuccess: () => {
-                  toast.success("GitHub Pages disabled");
-                  setConfirmingDisable(false);
-                },
-                onError: toastError,
-              })
-            }
+            onAct={handleDisable}
           />
         ) : (
           <Button

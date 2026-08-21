@@ -43,6 +43,7 @@ function scanner(name) {
 const hoverReveal = scanner("hover-reveal");
 const modKey = scanner("hand-rolled-mod-key");
 const setQueryData = scanner("setQueryData-noop");
+const repoSettingsMutate = scanner("mutate-in-repo-settings");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -162,6 +163,49 @@ test("setQueryData-noop does not reach across a `;` statement boundary", () => {
     "logger.debug(label, undefined);",
   ].join("\n");
   assert.deepEqual(setQueryData(source), []);
+});
+
+test("mutate-in-repo-settings flags every way a call reaches its callbacks", () => {
+  // The reason this check matches the CALL and not the callbacks object: the
+  // hoisted-options pair is the shape most of these sections used, and no
+  // regex anchored on `onSuccess`/`onError` sees it.
+  assert.deepEqual(
+    repoSettingsMutate(
+      'del.mutate(hook.id, { onSuccess: () => toast.success("x"), onError: e });',
+    ),
+    [1],
+  );
+  const hoisted = [
+    "const opts = { onSuccess: done, onError: toastError };",
+    "update.mutate({ id, body }, opts);",
+  ].join("\n");
+  assert.deepEqual(repoSettingsMutate(hoisted), [2]);
+  assert.deepEqual(
+    repoSettingsMutate("setEnforcement.mutate(vars, { onError: toastError });"),
+    [1],
+  );
+});
+
+test("mutate-in-repo-settings flags a bare call carrying no callbacks", () => {
+  // Deliberate: a fire-and-forget mutation here still loses nothing to the
+  // unmount, but the ratchet stays a token match — an exemption is an
+  // allowlist entry with rationale, not a hole in the pattern.
+  assert.deepEqual(repoSettingsMutate("ping.mutate(hook.id);"), [1]);
+  assert.deepEqual(repoSettingsMutate("refresh.mutate ();"), [1]);
+});
+
+test("mutate-in-repo-settings leaves the awaited idiom and comments alone", () => {
+  const awaited = [
+    "await update.mutateAsync(form);",
+    'toast.success("Repository settings saved");',
+  ].join("\n");
+  assert.deepEqual(repoSettingsMutate(awaited), []);
+  const documented = [
+    "// never `.mutate(vars, { onSuccess, onError })` — the callbacks are",
+    "// dropped when the observer unmounts.",
+    "await save.mutateAsync(vars);",
+  ].join("\n");
+  assert.deepEqual(repoSettingsMutate(documented), []);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {

@@ -2858,7 +2858,15 @@ async fn evict_git_credential() {
 /// sentinel seed, and re-prompts — on Windows GCM as well as macOS osxkeychain.
 /// Non-`https` URLs and URLs without userinfo pass through unchanged.
 pub(crate) fn strip_https_userinfo(url: &str) -> String {
-    let Some(rest) = url.strip_prefix("https://") else {
+    // Scheme matched case-insensitively, in lockstep with `forge::is_https_remote`: an
+    // `HTTPS://user@…` remote that passed that gate but skipped this rewrite would be
+    // seeded `credential.interactive=false` with no `insteadOf`, turning a prompt into a
+    // hard auth failure.
+    let Some(rest) = url
+        .get(..8)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        .map(|_| &url[8..])
+    else {
         return url.to_string();
     };
     let (authority, path) = match rest.split_once('/') {
@@ -5388,6 +5396,30 @@ mod tests {
         assert_eq!(
             strip_https_userinfo("git@bitbucket.org:ws/repo.git"),
             "git@bitbucket.org:ws/repo.git"
+        );
+        // Mixed-case scheme strips too — `forge::is_https_remote` admits it, so skipping
+        // the rewrite here would seed a non-interactive op with no credential match.
+        assert_eq!(
+            strip_https_userinfo("HTTPS://alice@bitbucket.org/ws/repo.git"),
+            "https://bitbucket.org/ws/repo.git"
+        );
+        // http:// is still not https.
+        assert_eq!(
+            strip_https_userinfo("http://alice@bitbucket.org/ws/repo.git"),
+            "http://alice@bitbucket.org/ws/repo.git"
+        );
+    }
+
+    #[test]
+    fn mixed_case_https_still_gets_its_insteadof_rewrite() {
+        // The regression the case-insensitive gate would otherwise open: interactive
+        // suppressed with no rewrite = a hard auth failure instead of a prompt.
+        let entries = bitbucket_credential_entries("HTTPS://alice@bitbucket.org/ws/repo.git");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "credential.interactive=false");
+        assert_eq!(
+            entries[1],
+            "url.https://bitbucket.org/ws/repo.git.insteadOf=HTTPS://alice@bitbucket.org/ws/repo.git"
         );
     }
 

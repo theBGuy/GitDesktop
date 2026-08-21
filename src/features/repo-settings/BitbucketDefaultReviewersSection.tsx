@@ -37,6 +37,28 @@ export function BitbucketDefaultReviewersSection({
 
   const rows = reviewers.data ?? [];
 
+  // Awaited, not per-call callbacks: this subtree unmounts when the dialog
+  // closes or the rail crossfades to another section, and react-query drops
+  // per-call callbacks on unmount — the outcome would never reach the user.
+  async function handleAdd(user: ForgeUserRef) {
+    try {
+      await add.mutateAsync(user.id);
+      toast.success(`Added ${user.label}`);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function handleRemove(reviewer: ForgeUserRef) {
+    try {
+      await remove.mutateAsync(reviewer.id);
+      toast.success(`Removed ${reviewer.label}`);
+      setConfirming(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <div className="min-w-0 space-y-4">
       <div className="flex items-center justify-between gap-2">
@@ -48,12 +70,7 @@ export function BitbucketDefaultReviewersSection({
           open={open}
           added={rows}
           pending={add.isPending}
-          onAdd={(user) =>
-            add.mutate(user.id, {
-              onSuccess: () => toast.success(`Added ${user.label}`),
-              onError: toastError,
-            })
-          }
+          onAdd={handleAdd}
         />
       </div>
 
@@ -90,15 +107,7 @@ export function BitbucketDefaultReviewersSection({
               pending={remove.isPending}
               onConfirm={() => setConfirming(r.id)}
               onCancel={() => setConfirming(null)}
-              onRemove={() =>
-                remove.mutate(r.id, {
-                  onSuccess: () => {
-                    toast.success(`Removed ${r.label}`);
-                    setConfirming(null);
-                  },
-                  onError: toastError,
-                })
-              }
+              onRemove={() => handleRemove(r)}
             />
           ))}
         </div>
