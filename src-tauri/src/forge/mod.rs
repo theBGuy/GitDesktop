@@ -941,8 +941,8 @@ pub async fn forge_clone(
     // stored token → URL and behavior untouched (ambient auth still works).
     let mut clone_url = url;
     // The helper entries key on `credential.https://…`, so a non-https URL can only get
-    // inert config — and for GitLab a hard `GlabNotFound` on top. Both arms fail open:
-    // ambient auth or a public repo must still clone when the CLI is absent.
+    // inert config — the gate skips that plus the CLI-resolve probes. Both arms fail
+    // open: ambient auth or a public repo must still clone when the CLI is absent.
     let https = is_https_remote(&clone_url);
     let extra = match provider {
         Provider::GitLab if https => {

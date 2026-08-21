@@ -146,11 +146,21 @@ fn read_token_twice(path: &Path) -> Option<String> {
 
 /// Exclusively create `path` and stamp `token` into it, flushed before returning so no
 /// contender can observe the file without its owner. `Ok(true)` = created by us,
-/// `Ok(false)` = someone else holds it. A failed stamp removes the file rather than
-/// leaving an unidentifiable one behind: we won the exclusive create, so nobody else can
-/// be holding it, and an untokened file is spared by eviction until double the stale
-/// window ([`acquire`]).
+/// `Ok(false)` = someone else holds it.
 fn create_with_token(path: &Path, token: &str) -> std::io::Result<bool> {
+    create_stamped(path, token, |file, token| {
+        file.write_all(token.as_bytes())?;
+        file.flush()
+    })
+}
+
+/// [`create_with_token`] with the stamp step injected, so a test can drive the arm where
+/// the file is created but never receives its token.
+fn create_stamped(
+    path: &Path,
+    token: &str,
+    stamp: impl FnOnce(&mut std::fs::File, &str) -> std::io::Result<()>,
+) -> std::io::Result<bool> {
     if token.is_empty() {
         // The one content this file must never be given deliberately: an empty stamp is
         // indistinguishable from a create in flight, so writing one manufactures a lock
@@ -165,14 +175,13 @@ fn create_with_token(path: &Path, token: &str) -> std::io::Result<bool> {
         .create_new(true)
         .open(path)
     {
-        Ok(mut file) => match file.write_all(token.as_bytes()).and_then(|()| file.flush()) {
-            Ok(()) => Ok(true),
-            Err(e) => {
-                drop(file);
-                let _ = std::fs::remove_file(path);
-                Err(e)
-            }
-        },
+        // A failed stamp LEAVES the file. Unlinking by path is the class this module
+        // refuses everywhere else: a stamp that stalled past the eviction window can find
+        // the path already re-created by someone else, and the cleanup would delete THEIR
+        // lock. Unstamped, it blocks this store's writers for at most 2× the stale window
+        // before [`acquire`]'s escape hatch reclaims it — bounded, where a deleted live
+        // lock is an unbounded double grant.
+        Ok(mut file) => stamp(&mut file, token).map(|()| true),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
         Err(e) => Err(e),
     }
@@ -290,9 +299,10 @@ fn acquire(
             let observed = read_token_twice(path)?;
             // An unstamped file is normally a create still in flight, so it is spared.
             // Past DOUBLE the window that reading no longer holds — stamping takes
-            // microseconds — and what is left is a process that died between the create
-            // and the stamp. Sparing that one forever would wedge every writer of this
-            // store into running unlocked.
+            // microseconds — and what is left is a create whose stamp never landed,
+            // because the process died or the write failed ([`create_stamped`] leaves
+            // those). Sparing them forever would wedge every writer of this store into
+            // running unlocked.
             if observed.is_empty() && !is_stale(path, stale_age.saturating_mul(2)) {
                 return None;
             }
@@ -545,8 +555,9 @@ mod tests {
     fn an_unstamped_lock_past_double_the_window_is_evictable() {
         let (_tmp, store) = tmp_store();
         let path = lock_path(&store);
-        // The escape hatch: a stamp takes microseconds, so an unstamped file this old is
-        // a process that died between the create and the stamp — not one in flight.
+        // The escape hatch, and the reclamation half of what
+        // `a_failed_stamp_leaves_its_file_for_the_hatch` leaves behind: a stamp takes
+        // microseconds, so an unstamped file this old never got one — not one in flight.
         // Without the hatch it would spare itself forever and every writer of this store
         // would run unlocked from here on.
         std::fs::write(&path, b"").unwrap();
@@ -555,6 +566,30 @@ mod tests {
         let taken = lock_at(&path, 1, Duration::from_millis(1), STALE_LOCK_AGE);
         let (_, token) = taken.owned.clone().expect("a dead create must not wedge the store");
         assert_eq!(read_token(&path).as_deref(), Some(token.as_str()));
+    }
+
+    /// A stamp that fails must LEAVE the file it created. Removing it is an unlink by
+    /// path, and a stamp slow enough to fail can be slow enough to have been evicted —
+    /// the cleanup would then delete whichever lock took the slot. The reclamation half
+    /// of this trade (an unstamped file self-heals after 2× the window) is owned by
+    /// `an_unstamped_lock_past_double_the_window_is_evictable`.
+    #[test]
+    fn a_failed_stamp_leaves_its_file_for_the_hatch() {
+        let (_tmp, store) = tmp_store();
+        let path = lock_path(&store);
+
+        let err = create_stamped(&path, "1:doomed", |_, _| {
+            Err(std::io::Error::other("the disk filled mid-stamp"))
+        })
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "the disk filled mid-stamp");
+        assert!(path.exists(), "the created file must not be unlinked");
+        assert_eq!(
+            read_token(&path).as_deref(),
+            Some(""),
+            "and it is unstamped, which is what the escape hatch keys on"
+        );
     }
 
     #[test]
@@ -643,7 +678,10 @@ mod tests {
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().contains(".evict."))
             .collect();
-        assert!(strays.is_empty(), "a restored lock leaves no scratch behind");
+        assert!(
+            strays.is_empty(),
+            "the live lock is never moved, so no aside is ever created"
+        );
     }
 
     #[test]
