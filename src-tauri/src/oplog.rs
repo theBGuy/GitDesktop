@@ -445,7 +445,6 @@ fn reconcile(
 /// The store logic behind [`reconcile`], taking an explicit path so a test can drive it
 /// against a temp file of its own (mirroring [`crate::review_notes`]'s `set_at`). The
 /// shared `cfg(test)` store can't answer whether a check WROTE, only what it left.
-#[allow(clippy::too_many_arguments)]
 fn reconcile_at(
     path: &Path,
     repo: &str,

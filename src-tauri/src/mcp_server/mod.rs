@@ -97,6 +97,9 @@ pub struct GitDesktopMcp {
     /// `Arc` because rmcp clones the handler per request. Mirrors `foldedGuards` in the
     /// frontend.
     consolidated: Arc<AtomicBool>,
+    /// The same latch for the SEPARATE `local-issues.json` store — one flag can't serve
+    /// both, or whichever store folded first would suppress the other's migration.
+    issues_consolidated: Arc<AtomicBool>,
     /// Per-process backend state — supplies the per-repo locks that serialize mutating git
     /// ops (`run_git_mutating` takes `&AppState`). Built with `AppState::default()` (no
     /// Tauri runtime needed); `Arc` so it survives the per-request clones.
@@ -230,6 +233,7 @@ impl GitDesktopMcp {
             allow_git_write,
             allow_destructive,
             consolidated: Arc::new(AtomicBool::new(false)),
+            issues_consolidated: Arc::new(AtomicBool::new(false)),
             state: Arc::new(crate::state::AppState::default()),
             toplevel: Arc::new(tokio::sync::OnceCell::new()),
             // `ToolRouter` implements `Add`, so the domain modules stay independent — a

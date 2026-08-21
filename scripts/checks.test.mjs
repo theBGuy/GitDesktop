@@ -194,12 +194,48 @@ test("mutate-in-repo-settings flags a bare call carrying no callbacks", () => {
   assert.deepEqual(repoSettingsMutate("refresh.mutate ();"), [1]);
 });
 
+test("mutate-in-repo-settings catches the dot-less destructured route", () => {
+  // `const { mutate } = useX()` reaches the same call with no `.mutate` token
+  // for the first pattern to see — a live idiom elsewhere under src/.
+  assert.deepEqual(
+    repoSettingsMutate("const { mutate } = useUpdateLocalPr(repo);"),
+    [1],
+  );
+  assert.deepEqual(
+    repoSettingsMutate("const { mutate: save } = useUpdateThing(repo);"),
+    [1],
+  );
+  assert.deepEqual(
+    repoSettingsMutate("const { isPending, mutate } = useX(repo);"),
+    [1],
+  );
+  // Wrapped by the formatter: caught because this pattern reads the whole-file
+  // view, where `[^}]*` still can't cross the destructure's own closing brace.
+  const wrapped = [
+    "const {",
+    "  mutate,",
+    "  isPending,",
+    "} = useUpdateSomethingWithALongName(repoPath);",
+  ].join("\n");
+  assert.deepEqual(repoSettingsMutate(wrapped), [1]);
+});
+
 test("mutate-in-repo-settings leaves the awaited idiom and comments alone", () => {
   const awaited = [
     "await update.mutateAsync(form);",
     'toast.success("Repository settings saved");',
   ].join("\n");
   assert.deepEqual(repoSettingsMutate(awaited), []);
+  // The `\b` after `mutate` is the whole reason the destructure pattern can
+  // coexist with the idiom it is enforcing.
+  assert.deepEqual(
+    repoSettingsMutate("const { mutateAsync } = useUpdateRepoSettings(repo);"),
+    [],
+  );
+  assert.deepEqual(
+    repoSettingsMutate("const { mutateAsync, isPending } = useX(repo);"),
+    [],
+  );
   const documented = [
     "// never `.mutate(vars, { onSuccess, onError })` — the callbacks are",
     "// dropped when the observer unmounts.",

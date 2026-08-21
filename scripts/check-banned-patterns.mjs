@@ -146,6 +146,11 @@ const anyPair = (pairs) => {
   return (v) => [...new Set(scans.flatMap((scan) => scan(v)))];
 };
 
+/** Scanner: the union of several scanners — one check, one allowlist, every
+ *  route to the same banned thing (including routes that want different
+ *  views: `perLine` for a token, `perFile` for one that can wrap). */
+const anyOf = (scans) => (v) => [...new Set(scans.flatMap((scan) => scan(v)))];
+
 // The same hover-reveal in each of its Tailwind spellings: the hiding utility
 // paired with the `group-hover:` class that undoes it. `inline` and
 // `inline-flex` are separate entries because the token boundary guard stops
@@ -193,6 +198,16 @@ const SET_QUERY_DATA_RE =
 // at all — every mutation there is awaited. `.mutateAsync(` does not match: the
 // `(` must follow `mutate` directly.
 const MUTATE_CALL_RE = /\.mutate\s*\(/;
+
+// The dot-less route to the same call: `const { mutate } = useX()` (a live idiom
+// elsewhere in src/) reaches `.mutate` off a destructured binding, so the token
+// above never sees it. The `\b` after `mutate` is what keeps `{ mutateAsync }`
+// clean, while a renamed `{ mutate: save }` still hits. Run over the whole-file
+// view, not per line: a destructure long enough to wrap is a shape this codebase
+// already produces (15 wrapped hook destructures under src/, none binding
+// `mutate` today), and `[^}]*` can't cross the destructure's own closing brace,
+// so the joined view adds no reach.
+const DESTRUCTURED_MUTATE_RE = /\bconst\s*\{[^}]*\bmutate\b[^}]*\}\s*=/g;
 
 // Vendored shadcn/Base UI primitives are off-limits to edit (CLAUDE.md), so a
 // hit inside them could only ever be silenced by an allowlist entry, never
@@ -263,10 +278,10 @@ export const CHECKS = [
     // dialog close and every rail section switch (the keyed crossfade). The
     // wider app's call sites are a separate tier and are not scanned here.
     appliesTo: (file) => file.startsWith("src/features/repo-settings/"),
-    scan: perLine(MUTATE_CALL_RE),
+    scan: anyOf([perLine(MUTATE_CALL_RE), perFile(DESTRUCTURED_MUTATE_RE)]),
     allowlist: [],
     message:
-      "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close or rail section switch mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( needs an allowlist entry with rationale",
+      "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close or rail section switch mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
   },
 ];
 

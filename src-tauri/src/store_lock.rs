@@ -65,12 +65,14 @@ pub(crate) struct StoreLock {
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
-        // Release through the same proof an eviction uses. A holder that outlives
-        // [`STALE_LOCK_AGE`] can be evicted mid-RMW, and both an unconditional
-        // `remove_file` and a read-then-remove (a whole eviction cycle fits between its
-        // two calls) would then delete the EVICTOR's lock, granting the store twice.
+        // Two gates, both needed. PRE-READ: a guard evicted past [`STALE_LOCK_AGE`] finds
+        // the evictor's LIVE lock here, and even renaming that aside to inspect it empties
+        // the slot long enough to be stolen — so on a mismatch, touch nothing. Then
+        // [`claim_by_rename`] guards the microseconds after it (an unlink alone would not).
         if let Some((path, token)) = &self.owned {
-            claim_by_rename(path, token);
+            if read_token_twice(path).as_deref() == Some(token.as_str()) {
+                claim_by_rename(path, token);
+            }
         }
     }
 }
@@ -641,6 +643,37 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".evict."))
             .collect();
         assert!(strays.is_empty(), "a restored lock leaves no scratch behind");
+    }
+
+    #[test]
+    fn a_guard_whose_lock_was_replaced_never_touches_the_file() {
+        let (tmp, store) = tmp_store();
+        let path = lock_path(&store);
+        let held = lock_store(&store);
+        assert!(held.owned.is_some());
+
+        // Same setup as the test above, but pinning the stronger property: not merely
+        // that the evictor's lock survives, that it is never MOVED. A yank-then-restore
+        // empties the slot for the read, which is all a third contender needs to take it
+        // and leave the rightful holder running unprotected beside it.
+        std::fs::remove_file(&path).unwrap();
+        create_new_lock(&path).unwrap().unwrap();
+        // Backdated so a restore would be visible: an exclusive re-create stamps `now`.
+        backdate(&path, STALE_LOCK_AGE + Duration::from_secs(5));
+        let untouched = mtime(&path).expect("the live lock must be readable");
+
+        drop(held);
+        assert_eq!(
+            mtime(&path),
+            Some(untouched),
+            "a stale guard must not even move a later generation's lock"
+        );
+        let strays: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".evict."))
+            .collect();
+        assert!(strays.is_empty(), "and must leave no scratch of its own");
     }
 
     #[test]

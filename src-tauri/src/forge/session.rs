@@ -143,13 +143,23 @@ async fn github_host_for_repo(repo_path: &str) -> String {
     };
     let host = crate::forge::remote_host(&url).unwrap_or_else(|| "github.com".to_string());
     let authority = crate::forge::remote_authority(&url).unwrap_or_else(|| "github.com".to_string());
-    // gh registers a ported host under its full authority, so `--hostname <bare>` would
-    // report a signed-in ported GHES as signed-out. Prefer the authority when gh knows
-    // it — the same string then keys the `auth status --json hosts` map.
-    if authority != host && crate::forge::github::gh_authenticated(&authority).await {
+    // Both spellings come from a crafted-able remote URL and go straight into argv, so
+    // neither ships unvalidated; an unsafe one reads as the default host, matching what an
+    // unparseable origin already does.
+    if authority != host
+        && crate::forge::is_safe_authority(&authority)
+        && crate::forge::github::gh_authenticated(&authority).await
+    {
+        // gh registers a ported host under its full authority, so `--hostname <bare>`
+        // would report a signed-in ported GHES as signed-out. The same string then keys
+        // the `auth status --json hosts` map.
         return authority;
     }
-    host
+    if crate::forge::is_safe_authority(&host) {
+        host
+    } else {
+        "github.com".to_string()
+    }
 }
 
 // ── forge_accounts_health (account-scoped) ──────────────────────────────────────

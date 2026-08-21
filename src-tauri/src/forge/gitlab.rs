@@ -186,6 +186,10 @@ pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> 
     // glab's signed-in hosts are the `hosts:` keys of its config.yml (written by
     // `glab auth login`) — the established repo signal, not a new `glab auth
     // status` probe. No entry → inject nothing; git's ambient helpers still run.
+    // Gate is bare-only (our reader port-strips these keys), so a bare-registered glab
+    // passes it yet serves a ported remote nothing — measured on glab 1.105:
+    // `auth git-credential get` with `host=gitlab.com:8443` answers EMPTY at exit 0. Fine:
+    // a ported instance needs a ported login anyway, and the funnel keeps its ambient retry.
     if !crate::forge::glab::known_hosts().await.contains(&host) {
         return Ok(Vec::new());
     }
@@ -201,8 +205,14 @@ pub async fn clone_credential_config(clone_url: &str) -> AppResult<Vec<String>> 
 /// is load-bearing — `-c name` without it sets boolean `true`), entry[1] installs
 /// glab as the sole helper so no ambient helper can shadow it. Reset MUST come
 /// first — consumers prefix `-c` pairs in Vec order. `authority` is `host[:port]`, not
-/// a bare host: git matches credential keys by authority. Pure/format-only.
+/// a bare host: git matches credential keys by authority. A crafted remote can drive
+/// characters git reads as config syntax through the URL parse, so an authority failing
+/// [`crate::forge::is_safe_authority`] emits NOTHING — git falls back to ambient helpers
+/// rather than to an injected one. Pure/format-only.
 fn gitlab_credential_entries(authority: &str, glab_path: &str) -> Vec<String> {
+    if !crate::forge::is_safe_authority(authority) {
+        return Vec::new();
+    }
     vec![
         format!("credential.https://{authority}.helper="),
         format!("credential.https://{authority}.helper=!\"{glab_path}\" auth git-credential"),
@@ -8467,6 +8477,15 @@ mod tests {
         let entries =
             gitlab_credential_entries(&crate::forge::remote_authority(url).unwrap(), "/abs/glab");
         assert_eq!(entries[0], "credential.https://gitlab.example.com:8443.helper=");
+    }
+
+    #[test]
+    fn a_crafted_authority_emits_no_entries_at_all() {
+        // Fail OPEN to ambient rather than installing an attacker's `!`-shell helper.
+        assert!(
+            gitlab_credential_entries("gitlab.com:443.helper=!evil #", "/abs/glab").is_empty()
+        );
+        assert!(gitlab_credential_entries("gitlab.com;evil", "/abs/glab").is_empty());
     }
 
     #[test]

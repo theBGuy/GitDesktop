@@ -12,6 +12,8 @@
 //! - **Reads** (list/get) are UNGATED, like every other read tool — this is the user's
 //!   own local app-data, not the forge.
 
+use std::sync::atomic::Ordering;
+
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
@@ -399,23 +401,26 @@ impl GitDesktopMcp {
     /// points at. Uses the SAME shared resolver (`git::repo::repo_identity`) the GUI's
     /// `git_repo_identity` command uses.
     ///
-    /// Unlike `local_pr_key`, this folds on EVERY call rather than once-per-session:
-    /// the session's once-flag (`consolidated`) is owned by `mod.rs` and reserved for
-    /// the local-PR store, and adding a second flag field would mean editing `mod.rs`
-    /// (out of scope for this store). `local_issues::consolidate` is idempotent and a
-    /// no-op read once folded, so the only cost is one extra small store read per
-    /// call — acceptable given how infrequent local-issue mutations are.
+    /// Folds once per session behind `issues_consolidated`, the local-issue twin of
+    /// `local_pr_key`'s latch (one flag can't serve both stores). Each fold is a locked
+    /// read-modify-write that can block for the store lock's whole retry budget, and both
+    /// spellings are folded, so per-call would pay that twice for a migration that is a
+    /// no-op after the first. The flag is set only AFTER both folds succeed, so a
+    /// transient failure retries on the next call.
     async fn local_issue_key(&self) -> Result<String, McpError> {
         let identity = crate::git::repo::repo_identity(&self.repo).await;
-        crate::local_issues::consolidate(&identity, &self.repo)
-            .await
-            .map_err(app_err)?;
-        // The pre-canonicalization spelling is a second legacy key (see
-        // `GitDesktopMcp::raw_repo`); folding it is idempotent like the first.
-        if let Some(raw) = &self.raw_repo {
-            crate::local_issues::consolidate(&identity, raw)
+        if !self.issues_consolidated.load(Ordering::Relaxed) {
+            crate::local_issues::consolidate(&identity, &self.repo)
                 .await
                 .map_err(app_err)?;
+            // The pre-canonicalization spelling is a second legacy key — see
+            // `GitDesktopMcp::raw_repo`.
+            if let Some(raw) = &self.raw_repo {
+                crate::local_issues::consolidate(&identity, raw)
+                    .await
+                    .map_err(app_err)?;
+            }
+            self.issues_consolidated.store(true, Ordering::Relaxed);
         }
         Ok(identity)
     }
