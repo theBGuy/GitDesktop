@@ -54,8 +54,9 @@ const RETRY_DELAY: Duration = Duration::from_millis(25);
 /// heartbeat would need a write handle on Windows for no gain.
 const STALE_LOCK_AGE: Duration = Duration::from_secs(10);
 
-/// RAII holder of a store lock: dropping it releases (best-effort `remove_file`) on
-/// every path, success or panic. A guard that FAILED to acquire owns nothing and
+/// RAII holder of a store lock: dropping it releases by proving the on-disk token is
+/// still ours and claiming the file by rename ([`claim_by_rename`]); a mismatch
+/// releases nothing. A guard that FAILED to acquire owns nothing and
 /// releases nothing — deleting a live holder's file would break the exclusion it is
 /// currently providing to someone else. What it owns is a path AND the ownership token
 /// stamped in that file, because the path alone can name a LATER generation's lock.
@@ -635,8 +636,8 @@ mod tests {
             Some(theirs.as_str()),
             "a stale guard must not release a later generation's lock"
         );
-        // The release yanks before it proves, so the put-back has to be complete: the
-        // live lock is back in the slot AND its aside copy is gone.
+        // The pre-read short-circuits the release, so the live lock is never touched:
+        // still in the slot, and no aside scratch was ever created.
         let strays: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
             .flatten()

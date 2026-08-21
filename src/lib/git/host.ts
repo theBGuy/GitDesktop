@@ -3,13 +3,16 @@ import { useForgeStatus } from "./queries";
 
 /**
  * Whether a host is safe to interpolate into a copyable `gh`/`glab auth …` command —
- * the same ASCII grammar `forge_reconnect` validates backend-side (alnum, `.`, `-`).
- * `remote_host` only splits a remote URL on `/` and `:`, so a crafted remote can carry
- * `;`, `$`, or a space into the host; the executed reconnect flow re-validates, but the
- * copy-paste command string is guarded here so it can never hand the user shell syntax.
+ * the same ASCII grammar `forge_reconnect` validates backend-side (alnum, `.`, `-`, plus
+ * an optional numeric port). The port belongs in the grammar: a self-hosted instance on
+ * one registers with the CLIs as `host:8443`, so rejecting it would deny the copyable
+ * fallback to the very users who need it. `remote_host` only splits a remote URL on `/`
+ * and `:`, so a crafted remote can carry `;`, `$`, or a space into the host; the executed
+ * reconnect flow re-validates, but the command string is guarded here so it can never
+ * hand the user shell syntax.
  */
 export function isReconnectHostSafe(host: string): boolean {
-  return /^[a-zA-Z0-9.-]+$/.test(host);
+  return /^[a-zA-Z0-9.-]+(:\d{1,5})?$/.test(host);
 }
 
 /**

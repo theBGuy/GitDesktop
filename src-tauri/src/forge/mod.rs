@@ -60,9 +60,10 @@ fn is_port(s: &str) -> bool {
 
 /// Whether a string is safe to interpolate as the authority of a `credential.https://…`
 /// config key or a `--hostname` argv: host `[A-Za-z0-9.-]+` plus an optional numeric
-/// port. Backend sibling of `isReconnectHostSafe` (`src/lib/git/host.ts`) — same class of
-/// crafted-remote guard, since `remote_host`/`remote_authority` only split on `/` and `:`
-/// and a crafted remote can carry `=`, `;`, `$`, or a space through them.
+/// port. THE reconnect/credential host grammar — `valid_reconnect_host` delegates here
+/// and `isReconnectHostSafe` (`src/lib/git/host.ts`) mirrors it, so the three can't
+/// drift. Needed because `remote_host`/`remote_authority` only split on `/` and `:`, so
+/// a crafted remote can carry `=`, `;`, `$`, or a space through them.
 pub(crate) fn is_safe_authority(value: &str) -> bool {
     let (host, port) = match value.split_once(':') {
         Some((h, p)) => (h, Some(p)),

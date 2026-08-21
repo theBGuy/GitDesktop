@@ -139,17 +139,14 @@ const nearPair = (a, b) => {
   return perFile(re);
 };
 
-/** Scanner: the union of several `nearPair`s — one check, one allowlist, every
- *  Tailwind spelling of the same idiom. */
-const anyPair = (pairs) => {
-  const scans = pairs.map(([a, b]) => nearPair(a, b));
-  return (v) => [...new Set(scans.flatMap((scan) => scan(v)))];
-};
-
 /** Scanner: the union of several scanners — one check, one allowlist, every
  *  route to the same banned thing (including routes that want different
  *  views: `perLine` for a token, `perFile` for one that can wrap). */
 const anyOf = (scans) => (v) => [...new Set(scans.flatMap((scan) => scan(v)))];
+
+/** Scanner: the union of several `nearPair`s — one check, one allowlist, every
+ *  Tailwind spelling of the same idiom. */
+const anyPair = (pairs) => anyOf(pairs.map(([a, b]) => nearPair(a, b)));
 
 // The same hover-reveal in each of its Tailwind spellings: the hiding utility
 // paired with the `group-hover:` class that undoes it. `inline` and
