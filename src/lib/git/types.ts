@@ -537,8 +537,13 @@ export interface ForgeRepo {
 }
 
 export interface ForgeRepoList {
-  /** The signed-in user's login, so the UI lists their own repos first. */
+  /** The signed-in user's login. Kept on the wire; no frontend consumer today. */
   viewer: string;
+  /** The `owner` namespaces that count as the viewer's own — a set because "yours" is
+   *  provider-shaped: a login on GitHub and GitLab, any workspace you belong to on
+   *  Bitbucket. Drives the own-repo Fork gate and the yours-first grouping; empty
+   *  means unresolved, so both fail open. */
+  ownedNamespaces: string[];
   repos: ForgeRepo[];
 }
 
@@ -1690,9 +1695,12 @@ export interface PrCheckOut {
   /** GitHub Actions job id, parsed from `.../actions/runs/<runId>/job/<jobId>`.
    *  Absent when the URL has no job segment (or isn't an Actions URL). */
   jobId?: string;
-  /** CheckRun `startedAt`; absent for a StatusContext (it has no start). */
+  /** When the check began — a CheckRun `startedAt`, or a StatusContext's creation
+   *  time, which gh reports under this same key. Absent only when the rollup
+   *  carried no real time. */
   startedAt?: string;
-  /** CheckRun `completedAt`; absent for a StatusContext. */
+  /** CheckRun `completedAt`. A StatusContext reports no completion at all, so start
+   *  time is the only key both rollup arms can be ordered by. */
   completedAt?: string;
 }
 

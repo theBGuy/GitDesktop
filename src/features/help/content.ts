@@ -128,8 +128,10 @@ Click the **⋮** menu next to the repo name for repo-wide actions:
 - On the host: **Star** the repository, **create an issue**, or **Fork** it (on GitLab
   and Bitbucket, forking opens the web fork page). Bitbucket has no stars and its
   issue tracker is retired, so those two actions don't appear for Bitbucket repos.
-  **Fork** doesn't appear on a GitHub repository you own personally — a fork always
-  lands under your own account (organization repositories stay forkable).
+  **Fork** doesn't appear on a GitHub repository you own personally — the in-app fork
+  always lands under your own account (organization repositories stay forkable). The
+  web fork page asks where the fork should go, so the GitLab and Bitbucket items stay
+  available on any repository.
 - **Insights** (analytics), **manage files**, **submodules**, the **remote URL**,
   **branch rules**, **git hooks**, {{ai}}**automations**, {{/ai}}**repository settings**,
   an **alias**, copy the repo path, copy the branch name, copy the HEAD SHA, and
@@ -187,10 +189,12 @@ and **last-updated** time, plus a **README preview** (loaded when you open the r
 From here:
 
 - **Clone** — pick a folder to clone into; GitDesktop opens the repo once it finishes.
-- **Fork** — create a fork under your account (on **GitHub, GitLab, and Bitbucket**). The
-  fork is created in the background, and then you're offered to **clone** it. It doesn't
-  appear on repositories you own personally (GitHub and GitLab) — a fork always lands
-  under your own account.
+- **Fork** — create a fork under your account. The fork is created in the background, and
+  then you're offered to **clone** it. It doesn't appear on a repository that already
+  counts as yours, which each host defines its own way: on **GitHub** and **GitLab**
+  that's your personal account or namespace (organization and group repositories stay
+  forkable), and on **Bitbucket** it's any workspace you belong to. Since Explore on
+  Bitbucket lists only your own workspaces, **Fork** doesn't normally come up there.
 - **Star / Unstar** — on **GitHub and GitLab** only. Bitbucket has no stars, so this action
   doesn't appear on Bitbucket results.
 - **View on GitHub / GitLab / Bitbucket** — open the repository on its host in your browser.
@@ -887,12 +891,13 @@ on both **GitHub** and **GitLab**.
 On **GitHub** the refusal is the base branch's rules going unmet, and the line names
 what is outstanding: **Merge is blocked — waiting on: build, fragment.** GitDesktop
 asks GitHub what that branch requires and matches it against the checks on this pull
-request, counting one as outstanding when it has failed, is still running, or has
-never reported. Four are named, then *and N more*. Where the rules also require
-approving reviews, the count rides along: **The rules also require 2 approving
-reviews.** Wherever the specific requirements can't be named, the line falls back to
-**Merge is blocked by the base branch's protection rules.** When only the approval
-count is known it reads **…protection rules, which require 2 approving reviews.**
+request, counting a context as outstanding when it has never reported, or when its
+most recent run failed, is still running, or has gone stale. Four are named, then
+*and N more*. Where the rules also require approving reviews, the count rides along:
+**The rules also require 2 approving reviews.** Wherever the specific requirements
+can't be named, the line falls back to **Merge is blocked by the base branch's
+protection rules.** When only the approval count is known it reads **…protection
+rules, which require 2 approving reviews.**
 
 On **GitLab** the project's own answer supplies the reason, in the app's words:
 **Merge is blocked — needs approval before it can merge**, **the pipeline must pass

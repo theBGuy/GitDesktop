@@ -2485,7 +2485,8 @@ export const forgeGlMrMergeState = (repoPath: string, number: number) =>
 
 // Arm auto-merge with a strategy ("merge" | "squash"; "rebase" is rejected
 // backend-side). `sha` is the same stale-view guard as a plain merge — GitLab
-// 409s if the head moved. 405s when the pipeline already finished (a race).
+// 409s if the head moved. 405s only when no auto-merge strategy is available and
+// the head pipeline isn't passing; a passing one merges immediately instead.
 export const forgeGlMrAutoMerge = (
   repoPath: string,
   number: number,

@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { groupByOwnerNamespace } from "@/features/explore/explore-utils";
 import { useAppForm } from "@/lib/form";
 import { cloneRepo, forgeClone, validateRepo } from "@/lib/git/api";
 import { useForgeRepos } from "@/lib/git/queries";
@@ -129,9 +130,9 @@ export function CloneRepoDialog({
   const values = useSelector(form.store, (s) => s.values);
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
 
-  // Group by owner — the viewer's own repos first, then other owners
-  // alphabetically — and flatten to rows for the virtualizer. Each group keeps
-  // the API's order.
+  // Group by owner and flatten to rows for the virtualizer, sharing Explore's
+  // ordering so the two surfaces list the same repos in the same order. Each group
+  // keeps the API's order.
   const rows = useMemo<Row[]>(() => {
     const data = repos.data;
     if (!data) return [];
@@ -142,18 +143,11 @@ export function CloneRepoDialog({
         r.name.toLowerCase().includes(q) ||
         r.fullName.toLowerCase().includes(q),
     );
-    const byOwner = new Map<string, ForgeRepo[]>();
-    for (const r of matched) {
-      const list = byOwner.get(r.owner);
-      if (list) list.push(r);
-      else byOwner.set(r.owner, [r]);
-    }
-    const owners = [...byOwner.entries()].sort((a, b) => {
-      if (a[0] === data.viewer) return -1;
-      if (b[0] === data.viewer) return 1;
-      return a[0].toLowerCase().localeCompare(b[0].toLowerCase());
-    });
-    return owners.flatMap(([owner, list]): Row[] => [
+    return groupByOwnerNamespace(
+      matched,
+      (r) => r.owner,
+      data.ownedNamespaces,
+    ).flatMap(([owner, list]): Row[] => [
       { kind: "header", owner },
       ...list.map((repo) => ({ kind: "repo" as const, repo })),
     ]);

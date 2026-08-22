@@ -2825,8 +2825,8 @@ struct RawComment {
 /// statusCheckRollup is a union of CheckRun (name/conclusion/detailsUrl) and
 /// StatusContext (context/state/targetUrl); accept any of the keys and normalize
 /// below. `details_url`/`target_url` are the two arms' link fields (whichever is
-/// present wins); `started_at`/`completed_at` are CheckRun-only timestamps that a
-/// StatusContext simply omits (they stay `None`).
+/// present wins); `started_at` arrives on both arms (`gh` aliases a StatusContext's
+/// creation time onto it), while `completed_at` is CheckRun-only.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawCheck {
@@ -3188,10 +3188,13 @@ pub struct PrCheckOut {
     /// `None` when the details URL has no job segment (or isn't an Actions URL).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
-    /// CheckRun `startedAt`; `None` for a StatusContext (it has no start).
+    /// When the check began: a CheckRun `startedAt`, or a StatusContext's creation
+    /// time, which `gh` aliases onto this same key — so both rollup arms carry one.
+    /// `None` once the Go-zero sentinel is filtered (see `real_check_time`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
-    /// CheckRun `completedAt`; `None` for a StatusContext.
+    /// CheckRun `completedAt`. A StatusContext reports no completion at all, leaving
+    /// start time the only key both rollup arms can be ordered by.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
 }

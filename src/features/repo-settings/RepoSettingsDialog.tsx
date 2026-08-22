@@ -312,6 +312,7 @@ export function RepoSettingsDialog({
   open,
   onOpenChange,
   initialSection,
+  subdueEntrance,
 }: {
   repoPath: string;
   open: boolean;
@@ -319,6 +320,10 @@ export function RepoSettingsDialog({
   /** Section to land on. An initializer is enough: the dialog mounts fresh on
    *  each open, so a later open with no request starts at "general" again. */
   initialSection?: SectionId;
+  /** Skip the open animation. A caller that reaches this dialog through a
+   *  Suspense fallback mounts a second Dialog root over one that already played
+   *  the entrance, and only that caller wants the replay suppressed. */
+  subdueEntrance?: boolean;
 }) {
   const [section, setSection] = useState<SectionId>(
     initialSection ?? "general",
@@ -362,7 +367,13 @@ export function RepoSettingsDialog({
           body column scrolls (overflow-y-auto) so a long form / many webhooks
           stay contained while the rail stays put. Caps to 85vh on short screens. */}
       <DialogContent
-        className="flex h-150 max-h-[85vh] flex-col sm:max-w-3xl"
+        className={cn(
+          "flex h-150 max-h-[85vh] flex-col sm:max-w-3xl",
+          // tailwind-merge treats animate-in and animate-none as unrelated, so
+          // neither class removes the other; `!` decides it on the cascade
+          // rather than on which rule the stylesheet happens to emit last.
+          subdueEntrance && "data-open:animate-none!",
+        )}
         onKeyDown={generateChord.onKeyDown}
       >
         <DialogHeader>

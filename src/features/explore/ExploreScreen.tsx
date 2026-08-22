@@ -49,6 +49,10 @@ import {
 type SortOption = "best" | "stars" | "updated";
 type ZeroMode = "yours" | "popular";
 
+/** Stable empty fallback, so a pending own-repos query doesn't hand the detail
+ *  pane a fresh array identity on every render. */
+const EMPTY_NAMESPACES: readonly string[] = [];
+
 const SORT_ITEMS: Record<SortOption, string> = {
   best: "Best match",
   stars: "Most stars",
@@ -100,7 +104,7 @@ export function ExploreScreen() {
   // refetch once the 5-minute staleTime lapsed — and on Bitbucket that read walks
   // every workspace.
   const ownRepos = useForgeRepos(provider, true);
-  const viewer = ownRepos.data?.viewer ?? null;
+  const ownedNamespaces = ownRepos.data?.ownedNamespaces ?? EMPTY_NAMESPACES;
 
   // Esc closes Explore. Guarded so Base UI popups (which mark the event consumed)
   // get first claim; an effect event reads the latest closeExplore.
@@ -259,7 +263,7 @@ export function ExploreScreen() {
               provider={provider}
               repo={selected}
               features={features.data}
-              viewer={viewer}
+              ownedNamespaces={ownedNamespaces}
               onClone={setCloneTarget}
             />
           </div>
@@ -297,7 +301,7 @@ function YoursResults({
     if (!data) return [];
     return groupReposByOwner(
       data.repos.map(forgeRepoToSearchRepo),
-      data.viewer,
+      data.ownedNamespaces,
     );
   }, [repos.data]);
 

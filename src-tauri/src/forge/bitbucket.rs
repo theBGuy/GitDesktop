@@ -29,8 +29,8 @@ use crate::forge::http::{
     KEY_USERNAME,
 };
 use crate::forge::model::{
-    Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList,
-    ForgeSearchRepo, ForgeStatus, ForgeUserRef, Implemented, Provider,
+    namespace_set, Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList,
+    ForgeSearchList, ForgeSearchRepo, ForgeStatus, ForgeUserRef, Implemented, Provider,
 };
 use crate::forge::{
     cap_readme, validate_owner, validate_repo_name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
@@ -509,6 +509,10 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
         http::bb_get_json(&creds, "user/workspaces?pagelen=100", "workspaces").await?;
 
     let mut repos = Vec::new();
+    // Bitbucket has no usable personal-workspace signal (`is_personal` reads false even
+    // on it, and the user uuid 404s as a workspace), so "yours" here means a workspace
+    // you belong to — these same slugs, which `owner` already carries.
+    let mut slugs = Vec::new();
     // Best-effort per workspace (one erroring shouldn't sink the others), but if EVERY
     // fetch fails, surface the last error rather than an empty "no repositories" list.
     let mut workspace_count = 0usize;
@@ -524,6 +528,9 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
             "repositories/{}?role=member&sort=-updated_on&pagelen=100",
             encode_query_value(&slug)
         );
+        // Membership, not fetch success: a workspace you belong to stays yours even if
+        // its repo page errors, and its repos can still reach the gate via Explore search.
+        slugs.push(slug);
         match http::bb_get_json::<BbPage<BbRepo>>(&creds, &path, "repositories").await {
             Ok(page) => {
                 any_ok = true;
@@ -538,7 +545,11 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
             AppError::Bitbucket("could not list Bitbucket repositories".into())
         }));
     }
-    Ok(ForgeRepoList { viewer, repos })
+    Ok(ForgeRepoList {
+        viewer,
+        owned_namespaces: namespace_set(slugs),
+        repos,
+    })
 }
 
 // ── Pull requests (read) ───────────────────────────────────────────────────────
@@ -5081,10 +5092,10 @@ pub async fn search_repos(query: &str, _sort: &str, _page: u32) -> AppResult<For
     })
 }
 
-/// Fork a Bitbucket repo by `owner/name` into the caller's personal workspace
-/// (`POST repositories/{owner}/{name}/forks` with an empty body). The response is
-/// the new repo object; readiness is a bounded `GET` poll on the fork (5×2s → ready
-/// on 200).
+/// Fork a Bitbucket repo by `owner/name` — `POST repositories/{owner}/{name}/forks`
+/// with an empty body, which leaves the destination workspace to Bitbucket. The
+/// response is the new repo object (its `full_name` names where the fork actually
+/// landed); readiness is a bounded `GET` poll on the fork (5×2s → ready on 200).
 pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     use serde_json::Value;
     validate_owner(owner)?;

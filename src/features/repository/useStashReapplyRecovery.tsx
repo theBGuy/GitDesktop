@@ -144,45 +144,46 @@ export function useStashReapplyRecovery(repoPath: string) {
     rebaseAutostash.isPending ||
     rebaseOntoAutostash.isPending;
 
-  function runRecovery(req: StashReapplyRequest) {
+  function runCompound(run: StashReapplyRun): Promise<AutostashOutcome> {
+    switch (run.op) {
+      case "pull":
+        return pullAutostash.mutateAsync(run.mode);
+      case "merge":
+        return mergeAutostash.mutateAsync(run.ref);
+      case "rebase":
+        return rebaseAutostash.mutateAsync(run.ref);
+      case "rebaseOnto":
+        return rebaseOntoAutostash.mutateAsync({
+          newBase: run.newBase,
+          oldBase: run.oldBase,
+        });
+    }
+  }
+
+  // Awaited, not per-call callbacks: a host can lose its effects mid-compound
+  // (the pull-request selection or the repo tab changes), and react-query drops
+  // per-call callbacks once the observer has no listeners — the report of a
+  // recovery the user explicitly asked for would never arrive, stash included.
+  async function runRecovery(req: StashReapplyRequest) {
     const copy: AutostashCopy = {
       operation: capitalize(req.operationLabel),
       reapplied: req.reappliedMessage,
       plain: req.plainMessage,
     };
-    const opts = {
-      onSuccess: (outcome: AutostashOutcome) => {
-        setRequest(null);
-        reportAutostashOutcome(outcome, copy);
-      },
-      onError: (e: Error) => {
-        setRequest(null);
-        toastError(e);
-      },
-    };
-    const run = req.run;
-    switch (run.op) {
-      case "pull":
-        pullAutostash.mutate(run.mode, opts);
-        return;
-      case "merge":
-        mergeAutostash.mutate(run.ref, opts);
-        return;
-      case "rebase":
-        rebaseAutostash.mutate(run.ref, opts);
-        return;
-      case "rebaseOnto":
-        rebaseOntoAutostash.mutate(
-          { newBase: run.newBase, oldBase: run.oldBase },
-          opts,
-        );
-        return;
+    try {
+      reportAutostashOutcome(await runCompound(req.run), copy);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setRequest(null);
     }
   }
 
   /** Start the recovery for an already-classified refusal. */
   function begin(req: StashReapplyRequest) {
-    if (settings.data?.autoStashOnPull) runRecovery(req);
+    // Fire-and-forget: `handleError` is a synchronous guard expression for its
+    // callers, so the compound can't be awaited from here.
+    if (settings.data?.autoStashOnPull) void runRecovery(req);
     else setRequest(req);
   }
 
@@ -201,7 +202,7 @@ export function useStashReapplyRecovery(repoPath: string) {
     if (always && settings.data && !settings.data.autoStashOnPull) {
       saveSettings.mutate({ ...settings.data, autoStashOnPull: true });
     }
-    runRecovery(request);
+    void runRecovery(request);
   }
 
   return {

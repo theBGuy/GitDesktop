@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::forge::glab::{run_glab, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT};
 use crate::forge::model::{
-    Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList,
-    ForgeSearchRepo, ForgeStatus, ForgeUserRef, Implemented, Provider,
+    namespace_set, Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList,
+    ForgeSearchList, ForgeSearchRepo, ForgeStatus, ForgeUserRef, Implemented, Provider,
 };
 use crate::forge::{
     cap_readme, validate_owner, validate_repo_name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
@@ -160,6 +160,9 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let projects: Vec<GlabProject> = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Glab(format!("could not parse your GitLab projects: {e}")))?;
     Ok(ForgeRepoList {
+        // A GitLab username IS the personal namespace's full path. Groups you own are a
+        // separate namespace and aren't resolved here, so Fork still shows on those.
+        owned_namespaces: namespace_set([viewer.clone()]),
         viewer,
         repos: projects.into_iter().map(from_glab_project).collect(),
     })
@@ -2596,10 +2599,11 @@ fn glab_http_status(stderr: &str) -> Option<u16> {
 /// cannot merge") and `409` ("SHA does not match HEAD of source branch") — GitLab's
 /// `doc/api/merge_requests.md`, "Merge a merge request".
 ///
-/// `arming_auto_merge` holds the 405 arm back as the conservative choice, NOT a
-/// documented distinction: arming rides the same endpoint and the same status table,
-/// and whether a finished head pipeline answers 405 there is unverified. Falling open
-/// to glab's own text on that path risks a worse message, never a wrong claim.
+/// `arming_auto_merge` holds the 405 arm back: on the arming path GitLab answers 405
+/// only when no auto-merge strategy is available AND the head pipeline isn't passing
+/// (a passing one merges immediately instead), per v19.3.0 `lib/api/merge_requests.rb`.
+/// Which strategies exist is version- and edition-dependent, so glab's own text stays
+/// the safer message there.
 ///
 /// The 405 message deliberately doesn't name WHICH requirement is unmet: the
 /// mergeability read owns that wording, and the refusal toast carries its line as a
@@ -2615,9 +2619,42 @@ fn classify_gl_merge_refusal(stderr: &str, arming_auto_merge: bool) -> Option<St
     }
 }
 
+/// The merge PUT's argv. `sha` is sent only when non-empty — an empty `sha=` would
+/// itself be rejected. Arming sends BOTH auto-merge params; the auto-merge section
+/// note below carries why.
+fn merge_mr_args(
+    endpoint: &str,
+    squash: bool,
+    delete_branch: bool,
+    sha: Option<&str>,
+    when_pipeline_succeeds: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "--method".to_string(),
+        "PUT".to_string(),
+        endpoint.to_string(),
+        "-f".to_string(),
+        format!("squash={squash}"),
+        "-f".to_string(),
+        format!("should_remove_source_branch={delete_branch}"),
+    ];
+    if let Some(s) = sha.filter(|s| !s.is_empty()) {
+        args.push("-f".to_string());
+        args.push(format!("sha={s}"));
+    }
+    if when_pipeline_succeeds {
+        args.push("-f".to_string());
+        args.push("merge_when_pipeline_succeeds=true".to_string());
+        args.push("-f".to_string());
+        args.push("auto_merge=true".to_string());
+    }
+    args
+}
+
 /// The shared body behind `merge_mr` and `auto_merge_mr` — same endpoint, same
 /// strategy validation, same `sha` guard. The only difference is the extra
-/// `merge_when_pipeline_succeeds` flag, so both wrappers can't drift apart.
+/// auto-merge flags, so both wrappers can't drift apart.
 async fn merge_mr_inner(
     repo_path: &str,
     number: u64,
@@ -2665,30 +2702,9 @@ async fn merge_mr_inner(
     )
     .await?;
     let endpoint = format!("projects/{enc}/merge_requests/{number}/merge");
-    let squash_arg = format!("squash={squash}");
-    let remove_arg = format!("should_remove_source_branch={delete_branch}");
-    let mut args = vec![
-        "api",
-        "--method",
-        "PUT",
-        &endpoint,
-        "-f",
-        &squash_arg,
-        "-f",
-        &remove_arg,
-    ];
-    // Only guard on a non-empty SHA — an empty `sha=` would itself be rejected.
-    let sha_arg;
-    if let Some(s) = sha.filter(|s| !s.is_empty()) {
-        sha_arg = format!("sha={s}");
-        args.push("-f");
-        args.push(&sha_arg);
-    }
-    if when_pipeline_succeeds {
-        args.push("-f");
-        args.push("merge_when_pipeline_succeeds=true");
-    }
-    let out = run_glab_raw(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    let args = merge_mr_args(&endpoint, squash, delete_branch, sha, when_pipeline_succeeds);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_glab_raw(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT).await?;
     if out.code != 0 {
         // Raw rather than `run_glab` only so a documented refusal can be reworded;
         // everything else keeps `run_glab`'s exact fallback.
@@ -2714,11 +2730,20 @@ async fn merge_mr_inner(
 //
 // GitLab's "auto-merge" (MWPS) arms the merge endpoint to complete server-side once
 // the head pipeline goes green — a GitLab-ONLY control (`mr_auto_merge`); GitHub has
-// no in-app PR auto-merge here. Arm reuses the merge endpoint with
-// `merge_when_pipeline_succeeds=true`; the read exposes the armed flag + detailed
-// merge status + head-pipeline summary so the UI can decide whether to offer it;
-// cancel disarms. A stale `sha` → 409 (propagates like merge); arming a FINISHED
-// pipeline → 405 (a race the UI gates against). Cancel's gotcha lives on
+// no in-app PR auto-merge here. Arm reuses the merge endpoint, sending BOTH
+// `merge_when_pipeline_succeeds=true` (deprecated as a REQUEST param in 17.11) and its
+// replacement `auto_merge=true`: pre-17.11 ignores the unknown `auto_merge` and honors
+// MWPS, 17.11+ ORs the two into one variable so both-true arms exactly once, and
+// `auto_merge` ALONE would merge a pre-17.11 MR immediately rather than arm it (v17.10
+// `immediately_mergeable?` falls through to `mergeable_state?`). Only the request param
+// moved: the RESPONSE field and the cancel endpoint's path both keep the MWPS name on
+// current GitLab (v19.3.0), with no replacement to migrate to.
+//
+// The read exposes the armed flag + detailed merge status + head-pipeline summary so
+// the UI can decide whether to offer it; cancel disarms. A stale `sha` → 409
+// (propagates like merge); arming 405s only when no auto-merge strategy is available
+// AND the head pipeline isn't passing — a passing one merges immediately instead
+// (v19.3.0 `lib/api/merge_requests.rb`). Cancel's gotcha lives on
 // `cancel_auto_merge_mr`.
 
 /// The head pipeline of an MR, as the slim MR GET embeds it (present only when
@@ -9292,9 +9317,9 @@ mod tests {
             .as_deref(),
             Some("The merge request changed while merging — refresh and retry.")
         );
-        // Arming rides the same endpoint and status table, so a 405 there may mean a
-        // race rather than a blocked merge. Unverified either way — that arm keeps
-        // glab's own wording rather than risking a wrong claim.
+        // A 405 on the arming path means no auto-merge strategy was available AND the
+        // head pipeline isn't passing; which strategies exist is version- and
+        // edition-dependent, so that arm keeps glab's own wording.
         assert_eq!(
             classify_gl_merge_refusal("glab: 405 Method Not Allowed (HTTP 405)\n", true),
             None
@@ -9315,6 +9340,98 @@ mod tests {
         ] {
             assert_eq!(classify_gl_merge_refusal(raw, false), None, "raw: {raw:?}");
         }
+    }
+
+    /// A plain merge sends neither auto-merge param, and `sha` rides along only when
+    /// non-empty — the stale-view guard is opt-in, an empty `sha=` would be rejected.
+    #[test]
+    fn merge_mr_args_send_no_auto_merge_params_unless_arming() {
+        let plain = merge_mr_args("projects/9/merge_requests/7/merge", true, false, None, false);
+        assert_eq!(
+            plain,
+            vec![
+                "api",
+                "--method",
+                "PUT",
+                "projects/9/merge_requests/7/merge",
+                "-f",
+                "squash=true",
+                "-f",
+                "should_remove_source_branch=false",
+            ]
+        );
+        assert!(!plain.iter().any(|a| a.contains("auto_merge")));
+        assert!(
+            !plain
+                .iter()
+                .any(|a| a.contains("merge_when_pipeline_succeeds"))
+        );
+
+        let empty_sha = merge_mr_args(
+            "projects/9/merge_requests/7/merge",
+            true,
+            false,
+            Some(""),
+            false,
+        );
+        assert_eq!(empty_sha, plain);
+
+        let guarded = merge_mr_args(
+            "projects/9/merge_requests/7/merge",
+            false,
+            true,
+            Some("abc123"),
+            false,
+        );
+        assert_eq!(
+            guarded,
+            vec![
+                "api",
+                "--method",
+                "PUT",
+                "projects/9/merge_requests/7/merge",
+                "-f",
+                "squash=false",
+                "-f",
+                "should_remove_source_branch=true",
+                "-f",
+                "sha=abc123",
+            ]
+        );
+    }
+
+    /// Arming sends BOTH `merge_when_pipeline_succeeds` (deprecated as a request param
+    /// in 17.11) and `auto_merge`, so pre-17.11 instances still arm and 17.11+ ones OR
+    /// the pair into a single arm. `auto_merge` alone would merge a pre-17.11 MR
+    /// outright. Everything else must be byte-identical to the plain merge.
+    #[test]
+    fn merge_mr_args_arm_with_both_auto_merge_params() {
+        let plain = merge_mr_args(
+            "projects/9/merge_requests/7/merge",
+            false,
+            true,
+            Some("abc123"),
+            false,
+        );
+        let arming = merge_mr_args(
+            "projects/9/merge_requests/7/merge",
+            false,
+            true,
+            Some("abc123"),
+            true,
+        );
+        assert_eq!(arming[..plain.len()], plain[..]);
+        assert_eq!(
+            arming[plain.len()..],
+            [
+                "-f",
+                "merge_when_pipeline_succeeds=true",
+                "-f",
+                "auto_merge=true",
+            ]
+        );
+        // `-f` is glab's raw field: no leading-`@` file-read magic on any value.
+        assert!(!arming.iter().any(|a| a == "-F"));
     }
 
     #[tokio::test]

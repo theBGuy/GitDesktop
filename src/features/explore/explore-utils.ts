@@ -38,32 +38,46 @@ export function forgeRepoToSearchRepo(repo: ForgeRepo): ForgeSearchRepo {
 }
 
 /**
- * Group repos by owner — the viewer's own repos first, then other owners
- * alphabetically — and flatten to rows for the virtualizer. Each group keeps its
- * incoming order. Mirrors CloneRepoDialog's `rows` memo so the two surfaces order
- * identically.
+ * Group items by owner namespace — the namespaces you belong to first, then the rest
+ * alphabetically — keeping each group's incoming order. `ownerOf` lets the two
+ * surfaces that group this way (Explore's Yours list and CloneRepoDialog's rows)
+ * share one ordering across their different row shapes; an empty `ownedNamespaces`
+ * just falls back to alphabetical.
+ */
+export function groupByOwnerNamespace<T>(
+  items: readonly T[],
+  ownerOf: (item: T) => string,
+  ownedNamespaces: readonly string[],
+): [string, T[]][] {
+  const byOwner = new Map<string, T[]>();
+  for (const item of items) {
+    const owner = ownerOf(item);
+    const list = byOwner.get(owner);
+    if (list) list.push(item);
+    else byOwner.set(owner, [item]);
+  }
+  const owned = new Set(ownedNamespaces);
+  return [...byOwner.entries()].sort((a, b) => {
+    const aOwned = owned.has(a[0]);
+    if (aOwned !== owned.has(b[0])) return aOwned ? -1 : 1;
+    return a[0].toLowerCase().localeCompare(b[0].toLowerCase());
+  });
+}
+
+/**
+ * Group repos by owner and flatten to rows for the virtualizer, ordered by
+ * {@link groupByOwnerNamespace}.
  */
 export function groupReposByOwner(
   repos: ForgeSearchRepo[],
-  viewer: string | null,
+  ownedNamespaces: readonly string[],
 ): ExploreRow[] {
-  const byOwner = new Map<string, ForgeSearchRepo[]>();
-  for (const r of repos) {
-    const list = byOwner.get(r.owner);
-    if (list) list.push(r);
-    else byOwner.set(r.owner, [r]);
-  }
-  const owners = [...byOwner.entries()].sort((a, b) => {
-    if (viewer) {
-      if (a[0] === viewer) return -1;
-      if (b[0] === viewer) return 1;
-    }
-    return a[0].toLowerCase().localeCompare(b[0].toLowerCase());
-  });
-  return owners.flatMap(([owner, list]): ExploreRow[] => [
-    { kind: "header", owner },
-    ...list.map((repo) => ({ kind: "repo" as const, repo })),
-  ]);
+  return groupByOwnerNamespace(repos, (r) => r.owner, ownedNamespaces).flatMap(
+    ([owner, list]): ExploreRow[] => [
+      { kind: "header", owner },
+      ...list.map((repo) => ({ kind: "repo" as const, repo })),
+    ],
+  );
 }
 
 /**

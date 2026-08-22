@@ -658,9 +658,24 @@ pub struct ForgeRepo {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ForgeRepoList {
-    /// The signed-in user's login, so the UI lists their own repos first.
+    /// The signed-in user's login. Kept on the wire; no frontend consumer today.
     pub viewer: String,
+    /// The [`ForgeRepo::owner`] namespaces that count as the viewer's own — a SET
+    /// because "yours" is provider-shaped: a login on GitHub and GitLab, but any
+    /// workspace you belong to on Bitbucket, where the login resolves to the account's
+    /// username or display name while repo owners are workspace slugs — separate
+    /// namespaces that don't line up. Drives the own-repo Fork gate and the yours-first
+    /// grouping; empty means unresolved, so both fail open.
+    pub owned_namespaces: Vec<String>,
     pub repos: Vec<ForgeRepo>,
+}
+
+/// The [`ForgeRepoList::owned_namespaces`] set, with blanks dropped: every provider's
+/// viewer/slug probe ends in `unwrap_or_default`, and `ForgeRepo::owner` does too, so
+/// an empty namespace in the set would match an unresolved repo and hide its Fork
+/// instead of falling open.
+pub fn namespace_set(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    names.into_iter().filter(|n| !n.is_empty()).collect()
 }
 
 /// One search-result repository for the Explore view — a superset of [`ForgeRepo`]
@@ -731,6 +746,37 @@ pub struct ProviderFeatures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The clone browser and Explore key off these exact wire names; a TS mirror that
+    /// misses `ownedNamespaces` reads `undefined` silently, so pin the whole shape.
+    #[test]
+    fn repo_list_serializes_camel_case_wire_keys() {
+        let value = serde_json::to_value(ForgeRepoList {
+            viewer: "evangoldberg98".into(),
+            owned_namespaces: vec!["thebguy1".into(), "betabotsllc".into()],
+            repos: vec![],
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "viewer": "evangoldberg98",
+                "ownedNamespaces": ["thebguy1", "betabotsllc"],
+                "repos": [],
+            })
+        );
+    }
+
+    /// A provider whose viewer/workspace probe failed contributes nothing to the set:
+    /// an empty namespace would match a repo whose own `owner` fell back to "".
+    #[test]
+    fn namespace_set_drops_unresolved_probes() {
+        assert_eq!(namespace_set(["".to_string()]), Vec::<String>::new());
+        assert_eq!(
+            namespace_set(["".to_string(), "octocat".to_string()]),
+            vec!["octocat".to_string()]
+        );
+    }
 
     #[test]
     fn github_supports_everything() {

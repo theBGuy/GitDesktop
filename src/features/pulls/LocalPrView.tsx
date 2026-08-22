@@ -386,14 +386,14 @@ export function LocalPrView({
   /** Close/Reopen, carrying any typed note. The note is appended in the SAME
    *  record mutation as the status flip, so the store can never persist one
    *  without the other; the draft clears only once that write lands. */
-  function setStatus(next: "open" | "closed") {
+  async function setStatus(next: "open" | "closed") {
     // Appending the note makes this non-idempotent, and the mutate callback
     // re-reads the record from disk — so a second click lands after the first
     // note is already stored and would post it twice.
     if (!pr || update.isPending) return;
     const note = comment.trim();
-    update.mutate(
-      {
+    try {
+      await update.mutateAsync({
         id: pr.id,
         mutate: (cur) => ({
           ...cur,
@@ -410,14 +410,13 @@ export function LocalPrView({
           status: next,
           closedAt: next === "closed" ? new Date().toISOString() : undefined,
         }),
-      },
-      {
-        onSuccess: () => setComment(""),
-        // Nothing was written, the note included — say so rather than leave a
-        // silent no-op behind a button that promised to post it.
-        onError: toastError,
-      },
-    );
+      });
+      setComment("");
+    } catch (e) {
+      // Nothing was written, the note included — say so rather than leave a
+      // silent no-op behind a button that promised to post it.
+      toastError(e);
+    }
   }
 
   function openEdit() {
@@ -435,58 +434,96 @@ export function LocalPrView({
     }
   }
 
-  function doMerge(strategy: MergeStrategy) {
+  // Awaited, not per-call callbacks: this view's effects tear down when the
+  // selection or the repo tab changes, and react-query drops per-call callbacks
+  // once the observer has no listeners. Here that would lose the record write —
+  // a landed merge still reading open, or a paused one with no `pendingMerge`
+  // to reach its resolver by.
+  async function doMerge(strategy: MergeStrategy) {
     if (!pr) return;
     const message = pr.body.trim() ? `${pr.title}\n\n${pr.body}` : pr.title;
-    merge.mutate(
-      { base: pr.base, head: pr.head, message, strategy },
-      {
-        onSuccess: (outcome) => {
-          if (outcome.status === "merged") {
-            update.mutate({
-              id: pr.id,
-              mutate: (cur) => ({
-                ...cur,
-                status: "merged",
-                mergedAt: new Date().toISOString(),
-              }),
-            });
-            toast.success(
-              `${MERGED_VERB[strategy]} ${pr.head} into ${pr.base}`,
-            );
-            return;
-          }
-          // Conflicts: the merge is paused in an isolated worktree (the user's
-          // branch and working tree are untouched). Record it on the PR so this
-          // view swaps to the in-place ResolveConflictsView, where the conflict
-          // editor is pointed at that worktree.
-          if (!outcome.worktreePath || !outcome.worktreeId) {
-            toastError(
-              new Error("Merge paused on conflicts but returned no worktree"),
-            );
-            return;
-          }
-          update.mutate({
-            id: pr.id,
-            mutate: (cur) => ({
-              ...cur,
-              pendingMerge: {
-                base: pr.base,
-                head: pr.head,
-                strategy: strategy as "merge" | "squash" | "rebase",
-                message,
-                worktreePath: outcome.worktreePath as string,
-                worktreeId: outcome.worktreeId as string,
-                opId: outcome.opId,
-                startedAt: new Date().toISOString(),
-              },
-            }),
-          });
-          toast.warning("Merge has conflicts — resolve them to finish");
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      const outcome = await merge.mutateAsync({
+        base: pr.base,
+        head: pr.head,
+        message,
+        strategy,
+      });
+      if (outcome.status === "merged") {
+        // The record write is awaited ahead of its toast: a store write can
+        // reject (a concurrent MCP writer, a locked store), and a merge
+        // reported as landed while the record still reads open is the exact
+        // desync this view has no second chance to repair.
+        await update.mutateAsync({
+          id: pr.id,
+          mutate: (cur) => ({
+            ...cur,
+            status: "merged",
+            mergedAt: new Date().toISOString(),
+          }),
+        });
+        toast.success(`${MERGED_VERB[strategy]} ${pr.head} into ${pr.base}`);
+        return;
+      }
+      // Conflicts: the merge is paused in an isolated worktree (the user's
+      // branch and working tree are untouched). Record it on the PR so this
+      // view swaps to the in-place ResolveConflictsView, where the conflict
+      // editor is pointed at that worktree — awaited because a lost write
+      // strands that worktree with nothing left pointing at it.
+      if (!outcome.worktreePath || !outcome.worktreeId) {
+        toastError(
+          new Error("Merge paused on conflicts but returned no worktree"),
+        );
+        return;
+      }
+      await update.mutateAsync({
+        id: pr.id,
+        mutate: (cur) => ({
+          ...cur,
+          pendingMerge: {
+            base: pr.base,
+            head: pr.head,
+            strategy: strategy as "merge" | "squash" | "rebase",
+            message,
+            worktreePath: outcome.worktreePath as string,
+            worktreeId: outcome.worktreeId as string,
+            opId: outcome.opId,
+            startedAt: new Date().toISOString(),
+          },
+        }),
+      });
+      toast.warning("Merge has conflicts — resolve them to finish");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  /** The "Update branch" button's action. Awaited because the dirty-tree refusal
+   *  reaches the stash-and-reapply prompt only through this rejection; dropping
+   *  it on teardown would withdraw the offer entirely. */
+  async function doUpdateBranch() {
+    if (!pr) return;
+    try {
+      await updateBranchFrom.mutateAsync({ branch: pr.head, base: pr.base });
+      toast.success(`Updated ${pr.head} from ${pr.base}`);
+    } catch (e) {
+      // Only an in-place update (head IS the current branch) can be refused
+      // over uncommitted changes — the throwaway worktree path is always
+      // clean. Anything else toasts.
+      if (
+        status.data?.branch?.name === pr.head &&
+        recovery.handleError(e, {
+          operationLabel: "update",
+          detail: pr.base,
+          reappliedMessage: `Updated from ${pr.base} and reapplied your changes.`,
+          plainMessage: `Updated ${pr.head} from ${pr.base}`,
+          run: { op: "merge", ref: pr.base },
+        })
+      ) {
+        return;
+      }
+      toastError(e);
+    }
   }
 
   // A calm status block above the Merge button: up to three INDEPENDENT lines —
@@ -1046,7 +1083,7 @@ export function LocalPrView({
               size="sm"
               disabled={update.isPending}
               reason="Saving…"
-              onClick={() => setStatus("closed")}
+              onClick={() => void setStatus("closed")}
               title={
                 draftRidesStateChange
                   ? "Closes and posts your draft as a comment"
@@ -1088,33 +1125,7 @@ export function LocalPrView({
                   }
                 })()}
                 title={`Merge ${pr.base} into ${pr.head} to catch it up`}
-                onClick={() =>
-                  updateBranchFrom.mutate(
-                    { branch: pr.head, base: pr.base },
-                    {
-                      onSuccess: () =>
-                        toast.success(`Updated ${pr.head} from ${pr.base}`),
-                      // Only an in-place update (head IS the current branch) can
-                      // be refused over uncommitted changes — the throwaway
-                      // worktree path is always clean. Anything else toasts.
-                      onError: (e) => {
-                        if (
-                          status.data?.branch?.name === pr.head &&
-                          recovery.handleError(e, {
-                            operationLabel: "update",
-                            detail: pr.base,
-                            reappliedMessage: `Updated from ${pr.base} and reapplied your changes.`,
-                            plainMessage: `Updated ${pr.head} from ${pr.base}`,
-                            run: { op: "merge", ref: pr.base },
-                          })
-                        ) {
-                          return;
-                        }
-                        toastError(e);
-                      },
-                    },
-                  )
-                }
+                onClick={() => void doUpdateBranch()}
               >
                 <ArrowClockwiseIcon data-icon="inline-start" />
                 Update branch
@@ -1146,7 +1157,7 @@ export function LocalPrView({
                   disabled={
                     !isMergeMethodAllowed(rulesConfig, pr.base, "merge")
                   }
-                  onClick={() => doMerge("merge")}
+                  onClick={() => void doMerge("merge")}
                 >
                   Create a merge commit
                 </DropdownMenuItem>
@@ -1154,7 +1165,7 @@ export function LocalPrView({
                   disabled={
                     !isMergeMethodAllowed(rulesConfig, pr.base, "squash")
                   }
-                  onClick={() => doMerge("squash")}
+                  onClick={() => void doMerge("squash")}
                 >
                   Squash and merge
                 </DropdownMenuItem>
@@ -1162,7 +1173,7 @@ export function LocalPrView({
                   disabled={
                     !isMergeMethodAllowed(rulesConfig, pr.base, "rebase")
                   }
-                  onClick={() => doMerge("rebase")}
+                  onClick={() => void doMerge("rebase")}
                 >
                   Rebase and merge
                 </DropdownMenuItem>
@@ -1178,7 +1189,7 @@ export function LocalPrView({
               size="sm"
               disabled={update.isPending}
               reason="Saving…"
-              onClick={() => setStatus("open")}
+              onClick={() => void setStatus("open")}
               title={
                 draftRidesStateChange
                   ? "Reopens and posts your draft as a comment"

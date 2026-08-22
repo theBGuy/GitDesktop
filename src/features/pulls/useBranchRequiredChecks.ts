@@ -34,6 +34,42 @@ export function useBranchRequiredChecks(
   });
 }
 
+/** When a run reported, for ordering same-named runs. Start time is the one key
+ *  both rollup shapes carry: a status context reports when it was created but never
+ *  a completion. NaN when the run is undated, which the API permits. */
+const reportedAt = (run: PrCheckOut) =>
+  Date.parse(run.startedAt ?? run.completedAt ?? "");
+
+/**
+ * The most recent of several same-named runs, or null when none of them is dated.
+ * Newest-wins is MEASURED, not GitHub's documented contract: a workflow that
+ * cancels its own in-progress runs on re-trigger leaves the superseded run in the
+ * rollup, and GitHub reports such a branch mergeable anyway. Ties keep the later
+ * entry, the order the rollup itself supplied.
+ */
+export function latestReportedRun(runs: PrCheckOut[]): PrCheckOut | null {
+  let latest: PrCheckOut | null = null;
+  let latestAt = Number.NEGATIVE_INFINITY;
+  for (const run of runs) {
+    const at = reportedAt(run);
+    if (Number.isNaN(at)) continue;
+    if (at >= latestAt) {
+      latest = run;
+      latestAt = at;
+    }
+  }
+  return latest;
+}
+
+/** Whether one run leaves its context still to come. STALE counts here but not in
+ *  the rollup's presentation: GitHub's passing set is success, skipped or neutral,
+ *  so a stale run holds the merge even though it reads as a finished result. */
+function isOutstanding(check: PrCheckOut, provider: ForgeProvider): boolean {
+  if (check.status.toUpperCase() === "STALE") return true;
+  const { bucket } = checkPresentation(check.status, provider);
+  return bucket === "failed" || bucket === "pending";
+}
+
 /**
  * Which required contexts the PR's own checks have not satisfied, in the order the
  * rules named them. Joined by NAME — the rules speak in contexts and the rollup in
@@ -45,8 +81,8 @@ export function unmetRequiredChecks(
   provider: ForgeProvider,
 ): string[] {
   if (required.length === 0) return [];
-  // Indexed once: GitHub allows several checks under one name, and every run of a
-  // required context has to be consulted before that context counts as satisfied.
+  // Indexed once: GitHub allows several runs under one name, and one of them
+  // decides the context — which one is resolved per group below.
   const runs = new Map<string, PrCheckOut[]>();
   for (const check of checks) {
     const existing = runs.get(check.name);
@@ -55,13 +91,18 @@ export function unmetRequiredChecks(
   }
   return required.filter((context) => {
     const named = runs.get(context);
+    // Unmet = never reported, still running, failed, or gone stale — what a viewer
+    // is waiting on. A skipped or neutral run has reported a conclusion GitHub
+    // accepts, so naming it as something still to come would be wrong.
     if (!named) return true;
-    // Unmet = never reported, still running, or failed — the three a viewer is
-    // waiting on. A skipped or neutral run has reported a conclusion, so naming
-    // it as something still to come would be wrong.
-    return named.some((check) => {
-      const { bucket } = checkPresentation(check.status, provider);
-      return bucket === "failed" || bucket === "pending";
-    });
+    // The newest DATED run decides, and an undated one is never overruled by it:
+    // nothing orders that run against the others, so it has to clear on its own.
+    // A group with no dated run at all therefore keeps the old rule — all of them.
+    const decisive = latestReportedRun(named);
+    const undated = named.some(
+      (check) =>
+        Number.isNaN(reportedAt(check)) && isOutstanding(check, provider),
+    );
+    return undated || (decisive !== null && isOutstanding(decisive, provider));
   });
 }

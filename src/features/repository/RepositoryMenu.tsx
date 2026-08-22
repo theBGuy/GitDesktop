@@ -46,7 +46,10 @@ import { RepoAutomationsDialog } from "@/features/automations/RepoAutomationsDia
 import { BranchRulesDialog } from "@/features/branch-rules/BranchRulesDialog";
 import { HooksDialog } from "@/features/hooks/HooksDialog";
 import { RepoJiraDialog } from "@/features/issues/RepoJiraDialog";
-import type { SectionId } from "@/features/repo-settings/RepoSettingsDialog";
+import type {
+  RepoSettingsDialog as RepoSettingsDialogComponent,
+  SectionId,
+} from "@/features/repo-settings/RepoSettingsDialog";
 import { copyText } from "@/lib/clipboard";
 import {
   forgeRepoUrl,
@@ -74,23 +77,38 @@ import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { RemoteUrlDialog } from "./RemoteUrlDialog";
 import { RemoveRepoDialog, RepoAliasDialog } from "./RepoDialogs";
+import { RepoSettingsDialogFallback } from "./RepoSettingsDialogFallback";
 import { RepositoryFilesDialog } from "./RepositoryFilesDialog";
 import { SubmodulesDialog } from "./SubmodulesDialog";
 import { WorktreesDialog } from "./WorktreesDialog";
+
+// Named so the menu can warm the chunk while the dropdown is up: the warm call
+// and the lazy mount go through the same dynamic import, so they share one fetch.
+const loadRepoSettingsDialog = () =>
+  import("@/features/repo-settings/RepoSettingsDialog");
+
+/** Resolve the chunk and hand the component back, so an open that follows can
+ *  render it directly instead of suspending. Best-effort: a failed warm stays
+ *  silent and the lazy path still surfaces the import error. */
+const warmRepoSettingsDialog = (
+  onReady: (dialog: typeof RepoSettingsDialogComponent) => void,
+) => {
+  loadRepoSettingsDialog()
+    .then((m) => onReady(m.RepoSettingsDialog))
+    .catch(() => undefined);
+};
 
 // RepoSettingsDialog's tree pulls in the Shiki highlighter (via parts.tsx →
 // shiki-highlighter's highlightJson), which is heavy and only needed once an
 // admin opens repository settings. Loading it lazily keeps that chunk off the
 // boot path. The dialog is rendered ONLY while open (not always-mounted like
 // the sibling dialogs): a lazy component that is always rendered loads its
-// chunk immediately, defeating the split — the open-gate is what defers the
-// import to first open. Trade-off: the dialog no longer stays mounted across
+// chunk immediately, defeating the split — the open-gate is what keeps the
+// import on demand. Trade-off: the dialog no longer stays mounted across
 // close/reopen, so its remembered rail section resets to "general" each open
 // (see the state note at its render site).
 const RepoSettingsDialog = lazy(() =>
-  import("@/features/repo-settings/RepoSettingsDialog").then((m) => ({
-    default: m.RepoSettingsDialog,
-  })),
+  loadRepoSettingsDialog().then((m) => ({ default: m.RepoSettingsDialog })),
 );
 
 export function RepositoryMenu({ repoPath }: { repoPath: string }) {
@@ -105,6 +123,18 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [jiraOpen, setJiraOpen] = useState(false);
   const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
+  // React's `lazy` suspends on its first element render even when the shared
+  // import has already resolved, so a warmed open would still flash the
+  // fallback for a commit. Holding the resolved component lets a warmed open
+  // render it directly; only the two warm triggers below ever fill this, so the
+  // chunk still stays off the boot path.
+  const [ReadyDialog, setReadyDialog] = useState<
+    typeof RepoSettingsDialogComponent | null
+  >(null);
+  // Which tree an open renders, fixed at the moment it opens: swapping trees
+  // mid-open would unmount one Dialog root and mount another, which is the
+  // doubled entrance this avoids.
+  const [openPath, setOpenPath] = useState<"direct" | "lazy" | null>(null);
   const [repoSettingsSection, setRepoSettingsSection] =
     useState<SectionId | null>(null);
   const repoSettingsRequest = useUiStore((s) => s.repoSettingsRequest);
@@ -157,6 +187,10 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
     !!gh.data?.login &&
     gh.data.repo.split("/")[0] === gh.data.login;
   // One predicate for the menu item and its palette twin, so the two can't drift.
+  // Bitbucket bypasses the ownership test rather than trusting `ownRepo` to fall
+  // false: its `login` is a /user username (a display name where that's absent), which
+  // doesn't line up with the workspace slug a repo's owner carries. Explore's Fork
+  // gate needs the real answer and gets it from a membership set instead.
   const canForkHere = canGh && (isGitLab || isBitbucket || !ownRepo);
   const starStatus = useRepoStarStatus(repoPath, canStar);
   const setStar = useSetRepoStar(repoPath);
@@ -184,13 +218,20 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // and the dialog opens in edit mode.
   const jiraLink = useJiraLink(repoPath);
 
+  // Every route opens through here, so the render path is captured once per
+  // open and holds for that whole open.
+  const openRepoSettings = () => {
+    setOpenPath(ReadyDialog ? "direct" : "lazy");
+    setRepoSettingsOpen(true);
+  };
+
   // A request that arrives while the dialog is already open is dropped, not
   // queued: the section is seeded at mount, so it couldn't be applied, and
   // deferring it would reopen the dialog the moment the user closed it.
   const openRepoSettingsAt = useEffectEvent((section: SectionId) => {
     if (repoSettingsOpen) return;
     setRepoSettingsSection(section);
-    setRepoSettingsOpen(true);
+    openRepoSettings();
   });
 
   // A one-shot deep link raised by another surface (the Findings tab's "turn on
@@ -204,6 +245,27 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
     if (canOpenRepoSettings) openRepoSettingsAt(repoSettingsRequest);
     clearRepoSettingsRequest();
   }, [repoSettingsRequest, clearRepoSettingsRequest, canOpenRepoSettings]);
+
+  // The palette and the Findings deep link have no menu to warm on, so the open
+  // itself warms too; the shared import means this and the menu preload resolve
+  // from one fetch. Gated on the dialog being open, so it can only run after a
+  // route the admin gate already guards has opened it.
+  useEffect(() => {
+    if (repoSettingsOpen) {
+      warmRepoSettingsDialog((dialog) => setReadyDialog(() => dialog));
+    }
+  }, [repoSettingsOpen]);
+
+  // Shared by the loading frame and the loaded dialog, so Esc or the backdrop
+  // cancels an open that is still fetching its chunk. Closing drops the
+  // deep-linked section so a later plain open starts at "general".
+  const closeRepoSettings = (open: boolean) => {
+    setRepoSettingsOpen(open);
+    if (!open) {
+      setRepoSettingsSection(null);
+      setOpenPath(null);
+    }
+  };
 
   const onError = (e: unknown) => toastError(e);
 
@@ -250,11 +312,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("manage-files", () => setFilesOpen(true));
   useHotkeyAction("automations", () => setAutomationsOpen(true), aiEnabled);
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));
-  useHotkeyAction(
-    "repository-settings",
-    () => setRepoSettingsOpen(true),
-    canOpenRepoSettings,
-  );
+  useHotkeyAction("repository-settings", openRepoSettings, canOpenRepoSettings);
   useHotkeyAction("branch-rules", () => setBranchRulesOpen(true));
   useHotkeyAction("git-hooks", () => setHooksOpen(true));
   useHotkeyAction("submodules", () => setSubmodulesOpen(true), hasSubmodules);
@@ -291,7 +349,16 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("remove-repository", () => setRemoveTarget(repoEntry));
 
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      onOpenChange={(menuOpen) => {
+        // Warm the repo-settings chunk while the menu is up, so the click that
+        // opens the dialog renders it directly instead of suspending on it.
+        // Gated like the item itself: a non-admin has nothing to open.
+        if (menuOpen && canOpenRepoSettings) {
+          warmRepoSettingsDialog((dialog) => setReadyDialog(() => dialog));
+        }
+      }}
+    >
       <DropdownMenuTrigger
         render={
           <Button
@@ -404,7 +471,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           {jiraLink.data ? "Change Jira project…" : "Link Jira project…"}
         </DropdownMenuItem>
         {canOpenRepoSettings && (
-          <DropdownMenuItem onClick={() => setRepoSettingsOpen(true)}>
+          <DropdownMenuItem onClick={openRepoSettings}>
             <GearSixIcon />
             Repository settings…
           </DropdownMenuItem>
@@ -479,27 +546,39 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
         existingLink={jiraLink.data ?? null}
       />
       {/* Open-gated (unlike the always-mounted siblings above) so its lazy
-          chunk loads on first open, not on boot. `open` stays true while
+          chunk loads on demand, not on boot. `open` stays true while
           mounted; `onOpenChange(false)` flips the gate, unmounting the subtree
           — the same immediate-unmount-on-close idiom the other open-gated
           dialogs in this app use (e.g. ImportMcpDialog). The dialog's remembered
           rail section (its internal `section` state) no longer persists across
-          close/reopen and resets to "general" each open. */}
-      {repoSettingsOpen && (
-        <Suspense fallback={null}>
-          <RepoSettingsDialog
+          close/reopen and resets to "general" each open.
+          Two shapes of the same dialog: a warmed open renders the resolved
+          component straight (one mount, one entrance), while a cold one
+          suspends behind the loading frame and skips the entrance the frame
+          already played. */}
+      {repoSettingsOpen &&
+        (openPath === "direct" && ReadyDialog ? (
+          <ReadyDialog
             repoPath={repoPath}
             open={repoSettingsOpen}
-            onOpenChange={(o) => {
-              setRepoSettingsOpen(o);
-              // Drop the deep-linked section on close so a later plain open
-              // starts at "general".
-              if (!o) setRepoSettingsSection(null);
-            }}
+            onOpenChange={closeRepoSettings}
             initialSection={repoSettingsSection ?? undefined}
           />
-        </Suspense>
-      )}
+        ) : (
+          <Suspense
+            fallback={
+              <RepoSettingsDialogFallback onOpenChange={closeRepoSettings} />
+            }
+          >
+            <RepoSettingsDialog
+              repoPath={repoPath}
+              open={repoSettingsOpen}
+              onOpenChange={closeRepoSettings}
+              initialSection={repoSettingsSection ?? undefined}
+              subdueEntrance
+            />
+          </Suspense>
+        ))}
       <BranchRulesDialog
         repoPath={repoPath}
         open={branchRulesOpen}

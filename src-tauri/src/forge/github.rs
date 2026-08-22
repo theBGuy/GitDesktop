@@ -8,8 +8,8 @@ use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::model::{
-    Capabilities, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo,
-    ForgeStatus, Implemented, Provider,
+    namespace_set, Capabilities, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList,
+    ForgeSearchRepo, ForgeStatus, Implemented, Provider,
 };
 use crate::forge::{
     validate_owner, validate_repo_name, Forge, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
@@ -71,6 +71,9 @@ fn from_gh_repo(r: GhRepo) -> ForgeRepo {
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let gh = gh_list_repos().await?;
     Ok(ForgeRepoList {
+        // A GitHub login IS its personal namespace, so the viewer is the whole set;
+        // org repos stay forkable.
+        owned_namespaces: namespace_set([gh.viewer.clone()]),
         viewer: gh.viewer,
         repos: gh.repos.into_iter().map(from_gh_repo).collect(),
     })

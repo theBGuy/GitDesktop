@@ -148,6 +148,12 @@ const REF_INCLUDES: Record<Draft["refScope"], (d: Draft) => string[]> = {
     ),
 };
 
+/** The stored parameters of one rule on the ruleset being edited. A save is a full
+ *  PUT replace, so every managed rule is rebuilt FROM these rather than from the
+ *  draft alone — the draft models a subset of each rule's fields. */
+const storedParameters = (original: RulesetFull | undefined, type: string) =>
+  original?.rules?.find((r) => r.type === type)?.parameters;
+
 function draftToBody(
   d: Draft,
   original?: RulesetFull,
@@ -158,23 +164,37 @@ function draftToBody(
     rules.push({
       type: "pull_request",
       parameters: {
+        // Seeds a new ruleset only: GitHub's schema demands the field and the
+        // editor has no control for it, so a stored value must win the spread.
+        required_review_thread_resolution: false,
+        ...storedParameters(original, "pull_request"),
         required_approving_review_count: d.approvals,
         dismiss_stale_reviews_on_push: d.dismissStale,
         require_code_owner_review: d.codeOwner,
         require_last_push_approval: d.lastPush,
-        required_review_thread_resolution: false,
       },
     });
   }
   if (d.requireChecks) {
+    const checks = storedParameters(original, "required_status_checks");
+    // A kept context keeps its whole stored entry: the entry can pin the check to
+    // one app (`integration_id`), which this editor cannot display and a save must
+    // not silently drop. A context typed in fresh has nothing to preserve.
+    const storedChecks = new Map<string, { context: string }>(
+      (
+        (checks?.required_status_checks as { context: string }[] | undefined) ??
+        []
+      ).map((c) => [c.context, c]),
+    );
     rules.push({
       type: "required_status_checks",
       parameters: {
-        strict_required_status_checks_policy: d.strictChecks,
         do_not_enforce_on_create: false,
-        required_status_checks: splitLines(d.checkContexts).map((context) => ({
-          context,
-        })),
+        ...checks,
+        strict_required_status_checks_policy: d.strictChecks,
+        required_status_checks: splitLines(d.checkContexts).map(
+          (context) => storedChecks.get(context) ?? { context },
+        ),
       },
     });
   }
@@ -188,10 +208,18 @@ function draftToBody(
   );
   return {
     name: d.name.trim(),
-    target: "branch",
+    // Target, ref excludes and any other condition are the ruleset's own state,
+    // not the draft's: an edit rewrites what it models and resends the rest.
+    target: original?.target ?? "branch",
     enforcement: d.enforcement,
     bypass_actors: original?.bypass_actors ?? [],
-    conditions: { ref_name: { include, exclude: [] } },
+    conditions: {
+      ...original?.conditions,
+      ref_name: {
+        include,
+        exclude: original?.conditions?.ref_name?.exclude ?? [],
+      },
+    },
     rules: [...rules, ...extra],
   };
 }
@@ -405,8 +433,10 @@ function RulesetForm({
     setD((p) => ({ ...p, [key]: value }));
 
   async function save() {
-    const body = draftToBody(d, original);
     try {
+      // Inside the try: building the body reads the stored ruleset's own shape, so
+      // a malformed one must surface as a toast rather than a silent no-op.
+      const body = draftToBody(d, original);
       if (id != null) await update.mutateAsync({ id, body });
       else await create.mutateAsync(body);
       toast.success(id != null ? "Ruleset updated" : "Ruleset created");

@@ -39,21 +39,22 @@ import { starParts } from "./explore-utils";
 
 /** The Explore detail pane: the selected repo's header, actions (clone / fork /
  *  star / view), and its lazily-fetched README. `features` gates fork/star, and
- *  `viewer` (the screen's own-repos query) additionally gates fork; a selected
- *  repo drives the star + README queries. */
+ *  `ownedNamespaces` (the screen's own-repos query) additionally gates fork; a
+ *  selected repo drives the star + README queries. */
 export function ExploreDetail({
   provider,
   repo,
   features,
-  viewer,
+  ownedNamespaces,
   onClone,
 }: {
   provider: ForgeProvider;
   repo: ForgeSearchRepo | null;
   features: ForgeProviderFeatures | undefined;
-  /** The signed-in user's login; null while resolving, and may be "" when the
-   *  provider's viewer probe fails (both fall back to the capability-only gate). */
-  viewer: string | null;
+  /** The owner namespaces that count as the viewer's own; empty while the query
+   *  resolves or when the provider's probe failed (both fall back to the
+   *  capability-only gate). */
+  ownedNamespaces: readonly string[];
   onClone: (target: ExploreCloneTarget) => void;
 }) {
   if (!repo) {
@@ -76,7 +77,7 @@ export function ExploreDetail({
       provider={provider}
       repo={repo}
       features={features}
-      viewer={viewer}
+      ownedNamespaces={ownedNamespaces}
       onClone={onClone}
     />
   );
@@ -86,26 +87,26 @@ function ExploreDetailBody({
   provider,
   repo,
   features,
-  viewer,
+  ownedNamespaces,
   onClone,
 }: {
   provider: ForgeProvider;
   repo: ForgeSearchRepo;
   features: ForgeProviderFeatures | undefined;
-  viewer: string | null;
+  ownedNamespaces: readonly string[];
   onClone: (target: ExploreCloneTarget) => void;
 }) {
   const label = providerLabel(provider);
-  // Forking always creates the copy under your own account, so a repo you own
-  // personally is never a valid target — hidden, not disabled, since there's
-  // nothing actionable to explain. Personal ownership, not write access: org
-  // repos stay forkable; an unknown viewer (null, or the "" non-GitHub backends
-  // emit) falls back to the capability gate. On Bitbucket the compare is inert in
-  // practice — `owner` is a workspace slug, `viewer` a username — which is why the
-  // guide scopes this behavior to GitHub and GitLab.
+  // A repo already in a namespace of yours is never a valid fork target — hidden,
+  // not disabled, since there's nothing actionable to explain. The backend decides
+  // what "yours" means per provider: your login on GitHub and GitLab, so org and
+  // group repos stay forkable; on Bitbucket, any workspace you belong to, because it
+  // exposes no usable personal-workspace signal and a fork inside a workspace you
+  // already have access to carries no contribution meaning. An empty set (resolving,
+  // or a failed probe) falls back to the capability gate.
   const canFork =
     (features?.implemented.repoForkByName ?? false) &&
-    !(viewer && repo.owner === viewer);
+    !ownedNamespaces.includes(repo.owner);
   const canStar = features?.implemented.repoStar ?? false;
   const canReadme = features?.implemented.repoReadme ?? false;
 
@@ -134,7 +135,7 @@ function ExploreDetailBody({
   async function onFork() {
     const ok = await useConfirm.getState().ask({
       title: `Fork ${repo.fullName}?`,
-      body: `Creates a fork under your account on ${label} in the background. You can clone it once it's ready.`,
+      body: `Creates a fork on ${label} in the background. You can clone it once it's ready.`,
       confirmLabel: "Fork",
     });
     if (!ok) return;

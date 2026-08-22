@@ -110,58 +110,64 @@ export function ResolveConflictsView({
   const canResolveWithAi = aiEnabled && reviewConfigured && remaining > 0;
   const busy = finish.isPending || abort.isPending;
 
-  function onFinish() {
+  // Awaited, not per-call callbacks: this surface unmounts the moment
+  // `pendingMerge` clears or the repo tab changes, and react-query drops
+  // per-call callbacks once the observer has no listeners — the PR record would
+  // keep pointing at a worktree the merge already finished with or threw away.
+  async function onFinish() {
     if (!pending) return;
-    finish.mutate(
-      {
+    try {
+      const outcome = await finish.mutateAsync({
         base: pr.base,
         strategy: pending.strategy,
         message: pending.message,
         worktreePath: pending.worktreePath,
         worktreeId: pending.worktreeId,
         opId: pending.opId,
-      },
-      {
-        onSuccess: (outcome) => {
-          if (outcome.status === "merged") {
-            update.mutate({
-              id: pr.id,
-              mutate: (cur) => ({
-                ...cur,
-                status: "merged",
-                mergedAt: new Date().toISOString(),
-                pendingMerge: undefined,
-              }),
-            });
-            toast.success(`Merged ${pr.head} into ${pr.base}`);
-            return;
-          }
-          // A multi-step rebase re-paused on the next commit's conflicts, still
-          // in the same worktree. Leave `pendingMerge` untouched — the live
-          // worktree status already drives this surface.
-          toast("More conflicts to resolve");
-        },
-        onError: toastError,
-      },
-    );
+      });
+      if (outcome.status === "merged") {
+        // Awaited ahead of its toast: a store write can reject (a concurrent
+        // MCP writer, a locked store), and a `pendingMerge` left behind points
+        // this surface at a worktree the merge has already consumed.
+        await update.mutateAsync({
+          id: pr.id,
+          mutate: (cur) => ({
+            ...cur,
+            status: "merged",
+            mergedAt: new Date().toISOString(),
+            pendingMerge: undefined,
+          }),
+        });
+        toast.success(`Merged ${pr.head} into ${pr.base}`);
+        return;
+      }
+      // A multi-step rebase re-paused on the next commit's conflicts, still
+      // in the same worktree. Leave `pendingMerge` untouched — the live
+      // worktree status already drives this surface.
+      toast("More conflicts to resolve");
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   async function onAbort() {
     if (!pending) return;
     if (!(await useConfirm.getState().ask(DISCARD_MERGE_CONFIRM))) return;
-    abort.mutate(
-      { worktreePath: pending.worktreePath, opId: pending.opId },
-      {
-        onSuccess: () => {
-          update.mutate({
-            id: pr.id,
-            mutate: (cur) => ({ ...cur, pendingMerge: undefined }),
-          });
-          toast.success("Merge discarded");
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await abort.mutateAsync({
+        worktreePath: pending.worktreePath,
+        opId: pending.opId,
+      });
+      // Same ordering as Finish: the worktree is already gone, so a record
+      // still naming it must surface as an error rather than a success toast.
+      await update.mutateAsync({
+        id: pr.id,
+        mutate: (cur) => ({ ...cur, pendingMerge: undefined }),
+      });
+      toast.success("Merge discarded");
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   const activeIndex = selectedPath ? conflictedPaths.indexOf(selectedPath) : -1;
@@ -207,7 +213,7 @@ export function ResolveConflictsView({
             size="xs"
             disabled={busy || remaining > 0}
             reason={remaining > 0 ? "Resolve every conflict first" : undefined}
-            onClick={onFinish}
+            onClick={() => void onFinish()}
           >
             {finish.isPending && <Spinner data-icon="inline-start" />}
             Finish merge
