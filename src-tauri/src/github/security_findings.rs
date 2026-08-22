@@ -607,7 +607,8 @@ fn split_url(url: &str) -> Option<(String, &str)> {
     // A bracketed IPv6 literal carries its own colons, so its span is taken before
     // the port strip; `www.` can never prefix one.
     let bare = match crate::forge::bracketed_split(host) {
-        // Only a `:port` may follow the span; any other suffix is no authority.
+        // A `:`-led suffix rides the port slot and is dropped, like the bare arm drops
+        // it; any other suffix is no authority.
         Some((_, suffix)) if !suffix.is_empty() && !suffix.starts_with(':') => return None,
         Some((span, _)) => span,
         None => host.split_once(':').map_or(host, |(h, _)| h),

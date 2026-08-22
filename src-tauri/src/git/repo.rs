@@ -56,9 +56,10 @@ fn parse_owner_host(url: &str) -> (Option<String>, Option<String>) {
     // Strip credentials and a port from the host.
     let host = host.rsplit('@').next().unwrap_or(host);
     // A bracketed IPv6 literal keeps its brackets — this host is persisted and compared
-    // against `remote_host`'s spelling by the provider routing. A malformed bracket, or
-    // a suffix after `]` that isn't a port, yields no host rather than a truncated one
-    // that would mismatch silently.
+    // against `remote_host`'s spelling by the provider routing. A `:`-led suffix rides
+    // the port slot and is dropped, like the bare arm drops it; a malformed bracket or
+    // any other suffix yields no host rather than a truncated one that would mismatch
+    // silently.
     let host = if host.starts_with('[') {
         crate::forge::bracketed_split(host)
             .filter(|(_, suffix)| suffix.is_empty() || suffix.starts_with(':'))

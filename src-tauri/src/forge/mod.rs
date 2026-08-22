@@ -138,8 +138,10 @@ pub(crate) fn is_safe_authority(value: &str) -> bool {
 /// match a `:8443` request — so the authority is the only key that always matches.
 ///
 /// A bracketed IPv6 literal yields `[addr]` or `[addr]:port`, git's own spelling for
-/// those requests (same measurement); a remainder after `]` that is neither empty nor a
-/// `:port` is no authority at all, and an unterminated `[` or empty `[]` is no host.
+/// those requests (same measurement). After `]`, only the `:`-led port slot may follow —
+/// a real port is carried, a non-port there falls back to the bare host (same posture as
+/// the unbracketed arm), and any other remainder is no authority at all, in both the
+/// scheme and scp regimes. An unterminated `[` or an empty `[]` is no host.
 pub(crate) fn remote_authority(url: &str) -> Option<String> {
     let url = url.trim();
     let (had_scheme, rest) = match url.split_once("://") {
@@ -154,6 +156,10 @@ pub(crate) fn remote_authority(url: &str) -> Option<String> {
     if authority.starts_with('[') {
         let (host, after) = bracketed_split(authority)?;
         let host = host.to_ascii_lowercase();
+        // Either regime: a remainder that isn't the `:`-led port slot is no authority.
+        if !after.is_empty() && !after.starts_with(':') {
+            return None;
+        }
         // scp `git@[addr]:path` has no port slot — that `:` is the path separator.
         if !had_scheme || after.is_empty() {
             return Some(host);
@@ -4091,6 +4097,7 @@ mod tests {
     fn remote_host_and_authority_agree_on_having_a_host() {
         for url in [
             "https://[::1]junk/o/r",
+            "git@[2001:db8::1]junk:o/r.git",
             "https://[::1/o]/r",
             "https://[::1",
             "https://[]",
@@ -4184,8 +4191,9 @@ mod tests {
             remote_authority("https://[2001:db8::1]:443.helper=!evil/o/r").as_deref(),
             Some("[2001:db8::1]"),
         );
-        // A remainder after `]` that isn't a `:port` is no authority.
+        // A remainder after `]` that isn't a `:port` is no authority, in either regime.
         assert_eq!(remote_authority("https://[2001:db8::1]junk/o/r"), None);
+        assert_eq!(remote_authority("git@[2001:db8::1]junk:o/r.git"), None);
         assert_eq!(remote_authority("https://[::1"), None);
         assert_eq!(remote_authority("https://[]"), None);
         assert_eq!(
