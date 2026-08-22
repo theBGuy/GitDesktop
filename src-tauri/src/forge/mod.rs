@@ -84,7 +84,9 @@ fn is_port(s: &str) -> bool {
 /// whose interior is non-empty, drawn from `[0-9A-Fa-f:.]`, and carries at least one `:`
 /// (RFC 3986 brackets are IPv6-only, so requiring the colon costs nothing and tightens
 /// the gate); either form plus an optional numeric port. A zone id (`%eth0`) is
-/// deliberately NOT admitted — no CLI takes one, so fail closed. THE
+/// deliberately NOT admitted: `%` is encoding/config syntax in a credential key, and the
+/// CLIs don't police it themselves (glab 1.105 accepts a zone-id hostname, measured), so
+/// this gate is the layer that keeps it out of keys and argv. THE
 /// reconnect/credential host grammar — `valid_reconnect_host` delegates here and
 /// `isReconnectHostSafe` (`src/lib/git/host.ts`) mirrors it, so the three can't drift.
 /// Needed because `remote_host`/`remote_authority` only split on `/`, `:` and the
