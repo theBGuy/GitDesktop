@@ -45,7 +45,12 @@ fn host_from_url(url: &str) -> Option<String> {
     let authority = after.split('/').next().unwrap_or("");
     let host = authority.rsplit('@').next().unwrap_or(authority);
     let host = if host.starts_with('[') {
-        crate::forge::bracketed_split(host)?.0
+        let (span, suffix) = crate::forge::bracketed_split(host)?;
+        // Only a `:port` may follow the span; any other suffix is no host at all.
+        if !suffix.is_empty() && !suffix.starts_with(':') {
+            return None;
+        }
+        span
     } else {
         host.split(':').next().unwrap_or(host)
     };
@@ -7168,6 +7173,8 @@ mod tests {
         // A malformed bracket fails closed rather than yielding a truncated host.
         assert_eq!(host_from_url("https://[2001:db8::1/o/r"), None);
         assert_eq!(host_from_url("https://[]/o/r"), None);
+        // So does a suffix after `]` that isn't a port.
+        assert_eq!(host_from_url("https://[2001:db8::1]junk/o/r"), None);
     }
 
     #[test]

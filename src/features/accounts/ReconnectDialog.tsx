@@ -98,6 +98,7 @@ function ReconnectFlow({
   const primaryRef = useRef<HTMLButtonElement>(null);
   const autoCloseRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const hostArg = reconnectHostArg(host);
   // The copy-paste fallback must match the flow the dialog was driving, argv spelling
   // included: a GitHub "refresh" maps to `gh auth refresh` (preserves granted scopes,
   // plus one `-s` per requested scope), everything else to `auth login --web` (glab has
@@ -106,7 +107,6 @@ function ReconnectFlow({
   // wherever `gh auth switch` last pointed.
   // Null when the host fails the reconnect grammar, so a crafted remote host can't
   // put shell syntax into the copyable command (the in-app flow re-validates anyway).
-  const hostArg = reconnectHostArg(host);
   const fallbackCommand = !isReconnectHostSafe(host)
     ? null
     : isGitHub && mode === "refresh"

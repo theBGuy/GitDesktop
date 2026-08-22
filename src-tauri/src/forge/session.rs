@@ -788,11 +788,12 @@ impl Drop for ReconnectGuard {
     }
 }
 
-/// A reconnect host is a hostname, or a bracketed IPv6 literal, with an optional numeric
-/// port — no scheme, no path, no shell syntax. The port is allowed because `gh auth login --hostname host:8443` is
-/// exactly how a ported instance registers, and the value becomes a `--hostname`
-/// argument the CLIs key their stored credentials by. One grammar, shared with the
-/// credential-key guard so the two can't drift.
+/// A reconnect host is a hostname, or a bracketed IPv6 literal, with an optional
+/// numeric port — no scheme, no path, no shell syntax. The port is allowed because
+/// `gh auth login --hostname host:8443` is exactly how a ported instance registers,
+/// and the value becomes a `--hostname` argument the CLIs key their stored
+/// credentials by. One grammar, shared with the credential-key guard so the two
+/// can't drift.
 fn valid_reconnect_host(host: &str) -> bool {
     crate::forge::is_safe_authority(host)
 }

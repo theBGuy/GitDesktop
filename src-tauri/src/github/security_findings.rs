@@ -606,8 +606,12 @@ fn split_url(url: &str) -> Option<(String, &str)> {
     let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     // A bracketed IPv6 literal carries its own colons, so its span is taken before
     // the port strip; `www.` can never prefix one.
-    let bare = crate::forge::bracketed_split(host)
-        .map_or_else(|| host.split_once(':').map_or(host, |(h, _)| h), |(s, _)| s);
+    let bare = match crate::forge::bracketed_split(host) {
+        // Only a `:port` may follow the span; any other suffix is no authority.
+        Some((_, suffix)) if !suffix.is_empty() && !suffix.starts_with(':') => return None,
+        Some((span, _)) => span,
+        None => host.split_once(':').map_or(host, |(h, _)| h),
+    };
     // Case-fold before stripping `www.`: hosts are case-insensitive, so an
     // upper-case prefix has to fall away too.
     let lower = bare.to_ascii_lowercase();
@@ -2038,6 +2042,8 @@ mod tests {
             ("http://EXAMPLE.COM/x", "example.com"),
             // A bracketed IPv6 literal labels whole — its colons aren't a port.
             ("https://[2001:DB8::1]:8443/x", "[2001:db8::1]"),
+            // A non-port suffix after `]` is no authority: the URL labels itself.
+            ("https://[2001:DB8::1]junk/x", "https://[2001:DB8::1]junk/x"),
             ("https://WWW.Example.com/x", "example.com"),
             // Nothing parseable to name it by: the URL labels itself.
             ("not a url", "not a url"),

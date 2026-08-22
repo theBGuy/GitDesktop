@@ -56,10 +56,13 @@ fn parse_owner_host(url: &str) -> (Option<String>, Option<String>) {
     // Strip credentials and a port from the host.
     let host = host.rsplit('@').next().unwrap_or(host);
     // A bracketed IPv6 literal keeps its brackets — this host is persisted and compared
-    // against `remote_host`'s spelling by the provider routing. A malformed bracket
-    // yields no host rather than a truncated one that would mismatch silently.
+    // against `remote_host`'s spelling by the provider routing. A malformed bracket, or
+    // a suffix after `]` that isn't a port, yields no host rather than a truncated one
+    // that would mismatch silently.
     let host = if host.starts_with('[') {
-        crate::forge::bracketed_split(host).map_or("", |(span, _)| span)
+        crate::forge::bracketed_split(host)
+            .filter(|(_, suffix)| suffix.is_empty() || suffix.starts_with(':'))
+            .map_or("", |(span, _)| span)
     } else {
         host.split(':').next().unwrap_or(host)
     };
@@ -454,6 +457,11 @@ mod owner_tests {
         // A malformed bracket is no host at all — the path still parses.
         assert_eq!(
             parse_owner_host("https://[2001:db8::1/owner/repo"),
+            (Some("owner".into()), None)
+        );
+        // Nor is a span followed by something that isn't a port.
+        assert_eq!(
+            parse_owner_host("https://[2001:db8::1]junk/owner/repo"),
             (Some("owner".into()), None)
         );
     }
