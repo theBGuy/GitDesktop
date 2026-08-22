@@ -1855,6 +1855,9 @@ mod tests {
         // A ported instance registers with gh/glab under `host:port`, so the reconnect
         // flow must accept the same spelling the health check reports.
         assert!(valid_reconnect_host("gitlab.example.com:8443"));
+        // A bracketed IPv6 literal is what the health check reports for such a remote.
+        assert!(valid_reconnect_host("[2001:db8::1]:8443"));
+        assert!(!valid_reconnect_host("[::1")); // unterminated bracket
         assert!(!valid_reconnect_host("")); // empty
         assert!(!valid_reconnect_host("gitlab.example.com:8443x")); // not a port
         assert!(!valid_reconnect_host("https://gitlab.example.com")); // scheme

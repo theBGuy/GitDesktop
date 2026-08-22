@@ -1,7 +1,11 @@
 import { CopyIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/clipboard";
-import { isReconnectHostSafe, useActiveGhHost } from "@/lib/git/host";
+import {
+  isReconnectHostSafe,
+  reconnectHostArg,
+  useActiveGhHost,
+} from "@/lib/git/host";
 import { useGhScopes } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
 
@@ -30,7 +34,7 @@ export function ScopeRefreshHint({
   const hostSafe = isReconnectHostSafe(host);
   // Spelled as the reconnect flow spawns it (`--hostname`, one `-s` per scope), so
   // the copied command and the button do the same thing.
-  const cmd = `gh auth refresh --hostname ${host} -s ${scope}`;
+  const cmd = `gh auth refresh --hostname ${reconnectHostArg(host)} -s ${scope}`;
   return (
     <div className="rounded-md border border-warning/40 bg-warning/10 p-2.5 text-[11px]">
       <p className="text-muted-foreground">

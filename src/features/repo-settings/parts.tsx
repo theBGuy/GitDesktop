@@ -5,7 +5,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { highlightJson } from "@/features/diff/shiki-highlighter";
 import { copyText } from "@/lib/clipboard";
-import { isReconnectHostSafe, useActiveGhHost } from "@/lib/git/host";
+import {
+  isReconnectHostSafe,
+  reconnectHostArg,
+  useActiveGhHost,
+} from "@/lib/git/host";
 import { useGhScopes } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
@@ -126,7 +130,7 @@ function ScopeErrorHint({ scope }: { scope: string }) {
         <p className="mt-2">
           {canRefresh ? "Or run" : "Run"}{" "}
           <span className="font-mono">
-            gh auth refresh --hostname {host} -s {scope}
+            gh auth refresh --hostname {reconnectHostArg(host)} -s {scope}
           </span>{" "}
           in a terminal, then reopen this dialog.
         </p>

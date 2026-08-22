@@ -3,16 +3,32 @@ import { useForgeStatus } from "./queries";
 
 /**
  * Whether a host is safe to interpolate into a copyable `gh`/`glab auth …` command —
- * the same ASCII grammar `forge_reconnect` validates backend-side (alnum, `.`, `-`, plus
- * an optional numeric port). The port belongs in the grammar: a self-hosted instance
- * on a non-default port registers with the CLIs as `host:8443`, so rejecting it would
- * deny the copyable fallback to the very users who need it. `remote_host` only splits a
- * remote URL on `/` and `:`, so a crafted remote can carry `;`, `$`, or a space into the
- * host; the executed reconnect flow re-validates, but the command string is guarded here
- * so it can never hand the user shell syntax.
+ * the same ASCII grammar `forge_reconnect` validates backend-side (alnum, `.`, `-`, or a
+ * bracketed IPv6 literal of hex/`:`/`.` carrying at least one `:`, plus an optional
+ * numeric port). The port belongs in the grammar: a self-hosted instance on a
+ * non-default port registers with the CLIs as `host:8443`, so rejecting it would deny
+ * the copyable fallback to the very users who need it. A crafted remote can carry `;`,
+ * `$`, or a space through the URL parse; the executed reconnect flow re-validates, but
+ * the command string is guarded here so it can never hand the user shell syntax. This
+ * must stay byte-equivalent to Rust's `is_safe_authority` — a charset gate, not an IPv6
+ * validator, so `[:]` passes both sides and that's fine; only drift between them matters.
  */
 export function isReconnectHostSafe(host: string): boolean {
-  return /^[a-zA-Z0-9.-]+(:\d{1,5})?$/.test(host);
+  return /^([a-zA-Z0-9.-]+|\[[0-9a-fA-F.]*:[0-9a-fA-F:.]*\])(:\d{1,5})?$/.test(
+    host,
+  );
+}
+
+/**
+ * A host spelled for a copy-pasteable command. A bracketed IPv6 literal is quoted:
+ * zsh (the macOS default) and fish read `[…]` as a glob character class, so with
+ * `nomatch` on the pasted command dies with "no matches found". Bare hosts stay
+ * unquoted — cmd.exe passes single quotes through literally, which would break the
+ * common case. No escaping is needed: {@link isReconnectHostSafe} has already banned
+ * `'` from every host that reaches a command string.
+ */
+export function reconnectHostArg(host: string): string {
+  return host.includes("[") ? `'${host}'` : host;
 }
 
 /**

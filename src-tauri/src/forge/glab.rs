@@ -168,10 +168,16 @@ fn glab_config_paths() -> Vec<PathBuf> {
 
 /// A bare lowercase hostname from a config value that may carry a scheme, a
 /// port, or a path (`https://gitlab.example.com:8443/` → `gitlab.example.com`).
-/// Ports are stripped to match what `remote_host` yields for remote URLs.
+/// Ports are stripped to match what `remote_host` yields for remote URLs — a
+/// bracketed IPv6 literal keeps its brackets for the same reason, and shares
+/// `remote_host`'s span parser so the two spellings can compare equal. A malformed
+/// bracket falls through to the plain split: the key then simply never matches.
 fn normalize_host(value: &str) -> Option<String> {
     let rest = value.trim();
     let rest = rest.split_once("://").map_or(rest, |(_, after)| after);
+    if let Some((span, _)) = crate::forge::bracketed_split(rest) {
+        return Some(span.to_ascii_lowercase());
+    }
     let host = rest.split(['/', ':']).next().unwrap_or("");
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
@@ -536,6 +542,18 @@ hosts:
             Some("gitlab.example.com".into())
         );
         assert_eq!(normalize_host("  "), None);
+        // A bracketed IPv6 key keeps its brackets, so it can compare equal to what
+        // `remote_host` yields; a port after `]` still drops.
+        assert_eq!(
+            normalize_host("[2001:DB8::1]"),
+            Some("[2001:db8::1]".into())
+        );
+        assert_eq!(
+            normalize_host("[2001:db8::1]:8443"),
+            Some("[2001:db8::1]".into())
+        );
+        // A malformed bracket folds exactly as it does today — it just never matches.
+        assert_eq!(normalize_host("[2001"), Some("[2001".into()));
     }
 
     #[test]

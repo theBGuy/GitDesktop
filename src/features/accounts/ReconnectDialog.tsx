@@ -16,7 +16,7 @@ import {
   forgeReconnectCancel,
   openInTerminal,
 } from "@/lib/git/api";
-import { isReconnectHostSafe } from "@/lib/git/host";
+import { isReconnectHostSafe, reconnectHostArg } from "@/lib/git/host";
 import { useInvalidateAfterReconnect } from "@/lib/git/queries";
 import { providerLabel, type ReconnectEvent } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
@@ -106,11 +106,12 @@ function ReconnectFlow({
   // wherever `gh auth switch` last pointed.
   // Null when the host fails the reconnect grammar, so a crafted remote host can't
   // put shell syntax into the copyable command (the in-app flow re-validates anyway).
+  const hostArg = reconnectHostArg(host);
   const fallbackCommand = !isReconnectHostSafe(host)
     ? null
     : isGitHub && mode === "refresh"
-      ? `gh auth refresh --hostname ${host}${(scopes ?? []).map((s) => ` -s ${s}`).join("")}`
-      : `${isGitHub ? "gh" : "glab"} auth login --hostname ${host} --web`;
+      ? `gh auth refresh --hostname ${hostArg}${(scopes ?? []).map((s) => ` -s ${s}`).join("")}`
+      : `${isGitHub ? "gh" : "glab"} auth login --hostname ${hostArg} --web`;
 
   // Handle streamed events without re-subscribing the channel on every render:
   // useEffectEvent reads the latest closures (invalidate/settings) but stays

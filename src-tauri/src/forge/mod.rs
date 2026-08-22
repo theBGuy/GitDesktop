@@ -36,19 +36,40 @@ pub trait Forge {
     async fn status(&self, repo_path: &str) -> AppResult<ForgeStatus>;
 }
 
+/// Split a leading bracketed IPv6 literal off an authority, yielding the `[…]` span
+/// (brackets included) and whatever follows the `]`. `None` for an unterminated `[` or
+/// an empty `[]`. The URL-decomposition idioms, the authority gate, and glab's
+/// hosts-key normalizer share it so a literal's own `:`s can never be mistaken for a
+/// port or an scp path separator.
+pub(crate) fn bracketed_split(rest: &str) -> Option<(&str, &str)> {
+    let after_open = rest.strip_prefix('[')?;
+    let close = after_open.find(']')?;
+    // `[]` carries no address, so it's no host either.
+    (close > 0).then(|| (&rest[..close + 2], &after_open[close + 1..]))
+}
+
 /// The host of a remote URL — both `https://host[:port]/…` and scp-style
 /// `git@host:owner/…`. Lowercased; `None` when there's no parseable host (a local
 /// path, say). Tolerates an optional `user@` and a `:port`.
+///
+/// Derived from [`remote_authority`] minus its port, so a URL has a host EXACTLY when it
+/// has an authority: the session health probe reads the two side by side under paired
+/// `unwrap_or_else` fallbacks, and any Some/None asymmetry there would probe one repo's
+/// host against the github.com default.
+///
+/// A bracketed IPv6 literal keeps its brackets (`[2001:db8::1]`) — git's own
+/// credential-context spelling (measured against git 2.51); a bare `2001:db8::1` would
+/// read as host `2001` plus a garbage port to every downstream `host[:port]` splitter.
 pub(crate) fn remote_host(url: &str) -> Option<String> {
-    let url = url.trim();
-    // `scheme://[user@]host[:port]/…` → strip the scheme; otherwise treat it as a
-    // scp-like `[user@]host:path` and operate on the whole string.
-    let rest = url.split_once("://").map_or(url, |(_, after)| after);
-    // Drop an optional `user@` (rsplit so `user@host` keeps `host`).
-    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
-    // The host ends at the first `/` (path) or `:` (port / scp path separator).
-    let host = rest.split(['/', ':']).next().unwrap_or("");
-    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+    let authority = remote_authority(url)?;
+    let host = if authority.starts_with('[') {
+        // A bracketed literal's host is the span through `]`; only a `:port` follows it.
+        authority.split_inclusive(']').next().unwrap_or(&authority)
+    } else {
+        // Otherwise the first `:` opens the port.
+        authority.split(':').next().unwrap_or(&authority)
+    };
+    Some(host.to_string())
 }
 
 /// A TCP port as a URL spells one: 1-5 ASCII digits. Deliberately not range-checked —
@@ -59,12 +80,38 @@ fn is_port(s: &str) -> bool {
 }
 
 /// Whether a string is safe to interpolate as the authority of a `credential.https://…`
-/// config key or a `--hostname` argv: host `[A-Za-z0-9.-]+` plus an optional numeric
-/// port. THE reconnect/credential host grammar — `valid_reconnect_host` delegates here
-/// and `isReconnectHostSafe` (`src/lib/git/host.ts`) mirrors it, so the three can't
-/// drift. Needed because `remote_host`/`remote_authority` only split on `/` and `:`, so
-/// a crafted remote can carry `=`, `;`, `$`, or a space through them.
+/// config key or a `--hostname` argv: host `[A-Za-z0-9.-]+`, or a bracketed IPv6 literal
+/// whose interior is non-empty, drawn from `[0-9A-Fa-f:.]`, and carries at least one `:`
+/// (RFC 3986 brackets are IPv6-only, so requiring the colon costs nothing and tightens
+/// the gate); either form plus an optional numeric port. A zone id (`%eth0`) is
+/// deliberately NOT admitted — no CLI takes one, so fail closed. THE
+/// reconnect/credential host grammar — `valid_reconnect_host` delegates here and
+/// `isReconnectHostSafe` (`src/lib/git/host.ts`) mirrors it, so the three can't drift.
+/// Needed because `remote_host`/`remote_authority` only split on `/`, `:` and the
+/// bracket span, so a crafted remote can carry `=`, `;`, `$`, or a space through them.
+/// A charset gate, not an IPv6 validator: `[:]` passes both sides, and that's fine —
+/// it's injection-safe garbage git will reject on its own.
 pub(crate) fn is_safe_authority(value: &str) -> bool {
+    // Bracketed literals resolve first: their own `:`s make a first-`:` split wrong.
+    // Sharing `bracketed_split` keeps the gate's idea of the span identical to the
+    // parsers' (it already refuses an unterminated `[` and an empty `[]`).
+    if value.starts_with('[') {
+        let Some((span, after)) = bracketed_split(value) else {
+            return false;
+        };
+        let inner = &span[1..span.len() - 1];
+        if !inner.contains(':')
+            || !inner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+        {
+            return false;
+        }
+        return match after.strip_prefix(':') {
+            Some(port) => is_port(port),
+            None => after.is_empty(),
+        };
+    }
     let (host, port) = match value.split_once(':') {
         Some((h, p)) => (h, Some(p)),
         None => (value, None),
@@ -91,6 +138,10 @@ pub(crate) fn is_safe_authority(value: &str) -> bool {
 /// 2.51 (`git credential fill`, isolated config), a `host:port` key matches a ported
 /// request, git normalizes the DEFAULT port both directions, and a portless key does NOT
 /// match a `:8443` request — so the authority is the only key that always matches.
+///
+/// A bracketed IPv6 literal yields `[addr]` or `[addr]:port`, git's own spelling for
+/// those requests (same measurement); a remainder after `]` that is neither empty nor a
+/// `:port` is no authority at all, and an unterminated `[` or empty `[]` is no host.
 pub(crate) fn remote_authority(url: &str) -> Option<String> {
     let url = url.trim();
     let (had_scheme, rest) = match url.split_once("://") {
@@ -99,9 +150,25 @@ pub(crate) fn remote_authority(url: &str) -> Option<String> {
     };
     // Drop an optional `user@` (rsplit so `user@host` keeps `host`).
     let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
-    // The authority ends at the first `/`; without a scheme the remaining `:` is scp's
-    // path separator, so trim there too.
+    // The authority ends at the first `/`; a bracketed literal can't contain one, so
+    // this split is safe to take before the bracket span is resolved.
     let authority = rest.split('/').next().unwrap_or("");
+    if authority.starts_with('[') {
+        let (host, after) = bracketed_split(authority)?;
+        let host = host.to_ascii_lowercase();
+        // scp `git@[addr]:path` has no port slot — that `:` is the path separator.
+        if !had_scheme || after.is_empty() {
+            return Some(host);
+        }
+        let after = after.strip_prefix(':')?;
+        // Same posture as the non-bracketed arm below: only a real port is carried.
+        return Some(if is_port(after) {
+            format!("{host}:{after}")
+        } else {
+            host
+        });
+    }
+    // Without a scheme the remaining `:` is scp's path separator, so trim there too.
     let authority = if had_scheme {
         authority
     } else {
@@ -132,7 +199,9 @@ pub(crate) fn remote_authority(url: &str) -> Option<String> {
 /// Complements [`remote_host`]; `None` when there's no path. Handles both
 /// `https://host[:port]/path` and scp-style `git@host:path`: with a scheme a `:`
 /// is a port (path starts after the next `/`), without one it's the scp path
-/// separator. Used to address a repo on a provider's API (e.g. a GitLab project).
+/// separator — counted past a bracketed IPv6 literal, whose own `:`s would otherwise
+/// cut the host short. Used to address a repo on a provider's API (e.g. a GitLab
+/// project).
 pub(crate) fn remote_path(url: &str) -> Option<String> {
     let url = url.trim();
     let (had_scheme, rest) = match url.split_once("://") {
@@ -145,8 +214,14 @@ pub(crate) fn remote_path(url: &str) -> Option<String> {
         // `host[:port]/path` → everything after the first `/`.
         rest.split_once('/').map(|(_, after)| after)?
     } else {
-        // scp `host:path` → everything after the first `:`.
-        rest.split_once(':').map(|(_, after)| after)?
+        // scp `host:path` → everything after the first `:`, counted past a bracketed
+        // IPv6 literal so the address's own `:`s aren't read as the separator.
+        let after_host = if rest.starts_with('[') {
+            bracketed_split(rest)?.1
+        } else {
+            rest
+        };
+        after_host.split_once(':').map(|(_, after)| after)?
     };
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
@@ -3983,6 +4058,52 @@ mod tests {
     }
 
     #[test]
+    fn remote_host_keeps_bracketed_ipv6_literals_whole() {
+        // The brackets ride along — they're git's own spelling and the only form a
+        // downstream `host[:port]` splitter reads correctly.
+        assert_eq!(
+            remote_host("https://[2001:db8::1]:8443/o/r").as_deref(),
+            Some("[2001:db8::1]"),
+        );
+        assert_eq!(
+            remote_host("https://[2001:DB8::1]/o/r").as_deref(),
+            Some("[2001:db8::1]"),
+        );
+        assert_eq!(
+            remote_host("ssh://git@[2001:db8::1]/g/r.git").as_deref(),
+            Some("[2001:db8::1]"),
+        );
+        // scp form: the `:` after `]` is the path separator.
+        assert_eq!(
+            remote_host("git@[2001:db8::1]:o/r.git").as_deref(),
+            Some("[2001:db8::1]"),
+        );
+        assert_eq!(
+            remote_host("https://user@[2001:db8::1]:8443/o/r").as_deref(),
+            Some("[2001:db8::1]"),
+        );
+        // An unterminated bracket or an empty one is no host at all.
+        assert_eq!(remote_host("https://[2001:db8::1/o/r"), None);
+        assert_eq!(remote_host("https://[]/o/r"), None);
+    }
+
+    /// The session health probe reads host and authority side by side under paired
+    /// github.com fallbacks, so a URL must yield both or neither.
+    #[test]
+    fn remote_host_and_authority_agree_on_having_a_host() {
+        for url in [
+            "https://[::1]junk/o/r",
+            "https://[::1/o]/r",
+            "https://[::1",
+            "https://[]",
+            "/local/path",
+        ] {
+            assert_eq!(remote_host(url), None, "host {url}");
+            assert_eq!(remote_authority(url), None, "authority {url}");
+        }
+    }
+
+    #[test]
     fn remote_authority_keeps_the_port_remote_host_drops() {
         // The whole point: a non-default port survives, verbatim.
         assert_eq!(
@@ -4034,6 +4155,48 @@ mod tests {
     }
 
     #[test]
+    fn remote_authority_brackets_ipv6_hosts_and_their_ports() {
+        assert_eq!(
+            remote_authority("https://[2001:db8::1]:8443/o/r").as_deref(),
+            Some("[2001:db8::1]:8443"),
+        );
+        assert_eq!(
+            remote_authority("https://[2001:db8::1]/o/r").as_deref(),
+            Some("[2001:db8::1]"),
+        );
+        assert_eq!(
+            remote_authority("HTTPS://[2001:DB8::1]:8443/o/r").as_deref(),
+            Some("[2001:db8::1]:8443"),
+        );
+        assert_eq!(
+            remote_authority("https://user@[::1]:8443/o/r").as_deref(),
+            Some("[::1]:8443"),
+        );
+        // scp form: the `:` after `]` is the path separator, never a port.
+        assert_eq!(
+            remote_authority("git@[2001:db8::1]:o/r.git").as_deref(),
+            Some("[2001:db8::1]"),
+        );
+        // A non-port segment falls back to the bare host, injection shapes included.
+        assert_eq!(
+            remote_authority("https://[2001:db8::1]:8443x/o/r").as_deref(),
+            Some("[2001:db8::1]"),
+        );
+        assert_eq!(
+            remote_authority("https://[2001:db8::1]:443.helper=!evil/o/r").as_deref(),
+            Some("[2001:db8::1]"),
+        );
+        // A remainder after `]` that isn't a `:port` is no authority.
+        assert_eq!(remote_authority("https://[2001:db8::1]junk/o/r"), None);
+        assert_eq!(remote_authority("https://[::1"), None);
+        assert_eq!(remote_authority("https://[]"), None);
+        assert_eq!(
+            remote_authority("https://[::1]:65535/o/r").as_deref(),
+            Some("[::1]:65535"),
+        );
+    }
+
+    #[test]
     fn a_crafted_port_segment_never_reaches_a_credential_key() {
         // A remote URL any opened repo's .git/config can carry. git splits a `-c` at its
         // FIRST `=`, so keeping this port verbatim would key an attacker-chosen `!`-shell
@@ -4058,6 +4221,32 @@ mod tests {
         assert!(!is_safe_authority("host:123456"));
         assert!(!is_safe_authority(":8443"));
         assert!(!is_safe_authority(""));
+    }
+
+    #[test]
+    fn is_safe_authority_admits_bracketed_ipv6_literals() {
+        assert!(is_safe_authority("[2001:db8::1]"));
+        assert!(is_safe_authority("[::1]"));
+        assert!(is_safe_authority("[2001:db8::1]:8443"));
+        assert!(is_safe_authority("[::ffff:192.0.2.1]"));
+        assert!(is_safe_authority("[::1]:65535"));
+        // Malformed brackets, and the unbracketed spelling no splitter reads right.
+        assert!(!is_safe_authority("[]"));
+        assert!(!is_safe_authority("[::1"));
+        assert!(!is_safe_authority("::1]"));
+        assert!(!is_safe_authority("2001:db8::1"));
+        // Brackets are IPv6-only, so an interior without a `:` is not one.
+        assert!(!is_safe_authority("[gh.com]"));
+        // The port rules are the bare host's, applied after the bracket close.
+        assert!(!is_safe_authority("[::1]:"));
+        assert!(!is_safe_authority("[::1]:123456"));
+        assert!(!is_safe_authority("[::1]:8443x"));
+        assert!(!is_safe_authority("[::1]x"));
+        assert!(!is_safe_authority("[::1] "));
+        // Config/shell syntax stays out, and a zone id fails closed.
+        assert!(!is_safe_authority("[::1];rm -rf /"));
+        assert!(!is_safe_authority("[::1%25eth0]"));
+        assert!(!is_safe_authority("[2001:db8::1]:443.helper=!evil #"));
     }
 
     #[test]
@@ -4118,6 +4307,20 @@ mod tests {
         // host only → no path.
         assert_eq!(remote_path("https://gitlab.com"), None);
         assert_eq!(remote_path("/local/path"), None);
+    }
+
+    #[test]
+    fn remote_path_counts_the_scp_separator_past_the_bracket() {
+        assert_eq!(
+            remote_path("git@[2001:db8::1]:group/sub/repo.git").as_deref(),
+            Some("group/sub/repo"),
+        );
+        assert_eq!(
+            remote_path("https://[2001:db8::1]:8443/g/r.git").as_deref(),
+            Some("g/r"),
+        );
+        // Host and separator but no path.
+        assert_eq!(remote_path("git@[::1]:"), None);
     }
 
     #[test]
@@ -4354,6 +4557,15 @@ mod tests {
         // No repo path to splice → None, so the caller errors instead of guessing.
         assert_eq!(f("https://github.com"), None);
         assert_eq!(f(""), None);
+    }
+
+    #[test]
+    fn fork_url_splices_a_bracketed_ipv6_origin() {
+        assert_eq!(
+            fork_url_from_origin("https://[2001:db8::1]:8443/old/repo.git", "owner", "repo")
+                .as_deref(),
+            Some("https://[2001:db8::1]:8443/owner/repo.git"),
+        );
     }
 
     /// The frontend keys off these exact names, and an unknown probe must travel
