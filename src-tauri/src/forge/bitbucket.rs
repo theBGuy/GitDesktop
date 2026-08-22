@@ -490,13 +490,34 @@ fn from_bb_repo(r: BbRepo) -> ForgeRepo {
     }
 }
 
+/// One step of the workspace walk: absorb a fetched page and answer with the next URL
+/// to follow, `None` to stop, or an error to abort. Best-effort past the first page —
+/// a later page failing costs some namespaces (the Fork gate then fails open on their
+/// repos), while page one failing means no workspaces at all, a real error. Pure, so
+/// the fallback is testable without an HTTP seam.
+fn best_effort_page_step<T>(
+    fetched: AppResult<BbPage<T>>,
+    out: &mut Vec<T>,
+    is_first_page: bool,
+) -> AppResult<Option<String>> {
+    match fetched {
+        Ok(page) => {
+            out.extend(page.values);
+            Ok(next_page_url(page.next))
+        }
+        Err(_) if !is_first_page => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// The signed-in user's repositories, for the clone browser. Both `GET
 /// /2.0/repositories?role=member` AND `GET /2.0/workspaces` were removed (CHANGE-2770,
 /// Feb 2026); the replacement is `GET /2.0/user/workspaces` (CHANGE-3022), whose items
 /// are `workspace_access` membership wrappers (nested `workspace_base` with
-/// uuid/slug/links — no `name`). We follow `next` over the viewer's workspaces, then
-/// read each workspace's member repos as a single page at the max `pagelen` (100),
-/// sorted `-updated_on`, so repos past 100/workspace drop off.
+/// uuid/slug/links — no `name`). We follow `next` over the viewer's workspaces
+/// (best-effort past the first page), then read each workspace's member repos as a
+/// single page at the max `pagelen` (100), sorted `-updated_on`, so repos past
+/// 100/workspace drop off.
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let creds = http::load_credentials().await?;
     let viewer = http::bb_get_json::<BbUser>(&creds, "user", "user")
@@ -507,13 +528,19 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
 
     // Follow `next` here, matching `workspaces()` (which Explore search pages through):
     // a short workspace list would leave a member workspace out of `owned_namespaces`,
-    // and the Fork gate would then fail open on a search row from that workspace.
-    let workspaces: Vec<BbWorkspaceAccess> = bb_paginate(
-        &creds,
-        "user/workspaces?pagelen=100".to_string(),
-        "workspaces",
-    )
-    .await?;
+    // and the Fork gate would then fail open on a search row from that workspace. Walked
+    // inline rather than through `bb_paginate` so a later page's failure degrades the way
+    // the per-workspace loop below does, instead of sinking the whole read.
+    let mut workspaces: Vec<BbWorkspaceAccess> = Vec::new();
+    let mut ws_url = "user/workspaces?pagelen=100".to_string();
+    for page in 0..BB_MAX_PAGES {
+        let fetched = http::bb_get_json::<BbPage<BbWorkspaceAccess>>(&creds, &ws_url, "workspaces")
+            .await;
+        match best_effort_page_step(fetched, &mut workspaces, page == 0)? {
+            Some(next) => ws_url = next,
+            None => break,
+        }
+    }
 
     let mut repos = Vec::new();
     // Bitbucket has no usable personal-workspace signal (`is_personal` reads false even
@@ -6041,6 +6068,32 @@ mod tests {
         assert!(!repo.private);
         assert!(!repo.fork);
         assert_eq!(repo.ssh_url, "");
+    }
+
+    /// The workspace walk degrades like the per-workspace loop: a page-2 failure keeps
+    /// what page one produced, while a page-1 failure is a real error — no workspaces at
+    /// all, so there is nothing to be best-effort about.
+    #[test]
+    fn a_later_workspace_page_failure_keeps_the_pages_already_read() {
+        let next = "https://api.bitbucket.org/2.0/user/workspaces?page=2";
+        let page_one = BbPage {
+            values: vec!["alpha".to_string()],
+            next: Some(next.to_string()),
+        };
+        let mut out: Vec<String> = Vec::new();
+        assert_eq!(
+            best_effort_page_step(Ok(page_one), &mut out, true).unwrap(),
+            Some(next.to_string())
+        );
+
+        let failed: AppResult<BbPage<String>> = Err(AppError::Bitbucket("HTTP 500".into()));
+        assert_eq!(best_effort_page_step(failed, &mut out, false).unwrap(), None);
+        assert_eq!(out, vec!["alpha".to_string()]);
+
+        let first_fails: AppResult<BbPage<String>> = Err(AppError::Bitbucket("HTTP 500".into()));
+        let mut empty: Vec<String> = Vec::new();
+        assert!(best_effort_page_step(first_fails, &mut empty, true).is_err());
+        assert!(empty.is_empty());
     }
 
     #[test]

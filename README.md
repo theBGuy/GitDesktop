@@ -542,16 +542,18 @@ navigation.
 
 ### Explore repositories
 
-A full-page browser across **GitHub, GitLab & Bitbucket**. Before you type,
-it shows **your own repositories** (grouped by owner) and a **Popular**
-star-sorted feed (GitHub & GitLab); typing searches GitHub, all public
-GitLab projects, or your Bitbucket workspaces (Bitbucket retired global repo
-search). Sort by best match, most stars, or recently updated. Open a result
-for its README preview, then **clone** it, **fork** it (with an offer to
-clone the fork), or **star** it (GitHub & GitLab), without ever knowing the
-URL. **Fork** only shows on a repository that isn't already yours, so on
-Bitbucket (where Explore lists just your own workspaces) it doesn't
-normally appear. Fully keyboard-navigable.
+A full-page browser across **GitHub, GitLab & Bitbucket**. Before you
+type, it shows **the repositories you have access to** (your own, ones you
+collaborate on, and those in an organization, group, or Bitbucket
+workspace you belong to), grouped by owner, plus a **Popular** star-sorted
+feed (GitHub & GitLab); typing searches GitHub, all public GitLab
+projects, or your Bitbucket workspaces (Bitbucket retired global repo
+search). Sort by best match, most stars, or recently updated. Open a
+result for its README preview, then **clone** it, **fork** it (with an
+offer to clone the fork), or **star** it (GitHub & GitLab), without ever
+knowing the URL. **Fork** only shows on a repository that isn't already
+yours, so on Bitbucket (where Explore lists just your own workspaces) it
+doesn't normally appear. Fully keyboard-navigable.
 
 ### GitLab
 
