@@ -46,6 +46,8 @@ import { RepoAutomationsDialog } from "@/features/automations/RepoAutomationsDia
 import { BranchRulesDialog } from "@/features/branch-rules/BranchRulesDialog";
 import { HooksDialog } from "@/features/hooks/HooksDialog";
 import { RepoJiraDialog } from "@/features/issues/RepoJiraDialog";
+// Type-only, so the chunk stays split; `typeof` queries on these bindings are
+// type-space only and legal — value-position use is what `import type` forbids.
 import type {
   RepoSettingsDialog as RepoSettingsDialogComponent,
   SectionId,

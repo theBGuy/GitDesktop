@@ -494,9 +494,9 @@ fn from_bb_repo(r: BbRepo) -> ForgeRepo {
 /// /2.0/repositories?role=member` AND `GET /2.0/workspaces` were removed (CHANGE-2770,
 /// Feb 2026); the replacement is `GET /2.0/user/workspaces` (CHANGE-3022), whose items
 /// are `workspace_access` membership wrappers (nested `workspace_base` with
-/// uuid/slug/links — no `name`). We list the viewer's workspaces, then each workspace's
-/// member repos: one page each at the max `pagelen` (100), sorted `-updated_on`, so
-/// repos past 100/workspace drop off.
+/// uuid/slug/links — no `name`). We follow `next` over the viewer's workspaces, then
+/// read each workspace's member repos as a single page at the max `pagelen` (100),
+/// sorted `-updated_on`, so repos past 100/workspace drop off.
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let creds = http::load_credentials().await?;
     let viewer = http::bb_get_json::<BbUser>(&creds, "user", "user")
@@ -505,8 +505,15 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
         .and_then(|u| u.username.or(u.display_name))
         .unwrap_or_default();
 
-    let workspaces: BbPage<BbWorkspaceAccess> =
-        http::bb_get_json(&creds, "user/workspaces?pagelen=100", "workspaces").await?;
+    // Follow `next` here, matching `workspaces()` (which Explore search pages through):
+    // a short workspace list would leave a member workspace out of `owned_namespaces`,
+    // and the Fork gate would then fail open on a search row from that workspace.
+    let workspaces: Vec<BbWorkspaceAccess> = bb_paginate(
+        &creds,
+        "user/workspaces?pagelen=100".to_string(),
+        "workspaces",
+    )
+    .await?;
 
     let mut repos = Vec::new();
     // Bitbucket has no usable personal-workspace signal (`is_personal` reads false even
@@ -518,7 +525,7 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let mut workspace_count = 0usize;
     let mut any_ok = false;
     let mut last_err: Option<AppError> = None;
-    for access in workspaces.values {
+    for access in workspaces {
         // Skip an entry with no nested workspace or an empty slug rather than error.
         let Some(slug) = access.workspace.map(|w| w.slug).filter(|s| !s.is_empty()) else {
             continue;

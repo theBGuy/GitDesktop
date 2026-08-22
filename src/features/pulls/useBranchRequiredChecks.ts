@@ -47,7 +47,7 @@ const reportedAt = (run: PrCheckOut) =>
  * rollup, and GitHub reports such a branch mergeable anyway. Ties keep the later
  * entry, the order the rollup itself supplied.
  */
-export function latestReportedRun(runs: PrCheckOut[]): PrCheckOut | null {
+function latestReportedRun(runs: PrCheckOut[]): PrCheckOut | null {
   let latest: PrCheckOut | null = null;
   let latestAt = Number.NEGATIVE_INFINITY;
   for (const run of runs) {

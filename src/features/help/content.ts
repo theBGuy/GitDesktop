@@ -165,7 +165,8 @@ connected — see *Getting started*), a **search box**, and a **sort** control:
 
 With the search box empty, the page shows two sections:
 
-- **Your repositories** — the repos you own, grouped by owner.
+- **Your repositories** — grouped by owner: your own repos, ones you collaborate on, and
+  those in an organization, group, or Bitbucket workspace you belong to.
 - **Popular** — a star-sorted feed of popular repositories (**GitHub and GitLab** only;
   Bitbucket has no popular feed here).
 
@@ -189,12 +190,14 @@ and **last-updated** time, plus a **README preview** (loaded when you open the r
 From here:
 
 - **Clone** — pick a folder to clone into; GitDesktop opens the repo once it finishes.
-- **Fork** — create a fork under your account. The fork is created in the background, and
-  then you're offered to **clone** it. It doesn't appear on a repository that already
-  counts as yours, which each host defines its own way: on **GitHub** and **GitLab**
-  that's your personal account or namespace (organization and group repositories stay
-  forkable), and on **Bitbucket** it's any workspace you belong to. Since Explore on
-  Bitbucket lists only your own workspaces, **Fork** doesn't normally come up there.
+- **Fork** — create a fork of the repository. On **GitHub** and **GitLab** it lands
+  under your own account; on **Bitbucket** the host picks the destination workspace.
+  The fork is created in the background, and then you're offered to **clone** it. It
+  doesn't appear on a repository that already counts as yours, which each host defines
+  its own way: on **GitHub** and **GitLab** that's your personal account or namespace
+  (organization and group repositories stay forkable), and on **Bitbucket** it's any
+  workspace you belong to. Since Explore on Bitbucket lists only your own workspaces,
+  **Fork** doesn't normally come up there.
 - **Star / Unstar** — on **GitHub and GitLab** only. Bitbucket has no stars, so this action
   doesn't appear on Bitbucket results.
 - **View on GitHub / GitLab / Bitbucket** — open the repository on its host in your browser.

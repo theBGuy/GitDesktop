@@ -177,15 +177,19 @@ function draftToBody(
   }
   if (d.requireChecks) {
     const checks = storedParameters(original, "required_status_checks");
-    // A kept context keeps its whole stored entry: the entry can pin the check to
-    // one app (`integration_id`), which this editor cannot display and a save must
-    // not silently drop. A context typed in fresh has nothing to preserve.
-    const storedChecks = new Map<string, { context: string }>(
-      (
-        (checks?.required_status_checks as { context: string }[] | undefined) ??
-        []
-      ).map((c) => [c.context, c]),
-    );
+    // Kept lines consume their stored entries in order. An entry can pin the check
+    // to one app (`integration_id`) and GitHub accepts several pins under a single
+    // context, neither of which this editor displays, so a save must preserve every
+    // entry rather than reduce a context to one. Fresh lines have no pin to keep.
+    const storedList =
+      (checks?.required_status_checks as { context: string }[] | undefined) ??
+      [];
+    const storedChecks = new Map<string, { context: string }[]>();
+    for (const entry of storedList) {
+      const queue = storedChecks.get(entry.context);
+      if (queue) queue.push(entry);
+      else storedChecks.set(entry.context, [entry]);
+    }
     rules.push({
       type: "required_status_checks",
       parameters: {
@@ -193,7 +197,7 @@ function draftToBody(
         ...checks,
         strict_required_status_checks_policy: d.strictChecks,
         required_status_checks: splitLines(d.checkContexts).map(
-          (context) => storedChecks.get(context) ?? { context },
+          (context) => storedChecks.get(context)?.shift() ?? { context },
         ),
       },
     });

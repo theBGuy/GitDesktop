@@ -273,7 +273,10 @@ export const CHECKS = [
     name: "mutate-in-repo-settings",
     // Scoped to the settings dialog's own tree, whose sections unmount on BOTH
     // dialog close and every rail section switch (the keyed crossfade). The
-    // wider app's call sites are a separate tier and are not scanned here.
+    // wider app's call sites are a separate tier and are not scanned here —
+    // pulls/ and repository/ carry converted-but-unguarded surfaces whose
+    // remaining bare .mutate( calls are deliberately callback-free, which a
+    // per-file allowlist cannot express.
     appliesTo: (file) => file.startsWith("src/features/repo-settings/"),
     scan: anyOf([perLine(MUTATE_CALL_RE), perFile(DESTRUCTURED_MUTATE_RE)]),
     allowlist: [],
