@@ -604,12 +604,13 @@ fn split_url(url: &str) -> Option<(String, &str)> {
     let (authority, path) =
         hierarchical.split_at(hierarchical.find('/').unwrap_or(hierarchical.len()));
     let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // A bracketed IPv6 literal carries its own colons, so its span is taken before
+    // the port strip; `www.` can never prefix one.
+    let bare = crate::forge::bracketed_split(host)
+        .map_or_else(|| host.split_once(':').map_or(host, |(h, _)| h), |(s, _)| s);
     // Case-fold before stripping `www.`: hosts are case-insensitive, so an
     // upper-case prefix has to fall away too.
-    let lower = host
-        .split_once(':')
-        .map_or(host, |(h, _)| h)
-        .to_ascii_lowercase();
+    let lower = bare.to_ascii_lowercase();
     let host = lower.strip_prefix("www.").unwrap_or(&lower);
     (!host.is_empty()).then(|| (host.to_string(), path))
 }
@@ -2035,6 +2036,8 @@ mod tests {
                 "lists.debian.org",
             ),
             ("http://EXAMPLE.COM/x", "example.com"),
+            // A bracketed IPv6 literal labels whole — its colons aren't a port.
+            ("https://[2001:DB8::1]:8443/x", "[2001:db8::1]"),
             ("https://WWW.Example.com/x", "example.com"),
             // Nothing parseable to name it by: the URL labels itself.
             ("not a url", "not a url"),

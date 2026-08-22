@@ -55,7 +55,15 @@ fn parse_owner_host(url: &str) -> (Option<String>, Option<String>) {
     };
     // Strip credentials and a port from the host.
     let host = host.rsplit('@').next().unwrap_or(host);
-    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    // A bracketed IPv6 literal keeps its brackets — this host is persisted and compared
+    // against `remote_host`'s spelling by the provider routing. A malformed bracket
+    // yields no host rather than a truncated one that would mismatch silently.
+    let host = if host.starts_with('[') {
+        crate::forge::bracketed_split(host).map_or("", |(span, _)| span)
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    let host = host.to_ascii_lowercase();
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     // owner is the segment immediately before the repo name.
     let owner = (segs.len() >= 2).then(|| segs[segs.len() - 2].to_string());
@@ -428,6 +436,26 @@ mod owner_tests {
             (Some("g".into()), Some("gitlab.acme.com".into()))
         );
         assert_eq!(parse_owner_host("not-a-url"), (None, None));
+    }
+
+    #[test]
+    fn bracketed_ipv6_hosts_keep_their_brackets() {
+        // The persisted host must be spelled as `remote_host` spells it, or the
+        // provider routing compares two different strings for the same instance.
+        assert_eq!(
+            parse_owner_host("https://[2001:DB8::1]:8443/owner/repo.git"),
+            (Some("owner".into()), Some("[2001:db8::1]".into()))
+        );
+        // scp form: `rfind(':')` lands past the address, on the path separator.
+        assert_eq!(
+            parse_owner_host("git@[2001:db8::1]:owner/repo.git"),
+            (Some("owner".into()), Some("[2001:db8::1]".into()))
+        );
+        // A malformed bracket is no host at all — the path still parses.
+        assert_eq!(
+            parse_owner_host("https://[2001:db8::1/owner/repo"),
+            (Some("owner".into()), None)
+        );
     }
 
     #[test]

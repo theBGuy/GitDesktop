@@ -62,13 +62,9 @@ pub(crate) fn bracketed_split(rest: &str) -> Option<(&str, &str)> {
 /// read as host `2001` plus a garbage port to every downstream `host[:port]` splitter.
 pub(crate) fn remote_host(url: &str) -> Option<String> {
     let authority = remote_authority(url)?;
-    let host = if authority.starts_with('[') {
-        // A bracketed literal's host is the span through `]`; only a `:port` follows it.
-        authority.split_inclusive(']').next().unwrap_or(&authority)
-    } else {
-        // Otherwise the first `:` opens the port.
-        authority.split(':').next().unwrap_or(&authority)
-    };
+    // A bracketed literal's host is its span; otherwise the first `:` opens the port.
+    let host = bracketed_split(&authority)
+        .map_or_else(|| authority.split(':').next().unwrap_or(&authority), |(span, _)| span);
     Some(host.to_string())
 }
 

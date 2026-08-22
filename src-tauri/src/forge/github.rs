@@ -1319,6 +1319,10 @@ mod tests {
         // No host is special-cased: a port rides through on the canonical host too.
         let ported = github_credential_entries("github.com:8443", "/abs/gh");
         assert_eq!(ported[0], "credential.https://github.com:8443.helper=");
+        // git spells an IPv6 credential context bracketed (measured against git 2.51),
+        // so the key must carry the brackets to match the request.
+        let v6 = github_credential_entries("[::1]:8443", "/abs/gh");
+        assert_eq!(v6[0], "credential.https://[::1]:8443.helper=");
     }
 
     #[test]

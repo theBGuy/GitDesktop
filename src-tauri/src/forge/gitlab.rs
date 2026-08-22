@@ -8462,6 +8462,10 @@ mod tests {
             ported[1],
             "credential.https://gitlab.example.com:8443.helper=!\"/abs/glab\" auth git-credential"
         );
+        // git spells an IPv6 credential context bracketed (measured against git 2.51),
+        // so the key must carry the brackets to match the request.
+        let v6 = gitlab_credential_entries("[::1]:8443", "/abs/glab");
+        assert_eq!(v6[0], "credential.https://[::1]:8443.helper=");
     }
 
     #[test]

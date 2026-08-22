@@ -1,3 +1,4 @@
+import { isWindows } from "@/lib/hotkeys/binding";
 import { useUiStore } from "@/lib/stores/ui";
 import { useForgeStatus } from "./queries";
 
@@ -22,13 +23,13 @@ export function isReconnectHostSafe(host: string): boolean {
 /**
  * A host spelled for a copy-pasteable command. A bracketed IPv6 literal is quoted:
  * zsh (the macOS default) and fish read `[…]` as a glob character class, so with
- * `nomatch` on the pasted command dies with "no matches found". Bare hosts stay
- * unquoted — cmd.exe passes single quotes through literally, which would break the
- * common case. No escaping is needed: {@link isReconnectHostSafe} has already banned
- * `'` from every host that reaches a command string.
+ * `nomatch` on the pasted command dies with "no matches found". Unquoted on Windows,
+ * where cmd.exe passes `'` through literally and neither shell globs `[` in a native
+ * command's arguments. No escaping is needed: {@link isReconnectHostSafe} has already
+ * banned `'` from every host that reaches a command string.
  */
 export function reconnectHostArg(host: string): string {
-  return host.includes("[") ? `'${host}'` : host;
+  return !isWindows && host.startsWith("[") ? `'${host}'` : host;
 }
 
 /**
