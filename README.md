@@ -552,8 +552,8 @@ search). Sort by best match, most stars, or recently updated. Open a
 result for its README preview, then **clone** it, **fork** it (with an
 offer to clone the fork), or **star** it (GitHub & GitLab), without ever
 knowing the URL. **Fork** only shows on a repository that isn't already
-yours, so on Bitbucket (where Explore lists just your own workspaces) it
-doesn't normally appear. Fully keyboard-navigable.
+yours, so on Bitbucket (where Explore lists just workspaces you belong to)
+it doesn't normally appear. Fully keyboard-navigable.
 
 ### GitLab
 

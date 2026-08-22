@@ -102,6 +102,15 @@ const splitLines = (s: string) =>
     .map((x) => x.trim())
     .filter(Boolean);
 
+/** Check contexts split on newlines only: a context can carry a comma of its own,
+ *  because GitHub Actions builds a matrix job's name by joining its values with
+ *  ", ". Splitting there would save contexts no run will ever report. */
+const splitCheckLines = (s: string) =>
+  s
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
 function rulesetToDraft(rs: RulesetFull): Draft {
   const include = rs.conditions?.ref_name?.include ?? [];
   const refScope = include.includes("~DEFAULT_BRANCH")
@@ -196,7 +205,7 @@ function draftToBody(
         do_not_enforce_on_create: false,
         ...checks,
         strict_required_status_checks_policy: d.strictChecks,
-        required_status_checks: splitLines(d.checkContexts).map(
+        required_status_checks: splitCheckLines(d.checkContexts).map(
           (context) => storedChecks.get(context)?.shift() ?? { context },
         ),
       },
@@ -577,7 +586,7 @@ function RulesetForm({
             <Textarea
               value={d.checkContexts}
               onChange={(e) => set("checkContexts", e.target.value)}
-              placeholder="check names, one per line (e.g. build, test)"
+              placeholder="check names, one per line"
               rows={2}
               autoComplete="off"
               spellCheck={false}

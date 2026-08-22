@@ -13,8 +13,9 @@
 //!
 //! Pagination default: one page at the endpoint's max `pagelen`, no `next`-following
 //! (the PR-list endpoint caps at 50; repos/pipelines allow 100). Readers that DO follow
-//! `next` go through [`bb_paginate`], which bounds them at [`BB_MAX_PAGES`]; each
-//! states that bound at its call site.
+//! `next` go through [`bb_paginate`], or walk inline when they need a different failure
+//! posture; either way [`BB_MAX_PAGES`] bounds them, and each states that bound at its
+//! call site.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -349,8 +350,9 @@ struct BbCloneLink {
 }
 
 /// A paginated envelope (`{values, next, …}`). `next` is an ABSOLUTE URL to the next
-/// page; only [`bb_paginate`] follows it — the many single-page reads deserialize the
-/// envelope and ignore it, per the module's pagination policy.
+/// page; the readers that follow it go through [`bb_paginate`] or an inline walk under
+/// the same bound — the many single-page reads deserialize the envelope and ignore it,
+/// per the module's pagination policy.
 #[derive(Deserialize)]
 struct BbPage<T> {
     #[serde(default = "Vec::new")]
@@ -493,7 +495,7 @@ fn from_bb_repo(r: BbRepo) -> ForgeRepo {
 /// One step of the workspace walk: absorb a fetched page and answer with the next URL
 /// to follow, `None` to stop, or an error to abort. Best-effort past the first page —
 /// a later page failing costs some namespaces (the Fork gate then fails open on their
-/// repos), while page one failing means no workspaces at all, a real error. Pure, so
+/// repos), while page one failing means no workspaces at all, a real error. No I/O, so
 /// the fallback is testable without an HTTP seam.
 fn best_effort_page_step<T>(
     fetched: AppResult<BbPage<T>>,
@@ -514,8 +516,8 @@ fn best_effort_page_step<T>(
 /// /2.0/repositories?role=member` AND `GET /2.0/workspaces` were removed (CHANGE-2770,
 /// Feb 2026); the replacement is `GET /2.0/user/workspaces` (CHANGE-3022), whose items
 /// are `workspace_access` membership wrappers (nested `workspace_base` with
-/// uuid/slug/links — no `name`). We follow `next` over the viewer's workspaces
-/// (best-effort past the first page), then read each workspace's member repos as a
+/// uuid/slug/links — no `name`). We follow `next` over the viewer's workspaces up to 5
+/// pages (best-effort past the first), then read each workspace's member repos as a
 /// single page at the max `pagelen` (100), sorted `-updated_on`, so repos past
 /// 100/workspace drop off.
 pub async fn list_repos() -> AppResult<ForgeRepoList> {

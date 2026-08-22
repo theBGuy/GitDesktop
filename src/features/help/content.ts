@@ -196,8 +196,8 @@ From here:
   doesn't appear on a repository that already counts as yours, which each host defines
   its own way: on **GitHub** and **GitLab** that's your personal account or namespace
   (organization and group repositories stay forkable), and on **Bitbucket** it's any
-  workspace you belong to. Since Explore on Bitbucket lists only your own workspaces,
-  **Fork** doesn't normally come up there.
+  workspace you belong to. Since Explore on Bitbucket lists only workspaces you
+  belong to, **Fork** doesn't normally come up there.
 - **Star / Unstar** — on **GitHub and GitLab** only. Bitbucket has no stars, so this action
   doesn't appear on Bitbucket results.
 - **View on GitHub / GitLab / Bitbucket** — open the repository on its host in your browser.
