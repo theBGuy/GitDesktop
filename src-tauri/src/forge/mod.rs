@@ -4327,7 +4327,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_path_counts_the_scp_separator_past_the_bracket() {
+    fn remote_path_parses_bracketed_hosts_and_refuses_malformed_ones() {
         assert_eq!(
             remote_path("git@[2001:db8::1]:group/sub/repo.git").as_deref(),
             Some("group/sub/repo"),
@@ -4347,6 +4347,9 @@ mod tests {
         // so fork_url_from_origin can't splice onto a malformed origin.
         assert_eq!(remote_path("https://[2001:db8::1/path]:8443/group/repo"), None);
         assert_eq!(remote_path("git@[::1]junk:group/repo"), None);
+        // The gate also refuses an EMPTY authority, so a file:// remote no longer
+        // yields its filesystem path as a bogus owner/repo slug.
+        assert_eq!(remote_path("file:///srv/repos/x"), None);
     }
 
     #[test]
