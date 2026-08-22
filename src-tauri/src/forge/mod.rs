@@ -37,13 +37,18 @@ pub trait Forge {
 }
 
 /// Split a leading bracketed IPv6 literal off an authority, yielding the `[…]` span
-/// (brackets included) and whatever follows the `]`. `None` for an unterminated `[` or
-/// an empty `[]`. The URL-decomposition idioms, the authority gate, and glab's
-/// hosts-key normalizer share it so a literal's own `:`s can never be mistaken for a
-/// port or an scp path separator.
+/// (brackets included) and whatever follows the `]`. `None` for an unterminated `[`,
+/// an empty `[]`, or a `/` inside the span — no IPv6 literal carries one, and refusing
+/// it here keeps callers that pre-split on `/` and callers that don't (`remote_path`'s
+/// scp arm) agreeing on malformed spans. The URL-decomposition idioms, the authority
+/// gate, and glab's hosts-key normalizer share it so a literal's own `:`s can never be
+/// mistaken for a port or an scp path separator.
 pub(crate) fn bracketed_split(rest: &str) -> Option<(&str, &str)> {
     let after_open = rest.strip_prefix('[')?;
     let close = after_open.find(']')?;
+    if after_open[..close].contains('/') {
+        return None;
+    }
     // `[]` carries no address, so it's no host either.
     (close > 0).then(|| (&rest[..close + 2], &after_open[close + 1..]))
 }
@@ -138,10 +143,11 @@ pub(crate) fn is_safe_authority(value: &str) -> bool {
 /// match a `:8443` request — so the authority is the only key that always matches.
 ///
 /// A bracketed IPv6 literal yields `[addr]` or `[addr]:port`, git's own spelling for
-/// those requests (same measurement). After `]`, only the `:`-led port slot may follow —
-/// a real port is carried, a non-port there falls back to the bare host (same posture as
-/// the unbracketed arm), and any other remainder is no authority at all, in both the
-/// scheme and scp regimes. An unterminated `[` or an empty `[]` is no host.
+/// those requests (same measurement). After `]`, only the `:`-led port slot may follow;
+/// any other remainder is no authority, in either regime. A scheme URL carries a real
+/// port and drops a non-port to the bare host (same posture as the unbracketed arm);
+/// in scp form the `:` after `]` opens the path, so the bare host comes back. An
+/// unterminated `[` or an empty `[]` is no host.
 pub(crate) fn remote_authority(url: &str) -> Option<String> {
     let url = url.trim();
     let (had_scheme, rest) = match url.split_once("://") {
@@ -4327,6 +4333,11 @@ mod tests {
         );
         // Host and separator but no path.
         assert_eq!(remote_path("git@[::1]:"), None);
+        // The scp arm's own fail-closed refusals: an unterminated bracket, and a `/`
+        // inside the span (no IPv6 literal has one — remote_authority refuses it too,
+        // so the pair can't disagree and feed fork_url_from_origin a half-parse).
+        assert_eq!(remote_path("git@[::1:o/r"), None);
+        assert_eq!(remote_path("git@[2001:db8::1/path]:group/repo"), None);
     }
 
     #[test]
