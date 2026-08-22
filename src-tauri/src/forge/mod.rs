@@ -212,8 +212,13 @@ pub(crate) fn remote_authority(url: &str) -> Option<String> {
 /// separator — counted past a bracketed IPv6 literal, whose own `:`s would otherwise
 /// cut the host short. Used to address a repo on a provider's API (e.g. a GitLab
 /// project).
+///
+/// Gated on [`remote_authority`]: a URL it refuses has no path either, so the pair
+/// can't diverge — [`fork_url_from_origin`] splices from this path alone, and a
+/// divergence would build a fork URL on a malformed origin.
 pub(crate) fn remote_path(url: &str) -> Option<String> {
     let url = url.trim();
+    remote_authority(url)?;
     let (had_scheme, rest) = match url.split_once("://") {
         Some((_, after)) => (true, after),
         None => (false, url),
@@ -4338,6 +4343,10 @@ mod tests {
         // so the pair can't disagree and feed fork_url_from_origin a half-parse).
         assert_eq!(remote_path("git@[::1:o/r"), None);
         assert_eq!(remote_path("git@[2001:db8::1/path]:group/repo"), None);
+        // The remote_authority gate: URLs it refuses yield no path from either arm,
+        // so fork_url_from_origin can't splice onto a malformed origin.
+        assert_eq!(remote_path("https://[2001:db8::1/path]:8443/group/repo"), None);
+        assert_eq!(remote_path("git@[::1]junk:group/repo"), None);
     }
 
     #[test]
