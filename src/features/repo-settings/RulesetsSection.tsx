@@ -202,7 +202,7 @@ const storedParameters = (original: RulesetFull | undefined, type: string) =>
  *  sends an array — normalizes to empty instead of blocking the editor. */
 const storedCheckEntries = (
   original: RulesetFull | undefined,
-): { context: string }[] => {
+): ({ context: string } & Record<string, unknown>)[] => {
   const stored = storedParameters(
     original,
     "required_status_checks",
@@ -260,7 +260,10 @@ function draftToBody(
     // to one app (`integration_id`) and GitHub accepts several pins under a single
     // context, neither of which this editor displays, so a save must preserve every
     // entry rather than reduce a context to one. Fresh lines have no pin to keep.
-    const storedChecks = new Map<string, { context: string }[]>();
+    const storedChecks = new Map<
+      string,
+      ({ context: string } & Record<string, unknown>)[]
+    >();
     for (const entry of storedCheckEntries(original)) {
       const queue = storedChecks.get(entry.context);
       if (queue) queue.push(entry);
