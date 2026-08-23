@@ -1709,18 +1709,19 @@ export interface PrCheckOut {
 }
 
 /**
- * One PR activity-timeline event, mirroring the Rust `PrTimelineEventOut` tagged enum.
- * Provider-neutral: GitHub renders reviews as cards so it emits no
- * approved/changesRequested, while GitLab/Bitbucket emit approval events here. Events
- * arrive oldest→newest; `actor`/`date`/oid fields are `""` when the provider returned
- * null.
+ * One activity-timeline event on a PR/MR or an issue, mirroring the Rust
+ * `ForgeTimelineEventOut` tagged enum. Provider-neutral: GitHub renders reviews as
+ * cards so it emits no approved/changesRequested, while GitLab/Bitbucket emit approval
+ * events here. Events arrive oldest→newest; every string field is `""` (and every
+ * number `0`) when the provider returned null, so absence reads as empty rather than
+ * missing.
  */
-export type PrTimelineEvent =
+export type ForgeTimelineEvent =
   | {
       kind: "forcePushed";
       before: string;
       after: string;
-      actor: string;
+      actor: ForgeUserRef;
       date: string;
     }
   | {
@@ -1729,23 +1730,108 @@ export type PrTimelineEvent =
       color: string;
       /** true for a LABELED_EVENT, false for an UNLABELED_EVENT. */
       added: boolean;
-      actor: string;
+      actor: ForgeUserRef;
       date: string;
     }
-  | { kind: "reviewRequested"; reviewer: string; actor: string; date: string }
-  | { kind: "readyForReview"; actor: string; date: string }
-  | { kind: "convertToDraft"; actor: string; date: string }
-  | { kind: "approved"; actor: string; date: string }
-  | { kind: "changesRequested"; actor: string; date: string }
-  | { kind: "unapproved"; actor: string; date: string }
-  | { kind: "closed"; actor: string; date: string }
-  | { kind: "reopened"; actor: string; date: string }
-  | { kind: "merged"; actor: string; commitOid?: string; date: string }
+  | {
+      kind: "reviewRequested";
+      reviewer: string;
+      actor: ForgeUserRef;
+      date: string;
+    }
+  | { kind: "readyForReview"; actor: ForgeUserRef; date: string }
+  | { kind: "convertToDraft"; actor: ForgeUserRef; date: string }
+  | { kind: "approved"; actor: ForgeUserRef; date: string }
+  | { kind: "changesRequested"; actor: ForgeUserRef; date: string }
+  | { kind: "unapproved"; actor: ForgeUserRef; date: string }
+  | {
+      kind: "closed";
+      actor: ForgeUserRef;
+      /** `"completed" | "not_planned" | "duplicate"` on a GitHub issue close; `""`
+       *  for PRs and for GitLab/Bitbucket, which report no reason. */
+      stateReason: string;
+      date: string;
+    }
+  | { kind: "reopened"; actor: ForgeUserRef; date: string }
+  | { kind: "merged"; actor: ForgeUserRef; commitOid?: string; date: string }
   | {
       kind: "renamed";
       previous: string;
       current: string;
-      actor: string;
+      actor: ForgeUserRef;
+      date: string;
+    }
+  | {
+      kind: "assigned";
+      assignee: string;
+      /** true for an assignment, false for an unassignment. */
+      added: boolean;
+      actor: ForgeUserRef;
+      date: string;
+    }
+  | {
+      kind: "milestoned";
+      milestone: string;
+      /** true when added to the milestone, false when removed. */
+      added: boolean;
+      actor: ForgeUserRef;
+      date: string;
+    }
+  | {
+      kind: "crossReferenced";
+      /** `"pr" | "issue"`, or `""` when the referring entity's type is unknown. */
+      sourceKind: string;
+      sourceNumber: number;
+      sourceTitle: string;
+      /** The referring entity's `owner/name` — a cross-reference can live in another
+       *  repository, so the number alone can't address it. `""` when unknown. */
+      sourceRepo: string;
+      willClose: boolean;
+      actor: ForgeUserRef;
+      date: string;
+    }
+  | {
+      kind: "connected";
+      sourceKind: string;
+      sourceNumber: number;
+      sourceTitle: string;
+      sourceRepo: string;
+      /** true when the link was made, false when it was broken. */
+      added: boolean;
+      actor: ForgeUserRef;
+      date: string;
+    }
+  | {
+      kind: "pinned";
+      /** true for a pin, false for an unpin. */
+      added: boolean;
+      actor: ForgeUserRef;
+      date: string;
+    }
+  | {
+      kind: "locked";
+      locked: boolean;
+      /** The lock reason lowercased (`"off_topic"`, `"too_heated"`, `"resolved"`,
+       *  `"spam"`); `""` when none was given, and on unlock. */
+      reason: string;
+      actor: ForgeUserRef;
+      date: string;
+    }
+  | {
+      kind: "transferred";
+      /** The `owner/name` the issue moved here from; `""` when unknown. */
+      fromRepo: string;
+      actor: ForgeUserRef;
+      date: string;
+    }
+  | {
+      kind: "markedAsDuplicate";
+      canonicalKind: string;
+      canonicalNumber: number;
+      /** The canonical entity's `owner/name` (same cross-repo reason as
+       *  `sourceRepo`); `""` when unknown. */
+      canonicalRepo: string;
+      actor: ForgeUserRef;
       date: string;
     };
 
@@ -1878,19 +1964,23 @@ export interface CompletedReviewerWithState {
   state: string;
 }
 
-/** A provider user reference for pickers — a stable id + a human label.
- *  Bitbucket's reviewer picker emits it today (id = account uuid, label =
- *  display name / nickname): Bitbucket nicknames aren't unique, so the label
- *  alone can't round-trip a mutation. */
+/** A provider user reference — a stable id + a human label — for pickers,
+ *  read-only chips, and timeline actors. Bitbucket carries the account uuid as
+ *  the id with the display name / nickname as the label: its nicknames aren't
+ *  unique, so the label alone can't round-trip a mutation. GitHub and GitLab put
+ *  the login/username in both fields. */
 export interface ForgeUserRef {
   id: string;
   label: string;
-  /** The user's avatar URL when the provider supplies one (GitLab/Bitbucket).
-   *  Empty for GitHub, where the picker derives it from the login. */
+  /** The user's avatar URL whenever the source supplies one — GitLab/Bitbucket
+   *  return it on every user, and the GitHub timeline reads `actor.avatarUrl`.
+   *  Empty means derive it from the login on GitHub, initials elsewhere
+   *  (`ForgeUserAvatar` owns both fallbacks). */
   avatarUrl: string;
-  /** True for a bot requested reviewer (e.g. GitHub Copilot). Bot reviewers are
-   *  display-only: they're rendered as read-only chips, never enter the editable
-   *  picker's managed set, and the reviewer setters never add or remove them. */
+  /** True for a bot account — a bot requested reviewer (e.g. GitHub Copilot), or a
+   *  timeline actor GitHub typed as a `Bot`. Bot reviewers are display-only:
+   *  they're rendered as read-only chips, never enter the editable picker's
+   *  managed set, and the reviewer setters never add or remove them. */
   isBot: boolean;
 }
 

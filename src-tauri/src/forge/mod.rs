@@ -1207,7 +1207,7 @@ pub async fn forge_pr_list_mergeability(
 
 /// The PR/MR activity timeline — state changes, label edits, approvals — behind the
 /// abstraction. Each provider maps its own event source onto the neutral
-/// `PrTimelineEventOut` union: GitHub `timelineItems`, GitLab resource/state/label
+/// `ForgeTimelineEventOut` union: GitHub `timelineItems`, GitLab resource/state/label
 /// events + approval system-notes, Bitbucket PR `activity`. Events sort oldest→newest;
 /// the frontend interleaves `pr.commits` itself, so no arm emits commit events.
 #[tauri::command]
@@ -1215,7 +1215,7 @@ pub async fn forge_pr_timeline(
     repo_path: String,
     number: u64,
     lens: Option<String>,
-) -> AppResult<Vec<crate::github::pr::PrTimelineEventOut>> {
+) -> AppResult<Vec<crate::forge::model::ForgeTimelineEventOut>> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::mr_timeline(&repo_path, number).await,
         Some((Provider::Bitbucket, _)) => bitbucket::pr_activity(&repo_path, number).await,
@@ -2003,6 +2003,26 @@ pub async fn forge_issue_view(
             "Bitbucket issues aren't supported yet.".into(),
         )),
         _ => github::view_issue(&repo_path, number, lens).await,
+    }
+}
+
+/// The issue's activity timeline — label, assignee and milestone changes,
+/// cross-references and links, state changes — behind the abstraction, on the same
+/// neutral `ForgeTimelineEventOut` union as the PR read. GitHub maps
+/// `timelineItems`; GitLab maps its resource label/state/milestone events plus the
+/// assignment/reference/lock system notes. Events sort oldest→newest.
+#[tauri::command]
+pub async fn forge_issue_timeline(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<Vec<crate::forge::model::ForgeTimelineEventOut>> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => gitlab::issue_timeline(&repo_path, number).await,
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Bitbucket issues aren't supported yet.".into(),
+        )),
+        _ => github::issue_timeline(&repo_path, number, lens).await,
     }
 }
 

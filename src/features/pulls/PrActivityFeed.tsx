@@ -9,10 +9,10 @@ import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import type {
   ForgeProvider,
+  ForgeTimelineEvent,
   IssueReactions,
   PrDetails,
   PrThreadOut,
-  PrTimelineEvent,
   ReviewThreadOut,
 } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
@@ -202,7 +202,7 @@ export function PrActivityFeed({
   reactionsReason,
 }: {
   pr: PrDetails;
-  timeline: PrTimelineEvent[] | undefined;
+  timeline: ForgeTimelineEvent[] | undefined;
   reactions: IssueReactions | undefined;
   claims: PrThreadClaims;
   providerKey: ForgeProvider;

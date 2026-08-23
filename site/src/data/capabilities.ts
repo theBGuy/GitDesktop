@@ -281,6 +281,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Issues & discussions",
+    label:
+      "Issue activity timeline — labels, assignees, milestones, linked PRs & mentions, with actor avatars",
+  },
+  {
+    group: "Issues & discussions",
     label: "GitHub Discussions — read, post & react",
   },
   {

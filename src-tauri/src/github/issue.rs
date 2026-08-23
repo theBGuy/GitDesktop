@@ -1177,6 +1177,54 @@ pub struct LinkedPr {
     pub url: String,
 }
 
+const ISSUE_TIMELINE_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ issue(number:$number){ timelineItems(last:100, itemTypes:[LABELED_EVENT, UNLABELED_EVENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, CROSS_REFERENCED_EVENT, CONNECTED_EVENT, DISCONNECTED_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, CLOSED_EVENT, REOPENED_EVENT, RENAMED_TITLE_EVENT, PINNED_EVENT, UNPINNED_EVENT, LOCKED_EVENT, UNLOCKED_EVENT, MARKED_AS_DUPLICATE_EVENT, TRANSFERRED_EVENT]){ nodes{ __typename ... on LabeledEvent{ actor{login avatarUrl(size: 48) __typename} createdAt label{name color} } ... on UnlabeledEvent{ actor{login avatarUrl(size: 48) __typename} createdAt label{name color} } ... on AssignedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt assignee{ __typename ... on User{login} ... on Bot{login} ... on Mannequin{login} ... on Organization{login} } } ... on UnassignedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt assignee{ __typename ... on User{login} ... on Bot{login} ... on Mannequin{login} ... on Organization{login} } } ... on CrossReferencedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt willCloseTarget source{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } } ... on ConnectedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt source{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } subject{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } } ... on DisconnectedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt source{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } subject{ __typename ... on Issue{number title repository{nameWithOwner}} ... on PullRequest{number title repository{nameWithOwner}} } } ... on MilestonedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt milestoneTitle } ... on DemilestonedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt milestoneTitle } ... on ClosedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt stateReason } ... on ReopenedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on RenamedTitleEvent{ actor{login avatarUrl(size: 48) __typename} createdAt previousTitle currentTitle } ... on PinnedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on UnpinnedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on LockedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt lockReason } ... on UnlockedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on MarkedAsDuplicateEvent{ actor{login avatarUrl(size: 48) __typename} createdAt canonical{ __typename ... on Issue{number repository{nameWithOwner}} ... on PullRequest{number repository{nameWithOwner}} } } ... on TransferredEvent{ actor{login avatarUrl(size: 48) __typename} createdAt fromRepository{nameWithOwner} } } } } } }"#;
+
+/// The issue's activity timeline — label/assignee/milestone changes, cross-references
+/// and links, state changes — for the conversation view; GitHub's arm of
+/// `forge_issue_timeline`. Nodes arrive oldest→newest and that order is preserved.
+/// One `last:100` window with no pagination, like the PR read: a very busy issue
+/// truncates its oldest events.
+///
+/// Every fragment's selection set is dictated by `map_timeline_node`'s documented
+/// contract — a missing `repository{nameWithOwner}` arrives as an empty string
+/// rather than an error.
+pub async fn gh_issue_timeline(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<Vec<crate::forge::model::ForgeTimelineEventOut>> {
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
+    let out = run_gh(
+        Some(&repo_path),
+        &[
+            "api",
+            "graphql",
+            "-F",
+            &format!("owner={owner}"),
+            "-F",
+            &format!("name={name}"),
+            "-F",
+            &format!("number={number}"),
+            "-f",
+            &format!("query={ISSUE_TIMELINE_QUERY}"),
+        ],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse issue timeline: {e}")))?;
+    let nodes = value
+        .pointer("/data/repository/issue/timelineItems/nodes")
+        .and_then(serde_json::Value::as_array);
+    Ok(nodes
+        .map(|ns| {
+            ns.iter()
+                .filter_map(crate::github::pr::map_timeline_node)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// An issue's "Development" links: the PRs that close it + branches linked to it.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1369,7 +1417,7 @@ pub fn read_issue_templates(repo_path: String) -> AppResult<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_issues_disabled, map_gh_too_old};
+    use super::{is_issues_disabled, map_gh_too_old, ISSUE_TIMELINE_QUERY};
     use crate::error::AppError;
 
     #[test]
@@ -1426,5 +1474,41 @@ mod tests {
             map_gh_too_old(AppError::IssuesDisabled),
             AppError::IssuesDisabled
         ));
+    }
+
+    #[test]
+    fn issue_timeline_query_selects_every_mapped_field() {
+        // A dropped selection is a SILENT failure — GraphQL simply omits the field
+        // and `map_timeline_node` reads it as "", so pin the contract here.
+        assert!(ISSUE_TIMELINE_QUERY.contains("actor{login avatarUrl(size: 48) __typename}"));
+        // source/subject/canonical, each on its Issue AND PullRequest fragment.
+        assert!(ISSUE_TIMELINE_QUERY.matches("repository{nameWithOwner}").count() >= 4);
+        assert!(ISSUE_TIMELINE_QUERY.contains("willCloseTarget"));
+        assert!(ISSUE_TIMELINE_QUERY.contains("stateReason"));
+        for item_type in [
+            "LABELED_EVENT",
+            "UNLABELED_EVENT",
+            "ASSIGNED_EVENT",
+            "UNASSIGNED_EVENT",
+            "CROSS_REFERENCED_EVENT",
+            "CONNECTED_EVENT",
+            "DISCONNECTED_EVENT",
+            "MILESTONED_EVENT",
+            "DEMILESTONED_EVENT",
+            "CLOSED_EVENT",
+            "REOPENED_EVENT",
+            "RENAMED_TITLE_EVENT",
+            "PINNED_EVENT",
+            "UNPINNED_EVENT",
+            "LOCKED_EVENT",
+            "UNLOCKED_EVENT",
+            "MARKED_AS_DUPLICATE_EVENT",
+            "TRANSFERRED_EVENT",
+        ] {
+            assert!(
+                ISSUE_TIMELINE_QUERY.contains(item_type),
+                "itemTypes missing {item_type}"
+            );
+        }
     }
 }

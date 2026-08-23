@@ -2222,6 +2222,24 @@ export function useIssueReactions(
   });
 }
 
+/** An issue's activity timeline for the issue view. Provider-neutral (the backend
+ *  dispatches), so the caller passes `enabled = <known provider that has it>` — an
+ *  unresolved provider must NOT fetch. Decoupled from the issue view like
+ *  {@link useIssueReactions}. */
+export function useIssueTimeline(
+  repoPath: string,
+  number: number,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
+  return useQuery({
+    queryKey: ["repo", repoPath, "issue", lens, number, "timeline"] as const,
+    queryFn: () => api.forgeIssueTimeline(repoPath, number, lens),
+    enabled,
+    staleTime: 30_000,
+  });
+}
+
 function patchReactionList(
   list: Reaction[],
   content: string,

@@ -52,6 +52,7 @@ import type {
   ForgeRepoWriteAccess,
   ForgeSearchList,
   ForgeStatus,
+  ForgeTimelineEvent,
   ForgeUserRef,
   ForkPrMatch,
   GeneratedNotes,
@@ -100,7 +101,6 @@ import type {
   PrPollInfo,
   PrRef,
   PrTask,
-  PrTimelineEvent,
   PunchCard,
   ReconnectEvent,
   ReleaseDetails,
@@ -1554,7 +1554,23 @@ export const forgePrTimeline = (
   repoPath: string,
   number: number,
   lens: RemoteLens,
-) => invoke<PrTimelineEvent[]>("forge_pr_timeline", { repoPath, number, lens });
+) =>
+  invoke<ForgeTimelineEvent[]>("forge_pr_timeline", { repoPath, number, lens });
+
+/** An issue's activity timeline (labels, assignment, milestones, cross-references,
+ *  state changes) for the issue view. Provider-neutral — the backend dispatches
+ *  (GitHub GraphQL, GitLab resource events + system notes; Bitbucket issues are
+ *  unsupported). */
+export const forgeIssueTimeline = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+) =>
+  invoke<ForgeTimelineEvent[]>("forge_issue_timeline", {
+    repoPath,
+    number,
+    lens,
+  });
 
 // Provider-neutral merge/pull request reads — the backend resolves the repo's provider
 // and dispatches, returning the same neutral `PrInfo`/`PrDetails` shapes. Neutral

@@ -131,7 +131,7 @@ pub async fn pr_timeline(
     repo_path: &str,
     number: u64,
     lens: Option<&str>,
-) -> AppResult<Vec<crate::github::pr::PrTimelineEventOut>> {
+) -> AppResult<Vec<crate::forge::model::ForgeTimelineEventOut>> {
     crate::github::pr::pr_timeline(repo_path, number, lens).await
 }
 
@@ -335,6 +335,14 @@ pub async fn view_issue(
     lens: Option<String>,
 ) -> AppResult<crate::github::issue::IssueDetails> {
     crate::github::issue::gh_issue_view(repo_path.to_string(), number, lens).await
+}
+
+pub async fn issue_timeline(
+    repo_path: &str,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<Vec<crate::forge::model::ForgeTimelineEventOut>> {
+    crate::github::issue::gh_issue_timeline(repo_path.to_string(), number, lens).await
 }
 
 // ── CI / Actions ─────────────────────────────────────────────────────────────

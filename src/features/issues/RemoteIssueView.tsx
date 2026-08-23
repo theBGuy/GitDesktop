@@ -40,6 +40,11 @@ import {
   Thread,
 } from "@/features/conversations/Thread";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
+import {
+  sortTimeline,
+  type TimelineEntry,
+  TimelineEventRow,
+} from "@/features/pulls/PrTimeline";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import type { LockReason, MinimizeReason } from "@/lib/git/api";
@@ -58,6 +63,7 @@ import {
   useGlMemberProjects,
   useIssueDetails,
   useIssueReactions,
+  useIssueTimeline,
   useLockIssue,
   useMinimizeComment,
   usePinIssue,
@@ -201,6 +207,8 @@ export function RemoteIssueView({
   const transferIssue = useTransferIssue(repoPath, lens);
   const deleteIssue = useDeleteIssue(repoPath, lens);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const selectPr = useUiStore((s) => s.selectPr);
+  const setRepoTab = useUiStore((s) => s.setRepoTab);
   const selectedIssue = useUiStore((s) => s.selectedIssue);
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   // Whether this view owns the current selection: the mounted view lags the
@@ -217,6 +225,16 @@ export function RemoteIssueView({
   const canEditOwnComments =
     canWrite || forgeFeatureReady(forge.data, "issueCommentEdit");
   const reactions = useIssueReactions(repoPath, canReact ? number : null, lens);
+  // Activity-timeline events (labels, assignment, milestones, cross-references,
+  // state changes) interleaved into the feed below; provider-neutral via the
+  // backend's `forge_issue_timeline`. The composite gate is load-bearing: an
+  // unresolved provider must not fetch, and Bitbucket issues aren't wired.
+  const timeline = useIssueTimeline(
+    repoPath,
+    number,
+    !!provider && provider !== "bitbucket",
+    lens,
+  );
   const toggleReactionMutation = useToggleReaction(
     repoPath,
     ["repo", repoPath, "issue", lens, number, "reactions"] as const,
@@ -507,6 +525,19 @@ export function RemoteIssueView({
     });
   }
 
+  /** Drill into a PR/issue a timeline reference row points at. Same-repo only —
+   *  the row hands over a bare number, which addresses nothing elsewhere, and
+   *  TimelineEventRow already keeps cross-repo chips non-interactive. Each arm is
+   *  the navigation its own surface uses (Development panel / related issues). */
+  function openRef(kind: "pr" | "issue", refNumber: number) {
+    if (kind === "pr") {
+      selectPr({ kind: "remote", id: String(refNumber) });
+      setRepoTab("pulls");
+      return;
+    }
+    selectIssue({ kind: "remote", id: String(refNumber) });
+  }
+
   function submitTransfer() {
     const destination = transferDest.trim();
     if (!destination) return;
@@ -558,6 +589,77 @@ export function RemoteIssueView({
   )
     .filter((n) => !repoQuery || n.toLowerCase().includes(repoQuery))
     .slice(0, 6);
+
+  // The activity feed: comments interleaved with timeline events, oldest→newest,
+  // on the PR feed's slot convention (comments 2, events 3). Keys are slot-prefixed
+  // because a comment id and an event index share one child list.
+  const feedEntries: TimelineEntry[] = [];
+  for (const c of comments) {
+    feedEntries.push({
+      date: c.date,
+      sortKey: 2,
+      node: (
+        <Thread
+          key={`comment-${c.id}`}
+          thread={c}
+          onQuote={
+            canWrite && !detailsStale ? () => quoteReply(c.body) : undefined
+          }
+          onSaveEdit={
+            canEditOwnComments && c.viewerDidAuthor && !detailsStale
+              ? (body) => saveCommentEdit(c.id, body)
+              : undefined
+          }
+          // Withholding the handler only drops the menu entry; an editor
+          // already open when the switch began needs its Save held too.
+          editHeld={detailsStale}
+          onDelete={
+            canEditOwnComments && c.viewerDidAuthor && !detailsStale
+              ? () => setDeletingCommentId(c.id)
+              : undefined
+          }
+          onHide={
+            canWrite && !c.isMinimized
+              ? (classifier) => hideComment(c.id, classifier)
+              : undefined
+          }
+          onUnhide={
+            canWrite && c.isMinimized ? () => unhideComment(c.id) : undefined
+          }
+          // Hide/Unhide stay visible but disabled through the switch. The
+          // permission reason ranks first — it's the one still true once
+          // the selected issue is on screen.
+          disabledReason={triageItemReason ?? staleReason}
+          reactions={canReact ? reactions.data?.comments[c.id] : undefined}
+          onToggleReaction={
+            canReact
+              ? (content, active) => toggleReaction(c.id, content, active)
+              : undefined
+          }
+          reactionsHeld={detailsStale}
+          reactionsReason={staleReason}
+        />
+      ),
+    });
+  }
+  for (const [i, ev] of (timeline.data ?? []).entries()) {
+    feedEntries.push({
+      date: ev.date,
+      sortKey: 3,
+      node: (
+        <TimelineEventRow
+          key={`event-${i}`}
+          event={ev}
+          onOpenRef={openRef}
+          // ForgeStatus.repo is the ORIGIN slug, lens-unaware: under the Upstream
+          // lens an upstream-repo ref mismatches and its chip degrades to inert
+          // text — never a wrong drill-in, so the safe direction.
+          selfRepo={forge.data?.repo ?? undefined}
+        />
+      ),
+    });
+  }
+  const feed = sortTimeline(feedEntries);
 
   // The close/reopen arm LEADS the bottom bar in both permission states — inside
   // the composer's action row (Comment is the primary and stays last), or alone
@@ -976,56 +1078,8 @@ export function RemoteIssueView({
                   disabledReason={writeReason ?? staleReason}
                 />
               )}
-              {comments.map((c) => (
-                <Thread
-                  key={c.id}
-                  thread={c}
-                  onQuote={
-                    canWrite && !detailsStale
-                      ? () => quoteReply(c.body)
-                      : undefined
-                  }
-                  onSaveEdit={
-                    canEditOwnComments && c.viewerDidAuthor && !detailsStale
-                      ? (body) => saveCommentEdit(c.id, body)
-                      : undefined
-                  }
-                  // Withholding the handler only drops the menu entry; an editor
-                  // already open when the switch began needs its Save held too.
-                  editHeld={detailsStale}
-                  onDelete={
-                    canEditOwnComments && c.viewerDidAuthor && !detailsStale
-                      ? () => setDeletingCommentId(c.id)
-                      : undefined
-                  }
-                  onHide={
-                    canWrite && !c.isMinimized
-                      ? (classifier) => hideComment(c.id, classifier)
-                      : undefined
-                  }
-                  onUnhide={
-                    canWrite && c.isMinimized
-                      ? () => unhideComment(c.id)
-                      : undefined
-                  }
-                  // Hide/Unhide stay visible but disabled through the switch. The
-                  // permission reason ranks first — it's the one still true once
-                  // the selected issue is on screen.
-                  disabledReason={triageItemReason ?? staleReason}
-                  reactions={
-                    canReact ? reactions.data?.comments[c.id] : undefined
-                  }
-                  onToggleReaction={
-                    canReact
-                      ? (content, active) =>
-                          toggleReaction(c.id, content, active)
-                      : undefined
-                  }
-                  reactionsHeld={detailsStale}
-                  reactionsReason={staleReason}
-                />
-              ))}
-              {comments.length === 0 && (
+              {feed.map((e) => e.node)}
+              {feed.length === 0 && (
                 <p className="text-xs text-muted-foreground">
                   No comments yet.
                 </p>

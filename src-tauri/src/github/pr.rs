@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::forge::gitlab::null_to_default;
+use crate::forge::model::{ForgeTimelineEventOut, ForgeUserRef};
 use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
@@ -3919,100 +3920,66 @@ pub async fn gh_pr_reactions(
     Ok(IssueReactions { body, comments })
 }
 
-/// One activity-timeline event on a PR, a tagged union keyed on `kind` (camelCase)
-/// feeding the Conversation tab. The backend maps a GitHub `timelineItems`
-/// `__typename` onto a variant; an unclassifiable node is skipped, never a panic.
-/// Every `actor`/`date`/oid defaults to `""` for GitHub nulls.
-///
-/// `rename_all` renames VARIANT tags only, so `rename_all_fields` is load-bearing
-/// for the TS mirror (`src/lib/git/types.ts`): without it `Merged.commit_oid` reaches
-/// TS as `undefined` and a merged PR silently loses its merge commit.
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum PrTimelineEventOut {
-    /// `HeadRefForcePushedEvent` — the head branch was force-pushed.
-    ForcePushed {
-        before: String,
-        after: String,
-        actor: String,
-        date: String,
-    },
-    /// `LabeledEvent` (`added = true`) / `UnlabeledEvent` (`added = false`).
-    Labeled {
-        label: String,
-        color: String,
-        added: bool,
-        actor: String,
-        date: String,
-    },
-    /// `ReviewRequestedEvent` — `reviewer` is a user login OR a team slug.
-    ReviewRequested {
-        reviewer: String,
-        actor: String,
-        date: String,
-    },
-    /// `ReadyForReviewEvent` — a draft was marked ready.
-    ReadyForReview { actor: String, date: String },
-    /// `ConvertToDraftEvent` — the PR was converted back to a draft.
-    ConvertToDraft { actor: String, date: String },
-    /// `ClosedEvent` — the PR was closed (without merging).
-    Closed { actor: String, date: String },
-    /// `ReopenedEvent` — a closed PR was reopened.
-    Reopened { actor: String, date: String },
-    /// `MergedEvent` — `commit_oid` is the merge commit (may be `None`).
-    Merged {
-        actor: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        commit_oid: Option<String>,
-        date: String,
-    },
-    /// `RenamedTitleEvent` — the PR title changed.
-    Renamed {
-        previous: String,
-        current: String,
-        actor: String,
-        date: String,
-    },
-    /// An approval was given. GitHub surfaces approvals through the review flow
-    /// (they render as review cards), so its own timeline never emits this — it's
-    /// produced by the GitLab (system-note "approved") and Bitbucket (`approval`
-    /// activity) arms, whose approvals carry no reviewable body.
-    Approved { actor: String, date: String },
-    /// A "request changes" verdict without an accompanying review card. Emitted by
-    /// the GitLab (system-note "requested changes") and Bitbucket (`changes_requested`
-    /// activity) arms; GitHub renders its request-changes reviews as cards instead.
-    ChangesRequested { actor: String, date: String },
-    /// A previously-given approval was withdrawn (GitLab system-note "unapproved";
-    /// Bitbucket has no explicit unapproval activity). GitHub never emits it.
-    Unapproved { actor: String, date: String },
-}
+const PR_TIMELINE_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ timelineItems(last:100, itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT, LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, CLOSED_EVENT, REOPENED_EVENT, MERGED_EVENT, RENAMED_TITLE_EVENT]){ nodes{ __typename ... on HeadRefForcePushedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt beforeCommit{oid} afterCommit{oid} } ... on LabeledEvent{ actor{login avatarUrl(size: 48) __typename} createdAt label{name color} } ... on UnlabeledEvent{ actor{login avatarUrl(size: 48) __typename} createdAt label{name color} } ... on ReviewRequestedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt requestedReviewer{ __typename ... on User{login} ... on Team{slug} } } ... on ReadyForReviewEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on ConvertToDraftEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on ClosedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on ReopenedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt } ... on MergedEvent{ actor{login avatarUrl(size: 48) __typename} createdAt commit{oid} } ... on RenamedTitleEvent{ actor{login avatarUrl(size: 48) __typename} createdAt previousTitle currentTitle } } } } } }"#;
 
-const PR_TIMELINE_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ timelineItems(last:100, itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT, LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, CLOSED_EVENT, REOPENED_EVENT, MERGED_EVENT, RENAMED_TITLE_EVENT]){ nodes{ __typename ... on HeadRefForcePushedEvent{ actor{login} createdAt beforeCommit{oid} afterCommit{oid} } ... on LabeledEvent{ actor{login} createdAt label{name color} } ... on UnlabeledEvent{ actor{login} createdAt label{name color} } ... on ReviewRequestedEvent{ actor{login} createdAt requestedReviewer{ __typename ... on User{login} ... on Team{slug} } } ... on ReadyForReviewEvent{ actor{login} createdAt } ... on ConvertToDraftEvent{ actor{login} createdAt } ... on ClosedEvent{ actor{login} createdAt } ... on ReopenedEvent{ actor{login} createdAt } ... on MergedEvent{ actor{login} createdAt commit{oid} } ... on RenamedTitleEvent{ actor{login} createdAt previousTitle currentTitle } } } } } }"#;
-
-/// Map one `timelineItems` node onto a `PrTimelineEventOut`, or `None` when the
+/// Map one `timelineItems` node onto a [`ForgeTimelineEventOut`], or `None` when the
 /// `__typename` is missing/unrecognized (so one odd node can't break the batch).
 /// Every string field defaults to `""` for nulls — ghost actor, gone commit, absent title.
-fn map_timeline_node(node: &serde_json::Value) -> Option<PrTimelineEventOut> {
+///
+/// Shared by the PR and issue timeline reads, so it classifies typenames the PR query
+/// never asks for. A caller's query must select, on each fragment it does request:
+/// `actor{login avatarUrl(size: 48) __typename}` (the unsized default is a 460px
+/// asset for a 16px slot), and on the `source`/`subject`/`canonical`
+/// entity fragments `number title repository{nameWithOwner}` — a reference can point
+/// into another repository, so the number alone can't address it.
+pub(crate) fn map_timeline_node(node: &serde_json::Value) -> Option<ForgeTimelineEventOut> {
     let s = |p: &str| {
         node.pointer(p)
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string()
     };
-    let actor = s("/actor/login");
+    let typename = node.get("__typename").and_then(serde_json::Value::as_str)?;
+    let actor = ForgeUserRef {
+        id: s("/actor/login"),
+        label: s("/actor/login"),
+        avatar_url: s("/actor/avatarUrl"),
+        is_bot: node
+            .pointer("/actor/__typename")
+            .and_then(serde_json::Value::as_str)
+            == Some("Bot"),
+    };
     let date = s("/createdAt");
-    match node.get("__typename").and_then(serde_json::Value::as_str)? {
-        "HeadRefForcePushedEvent" => Some(PrTimelineEventOut::ForcePushed {
+    // A referenced PR/issue under `base` → (kind, number, title, owner/name).
+    let entity = |base: &str| {
+        let kind = match node
+            .pointer(&format!("{base}/__typename"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("PullRequest") => "pr",
+            Some("Issue") => "issue",
+            _ => "",
+        };
+        (
+            kind.to_string(),
+            node.pointer(&format!("{base}/number"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            s(&format!("{base}/title")),
+            s(&format!("{base}/repository/nameWithOwner")),
+        )
+    };
+    match typename {
+        "HeadRefForcePushedEvent" => Some(ForgeTimelineEventOut::ForcePushed {
             before: s("/beforeCommit/oid"),
             after: s("/afterCommit/oid"),
             actor,
             date,
         }),
-        "LabeledEvent" | "UnlabeledEvent" => Some(PrTimelineEventOut::Labeled {
+        "LabeledEvent" | "UnlabeledEvent" => Some(ForgeTimelineEventOut::Labeled {
             label: s("/label/name"),
             color: s("/label/color"),
-            added: node.get("__typename").and_then(serde_json::Value::as_str)
-                == Some("LabeledEvent"),
+            added: typename == "LabeledEvent",
             actor,
             date,
         }),
@@ -4027,34 +3994,121 @@ fn map_timeline_node(node: &serde_json::Value) -> Option<PrTimelineEventOut> {
                     user
                 }
             };
-            Some(PrTimelineEventOut::ReviewRequested {
+            Some(ForgeTimelineEventOut::ReviewRequested {
                 reviewer,
                 actor,
                 date,
             })
         }
-        "ReadyForReviewEvent" => Some(PrTimelineEventOut::ReadyForReview { actor, date }),
-        "ConvertToDraftEvent" => Some(PrTimelineEventOut::ConvertToDraft { actor, date }),
-        "ClosedEvent" => Some(PrTimelineEventOut::Closed { actor, date }),
-        "ReopenedEvent" => Some(PrTimelineEventOut::Reopened { actor, date }),
+        "ReadyForReviewEvent" => Some(ForgeTimelineEventOut::ReadyForReview { actor, date }),
+        "ConvertToDraftEvent" => Some(ForgeTimelineEventOut::ConvertToDraft { actor, date }),
+        "ClosedEvent" => Some(ForgeTimelineEventOut::Closed {
+            actor,
+            // GraphQL sends COMPLETED / NOT_PLANNED / DUPLICATE on issues and nothing
+            // on PRs; the wire contract is lowercase.
+            state_reason: s("/stateReason").to_lowercase(),
+            date,
+        }),
+        "ReopenedEvent" => Some(ForgeTimelineEventOut::Reopened { actor, date }),
         "MergedEvent" => {
             let commit_oid = node
                 .pointer("/commit/oid")
                 .and_then(serde_json::Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
-            Some(PrTimelineEventOut::Merged {
+            Some(ForgeTimelineEventOut::Merged {
                 actor,
                 commit_oid,
                 date,
             })
         }
-        "RenamedTitleEvent" => Some(PrTimelineEventOut::Renamed {
+        "RenamedTitleEvent" => Some(ForgeTimelineEventOut::Renamed {
             previous: s("/previousTitle"),
             current: s("/currentTitle"),
             actor,
             date,
         }),
+        "AssignedEvent" | "UnassignedEvent" => Some(ForgeTimelineEventOut::Assigned {
+            assignee: s("/assignee/login"),
+            added: typename == "AssignedEvent",
+            actor,
+            date,
+        }),
+        "MilestonedEvent" | "DemilestonedEvent" => Some(ForgeTimelineEventOut::Milestoned {
+            milestone: s("/milestoneTitle"),
+            added: typename == "MilestonedEvent",
+            actor,
+            date,
+        }),
+        "CrossReferencedEvent" => {
+            let (source_kind, source_number, source_title, source_repo) = entity("/source");
+            Some(ForgeTimelineEventOut::CrossReferenced {
+                source_kind,
+                source_number,
+                source_title,
+                source_repo,
+                will_close: node
+                    .pointer("/willCloseTarget")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                actor,
+                date,
+            })
+        }
+        "ConnectedEvent" | "DisconnectedEvent" => {
+            // Probed live: on a ConnectedEvent `source` is the issue the event sits on
+            // and `subject` is the linked PR — so prefer `subject`, falling back to
+            // `source` only when it carries no number.
+            let subject = entity("/subject");
+            let (source_kind, source_number, source_title, source_repo) = if subject.1 != 0 {
+                subject
+            } else {
+                entity("/source")
+            };
+            Some(ForgeTimelineEventOut::Connected {
+                source_kind,
+                source_number,
+                source_title,
+                source_repo,
+                added: typename == "ConnectedEvent",
+                actor,
+                date,
+            })
+        }
+        "PinnedEvent" | "UnpinnedEvent" => Some(ForgeTimelineEventOut::Pinned {
+            added: typename == "PinnedEvent",
+            actor,
+            date,
+        }),
+        "LockedEvent" => Some(ForgeTimelineEventOut::Locked {
+            locked: true,
+            // GraphQL's LockReason is an uppercase enum (OFF_TOPIC, TOO_HEATED,
+            // RESOLVED, SPAM); the wire contract is lowercase, like `state_reason`.
+            reason: s("/lockReason").to_lowercase(),
+            actor,
+            date,
+        }),
+        "UnlockedEvent" => Some(ForgeTimelineEventOut::Locked {
+            locked: false,
+            reason: String::new(),
+            actor,
+            date,
+        }),
+        "TransferredEvent" => Some(ForgeTimelineEventOut::Transferred {
+            from_repo: s("/fromRepository/nameWithOwner"),
+            actor,
+            date,
+        }),
+        "MarkedAsDuplicateEvent" => {
+            let (canonical_kind, canonical_number, _, canonical_repo) = entity("/canonical");
+            Some(ForgeTimelineEventOut::MarkedAsDuplicate {
+                canonical_kind,
+                canonical_number,
+                canonical_repo,
+                actor,
+                date,
+            })
+        }
         _ => None,
     }
 }
@@ -4068,7 +4122,7 @@ pub async fn pr_timeline(
     repo_path: &str,
     number: u64,
     lens: Option<&str>,
-) -> AppResult<Vec<PrTimelineEventOut>> {
+) -> AppResult<Vec<ForgeTimelineEventOut>> {
     let (owner, name) = repo_owner_name(repo_path, lens).await?;
     let out = run_gh(
         Some(repo_path),
@@ -5715,7 +5769,7 @@ mod tests {
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
         GhMergeabilityRow, PrMergeability, PrPollInfo, PrStackInfo, PrStackMember,
-        PrTimelineEventOut,
+        ForgeTimelineEventOut,
         batch_check_present, oid_outside_origin_graph, select_fork_pr_match, validate_branch,
         ForkPrMatch, RawForkPr, RawLogin, RawPr,
     };
@@ -7316,22 +7370,36 @@ github.acme.com
         // Force-push → before/after oids + actor + date.
         match node(serde_json::json!({
             "__typename": "HeadRefForcePushedEvent",
-            "actor": {"login": "alice"},
+            "actor": {"login": "alice", "avatarUrl": "https://a/alice.png", "__typename": "User"},
             "createdAt": "2026-05-12T12:01:23Z",
             "beforeCommit": {"oid": "aaa"},
             "afterCommit": {"oid": "bbb"},
         })) {
-            Some(PrTimelineEventOut::ForcePushed {
+            Some(ForgeTimelineEventOut::ForcePushed {
                 before,
                 after,
                 actor,
                 date,
             }) => {
-                assert_eq!((before, after, actor), ("aaa".into(), "bbb".into(), "alice".into()));
+                assert_eq!((before, after), ("aaa".into(), "bbb".into()));
+                // The login fills BOTH id and label (GitHub identifies users by login).
+                assert_eq!((actor.id, actor.label), ("alice".into(), "alice".into()));
+                assert_eq!(actor.avatar_url, "https://a/alice.png");
+                assert!(!actor.is_bot);
                 assert_eq!(date, "2026-05-12T12:01:23Z");
             }
             other => panic!("expected ForcePushed, got {:?}", other.is_some()),
         }
+
+        // A GitHub App actor (`__typename: "Bot"`) is flagged as a bot.
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "LabeledEvent",
+                "actor": {"login": "dependabot", "avatarUrl": "u", "__typename": "Bot"},
+                "createdAt": "d", "label": {"name": "deps", "color": "ededed"},
+            })),
+            Some(ForgeTimelineEventOut::Labeled { actor, .. }) if actor.is_bot
+        ));
 
         // LABELED_EVENT → added = true; UNLABELED_EVENT → added = false.
         match node(serde_json::json!({
@@ -7340,7 +7408,7 @@ github.acme.com
             "createdAt": "d",
             "label": {"name": "bug", "color": "d73a4a"},
         })) {
-            Some(PrTimelineEventOut::Labeled { label, color, added, .. }) => {
+            Some(ForgeTimelineEventOut::Labeled { label, color, added, .. }) => {
                 assert_eq!((label, color, added), ("bug".into(), "d73a4a".into(), true));
             }
             _ => panic!("expected Labeled"),
@@ -7351,7 +7419,7 @@ github.acme.com
                 "actor": {"login": "bot"}, "createdAt": "d",
                 "label": {"name": "bug", "color": "d73a4a"},
             })),
-            Some(PrTimelineEventOut::Labeled { added: false, .. })
+            Some(ForgeTimelineEventOut::Labeled { added: false, .. })
         ));
 
         // Review request: User login and Team slug both land in `reviewer`.
@@ -7360,14 +7428,14 @@ github.acme.com
                 "__typename": "ReviewRequestedEvent", "actor": {"login": "a"}, "createdAt": "d",
                 "requestedReviewer": {"__typename": "User", "login": "carol"},
             })),
-            Some(PrTimelineEventOut::ReviewRequested { reviewer, .. }) if reviewer == "carol"
+            Some(ForgeTimelineEventOut::ReviewRequested { reviewer, .. }) if reviewer == "carol"
         ));
         assert!(matches!(
             node(serde_json::json!({
                 "__typename": "ReviewRequestedEvent", "actor": {"login": "a"}, "createdAt": "d",
                 "requestedReviewer": {"__typename": "Team", "slug": "reviewers"},
             })),
-            Some(PrTimelineEventOut::ReviewRequested { reviewer, .. }) if reviewer == "reviewers"
+            Some(ForgeTimelineEventOut::ReviewRequested { reviewer, .. }) if reviewer == "reviewers"
         ));
         // A null requestedReviewer (deleted entity) → empty reviewer, still classified.
         assert!(matches!(
@@ -7375,17 +7443,17 @@ github.acme.com
                 "__typename": "ReviewRequestedEvent", "actor": {"login": "a"}, "createdAt": "d",
                 "requestedReviewer": serde_json::Value::Null,
             })),
-            Some(PrTimelineEventOut::ReviewRequested { reviewer, .. }) if reviewer.is_empty()
+            Some(ForgeTimelineEventOut::ReviewRequested { reviewer, .. }) if reviewer.is_empty()
         ));
 
-        // Merged with a commit oid; a ghost/null actor defaults to "".
+        // Merged with a commit oid; a ghost/null actor defaults to an empty ref.
         assert!(matches!(
             node(serde_json::json!({
                 "__typename": "MergedEvent", "actor": serde_json::Value::Null, "createdAt": "d",
                 "commit": {"oid": "deadbeef"},
             })),
-            Some(PrTimelineEventOut::Merged { actor, commit_oid: Some(oid), .. })
-                if actor.is_empty() && oid == "deadbeef"
+            Some(ForgeTimelineEventOut::Merged { actor, commit_oid: Some(oid), .. })
+                if actor.label.is_empty() && actor.avatar_url.is_empty() && oid == "deadbeef"
         ));
 
         // Rename carries both titles.
@@ -7394,35 +7462,189 @@ github.acme.com
                 "__typename": "RenamedTitleEvent", "actor": {"login": "a"}, "createdAt": "d",
                 "previousTitle": "old", "currentTitle": "new",
             })),
-            Some(PrTimelineEventOut::Renamed { previous, current, .. })
+            Some(ForgeTimelineEventOut::Renamed { previous, current, .. })
                 if previous == "old" && current == "new"
+        ));
+
+        // Close: GraphQL's uppercase stateReason lands lowercased; a PR close (no
+        // stateReason at all) leaves it empty.
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "ClosedEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "stateReason": "NOT_PLANNED",
+            })),
+            Some(ForgeTimelineEventOut::Closed { state_reason, .. })
+                if state_reason == "not_planned"
+        ));
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "ClosedEvent", "actor": {"login": "a"}, "createdAt": "d",
+            })),
+            Some(ForgeTimelineEventOut::Closed { state_reason, .. }) if state_reason.is_empty()
+        ));
+
+        // Assign / unassign — the paired variant flips `added`.
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "AssignedEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "assignee": {"login": "carol"},
+            })),
+            Some(ForgeTimelineEventOut::Assigned { assignee, added: true, .. })
+                if assignee == "carol"
+        ));
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "UnassignedEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "assignee": {"login": "carol"},
+            })),
+            Some(ForgeTimelineEventOut::Assigned { added: false, .. })
+        ));
+
+        // Milestone / demilestone.
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "MilestonedEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "milestoneTitle": "v1.0",
+            })),
+            Some(ForgeTimelineEventOut::Milestoned { milestone, added: true, .. })
+                if milestone == "v1.0"
+        ));
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "DemilestonedEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "milestoneTitle": "v1.0",
+            })),
+            Some(ForgeTimelineEventOut::Milestoned { added: false, .. })
+        ));
+
+        // Cross-reference: the source's __typename maps to the neutral kind, and the
+        // referring repo travels with it.
+        match node(serde_json::json!({
+            "__typename": "CrossReferencedEvent", "actor": {"login": "a"}, "createdAt": "d",
+            "willCloseTarget": true,
+            "source": {"__typename": "PullRequest", "number": 42, "title": "Fix it",
+                       "repository": {"nameWithOwner": "octocat/other"}},
+        })) {
+            Some(ForgeTimelineEventOut::CrossReferenced {
+                source_kind,
+                source_number,
+                source_title,
+                source_repo,
+                will_close,
+                ..
+            }) => {
+                assert_eq!((source_kind.as_str(), source_number), ("pr", 42));
+                assert_eq!(source_title, "Fix it");
+                assert_eq!(source_repo, "octocat/other");
+                assert!(will_close);
+            }
+            _ => panic!("expected CrossReferenced"),
+        }
+        // An Issue source, no willCloseTarget, and no repository selected → "issue",
+        // false, and an empty repo (never a guessed one).
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "CrossReferencedEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "source": {"__typename": "Issue", "number": 7, "title": "t"},
+            })),
+            Some(ForgeTimelineEventOut::CrossReferenced {
+                source_kind, source_repo, will_close: false, ..
+            }) if source_kind == "issue" && source_repo.is_empty()
+        ));
+
+        // Connected: `subject` is the LINKED entity and wins; `source` is the issue
+        // the event sits on and is only the fallback.
+        match node(serde_json::json!({
+            "__typename": "ConnectedEvent", "actor": {"login": "a"}, "createdAt": "d",
+            "source": {"__typename": "Issue", "number": 7, "title": "the issue",
+                       "repository": {"nameWithOwner": "octocat/self"}},
+            "subject": {"__typename": "PullRequest", "number": 9, "title": "the pr",
+                        "repository": {"nameWithOwner": "octocat/other"}},
+        })) {
+            Some(ForgeTimelineEventOut::Connected {
+                source_kind,
+                source_number,
+                source_repo,
+                added,
+                ..
+            }) => {
+                assert_eq!((source_kind.as_str(), source_number), ("pr", 9));
+                assert_eq!(source_repo, "octocat/other");
+                assert!(added);
+            }
+            _ => panic!("expected Connected"),
+        }
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "DisconnectedEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "source": {"__typename": "Issue", "number": 7, "title": "the issue"},
+            })),
+            Some(ForgeTimelineEventOut::Connected { source_number: 7, added: false, .. })
+        ));
+
+        // Pin / unpin, lock / unlock.
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "PinnedEvent", "actor": {"login": "a"}, "createdAt": "d",
+            })),
+            Some(ForgeTimelineEventOut::Pinned { added: true, .. })
+        ));
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "UnpinnedEvent", "actor": {"login": "a"}, "createdAt": "d",
+            })),
+            Some(ForgeTimelineEventOut::Pinned { added: false, .. })
+        ));
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "LockedEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "lockReason": "TOO_HEATED",
+            })),
+            Some(ForgeTimelineEventOut::Locked { locked: true, reason, .. })
+                if reason == "too_heated"
+        ));
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "UnlockedEvent", "actor": {"login": "a"}, "createdAt": "d",
+            })),
+            Some(ForgeTimelineEventOut::Locked { locked: false, reason, .. })
+                if reason.is_empty()
+        ));
+
+        // Transfer + marked-as-duplicate carry the other repo / canonical entity.
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "TransferredEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "fromRepository": {"nameWithOwner": "octocat/old"},
+            })),
+            Some(ForgeTimelineEventOut::Transferred { from_repo, .. })
+                if from_repo == "octocat/old"
+        ));
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "MarkedAsDuplicateEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "canonical": {"__typename": "Issue", "number": 3,
+                              "repository": {"nameWithOwner": "octocat/other"}},
+            })),
+            Some(ForgeTimelineEventOut::MarkedAsDuplicate {
+                canonical_kind, canonical_number: 3, canonical_repo, ..
+            }) if canonical_kind == "issue" && canonical_repo == "octocat/other"
+        ));
+        // A null canonical (deleted entity) → zeroed number + empty kind/repo, still
+        // classified so the row can say "marked this as a duplicate".
+        assert!(matches!(
+            node(serde_json::json!({
+                "__typename": "MarkedAsDuplicateEvent", "actor": {"login": "a"}, "createdAt": "d",
+                "canonical": serde_json::Value::Null,
+            })),
+            Some(ForgeTimelineEventOut::MarkedAsDuplicate {
+                canonical_kind, canonical_number: 0, canonical_repo, ..
+            }) if canonical_kind.is_empty() && canonical_repo.is_empty()
         ));
 
         // An unrecognized/missing __typename is skipped (None), not a panic.
         assert!(node(serde_json::json!({ "__typename": "SomeOtherEvent" })).is_none());
         assert!(node(serde_json::json!({ "actor": {"login": "a"} })).is_none());
-    }
-
-    #[test]
-    fn merged_timeline_event_wire_shape_is_camel_case() {
-        // Pins the IPC contract with the TS mirror (src/lib/git/types.ts): `commit_oid`
-        // is the enum's only multi-word field, and the frontend reads it as `commitOid`.
-        let merged = serde_json::to_value(PrTimelineEventOut::Merged {
-            actor: "alice".to_string(),
-            commit_oid: Some("deadbeef".to_string()),
-            date: "2026-05-12T12:01:23Z".to_string(),
-        })
-        .expect("Merged serializes");
-        let obj = merged.as_object().expect("Merged is a JSON object");
-        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["actor", "commitOid", "date", "kind"]);
-        assert_eq!(obj["kind"], "merged");
-        assert_eq!(obj["commitOid"], "deadbeef");
-        assert!(
-            obj.get("commit_oid").is_none(),
-            "snake_case field must not ship"
-        );
     }
 
     #[test]

@@ -340,6 +340,7 @@ pub fn run() {
             forge::forge_pr_mergeability,
             forge::forge_pr_list_mergeability,
             forge::forge_pr_timeline,
+            forge::forge_issue_timeline,
             forge::forge_pr_diff,
             forge::forge_pr_commit_diff,
             forge::forge_commit_comments,

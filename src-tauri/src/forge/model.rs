@@ -602,24 +602,173 @@ pub struct ForgeStatus {
     pub implemented: Implemented,
 }
 
-/// A provider user reference for pickers — a stable id plus a human label.
-/// Bitbucket's reviewer picker is the emitter today (id = the braced account
-/// uuid, label = display name / nickname): Bitbucket identity must travel as the
-/// uuid because participant objects never carry `username`, and nicknames aren't
-/// unique — the display string alone can't round-trip a mutation safely.
+/// A provider user reference — a stable id plus a human label — for pickers,
+/// read-only chips, and timeline actors. Bitbucket identity must travel as the
+/// braced account uuid (id) with the display name / nickname as the label:
+/// participant objects never carry `username`, and nicknames aren't unique, so
+/// the display string alone can't round-trip a mutation safely. GitHub and GitLab
+/// put the login/username in both fields.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ForgeUserRef {
     pub id: String,
     pub label: String,
-    /// The user's avatar URL when the provider supplies one (GitLab/Bitbucket
-    /// return it directly). Empty for GitHub, where the picker derives the avatar
-    /// from the login (`<host>/<login>.png`), so we don't spend a field on it.
+    /// The user's avatar URL whenever the source supplies one — GitLab/Bitbucket
+    /// return it on every user, and the GitHub timeline reads `actor.avatarUrl`.
+    /// Empty means the frontend derives it from the login on GitHub
+    /// (`<host>/<login>.png`) and falls back to initials elsewhere, so an emitter
+    /// with no URL to hand leaves it empty rather than guessing one.
     pub avatar_url: String,
-    /// True for a bot requested reviewer (e.g. GitHub Copilot). Bot reviewers are
+    /// True for a bot account — a bot requested reviewer (e.g. GitHub Copilot), or
+    /// a timeline actor whose GraphQL `__typename` is `Bot`. Bot reviewers are
     /// display-only: they are never part of the editable picker's managed set and
     /// the reviewer setters never add or remove them.
     pub is_bot: bool,
+}
+
+/// One activity-timeline event on a merge/pull request or an issue, a tagged union
+/// keyed on `kind` (camelCase). The backend maps a GitHub `timelineItems`
+/// `__typename` (or a GitLab/Bitbucket event) onto a variant; an unclassifiable node
+/// is skipped, never a panic. Every `date`/string defaults to `""` for provider
+/// nulls, so a field is absent-as-empty rather than missing — `Merged.commit_oid` is
+/// the one exception, an `Option` that is genuinely absent from the wire when unset.
+///
+/// `rename_all` renames VARIANT tags only, so `rename_all_fields` is load-bearing
+/// for the TS mirror (`src/lib/git/types.ts`): without it `Merged.commit_oid` reaches
+/// TS as `undefined` and a merged PR silently loses its merge commit.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ForgeTimelineEventOut {
+    /// `HeadRefForcePushedEvent` — the head branch was force-pushed.
+    ForcePushed {
+        before: String,
+        after: String,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `LabeledEvent` (`added = true`) / `UnlabeledEvent` (`added = false`).
+    Labeled {
+        label: String,
+        color: String,
+        added: bool,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `ReviewRequestedEvent` — `reviewer` is a user login OR a team slug.
+    ReviewRequested {
+        reviewer: String,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `ReadyForReviewEvent` — a draft was marked ready.
+    ReadyForReview { actor: ForgeUserRef, date: String },
+    /// `ConvertToDraftEvent` — the PR was converted back to a draft.
+    ConvertToDraft { actor: ForgeUserRef, date: String },
+    /// `ClosedEvent` — the PR/issue was closed (without merging). `state_reason` is
+    /// GitHub's issue close reason lowercased ("completed" / "not_planned" /
+    /// "duplicate"); `""` for PRs and for the other providers, which report none.
+    Closed {
+        actor: ForgeUserRef,
+        state_reason: String,
+        date: String,
+    },
+    /// `ReopenedEvent` — a closed PR/issue was reopened.
+    Reopened { actor: ForgeUserRef, date: String },
+    /// `MergedEvent` — `commit_oid` is the merge commit (may be `None`).
+    Merged {
+        actor: ForgeUserRef,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commit_oid: Option<String>,
+        date: String,
+    },
+    /// `RenamedTitleEvent` — the title changed.
+    Renamed {
+        previous: String,
+        current: String,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// An approval was given. GitHub surfaces approvals through the review flow
+    /// (they render as review cards), so its own timeline never emits this — it's
+    /// produced by the GitLab (system-note "approved") and Bitbucket (`approval`
+    /// activity) arms, whose approvals carry no reviewable body.
+    Approved { actor: ForgeUserRef, date: String },
+    /// A "request changes" verdict without an accompanying review card. Emitted by
+    /// the GitLab (system-note "requested changes") and Bitbucket (`changes_requested`
+    /// activity) arms; GitHub renders its request-changes reviews as cards instead.
+    ChangesRequested { actor: ForgeUserRef, date: String },
+    /// A previously-given approval was withdrawn (GitLab system-note "unapproved";
+    /// Bitbucket has no explicit unapproval activity). GitHub never emits it.
+    Unapproved { actor: ForgeUserRef, date: String },
+    /// `AssignedEvent` (`added = true`) / `UnassignedEvent` (`added = false`).
+    Assigned {
+        assignee: String,
+        added: bool,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `MilestonedEvent` (`added = true`) / `DemilestonedEvent` (`added = false`).
+    Milestoned {
+        milestone: String,
+        added: bool,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `CrossReferencedEvent` — another PR/issue mentioned this one. `source_kind` is
+    /// `"pr"` / `"issue"` (`""` when unrecognized) and `source_repo` is the referring
+    /// entity's `owner/name`: a cross-reference can live in ANOTHER repository, so the
+    /// number alone can't address it.
+    CrossReferenced {
+        source_kind: String,
+        source_number: u64,
+        source_title: String,
+        source_repo: String,
+        will_close: bool,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `ConnectedEvent` (`added = true`) / `DisconnectedEvent` (`added = false`) — a
+    /// PR/issue link was made or broken. Same `source_*` shape (and cross-repo caveat)
+    /// as [`ForgeTimelineEventOut::CrossReferenced`].
+    Connected {
+        source_kind: String,
+        source_number: u64,
+        source_title: String,
+        source_repo: String,
+        added: bool,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `PinnedEvent` (`added = true`) / `UnpinnedEvent` (`added = false`).
+    Pinned {
+        added: bool,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `LockedEvent` (`locked = true`) / `UnlockedEvent` (`locked = false`). `reason`
+    /// is GitHub's lock reason lowercased, `""` when none was given or on unlock.
+    Locked {
+        locked: bool,
+        reason: String,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `TransferredEvent` — the issue moved here from `from_repo` (`owner/name`).
+    Transferred {
+        from_repo: String,
+        actor: ForgeUserRef,
+        date: String,
+    },
+    /// `MarkedAsDuplicateEvent` — closed as a duplicate of the canonical entity.
+    /// `canonical_repo` carries its `owner/name` for the same cross-repo reason as
+    /// [`ForgeTimelineEventOut::CrossReferenced`].
+    MarkedAsDuplicate {
+        canonical_kind: String,
+        canonical_number: u64,
+        canonical_repo: String,
+        actor: ForgeUserRef,
+        date: String,
+    },
 }
 
 /// A reviewer who has submitted a verdict (GitLab approval/requested-changes,
@@ -776,6 +925,105 @@ mod tests {
             namespace_set(["".to_string(), "octocat".to_string()]),
             vec!["octocat".to_string()]
         );
+    }
+
+    fn actor(login: &str) -> ForgeUserRef {
+        ForgeUserRef {
+            id: login.to_string(),
+            label: login.to_string(),
+            avatar_url: format!("https://avatars/{login}.png"),
+            is_bot: false,
+        }
+    }
+
+    /// Pins the IPC contract with the TS mirror (src/lib/git/types.ts): `commit_oid` is
+    /// the variant's multi-word field (read as `commitOid`), and `actor` is a nested
+    /// object whose own keys are camelCase too.
+    #[test]
+    fn merged_timeline_event_wire_shape_is_camel_case() {
+        let merged = serde_json::to_value(ForgeTimelineEventOut::Merged {
+            actor: actor("alice"),
+            commit_oid: Some("deadbeef".to_string()),
+            date: "2026-05-12T12:01:23Z".to_string(),
+        })
+        .expect("Merged serializes");
+        let obj = merged.as_object().expect("Merged is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["actor", "commitOid", "date", "kind"]);
+        assert_eq!(obj["kind"], "merged");
+        assert_eq!(obj["commitOid"], "deadbeef");
+        assert!(
+            obj.get("commit_oid").is_none(),
+            "snake_case field must not ship"
+        );
+        let mut actor_keys: Vec<&str> = obj["actor"]
+            .as_object()
+            .expect("actor is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        actor_keys.sort_unstable();
+        assert_eq!(actor_keys, ["avatarUrl", "id", "isBot", "label"]);
+    }
+
+    /// The ref-carrying variants have the most multi-word fields, so they're the
+    /// tightest check that `rename_all_fields` still covers a NEW variant.
+    #[test]
+    fn cross_referenced_wire_shape_is_camel_case() {
+        let value = serde_json::to_value(ForgeTimelineEventOut::CrossReferenced {
+            source_kind: "pr".to_string(),
+            source_number: 42,
+            source_title: "Fix the thing".to_string(),
+            source_repo: "octocat/hello".to_string(),
+            will_close: true,
+            actor: actor("alice"),
+            date: "2026-05-12T12:01:23Z".to_string(),
+        })
+        .expect("CrossReferenced serializes");
+        let obj = value.as_object().expect("CrossReferenced is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "actor",
+                "date",
+                "kind",
+                "sourceKind",
+                "sourceNumber",
+                "sourceRepo",
+                "sourceTitle",
+                "willClose",
+            ]
+        );
+        assert_eq!(obj["kind"], "crossReferenced");
+    }
+
+    /// `state_reason` always ships (no skip), so the issue view can distinguish a
+    /// "closed as not planned" from a plain close without a second read.
+    #[test]
+    fn closed_timeline_event_serializes_state_reason() {
+        let value = serde_json::to_value(ForgeTimelineEventOut::Closed {
+            actor: actor("alice"),
+            state_reason: "not_planned".to_string(),
+            date: "2026-05-12T12:01:23Z".to_string(),
+        })
+        .expect("Closed serializes");
+        let obj = value.as_object().expect("Closed is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["actor", "date", "kind", "stateReason"]);
+        assert_eq!(obj["kind"], "closed");
+        assert_eq!(obj["stateReason"], "not_planned");
+        // The empty (PR / non-GitHub) case still ships the key.
+        let empty = serde_json::to_value(ForgeTimelineEventOut::Closed {
+            actor: actor("alice"),
+            state_reason: String::new(),
+            date: String::new(),
+        })
+        .expect("Closed serializes");
+        assert_eq!(empty["stateReason"], "");
     }
 
     #[test]

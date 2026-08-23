@@ -1,15 +1,27 @@
 import {
   ArrowCounterClockwiseIcon,
   ArrowsClockwiseIcon,
+  ArrowsLeftRightIcon,
   CaretDownIcon,
   CaretRightIcon,
   CheckCircleIcon,
+  FlagIcon,
   GitBranchIcon,
   GitCommitIcon,
   GitMergeIcon,
   GitPullRequestIcon,
+  LinkBreakIcon,
+  LinkIcon,
+  LockSimpleIcon,
+  LockSimpleOpenIcon,
   PencilSimpleIcon,
+  ProhibitIcon,
+  PushPinIcon,
+  PushPinSlashIcon,
+  StackIcon,
   TagIcon,
+  UserMinusIcon,
+  UserPlusIcon,
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
@@ -19,9 +31,11 @@ import {
   type ReactNode,
   useState,
 } from "react";
+import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { RelativeTime } from "@/components/relative-time";
 import type { CommitRow } from "@/features/conversations/CommitsList";
-import type { PrTimelineEvent } from "@/lib/git/types";
+import { useActiveForgeGhHost } from "@/lib/git/host";
+import type { ForgeTimelineEvent } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -124,16 +138,55 @@ function RailIcon({
   );
 }
 
-/** Presentation (icon, tone, verb phrase, actor) for one timeline event. Icon +
- *  word — never color-alone. Returns the pieces so the row can render actor +
- *  time consistently. `label` is the accessible verb; `extra` is optional
- *  trailing content (e.g. a label color dot). */
-function eventPresentation(event: PrTimelineEvent): {
+/** A referenced PR/issue a timeline row points at. `repo` is its `owner/name`, or
+ *  `""` when the provider didn't say — a reference can live in ANOTHER repository,
+ *  so the number alone can't address it. */
+interface ReferenceChipData {
+  /** `"pr"` / `"issue"`, or `""` when the entity's type is unknown. */
+  kind: string;
+  number: number;
+  title: string;
+  repo: string;
+}
+
+interface EventPresentation {
   Icon: typeof GitCommitIcon;
   tone?: string;
   label: string;
   colorDot?: string;
-} {
+  /** Rendered after the label as a compact `#N` + title reference. */
+  refChip?: ReferenceChipData;
+}
+
+/** Per-reason presentation for a `closed` event (GitHub issues only); the plain PR
+ *  close and every unknown reason fall back to the base close in `eventPresentation`. */
+const CLOSE_REASON_PRESENTATION: Partial<Record<string, EventPresentation>> = {
+  // Completed is a resolution, so it takes the terminal-success token rather than
+  // the destructive close.
+  completed: {
+    Icon: CheckCircleIcon,
+    tone: "text-merged",
+    label: "closed this as completed",
+  },
+  duplicate: {
+    Icon: XCircleIcon,
+    tone: "text-destructive",
+    label: "closed this as a duplicate",
+  },
+  // Not-planned is a dismissal rather than a resolution, so it reads muted — the
+  // prohibit glyph, not the destructive X.
+  not_planned: {
+    Icon: ProhibitIcon,
+    tone: "text-muted-foreground",
+    label: "closed this as not planned",
+  },
+};
+
+/** Presentation (icon, tone, verb phrase, actor) for one timeline event. Icon +
+ *  word — never color-alone. Returns the pieces so the row can render actor +
+ *  time consistently. `label` is the accessible verb; `extra` is optional
+ *  trailing content (e.g. a label color dot). */
+function eventPresentation(event: ForgeTimelineEvent): EventPresentation {
   switch (event.kind) {
     case "forcePushed":
       return {
@@ -178,11 +231,13 @@ function eventPresentation(event: PrTimelineEvent): {
         label: "withdrew their approval",
       };
     case "closed":
-      return {
-        Icon: XCircleIcon,
-        tone: "text-destructive",
-        label: "closed this",
-      };
+      return (
+        CLOSE_REASON_PRESENTATION[event.stateReason] ?? {
+          Icon: XCircleIcon,
+          tone: "text-destructive",
+          label: "closed this",
+        }
+      );
     case "reopened":
       return {
         Icon: CheckCircleIcon,
@@ -202,19 +257,184 @@ function eventPresentation(event: PrTimelineEvent): {
         Icon: GitBranchIcon,
         label: `renamed this from ${event.previous} to ${event.current}`,
       };
+    case "assigned": {
+      // An actor assigning themselves reads as "self-assigned", matching how every
+      // forge phrases it; `actor.label` and `assignee` are both the login.
+      const self = event.actor.label === event.assignee;
+      if (event.added) {
+        return {
+          Icon: UserPlusIcon,
+          label: self ? "self-assigned this" : `assigned ${event.assignee}`,
+        };
+      }
+      return {
+        Icon: UserMinusIcon,
+        label: self
+          ? "removed their assignment"
+          : `unassigned ${event.assignee}`,
+      };
+    }
+    case "milestoned":
+      return {
+        Icon: FlagIcon,
+        label: event.added
+          ? `added this to the ${event.milestone} milestone`
+          : `removed this from the ${event.milestone} milestone`,
+      };
+    case "crossReferenced":
+      // A deleted or inaccessible referent comes back as number 0 — say the plain
+      // thing rather than offer a chip that leads nowhere.
+      if (!event.sourceNumber) {
+        return { Icon: LinkIcon, label: "mentioned this" };
+      }
+      return {
+        Icon: LinkIcon,
+        label: "mentioned this in",
+        refChip: {
+          kind: event.sourceKind,
+          number: event.sourceNumber,
+          title: event.sourceTitle,
+          repo: event.sourceRepo,
+        },
+      };
+    case "connected":
+      if (!event.sourceNumber) {
+        return {
+          Icon: event.added ? LinkIcon : LinkBreakIcon,
+          label: event.added ? "linked this" : "unlinked this",
+        };
+      }
+      return {
+        Icon: event.added ? LinkIcon : LinkBreakIcon,
+        label: event.added ? "linked" : "unlinked",
+        refChip: {
+          kind: event.sourceKind,
+          number: event.sourceNumber,
+          title: event.sourceTitle,
+          repo: event.sourceRepo,
+        },
+      };
+    case "pinned":
+      return {
+        Icon: event.added ? PushPinIcon : PushPinSlashIcon,
+        label: event.added ? "pinned this" : "unpinned this",
+      };
+    case "locked":
+      if (!event.locked) {
+        return {
+          Icon: LockSimpleOpenIcon,
+          label: "unlocked this conversation",
+        };
+      }
+      return {
+        Icon: LockSimpleIcon,
+        label: event.reason
+          ? `locked this conversation as ${event.reason.replaceAll("_", " ")}`
+          : "locked this conversation",
+      };
+    case "transferred":
+      return {
+        Icon: ArrowsLeftRightIcon,
+        label: event.fromRepo
+          ? `transferred this from ${event.fromRepo}`
+          : "transferred this from another repository",
+      };
+    case "markedAsDuplicate":
+      if (!event.canonicalNumber) {
+        return { Icon: StackIcon, label: "marked this as a duplicate" };
+      }
+      return {
+        Icon: StackIcon,
+        label: "marked this as a duplicate of",
+        refChip: {
+          kind: event.canonicalKind,
+          number: event.canonicalNumber,
+          title: "",
+          repo: event.canonicalRepo,
+        },
+      };
   }
 }
 
-/** A calm, GitHub-timeline-density event row: rail + icon + actor + muted verb
- *  phrase + relative time. */
-export function TimelineEventRow({ event }: { event: PrTimelineEvent }) {
-  const { Icon, tone, label, colorDot } = eventPresentation(event);
+/** The compact `owner/name#N` + title reference a cross-reference / link / duplicate
+ *  row points at. Interactive only when the caller can navigate there AND the ref is
+ *  in the viewed repo: a cross-repo number would drill into the wrong entity, so it
+ *  renders as text carrying its repo prefix instead. */
+function ReferenceChip({
+  chip,
+  onOpenRef,
+  selfRepo,
+}: {
+  chip: ReferenceChipData;
+  onOpenRef?: (kind: "pr" | "issue", number: number) => void;
+  selfRepo?: string;
+}) {
+  const sameRepo =
+    chip.repo === "" || chip.repo.toLowerCase() === selfRepo?.toLowerCase();
+  const kind = chip.kind === "pr" || chip.kind === "issue" ? chip.kind : null;
+  const ref = `${sameRepo ? "" : chip.repo}#${chip.number}`;
+  const body = (
+    <>
+      <span className="shrink-0 font-mono">{ref}</span>
+      {chip.title && (
+        <span className="min-w-0 truncate" onMouseEnter={clipTitle(chip.title)}>
+          {chip.title}
+        </span>
+      )}
+    </>
+  );
+  if (!onOpenRef || !kind || !sameRepo) {
+    return <span className="flex min-w-0 items-center gap-1">{body}</span>;
+  }
+  return (
+    // No `title` here: the inner span's clipTitle sets title="" when the text isn't
+    // clipped, and an empty title on a descendant SUPPRESSES the ancestor's tooltip
+    // rather than deferring to it — the clipped-text tooltip is the one that matters.
+    <button
+      type="button"
+      onClick={() => onOpenRef(kind, chip.number)}
+      className="flex min-w-0 cursor-pointer items-center gap-1 text-primary underline-offset-2 outline-none hover:underline focus-visible:ring-1 focus-visible:ring-ring/50"
+    >
+      {body}
+    </button>
+  );
+}
+
+/** A calm, GitHub-timeline-density event row: rail + icon + actor avatar + actor +
+ *  muted verb phrase + relative time. The avatar is decorative — the login is right
+ *  beside it, and a metadata row must not add a tab stop per event. */
+export function TimelineEventRow({
+  event,
+  onOpenRef,
+  selfRepo,
+}: {
+  event: ForgeTimelineEvent;
+  /** Drill into a referenced PR/issue from a reference chip. Without it the chip
+   *  stays plain text. */
+  onOpenRef?: (kind: "pr" | "issue", number: number) => void;
+  /** The viewed repo's `owner/name`, so a cross-repo reference can be told apart
+   *  from a local one and rendered non-interactive. */
+  selfRepo?: string;
+}) {
+  const { Icon, tone, label, colorDot, refChip } = eventPresentation(event);
+  const ghHost = useActiveForgeGhHost();
   return (
     <div className="flex items-start gap-2 text-xs">
       <RailIcon Icon={Icon} tone={tone} label={label} />
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 py-0.5 text-muted-foreground">
-        {event.actor && (
-          <span className="font-medium text-foreground">{event.actor}</span>
+        {event.actor.label && (
+          <>
+            <ForgeUserAvatar
+              user={event.actor}
+              ghHost={ghHost}
+              size="sm"
+              decorative
+              className="size-4"
+            />
+            <span className="font-medium text-foreground">
+              {event.actor.label}
+            </span>
+          </>
         )}
         {colorDot && (
           <span
@@ -226,6 +446,13 @@ export function TimelineEventRow({ event }: { event: PrTimelineEvent }) {
         <span className="min-w-0 truncate" onMouseEnter={clipTitle(label)}>
           {label}
         </span>
+        {refChip && (
+          <ReferenceChip
+            chip={refChip}
+            onOpenRef={onOpenRef}
+            selfRepo={selfRepo}
+          />
+        )}
         {parseableDate(event.date) && (
           <span className="shrink-0 text-muted-foreground/80">
             · <RelativeTime date={event.date} />
