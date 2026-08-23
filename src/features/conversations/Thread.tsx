@@ -22,6 +22,7 @@ import { useActiveForgeGhHost, useActiveGhHost } from "@/lib/git/host";
 import type { PrThreadOut, Reaction, RepoLabel } from "@/lib/git/types";
 import { CommentEditor } from "./CommentEditor";
 import { ReactionBar } from "./ReactionBar";
+import type { MentionSource } from "./useMentionCandidates";
 
 /**
  * Shared conversation primitives for any GitHub thread surface (pull requests,
@@ -101,6 +102,7 @@ export function Thread({
   renderBody,
   copyMarkdown,
   disabledReason,
+  mentions,
 }: {
   thread: PrThreadOut;
   onQuote?: () => void;
@@ -142,6 +144,9 @@ export function Thread({
   /** Why `reactionsHeld` holds — the bar shows and announces it on every control
    *  it disables. Absent leaves a plain disable no viewer can interrogate. */
   reactionsReason?: string | null;
+  /** Opt in to `@`/`#`/`!` autocomplete in the edit-in-place editor — only
+   *  surfaces whose forge autolinks the completed reference pass one. */
+  mentions?: MentionSource;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -276,6 +281,7 @@ export function Thread({
           }}
           onCancel={() => setEditing(false)}
           textareaClassName="max-h-48 min-h-16 resize-y font-mono"
+          mentions={mentions}
         />
       ) : minimized && !expanded ? (
         <button

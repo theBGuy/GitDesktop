@@ -2,6 +2,7 @@ import { type KeyboardEvent, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { useCreateReviewThread } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
@@ -55,6 +56,7 @@ export function ReviewComposer({
   const [pending, setPending] = useState(false);
   const createThread = useCreateReviewThread(repoPath, lens);
   const addDraft = useAddReviewDraft(repoPath, lens, number);
+  const mentions = useMentionCandidates({ repoPath, lens, provider });
 
   // The multi-line range, normalized: [from, line] with from <= line.
   const rangeFrom = fromLine !== undefined && fromLine < line ? fromLine : line;
@@ -183,6 +185,7 @@ export function ReviewComposer({
         autoFocus
         rows={3}
         textareaClassName="max-h-48 min-h-16 resize-y"
+        mentions={mentions}
       />
       <div className="flex items-center gap-2">
         {canCreateThread && (

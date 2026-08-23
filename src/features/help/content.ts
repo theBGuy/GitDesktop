@@ -818,7 +818,19 @@ Comments, replies, edits, and descriptions use a Markdown editor with **Write / 
 tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and bulleted
 / numbered / task lists, with {{key:mod+b}} / {{key:mod+i}} / {{key:mod+k}}); press
 {{key:mod+enter}} to submit a comment or save an edit. The same editor is everywhere
-you write Markdown — issues, discussions, and release notes.
+you write Markdown — issues, discussions, and release notes. On **GitHub** and
+**GitLab** repos, typing **@** suggests people and **#** suggests issues and pull
+requests (on GitLab, **#** covers issues and **!** covers merge requests). That works
+in the comment box at the bottom of a pull request, issue, discussion, or commit, and
+in replies, edits, line comments on a diff, and release notes; arrow keys move through
+the list, Enter or Tab accepts, and Esc dismisses it. The comment box itself folds to a
+one-line strip when you want more of the thread on screen: the caret at the left of its
+button row collapses it, and clicking the strip (or starting a quote reply) opens it
+again with the cursor in the editor. The caret keeps that slot in both states, so
+collapsing leaves the pointer on the control that opens the box back up. Folded, the
+surface's own actions stay on the strip and a saved draft shows its first line there;
+the choice is remembered across every conversation surface and across restarts, and the
+command palette's **Collapse or expand the comment box** toggles it too.
 
 ## Conflicts with the base branch
 
@@ -1317,7 +1329,9 @@ add labels, **close / reopen** (closing asks first; either way your drafted comm
 alongside), **lock**, and **transfer** an issue to another repo.
 The comment box sits at the bottom of the issue,
 past the side rail, and the command palette's **Focus the comment box** jumps straight
-to it — no default shortcut, so give it one in **Settings → Keyboard**.
+to it — no default shortcut, so give it one in **Settings → Keyboard**. It folds to a
+one-line strip and completes **@** mentions and **#** references the same way it does on
+the Pull Requests tab.
 
 - **Sub-issues** — break an issue into a parent/child checklist with completion tracking.
 - **Dependencies** — link issues as blocked-by / blocking.
@@ -1453,7 +1467,9 @@ The **Discussions** tab ({{kbd:tab-discussions}}, in the More ▾ menu) browses 
 part in GitHub Discussions for the repo. (Discussions must be enabled on the repo.)
 
 - Read **threaded conversations** — top-level comments with nested replies — and post,
-  edit, delete, or hide comments with the Markdown editor.
+  edit, delete, or hide comments with the Markdown editor. The comment box folds to a
+  one-line strip and completes **@** mentions and **#** references the same way it does
+  on the Pull Requests tab.
 - In a Q&A discussion, **mark a reply as the answer**.
 - Add **reactions** and upvotes. The upvote chip stays keyboard-reachable while a vote is
   being recorded, or while the discussion you picked is still loading, and says what it's

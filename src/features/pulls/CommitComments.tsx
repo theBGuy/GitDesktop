@@ -7,6 +7,7 @@ import { Markdown } from "@/components/ui/markdown";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import { Thread } from "@/features/conversations/Thread";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
 import type { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
@@ -14,6 +15,7 @@ import {
   useCreateCommitComment,
   useDeleteCommitComment,
   useEditCommitComment,
+  useForgeStatus,
 } from "@/lib/git/queries";
 import type {
   CommitCommentOut,
@@ -255,6 +257,14 @@ export function CommitComments({
   const createComment = useCreateCommitComment(repoPath, lens);
   const editComment = useEditCommitComment(repoPath, lens);
   const deleteComment = useDeleteCommitComment(repoPath, lens);
+  // The pane takes `remoteLabel`, not the provider, and which triggers autolink
+  // is a per-forge fact — read it from the shared forge status.
+  const forge = useForgeStatus(repoPath);
+  const mentions = useMentionCandidates({
+    repoPath,
+    lens,
+    provider: forge.data?.provider,
+  });
 
   const [deletingId, setDeletingId] = useState<string | null>(null);
   // Identity is the same triple the comments are read and written under.
@@ -374,6 +384,7 @@ export function CommitComments({
                     ? () => setDeletingId(c.id)
                     : undefined
                 }
+                mentions={mentions}
               />
             ))}
 
@@ -418,6 +429,7 @@ export function CommitComments({
                             ? () => setDeletingId(c.id)
                             : undefined
                         }
+                        mentions={mentions}
                       />
                     </div>
                   );
@@ -442,6 +454,7 @@ export function CommitComments({
           onChange={draft.set}
           onSubmit={submit}
           submitLabel="Comment"
+          mentions={mentions}
           busy={busy}
           reason={composerReason}
         />
@@ -521,6 +534,7 @@ export function CommitLineComposer({
   lens: RemoteLens;
 }) {
   const createComment = useCreateCommitComment(repoPath, lens);
+  const mentions = useMentionCandidates({ repoPath, lens, provider });
   const [body, setBody] = useState("");
 
   // The multi-line range, normalized: [from, line] with from <= line.
@@ -599,6 +613,7 @@ export function CommitLineComposer({
         autoFocus
         rows={3}
         textareaClassName="max-h-48 min-h-16 resize-y"
+        mentions={mentions}
       />
       <div className="flex items-center gap-2">
         <DisabledReasonButton

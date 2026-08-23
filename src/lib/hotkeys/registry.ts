@@ -199,6 +199,12 @@ export const ACTIONS = [
     // it ships without spending a chord. Users can bind a key.
     defaultBinding: null,
   },
+  {
+    id: "toggle-comment-composer",
+    label: "Collapse or expand the comment box",
+    category: "Navigation",
+    defaultBinding: null,
+  },
 
   // Repository
   {

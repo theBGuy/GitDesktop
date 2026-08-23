@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { useAppForm } from "@/lib/form";
 import {
   useBranches,
@@ -111,6 +112,13 @@ export function CreateReleaseDialog({
   // provider with an auto-changelog API — gates the `gh` call in the AI hook.
   const isGitHub =
     releaseProvider !== "gitlab" && releaseProvider !== "bitbucket";
+  // Release notes autolink the same `@`/`#`/`!` references a comment does.
+  // Releases are repo-wide, so the candidate lists come off origin.
+  const mentions = useMentionCandidates({
+    repoPath,
+    lens: "origin",
+    provider: releaseProvider,
+  });
   const status = useRepoStatus(repoPath);
   const tagList = useTagList(repoPath);
   const branches = useBranches(repoPath);
@@ -426,6 +434,7 @@ export function CreateReleaseDialog({
                 // No `rows`/`resize-y` in fill mode: the explicit floor plus
                 // `flex-1` set the height, and a manual drag fights the flex sizing.
                 textareaClassName="min-h-32 font-mono"
+                mentions={mentions}
                 actions={
                   // GitLab's only generator is the AI one — with AI hidden the
                   // menu would hold a single disabled item, so hide it entirely.

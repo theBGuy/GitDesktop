@@ -5,6 +5,7 @@ import {
   hasVisibleBody,
   Thread,
 } from "@/features/conversations/Thread";
+import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import type {
@@ -200,6 +201,7 @@ export function PrActivityFeed({
   onToggleReaction,
   reactionsHeld = false,
   reactionsReason,
+  mentions,
 }: {
   pr: PrDetails;
   timeline: PrTimelineEvent[] | undefined;
@@ -257,6 +259,10 @@ export function PrActivityFeed({
   /** Why `reactionsHeld` holds — shown and announced on every control it
    *  disables. Absent leaves a plain disable no viewer can interrogate. */
   reactionsReason?: string | null;
+  /** Opt in to `@`/`#`/`!` autocomplete in every editor this feed opens (comment
+   *  edits, review-thread replies) — only surfaces whose forge autolinks the
+   *  completed reference pass one. */
+  mentions?: MentionSource;
 }) {
   const {
     renderedReviews,
@@ -374,6 +380,7 @@ export function PrActivityFeed({
                 : undefined
             }
             copyMarkdown={copyMarkdown}
+            mentions={mentions}
           />
           {stale && <StaleReviewMarker commitsSince={commitsSince(r.date)} />}
           {ownThreads.length > 0 && (
@@ -397,6 +404,7 @@ export function PrActivityFeed({
                 provider={providerKey}
                 apply={suggestionApply}
                 fileDiffLookup={fileDiffLookup}
+                mentions={mentions}
                 revealThreadId={revealThreadId}
                 onRevealed={() => setRevealThreadId(null)}
               />
@@ -449,6 +457,7 @@ export function PrActivityFeed({
                 ? (content, active) => onToggleReaction(c.id, content, active)
                 : undefined
             }
+            mentions={mentions}
           />
         </div>
       ),

@@ -39,6 +39,7 @@ import {
   hasVisibleBody,
   Thread,
 } from "@/features/conversations/Thread";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
@@ -187,6 +188,7 @@ export function RemoteIssueView({
   const canTrackTime = forgeFeatureReady(forge.data, "timeTracking");
   const canLinkIssues = forgeFeatureReady(forge.data, "issueLinks");
   const details = useIssueDetails(repoPath, number, lens);
+  const mentions = useMentionCandidates({ repoPath, lens, provider });
   const comment = useCommentIssue(repoPath, lens);
   const closeIssue = useCloseIssue(repoPath, lens);
   const reopenIssue = useReopenIssue(repoPath, lens);
@@ -1023,6 +1025,7 @@ export function RemoteIssueView({
                   }
                   reactionsHeld={detailsStale}
                   reactionsReason={staleReason}
+                  mentions={mentions}
                 />
               ))}
               {comments.length === 0 && (
@@ -1072,6 +1075,7 @@ export function RemoteIssueView({
           value={compose.value}
           onChange={compose.set}
           onSubmit={submitComment}
+          mentions={mentions}
           submitLabel="Comment"
           busy={busy}
           reason={composerReason}
