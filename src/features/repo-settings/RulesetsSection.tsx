@@ -129,9 +129,9 @@ function rulesetToDraft(rs: RulesetFull): Draft {
   const byType = (t: string) => rules.find((r) => r.type === t);
   const pr = byType("pull_request")?.parameters ?? {};
   const checks = byType("required_status_checks")?.parameters ?? {};
-  // A non-integer coercion (NaN) is the one stored count that must not seed the
-  // number Input: it renders blank and serializes back as null. The >= 0 floor is
-  // the only other normalization — a negative count is unproducible and invalid.
+  // The number Input seeds only from a whole count of 0 or more; anything else
+  // (NaN, a fraction, Infinity, a negative) falls back to 1. draftToBody refuses
+  // anything but a whole 0-10 on save, so no rejected shape reaches the wire.
   const approvals = Number(pr.required_approving_review_count ?? 1);
   return {
     name: rs.name ?? "",
