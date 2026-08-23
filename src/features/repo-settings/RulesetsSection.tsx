@@ -129,9 +129,9 @@ function rulesetToDraft(rs: RulesetFull): Draft {
   const byType = (t: string) => rules.find((r) => r.type === t);
   const pr = byType("pull_request")?.parameters ?? {};
   const checks = byType("required_status_checks")?.parameters ?? {};
-  // Seeds only a count the editor's own input accepts (a whole 0–10): anything
-  // else would reach the number Input as NaN or out of range and serialize back
-  // as null, so it falls back to the same 1 an absent value seeds.
+  // A non-integer coercion (NaN) is the one stored count that must not seed the
+  // number Input: it renders blank and serializes back as null. The >= 0 floor is
+  // the only other normalization — a negative count is unproducible and invalid.
   const approvals = Number(pr.required_approving_review_count ?? 1);
   return {
     name: rs.name ?? "",
@@ -142,10 +142,7 @@ function rulesetToDraft(rs: RulesetFull): Draft {
         ? include.map((p) => p.replace(/^refs\/heads\//, "")).join("\n")
         : "",
     requirePr: !!byType("pull_request"),
-    approvals:
-      Number.isInteger(approvals) && approvals >= 0 && approvals <= 10
-        ? approvals
-        : 1,
+    approvals: Number.isInteger(approvals) && approvals >= 0 ? approvals : 1,
     dismissStale: !!pr.dismiss_stale_reviews_on_push,
     codeOwner: !!pr.require_code_owner_review,
     lastPush: !!pr.require_last_push_approval,
@@ -174,11 +171,11 @@ const REF_INCLUDES: Record<Draft["refScope"], (d: Draft) => string[]> = {
 
 type StoredRule = NonNullable<RulesetFull["rules"]>[number];
 
-/** The stored rules, normalized: a non-array `rules` or an element without a
- *  string `type` throws on the render path, where the seed runs inside a useMemo
- *  with no toast to catch it. Neither shape is reachable from GitHub, which types
- *  every rule — and a typeless element is unusable anyway, since the editor and
- *  the unmodeled-rule `extra` pass both key on `type`. */
+/** The stored rules, normalized: a non-array `rules` or a null element throws on
+ *  the render path, where the seed runs inside a useMemo with no toast to catch
+ *  it. Neither shape is reachable from GitHub, which types every rule — and a
+ *  typeless element is unusable anyway, since the editor and the unmodeled-rule
+ *  `extra` pass both key on `type`. */
 const storedRules = (original: RulesetFull | undefined): StoredRule[] => {
   const rules = original?.rules;
   return Array.isArray(rules)
@@ -225,6 +222,14 @@ function draftToBody(
   d: Draft,
   original?: RulesetFull,
 ): Record<string, unknown> {
+  // Refused at the boundary the approvals input already draws, so a count outside
+  // it fails loudly here rather than as a 422 from GitHub.
+  if (
+    d.requirePr &&
+    (!Number.isInteger(d.approvals) || d.approvals < 0 || d.approvals > 10)
+  ) {
+    throw new Error("Required approvals must be a whole number from 0 to 10.");
+  }
   const include = REF_INCLUDES[d.refScope](d);
   const rules: Record<string, unknown>[] = [];
   if (d.requirePr) {
@@ -545,9 +550,9 @@ function RulesetForm({
   async function save() {
     try {
       // Inside the try: building the body reads the stored ruleset's own shape,
-      // and a malformed one (a `rules` that isn't an array, say) throws here —
-      // a toast beats a silent no-op. Check entries are the exception, being
-      // normalized before they reach this.
+      // and a malformed one (a `rules` that isn't an array, say) throws here, as
+      // does an out-of-range approval count in the draft — a toast beats both a
+      // silent no-op and a 422. Check entries are the exception, normalized first.
       const body = draftToBody(d, original);
       if (id != null) await update.mutateAsync({ id, body });
       else await create.mutateAsync(body);
