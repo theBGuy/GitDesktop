@@ -125,11 +125,13 @@ function rulesetToDraft(rs: RulesetFull): Draft {
     : include.includes("~ALL")
       ? "all"
       : "custom";
-  const byType = (t: string) => rs.rules?.find((r) => r.type === t);
+  const rules = storedRules(rs);
+  const byType = (t: string) => rules.find((r) => r.type === t);
   const pr = byType("pull_request")?.parameters ?? {};
   const checks = byType("required_status_checks")?.parameters ?? {};
-  // A non-numeric stored count would reach the number Input as NaN and serialize
-  // back as null, so it falls back to the same 1 an absent value seeds.
+  // Seeds only a count the editor's own input accepts (a whole 0–10): anything
+  // else would reach the number Input as NaN or out of range and serialize back
+  // as null, so it falls back to the same 1 an absent value seeds.
   const approvals = Number(pr.required_approving_review_count ?? 1);
   return {
     name: rs.name ?? "",
@@ -140,7 +142,10 @@ function rulesetToDraft(rs: RulesetFull): Draft {
         ? include.map((p) => p.replace(/^refs\/heads\//, "")).join("\n")
         : "",
     requirePr: !!byType("pull_request"),
-    approvals: Number.isFinite(approvals) ? approvals : 1,
+    approvals:
+      Number.isInteger(approvals) && approvals >= 0 && approvals <= 10
+        ? approvals
+        : 1,
     dismissStale: !!pr.dismiss_stale_reviews_on_push,
     codeOwner: !!pr.require_code_owner_review,
     lastPush: !!pr.require_last_push_approval,
@@ -167,11 +172,25 @@ const REF_INCLUDES: Record<Draft["refScope"], (d: Draft) => string[]> = {
     ),
 };
 
+type StoredRule = NonNullable<RulesetFull["rules"]>[number];
+
+/** The stored rules, normalized: a non-array `rules` or an element without a
+ *  string `type` throws on the render path, where the seed runs inside a useMemo
+ *  with no toast to catch it. Neither shape is reachable from GitHub, which types
+ *  every rule — and a typeless element is unusable anyway, since the editor and
+ *  the unmodeled-rule `extra` pass both key on `type`. */
+const storedRules = (original: RulesetFull | undefined): StoredRule[] => {
+  const rules = original?.rules;
+  return Array.isArray(rules)
+    ? rules.filter((r) => typeof r?.type === "string")
+    : [];
+};
+
 /** The stored parameters of one rule on the ruleset being edited. A save is a full
  *  PUT replace, so every managed rule is rebuilt FROM these rather than from the
  *  draft alone — the draft models a subset of each rule's fields. */
 const storedParameters = (original: RulesetFull | undefined, type: string) =>
-  original?.rules?.find((r) => r.type === type)?.parameters;
+  storedRules(original).find((r) => r.type === type)?.parameters;
 
 /** The stored required-status-check entries — the frontend's one reader of that
  *  raw array (the branch-rules surface reads it again in `github/rulesets.rs`),
@@ -253,7 +272,7 @@ function draftToBody(
   if (d.linearHistory) rules.push({ type: "required_linear_history" });
   if (d.requireSignatures) rules.push({ type: "required_signatures" });
   // Preserve rule types the editor doesn't model.
-  const extra = (original?.rules ?? []).filter(
+  const extra = storedRules(original).filter(
     (r) => !MANAGED_RULE_TYPES.includes(r.type),
   );
   return {
