@@ -88,7 +88,8 @@ function rankUsers(
   const needle = query.toLowerCase();
   const scored: { user: ForgeUserRef; rank: number; order: number }[] = [];
   for (const [order, user] of users.entries()) {
-    // A user matches on either the display name or the handle, taking the better rank.
+    // Ranking both fields covers a provider whose display name differs from the
+    // handle; the wired ones set them equal, so today the two ranks agree.
     const ranks = [
       textRank(user.label, needle),
       textRank(user.id, needle),
@@ -128,9 +129,13 @@ function rankRefs(
     const rank = textRank(row.title, needle);
     if (rank !== -1) scored.push({ row, rank });
   }
-  scored.sort(
-    (a, b) => a.rank - b.rank || (a.row.sortAt < b.row.sortAt ? 1 : -1),
-  );
+  scored.sort((a, b) => {
+    if (a.rank !== b.rank) return a.rank - b.rank;
+    // Equal timestamps must compare equal, not -1 both ways: an inconsistent
+    // comparator lets the sort permute rows that should hold their input order.
+    if (a.row.sortAt === b.row.sortAt) return 0;
+    return a.row.sortAt < b.row.sortAt ? 1 : -1;
+  });
   return scored.slice(0, MAX_ROWS).map(({ row }) => ({
     key: `${row.isPr ? "pr" : "issue"}:${row.number}`,
     insert: String(row.number),

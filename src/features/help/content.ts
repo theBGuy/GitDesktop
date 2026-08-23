@@ -819,8 +819,9 @@ tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and b
 / numbered / task lists, with {{key:mod+b}} / {{key:mod+i}} / {{key:mod+k}}); press
 {{key:mod+enter}} to submit a comment or save an edit. The same editor is everywhere
 you write Markdown — issues, discussions, and release notes. On **GitHub** and
-**GitLab** repos, typing **@** suggests people and **#** suggests issues and pull
-requests (on GitLab, **#** covers issues and **!** covers merge requests). That works
+**GitLab** repos, typing **@** suggests people and **#** suggests the recently updated
+**open** issues and pull requests (on GitLab, **#** covers issues and **!** covers
+merge requests). That works
 in the comment box at the bottom of a pull request, issue, discussion, or commit, and
 in replies, edits, line comments on a diff, and release notes; arrow keys move through
 the list, Enter or Tab accepts, and Esc dismisses it. The comment box itself folds to a

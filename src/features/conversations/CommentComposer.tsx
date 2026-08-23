@@ -95,9 +95,12 @@ export function CommentComposer({
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const editorWrapRef = useRef<HTMLDivElement>(null);
   const peekRef = useRef<HTMLButtonElement>(null);
-  // Set by an expand that started with the conversation scrolled to its bottom,
-  // consumed by the layout effect that re-pins it.
-  const repinRef = useRef(false);
+  // The scroll region measured at expand time, when the reader was sitting at
+  // its bottom — null otherwise. The ELEMENT is held rather than re-walked on
+  // the commit: un-hiding the editor changes which containers overflow, so a
+  // second walk can answer with a different element than the one the pin
+  // decision was made against.
+  const repinRef = useRef<HTMLElement | null>(null);
   // What the expanded/collapsed render owes the user once it commits. The
   // un-hide rides a react-query cache notify, whose batching can land after any
   // frame we might have scheduled, so every follow-up is keyed on the render
@@ -124,7 +127,7 @@ export function CommentComposer({
     // Arm follow-ups only on a real transition: a write the hook declined leaves
     // no commit to consume them, and a stale flag would fire on a later expand.
     const changed = setCollapsed(false);
-    repinRef.current = changed && pinned;
+    repinRef.current = changed && pinned ? region : null;
     pendingRef.current = changed ? then : null;
   }
 
@@ -137,7 +140,9 @@ export function CommentComposer({
 
   // No dependency list: the handle closes over `collapsed` and over locals the
   // compiler re-creates, and re-attaching it each render is cheaper than the
-  // stale-closure risk of pinning it.
+  // stale-closure risk of pinning it — which holds only while callers pass an
+  // OBJECT ref, since a callback ref would be invoked with null and the handle
+  // on every render.
   useImperativeHandle(ref, () => ({
     focus() {
       if (collapsed) expand("focus");
@@ -173,12 +178,10 @@ export function CommentComposer({
   // editor's `scrollIntoView({block:"nearest"})` cannot reach it.
   useLayoutEffect(() => {
     if (collapsed) return;
-    if (repinRef.current) {
-      repinRef.current = false;
-      const region = findScrollRegion(
-        rootRef.current?.previousElementSibling ?? null,
-      );
-      if (region) region.scrollTop = region.scrollHeight;
+    const region = repinRef.current;
+    if (region) {
+      repinRef.current = null;
+      region.scrollTop = region.scrollHeight;
     }
     const pending = pendingRef.current;
     if (!pending) return;

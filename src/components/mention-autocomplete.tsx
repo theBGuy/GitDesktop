@@ -8,6 +8,7 @@ import {
   type RefObject,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -34,7 +35,9 @@ const MAX_LIST_HEIGHT = 224;
 const GUTTER = 8;
 /** Enough of a row to estimate the list's height before it renders. */
 const ROW_HEIGHT = 28;
-/** Below this the flipped side is not worth taking. */
+/** Floor under the computed `maxHeight` on whichever side is chosen, so a caret
+ *  with almost no room still shows a usable list — at extreme heights it wins over
+ *  the gutter and the box overhangs the viewport edge. No input to the flip test. */
 const MIN_LIST_HEIGHT = 72;
 
 /** Keys that can move the caret without changing the text — the token has to be
@@ -46,6 +49,8 @@ const RESYNC_KEYS = new Set([
   "ArrowRight",
   "ArrowUp",
   "ArrowDown",
+  "PageUp",
+  "PageDown",
   "Home",
   "End",
 ]);
@@ -119,6 +124,16 @@ function place(
   };
 }
 
+/** Re-place an open token's box against the caret it already names, for the two
+ *  things that move the box without moving the token: the anchor scrolling under
+ *  it, and candidates arriving and changing the list's height. */
+function reposition(textarea: HTMLTextAreaElement, rowCount: number) {
+  return (t: ActiveToken | null): ActiveToken | null =>
+    t
+      ? { ...t, ...place(textarea, t.start + 1 + t.query.length, rowCount) }
+      : t;
+}
+
 /**
  * GitHub-style `@`/`#`/`!` completion for a textarea: token detection, the caret-
  * anchored listbox, and the keyboard contract the popover owns while a token is
@@ -149,8 +164,9 @@ export function useMentionAutocomplete({
   const listRef = useRef<HTMLDivElement>(null);
   // Swallows the one onChange an accepted completion produces (see `insert`).
   const skipSync = useRef(false);
-  // Whether the popover took the last keydown, read by its keyup twin.
-  const lastConsumed = useRef(false);
+  // Which keys the popover consumed, each read and cleared by its own keyup —
+  // one shared flag would let a second key's keydown clear the first key's mark.
+  const consumedKeys = useRef(new Set<string>());
   const listId = useId();
 
   // Render-time reset rather than an effect: a popover must never paint over a
@@ -162,6 +178,16 @@ export function useMentionAutocomplete({
   const items = result?.items ?? [];
   // The list can shrink under a stale index while data arrives.
   const activeIndex = items.length > 0 ? Math.min(index, items.length - 1) : 0;
+  const rowCount = items.length;
+
+  // The lazy queries only enable as the first token opens, so a token is always
+  // placed against an empty list first; re-place once the candidates land, before
+  // paint, or the box keeps the flip and height it chose for zero rows.
+  useLayoutEffect(() => {
+    const ta = textareaRef.current;
+    if (!open || !ta) return;
+    setToken(reposition(ta, rowCount));
+  }, [open, rowCount, textareaRef]);
 
   useEffect(() => {
     if (!open) return;
@@ -170,6 +196,14 @@ export function useMentionAutocomplete({
       // underneath invalidates the caret anchor.
       const list = listRef.current;
       if (list && e.target instanceof Node && list.contains(e.target)) return;
+      const ta = textareaRef.current;
+      if (ta && e.target === ta) {
+        // The anchor scrolled, not the page — typing across a wrap boundary in a
+        // capped composer does this. Placement nets out scrollTop, so following
+        // the caret is correct where dismissing would drop the query mid-word.
+        setToken(reposition(ta, rowCount));
+        return;
+      }
       setToken(null);
     };
     const dismiss = () => setToken(null);
@@ -180,6 +214,12 @@ export function useMentionAutocomplete({
       window.removeEventListener("scroll", onScroll, opts);
       window.removeEventListener("resize", dismiss);
     };
+  }, [open, rowCount, textareaRef]);
+
+  // The consumed set lives per interaction: a closed token must not leave a key
+  // marked, or the next one's keyup would skip the re-sync it needs.
+  useEffect(() => {
+    if (!open) consumedKeys.current.clear();
   }, [open]);
 
   /** Recompute the token from the text up to the caret, and re-place the popover. */
@@ -296,7 +336,8 @@ export function useMentionAutocomplete({
   /** Returns true when the popover consumed the key. */
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>): boolean {
     const consumed = handleKey(e);
-    lastConsumed.current = consumed;
+    if (consumed) consumedKeys.current.add(e.key);
+    else consumedKeys.current.delete(e.key);
     return consumed;
   }
 
@@ -311,12 +352,16 @@ export function useMentionAutocomplete({
         "aria-controls": open ? listId : undefined,
         "aria-activedescendant":
           open && items.length > 0 ? `${listId}-${activeIndex}` : undefined,
-        onBlur: () => setToken(null),
+        onBlur: () => {
+          consumedKeys.current.clear();
+          setToken(null);
+        },
         onMouseDown: () => setToken(null),
         onKeyUp: (e: KeyboardEvent<HTMLTextAreaElement>) => {
-          // Only an arrow the popover declined moved the caret; re-syncing after
-          // one it consumed would reset the row that arrow just highlighted.
-          if (!lastConsumed.current && RESYNC_KEYS.has(e.key)) resync();
+          // Only a key the popover declined moved the caret; re-syncing after one
+          // it consumed would reset the row that arrow just highlighted.
+          const consumed = consumedKeys.current.delete(e.key);
+          if (!consumed && RESYNC_KEYS.has(e.key)) resync();
         },
       }
     : undefined;
@@ -339,9 +384,12 @@ export function useMentionAutocomplete({
   return { textareaProps, sync, onKeyDown, popover };
 }
 
-/** Open/closed glyph for a suggested reference. Mirrors the Issues panel's
- *  `StateIcon` (shape carries the state, not the tint alone); local rather than
- *  imported so the editor doesn't pull the issue-relations module into its chunk. */
+/** Glyph for a suggested reference: the shape separates an issue from a PR, and
+ *  the issue arm mirrors the Issues panel's `StateIcon` (local rather than imported
+ *  so the editor doesn't pull the issue-relations module into its chunk). Both
+ *  closed-state arms are unreachable while the ref lists request the open state
+ *  only; the PR arm distinguishes state by tint alone, so an all-states list would
+ *  need a second glyph before it could be trusted to convey one. */
 function RefGlyph({ state, isPr }: { state: string; isPr: boolean }) {
   if (isPr) {
     return (
@@ -418,6 +466,9 @@ function MentionPopover({
             role="option"
             aria-selected={i === activeIndex}
             type="button"
+            // Selection rides aria-activedescendant on the textarea, which keeps
+            // focus; a portalled row in the tab order would be reachable behind it.
+            tabIndex={-1}
             // mousedown (not click) so the textarea doesn't blur before the insert
             onMouseDown={(e) => {
               e.preventDefault();

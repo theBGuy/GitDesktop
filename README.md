@@ -815,13 +815,14 @@ review via its subscription login. The full list is under
   and dark).
 - **Mention & reference autocomplete**: on GitHub and GitLab repos, type
   `@` in a comment box, reply, edit, diff line comment, or release notes to
-  pick a person and `#` to pick an issue or pull request, with arrow keys and
-  Enter to accept. GitLab adds `!` for merge requests; each forge offers only
-  the references it links.
-- **Collapsible comment box**: fold the comment box on a pull request, issue,
-  discussion, or commit down to a one-line strip to read more of the thread.
-  Approve, Review, and Close stay on the strip, a saved draft shows its first
-  line there, and the choice is remembered until you expand it again.
+  pick a person and `#` to pick from the recently updated open issues and pull
+  requests, with arrow keys and Enter to accept. GitLab adds `!` for merge
+  requests; each forge offers only the references it links.
+- **Collapsible comment box**: fold the comment box down to a one-line strip to
+  read more of the thread, on every conversation surface — pull requests and
+  issues (local, on the forge, and Jira), discussions, and commits. Approve,
+  Review, and Close stay on the strip, a saved draft shows its first line there,
+  and the choice is remembered until you expand it again.
 - **Keyboard-first**: rebindable shortcuts with GitHub-Desktop-compatible
   defaults, a generated cheat sheet (`Ctrl`/`⌘`+`/`), a command palette
   (`Ctrl`/`⌘`+`K`), and arrow-key navigation everywhere.

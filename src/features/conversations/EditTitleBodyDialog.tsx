@@ -14,6 +14,7 @@ import { required, useAppForm, withForm } from "@/lib/form";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { toastError } from "@/lib/toast";
+import type { MentionSource } from "./useMentionCandidates";
 
 /** Shared form shape so the hook's `useAppForm` and the `withForm` dialog agree. */
 export const editTitleBodyFormOpts = formOptions({
@@ -85,6 +86,10 @@ interface EditTitleBodyDialogProps {
    *  `onGenerate` — the issue views omit it, so they compile untouched and render
    *  byte-identically. */
   belowBody?: ReactNode;
+  /** Opt in to `@`/`#`/`!` autocomplete in the description field, matching the
+   *  composer below the thread. The local views omit it (nothing autolinks a
+   *  local body). */
+  mentions?: MentionSource;
 }
 
 export const EditTitleBodyDialog = withForm({
@@ -103,6 +108,7 @@ export const EditTitleBodyDialog = withForm({
     generating: undefined as boolean | undefined,
     generateDisabled: undefined as boolean | undefined,
     belowBody: undefined as ReactNode,
+    mentions: undefined as MentionSource | undefined,
   } as EditTitleBodyDialogProps,
   render: function EditTitleBodyDialogRender({
     form,
@@ -117,6 +123,7 @@ export const EditTitleBodyDialog = withForm({
     generating,
     generateDisabled,
     belowBody,
+    mentions,
   }) {
     // Context-sensitive reuse of the `generate-commit-message` binding while
     // this dialog is open. This dialog is shared with the ISSUE views, which
@@ -182,6 +189,7 @@ export const EditTitleBodyDialog = withForm({
                   rows={8}
                   textareaClassName={bodyTextareaClassName}
                   actions={bodyActions}
+                  mentions={mentions}
                 />
               )}
             </form.AppField>

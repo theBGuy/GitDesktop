@@ -3366,6 +3366,7 @@ export function RemotePrView({
         description={`Updates the title, description, and base branch of #${number} on ${remoteLabel}.`}
         contentClassName="sm:max-w-lg"
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
+        mentions={mentions}
         onGenerate={aiEnabled ? runGenerate : undefined}
         generating={prGen.generating}
         belowBody={

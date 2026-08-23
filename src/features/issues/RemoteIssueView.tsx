@@ -1116,6 +1116,7 @@ export function RemoteIssueView({
         description={`Updates the title and description of #${number} on ${remoteLabel}.`}
         contentClassName="sm:max-w-lg"
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
+        mentions={mentions}
       />
 
       <DeleteCommentDialog
