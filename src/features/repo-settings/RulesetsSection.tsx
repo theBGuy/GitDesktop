@@ -122,9 +122,9 @@ function rulesetToDraft(rs: RulesetFull): Draft {
   const byType = (t: string) => rs.rules?.find((r) => r.type === t);
   const pr = byType("pull_request")?.parameters ?? {};
   const checks = byType("required_status_checks")?.parameters ?? {};
-  const contexts = (
-    (checks.required_status_checks as { context: string }[] | undefined) ?? []
-  ).filter((c): c is { context: string } => typeof c?.context === "string");
+  // A non-numeric stored count would reach the number Input as NaN and serialize
+  // back as null, so it falls back to the same 1 an absent value seeds.
+  const approvals = Number(pr.required_approving_review_count ?? 1);
   return {
     name: rs.name ?? "",
     enforcement: (rs.enforcement as RulesetEnforcement) ?? "active",
@@ -134,12 +134,14 @@ function rulesetToDraft(rs: RulesetFull): Draft {
         ? include.map((p) => p.replace(/^refs\/heads\//, "")).join("\n")
         : "",
     requirePr: !!byType("pull_request"),
-    approvals: Number(pr.required_approving_review_count ?? 1),
+    approvals: Number.isFinite(approvals) ? approvals : 1,
     dismissStale: !!pr.dismiss_stale_reviews_on_push,
     codeOwner: !!pr.require_code_owner_review,
     lastPush: !!pr.require_last_push_approval,
     requireChecks: !!byType("required_status_checks"),
-    checkContexts: contexts.map((c) => c.context).join("\n"),
+    checkContexts: storedCheckEntries(rs)
+      .map((c) => c.context)
+      .join("\n"),
     strictChecks: !!checks.strict_required_status_checks_policy,
     blockForcePush: !!byType("non_fast_forward"),
     restrictDeletions: !!byType("deletion"),
@@ -165,16 +167,30 @@ const REF_INCLUDES: Record<Draft["refScope"], (d: Draft) => string[]> = {
 const storedParameters = (original: RulesetFull | undefined, type: string) =>
   original?.rules?.find((r) => r.type === type)?.parameters;
 
+/** The stored required-status-check entries — the frontend's one reader of that
+ *  raw array (the branch-rules surface reads it again in `github/rulesets.rs`),
+ *  so the seed, the repeat check and the save can't diverge on its shape. An
+ *  entry without a string context is dropped rather than rebuilt into the PUT:
+ *  it names no check and carries no pin worth keeping (unmodeled RULES still
+ *  ride along via `extra`). A non-array value — never seen from GitHub, whose
+ *  schema always sends an array — normalizes to empty instead of blocking the
+ *  editor. */
+const storedCheckEntries = (
+  original: RulesetFull | undefined,
+): { context: string }[] => {
+  const stored = storedParameters(original, "required_status_checks")
+    ?.required_status_checks;
+  if (!Array.isArray(stored)) return [];
+  return stored.filter(
+    (entry): entry is { context: string } => typeof entry?.context === "string",
+  );
+};
+
 /** Whether the stored ruleset requires one check context through several entries.
  *  Those usually differ only by their app pin (`integration_id`), which this
  *  editor doesn't show — so they read as identical repeated lines. */
 const hasRepeatedCheckContexts = (original: RulesetFull | undefined) => {
-  const stored =
-    (storedParameters(original, "required_status_checks")
-      ?.required_status_checks as { context: string }[] | undefined) ?? [];
-  const contexts = stored
-    .filter((c): c is { context: string } => typeof c?.context === "string")
-    .map((c) => c.context);
+  const contexts = storedCheckEntries(original).map((c) => c.context);
   return new Set(contexts).size !== contexts.length;
 };
 
@@ -205,11 +221,8 @@ function draftToBody(
     // to one app (`integration_id`) and GitHub accepts several pins under a single
     // context, neither of which this editor displays, so a save must preserve every
     // entry rather than reduce a context to one. Fresh lines have no pin to keep.
-    const storedList =
-      (checks?.required_status_checks as { context: string }[] | undefined) ??
-      [];
     const storedChecks = new Map<string, { context: string }[]>();
-    for (const entry of storedList) {
+    for (const entry of storedCheckEntries(original)) {
       const queue = storedChecks.get(entry.context);
       if (queue) queue.push(entry);
       else storedChecks.set(entry.context, [entry]);
@@ -220,6 +233,7 @@ function draftToBody(
         do_not_enforce_on_create: false,
         ...checks,
         strict_required_status_checks_policy: d.strictChecks,
+        // After the spread on purpose: it replaces the raw stored array.
         required_status_checks: splitNonEmptyLines(d.checkContexts).map(
           (context) => storedChecks.get(context)?.shift() ?? { context },
         ),
@@ -500,8 +514,10 @@ function RulesetForm({
 
   async function save() {
     try {
-      // Inside the try: building the body reads the stored ruleset's own shape, so
-      // a malformed one must surface as a toast rather than a silent no-op.
+      // Inside the try: building the body reads the stored ruleset's own shape,
+      // and a malformed one (a `rules` that isn't an array, say) throws here —
+      // a toast beats a silent no-op. Check entries are the exception, being
+      // normalized before they reach this.
       const body = draftToBody(d, original);
       if (id != null) await update.mutateAsync({ id, body });
       else await create.mutateAsync(body);

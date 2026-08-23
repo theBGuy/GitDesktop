@@ -5,6 +5,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { highlightJson } from "@/features/diff/shiki-highlighter";
 import { copyText } from "@/lib/clipboard";
+import { presentError } from "@/lib/error-summary";
 import {
   isReconnectHostSafe,
   reconnectHostArg,
@@ -16,9 +17,11 @@ import { cn } from "@/lib/utils";
 
 /**
  * The destructive error card the repo-settings surfaces share: a title, the
- * rejection's message when it carries one (a Tauri IPC rejection is often a bare
- * string), then any hint. `children` render between the two — the slot the scope
- * note takes, which needs hooks the card itself has no business owning.
+ * failure as one humanized line, then any hint. `presentError` is what makes the
+ * line humanized, and it also reads the plain `AppError` object every `invoke`
+ * rejection carries, which an `instanceof Error` check would show nothing for.
+ * `children` render between message and hint — the slot the scope note takes,
+ * which needs hooks this card shouldn't own.
  */
 export function AsyncErrorCard({
   title,
@@ -35,8 +38,10 @@ export function AsyncErrorCard({
   return (
     <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
       <p className="font-medium text-destructive">{title}</p>
-      {error instanceof Error && (
-        <p className="mt-1 text-muted-foreground">{error.message}</p>
+      {error != null && (
+        <p className="mt-1 text-muted-foreground">
+          {presentError(error).summary}
+        </p>
       )}
       {children}
       {hint && <div className="mt-2 text-muted-foreground">{hint}</div>}
