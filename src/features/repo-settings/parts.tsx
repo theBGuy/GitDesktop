@@ -18,8 +18,8 @@ import { cn } from "@/lib/utils";
 /**
  * The destructive error card the repo-settings surfaces share: a title, the
  * failure as one humanized line, then any hint. `presentError` is what makes the
- * line humanized, and it also reads the plain `AppError` object every `invoke`
- * rejection carries, which an `instanceof Error` check would show nothing for.
+ * line humanized, and it reads the plain `AppError` object every `invoke`
+ * rejection carries, which is not an `Error` instance.
  * `children` render between message and hint — the slot the scope note takes,
  * which needs hooks this card shouldn't own.
  */

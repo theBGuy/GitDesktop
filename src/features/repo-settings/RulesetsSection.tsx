@@ -113,7 +113,13 @@ const splitNonEmptyLines = (s: string) =>
     .filter(Boolean);
 
 function rulesetToDraft(rs: RulesetFull): Draft {
-  const include = rs.conditions?.ref_name?.include ?? [];
+  // Stored JSON, checked at the array AND the element: this runs in a useMemo on
+  // the render path, where a throw reaches no toast — and the patterns below are
+  // string-replaced.
+  const storedInclude = rs.conditions?.ref_name?.include;
+  const include = Array.isArray(storedInclude)
+    ? storedInclude.filter((p): p is string => typeof p === "string")
+    : [];
   const refScope = include.includes("~DEFAULT_BRANCH")
     ? "default"
     : include.includes("~ALL")
@@ -178,8 +184,10 @@ const storedParameters = (original: RulesetFull | undefined, type: string) =>
 const storedCheckEntries = (
   original: RulesetFull | undefined,
 ): { context: string }[] => {
-  const stored = storedParameters(original, "required_status_checks")
-    ?.required_status_checks;
+  const stored = storedParameters(
+    original,
+    "required_status_checks",
+  )?.required_status_checks;
   if (!Array.isArray(stored)) return [];
   return stored.filter(
     (entry): entry is { context: string } => typeof entry?.context === "string",
@@ -449,7 +457,10 @@ function RulesetEditor({
   // actors, unmodeled rules and conditions. (The create path fetches nothing.)
   const body = (() => {
     switch (true) {
-      case id != null && existing.isLoading:
+      // `isPending`, not `isLoading`: a fetch react-query paused for being
+      // offline is neither loading nor errored, and the error arm below would
+      // blame permissions for it.
+      case id != null && existing.isPending:
         return <Skeleton className="h-64 w-full" />;
       // Gated on absent data, not on `isError`: a failed background refetch keeps
       // the last good ruleset, and unmounting the form there would silently
