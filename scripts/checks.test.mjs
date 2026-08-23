@@ -43,7 +43,7 @@ function scanner(name) {
 const hoverReveal = scanner("hover-reveal");
 const modKey = scanner("hand-rolled-mod-key");
 const setQueryData = scanner("setQueryData-noop");
-const repoSettingsMutate = scanner("mutate-in-repo-settings");
+const bareMutate = scanner("bare-mutate-in-converted-trees");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -165,12 +165,12 @@ test("setQueryData-noop does not reach across a `;` statement boundary", () => {
   assert.deepEqual(setQueryData(source), []);
 });
 
-test("mutate-in-repo-settings flags every way a call reaches its callbacks", () => {
+test("bare-mutate-in-converted-trees flags every way a call reaches its callbacks", () => {
   // The reason this check matches the CALL and not the callbacks object: the
   // hoisted-options pair is the shape most of these sections used, and no
   // regex anchored on `onSuccess`/`onError` sees it.
   assert.deepEqual(
-    repoSettingsMutate(
+    bareMutate(
       'del.mutate(hook.id, { onSuccess: () => toast.success("x"), onError: e });',
     ),
     [1],
@@ -179,34 +179,34 @@ test("mutate-in-repo-settings flags every way a call reaches its callbacks", () 
     "const opts = { onSuccess: done, onError: toastError };",
     "update.mutate({ id, body }, opts);",
   ].join("\n");
-  assert.deepEqual(repoSettingsMutate(hoisted), [2]);
+  assert.deepEqual(bareMutate(hoisted), [2]);
   assert.deepEqual(
-    repoSettingsMutate("setEnforcement.mutate(vars, { onError: toastError });"),
+    bareMutate("setEnforcement.mutate(vars, { onError: toastError });"),
     [1],
   );
 });
 
-test("mutate-in-repo-settings flags a bare call carrying no callbacks", () => {
+test("bare-mutate-in-converted-trees flags a bare call carrying no callbacks", () => {
   // Deliberate: a fire-and-forget mutation here still loses nothing to the
   // unmount, but the ratchet stays a token match — an exemption is an
   // allowlist entry with rationale, not a hole in the pattern.
-  assert.deepEqual(repoSettingsMutate("ping.mutate(hook.id);"), [1]);
-  assert.deepEqual(repoSettingsMutate("refresh.mutate ();"), [1]);
+  assert.deepEqual(bareMutate("ping.mutate(hook.id);"), [1]);
+  assert.deepEqual(bareMutate("refresh.mutate ();"), [1]);
 });
 
-test("mutate-in-repo-settings catches the dot-less destructured route", () => {
+test("bare-mutate-in-converted-trees catches the dot-less destructured route", () => {
   // `const { mutate } = useX()` reaches the same call with no `.mutate` token
   // for the first pattern to see — a live idiom elsewhere under src/.
   assert.deepEqual(
-    repoSettingsMutate("const { mutate } = useUpdateLocalPr(repo);"),
+    bareMutate("const { mutate } = useUpdateLocalPr(repo);"),
     [1],
   );
   assert.deepEqual(
-    repoSettingsMutate("const { mutate: save } = useUpdateThing(repo);"),
+    bareMutate("const { mutate: save } = useUpdateThing(repo);"),
     [1],
   );
   assert.deepEqual(
-    repoSettingsMutate("const { isPending, mutate } = useX(repo);"),
+    bareMutate("const { isPending, mutate } = useX(repo);"),
     [1],
   );
   // Wrapped by the formatter: caught because this pattern reads the whole-file
@@ -217,23 +217,23 @@ test("mutate-in-repo-settings catches the dot-less destructured route", () => {
     "  isPending,",
     "} = useUpdateSomethingWithALongName(repoPath);",
   ].join("\n");
-  assert.deepEqual(repoSettingsMutate(wrapped), [1]);
+  assert.deepEqual(bareMutate(wrapped), [1]);
 });
 
-test("mutate-in-repo-settings leaves the awaited idiom and comments alone", () => {
+test("bare-mutate-in-converted-trees leaves the awaited idiom and comments alone", () => {
   const awaited = [
     "await update.mutateAsync(form);",
     'toast.success("Repository settings saved");',
   ].join("\n");
-  assert.deepEqual(repoSettingsMutate(awaited), []);
+  assert.deepEqual(bareMutate(awaited), []);
   // The `\b` after `mutate` is the whole reason the destructure pattern can
   // coexist with the idiom it is enforcing.
   assert.deepEqual(
-    repoSettingsMutate("const { mutateAsync } = useUpdateRepoSettings(repo);"),
+    bareMutate("const { mutateAsync } = useUpdateRepoSettings(repo);"),
     [],
   );
   assert.deepEqual(
-    repoSettingsMutate("const { mutateAsync, isPending } = useX(repo);"),
+    bareMutate("const { mutateAsync, isPending } = useX(repo);"),
     [],
   );
   const documented = [
@@ -241,7 +241,28 @@ test("mutate-in-repo-settings leaves the awaited idiom and comments alone", () =
     "// dropped when the observer unmounts.",
     "await save.mutateAsync(vars);",
   ].join("\n");
-  assert.deepEqual(repoSettingsMutate(documented), []);
+  assert.deepEqual(bareMutate(documented), []);
+});
+
+test("bare-mutate-in-converted-trees applies to the converted trees only", () => {
+  // The tier boundary is the deliberate part: the two converted trees are in,
+  // and the ones still carrying per-call callbacks in bulk are out until their
+  // own conversion lands. Widening this is a decision, not a drive-by.
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "bare-mutate-in-converted-trees",
+  );
+  for (const file of [
+    "src/features/repo-settings/RulesetsSection.tsx",
+    "src/features/explore/ExploreDetail.tsx",
+  ]) {
+    assert.equal(appliesTo(file), true, `should scan ${file}`);
+  }
+  for (const file of [
+    "src/features/pulls/LocalPrView.tsx",
+    "src/features/repository/ChangesPanel.tsx",
+  ]) {
+    assert.equal(appliesTo(file), false, `should not scan ${file}`);
+  }
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {

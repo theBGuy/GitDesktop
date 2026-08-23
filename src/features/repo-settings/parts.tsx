@@ -15,6 +15,36 @@ import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 
 /**
+ * The destructive error card the repo-settings surfaces share: a title, the
+ * rejection's message when it carries one (a Tauri IPC rejection is often a bare
+ * string), then any hint. `children` render between the two — the slot the scope
+ * note takes, which needs hooks the card itself has no business owning.
+ */
+export function AsyncErrorCard({
+  title,
+  error,
+  hint,
+  children,
+}: {
+  title: ReactNode;
+  error: unknown;
+  /** A closing note in the card's own muted style (permissions, next steps). */
+  hint?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
+      <p className="font-medium text-destructive">{title}</p>
+      {error instanceof Error && (
+        <p className="mt-1 text-muted-foreground">{error.message}</p>
+      )}
+      {children}
+      {hint && <div className="mt-2 text-muted-foreground">{hint}</div>}
+    </div>
+  );
+}
+
+/**
  * The shared loading / error / empty / list shell for the repo-settings async
  * lists (secrets, collaborators, rulesets, webhooks). Renders skeletons while
  * loading, a destructive error card (optionally with a `gh auth refresh` scope
@@ -57,16 +87,9 @@ export function AsyncListBody({
   }
   if (error) {
     return (
-      <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
-        <p className="font-medium text-destructive">{errorTitle}</p>
-        {error instanceof Error && (
-          <p className="mt-1 text-muted-foreground">{error.message}</p>
-        )}
+      <AsyncErrorCard title={errorTitle} error={error} hint={errorHint}>
         {errorScope && <ScopeErrorHint scope={errorScope} />}
-        {errorHint && (
-          <div className="mt-2 text-muted-foreground">{errorHint}</div>
-        )}
-      </div>
+      </AsyncErrorCard>
     );
   }
   if (empty) {

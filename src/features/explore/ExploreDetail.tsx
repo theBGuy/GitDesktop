@@ -38,6 +38,10 @@ import { toastError } from "@/lib/toast";
 import type { ExploreCloneTarget } from "./ExploreCloneDialog";
 import { starParts } from "./explore-utils";
 
+/** The not-yet-clonable note, shared by the fork toast and the inline fork card
+ *  so the two can't drift. */
+const FORK_NOT_READY = "It may take a moment before the fork can be cloned.";
+
 /** The Explore detail pane: the selected repo's header, actions (clone / fork /
  *  star / view), and its lazily-fetched README. `features` gates fork/star, and
  *  `ownedNamespaces` (the screen's own-repos query) additionally gates fork; a
@@ -157,9 +161,7 @@ function ExploreDetailBody({
       });
       setForked(result);
       toast.success(`Forked to ${result.fullName}`, {
-        description: result.ready
-          ? undefined
-          : "It may take a moment before the fork can be cloned.",
+        description: result.ready ? undefined : FORK_NOT_READY,
       });
     } catch (e) {
       toastError(e);
@@ -296,7 +298,7 @@ function ExploreDetailBody({
           <p className="text-xs font-medium">Forked to {forked.fullName}</p>
           {!forked.ready && (
             <p className="text-[11px] text-muted-foreground">
-              It may take a moment before the fork can be cloned.
+              {FORK_NOT_READY}
             </p>
           )}
           <Button

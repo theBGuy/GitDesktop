@@ -27,7 +27,7 @@ import {
 } from "@/lib/git/queries";
 import type { RulesetEnforcement, RulesetFull } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { AsyncErrorCard, AsyncListBody, InlineConfirm } from "./parts";
 
 const ENFORCEMENTS: { value: RulesetEnforcement; label: string }[] = [
   { value: "active", label: "Active" },
@@ -47,6 +47,10 @@ const REF_SCOPE_ITEMS: Record<string, string> = {
   all: "All branches",
   custom: "Custom patterns…",
 };
+
+/** Shown by both ruleset surfaces when a load fails — a 403 is the likeliest
+ *  reason, and rulesets are admin-only on GitHub. */
+const ADMIN_HINT = "Managing rulesets needs repo-admin access.";
 
 /** Rule types we model in the editor. Any others on an edited ruleset are
  *  preserved untouched (so advanced rules aren't dropped). */
@@ -118,8 +122,9 @@ function rulesetToDraft(rs: RulesetFull): Draft {
   const byType = (t: string) => rs.rules?.find((r) => r.type === t);
   const pr = byType("pull_request")?.parameters ?? {};
   const checks = byType("required_status_checks")?.parameters ?? {};
-  const contexts =
-    (checks.required_status_checks as { context: string }[] | undefined) ?? [];
+  const contexts = (
+    (checks.required_status_checks as { context: string }[] | undefined) ?? []
+  ).filter((c): c is { context: string } => typeof c?.context === "string");
   return {
     name: rs.name ?? "",
     enforcement: (rs.enforcement as RulesetEnforcement) ?? "active",
@@ -160,16 +165,16 @@ const REF_INCLUDES: Record<Draft["refScope"], (d: Draft) => string[]> = {
 const storedParameters = (original: RulesetFull | undefined, type: string) =>
   original?.rules?.find((r) => r.type === type)?.parameters;
 
-/** Whether the stored ruleset requires one check context through several entries
- *  — GitHub allows a context per app (`integration_id`), which this editor shows
- *  as repeated lines with nothing to tell them apart. */
+/** Whether the stored ruleset requires one check context through several entries.
+ *  Those usually differ only by their app pin (`integration_id`), which this
+ *  editor doesn't show — so they read as identical repeated lines. */
 const hasRepeatedCheckContexts = (original: RulesetFull | undefined) => {
   const stored =
     (storedParameters(original, "required_status_checks")
       ?.required_status_checks as { context: string }[] | undefined) ?? [];
   const contexts = stored
-    .map((c) => c.context)
-    .filter((c) => typeof c === "string");
+    .filter((c): c is { context: string } => typeof c?.context === "string")
+    .map((c) => c.context);
   return new Set(contexts).size !== contexts.length;
 };
 
@@ -335,7 +340,7 @@ function RulesetList({
         emptyLabel="No rulesets yet."
         skeletonClassName="h-12 w-full"
         errorTitle="Couldn't load rulesets."
-        errorHint="Managing rulesets needs repo-admin access."
+        errorHint={ADMIN_HINT}
       >
         {rulesets.data?.map((rs) => {
           const org = rs.sourceType === "Organization";
@@ -391,11 +396,7 @@ function RulesetList({
                     size="sm"
                     variant="ghost"
                     disabled={!canEdit}
-                    reason={
-                      canEdit
-                        ? null
-                        : "Only branch rulesets can be edited here — manage tag and push rulesets on GitHub."
-                    }
+                    reason="Only branch rulesets can be edited here — manage tag and push rulesets on GitHub."
                     onClick={() => onEdit(rs.id)}
                   >
                     Edit
@@ -441,19 +442,11 @@ function RulesetEditor({
       // discard a half-authored draft.
       case id != null && !existing.data:
         return (
-          <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
-            <p className="font-medium text-destructive">
-              Couldn't load this ruleset.
-            </p>
-            {existing.error instanceof Error && (
-              <p className="mt-1 text-muted-foreground">
-                {existing.error.message}
-              </p>
-            )}
-            <p className="mt-2 text-muted-foreground">
-              Managing rulesets needs repo-admin access.
-            </p>
-          </div>
+          <AsyncErrorCard
+            title="Couldn't load this ruleset."
+            error={existing.error}
+            hint={ADMIN_HINT}
+          />
         );
       default:
         return (
@@ -644,8 +637,8 @@ function RulesetForm({
             />
             {repeatedChecks && (
               <p className="text-[11px] text-muted-foreground">
-                This ruleset requires the same check from more than one app —
-                keep every line to keep them all.
+                This ruleset requires the same check more than once — keep every
+                line to keep them all.
               </p>
             )}
             <RuleToggle

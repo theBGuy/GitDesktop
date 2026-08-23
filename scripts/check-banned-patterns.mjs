@@ -270,7 +270,7 @@ export const CHECKS = [
       "setQueryData(key, undefined) is a silent no-op in TanStack v5 — snapshot and restore the previous value instead",
   },
   {
-    name: "mutate-in-repo-settings",
+    name: "bare-mutate-in-converted-trees",
     // Scoped to the two trees that are fully converted, so the check can only
     // ever see a NEW site: the settings dialog's own sections (which unmount on
     // BOTH dialog close and every rail section switch — the keyed crossfade),
@@ -284,7 +284,7 @@ export const CHECKS = [
     scan: anyOf([perLine(MUTATE_CALL_RE), perFile(DESTRUCTURED_MUTATE_RE)]),
     allowlist: [],
     message:
-      "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close or rail section switch mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
+      "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close, a rail section switch, or a keyed pane remount mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
   },
 ];
 
