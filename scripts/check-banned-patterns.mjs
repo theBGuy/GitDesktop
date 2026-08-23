@@ -191,9 +191,9 @@ const SET_QUERY_DATA_RE =
 // reaches the call: inline literal, hoisted variable (`.mutate(v, opts)` — the
 // shape 5 of the settings sections used, and still live elsewhere under src/),
 // spread, shorthand keys. The token has no such surface, and it costs nothing
-// here because the directory this check applies to has no `.mutate(` calls left
-// at all — every mutation there is awaited. `.mutateAsync(` does not match: the
-// `(` must follow `mutate` directly.
+// here because the directories this check applies to have no `.mutate(` calls
+// left at all — every mutation there is awaited. `.mutateAsync(` does not match:
+// the `(` must follow `mutate` directly.
 const MUTATE_CALL_RE = /\.mutate\s*\(/;
 
 // The dot-less route to the same call: `const { mutate } = useX()` (a live idiom
@@ -271,13 +271,16 @@ export const CHECKS = [
   },
   {
     name: "mutate-in-repo-settings",
-    // Scoped to the settings dialog's own tree, whose sections unmount on BOTH
-    // dialog close and every rail section switch (the keyed crossfade). The
-    // wider app's call sites are a separate tier and are not scanned here —
-    // pulls/ and repository/ carry converted-but-unguarded surfaces whose
-    // remaining bare .mutate( calls are deliberately callback-free, which a
-    // per-file allowlist cannot express.
-    appliesTo: (file) => file.startsWith("src/features/repo-settings/"),
+    // Scoped to the two trees that are fully converted, so the check can only
+    // ever see a NEW site: the settings dialog's own sections (which unmount on
+    // BOTH dialog close and every rail section switch — the keyed crossfade),
+    // and Explore, whose detail pane is keyed per repo. The wider app is a
+    // separate tier: pulls/ and repository/ still carry per-call callback sites
+    // in bulk, so scanning them would report a backlog rather than a regression.
+    // Each tree joins this check on the change that converts it.
+    appliesTo: (file) =>
+      file.startsWith("src/features/repo-settings/") ||
+      file.startsWith("src/features/explore/"),
     scan: anyOf([perLine(MUTATE_CALL_RE), perFile(DESTRUCTURED_MUTATE_RE)]),
     allowlist: [],
     message:

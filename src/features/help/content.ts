@@ -192,7 +192,8 @@ From here:
 - **Clone** — pick a folder to clone into; GitDesktop opens the repo once it finishes.
 - **Fork** — create a fork of the repository. On **GitHub** and **GitLab** it lands
   under your own account; on **Bitbucket** the host picks the destination workspace.
-  The fork is created in the background, and then you're offered to **clone** it. It
+  The fork is created in the background, and you'll be told how it went even if you've
+  moved on; while you're still on the repository, you're offered to **clone** it. It
   doesn't appear on a repository that already counts as yours, which each host defines
   its own way: on **GitHub** and **GitLab** that's your personal account or namespace
   (organization and group repositories stay forkable), and on **Bitbucket** it's any
@@ -223,10 +224,13 @@ like this:
 - **Access** — collaborators and their roles; invite someone at any level
   (Read / Triage / Write / Maintain / Admin), change a role inline, remove access, and
   manage pending invitations.
-- **Rules** — GitHub's branch **rulesets**: list them, flip enforcement
-  (Active / Evaluate / Disabled), and create or edit one (require a PR with approvals /
-  code-owner review, required status checks, block force pushes, restrict deletions,
-  linear history, signed commits).
+- **Rules** — GitHub's **rulesets**: list them, flip enforcement
+  (Active / Evaluate / Disabled), and create or edit a **branch** ruleset (require a PR
+  with approvals / code-owner review, required status checks, block force pushes,
+  restrict deletions, linear history, signed commits). Tag and push rulesets appear in
+  the list with the same enforcement control, and are edited on GitHub. Rulesets
+  inherited from an **organization** are read-only here, with their enforcement
+  shown as a badge.
 - **Security** — secret scanning (with AI detection and non-provider-pattern
   sub-toggles), push protection, code scanning, Dependabot alerts and security updates,
   and private vulnerability reporting, behind a save/discard bar. Dependabot **version

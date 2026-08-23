@@ -5,6 +5,7 @@ import {
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
+import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
@@ -123,15 +124,24 @@ function ExploreDetailBody({
     canReadme,
   );
 
-  function toggleStar() {
-    starMutation.mutate({
-      provider,
-      owner: repo.owner,
-      name: repo.name,
-      star: !starred.data,
-    });
+  async function toggleStar() {
+    try {
+      await starMutation.mutateAsync({
+        provider,
+        owner: repo.owner,
+        name: repo.name,
+        star: !starred.data,
+      });
+    } catch (e) {
+      // The optimistic flip rolls back on failure, so without this the icon
+      // snaps back with nothing explaining why.
+      toastError(e);
+    }
   }
 
+  // Awaited, not per-call callbacks: this pane is keyed per repo and unmounts on
+  // a switch while the fork's readiness poll still runs, and react-query drops
+  // per-call callbacks once the observer has no listeners.
   async function onFork() {
     const ok = await useConfirm.getState().ask({
       title: `Fork ${repo.fullName}?`,
@@ -139,13 +149,21 @@ function ExploreDetailBody({
       confirmLabel: "Fork",
     });
     if (!ok) return;
-    fork.mutate(
-      { provider, owner: repo.owner, name: repo.name },
-      {
-        onSuccess: (result) => setForked(result),
-        onError: (e) => toastError(e),
-      },
-    );
+    try {
+      const result = await fork.mutateAsync({
+        provider,
+        owner: repo.owner,
+        name: repo.name,
+      });
+      setForked(result);
+      toast.success(`Forked to ${result.fullName}`, {
+        description: result.ready
+          ? undefined
+          : "It may take a moment before the fork can be cloned.",
+      });
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   // Only actionable once the starred state has resolved — a click on `undefined`

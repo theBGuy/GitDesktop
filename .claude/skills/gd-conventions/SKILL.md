@@ -136,6 +136,9 @@ route to one of those ops imports the existing prompt, never re-spells it.
 **Layout gotchas.** `DialogContent` is a grid — truncating flex content needs
 `min-w-0` on the grid item; cap tall dialogs at `max-h-[85vh]`. Link-styled
 clickables add `cursor-pointer` at the call site (vendored Button sets none).
+Tailwind animation overrides need the `!` important modifier — tw-merge doesn't
+dedupe the animate group, so `animate-none` vs an existing `animate-in` is a
+build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 
 **State & rendering gotchas.**
 - **`gd/session/*` branches are filtered from every branch surface** (lists,

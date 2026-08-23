@@ -1,6 +1,7 @@
 import { CaretLeftIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -96,16 +97,12 @@ const BLANK: Draft = {
   requireSignatures: false,
 };
 
-const splitLines = (s: string) =>
-  s
-    .split(/[\n,]+/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-
-/** Check contexts split on newlines only: a context can carry a comma of its own,
- *  because GitHub Actions builds a matrix job's name by joining its values with
- *  ", ". Splitting there would save contexts no run will ever report. */
-const splitCheckLines = (s: string) =>
+/** The one-per-line textareas split on newlines only, never commas: a check
+ *  context can carry one because GitHub Actions builds a matrix job's name by
+ *  joining its values with ", ", and a ref pattern can carry one because git
+ *  permits commas in refnames. Splitting there would save entries that nothing
+ *  ever matches. */
+const splitNonEmptyLines = (s: string) =>
   s
     .split(/\r?\n/)
     .map((x) => x.trim())
@@ -152,7 +149,7 @@ const REF_INCLUDES: Record<Draft["refScope"], (d: Draft) => string[]> = {
   default: () => ["~DEFAULT_BRANCH"],
   all: () => ["~ALL"],
   custom: (d) =>
-    splitLines(d.customPatterns).map((p) =>
+    splitNonEmptyLines(d.customPatterns).map((p) =>
       p.startsWith("refs/") ? p : `refs/heads/${p}`,
     ),
 };
@@ -162,6 +159,19 @@ const REF_INCLUDES: Record<Draft["refScope"], (d: Draft) => string[]> = {
  *  draft alone — the draft models a subset of each rule's fields. */
 const storedParameters = (original: RulesetFull | undefined, type: string) =>
   original?.rules?.find((r) => r.type === type)?.parameters;
+
+/** Whether the stored ruleset requires one check context through several entries
+ *  — GitHub allows a context per app (`integration_id`), which this editor shows
+ *  as repeated lines with nothing to tell them apart. */
+const hasRepeatedCheckContexts = (original: RulesetFull | undefined) => {
+  const stored =
+    (storedParameters(original, "required_status_checks")
+      ?.required_status_checks as { context: string }[] | undefined) ?? [];
+  const contexts = stored
+    .map((c) => c.context)
+    .filter((c) => typeof c === "string");
+  return new Set(contexts).size !== contexts.length;
+};
 
 function draftToBody(
   d: Draft,
@@ -205,7 +215,7 @@ function draftToBody(
         do_not_enforce_on_create: false,
         ...checks,
         strict_required_status_checks_policy: d.strictChecks,
-        required_status_checks: splitCheckLines(d.checkContexts).map(
+        required_status_checks: splitNonEmptyLines(d.checkContexts).map(
           (context) => storedChecks.get(context)?.shift() ?? { context },
         ),
       },
@@ -329,6 +339,9 @@ function RulesetList({
       >
         {rulesets.data?.map((rs) => {
           const org = rs.sourceType === "Organization";
+          // The editor models branch rulesets only — its scope control and rules
+          // are branch-shaped, and saving one converts a tag/push ruleset's target.
+          const canEdit = rs.target === "branch";
           return (
             <div
               key={rs.id}
@@ -374,13 +387,19 @@ function RulesetList({
                       ))}
                     </SelectContent>
                   </Select>
-                  <Button
+                  <DisabledReasonButton
                     size="sm"
                     variant="ghost"
+                    disabled={!canEdit}
+                    reason={
+                      canEdit
+                        ? null
+                        : "Only branch rulesets can be edited here — manage tag and push rulesets on GitHub."
+                    }
                     onClick={() => onEdit(rs.id)}
                   >
                     Edit
-                  </Button>
+                  </DisabledReasonButton>
                   <Button
                     size="sm"
                     variant="ghost"
@@ -410,16 +429,56 @@ function RulesetEditor({
   onDone: () => void;
 }) {
   const existing = useRuleset(repoPath, id);
-  if (id != null && existing.isLoading) {
-    return <Skeleton className="h-64 w-full" />;
-  }
+  // The form only ever mounts on loaded data: a save is a full-replace PUT built
+  // from `original`, so a form seeded blank would wipe the ruleset's bypass
+  // actors, unmodeled rules and conditions. (The create path fetches nothing.)
+  const body = (() => {
+    switch (true) {
+      case id != null && existing.isLoading:
+        return <Skeleton className="h-64 w-full" />;
+      // Gated on absent data, not on `isError`: a failed background refetch keeps
+      // the last good ruleset, and unmounting the form there would silently
+      // discard a half-authored draft.
+      case id != null && !existing.data:
+        return (
+          <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
+            <p className="font-medium text-destructive">
+              Couldn't load this ruleset.
+            </p>
+            {existing.error instanceof Error && (
+              <p className="mt-1 text-muted-foreground">
+                {existing.error.message}
+              </p>
+            )}
+            <p className="mt-2 text-muted-foreground">
+              Managing rulesets needs repo-admin access.
+            </p>
+          </div>
+        );
+      default:
+        return (
+          <RulesetForm
+            repoPath={repoPath}
+            id={id}
+            original={existing.data}
+            onDone={onDone}
+          />
+        );
+    }
+  })();
+
   return (
-    <RulesetForm
-      repoPath={repoPath}
-      id={id}
-      original={id != null ? existing.data : undefined}
-      onDone={onDone}
-    />
+    <div className="min-w-0 space-y-4">
+      <button
+        type="button"
+        onClick={onDone}
+        className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <CaretLeftIcon />
+        Back to rulesets
+      </button>
+      {body}
+    </div>
   );
 }
 
@@ -442,6 +501,7 @@ function RulesetForm({
     [original],
   );
   const [d, setD] = useState<Draft>(seed);
+  const repeatedChecks = hasRepeatedCheckContexts(original);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setD((p) => ({ ...p, [key]: value }));
 
@@ -461,15 +521,6 @@ function RulesetForm({
 
   return (
     <div className="min-w-0 space-y-4">
-      <button
-        type="button"
-        onClick={onDone}
-        className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <CaretLeftIcon />
-        Back to rulesets
-      </button>
-
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="ruleset-name">Name</Label>
@@ -591,6 +642,12 @@ function RulesetForm({
               autoComplete="off"
               spellCheck={false}
             />
+            {repeatedChecks && (
+              <p className="text-[11px] text-muted-foreground">
+                This ruleset requires the same check from more than one app —
+                keep every line to keep them all.
+              </p>
+            )}
             <RuleToggle
               label="Require branches to be up to date before merging"
               checked={d.strictChecks}

@@ -3099,14 +3099,21 @@ export function useStarRepo() {
 }
 
 /** Fork a repo by owner/name. Returns the {@link ForgeForkResult} so the caller
- *  can offer "Clone the fork" (and warn when it's not yet clonable). */
+ *  can offer "Clone the fork" (and warn when it's not yet clonable). The new fork
+ *  belongs in the provider's own-repos list; invalidating at the mutation level
+ *  keeps that refresh alive after the calling pane unmounts. */
 export function useForkRepoByName() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: {
       provider: ForgeProvider;
       owner: string;
       name: string;
     }) => api.forgeForkRepo(args.provider, args.owner, args.name),
+    onSettled: (_d, _e, args) =>
+      void queryClient.invalidateQueries({
+        queryKey: ["forge-repos", args.provider],
+      }),
   });
 }
 

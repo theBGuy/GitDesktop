@@ -289,6 +289,38 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
     return setForkOpen(true);
   };
 
+  // Awaited, not per-call callbacks: leaving the repository view (closing the
+  // repo, or moving to Explore/Settings/Help) unmounts this menu while the fork
+  // still polls for readiness, and react-query then drops per-call callbacks —
+  // origin is rewired either way, so the outcome must not depend on the menu.
+  async function doFork() {
+    try {
+      const url = await fork.mutateAsync(forkIntent === "contribute");
+      setForkOpen(false);
+      toast.success(
+        url
+          ? "Forked — your fork is now origin"
+          : "Fork already existed — remotes updated",
+        { description: url || undefined },
+      );
+    } catch (e) {
+      onError(e);
+    }
+  }
+
+  // Shared by the menu item and the hotkey so the two can't diverge, and awaited
+  // for the same reason as the fork above.
+  async function doStar() {
+    try {
+      await setStar.mutateAsync(!starred);
+      toast.success(
+        starred ? "Star removed" : `Starred ${gh.data?.repo ?? "repository"}`,
+      );
+    } catch (e) {
+      onError(e);
+    }
+  }
+
   // Every menu entry doubles as a hotkey/palette action with the same gates.
   useHotkeyAction("view-on-github", () => openWeb(), canGh);
   // create-issue is the in-app dialog (registered in RepositoryView + IssuesPanel);
@@ -319,20 +351,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("git-hooks", () => setHooksOpen(true));
   useHotkeyAction("submodules", () => setSubmodulesOpen(true), hasSubmodules);
   useHotkeyAction("worktrees", () => setWorktreesOpen(true));
-  useHotkeyAction(
-    "star-repository",
-    () =>
-      setStar.mutate(!starred, {
-        onSuccess: () =>
-          toast.success(
-            starred
-              ? "Star removed"
-              : `Starred ${gh.data?.repo ?? "repository"}`,
-          ),
-        onError,
-      }),
-    canStar && !setStar.isPending,
-  );
+  useHotkeyAction("star-repository", doStar, canStar && !setStar.isPending);
   useHotkeyAction("change-remote-url", () => setRemoteUrlOpen(true));
   useHotkeyAction("repo-alias", () => setAliasTarget(repoEntry));
   useHotkeyAction("copy-repo-path", () =>
@@ -380,20 +399,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
               View on {remoteLabel}
             </DropdownMenuItem>
             {canStar && (
-              <DropdownMenuItem
-                disabled={setStar.isPending}
-                onClick={() =>
-                  setStar.mutate(!starred, {
-                    onSuccess: () =>
-                      toast.success(
-                        starred
-                          ? "Star removed"
-                          : `Starred ${gh.data?.repo ?? "repository"}`,
-                      ),
-                    onError,
-                  })
-                }
-              >
+              <DropdownMenuItem disabled={setStar.isPending} onClick={doStar}>
                 <StarIcon weight={starred ? "fill" : "regular"} />
                 {starred ? "Unstar repository" : "Star repository"}
               </DropdownMenuItem>
@@ -674,23 +680,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
             >
               Cancel
             </Button>
-            <Button
-              disabled={fork.isPending}
-              onClick={() =>
-                fork.mutate(forkIntent === "contribute", {
-                  onSuccess: (url) => {
-                    setForkOpen(false);
-                    toast.success(
-                      url
-                        ? "Forked — your fork is now origin"
-                        : "Fork already existed — remotes updated",
-                      { description: url || undefined },
-                    );
-                  },
-                  onError,
-                })
-              }
-            >
+            <Button disabled={fork.isPending} onClick={doFork}>
               {fork.isPending && <Spinner data-icon="inline-start" />}
               Fork repository
             </Button>
