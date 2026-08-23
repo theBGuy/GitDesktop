@@ -367,20 +367,19 @@ export function RunDetailView({
   async function doRerun(failedOnly: boolean) {
     try {
       await rerun.mutateAsync({ runId, failed: failedOnly });
-      toast.success(
-        (() => {
-          switch (true) {
-            case provider === "gitlab":
-              return "Retrying pipeline";
-            case provider === "bitbucket":
-              return "Triggering a new pipeline";
-            case failedOnly:
-              return "Re-running failed jobs";
-            default:
-              return "Re-running workflow";
-          }
-        })(),
-      );
+      const message = (() => {
+        switch (true) {
+          case provider === "gitlab":
+            return "Retrying pipeline";
+          case provider === "bitbucket":
+            return "Triggering a new pipeline";
+          case failedOnly:
+            return "Re-running failed jobs";
+          default:
+            return "Re-running workflow";
+        }
+      })();
+      toast.success(message);
     } catch (e) {
       toastError(e);
     }

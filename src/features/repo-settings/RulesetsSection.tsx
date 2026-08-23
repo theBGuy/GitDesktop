@@ -191,14 +191,15 @@ const storedParameters = (original: RulesetFull | undefined, type: string) =>
 
 /** The stored required-status-check entries — the frontend's one reader of that
  *  raw array (the branch-rules surface reads it again in `github/rulesets.rs`),
- *  so the seed, the repeat check and the save can't diverge on its shape. An
- *  entry whose context is missing or blank is dropped rather than rebuilt into
- *  the PUT: it names no check and carries no pin worth keeping, and a blank one
- *  would seed an invisible textarea line and count toward the repeated-context
- *  hint (unmodeled RULES still ride along via `extra`). `splitNonEmptyLines`
- *  drops the same lines on save, so seed and save stay in step. A non-array
- *  value — never seen from GitHub, whose schema always sends an array —
- *  normalizes to empty instead of blocking the editor. */
+ *  so the seed, the repeat check and the save can't diverge on its shape.
+ *  Contexts are trimmed here and blank ones dropped, matching
+ *  `splitNonEmptyLines` on both axes: the save looks a stored entry up BY this
+ *  context, so an untrimmed " ci " would miss the lookup for the "ci" its own
+ *  textarea line round-trips and rebuild the entry without its `integration_id`
+ *  pin. A blank entry names no check and would seed an invisible line that still
+ *  counts toward the repeated-context hint (unmodeled RULES ride along via
+ *  `extra`). A non-array value — never seen from GitHub, whose schema always
+ *  sends an array — normalizes to empty instead of blocking the editor. */
 const storedCheckEntries = (
   original: RulesetFull | undefined,
 ): { context: string }[] => {
@@ -207,10 +208,13 @@ const storedCheckEntries = (
     "required_status_checks",
   )?.required_status_checks;
   if (!Array.isArray(stored)) return [];
-  return stored.filter(
-    (entry): entry is { context: string } =>
-      typeof entry?.context === "string" && entry.context !== "",
-  );
+  return stored.flatMap((entry) => {
+    if (typeof entry?.context !== "string") return [];
+    const context = entry.context.trim();
+    // Spread first: an entry's unmodeled fields (`integration_id`) are the whole
+    // reason the save reuses it rather than rebuilding from the context alone.
+    return context === "" ? [] : [{ ...entry, context }];
+  });
 };
 
 /** Whether the stored ruleset requires one check context through several entries.

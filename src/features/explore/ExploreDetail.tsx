@@ -169,10 +169,11 @@ function ExploreDetailBody({
         owner: repo.owner,
         name: repo.name,
       });
-      setForked(result);
       // Still here: the card says it, with the Clone action attached. Gone: the
       // toast is the only surface left to say it.
-      if (!mounted.current) {
+      if (mounted.current) {
+        setForked(result);
+      } else {
         toast.success(`Forked to ${result.fullName}`, {
           description: result.ready ? undefined : FORK_NOT_READY,
         });
@@ -307,38 +308,46 @@ function ExploreDetailBody({
         )}
       </div>
 
-      {forked && (
-        // The card is the only confirmation while the pane is mounted, so it has to
-        // announce itself: the toast that would otherwise carry it fires only once
-        // this pane is gone.
-        <div
-          role="status"
-          className="space-y-2 border border-success/40 bg-success/10 p-3"
-        >
-          <p className="text-xs font-medium">Forked to {forked.fullName}</p>
-          {!forked.ready && (
-            <p className="text-[11px] text-muted-foreground">
-              {FORK_NOT_READY}
-            </p>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() =>
-              onClone({
-                provider,
-                cloneUrl: forked.cloneUrl,
-                // Use the fork's OWN name, not repo.name: GitHub renames a
-                // colliding fork (rust → rust-1), so the local folder must
-                // follow the fork's actual name segment.
-                name: forked.fullName.split("/").pop() ?? repo.name,
-              })
-            }
-          >
-            Clone the fork
-          </Button>
-        </div>
-      )}
+      {/* The card is the only confirmation while the pane is mounted (the toast
+          that would otherwise carry it fires once this pane is gone), so it has to
+          announce itself. Mounted unconditionally: a live region created together
+          with its text announces unreliably, so the region pre-exists and only its
+          CONTENT changes, and `sr-only` keeps the empty state out of layout. */}
+      <div
+        role="status"
+        className={
+          forked
+            ? "space-y-2 border border-success/40 bg-success/10 p-3"
+            : "sr-only"
+        }
+      >
+        {forked && (
+          <>
+            <p className="text-xs font-medium">Forked to {forked.fullName}</p>
+            {!forked.ready && (
+              <p className="text-[11px] text-muted-foreground">
+                {FORK_NOT_READY}
+              </p>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                onClone({
+                  provider,
+                  cloneUrl: forked.cloneUrl,
+                  // Use the fork's OWN name, not repo.name: GitHub renames a
+                  // colliding fork (rust → rust-1), so the local folder must
+                  // follow the fork's actual name segment.
+                  name: forked.fullName.split("/").pop() ?? repo.name,
+                })
+              }
+            >
+              Clone the fork
+            </Button>
+          </>
+        )}
+      </div>
 
       {canReadme && (
         <>

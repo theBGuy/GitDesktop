@@ -198,8 +198,11 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // personally is never a target (org repos stay forkable). GitLab: its fork page picks
   // the destination namespace, and forking your own project into a group you own is
   // supported, so the web arm stays offered on everything.
+  // Case-folded: the API's slugs are canonical lowercase, while `owner` is whatever
+  // the origin remote spells (`workspace_slug` hands back the URL segment verbatim).
+  const ownerKey = owner?.toLowerCase();
   const ownedHere = isBitbucket
-    ? ownedNamespaces.length > 0 && !!owner && ownedNamespaces.includes(owner)
+    ? ownedNamespaces.some((n) => n.toLowerCase() === ownerKey)
     : ownRepo && !isGitLab;
   // One predicate for the menu item and its palette twin, so the two can't drift.
   const canForkHere = canGh && !ownedHere;

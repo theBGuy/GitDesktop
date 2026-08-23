@@ -57,15 +57,14 @@ export function RunWorkflowDialog({
   const hasCustomPipelines = isBitbucket && pipelineNames.length > 0;
   const runWorkflow = useRunWorkflow(repoPath);
   const selectRun = useUiStore((s) => s.selectRun);
-  // Identity of the current open session: a fresh number on each open, null while
+  // Identity of the current open session: a fresh object on each open, null while
   // closed or unmounted. A mounted ref can't stand in for it — the panel renders
   // this dialog unconditionally, so closing it leaves the component mounted. Any
   // lifecycle that re-runs this effect also ends the session, landing the safe
   // arm: the toast still fires, only the navigation is skipped.
-  const openSeq = useRef(0);
-  const session = useRef<number | null>(null);
+  const session = useRef<object | null>(null);
   useEffect(() => {
-    session.current = open ? ++openSeq.current : null;
+    session.current = open ? {} : null;
     return () => {
       session.current = null;
     };

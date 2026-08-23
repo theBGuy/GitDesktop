@@ -132,8 +132,8 @@ Click the **⋮** menu next to the repo name for repo-wide actions:
   **GitHub** repository you own personally, since the in-app fork always lands under
   your own account (organization repositories stay forkable), or on a **Bitbucket**
   repository in a workspace you belong to, which GitDesktop reads from your workspaces
-  on the host. The **GitLab** and **Bitbucket** fork pages ask where the fork should
-  go, so on GitLab the item stays offered on any project, including your own.
+  on the host. GitLab's fork page asks where the fork should go, so the item stays
+  offered on any project, including your own.
 - **Insights** (analytics), **manage files**, **submodules**, the **remote URL**,
   **branch rules**, **git hooks**, {{ai}}**automations**, {{/ai}}**repository settings**,
   an **alias**, copy the repo path, copy the branch name, copy the HEAD SHA, and

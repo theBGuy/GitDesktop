@@ -1,2 +1,3 @@
-- The ruleset editor's required-approvals field settles on a whole number from 0
-  to 10 when you leave it, so you can clear it and retype freely while editing.
+- The ruleset editor keeps a required-approvals count you type to a whole number
+  from 0 to 10, and a stored count outside that range stays visible until you
+  correct it.

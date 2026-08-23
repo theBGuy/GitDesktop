@@ -275,10 +275,10 @@ export const CHECKS = [
     // see a NEW site: the settings dialog's own sections (which unmount on BOTH
     // dialog close and every rail section switch — the keyed crossfade), Explore,
     // whose detail pane is keyed per repo, and Actions, whose run detail is keyed
-    // per run. The wider app is a separate tier: pulls/ and repository/ still
-    // carry per-call callback sites in bulk, so scanning them would report a
-    // backlog rather than a regression. Each tree joins this check on the change
-    // that converts it.
+    // per run and whose dispatch dialog unmounts with the repo view. The wider app
+    // is a separate tier: pulls/ and repository/ still carry per-call callback
+    // sites in bulk, so scanning them would report a backlog rather than a
+    // regression. Each tree joins this check on the change that converts it.
     appliesTo: (file) =>
       file.startsWith("src/features/repo-settings/") ||
       file.startsWith("src/features/explore/") ||
