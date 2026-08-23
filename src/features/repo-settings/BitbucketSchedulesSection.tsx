@@ -26,7 +26,10 @@ import {
 } from "@/lib/git/queries";
 import type { BitbucketPipelineSchedule } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { PipelinesDisabledBanner } from "./BitbucketVariablesSection";
+import {
+  PipelinesConfigErrorCard,
+  PipelinesDisabledBanner,
+} from "./BitbucketVariablesSection";
 import { AsyncListBody, InlineConfirm } from "./parts";
 
 const bbSchedulesKey = (repo: string) => ["repo", repo, "bb-schedules"];
@@ -113,6 +116,13 @@ export function BitbucketSchedulesSection({
     }
   }
 
+  // Ahead of the `creating` form as well as the banner: only a config that never
+  // loaded reaches here, and until it does this section can't tell whether
+  // schedules are available to create at all.
+  if (config.isError && !config.data) {
+    return <PipelinesConfigErrorCard error={config.error} />;
+  }
+
   if (config.data && !enabled) {
     return (
       <PipelinesDisabledBanner
@@ -149,7 +159,7 @@ export function BitbucketSchedulesSection({
       </div>
 
       <AsyncListBody
-        loading={schedules.isLoading}
+        loading={schedules.isPending}
         error={schedules.error}
         empty={schedules.data?.length === 0}
         emptyLabel="No schedules yet — a schedule runs a branch's pipeline on a recurring cron."

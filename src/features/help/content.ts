@@ -128,10 +128,12 @@ Click the **⋮** menu next to the repo name for repo-wide actions:
 - On the host: **Star** the repository, **create an issue**, or **Fork** it (on GitLab
   and Bitbucket, forking opens the web fork page). Bitbucket has no stars and its
   issue tracker is retired, so those two actions don't appear for Bitbucket repos.
-  **Fork** doesn't appear on a GitHub repository you own personally — the in-app fork
-  always lands under your own account (organization repositories stay forkable). The
-  web fork page asks where the fork should go, so the GitLab and Bitbucket items stay
-  available on any repository.
+  **Fork** is for repositories outside your own space. It doesn't come up on a
+  **GitHub** repository you own personally, since the in-app fork always lands under
+  your own account (organization repositories stay forkable), or on a **Bitbucket**
+  repository in a workspace you belong to, which GitDesktop reads from your workspaces
+  on the host. The **GitLab** and **Bitbucket** fork pages ask where the fork should
+  go, so on GitLab the item stays offered on any project, including your own.
 - **Insights** (analytics), **manage files**, **submodules**, the **remote URL**,
   **branch rules**, **git hooks**, {{ai}}**automations**, {{/ai}}**repository settings**,
   an **alias**, copy the repo path, copy the branch name, copy the HEAD SHA, and

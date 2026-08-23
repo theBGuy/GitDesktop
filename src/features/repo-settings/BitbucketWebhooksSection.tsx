@@ -98,7 +98,7 @@ export function BitbucketWebhooksSection({
       </div>
 
       <AsyncListBody
-        loading={hooks.isLoading}
+        loading={hooks.isPending}
         error={hooks.error}
         empty={hooks.data?.length === 0}
         emptyLabel="No webhooks yet."

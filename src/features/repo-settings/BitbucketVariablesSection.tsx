@@ -20,7 +20,7 @@ import {
 } from "@/lib/git/queries";
 import type { BitbucketPipelineVariable } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { AsyncListBody, InlineConfirm } from "./parts";
+import { AsyncErrorCard, AsyncListBody, InlineConfirm } from "./parts";
 
 function validKey(k: string): boolean {
   return /^[A-Za-z0-9_]{1,255}$/.test(k);
@@ -61,6 +61,10 @@ export function BitbucketVariablesSection({
     } catch (e) {
       toastError(e);
     }
+  }
+
+  if (config.isError && !config.data) {
+    return <PipelinesConfigErrorCard error={config.error} />;
   }
 
   if (config.data && !enabled) {
@@ -184,7 +188,7 @@ export function BitbucketVariablesSection({
       </div>
 
       <AsyncListBody
-        loading={variables.isLoading}
+        loading={variables.isPending}
         error={variables.error}
         empty={variables.data?.length === 0}
         emptyLabel="No pipeline variables yet."
@@ -351,6 +355,22 @@ function VariableRow({
         {variable.secured ? " (secured variables can't be un-secured)" : ""}
       </Label>
     </div>
+  );
+}
+
+/** The card the three Pipelines sections show when the availability check itself
+ *  failed. Every call site gates it on ABSENT config data, ahead of the disabled
+ *  banner: a read that never landed leaves `enabled` false with nothing to tell
+ *  it apart from "pipelines are off", and the section's list query stays
+ *  disabled while it is, so no other surface reports the failure. A failed
+ *  background REFETCH keeps the last good config, where tearing a working
+ *  section down would be wrong. */
+export function PipelinesConfigErrorCard({ error }: { error: unknown }) {
+  return (
+    <AsyncErrorCard
+      title="Couldn't check whether Pipelines are enabled."
+      error={error}
+    />
   );
 }
 

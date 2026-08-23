@@ -361,49 +361,58 @@ export function RunDetailView({
   const canApprove =
     tabActive && approvalPending && !writeBlocked && !approveRun.isPending;
 
-  function doRerun(failedOnly: boolean) {
-    rerun.mutate(
-      { runId, failed: failedOnly },
-      {
-        onSuccess: () =>
-          toast.success(
-            provider === "gitlab"
-              ? "Retrying pipeline"
-              : provider === "bitbucket"
-                ? "Triggering a new pipeline"
-                : failedOnly
-                  ? "Re-running failed jobs"
-                  : "Re-running workflow",
-          ),
-        onError: toastError,
-      },
-    );
+  // Awaited, not per-call callbacks: this view is keyed per run and unmounts the
+  // moment another run is selected, and react-query drops per-call callbacks once
+  // the observer has no listeners.
+  async function doRerun(failedOnly: boolean) {
+    try {
+      await rerun.mutateAsync({ runId, failed: failedOnly });
+      toast.success(
+        (() => {
+          switch (true) {
+            case provider === "gitlab":
+              return "Retrying pipeline";
+            case provider === "bitbucket":
+              return "Triggering a new pipeline";
+            case failedOnly:
+              return "Re-running failed jobs";
+            default:
+              return "Re-running workflow";
+          }
+        })(),
+      );
+    } catch (e) {
+      toastError(e);
+    }
   }
 
-  function doCancel() {
-    cancel.mutate(runId, {
-      onSuccess: () => toast.success("Cancelling run…"),
-      onError: toastError,
-    });
+  async function doCancel() {
+    try {
+      await cancel.mutateAsync(runId);
+      toast.success("Cancelling run…");
+    } catch (e) {
+      toastError(e);
+    }
   }
 
-  function doPlay(jobId: number) {
-    playJob.mutate(jobId, {
-      onSuccess: () => toast.success("Starting job…"),
-      onError: toastError,
-    });
+  async function doPlay(jobId: number) {
+    try {
+      await playJob.mutateAsync(jobId);
+      toast.success("Starting job…");
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   async function doApprove() {
     const ok = await useConfirm.getState().ask(APPROVE_RUN_CONFIRM);
     if (!ok) return;
-    approveRun.mutate(
-      { runId },
-      {
-        onSuccess: () => toast.success("Workflow run approved."),
-        onError: toastError,
-      },
-    );
+    try {
+      await approveRun.mutateAsync({ runId });
+      toast.success("Workflow run approved.");
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   useHotkeyAction("approve-workflow-run", () => void doApprove(), canApprove);

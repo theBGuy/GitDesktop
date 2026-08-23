@@ -33,7 +33,7 @@ import {
 } from "@/lib/git/queries";
 import type { SecurityFeature, SecurityStatus } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { InlineConfirm } from "./parts";
+import { AsyncErrorCard, InlineConfirm } from "./parts";
 
 /** Dependabot / dependency-graph options GitHub exposes to NO repo-level API —
  *  they're web-UI-only. (Version updates is handled by the dependabot.yml
@@ -158,7 +158,7 @@ export function SecuritySection({
 }) {
   const security = useSecurity(repoPath, open);
 
-  if (security.isLoading) {
+  if (security.isPending) {
     return (
       <div className="min-w-0 space-y-3">
         <Skeleton className="h-12 w-full" />
@@ -169,15 +169,11 @@ export function SecuritySection({
   }
   if (security.isError || !security.data) {
     return (
-      <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
-        <p className="font-medium text-destructive">Couldn't load security.</p>
-        <p className="mt-1 text-muted-foreground">
-          {security.error instanceof Error ? security.error.message : null}
-        </p>
-        <p className="mt-2 text-muted-foreground">
-          These settings need repo-admin access.
-        </p>
-      </div>
+      <AsyncErrorCard
+        title="Couldn't load security."
+        error={security.error}
+        hint="These settings need repo-admin access."
+      />
     );
   }
 
@@ -234,7 +230,7 @@ function DependabotVersionUpdates({
     }
   }
 
-  if (config.isLoading) return null;
+  if (config.isPending) return null;
   const exists = config.data != null;
 
   return (

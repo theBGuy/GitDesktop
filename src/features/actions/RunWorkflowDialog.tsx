@@ -57,6 +57,19 @@ export function RunWorkflowDialog({
   const hasCustomPipelines = isBitbucket && pipelineNames.length > 0;
   const runWorkflow = useRunWorkflow(repoPath);
   const selectRun = useUiStore((s) => s.selectRun);
+  // Identity of the current open session: a fresh number on each open, null while
+  // closed or unmounted. A mounted ref can't stand in for it — the panel renders
+  // this dialog unconditionally, so closing it leaves the component mounted. Any
+  // lifecycle that re-runs this effect also ends the session, landing the safe
+  // arm: the toast still fires, only the navigation is skipped.
+  const openSeq = useRef(0);
+  const session = useRef<number | null>(null);
+  useEffect(() => {
+    session.current = open ? ++openSeq.current : null;
+    return () => {
+      session.current = null;
+    };
+  }, [open]);
 
   // Only active workflows are dispatchable.
   const dispatchable = (workflows.data ?? []).filter(
@@ -96,38 +109,54 @@ export function RunWorkflowDialog({
     }
   }, [open, workflow, dispatchable]);
 
-  function submit() {
+  // Awaited, not per-call callbacks: leaving the repo view mid-dispatch unmounts
+  // this panel, and react-query drops per-call callbacks once the observer has no
+  // listeners.
+  async function submit() {
     if ((!isPipelineProvider && !workflow) || !gitRef.trim()) return;
     const record: Record<string, string> = {};
     for (const { key, value } of inputs) {
       const k = key.trim();
       if (k) record[k] = value;
     }
-    runWorkflow.mutate(
-      {
-        // Bitbucket rides a custom-pipeline selector (or "" for the default) through
-        // the `workflow` arg; GitLab always sends "" (byte-identical); GitHub sends
-        // the selected workflow id.
-        workflow: isBitbucket ? pipeline : isPipelineProvider ? "" : workflow,
+    const dispatchedFrom = session.current;
+    // Bitbucket rides a custom-pipeline selector (or "" for the default) through
+    // the `workflow` arg; GitLab always sends "" (byte-identical); GitHub sends
+    // the selected workflow id.
+    const workflowArg = (() => {
+      switch (true) {
+        case isBitbucket:
+          return pipeline;
+        case isPipelineProvider:
+          return "";
+        default:
+          return workflow;
+      }
+    })();
+    try {
+      await runWorkflow.mutateAsync({
+        workflow: workflowArg,
         gitRef: gitRef.trim(),
         inputs: record,
-      },
-      {
-        onSuccess: () => {
-          toast.success(
-            isPipelineProvider ? "Pipeline started" : "Workflow dispatched",
-            {
-              description:
-                "It may take a few seconds to appear in the runs list.",
-            },
-          );
-          // Clear any stale selection so the new run is easy to spot.
-          selectRun(null);
-          onOpenChange(false);
+      });
+      toast.success(
+        isPipelineProvider ? "Pipeline started" : "Workflow dispatched",
+        {
+          description: "It may take a few seconds to appear in the runs list.",
         },
-        onError: toastError,
-      },
-    );
+      );
+      // The toast reports the dispatch wherever the user went; the navigation only
+      // applies to the dialog they are still in, so it is gated on the session that
+      // started it — a close, a reopen, or a tab switch mid-dispatch would
+      // otherwise wipe the run they picked meanwhile or close a reopened dialog.
+      if (dispatchedFrom !== null && session.current === dispatchedFrom) {
+        // Clear any stale selection so the new run is easy to spot.
+        selectRun(null);
+        onOpenChange(false);
+      }
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   const noneDispatchable =

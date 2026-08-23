@@ -146,7 +146,7 @@ export function GitLabMembersSection({
       </div>
 
       <AsyncListBody
-        loading={members.isLoading}
+        loading={members.isPending}
         error={members.error}
         empty={members.data?.length === 0}
         emptyLabel="No members yet."

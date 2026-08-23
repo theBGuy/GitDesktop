@@ -60,8 +60,10 @@ import {
   openWithProgram,
 } from "@/lib/git/api";
 import {
+  EMPTY_NAMESPACES,
   forgeFeatureReady,
   forgeSupports,
+  useForgeRepos,
   useForgeStatus,
   useForkRepo,
   useRepoAdmin,
@@ -122,6 +124,8 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const repoName = useUiStore((s) => s.repoName);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const fork = useForkRepo(repoPath);
+  // The Fork item's verdict, sampled when the dropdown opens (see `canForkHere`).
+  const [forkWhileOpen, setForkWhileOpen] = useState(false);
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [jiraOpen, setJiraOpen] = useState(false);
   const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
@@ -181,19 +185,24 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const remoteLabel = providerLabel(provider);
   const canStar = canGh && forgeSupports(gh.data, "stars");
   const canCreateHostIssue = canGh && forgeSupports(gh.data, "issues");
-  // The in-app fork dialog always creates the fork under your own account, so a
-  // repo you own personally is never a valid target (org repos stay forkable).
-  // The GitLab/Bitbucket web arms offer a namespace choice, so they stay put.
-  const ownRepo =
-    !!gh.data?.repo &&
-    !!gh.data?.login &&
-    gh.data.repo.split("/")[0] === gh.data.login;
+  const owner = gh.data?.repo?.split("/")[0];
+  const ownRepo = !!owner && !!gh.data?.login && owner === gh.data.login;
+  // Bitbucket's `login` is a /user username (a display name where that's absent) and
+  // never matches the workspace slug a repo carries, so its ownership answer can only
+  // come from the workspaces you belong to. Fetched for every Bitbucket repo rather
+  // than on menu-open, because the palette twin below reads the verdict with no menu
+  // to trigger one. Unresolved (empty) falls open.
+  const ownRepos = useForgeRepos("bitbucket", canGh && isBitbucket);
+  const ownedNamespaces = ownRepos.data?.ownedNamespaces ?? EMPTY_NAMESPACES;
+  // GitHub: the in-app dialog always forks under your own account, so a repo you own
+  // personally is never a target (org repos stay forkable). GitLab: its fork page picks
+  // the destination namespace, and forking your own project into a group you own is
+  // supported, so the web arm stays offered on everything.
+  const ownedHere = isBitbucket
+    ? ownedNamespaces.length > 0 && !!owner && ownedNamespaces.includes(owner)
+    : ownRepo && !isGitLab;
   // One predicate for the menu item and its palette twin, so the two can't drift.
-  // Bitbucket bypasses the ownership test rather than trusting `ownRepo` to fall
-  // false: its `login` is a /user username (a display name where that's absent), which
-  // doesn't line up with the workspace slug a repo's owner carries. Explore's Fork
-  // gate needs the real answer and gets it from a membership set instead.
-  const canForkHere = canGh && (isGitLab || isBitbucket || !ownRepo);
+  const canForkHere = canGh && !ownedHere;
   const starStatus = useRepoStarStatus(repoPath, canStar);
   const setStar = useSetRepoStar(repoPath);
   const starred = starStatus.data ?? false;
@@ -371,11 +380,16 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
 
   return (
     <DropdownMenu
-      onOpenChange={(menuOpen) => {
+      onOpenChange={(open) => {
+        // Two sampling points, one predicate: the palette reads `canForkHere` live,
+        // while the menu renders the value it opened with, so a Bitbucket workspace
+        // read landing mid-open can't drop an item out from under the cursor (and out
+        // from under the arrow-key index).
+        setForkWhileOpen(open && canForkHere);
         // Warm the repo-settings chunk while the menu is up, so the click that
         // opens the dialog renders it directly instead of suspending on it.
         // Gated like the item itself: a non-admin has nothing to open.
-        if (menuOpen && canOpenRepoSettings) {
+        if (open && canOpenRepoSettings) {
           warmRepoSettingsDialog((dialog) => setReadyDialog(() => dialog));
         }
       }}
@@ -414,7 +428,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
                 Create issue on {remoteLabel}
               </DropdownMenuItem>
             )}
-            {canForkHere &&
+            {forkWhileOpen &&
               (isGitLab || isBitbucket ? (
                 // The fork dialog's flow (fork + rewire remotes + set-default) is
                 // GitHub-only; GitLab/Bitbucket fork from their web page instead of

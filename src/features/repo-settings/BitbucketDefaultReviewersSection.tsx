@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { presentError } from "@/lib/error-summary";
 import {
   useBbAddDefaultReviewer,
   useBbDefaultReviewers,
@@ -75,7 +76,7 @@ export function BitbucketDefaultReviewersSection({
       </div>
 
       <AsyncListBody
-        loading={reviewers.isLoading}
+        loading={reviewers.isPending}
         error={reviewers.error}
         empty={rows.length === 0}
         emptyLabel="No default reviewers — new pull requests start with no reviewers."
@@ -271,16 +272,14 @@ function AddReviewerPopover({
               aria-label="Member suggestions"
               className="mt-2 space-y-px"
             >
-              {candidates.isLoading && (
+              {candidates.isPending && (
                 <p className="px-2 py-1.5 text-xs text-muted-foreground">
                   Loading members…
                 </p>
               )}
               {candidates.isError && (
                 <p className="px-2 py-1.5 text-xs text-destructive">
-                  {candidates.error instanceof Error
-                    ? candidates.error.message
-                    : "Couldn't load members."}
+                  {presentError(candidates.error).summary}
                 </p>
               )}
               {suggestions.map((c, i) => {
@@ -311,7 +310,7 @@ function AddReviewerPopover({
                   </button>
                 );
               })}
-              {!candidates.isLoading &&
+              {!candidates.isPending &&
                 !candidates.isError &&
                 suggestions.length === 0 && (
                   <p className="px-2 py-1.5 text-xs text-muted-foreground">

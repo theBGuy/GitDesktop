@@ -192,9 +192,12 @@ const storedParameters = (original: RulesetFull | undefined, type: string) =>
 /** The stored required-status-check entries — the frontend's one reader of that
  *  raw array (the branch-rules surface reads it again in `github/rulesets.rs`),
  *  so the seed, the repeat check and the save can't diverge on its shape. An
- *  entry without a string context is dropped rather than rebuilt into the PUT:
- *  it names no check and carries no pin worth keeping (unmodeled RULES still
- *  ride along via `extra`). A non-array value — never seen from GitHub, whose
+ *  entry whose context is missing or blank is dropped rather than rebuilt into
+ *  the PUT: it names no check and carries no pin worth keeping, and a blank one
+ *  would seed an invisible textarea line and count toward the repeated-context
+ *  hint (unmodeled RULES still ride along via `extra`). `splitNonEmptyLines`
+ *  drops the same lines on save, so seed and save stay in step. A non-array
+ *  value — never seen from GitHub, whose
  *  schema always sends an array — normalizes to empty instead of blocking the
  *  editor. */
 const storedCheckEntries = (
@@ -206,7 +209,8 @@ const storedCheckEntries = (
   )?.required_status_checks;
   if (!Array.isArray(stored)) return [];
   return stored.filter(
-    (entry): entry is { context: string } => typeof entry?.context === "string",
+    (entry): entry is { context: string } =>
+      typeof entry?.context === "string" && entry.context !== "",
   );
 };
 
@@ -380,7 +384,7 @@ function RulesetList({
       </div>
 
       <AsyncListBody
-        loading={rulesets.isLoading}
+        loading={rulesets.isPending}
         error={rulesets.error}
         empty={rulesets.data?.length === 0}
         emptyLabel="No rulesets yet."
@@ -563,8 +567,10 @@ function RulesetForm({
     }
   }
 
+  // No wrapper of its own: RulesetEditor, the only place this renders, already
+  // owns the `min-w-0 space-y-4` column these fields flow in.
   return (
-    <div className="min-w-0 space-y-4">
+    <>
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="ruleset-name">Name</Label>
@@ -643,14 +649,9 @@ function RulesetForm({
               <Label htmlFor="ruleset-approvals" className="text-xs">
                 Required approvals
               </Label>
-              <Input
-                id="ruleset-approvals"
-                type="number"
-                min={0}
-                max={10}
+              <ApprovalsInput
                 value={d.approvals}
-                onChange={(e) => set("approvals", Number(e.target.value))}
-                className="h-7 w-16"
+                onChange={(n) => set("approvals", n)}
               />
             </div>
             <RuleToggle
@@ -731,7 +732,55 @@ function RulesetForm({
           {id != null ? "Save ruleset" : "Create ruleset"}
         </Button>
       </div>
-    </div>
+    </>
+  );
+}
+
+const clampApprovals = (n: number) => Math.min(10, Math.max(0, Math.round(n)));
+
+/**
+ * The required-approvals count. `typed` holds the raw string while the field is
+ * edited, so the display never rewrites itself mid-entry; every value committed
+ * to the draft is clamped instead, so no save can carry an out-of-range count
+ * whatever order a blur and a click arrive in — deliberately: a save that beats
+ * the blur lands the clamped count, not the raw text still shown. Blur then
+ * normalizes the display, falling back to the committed count for an emptied
+ * field.
+ */
+function ApprovalsInput({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (n: number) => void;
+}) {
+  const [typed, setTyped] = useState<string | null>(null);
+  return (
+    <Input
+      id="ruleset-approvals"
+      type="number"
+      min={0}
+      max={10}
+      value={typed ?? value}
+      onChange={(e) => {
+        setTyped(e.target.value);
+        const n = Number(e.target.value);
+        if (e.target.value.trim() !== "" && Number.isFinite(n))
+          onChange(clampApprovals(n));
+      }}
+      onBlur={() => {
+        // `null` means untouched: no keystroke landed, so nothing was committed
+        // and a focus-then-leave must not rewrite a stored count the user hasn't
+        // edited (`draftToBody` refuses one above 10 at save).
+        if (typed === null) return;
+        const parsed = Number(typed);
+        const base =
+          typed.trim() !== "" && Number.isFinite(parsed) ? parsed : value;
+        onChange(clampApprovals(base));
+        setTyped(null);
+      }}
+      className="h-7 w-16"
+    />
   );
 }
 

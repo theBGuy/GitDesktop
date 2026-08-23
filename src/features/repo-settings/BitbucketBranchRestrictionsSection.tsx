@@ -112,7 +112,7 @@ export function BitbucketBranchRestrictionsSection({
       </div>
 
       <AsyncListBody
-        loading={restrictions.isLoading}
+        loading={restrictions.isPending}
         error={restrictions.error}
         empty={restrictions.data?.length === 0}
         emptyLabel="No branch restrictions yet."
