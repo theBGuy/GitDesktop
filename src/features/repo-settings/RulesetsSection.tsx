@@ -197,9 +197,8 @@ const storedParameters = (original: RulesetFull | undefined, type: string) =>
  *  would seed an invisible textarea line and count toward the repeated-context
  *  hint (unmodeled RULES still ride along via `extra`). `splitNonEmptyLines`
  *  drops the same lines on save, so seed and save stay in step. A non-array
- *  value — never seen from GitHub, whose
- *  schema always sends an array — normalizes to empty instead of blocking the
- *  editor. */
+ *  value — never seen from GitHub, whose schema always sends an array —
+ *  normalizes to empty instead of blocking the editor. */
 const storedCheckEntries = (
   original: RulesetFull | undefined,
 ): { context: string }[] => {
