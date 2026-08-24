@@ -232,12 +232,8 @@ export function RemoteIssueView({
   // state changes) interleaved into the feed below; provider-neutral via the
   // backend's `forge_issue_timeline`. The composite gate is load-bearing: an
   // unresolved provider must not fetch, and Bitbucket issues aren't wired.
-  const timeline = useIssueTimeline(
-    repoPath,
-    number,
-    !!provider && provider !== "bitbucket",
-    lens,
-  );
+  const timelineEnabled = !!provider && provider !== "bitbucket";
+  const timeline = useIssueTimeline(repoPath, number, timelineEnabled, lens);
   // Feed-constant, so it's read once here rather than per event row; the
   // repo-path variant avoids the active-repo hook's second store subscription.
   const ghHost = useForgeGhHost(repoPath);
@@ -1096,12 +1092,17 @@ export function RemoteIssueView({
               )}
               {feed.map((e) => e.node)}
               {/* Wait for the timeline too: on an events-only issue the details
-                  can resolve first and flash this before the rows arrive. */}
-              {feed.length === 0 && !timeline.isPending && (
-                <p className="text-xs text-muted-foreground">
-                  No comments yet.
-                </p>
-              )}
+                  can resolve first and flash this before the rows arrive. A
+                  DISABLED timeline query never leaves pending, so it can't be
+                  the thing waited on — when the forge probe settles without
+                  enabling it, no events are coming and the line shows. */}
+              {feed.length === 0 &&
+                !forge.isPending &&
+                (!timelineEnabled || !timeline.isPending) && (
+                  <p className="text-xs text-muted-foreground">
+                    No comments yet.
+                  </p>
+                )}
             </div>
           </ScrollArea>
         </div>
