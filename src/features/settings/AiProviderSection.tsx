@@ -142,10 +142,15 @@ function ModelPicker({
         catalog?.cause !== "failed" &&
         !availableModels.isFetching:
         return "Model passed to the CLI — leave blank for its default";
-      case availableModels.isFetching:
-        return "Loading models…";
+      // A settled live list outranks an in-flight refetch: an HTTP provider's
+      // background refetch (staleTime + focus refetch) keeps its `live` data, so
+      // "Loading…" must not flash over the shown count. First load and a provider
+      // switch both change the query key, so `live` is false on the placeholder
+      // and the loading case still wins there.
       case catalog?.live === true:
         return `${models.length} models from ${PROVIDER_LABELS[value.provider]}`;
+      case availableModels.isFetching:
+        return "Loading models…";
       case failureReason !== undefined:
         return `Suggestions only — couldn't load the live list: ${failureReason}`;
       case catalog?.cause === "empty":
@@ -220,7 +225,12 @@ function ModelPicker({
           />
           <ComboboxContent>
             <ComboboxEmpty>
-              No matching models — the typed id is used as-is
+              {/* With placeholder suggestions always present, this shows only
+                  under a typed filter, which may still be resolving — note an
+                  in-flight probe, matching the session and PR-review pickers. */}
+              {availableModels.isFetching
+                ? "No matching models yet (catalog loading) — the typed id is used as-is"
+                : "No matching models — the typed id is used as-is"}
             </ComboboxEmpty>
             <ComboboxList>
               {(item: string) => (

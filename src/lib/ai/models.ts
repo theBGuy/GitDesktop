@@ -232,7 +232,11 @@ async function fetchProviderModels(
  * Live model list for the current provider, falling back to the static
  * suggestions when there's no key or base URL configured, the request fails, or
  * the provider lists nothing. `opts.enabled` lets a caller defer the provider
- * request until the user shows intent to pick a model.
+ * request until the user shows intent to pick a model. `data` is always defined
+ * — static suggestions stand in until the request settles, and whenever the query
+ * is gate-disabled — so query status is always `success`: detect an in-flight
+ * request with `isFetching`, never `isPending`, and read `data.live` / `data.cause`
+ * to tell a settled fallback from a stand-in.
  */
 export function useAvailableModels(
   settings: AiSettings,
@@ -308,6 +312,9 @@ export function useAvailableModels(
  * Live model list for an agent CLI, for the session-side pickers, falling back
  * to that CLI's static suggestions when it lists nothing or the probe fails.
  * `opts.enabled` defers the probe until the user shows intent to pick a model.
+ * `data` is always defined (static suggestions stand in until the probe settles,
+ * and whenever the query is gate-disabled), so status is always `success`: detect
+ * an in-flight probe with `isFetching`, never `isPending`.
  *
  * Deliberately carries no binary-path axis: sessions have no per-agent path
  * override (every session start passes `binPath: null`), and the probe must
