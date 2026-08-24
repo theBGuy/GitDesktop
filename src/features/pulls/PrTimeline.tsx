@@ -138,8 +138,9 @@ function RailIcon({
 }
 
 /** A referenced PR/issue a timeline row points at. `repo` is its `owner/name`, or
- *  `""` when the provider didn't say — a reference can live in ANOTHER repository,
- *  so the number alone can't address it. */
+ *  `""` when the reference is in the viewed repo — the wire's same-repo guarantee
+ *  the gate in {@link ReferenceChip} relies on; a reference can live in ANOTHER
+ *  repository, so the number alone can't address it. */
 interface ReferenceChipData {
   /** `"pr"` / `"issue"`, or `""` when the entity's type is unknown. */
   kind: string;

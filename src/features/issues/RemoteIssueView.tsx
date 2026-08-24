@@ -1095,7 +1095,9 @@ export function RemoteIssueView({
                 />
               )}
               {feed.map((e) => e.node)}
-              {feed.length === 0 && (
+              {/* Wait for the timeline too: on an events-only issue the details
+                  can resolve first and flash this before the rows arrive. */}
+              {feed.length === 0 && !timeline.isPending && (
                 <p className="text-xs text-muted-foreground">
                   No comments yet.
                 </p>
