@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
+import { ProjectsPopover } from "@/features/conversations/ProjectsPopover";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
 import {
   useAddIssueSpentTime,
@@ -89,7 +90,7 @@ export function IssueRail({ rows }: { rows: IssueRailRow[] }) {
 }
 
 /** A rail row's link out. Every one targets the issue's own URL — only the
- *  framing (Links / Projects / Notifications) differs per provider surface. */
+ *  framing (Links / Notifications) differs per provider surface. */
 function RailLinkButton({
   url,
   children,
@@ -258,6 +259,21 @@ export function IssueSidebar({
       ),
     },
     {
+      key: "projects",
+      when: canWrite,
+      render: () => (
+        <ProjectsPopover
+          repoPath={repoPath}
+          enabled
+          kind="issue"
+          number={number}
+          contentId={issue.id}
+          lens={lens}
+          disabledReason={pickerDisabledReason}
+        />
+      ),
+    },
+    {
       key: "milestone",
       when: canSetMilestone,
       render: () => (
@@ -275,14 +291,6 @@ export function IssueSidebar({
       ),
     },
     milestoneValueRow(issue, !canSetMilestone),
-    {
-      key: "projects",
-      when: canWrite,
-      heading: "Projects",
-      render: () => (
-        <RailLinkButton url={issue.url}>Manage on GitHub</RailLinkButton>
-      ),
-    },
     {
       key: "relationships",
       when: canWrite,
@@ -372,7 +380,7 @@ export function IssueSidebar({
         />
       ),
     },
-    // GitHub frames its link out as Projects + Notifications above instead.
+    // GitHub frames its link out as Notifications above instead.
     viewOnRemoteRow(issue, remoteLabel, !canWrite),
   ];
 

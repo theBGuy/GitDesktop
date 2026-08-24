@@ -791,6 +791,9 @@ visible after the reviewer leaves the pending-request list. A pull request that 
 merges cleanly says so under its header, and **Resolve conflicts** settles it without
 leaving the app — see *Conflicts with the base branch* below.
 
+An open pull request's side rail carries the same **Projects** row an issue gets — chips for
+the **GitHub Projects** it belongs to, and a picker to link or unlink it (see *Issues*).
+
 The list toolbar's **funnel** filters the list by **author or label** — type in its search
 box to narrow both groups at once, toggle any number of options (each shows its match
 count), and long author lists scroll inside the popup.
@@ -1357,6 +1360,11 @@ duplicates, and same-project mentions.
 - **Dependencies** — link issues as blocked-by / blocking.
 - **Development** — see linked PRs and branches, and **create a branch** wired to the
   issue.
+- **Projects** — chips in the side rail show which **GitHub Projects** the issue belongs to,
+  and a picker links or unlinks it across the repository's projects and the owner's; your
+  changes apply when the picker closes. GitHub only, and it needs the \`project\` scope —
+  without it the picker says so and offers **Reconnect GitHub…**, or a copyable
+  \`gh auth refresh\` command already pointed at your host.
 
 As on the Pull Requests tab, these follow your access on the repository: an action you
 don't have the access for — a lighter tier for labels, assignees, milestones, and

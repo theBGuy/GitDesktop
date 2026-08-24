@@ -261,9 +261,10 @@ PR (comments and all) in one click.
 - **Open, edit, merge**: review, comment, label, **assign**, **request
   reviewers**, approve, edit, and merge (merge/squash/rebase) without the
   browser. Set labels and assignees right when you open a PR/MR (GitHub &
-  GitLab), request reviewers across GitHub, GitLab & Bitbucket, flip a PR
-  between **draft and ready for review** either way on all three, and
-  **create new PRs as drafts by default** (Settings → General).
+  GitLab), request reviewers across GitHub, GitLab & Bitbucket, add an open
+  PR to **GitHub Projects** from its side rail, flip a PR between **draft and
+  ready for review** either way on all three, and **create new PRs as drafts
+  by default** (Settings → General).
 - **Linked issues**: link related issues when you open *or* edit a PR, as
   chips **auto-detected** from your branch name and commits (a `fix/123-…`
   branch seeds `#123`) or picked by hand. Each chip toggles between
@@ -447,9 +448,10 @@ close the window.
 A dedicated tab for GitHub issues and private **local to-dos** (no remote
 needed; publishable to GitHub in one click). Browse, create, and edit
 (drafting with AI from your repo's issue templates), react with emoji, and
-manage the full metadata: labels, assignees, milestones, issue type,
-sub-issues, dependencies (blocked-by / blocking), and development links
-(linked and closing PRs and branches, plus create-a-branch). Close or
+manage the full metadata: labels, assignees, milestones, **projects**
+(GitHub Projects, repo and owner level), issue type, sub-issues,
+dependencies (blocked-by / blocking), and development links (linked and
+closing PRs and branches, plus create-a-branch). Close or
 reopen with a comment you've drafted posted alongside; duplicate, transfer,
 pin/unpin, lock/unlock, or delete. On a **fork**, the same
 **Fork | Upstream** lens as the PR tab browses the parent repository's

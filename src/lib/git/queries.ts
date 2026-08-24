@@ -49,6 +49,9 @@ import type {
   PrDetails,
   PrInfo,
   PrMergeabilityState,
+  ProjectItemRef,
+  ProjectItemRemove,
+  ProjectV2Ref,
   PrThreadOut,
   Reaction,
   RemoteLens,
@@ -2150,6 +2153,100 @@ export function useSetIssueType(repo: string, lens: RemoteLens) {
   );
 }
 
+/** The GitHub Projects (v2) boards an item could join — repo-level plus the
+ *  owner's. `retry: false` because the common failure is a missing `project`
+ *  token scope, which no retry can fix; the picker renders the hint instead. */
+export function useAvailableProjects(
+  repo: string,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
+  return useQuery({
+    queryKey: ["repo", repo, "projects-available", lens] as const,
+    queryFn: () => api.ghProjectsAvailable(repo, lens),
+    enabled,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+const itemProjectsKey = (
+  repo: string,
+  lens: RemoteLens,
+  kind: "issue" | "pr",
+  number: number,
+) => ["repo", repo, "item-projects", lens, kind, number] as const;
+
+/** One issue/PR's board memberships. Shorter staleTime than the catalog: the
+ *  memberships are what the picker edits, the catalog only what it offers. */
+export function useItemProjects(
+  repo: string,
+  kind: "issue" | "pr",
+  number: number,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
+  return useQuery({
+    queryKey: itemProjectsKey(repo, lens, kind, number),
+    queryFn: () => api.ghItemProjects(repo, kind, number, lens),
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+/** The picker's batched link/unlink, with an optimistic patch of the memberships
+ *  cache. Adds land as `pending:`-prefixed placeholder item ids — the real item id
+ *  only exists once GitHub creates the item, and `onSettled`'s refetch supplies
+ *  it; the picker refuses to send a `pending:` id back as a remove target. */
+export function useEditItemProjects(
+  repo: string,
+  kind: "issue" | "pr",
+  number: number,
+  lens: RemoteLens,
+) {
+  const queryClient = useQueryClient();
+  const key = itemProjectsKey(repo, lens, kind, number);
+  return useMutation({
+    mutationFn: (args: {
+      contentId: string;
+      /** Full refs, not ids: the optimistic chip renders the title before the
+       *  refetch lands (the backend takes only the ids). */
+      adds: ProjectV2Ref[];
+      removes: ProjectItemRemove[];
+    }) =>
+      api.ghEditItemProjects(
+        repo,
+        args.contentId,
+        args.adds.map((p) => p.id),
+        args.removes,
+      ),
+    onMutate: async (args) => {
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData<ProjectItemRef[]>(key);
+      if (prev) {
+        const removed = new Set(args.removes.map((r) => r.itemId));
+        queryClient.setQueryData<ProjectItemRef[]>(key, [
+          ...prev.filter((item) => !removed.has(item.itemId)),
+          ...args.adds.map((project) => ({
+            itemId: `pending:${project.id}`,
+            project,
+          })),
+        ]);
+      }
+      return { prev };
+    },
+    // Reporting lives here, not in the caller's `mutate` options: the popover
+    // that fires this closes as it does, and react-query drops mutate-scoped
+    // callbacks once the observer loses its listeners.
+    onError: (e, _args, ctx) => {
+      if (ctx?.prev) queryClient.setQueryData<ProjectItemRef[]>(key, ctx.prev);
+      toastError(e);
+    },
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: key }),
+  });
+}
+
 /**
  * An issue-lifecycle write (close/reopen/edit/pin/lock/transfer/delete) that reconciles
  * NARROWLY instead of whole-repo: the one issue's detail subtree (prefix-matched, so its
@@ -2766,7 +2863,9 @@ export function useAccountsHealth() {
  *  forge-session-health, the gh-accounts list (which account is active), the gh
  *  token scopes (a reconnect can grant new ones), and the repo-settings lists a
  *  scope hint sends users here from — secrets, variables and webhooks all fail
- *  closed on a missing scope, so their error cards must retry the call themselves.
+ *  closed on a missing scope, so their error cards must retry the call themselves,
+ *  as do the two GitHub Projects reads (a granted `project` scope has to light the
+ *  picker up without a restart).
  *  Call from a reconnect's `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {
   const queryClient = useQueryClient();
@@ -2783,7 +2882,9 @@ export function useInvalidateAfterReconnect() {
           q.queryKey[2] === "forge-session-health" ||
           q.queryKey[2] === "secrets" ||
           q.queryKey[2] === "variables" ||
-          q.queryKey[2] === "webhooks"),
+          q.queryKey[2] === "webhooks" ||
+          q.queryKey[2] === "projects-available" ||
+          q.queryKey[2] === "item-projects"),
     });
   }, [queryClient]);
 }

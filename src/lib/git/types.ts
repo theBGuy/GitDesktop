@@ -2041,6 +2041,37 @@ export interface IssueType {
   color: string;
 }
 
+/** A GitHub Projects (v2) board an issue/PR can belong to. */
+export interface ProjectV2Ref {
+  id: string;
+  title: string;
+  number: number;
+  closed: boolean;
+  /** Whether the viewer may add/remove items — false rows stay visible but held. */
+  viewerCanUpdate: boolean;
+}
+
+/** One membership: the item's own node id on that board, plus the board. The
+ *  `itemId` is what an unlink addresses, so it can't be derived from the project. */
+export interface ProjectItemRef {
+  itemId: string;
+  project: ProjectV2Ref;
+}
+
+/** The projects an item could be added to — the repo's plus its owner's. */
+export interface AvailableProjects {
+  projects: ProjectV2Ref[];
+  /** The server capped the list; the UI says so rather than implying completeness. */
+  truncated: boolean;
+}
+
+/** An unlink target. Both ids are required: the mutation removes `itemId` from
+ *  `projectId`'s board. */
+export interface ProjectItemRemove {
+  projectId: string;
+  itemId: string;
+}
+
 export interface Reaction {
   /** GitHub ReactionContent enum value (THUMBS_UP, HEART, ROCKET, …). */
   content: string;

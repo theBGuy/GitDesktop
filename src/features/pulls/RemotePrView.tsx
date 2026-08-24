@@ -53,6 +53,7 @@ import {
   useEditTitleBody,
 } from "@/features/conversations/EditTitleBodyDialog";
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
+import { ProjectsPopover } from "@/features/conversations/ProjectsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
@@ -2420,6 +2421,21 @@ export function RemotePrView({
             </div>
           )
         )}
+        {/* GitHub Projects membership (GitHub-only). Unlike labels/assignees it has
+            no read-only fallback: its chips come from their own query rather than
+            from `pr`, so a closed PR would pay a fetch to show them. */}
+        {isOpen && providerKey === "github" ? (
+          <ProjectsPopover
+            key={`projects-${entityKey}`}
+            repoPath={repoPath}
+            enabled
+            kind="pr"
+            number={number}
+            contentId={pr.id}
+            lens={lens}
+            disabledReason={pickerReason}
+          />
+        ) : null}
         {/* Reviewers picker (all three providers). A closed/merged PR falls back to
             read-only chips. Bot requests (e.g. Copilot) are display-only and split out
             here so the popover's onChange — which emits its `value` as the desired

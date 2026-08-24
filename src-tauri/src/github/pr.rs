@@ -2481,7 +2481,7 @@ pub struct RepoLabel {
 
 /// GraphQL node ids and owner/repo names are embedded into query strings;
 /// restrict them to their known-safe alphabets so quoting can't be escaped.
-fn validate_graphql_embed(value: &str, what: &str) -> AppResult<()> {
+pub(crate) fn validate_graphql_embed(value: &str, what: &str) -> AppResult<()> {
     let ok = !value.is_empty()
         && value
             .chars()

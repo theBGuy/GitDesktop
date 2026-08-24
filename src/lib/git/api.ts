@@ -9,6 +9,7 @@ import {
 import type {
   ApplyLinesResult,
   ApprovalState,
+  AvailableProjects,
   BbAccountInfo,
   BbEnvironment,
   BitbucketBranchRestriction,
@@ -98,6 +99,8 @@ import type {
   PrInfo,
   PrMergeability,
   PrMergeabilityState,
+  ProjectItemRef,
+  ProjectItemRemove,
   PrPollInfo,
   PrRef,
   PrTask,
@@ -2187,6 +2190,42 @@ export const ghIssueRemoveSubIssue = (
   parentId: string,
   subId: string,
 ) => invoke<void>("gh_issue_remove_sub_issue", { repoPath, parentId, subId });
+
+/** The GitHub Projects (v2) boards this repo's items can be added to — the repo's
+ *  own plus its owner's. Needs the `project` (or `read:project`) token scope; a
+ *  token without it fails with the scope hint rather than an empty list. */
+export const ghProjectsAvailable = (repoPath: string, lens: RemoteLens) =>
+  invoke<AvailableProjects>("gh_projects_available", { repoPath, lens });
+
+/** The boards one issue/PR currently belongs to, with each membership's item id. */
+export const ghItemProjects = (
+  repoPath: string,
+  kind: "issue" | "pr",
+  number: number,
+  lens: RemoteLens,
+) =>
+  invoke<ProjectItemRef[]>("gh_item_projects", {
+    repoPath,
+    kind,
+    number,
+    lens,
+  });
+
+/** Links/unlinks an item's boards in one call. Adds address the project by id
+ *  (`contentId` is the issue/PR node id); removes need the membership's item id,
+ *  which only exists once the item is on that board. */
+export const ghEditItemProjects = (
+  repoPath: string,
+  contentId: string,
+  addProjectIds: string[],
+  removes: ProjectItemRemove[],
+) =>
+  invoke<void>("gh_edit_item_projects", {
+    repoPath,
+    contentId,
+    addProjectIds,
+    removes,
+  });
 
 /** Third-party AI-reviewer findings on a PR/MR (Copilot/CodeRabbit/…), behind the
  *  forge abstraction: GitHub delegates unchanged, GitLab maps MR discussions,

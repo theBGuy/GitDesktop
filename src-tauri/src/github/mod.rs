@@ -9,6 +9,7 @@ pub mod lifecycle;
 pub mod mcp_search;
 pub mod pages;
 pub mod pr;
+pub mod project;
 pub mod release;
 pub mod repo_settings;
 pub mod rulesets;
