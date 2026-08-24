@@ -3022,10 +3022,11 @@ export function useForgeRepos(provider: ForgeProvider, enabled: boolean) {
 }
 
 /** The namespaces the signed-in user owns on a provider, feeding the repo menu's
- *  Fork gate. Not {@link useForgeRepos}: its Bitbucket arm walks every workspace's
- *  repositories to reach the same set, and the gate needs no repository. The key
- *  carries no host/account axis, same as `["forge-repos", provider]` — one ambient
- *  account per provider today, and the self-managed-forge work owns adding it. */
+ *  Fork gate. Not {@link useForgeRepos}: its Bitbucket arm lists repositories
+ *  from every workspace to reach the same set, and the gate needs no repository.
+ *  The key carries no host/account axis, same as `["forge-repos", provider]` —
+ *  one ambient account per provider today, and the self-managed-forge work owns
+ *  adding it. */
 export function useForgeOwnedNamespaces(
   provider: ForgeProvider,
   enabled: boolean,

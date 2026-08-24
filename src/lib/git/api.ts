@@ -1300,8 +1300,9 @@ export const forgeStatus = (repoPath: string) =>
 export const forgeListRepos = (provider: ForgeProvider) =>
   invoke<ForgeRepoList>("forge_list_repos", { provider });
 
-/** The namespaces the signed-in user owns on a provider — the same set
- *  `forgeListRepos` carries, without the repository list. */
+/** The namespaces the signed-in user owns on a provider — derived from the
+ *  same probes as `forgeListRepos`' `ownedNamespaces`, without the repository
+ *  list. */
 export const forgeOwnedNamespaces = (provider: ForgeProvider) =>
   invoke<string[]>("forge_owned_namespaces", { provider });
 

@@ -79,9 +79,11 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
     })
 }
 
-/// The viewer's owned namespaces for the Fork gate, without `list_repos`' repo page.
-/// Shares [`gh_viewer_login`] with it, so a failed viewer read errors here exactly as
-/// it does there.
+/// The viewer's owned namespaces, without `list_repos`' repo page. Shares
+/// [`gh_viewer_login`] with it, so a failed viewer read errors here exactly as it does
+/// there. Ambient identity (default host): the GitHub Fork gate itself reads
+/// `gh_status`'s host-scoped login, so this arm is not a drop-in for it on
+/// multi-account or Enterprise setups.
 pub async fn owned_namespaces() -> AppResult<Vec<String>> {
     // A GitHub login IS its personal namespace, so the viewer is the whole set;
     // org repos stay forkable.

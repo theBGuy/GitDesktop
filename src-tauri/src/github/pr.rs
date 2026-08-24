@@ -152,9 +152,10 @@ pub struct GhRepoList {
     pub repos: Vec<GhRepo>,
 }
 
-/// The signed-in user's login. The one source of this probe: the repo list and the
-/// forge layer's owned-namespace read must resolve the viewer identically, or their
-/// namespace answers drift. Errors when `gh` can't answer — callers decide the fallout.
+/// The signed-in user's login. The one source of the ambient (default-host) probe: the
+/// repo list and the forge layer's owned-namespace read must resolve the viewer
+/// identically, or their namespace answers drift. Errors when `gh` can't answer; an
+/// empty-but-successful answer passes through — callers decide the fallout.
 pub async fn gh_viewer_login() -> AppResult<String> {
     Ok(run_gh(None, &["api", "user", "-q", ".login"], GH_TIMEOUT)
         .await?

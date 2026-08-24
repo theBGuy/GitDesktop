@@ -140,9 +140,10 @@ fn from_glab_project(p: GlabProject) -> ForgeRepo {
     }
 }
 
-/// The signed-in user's username, on the short timeout. The one source of this probe:
-/// the project list and the owned-namespace read must resolve the viewer identically,
-/// or their namespace answers drift. An unresolved probe answers empty (fail-open).
+/// The signed-in user's username, on the short timeout. The one source of the ambient
+/// (default-host) probe: the project list and the owned-namespace read must resolve
+/// the viewer identically, or their namespace answers drift. An unresolved probe
+/// answers empty (fail-open).
 async fn viewer_username() -> String {
     run_glab(None, &["api", "user"], GLAB_TIMEOUT)
         .await

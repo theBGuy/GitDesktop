@@ -519,7 +519,8 @@ fn best_effort_page_step<T>(
 /// through `bb_paginate`, matching `workspaces()` (which Explore search pages through):
 /// a short workspace list drops a member workspace from `owned_namespaces`, and the Fork
 /// gate then fails open on its repos. Bounded at [`BB_MAX_PAGES`] pages, so a member of
-/// more workspaces than that silently loses the excess. Empty/absent slugs are skipped.
+/// more workspaces than those pages hold silently loses the excess. Empty/absent slugs
+/// are skipped.
 async fn workspace_slugs(creds: &BbCredentials) -> AppResult<Vec<String>> {
     let mut accesses: Vec<BbWorkspaceAccess> = Vec::new();
     let mut ws_url = "user/workspaces?pagelen=100".to_string();
