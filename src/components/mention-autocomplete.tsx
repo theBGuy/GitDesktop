@@ -29,7 +29,8 @@ const ALL_TRIGGERS = "@#!";
 
 /** `w-72` — the popover's fixed width, needed before it is laid out to clamp it. */
 const POPOVER_WIDTH = 288;
-/** `max-h-56` — the ceiling the viewport clamp works down from. */
+/** Ceiling the viewport clamp works down from, in px: no class carries it, the
+ *  placement applies the clamped result as an inline `maxHeight`. */
 const MAX_LIST_HEIGHT = 224;
 /** Keeps the popover off the viewport edges. */
 const GUTTER = 8;
@@ -54,6 +55,9 @@ const RESYNC_KEYS = new Set([
   "Home",
   "End",
 ]);
+
+/** Whether the text after a completed token already begins with whitespace. */
+const FOLLOWED_BY_SPACE = /^\s/;
 
 /** Cached per trigger set: the token regexes are rebuilt on every keystroke otherwise. */
 const REGEX_CACHE = new Map<string, RegExp>();
@@ -124,16 +128,6 @@ function place(
   };
 }
 
-/** Re-place an open token's box against the caret it already names, for the two
- *  things that move the box without moving the token: the anchor scrolling under
- *  it, and candidates arriving and changing the list's height. */
-function reposition(textarea: HTMLTextAreaElement, rowCount: number) {
-  return (t: ActiveToken | null): ActiveToken | null =>
-    t
-      ? { ...t, ...place(textarea, t.start + 1 + t.query.length, rowCount) }
-      : t;
-}
-
 /**
  * GitHub-style `@`/`#`/`!` completion for a textarea: token detection, the caret-
  * anchored listbox, and the keyboard contract the popover owns while a token is
@@ -167,11 +161,31 @@ export function useMentionAutocomplete({
   // Which keys the popover consumed, each read and cleared by its own keyup —
   // one shared flag would let a second key's keydown clear the first key's mark.
   const consumedKeys = useRef(new Set<string>());
+  // A token the user dismissed at this index, so a caret move inside it doesn't
+  // reopen what they just closed.
+  const dismissed = useRef<{ start: number; trigger: MentionTrigger } | null>(
+    null,
+  );
+  // The committed token, for the effects that re-place it: placement measures the
+  // DOM, which a state updater (run during render, twice under StrictMode) can't.
+  const tokenRef = useRef<ActiveToken | null>(null);
+  tokenRef.current = token;
   const listId = useId();
 
-  // Render-time reset rather than an effect: a popover must never paint over a
-  // preview pane or a frozen editor, not even for one commit.
-  if (token && (suspended || !mentions)) setToken(null);
+  // Render-time reset, not an effect — neither state may survive a commit. A
+  // popover must never paint over a preview pane or a frozen editor; and external
+  // writes to `value` (a submit clearing the draft, a quote-reply fill, an
+  // error restore) never reach `sync`, so the token's validity derives from
+  // `value` rather than from the events that set it.
+  if (
+    token &&
+    (suspended ||
+      !mentions ||
+      value.slice(token.start, token.start + 1 + token.query.length) !==
+        token.trigger + token.query)
+  ) {
+    setToken(null);
+  }
 
   const open = token !== null && !suspended && !!mentions;
   const result = open ? mentions.query(token.trigger, token.query) : null;
@@ -185,8 +199,9 @@ export function useMentionAutocomplete({
   // paint, or the box keeps the flip and height it chose for zero rows.
   useLayoutEffect(() => {
     const ta = textareaRef.current;
-    if (!open || !ta) return;
-    setToken(reposition(ta, rowCount));
+    const t = tokenRef.current;
+    if (!open || !ta || !t) return;
+    setToken({ ...t, ...place(ta, t.start + 1 + t.query.length, rowCount) });
   }, [open, rowCount, textareaRef]);
 
   useEffect(() => {
@@ -197,22 +212,26 @@ export function useMentionAutocomplete({
       const list = listRef.current;
       if (list && e.target instanceof Node && list.contains(e.target)) return;
       const ta = textareaRef.current;
-      if (ta && e.target === ta) {
+      const t = tokenRef.current;
+      if (ta && t && e.target === ta) {
         // The anchor scrolled, not the page — typing across a wrap boundary in a
         // capped composer does this. Placement nets out scrollTop, so following
         // the caret is correct where dismissing would drop the query mid-word.
-        setToken(reposition(ta, rowCount));
+        setToken({
+          ...t,
+          ...place(ta, t.start + 1 + t.query.length, rowCount),
+        });
         return;
       }
       setToken(null);
     };
-    const dismiss = () => setToken(null);
+    const onResize = () => setToken(null);
     const opts = { capture: true, passive: true } as const;
     window.addEventListener("scroll", onScroll, opts);
-    window.addEventListener("resize", dismiss, { passive: true });
+    window.addEventListener("resize", onResize, { passive: true });
     return () => {
       window.removeEventListener("scroll", onScroll, opts);
-      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("resize", onResize);
     };
   }, [open, rowCount, textareaRef]);
 
@@ -222,13 +241,18 @@ export function useMentionAutocomplete({
     if (!open) consumedKeys.current.clear();
   }, [open]);
 
-  /** Recompute the token from the text up to the caret, and re-place the popover. */
-  function sync(next: string, caret: number) {
+  /**
+   * Recompute the token from the text up to the caret, and re-place the popover.
+   * `fromInput` distinguishes typing from a bare caret move: typing always reopens
+   * a dismissed token (as github.com does), a caret move never does.
+   */
+  function sync(next: string, caret: number, fromInput = true) {
     const ta = textareaRef.current;
     if (skipSync.current) {
       setToken(null);
       return;
     }
+    if (fromInput) dismissed.current = null;
     if (!mentions || suspended || !ta || mentions.triggers.length === 0) {
       setToken(null);
       return;
@@ -240,12 +264,19 @@ export function useMentionAutocomplete({
     }
     const trigger = m[1] as MentionTrigger;
     const query = m[2];
+    const start = caret - query.length - 1;
+    const wasDismissed = dismissed.current;
+    if (wasDismissed?.start === start && wasDismissed.trigger === trigger) {
+      return;
+    }
+    // A token at another index is a different one, so the old dismissal lapses.
+    dismissed.current = null;
     mentions.onActive();
     setIndex(0);
     setToken({
       trigger,
       query,
-      start: caret - query.length - 1,
+      start,
       ...place(ta, caret, mentions.query(trigger, query).items.length),
     });
   }
@@ -253,7 +284,14 @@ export function useMentionAutocomplete({
   /** Re-sync from the live caret — for the keys that move it without editing. */
   function resync() {
     const ta = textareaRef.current;
-    if (ta) sync(ta.value, ta.selectionStart ?? ta.value.length);
+    if (ta) sync(ta.value, ta.selectionStart ?? ta.value.length, false);
+  }
+
+  /** Close the popover and remember the token, so only typing reopens it. */
+  function dismiss() {
+    if (token)
+      dismissed.current = { start: token.start, trigger: token.trigger };
+    setToken(null);
   }
 
   function insert(candidate: MentionCandidate) {
@@ -261,8 +299,10 @@ export function useMentionAutocomplete({
     if (!token || !ta) return;
     const end = token.start + 1 + token.query.length;
     const rest = value.slice(end);
-    // No double space when completing mid-sentence.
-    const text = `${token.trigger}${candidate.insert}${rest.startsWith(" ") ? "" : " "}`;
+    // The completion supplies its own separator only when nothing already
+    // separates it from what follows — a newline or tab counts.
+    const text = `${token.trigger}${candidate.insert}${FOLLOWED_BY_SPACE.test(rest) ? "" : " "}`;
+    dismissed.current = null;
     setToken(null);
     ta.focus({ preventScroll: true });
     ta.setSelectionRange(token.start, end);
@@ -287,7 +327,7 @@ export function useMentionAutocomplete({
   }
 
   function handleKey(e: KeyboardEvent<HTMLTextAreaElement>): boolean {
-    if (!open) return false;
+    if (!open || !token) return false;
     // The submit chord always reaches the consumer, popover or not.
     if (e.key === "Enter" && eventToBinding(e)?.startsWith("mod+"))
       return false;
@@ -301,7 +341,7 @@ export function useMentionAutocomplete({
       // The line-widget composers close themselves on Escape; dismissing a
       // suggestion must not also throw away the box it was typed in.
       e.stopPropagation();
-      setToken(null);
+      dismiss();
       return true;
     }
     if (items.length > 0) {
@@ -327,7 +367,7 @@ export function useMentionAutocomplete({
       // Token open with nothing to complete: dismiss rather than submit the
       // half-typed reference.
       e.preventDefault();
-      setToken(null);
+      dismiss();
       return true;
     }
     return false;
@@ -347,13 +387,15 @@ export function useMentionAutocomplete({
 
   const textareaProps = wired
     ? {
+        // No `aria-expanded`: the textarea's implicit textbox role doesn't support
+        // it, so it announces nothing; the three below carry the pattern.
         "aria-autocomplete": "list" as const,
-        "aria-expanded": open,
         "aria-controls": open ? listId : undefined,
         "aria-activedescendant":
           open && items.length > 0 ? `${listId}-${activeIndex}` : undefined,
         onBlur: () => {
           consumedKeys.current.clear();
+          dismissed.current = null;
           setToken(null);
         },
         onMouseDown: () => setToken(null),
@@ -373,6 +415,7 @@ export function useMentionAutocomplete({
         listRef={listRef}
         items={items}
         loading={result?.loading ?? false}
+        isError={result?.isError ?? false}
         activeIndex={activeIndex}
         ghHost={mentions.ghHost}
         token={token}
@@ -408,6 +451,14 @@ function RefGlyph({ state, isPr }: { state: string; isPr: boolean }) {
   );
 }
 
+/** The one muted row shown when there is nothing to pick. A list still loading
+ *  outranks a failed one: a merged list whose halves resolve separately is worth
+ *  waiting on before it is called broken. */
+function emptyMessage(loading: boolean, isError: boolean): string {
+  if (loading) return "Loading…";
+  return isError ? "Couldn't load suggestions" : "No matches";
+}
+
 /** The caret-anchored suggestion listbox. Portalled to the body and fixed-
  *  positioned: the composer sits inside overflow containers that would clip it. */
 function MentionPopover({
@@ -415,6 +466,7 @@ function MentionPopover({
   listRef,
   items,
   loading,
+  isError,
   activeIndex,
   ghHost,
   token,
@@ -425,6 +477,8 @@ function MentionPopover({
   listRef: RefObject<HTMLDivElement | null>;
   items: MentionCandidate[];
   loading: boolean;
+  /** A backing list failed — say so instead of reporting a confident "No matches". */
+  isError: boolean;
   activeIndex: number;
   ghHost: string | null;
   token: ActiveToken;
@@ -456,7 +510,7 @@ function MentionPopover({
     >
       {items.length === 0 ? (
         <p className="px-2.5 py-2 text-[11px] text-muted-foreground">
-          {loading ? "Loading…" : "No matches"}
+          {emptyMessage(loading, isError)}
         </p>
       ) : (
         items.map((c, i) => (

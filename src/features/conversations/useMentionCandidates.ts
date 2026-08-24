@@ -33,11 +33,13 @@ export interface MentionSource {
   ghHost: string | null;
   /** First time a trigger token opens — flips the lazy queries on. Idempotent. */
   onActive: () => void;
-  /** Pure filter over cached data; called during render. */
+  /** Pure filter over cached data; called during render. `isError` reports that a
+   *  backing list failed, which an empty result would otherwise present as a
+   *  confident "nothing matches". */
   query: (
     trigger: MentionTrigger,
     query: string,
-  ) => { items: MentionCandidate[]; loading: boolean };
+  ) => { items: MentionCandidate[]; loading: boolean; isError: boolean };
 }
 
 /**
@@ -214,17 +216,19 @@ export function useMentionCandidates({
   const usersLoading = users.isLoading;
 
   const query = (trigger: MentionTrigger, text: string) => {
-    if (!provider) return { items: [], loading: false };
+    if (!provider) return { items: [], loading: false, isError: false };
     if (trigger === "@") {
       return {
         items: rankUsers(userData ?? [], text, provider),
         loading: usersLoading,
+        isError: users.isError,
       };
     }
     if (trigger === "!") {
       return {
         items: rankRefs(prRows(prData), text, (r) => `!${r.number}`),
         loading: prsLoading,
+        isError: prs.isError,
       };
     }
     // `#`: GitHub merges both lists into its shared number space; GitLab's `#`
@@ -236,6 +240,7 @@ export function useMentionCandidates({
     return {
       items: rankRefs(rows, text, (r) => `#${r.number}`),
       loading: issuesLoading || (provider === "github" && prsLoading),
+      isError: issues.isError || (provider === "github" && prs.isError),
     };
   };
 
