@@ -5,6 +5,7 @@ import { guardedFetch } from "./guarded-fetch";
 import { providerErrorMessage } from "./provider-error";
 import {
   GOOGLE_AI_STUDIO_BASE_URL,
+  isCliProvider,
   MODEL_SUGGESTIONS,
   OLLAMA_CLOUD_HOST,
   OPENAI_COMPATIBLE_PRESETS,
@@ -290,6 +291,9 @@ export function useAvailableModels(
     },
     enabled: opts?.enabled ?? true,
     staleTime: 5 * 60 * 1000,
+    // The CLI arm spawns a process, not an HTTP GET — alt-tabbing back into the
+    // app must not re-run the CLI. HTTP providers keep the default focus refresh.
+    refetchOnWindowFocus: !isCliProvider(settings.provider),
   });
 }
 
@@ -306,10 +310,10 @@ export function useAgentModels(
   kind: AgentKind,
   opts?: { enabled?: boolean },
 ): UseQueryResult<AvailableModels> {
+  const fallback = MODEL_SUGGESTIONS[kindProvider(kind)];
   return useQuery({
     queryKey: ["agent-models", kind] as const,
     queryFn: async (): Promise<AvailableModels> => {
-      const fallback = MODEL_SUGGESTIONS[kindProvider(kind)];
       try {
         const models = await listAgentModels(kind);
         if (models.length > 0) return { models, live: true };
@@ -328,10 +332,7 @@ export function useAgentModels(
     // Until the probe resolves (and whenever the query is gate-disabled), the
     // SESSION pickers show the CLI's static suggestions — the pre-live
     // behavior. No `cause`: this is not a settled fallback.
-    placeholderData: () => ({
-      models: MODEL_SUGGESTIONS[kindProvider(kind)],
-      live: false,
-    }),
+    placeholderData: () => ({ models: fallback, live: false }),
     // A refetch here spawns a process, not an HTTP GET — alt-tabbing back into
     // the app must not re-run the CLI.
     refetchOnWindowFocus: false,

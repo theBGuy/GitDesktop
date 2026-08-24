@@ -688,14 +688,12 @@ pub(crate) async fn run_capture_parts(
     program: &Path,
     args: &[&str],
     timeout: Duration,
-    extra_env: &[(&str, String)],
 ) -> AppResult<(i32, String, String)> {
     let mut cmd = Command::new(program);
     sanitize_child_env(&mut cmd);
     cmd.args(args)
         .env("NO_COLOR", "1")
         .env("CLICOLOR", "0")
-        .envs(extra_env.iter().map(|(k, v)| (*k, v.as_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -720,7 +718,7 @@ pub(crate) async fn run_capture(
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<(i32, String)> {
-    let (code, mut text, stderr) = run_capture_parts(program, args, timeout, &[]).await?;
+    let (code, mut text, stderr) = run_capture_parts(program, args, timeout).await?;
     text.push_str(&stderr);
     Ok((code, text))
 }
@@ -766,10 +764,10 @@ pub async fn agent_detect(kind: AgentKind, bin_path: Option<String>) -> AppResul
 const MODELS_LIMIT: usize = 2000;
 
 /// Picks model ids out of a catalog listing: one bare `provider/model` id per
-/// line, everything else dropped. The whitespace and control-character gates
-/// reject banners, warnings, `--verbose` JSON, and ANSI-wrapped ids from a
-/// wrapper that ignores `NO_COLOR`. Input order is the CLI's deliberate sort
-/// (opencode-own providers first), so it is preserved.
+/// line, everything else dropped. The whitespace, control-character, and
+/// empty-segment gates reject banners, warnings, `--verbose` JSON, URLs, and
+/// ANSI-wrapped ids from a wrapper that ignores `NO_COLOR`. Input order is the
+/// CLI's deliberate sort (opencode-own providers first), so it is preserved.
 fn parse_models_output(stdout: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
@@ -778,6 +776,7 @@ fn parse_models_output(stdout: &str) -> Vec<String> {
         if id.is_empty()
             || id.chars().any(|c| c.is_whitespace() || c < '\x20' || c == '\x7f')
             || !id.contains('/')
+            || id.split('/').any(|seg| seg.is_empty())
         {
             continue;
         }
@@ -805,7 +804,7 @@ pub async fn agent_models(kind: AgentKind, bin_path: Option<String>) -> AppResul
             kind.label()
         ))
     })?;
-    let (code, stdout, stderr) = run_capture_parts(&binary, args, MODELS_TIMEOUT, &[]).await?;
+    let (code, stdout, stderr) = run_capture_parts(&binary, args, MODELS_TIMEOUT).await?;
     if code != 0 {
         let reason = stderr
             .lines()
@@ -3114,6 +3113,21 @@ opencode/x-preview-f-free
             parse_models_output(out),
             ["opencode/keep-one", "opencode/keep-two"]
         );
+    }
+
+    #[test]
+    fn models_output_rejects_ids_with_empty_segments() {
+        // A URL splits to an empty middle segment. Multi-slash ids whose segments
+        // are all non-empty stay accepted — custom providers may nest.
+        let out = concat!(
+            "/model\n",
+            "provider/\n",
+            "https://host\n",
+            "//\n",
+            "a/b-c\n",
+            "a/b/c\n",
+        );
+        assert_eq!(parse_models_output(out), ["a/b-c", "a/b/c"]);
     }
 
     #[test]
