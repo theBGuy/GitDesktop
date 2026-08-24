@@ -233,7 +233,8 @@ pushing and pulling stay manual.
   over Incoming (theirs) with Accept current / incoming / both, plus
   whole-file Accept all current / incoming and Open in editor, and Mark
   resolved to stage a file exactly as it stands on disk when you settled it
-  outside the app (edited, emptied, or removed).
+  outside the app (edited, emptied, or deleted while both sides still have
+  a version of it).
 - **AI conflict resolution**: one more option there. Ask your model to merge
   a file, review the proposal as a diff, and accept it (per file or all at
   once). Multi-provider, runs on local Ollama or a keyless Claude Code /
