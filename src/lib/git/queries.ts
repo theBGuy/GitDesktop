@@ -3002,8 +3002,9 @@ export function useGhRepos(enabled: boolean) {
   });
 }
 
-/** Stable fallback for an unresolved {@link useForgeRepos} read, so a pending
- *  query doesn't hand its consumers a fresh array identity every render. */
+/** Stable fallback for an unresolved {@link useForgeRepos} or
+ *  {@link useForgeOwnedNamespaces} read, so a pending query doesn't hand its
+ *  consumers a fresh array identity every render. */
 export const EMPTY_NAMESPACES: readonly string[] = [];
 
 /** The signed-in user's repositories on a provider (GitHub via gh, GitLab via
@@ -3014,6 +3015,24 @@ export function useForgeRepos(provider: ForgeProvider, enabled: boolean) {
   return useQuery({
     queryKey: ["forge-repos", provider] as const,
     queryFn: () => api.forgeListRepos(provider),
+    enabled,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+/** The namespaces the signed-in user owns on a provider, feeding the repo menu's
+ *  Fork gate. Not {@link useForgeRepos}: its Bitbucket arm walks every workspace's
+ *  repositories to reach the same set, and the gate needs no repository. The key
+ *  carries no host/account axis, same as `["forge-repos", provider]` — one ambient
+ *  account per provider today, and the self-managed-forge work owns adding it. */
+export function useForgeOwnedNamespaces(
+  provider: ForgeProvider,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["forge-namespaces", provider] as const,
+    queryFn: () => api.forgeOwnedNamespaces(provider),
     enabled,
     staleTime: 5 * 60_000,
     retry: false,

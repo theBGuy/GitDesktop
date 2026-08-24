@@ -14,7 +14,7 @@ use crate::forge::model::{
 use crate::forge::{
     validate_owner, validate_repo_name, Forge, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
 };
-use crate::github::pr::{gh_list_repos, gh_status, GhRepo, GhStatus};
+use crate::github::pr::{gh_list_repos, gh_status, gh_viewer_login, GhRepo, GhStatus};
 use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
 /// GitHub via the `gh` CLI. Unit struct — `gh` carries all the state (auth, host).
@@ -77,6 +77,15 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
         viewer: gh.viewer,
         repos: gh.repos.into_iter().map(from_gh_repo).collect(),
     })
+}
+
+/// The viewer's owned namespaces for the Fork gate, without `list_repos`' repo page.
+/// Shares [`gh_viewer_login`] with it, so a failed viewer read errors here exactly as
+/// it does there.
+pub async fn owned_namespaces() -> AppResult<Vec<String>> {
+    // A GitHub login IS its personal namespace, so the viewer is the whole set;
+    // org repos stay forkable.
+    Ok(namespace_set([gh_viewer_login().await?]))
 }
 
 // ── Pull requests ────────────────────────────────────────────────────────────
@@ -1032,11 +1041,7 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     let source = format!("{owner}/{name}");
     run_gh(None, &fork_args(&source), GH_NETWORK_TIMEOUT).await?;
     // The fork owner is the signed-in user.
-    let login = run_gh(None, &["api", "user", "-q", ".login"], GH_TIMEOUT)
-        .await?
-        .stdout_lossy()
-        .trim()
-        .to_string();
+    let login = gh_viewer_login().await?;
     if login.is_empty() {
         return Err(AppError::Gh("could not resolve your GitHub login".into()));
     }

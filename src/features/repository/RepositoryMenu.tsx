@@ -63,7 +63,7 @@ import {
   EMPTY_NAMESPACES,
   forgeFeatureReady,
   forgeSupports,
-  useForgeRepos,
+  useForgeOwnedNamespaces,
   useForgeStatus,
   useForkRepo,
   useRepoAdmin,
@@ -189,11 +189,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const ownRepo = !!owner && !!gh.data?.login && owner === gh.data.login;
   // Bitbucket's `login` is a /user username (a display name where that's absent) and
   // never matches the workspace slug a repo carries, so its ownership answer can only
-  // come from the workspaces you belong to. Fetched for every Bitbucket repo rather
-  // than on menu-open, because the palette twin below reads the verdict with no menu
-  // to trigger one. Unresolved (empty) falls open.
-  const ownRepos = useForgeRepos("bitbucket", canGh && isBitbucket);
-  const ownedNamespaces = ownRepos.data?.ownedNamespaces ?? EMPTY_NAMESPACES;
+  // come from the workspaces you belong to — read here as the namespaces alone, no
+  // repositories. Fetched for every Bitbucket repo rather than on menu-open, because
+  // the palette twin below reads the verdict with no menu to trigger one. Unresolved
+  // (empty) falls open.
+  const ownedNs = useForgeOwnedNamespaces("bitbucket", canGh && isBitbucket);
+  const ownedNamespaces = ownedNs.data ?? EMPTY_NAMESPACES;
   // GitHub: the in-app dialog always forks under your own account, so a repo you own
   // personally is never a target (org repos stay forkable). GitLab: its fork page picks
   // the destination namespace, and forking your own project into a group you own is

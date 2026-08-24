@@ -152,6 +152,17 @@ pub struct GhRepoList {
     pub repos: Vec<GhRepo>,
 }
 
+/// The signed-in user's login. The one source of this probe: the repo list and the
+/// forge layer's owned-namespace read must resolve the viewer identically, or their
+/// namespace answers drift. Errors when `gh` can't answer — callers decide the fallout.
+pub async fn gh_viewer_login() -> AppResult<String> {
+    Ok(run_gh(None, &["api", "user", "-q", ".login"], GH_TIMEOUT)
+        .await?
+        .stdout_lossy()
+        .trim()
+        .to_string())
+}
+
 /// Every repository the signed-in user can access (owned, collaborator, and
 /// org member), newest-push first, plus the viewer's login. Used by the
 /// clone dialog's GitHub.com tab. `--paginate` merges all pages into one
@@ -159,11 +170,7 @@ pub struct GhRepoList {
 #[tauri::command]
 pub async fn gh_list_repos() -> AppResult<GhRepoList> {
     // The viewer's login is cheap and lets the UI group their repos first.
-    let viewer = run_gh(None, &["api", "user", "-q", ".login"], GH_TIMEOUT)
-        .await?
-        .stdout_lossy()
-        .trim()
-        .to_string();
+    let viewer = gh_viewer_login().await?;
 
     let out = run_gh(
         None,

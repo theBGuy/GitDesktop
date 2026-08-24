@@ -140,17 +140,24 @@ fn from_glab_project(p: GlabProject) -> ForgeRepo {
     }
 }
 
+/// The signed-in user's username, on the short timeout. The one source of this probe:
+/// the project list and the owned-namespace read must resolve the viewer identically,
+/// or their namespace answers drift. An unresolved probe answers empty (fail-open).
+async fn viewer_username() -> String {
+    run_glab(None, &["api", "user"], GLAB_TIMEOUT)
+        .await
+        .ok()
+        .and_then(|o| serde_json::from_str::<GlabUser>(&o.stdout_lossy()).ok())
+        .map(|u| u.username)
+        .unwrap_or_default()
+}
+
 /// The signed-in GitLab user's projects, for the clone browser, via the `glab api`
 /// REST escape hatch; `membership=true` = projects the user belongs to. Caps at 100
 /// (`--paginate`'s multi-page output needs its own validation); ordering by activity
 /// means the cap drops the least-recently-active projects, not an arbitrary 100.
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
-    let viewer = run_glab(None, &["api", "user"], GLAB_TIMEOUT)
-        .await
-        .ok()
-        .and_then(|o| serde_json::from_str::<GlabUser>(&o.stdout_lossy()).ok())
-        .map(|u| u.username)
-        .unwrap_or_default();
+    let viewer = viewer_username().await;
     let out = run_glab(
         None,
         &[
@@ -169,6 +176,15 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
         viewer,
         repos: projects.into_iter().map(from_glab_project).collect(),
     })
+}
+
+/// The viewer's owned namespaces for the Fork gate, without `list_repos`' projects
+/// read. Shares [`viewer_username`] with it, including its fail-open: an unresolved
+/// viewer yields an empty set rather than an error, so Fork stays offered.
+pub async fn owned_namespaces() -> AppResult<Vec<String>> {
+    // A GitLab username IS the personal namespace's full path. Groups you own are a
+    // separate namespace and aren't resolved here, so Fork still shows on those.
+    Ok(namespace_set([viewer_username().await]))
 }
 
 /// The one-shot `git -c` credential entries that let a network op on a private

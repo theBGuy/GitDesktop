@@ -514,14 +514,42 @@ fn best_effort_page_step<T>(
     }
 }
 
+/// The slugs of the workspaces the viewer belongs to (`GET /2.0/user/workspaces`, whose
+/// items are `workspace_access` membership wrappers). Follows `next` inline rather than
+/// through `bb_paginate`, matching `workspaces()` (which Explore search pages through):
+/// a short workspace list drops a member workspace from `owned_namespaces`, and the Fork
+/// gate then fails open on its repos. Bounded at [`BB_MAX_PAGES`] pages, so a member of
+/// more workspaces than that silently loses the excess. Empty/absent slugs are skipped.
+async fn workspace_slugs(creds: &BbCredentials) -> AppResult<Vec<String>> {
+    let mut accesses: Vec<BbWorkspaceAccess> = Vec::new();
+    let mut ws_url = "user/workspaces?pagelen=100".to_string();
+    for page in 0..BB_MAX_PAGES {
+        let fetched =
+            http::bb_get_json::<BbPage<BbWorkspaceAccess>>(creds, &ws_url, "workspaces").await;
+        match best_effort_page_step(fetched, &mut accesses, page == 0)? {
+            Some(next) => ws_url = next,
+            None => break,
+        }
+    }
+    Ok(accesses
+        .into_iter()
+        .filter_map(|a| a.workspace.map(|w| w.slug).filter(|s| !s.is_empty()))
+        .collect())
+}
+
+/// The viewer's owned namespaces for the Fork gate — the workspace slugs alone, with
+/// none of `list_repos`' per-workspace repo pages. No `/user` probe either: Bitbucket's
+/// namespace set never includes the viewer's username, only workspaces they belong to.
+pub async fn owned_namespaces() -> AppResult<Vec<String>> {
+    let creds = http::load_credentials().await?;
+    Ok(namespace_set(workspace_slugs(&creds).await?))
+}
+
 /// The signed-in user's repositories, for the clone browser. Both `GET
 /// /2.0/repositories?role=member` AND `GET /2.0/workspaces` were removed (CHANGE-2770,
-/// Feb 2026); the replacement is `GET /2.0/user/workspaces` (CHANGE-3022), whose items
-/// are `workspace_access` membership wrappers (nested `workspace_base` with
-/// uuid/slug/links — no `name`). We follow `next` over the viewer's workspaces up to 5
-/// pages (best-effort past the first), then read each workspace's member repos as a
-/// single page at the max `pagelen` (100), sorted `-updated_on`, so repos past
-/// 100/workspace drop off.
+/// Feb 2026); the replacement is `GET /2.0/user/workspaces` (CHANGE-3022). We walk the
+/// viewer's workspaces, then read each one's member repos as a single page at the max
+/// `pagelen` (100), sorted `-updated_on`, so repos past 100/workspace drop off.
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let creds = http::load_credentials().await?;
     let viewer = http::bb_get_json::<BbUser>(&creds, "user", "user")
@@ -530,45 +558,24 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
         .and_then(|u| u.username.or(u.display_name))
         .unwrap_or_default();
 
-    // Follow `next` here, matching `workspaces()` (which Explore search pages through):
-    // a short workspace list would leave a member workspace out of `owned_namespaces`,
-    // and the Fork gate would then fail open on a search row from that workspace. Walked
-    // inline rather than through `bb_paginate` so a later page's failure degrades the way
-    // the per-workspace loop below does, instead of sinking the whole read.
-    let mut workspaces: Vec<BbWorkspaceAccess> = Vec::new();
-    let mut ws_url = "user/workspaces?pagelen=100".to_string();
-    for page in 0..BB_MAX_PAGES {
-        let fetched = http::bb_get_json::<BbPage<BbWorkspaceAccess>>(&creds, &ws_url, "workspaces")
-            .await;
-        match best_effort_page_step(fetched, &mut workspaces, page == 0)? {
-            Some(next) => ws_url = next,
-            None => break,
-        }
-    }
-
-    let mut repos = Vec::new();
     // Bitbucket has no usable personal-workspace signal (`is_personal` reads false even
     // on it, and the user uuid 404s as a workspace), so "yours" here means a workspace
     // you belong to — these same slugs, which `owner` already carries.
-    let mut slugs = Vec::new();
+    let slugs = workspace_slugs(&creds).await?;
+
+    let mut repos = Vec::new();
     // Best-effort per workspace (one erroring shouldn't sink the others), but if EVERY
     // fetch fails, surface the last error rather than an empty "no repositories" list.
-    let mut workspace_count = 0usize;
+    // Membership, not fetch success, decides the namespace: a workspace you belong to
+    // stays yours even if its repo page errors, and its repos can still reach the gate
+    // via Explore search.
     let mut any_ok = false;
     let mut last_err: Option<AppError> = None;
-    for access in workspaces {
-        // Skip an entry with no nested workspace or an empty slug rather than error.
-        let Some(slug) = access.workspace.map(|w| w.slug).filter(|s| !s.is_empty()) else {
-            continue;
-        };
-        workspace_count += 1;
+    for slug in &slugs {
         let path = format!(
             "repositories/{}?role=member&sort=-updated_on&pagelen=100",
-            encode_query_value(&slug)
+            encode_query_value(slug)
         );
-        // Membership, not fetch success: a workspace you belong to stays yours even if
-        // its repo page errors, and its repos can still reach the gate via Explore search.
-        slugs.push(slug);
         match http::bb_get_json::<BbPage<BbRepo>>(&creds, &path, "repositories").await {
             Ok(page) => {
                 any_ok = true;
@@ -577,7 +584,7 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
             Err(e) => last_err = Some(e),
         }
     }
-    if workspace_count > 0 && !any_ok {
+    if !slugs.is_empty() && !any_ok {
         // Every workspace fetch failed — return the last error, not an empty Ok.
         return Err(last_err.unwrap_or_else(|| {
             AppError::Bitbucket("could not list Bitbucket repositories".into())

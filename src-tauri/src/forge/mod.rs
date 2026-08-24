@@ -903,6 +903,21 @@ pub async fn forge_list_repos(provider: Provider) -> AppResult<ForgeRepoList> {
     }
 }
 
+/// The namespaces the signed-in user owns on a provider — the Fork gate's whole input,
+/// without the repository list [`forge_list_repos`] fetches to reach it (on Bitbucket
+/// that means skipping a repo request per workspace). Parity invariant: per provider
+/// this returns the same set as that command's `owned_namespaces` whenever that command
+/// resolves (this one can still resolve where failing repo pages made that one error),
+/// so switching source never changes a verdict the heavier read could deliver.
+#[tauri::command]
+pub async fn forge_owned_namespaces(provider: Provider) -> AppResult<Vec<String>> {
+    match provider {
+        Provider::GitHub => github::owned_namespaces().await,
+        Provider::GitLab => gitlab::owned_namespaces().await,
+        Provider::Bitbucket => bitbucket::owned_namespaces().await,
+    }
+}
+
 // ── Explore: repo search / fork-by-name / star / README / provider features ────
 // Account-scoped (no repo path) — Explore browses arbitrary repos across a provider,
 // so each command dispatches on an explicit `provider` argument. The frontend
