@@ -291,9 +291,10 @@ export function useAvailableModels(
     },
     enabled: opts?.enabled ?? true,
     staleTime: 5 * 60 * 1000,
-    // The CLI arm spawns a process, not an HTTP GET — alt-tabbing back into the
-    // app must not re-run the CLI. HTTP providers keep the default focus refresh.
+    // The CLI arm spawns a process, not an HTTP GET — a focus or reconnect
+    // refetch must not re-run the CLI. HTTP providers keep both defaults.
     refetchOnWindowFocus: !isCliProvider(settings.provider),
+    refetchOnReconnect: !isCliProvider(settings.provider),
   });
 }
 
@@ -333,8 +334,9 @@ export function useAgentModels(
     // SESSION pickers show the CLI's static suggestions — the pre-live
     // behavior. No `cause`: this is not a settled fallback.
     placeholderData: () => ({ models: fallback, live: false }),
-    // A refetch here spawns a process, not an HTTP GET — alt-tabbing back into
-    // the app must not re-run the CLI.
+    // A refetch here spawns a process, not an HTTP GET — a focus or reconnect
+    // refetch must not re-run the CLI.
     refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }

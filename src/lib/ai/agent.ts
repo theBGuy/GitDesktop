@@ -156,23 +156,24 @@ export type ReviewEvent =
    *  care; reviews ignore it. */
   | { kind: "nativeSession"; id: string };
 
-/** Maps a review provider id to its backend agent kind, or null if not a CLI. */
-export function providerKind(provider: AiProviderId): AgentKind | null {
-  if (provider === "claude-cli") return "claude";
-  if (provider === "codex-cli") return "codex";
-  if (provider === "copilot-cli") return "copilot";
-  if (provider === "opencode-cli") return "opencode";
-  return null;
-}
-
 /** The provider id each agent kind belongs to — a total map, so a new kind can't
- *  silently lose its provider. */
+ *  silently lose its provider. Both directions read it, so the relation has a
+ *  single definition. */
 const KIND_PROVIDERS: Record<AgentKind, AiProviderId> = {
   claude: "claude-cli",
   codex: "codex-cli",
   copilot: "copilot-cli",
   opencode: "opencode-cli",
 };
+
+/** Maps a review provider id to its backend agent kind, or null if not a CLI. */
+export function providerKind(provider: AiProviderId): AgentKind | null {
+  return (
+    (Object.keys(KIND_PROVIDERS) as AgentKind[]).find(
+      (k) => KIND_PROVIDERS[k] === provider,
+    ) ?? null
+  );
+}
 
 /** The inverse of {@link providerKind}: the review provider id an agent kind is
  *  configured under. */
