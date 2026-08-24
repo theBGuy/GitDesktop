@@ -515,10 +515,11 @@ fn best_effort_page_step<T>(
 }
 
 /// The slugs of the workspaces the viewer belongs to (`GET /2.0/user/workspaces`, whose
-/// items are `workspace_access` membership wrappers). Follows `next` inline rather than
-/// through `bb_paginate`, matching `workspaces()` (which Explore search pages through):
-/// a short workspace list drops a member workspace from `owned_namespaces`, and the Fork
-/// gate then fails open on its repos. Bounded at [`BB_MAX_PAGES`] pages, so a member of
+/// items are `workspace_access` membership wrappers). Follows `next` like `workspaces()`
+/// does (Explore search pages through it), but inline rather than via `bb_paginate` so a
+/// later page's failure degrades instead of sinking the read: a short workspace list
+/// drops a member workspace from `owned_namespaces`, and the Fork gate then fails open
+/// on its repos. Bounded at [`BB_MAX_PAGES`] pages, so a member of
 /// more workspaces than those pages hold silently loses the excess. Empty/absent slugs
 /// are skipped.
 async fn workspace_slugs(creds: &BbCredentials) -> AppResult<Vec<String>> {

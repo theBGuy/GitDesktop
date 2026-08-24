@@ -3032,7 +3032,7 @@ export function useForgeOwnedNamespaces(
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: ["forge-namespaces", provider] as const,
+    queryKey: ["forge-owned-namespaces", provider] as const,
     queryFn: () => api.forgeOwnedNamespaces(provider),
     enabled,
     staleTime: 5 * 60_000,

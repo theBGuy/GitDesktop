@@ -193,8 +193,9 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // repositories. Fetched for every Bitbucket repo rather than on menu-open, because
   // the palette twin below reads the verdict with no menu to trigger one. Unresolved
   // (empty) falls open.
-  const ownedNs = useForgeOwnedNamespaces("bitbucket", canGh && isBitbucket);
-  const ownedNamespaces = ownedNs.data ?? EMPTY_NAMESPACES;
+  const ownedNamespaces =
+    useForgeOwnedNamespaces("bitbucket", canGh && isBitbucket).data ??
+    EMPTY_NAMESPACES;
   // GitHub: the in-app dialog always forks under your own account, so a repo you own
   // personally is never a target (org repos stay forkable). GitLab: its fork page picks
   // the destination namespace, and forking your own project into a group you own is
