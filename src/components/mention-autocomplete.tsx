@@ -7,6 +7,7 @@ import {
   type KeyboardEvent,
   type RefObject,
   useEffect,
+  useEffectEvent,
   useId,
   useLayoutEffect,
   useRef,
@@ -57,7 +58,7 @@ const RESYNC_KEYS = new Set([
 ]);
 
 /** Whether the text after a completed token already begins with whitespace. */
-const FOLLOWED_BY_SPACE = /^\s/;
+const FOLLOWED_BY_WHITESPACE = /^\s/;
 
 /** Cached per trigger set: the token regexes are rebuilt on every keystroke otherwise. */
 const REGEX_CACHE = new Map<string, RegExp>();
@@ -166,10 +167,6 @@ export function useMentionAutocomplete({
   const dismissed = useRef<{ start: number; trigger: MentionTrigger } | null>(
     null,
   );
-  // The committed token, for the effects that re-place it: placement measures the
-  // DOM, which a state updater (run during render, twice under StrictMode) can't.
-  const tokenRef = useRef<ActiveToken | null>(null);
-  tokenRef.current = token;
   const listId = useId();
 
   // Render-time reset, not an effect — neither state may survive a commit. A
@@ -194,14 +191,25 @@ export function useMentionAutocomplete({
   const activeIndex = items.length > 0 ? Math.min(index, items.length - 1) : 0;
   const rowCount = items.length;
 
+  // Re-place the open token's box against the caret it already names. Placement
+  // measures the DOM, so it must run from the effect rather than from a state
+  // updater (React runs those during render, twice under StrictMode).
+  const replace = useEffectEvent((ta: HTMLTextAreaElement) => {
+    if (!token) return;
+    setToken({
+      ...token,
+      ...place(ta, token.start + 1 + token.query.length, rowCount),
+    });
+  });
+
   // The lazy queries only enable as the first token opens, so a token is always
   // placed against an empty list first; re-place once the candidates land, before
   // paint, or the box keeps the flip and height it chose for zero rows.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `rowCount` is the trigger — the effect event reads it live, so dropping it here would stop the re-place from ever running.
   useLayoutEffect(() => {
     const ta = textareaRef.current;
-    const t = tokenRef.current;
-    if (!open || !ta || !t) return;
-    setToken({ ...t, ...place(ta, t.start + 1 + t.query.length, rowCount) });
+    if (!open || !ta) return;
+    replace(ta);
   }, [open, rowCount, textareaRef]);
 
   useEffect(() => {
@@ -212,15 +220,11 @@ export function useMentionAutocomplete({
       const list = listRef.current;
       if (list && e.target instanceof Node && list.contains(e.target)) return;
       const ta = textareaRef.current;
-      const t = tokenRef.current;
-      if (ta && t && e.target === ta) {
+      if (ta && e.target === ta) {
         // The anchor scrolled, not the page — typing across a wrap boundary in a
         // capped composer does this. Placement nets out scrollTop, so following
         // the caret is correct where dismissing would drop the query mid-word.
-        setToken({
-          ...t,
-          ...place(ta, t.start + 1 + t.query.length, rowCount),
-        });
+        replace(ta);
         return;
       }
       setToken(null);
@@ -233,7 +237,7 @@ export function useMentionAutocomplete({
       window.removeEventListener("scroll", onScroll, opts);
       window.removeEventListener("resize", onResize);
     };
-  }, [open, rowCount, textareaRef]);
+  }, [open, textareaRef]);
 
   // The consumed set lives per interaction: a closed token must not leave a key
   // marked, or the next one's keyup would skip the re-sync it needs.
@@ -301,7 +305,7 @@ export function useMentionAutocomplete({
     const rest = value.slice(end);
     // The completion supplies its own separator only when nothing already
     // separates it from what follows — a newline or tab counts.
-    const text = `${token.trigger}${candidate.insert}${FOLLOWED_BY_SPACE.test(rest) ? "" : " "}`;
+    const text = `${token.trigger}${candidate.insert}${FOLLOWED_BY_WHITESPACE.test(rest) ? "" : " "}`;
     dismissed.current = null;
     setToken(null);
     ta.focus({ preventScroll: true });
@@ -499,6 +503,9 @@ function MentionPopover({
       id={listId}
       role="listbox"
       aria-label="Mention suggestions"
+      // Dragging the list's own scrollbar must not blur the textarea, which would
+      // dismiss the popover out from under the drag.
+      onMouseDown={(e) => e.preventDefault()}
       style={{
         position: "fixed",
         left: token.left,

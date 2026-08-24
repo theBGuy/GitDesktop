@@ -202,18 +202,22 @@ export function useMentionCandidates({
 
   const onActive = useCallback(() => setActive(true), []);
 
-  // Both list queries leave state and limit free in their placeholder comparators,
-  // so a panel's closed-tab rows can be served here until this key's own fetch
-  // lands. Read placeholder rows as "still loading" rather than suggesting a
-  // closed issue the completion promised would be open.
+  // The data/loading/error triples below are the whole of what `query` closes
+  // over — never the query result objects, which re-identify every render and
+  // would churn this source's identity downstream. Both list queries also leave
+  // state and limit free in their placeholder comparators, so a panel's closed-tab
+  // rows can be served here until this key's own fetch lands: placeholder rows
+  // read as "still loading" rather than suggesting a closed issue the completion
+  // promised would be open.
   const issueData = issues.isPlaceholderData ? undefined : issues.data;
   const prData = prs.isPlaceholderData ? undefined : prs.data;
   const issuesLoading = issues.isLoading || issues.isPlaceholderData;
   const prsLoading = prs.isLoading || prs.isPlaceholderData;
-  // `query` closes over these rather than the query results themselves, which
-  // re-identify every render and would churn this source's identity downstream.
+  const issuesError = issues.isError;
+  const prsError = prs.isError;
   const userData = users.data;
   const usersLoading = users.isLoading;
+  const usersError = users.isError;
 
   const query = (trigger: MentionTrigger, text: string) => {
     if (!provider) return { items: [], loading: false, isError: false };
@@ -221,14 +225,14 @@ export function useMentionCandidates({
       return {
         items: rankUsers(userData ?? [], text, provider),
         loading: usersLoading,
-        isError: users.isError,
+        isError: usersError,
       };
     }
     if (trigger === "!") {
       return {
         items: rankRefs(prRows(prData), text, (r) => `!${r.number}`),
         loading: prsLoading,
-        isError: prs.isError,
+        isError: prsError,
       };
     }
     // `#`: GitHub merges both lists into its shared number space; GitLab's `#`
@@ -240,7 +244,7 @@ export function useMentionCandidates({
     return {
       items: rankRefs(rows, text, (r) => `#${r.number}`),
       loading: issuesLoading || (provider === "github" && prsLoading),
-      isError: issues.isError || (provider === "github" && prs.isError),
+      isError: issuesError || (provider === "github" && prsError),
     };
   };
 
