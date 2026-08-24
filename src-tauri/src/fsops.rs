@@ -1044,30 +1044,31 @@ pub async fn open_with_program(program: String, path: String) -> AppResult<()> {
     // rather than trying to spawn the bundle directory as a command.
     #[cfg(target_os = "macos")]
     if is_app_bundle(&program) {
-        std::process::Command::new("open")
-            .args(["-a", program.as_str(), path.as_str()])
+        let mut c = std::process::Command::new("open");
+        crate::agent::sanitize_child_env(&mut c);
+        c.args(["-a", program.as_str(), path.as_str()])
             .spawn()
             .map_err(AppError::Io)?;
         return Ok(());
     }
-    let lower = program.to_lowercase();
-    // .cmd/.bat shims (like VS Code's `code.cmd`) can't be spawned directly
-    let shim = lower.ends_with(".cmd") || lower.ends_with(".bat");
-    let mut cmd = if shim {
-        let mut c = std::process::Command::new("cmd");
-        crate::agent::sanitize_child_env(&mut c);
-        c.args(["/C", &program, &path]);
-        c
-    } else {
-        let mut c = std::process::Command::new(&program);
-        crate::agent::sanitize_child_env(&mut c);
-        c.arg(&path);
-        c
-    };
+    // Spawn a `.cmd`/`.bat` shim (e.g. VS Code's `code.cmd`) DIRECTLY, not via
+    // `cmd /C`: std then applies its batch-file argument escaping (CVE-2024-24576),
+    // whereas `cmd /C <shim> <path>` runs the untrusted `path` unquoted, so a
+    // space-free filename like `a&calc&b` from a cloned repo injects commands.
+    let mut cmd = std::process::Command::new(&program);
+    crate::agent::sanitize_child_env(&mut cmd);
+    cmd.arg(&path);
     // When this app is launched from a VS Code terminal, ELECTRON_RUN_AS_NODE=1
     // is in our environment; an Electron editor inheriting it runs as plain
     // Node and tries to *execute* the file instead of opening it.
     cmd.env_remove("ELECTRON_RUN_AS_NODE");
+    // The `.cmd`/`.bat` extension only means anything to Windows, which spawns a
+    // transient cmd.exe console to run the shim — hide it below.
+    #[cfg(windows)]
+    let shim = {
+        let lower = program.to_lowercase();
+        lower.ends_with(".cmd") || lower.ends_with(".bat")
+    };
     #[cfg(windows)]
     if shim {
         use std::os::windows::process::CommandExt;

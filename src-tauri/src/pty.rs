@@ -523,8 +523,9 @@ pub async fn pty_open(
         tree_kill,
     } = build_command(&opts, &id).await?;
     // portable-pty's CommandBuilder already inherits the parent environment, so we
-    // only subtract (the AppImage bundle's paths, which would poison host tools run
-    // in the terminal) and advertise a capable terminal — re-copying every var is
+    // only subtract (whatever `sanitize_child_env` removes — the AppImage bundle's
+    // paths and an inherited PWD, which would misdirect host tools run in the
+    // terminal) and advertise a capable terminal — re-copying every var is
     // redundant and can introduce odd-cased duplicate Windows vars.
     crate::agent::sanitize_child_env(&mut cmd);
     cmd.env("TERM", "xterm-256color");

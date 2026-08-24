@@ -1060,6 +1060,17 @@ fn codex_session_args(
     args
 }
 
+/// The session's worktree as the CLI will see it FOR THIS RUN: `/workspace` in a
+/// container (the bind-mount target — the host path names nothing inside), the real
+/// host path otherwise.
+fn run_dir(container: bool, worktree_path: &str) -> &str {
+    if container {
+        "/workspace"
+    } else {
+        worktree_path
+    }
+}
+
 /// GitHub Copilot CLI write-capable *session* invocation. Unlike Claude/Codex
 /// the prompt is an **argument** (`-p <text>`), not stdin, so the caller passes
 /// it here and feeds empty stdin.
@@ -1235,9 +1246,8 @@ fn copilot_review_args(
 /// a permission hang; the worktree's git isolation is the hard guarantee.
 /// opencode generates its OWN `sessionID` (no flag to set it), so turn 1 omits
 /// `--session`, we capture the id from the stream, and resume passes it back —
-/// the host-Codex thread-id dance, because host sessions share one opencode home
-/// (`~/.local/share/opencode`), so an implicit "continue last" could grab a
-/// concurrent session.
+/// the host-Codex thread-id dance. Naming the id resumes exactly the conversation
+/// we started, rather than whichever one opencode considers most recent.
 fn opencode_session_args(
     model: &str,
     session_id: &str,
@@ -1248,12 +1258,10 @@ fn opencode_session_args(
     // builtin `plan` — `plan` has NO web tools and opencode has no permission CLI
     // flags, so the agent is defined in `OPENCODE_CONFIG` (see mcp.rs).
     web: bool,
-    // The directory the turn must run in, as the path exists FOR THIS RUN.
     dir: &str,
 ) -> Vec<String> {
-    // opencode resolves its working root from `PWD` before the real cwd, so a stale
-    // inherited `PWD` would run the turn in another repo. `--dir` bypasses that and is
-    // stamped into the persisted session row, so resumes stay pinned too.
+    // `--dir` pins opencode's run root (it resolves `PWD` before cwd) and is stamped
+    // into the persisted session row, so resumes stay pinned too.
     let mut args: Vec<String> = vec![
         "run".into(),
         "--format".into(),
@@ -1298,8 +1306,7 @@ fn opencode_session_args(
 /// `--dangerously-skip-permissions` only auto-approves those reads. Diff-only
 /// invokes no tools at all.
 fn opencode_review_args(model: &str, repo_aware: bool, effort: &str, dir: &str) -> Vec<String> {
-    // opencode resolves its working root from `PWD` before the real cwd, so without
-    // `--dir` an inherited `PWD` would point the review at a different repository.
+    // `--dir` pins opencode's run root (it resolves `PWD` before cwd).
     let mut args: Vec<String> = vec![
         "run".into(),
         "--format".into(),
@@ -2598,14 +2605,7 @@ pub async fn agent_session(
             } else {
                 format!("{system_prompt}\n\n{user_prompt}")
             };
-            // `--add-dir` must name the path as it exists FOR THIS RUN: `/workspace` in
-            // a container, the real host path otherwise — the host path names nothing
-            // inside.
-            let add_dir = if container {
-                "/workspace"
-            } else {
-                worktree_path.as_str()
-            };
+            let add_dir = run_dir(container, &worktree_path);
             (
                 copilot_session_args(
                     &model,
@@ -2632,14 +2632,7 @@ pub async fn agent_session(
             } else {
                 format!("{system_prompt}\n\n{user_prompt}")
             };
-            // `--dir` must name the path as it exists FOR THIS RUN: `/workspace` in a
-            // container, the real host path otherwise — the host path names nothing
-            // inside.
-            let dir = if container {
-                "/workspace"
-            } else {
-                worktree_path.as_str()
-            };
+            let dir = run_dir(container, &worktree_path);
             (
                 opencode_session_args(
                     &model,
@@ -2885,7 +2878,7 @@ mod child_env_tests {
     }
 
     #[test]
-    fn every_child_loses_an_inherited_pwd() {
+    fn sanitize_child_env_drops_an_inherited_pwd() {
         let mut env = RecordingEnv::default();
         sanitize_child_env(&mut env);
         assert!(
@@ -4037,6 +4030,14 @@ opencode/x-preview-f-free
     }
 
     // --- opencode run directory ----------------------------------------------
+
+    #[test]
+    fn run_dir_is_the_mount_point_in_a_container_and_the_host_path_otherwise() {
+        // Both call sites (Copilot `--add-dir`, opencode `--dir`) hand the CLI a path
+        // it can actually resolve, so the container arm must not leak the host path.
+        assert_eq!(run_dir(true, "C:/wt/gd-session-1"), "/workspace");
+        assert_eq!(run_dir(false, "C:/wt/gd-session-1"), "C:/wt/gd-session-1");
+    }
 
     #[test]
     fn opencode_session_pins_the_run_directory_on_every_turn() {
