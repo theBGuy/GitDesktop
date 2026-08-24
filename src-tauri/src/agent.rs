@@ -385,9 +385,9 @@ impl ChildEnv for portable_pty::CommandBuilder {
 /// environment. Call it FIRST, before a site's own `.env()` calls, so explicitly-set
 /// variables always win.
 pub(crate) fn sanitize_child_env<C: ChildEnv>(cmd: &mut C) {
-    // Every spawn site sets the child's directory itself, so an inherited `PWD` (a
-    // shell-launched app exports one) only names a stale path — and a tool that reads
-    // `PWD` in preference to its real cwd would run against that path instead.
+    // An inherited `PWD` (a shell-launched app exports one) names the LAUNCHER's
+    // directory, never this child's — and a tool that prefers `PWD` over its real
+    // cwd (opencode's run root does) would run against that stale path.
     cmd.unset_var("PWD");
     for (name, value) in child_env_overrides() {
         match value {
