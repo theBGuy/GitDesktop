@@ -406,9 +406,9 @@ async fn launch_custom_command(command: &str, path: &str) -> AppResult<()> {
     let resolved = ensure_absolute(resolved, &std::env::current_dir().map_err(AppError::Io)?);
 
     // SECURITY: reject batch files on the RESOLVED path — a bare `foo` on PATH
-    // can resolve to `foo.cmd`, and Rust ≥1.77 routes batch files through
-    // `cmd.exe` (the BatBadBut CVE mitigation), silently reintroducing a shell
-    // and `%VAR%` expansion that the shell-free custom-command mode must avoid.
+    // can resolve to `foo.cmd`, which runs through `cmd.exe`, silently
+    // reintroducing a shell and `%VAR%` expansion that the shell-free
+    // custom-command mode must avoid.
     if is_batch_file(&resolved.to_string_lossy()) {
         return Err(AppError::InvalidArgument(format!(
             "terminal command points at a batch file ({}); point at the real \
