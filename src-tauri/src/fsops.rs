@@ -1055,6 +1055,7 @@ pub async fn open_with_program(program: String, path: String) -> AppResult<()> {
     let shim = lower.ends_with(".cmd") || lower.ends_with(".bat");
     let mut cmd = if shim {
         let mut c = std::process::Command::new("cmd");
+        crate::agent::sanitize_child_env(&mut c);
         c.args(["/C", &program, &path]);
         c
     } else {

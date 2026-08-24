@@ -381,9 +381,14 @@ impl ChildEnv for portable_pty::CommandBuilder {
     }
 }
 
-/// Removes the AppImage bundle's paths from a child's environment. Call it FIRST,
-/// before a site's own `.env()` calls, so explicitly-set variables always win.
+/// Removes the AppImage bundle's paths and an inherited `PWD` from a child's
+/// environment. Call it FIRST, before a site's own `.env()` calls, so explicitly-set
+/// variables always win.
 pub(crate) fn sanitize_child_env<C: ChildEnv>(cmd: &mut C) {
+    // Every spawn site sets the child's directory itself, so an inherited `PWD` (a
+    // shell-launched app exports one) only names a stale path — and a tool that reads
+    // `PWD` in preference to its real cwd would run against that path instead.
+    cmd.unset_var("PWD");
     for (name, value) in child_env_overrides() {
         match value {
             Some(v) => cmd.set_var(name, v),
@@ -1243,12 +1248,19 @@ fn opencode_session_args(
     // builtin `plan` — `plan` has NO web tools and opencode has no permission CLI
     // flags, so the agent is defined in `OPENCODE_CONFIG` (see mcp.rs).
     web: bool,
+    // The directory the turn must run in, as the path exists FOR THIS RUN.
+    dir: &str,
 ) -> Vec<String> {
+    // opencode resolves its working root from `PWD` before the real cwd, so a stale
+    // inherited `PWD` would run the turn in another repo. `--dir` bypasses that and is
+    // stamped into the persisted session row, so resumes stay pinned too.
     let mut args: Vec<String> = vec![
         "run".into(),
         "--format".into(),
         "json".into(),
         "--dangerously-skip-permissions".into(),
+        "--dir".into(),
+        dir.into(),
     ];
     if read_only {
         // A read-only conversation: a hard read-only guarantee via an agent with no
@@ -1285,8 +1297,16 @@ fn opencode_session_args(
 /// write/edit/bash — a hard guarantee even in the live repo);
 /// `--dangerously-skip-permissions` only auto-approves those reads. Diff-only
 /// invokes no tools at all.
-fn opencode_review_args(model: &str, repo_aware: bool, effort: &str) -> Vec<String> {
-    let mut args: Vec<String> = vec!["run".into(), "--format".into(), "json".into()];
+fn opencode_review_args(model: &str, repo_aware: bool, effort: &str, dir: &str) -> Vec<String> {
+    // opencode resolves its working root from `PWD` before the real cwd, so without
+    // `--dir` an inherited `PWD` would point the review at a different repository.
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "--format".into(),
+        "json".into(),
+        "--dir".into(),
+        dir.into(),
+    ];
     if repo_aware {
         args.push("--agent".into());
         args.push("plan".into());
@@ -2310,8 +2330,9 @@ pub async fn agent_review(
         ),
         // opencode review: prompt on stdin (no positional message), so a large or
         // newline-bearing diff prompt doesn't hit the argv / batch-file-arg limits.
+        // A review always runs on the host, so `--dir` names the repo we spawn it in.
         AgentKind::Opencode => (
-            opencode_review_args(&model, repo_aware, &effort),
+            opencode_review_args(&model, repo_aware, &effort, &repo_path),
             format!("{system_prompt}\n\n{user_prompt}"),
         ),
     };
@@ -2611,6 +2632,14 @@ pub async fn agent_session(
             } else {
                 format!("{system_prompt}\n\n{user_prompt}")
             };
+            // `--dir` must name the path as it exists FOR THIS RUN: `/workspace` in a
+            // container, the real host path otherwise — the host path names nothing
+            // inside.
+            let dir = if container {
+                "/workspace"
+            } else {
+                worktree_path.as_str()
+            };
             (
                 opencode_session_args(
                     &model,
@@ -2619,6 +2648,7 @@ pub async fn agent_session(
                     &effort,
                     read_only,
                     web,
+                    dir,
                 ),
                 prompt,
             )
@@ -2835,6 +2865,37 @@ mod child_env_tests {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| (*v).to_string())
         }
+    }
+
+    /// Records what an applier did to a child's environment, so the scrub is
+    /// assertable on Windows/macOS too, where the override plan is empty.
+    #[derive(Debug, Default)]
+    struct RecordingEnv {
+        set: Vec<(String, String)>,
+        unset: Vec<String>,
+    }
+
+    impl ChildEnv for RecordingEnv {
+        fn set_var(&mut self, key: &str, value: &str) {
+            self.set.push((key.to_string(), value.to_string()));
+        }
+        fn unset_var(&mut self, key: &str) {
+            self.unset.push(key.to_string());
+        }
+    }
+
+    #[test]
+    fn every_child_loses_an_inherited_pwd() {
+        let mut env = RecordingEnv::default();
+        sanitize_child_env(&mut env);
+        assert!(
+            env.unset.iter().any(|k| k == "PWD"),
+            "PWD must be dropped on every platform: {env:?}"
+        );
+        assert!(
+            !env.set.iter().any(|(k, _)| k == "PWD"),
+            "PWD must be dropped, never re-set: {env:?}"
+        );
     }
 
     /// Expected `strip_appdir_pathlist` result when `list` survived a real strip.
@@ -3973,6 +4034,38 @@ opencode/x-preview-f-free
         assert!(diff_only.iter().any(|a| a == "--allow-all-tools"));
         assert!(diff_only.iter().any(|a| a == "--deny-tool=write"));
         assert!(!diff_only.iter().any(|a| a == "--disable-builtin-mcps"));
+    }
+
+    // --- opencode run directory ----------------------------------------------
+
+    #[test]
+    fn opencode_session_pins_the_run_directory_on_every_turn() {
+        // opencode reads `PWD` before its real cwd, so the directory has to be in argv
+        // on turn 1 and on resume alike.
+        let turn_one =
+            opencode_session_args("m", "", false, "", false, false, "C:/wt/gd-session-1");
+        assert_eq!(flag_value(&turn_one, "--dir"), Some("C:/wt/gd-session-1"));
+        let resumed =
+            opencode_session_args("m", "ses_abc", true, "", false, false, "C:/wt/gd-session-1");
+        assert_eq!(flag_value(&resumed, "--dir"), Some("C:/wt/gd-session-1"));
+        assert!(resumed.iter().any(|a| a == "--session"));
+    }
+
+    #[test]
+    fn opencode_session_dir_is_the_container_mount_point() {
+        // In a container the worktree is bind-mounted at `/workspace`; the host path
+        // names nothing inside, so the call site passes the mount point through.
+        let args = opencode_session_args("m", "", false, "", true, true, "/workspace");
+        assert_eq!(flag_value(&args, "--dir"), Some("/workspace"));
+    }
+
+    #[test]
+    fn opencode_review_pins_the_repo_directory() {
+        let aware = opencode_review_args("m", true, "", "C:/repos/gd");
+        assert_eq!(flag_value(&aware, "--dir"), Some("C:/repos/gd"));
+        // A diff-only review invokes no tools, but the run still resolves a root.
+        let diff_only = opencode_review_args("m", false, "", "C:/repos/gd");
+        assert_eq!(flag_value(&diff_only, "--dir"), Some("C:/repos/gd"));
     }
 
     // --- EventSink seam ------------------------------------------------------
