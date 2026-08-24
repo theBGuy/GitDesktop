@@ -686,6 +686,12 @@ async fn resolve(kind: AgentKind, bin_path: Option<&str>) -> Option<PathBuf> {
 
 // --- detection -------------------------------------------------------------
 
+/// Per-stream cap on captured output. `Command::output` buffers without limit,
+/// so a runaway or compromised child could exhaust memory before the timeout
+/// (which bounds duration, not bytes). No legitimate capture here approaches it
+/// — the largest, `opencode models`, is tens of KB.
+const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Runs a short command and returns (exit code, stdout, stderr) as separate
 /// streams — what a line parser needs, since a banner on stderr must not
 /// interleave into the data being parsed.
@@ -706,14 +712,57 @@ pub(crate) async fn run_capture_parts(
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     cmd.kill_on_drop(true);
 
-    let out = tokio::time::timeout(timeout, cmd.output())
-        .await
-        .map_err(|_| AppError::Timeout(timeout.as_secs()))?
-        .map_err(AppError::Io)?;
+    let mut child = cmd.spawn().map_err(AppError::Io)?;
+    // Read both pipes concurrently (a full pipe would otherwise deadlock the
+    // child) and cap each, killing the child if either stream blows the cap.
+    let mut stdout = child.stdout.take().expect("stdout piped");
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let (status, out, err) = tokio::time::timeout(timeout, async {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut obuf = [0u8; 8192];
+        let mut ebuf = [0u8; 8192];
+        let (mut odone, mut edone) = (false, false);
+        loop {
+            tokio::select! {
+                r = stdout.read(&mut obuf), if !odone => {
+                    let n = r.map_err(AppError::Io)?;
+                    if n == 0 {
+                        odone = true;
+                    } else {
+                        let room = MAX_CAPTURE_BYTES - out.len();
+                        out.extend_from_slice(&obuf[..n.min(room)]);
+                        if n >= room {
+                            let _ = child.start_kill();
+                            break;
+                        }
+                    }
+                }
+                r = stderr.read(&mut ebuf), if !edone => {
+                    let n = r.map_err(AppError::Io)?;
+                    if n == 0 {
+                        edone = true;
+                    } else {
+                        let room = MAX_CAPTURE_BYTES - err.len();
+                        err.extend_from_slice(&ebuf[..n.min(room)]);
+                        if n >= room {
+                            let _ = child.start_kill();
+                            break;
+                        }
+                    }
+                }
+                else => break,
+            }
+        }
+        let status = child.wait().await.map_err(AppError::Io)?;
+        Ok::<_, AppError>((status, out, err))
+    })
+    .await
+    .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
     Ok((
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
+        status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out).into_owned(),
+        String::from_utf8_lossy(&err).into_owned(),
     ))
 }
 

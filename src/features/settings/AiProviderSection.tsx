@@ -110,14 +110,20 @@ function ModelPicker({
   allowedHosts: string[];
 }) {
   const keyPreview = useSecretPreview(value.provider);
+  const isCli = isCliProvider(value.provider);
+  // Listing a CLI's catalog spawns it, so a CLI provider's probe waits for the
+  // user to reach the picker — sticky, matching the session and PR-review
+  // pickers. HTTP providers keep fetching eagerly: reaching Settings → AI is
+  // itself the intent, and the cost is a GET, not a subprocess.
+  const [modelsWanted, setModelsWanted] = useState(false);
   const availableModels = useAvailableModels(
     value,
     Boolean(keyPreview.data),
     allowedHosts,
+    { enabled: !isCli || modelsWanted },
   );
   const catalog = availableModels.data;
   const models = catalog?.models ?? [];
-  const isCli = isCliProvider(value.provider);
   const modelMemory = useRef<Partial<Record<AiProviderId, string>>>({});
   // Only a failed fetch carries unbounded provider prose, so it alone is clamped and
   // given a tooltip; every other line is short enough to render whole.
@@ -134,9 +140,9 @@ function ModelPicker({
       case isCli &&
         catalog?.live !== true &&
         catalog?.cause !== "failed" &&
-        !availableModels.isPending:
+        !availableModels.isFetching:
         return "Model passed to the CLI — leave blank for its default";
-      case availableModels.isPending:
+      case availableModels.isFetching:
         return "Loading models…";
       case catalog?.live === true:
         return `${models.length} models from ${PROVIDER_LABELS[value.provider]}`;
@@ -200,6 +206,9 @@ function ModelPicker({
             if (model) onChange({ ...value, model });
           }}
           openOnInputClick
+          onOpenChange={(open) => {
+            if (open) setModelsWanted(true);
+          }}
         >
           <ComboboxInput
             id={`${idPrefix}-model`}
@@ -207,6 +216,7 @@ function ModelPicker({
             placeholder={
               defaultModelForProvider(value.provider) || "Account default"
             }
+            onFocus={() => setModelsWanted(true)}
           />
           <ComboboxContent>
             <ComboboxEmpty>

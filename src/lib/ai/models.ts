@@ -291,6 +291,12 @@ export function useAvailableModels(
     },
     enabled: opts?.enabled ?? true,
     staleTime: 5 * 60 * 1000,
+    // Static suggestions stand in while the (possibly CLI-spawning) probe runs
+    // and whenever the query is gate-disabled, so the picker never shows an empty
+    // list — parity with the session pickers' useAgentModels. placeholderData
+    // forces query status to `success`, so a consumer detects loading via
+    // `isFetching`, not `isPending`.
+    placeholderData: () => ({ models: fallbackModels(settings), live: false }),
     // The CLI arm spawns a process, not an HTTP GET — a focus or reconnect
     // refetch must not re-run the CLI. HTTP providers keep both defaults.
     refetchOnWindowFocus: !isCliProvider(settings.provider),
