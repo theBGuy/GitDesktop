@@ -32,6 +32,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { nameFromUrl } from "@/features/welcome/clone-utils";
+import { validateRepo } from "@/lib/git/api";
 import {
   useAddSubmodule,
   useRemoveSubmodule,
@@ -43,7 +44,9 @@ import {
 import type { Submodule } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
+import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
 import { useOpenRepoByPath } from "./useOpenRepoByPath";
 
@@ -77,10 +80,13 @@ const BUSY_REASON = "An operation is in progress";
  *  record a branch, so both edits would fail in git. */
 const NO_ENTRY_REASON = "no .gitmodules entry";
 
-/** Sets a hover title only when the line is actually clipped. */
+/** Sets a hover title only when the line is actually clipped. Clears the
+ *  attribute rather than blanking it: an empty `title` states that the
+ *  ancestor's does not apply, which would kill the row button's own tooltip. */
 const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
   const el = e.currentTarget;
-  el.title = el.scrollWidth > el.clientWidth ? value : "";
+  if (el.scrollWidth > el.clientWidth) el.title = value;
+  else el.removeAttribute("title");
 };
 
 /** The submodule's folder on disk. Its path is repo-root-relative with forward
@@ -118,7 +124,13 @@ export function SubmodulesDialog({
     if (open) setMode(initialMode);
   }, [open, initialMode]);
 
+  // Read `open` through a ref: an add whose clone outlives the close still runs
+  // its continuation, holding the props from before it — propagating the mode
+  // then would set the caller's state and pop the closed dialog back open. The
+  // stale local `mode` needs no repair; the re-seed above owns it on next open.
+  const openRef = useLatestRef(open);
   function changeMode(next: "list" | "add") {
+    if (!openRef.current) return;
     setMode(next);
     onModeChange(next);
   }
@@ -274,9 +286,23 @@ function SubmoduleList({
   }
 
   async function handleOpenAsRepo(s: Submodule) {
+    const full = submodulePath(repoPath, s.path);
+    // useOpenRepoByPath reports its own failures as a toast and resolves the
+    // same either way, so probe first — closing the manager on a failed open
+    // would hide the toast's context behind a dismissed dialog.
+    try {
+      await validateRepo(full);
+    } catch (e) {
+      if (isAppError(e) && e.kind === "notARepo") {
+        toast.error(`${s.path} is not a git repository.`);
+      } else {
+        toastError(e);
+      }
+      return;
+    }
     // A submodule is an independent repository that nothing else in the app can
     // reach, so it earns a recents row like any other opened repo.
-    await openByPath(submodulePath(repoPath, s.path), "picker");
+    await openByPath(full, "picker");
     onClose();
   }
 

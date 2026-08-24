@@ -8,5 +8,8 @@ import type { MouseEvent } from "react";
  */
 export const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
   const el = e.currentTarget;
-  el.title = el.scrollWidth > el.clientWidth ? value : "";
+  // Clear by REMOVING the attribute: an empty `title` states that the ancestor's
+  // does not apply, which would suppress a titled parent's tooltip (HTML).
+  if (el.scrollWidth > el.clientWidth) el.title = value;
+  else el.removeAttribute("title");
 };

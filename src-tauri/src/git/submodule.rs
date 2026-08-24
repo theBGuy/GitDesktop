@@ -14,17 +14,38 @@ use crate::state::AppState;
 /// it reaches argv: a leading `-` parses as an option, and an absolute or
 /// `..`-escaping path would place the submodule outside the working tree.
 /// Backslashes never appear in git's own output, so they can only be hand-typed.
+///
+/// `.` segments are refused alongside `..` because they retarget without escaping:
+/// as a module-data name, `x/.` stays inside the modules subtree yet resolves to
+/// SIBLING `x`. Split on `/` rather than `Path::components`, which normalizes a
+/// trailing `.` away entirely and would report `x/.` as one clean Normal component.
 fn validate_repo_relative(path: &str, label: &str) -> AppResult<()> {
     let escapes = path.is_empty()
         || path.starts_with('-')
         || path.contains('\\')
         || path.starts_with('/')
         || Path::new(path).is_absolute()
-        || path.split('/').any(|seg| seg == "..");
+        || has_drive_prefix(path)
+        || path.split('/').any(|seg| seg == ".." || seg == ".");
     if escapes {
-        return Err(AppError::InvalidArgument(format!("invalid {label}: {path}")));
+        return Err(AppError::InvalidArgument(format!(
+            "Invalid {label} \"{path}\" — it must be a forward-slash path inside this \
+             repository (for example libs/dep), without \".\" or \"..\" segments, a \
+             leading \"-\", or a drive prefix."
+        )));
     }
     Ok(())
+}
+
+/// A Windows drive prefix — `C:/windows` (drive-absolute) or `c:relative` (relative
+/// to that drive's current directory). Refused on EVERY platform rather than behind
+/// a `cfg`: `Path::is_absolute` reads `C:/windows` as a plain relative path on Unix,
+/// and these paths reach the validator from `.gitmodules`, which is untrusted repo
+/// content that travels between hosts — what a repo is allowed to contain must not
+/// depend on which OS opens it.
+fn has_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 /// A value that rides in an argv option slot; only the option-injection shape is
@@ -32,7 +53,7 @@ fn validate_repo_relative(path: &str, label: &str) -> AppResult<()> {
 fn validate_option_value(value: &str, label: &str) -> AppResult<()> {
     if value.is_empty() || value.starts_with('-') {
         return Err(AppError::InvalidArgument(format!(
-            "invalid {label}: {value}"
+            "Invalid {label} \"{value}\" — it can't be empty or start with \"-\"."
         )));
     }
     Ok(())
@@ -100,6 +121,13 @@ async fn gitmodules_entries(repo_path: &str) -> HashMap<String, ModuleEntry> {
 
 /// The repo's submodules, joining `git submodule status` to `.gitmodules`.
 /// Lock-free runners only, so callers may hold the repo lock across it.
+///
+/// `repo_path` must be the worktree TOPLEVEL — the contract for every command in
+/// this module. The join needs it: `.gitmodules` spells `path` relative to the root
+/// while `submodule status` spells it relative to the cwd, so from a subdirectory
+/// the two sides stop matching and every row silently loses its name, URL and
+/// branch. Tauri only ever passes the validated toplevel; the MCP server, which
+/// takes `--repo` verbatim, exposes none of these commands.
 pub(crate) async fn list_submodules(repo_path: &str) -> AppResult<Vec<Submodule>> {
     // `git submodule status` prints "[ +-U]<sha> <path>[ (<describe>)]" per line.
     // The leading flag means: ' ' in sync, '-' not initialized, '+' the checked-
@@ -291,6 +319,7 @@ pub(crate) async fn git_submodule_add_core(
     // index.lock retry.
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
+    crate::git::ops::refuse_mid_op_for(&repo_path, "add a submodule").await?;
     refuse_unstaged_gitmodules(&repo_path).await?;
     run_git(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
     Ok(())
@@ -425,7 +454,17 @@ async fn module_data_dir(repo_path: &str, name: &str) -> AppResult<PathBuf> {
     if git_dir.is_empty() {
         return Err(AppError::NotARepo(repo_path.to_string()));
     }
-    Ok(Path::new(git_dir).join("modules").join(name))
+    let modules = Path::new(git_dir).join("modules");
+    let dir = modules.join(name);
+    // Structural containment, independent of the validator above: `join` REPLACES the
+    // base when the joined path has a root or a Windows drive prefix, so `C:x` as a
+    // name would otherwise hand `remove_dir_all` a target outside the modules subtree.
+    if !dir.starts_with(&modules) {
+        return Err(AppError::InvalidArgument(format!(
+            "Invalid submodule name \"{name}\" — it escapes the repository's module data."
+        )));
+    }
+    Ok(dir)
 }
 
 /// Points the submodule at `path` at a new `url`, syncing `.git/config` so the
@@ -511,8 +550,8 @@ pub(crate) async fn git_submodule_set_branch_core(
 /// with or without `-f` — and `deinit -f` succeeds first, so the force path would
 /// strand a cleared worktree with nothing staged — and `add` (which stages the whole
 /// worktree file itself) and [`stage_gitmodules`] would otherwise sweep the user's
-/// unrelated edits into the index. `:/` anchors at the repo root, since `repo_path`
-/// may be a subdirectory.
+/// unrelated edits into the index. `:/` costs nothing and anchors at the repo root,
+/// but does not widen the module's contract — see [`list_submodules`].
 async fn refuse_unstaged_gitmodules(repo_path: &str) -> AppResult<()> {
     let out = run_git(
         Some(repo_path),
@@ -530,8 +569,8 @@ async fn refuse_unstaged_gitmodules(repo_path: &str) -> AppResult<()> {
 
 /// `set-url`/`set-branch` leave `.gitmodules` modified but UNSTAGED, unlike
 /// `add`/`rm`. Stage it so every manager mutation reaches the user the same way:
-/// staged, uncommitted. `:/` anchors the path at the repo root, since `repo_path`
-/// may be a subdirectory.
+/// staged, uncommitted. `:/` costs nothing and anchors at the repo root, but does
+/// not widen the module's contract — see [`list_submodules`].
 async fn stage_gitmodules(repo_path: &str) -> AppResult<()> {
     run_git(
         Some(repo_path),
@@ -616,15 +655,50 @@ mod tests {
 
     #[test]
     fn repo_relative_paths_reject_option_and_escape_shapes() {
+        // Multi-segment values stay legal — a submodule NAME falls back to its path.
         assert!(validate_repo_relative("libs/dep", "p").is_ok());
         assert!(validate_repo_relative("", "p").is_err());
         assert!(validate_repo_relative("--upload-pack=x", "p").is_err());
         assert!(validate_repo_relative("/etc/passwd", "p").is_err());
+        // Drive shapes: `Path::is_absolute` calls none of these absolute on Unix,
+        // so `has_drive_prefix` is what has to carry them everywhere.
         assert!(validate_repo_relative("C:/windows", "p").is_err());
+        assert!(validate_repo_relative("c:relative", "p").is_err());
+        assert!(validate_repo_relative("C:x", "p").is_err());
         assert!(validate_repo_relative(r"libs\dep", "p").is_err());
         assert!(validate_repo_relative("libs/../../out", "p").is_err());
+        // `.` segments retarget without escaping: as a name, `x/.` resolves to the
+        // SIBLING module-data dir `x` while still passing containment.
+        assert!(validate_repo_relative("x/.", "p").is_err());
+        assert!(validate_repo_relative("./x", "p").is_err());
+        assert!(validate_repo_relative("libs/./dep", "p").is_err());
         // A `..` INSIDE a segment is a legal directory name, not an escape.
         assert!(validate_repo_relative("libs/a..b", "p").is_ok());
+    }
+
+    /// Pins the `join` PREMISE the containment guard rests on: the base is replaced
+    /// when the joined path carries a root (or, on Windows, a drive prefix). The
+    /// guard's own branch is deliberately unreachable defense-in-depth — the
+    /// validator already rejects every base-replacing shape — so the premise, not
+    /// the branch, is what a regression here would break.
+    // The replacement clippy warns about is the behavior under test, not a mistake.
+    #[allow(clippy::join_absolute_paths)]
+    #[test]
+    fn module_data_join_replacement_premises() {
+        let modules = Path::new("/repo/.git").join("modules");
+        assert!(modules.join("libs/dep").starts_with(&modules));
+        // Rooted on every platform.
+        assert!(!modules.join("/abs").starts_with(&modules));
+        // Containment alone is NOT sufficient: `x/.` stays inside the subtree and
+        // still retargets to sibling `x`, so `validate_repo_relative` owns that arm.
+        assert!(modules.join("x/.").starts_with(&modules));
+        // Drive shapes replace the base only on Windows; on Unix they are ordinary
+        // relative names, which is why `validate_repo_relative` rejects them there
+        // and this containment is the second layer rather than the only one.
+        #[cfg(windows)]
+        for escape in ["C:x", "C:/windows", "c:relative"] {
+            assert!(!modules.join(escape).starts_with(&modules), "{escape}");
+        }
     }
 
     #[test]
@@ -919,6 +993,58 @@ mod tests {
         let status = git(&host, &["status", "--porcelain"]).await;
         assert!(status.contains(" M .gitmodules"), "still unstaged: {status}");
         assert!(!exists(&host, "libs/dep2"), "nothing was cloned");
+    }
+
+    /// Adding a submodule mid-merge would bury a new gitlink in an index the user is
+    /// still resolving.
+    #[tokio::test]
+    async fn add_refuses_mid_merge() {
+        let (dir, host, _dep) = host_with_submodule("add-midop").await;
+        seed_repo(dir.path(), "dep2").await;
+        // A bare MERGE_HEAD is what `op_state` reads; a real conflicted merge would
+        // also leave unmerged index entries, which the same gate refuses first.
+        let head = git(&host, &["rev-parse", "HEAD"]).await.trim().to_string();
+        std::fs::write(dir.path().join("host/.git/MERGE_HEAD"), format!("{head}\n")).unwrap();
+        let before = git(&host, &["status", "--porcelain"]).await;
+
+        let err = git_submodule_add_core(
+            &AppState::default(),
+            host.clone(),
+            "../dep2".into(),
+            Some("libs/dep2".into()),
+            None,
+        )
+        .await
+        .expect_err("a mid-merge add must be refused");
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        assert!(!exists(&host, "libs/dep2"), "nothing was cloned");
+        assert_eq!(git(&host, &["status", "--porcelain"]).await, before);
+    }
+
+    /// The fourth `.gitmodules` writer gets the same guard as add/remove/set_url.
+    #[tokio::test]
+    async fn set_branch_refuses_unstaged_gitmodules() {
+        let (dir, host, _dep) = host_with_submodule("branch-unstaged").await;
+        let gitmodules = dir.path().join("host/.gitmodules");
+        let original = std::fs::read_to_string(&gitmodules).unwrap();
+        std::fs::write(&gitmodules, format!("{original}\n[core]\n\tjunk = 1\n")).unwrap();
+
+        let err = git_submodule_set_branch_core(
+            &AppState::default(),
+            host.clone(),
+            "libs/dep".into(),
+            Some("release".into()),
+        )
+        .await
+        .expect_err("unstaged .gitmodules must be refused");
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        let status = git(&host, &["status", "--porcelain"]).await;
+        assert!(status.contains(" M .gitmodules"), "still unstaged: {status}");
+        assert_eq!(
+            list_submodules(&host).await.unwrap()[0].branch.as_deref(),
+            Some("main"),
+            "the branch is unchanged"
+        );
     }
 
     /// Without the pre-check, `stage_gitmodules` would sweep the user's unrelated

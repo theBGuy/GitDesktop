@@ -73,7 +73,10 @@ import { useOpenWorktree } from "./useOpenRepoByPath";
  *  `currentTarget`, not an inner span (a span-level check never fires). */
 const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
   const el = e.currentTarget;
-  el.title = el.scrollWidth > el.clientWidth ? value : "";
+  // Clear by REMOVING the attribute — an empty `title` suppresses a titled
+  // ancestor's tooltip (the row button's) over this element.
+  if (el.scrollWidth > el.clientWidth) el.title = value;
+  else el.removeAttribute("title");
 };
 
 /**
@@ -384,10 +387,7 @@ function WorktreeRow({
           </span>
           <span
             className="mt-0.5 block truncate text-[11px] text-muted-foreground"
-            onMouseEnter={(e) => {
-              const el = e.currentTarget;
-              el.title = el.scrollWidth > el.clientWidth ? path : "";
-            }}
+            onMouseEnter={clipTitle(path)}
           >
             {path}
           </span>
