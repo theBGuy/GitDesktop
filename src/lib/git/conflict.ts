@@ -13,6 +13,9 @@ export interface ConflictSides {
   theirs: string | null;
   /** The path matches an AI-ignore pattern — never send it to a model. */
   aiIgnored: boolean;
+  /** Whether the working file exists on disk — false when the user deleted it
+   *  (`working` collapses to "" either way). */
+  workingExists: boolean;
 }
 
 /** Reads a conflicted file's base/ours/theirs blobs + the marked working file,

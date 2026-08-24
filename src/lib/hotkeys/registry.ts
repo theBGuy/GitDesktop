@@ -577,6 +577,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "mark-conflict-resolved",
+    label: "Mark conflict resolved",
+    category: "Changes",
+    defaultBinding: null,
+  },
+  {
     id: "undo-commit",
     label: "Undo last commit",
     category: "Changes",

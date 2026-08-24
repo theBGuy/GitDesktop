@@ -716,7 +716,11 @@ already settled by hand included. Files mark
 themselves resolved as you go — the \`!\` badge clears — and the finish control stays
 disabled, saying so, until every conflict is resolved. When one side of a conflict removed
 a file, the editor names the removal instead of showing regions, and the same whole-file
-accept actions choose between keeping the file and taking the deletion.
+accept actions choose between keeping the file and taking the deletion; when you've edited
+the surviving file yourself, **Mark resolved** keeps that edit. A file you resolved outside
+GitDesktop (its conflict markers gone, but Git still listing it as conflicted) offers
+**Mark resolved** too, staging it exactly as it is on disk, and so does one you emptied,
+or deleted while both sides still have a version of it.
 
 {{ai}}## Resolve conflicts with AI
 

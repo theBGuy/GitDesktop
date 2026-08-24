@@ -40,6 +40,9 @@ pub struct ConflictSides {
     /// The path matches an AI-ignore pattern, so it must never be sent to a
     /// model. The UI refuses to resolve it and says why.
     pub ai_ignored: bool,
+    /// Whether the working file is on disk. `working` collapses to "" for an
+    /// empty file and a deleted one alike; this is what separates them.
+    pub working_exists: bool,
 }
 
 /// Rejects paths that could be read as a git flag or escape the repo root. The
@@ -120,10 +123,16 @@ pub async fn git_conflict_sides(
 
     let ai_ignored = is_ai_ignored(&repo_path, &path, &exclude).await?;
 
-    // A both-deleted conflict has no working file → "".
-    let working_bytes = tokio::fs::read(Path::new(&repo_path).join(&path))
-        .await
-        .unwrap_or_default();
+    // A both-deleted conflict has no working file → "". NotFound is the only
+    // signal that the file is gone; any other read error keeps the swallow-to-
+    // empty behavior but still reports the file as present, so the UI never
+    // offers to stage a removal on the strength of a permissions error.
+    let working_read = tokio::fs::read(Path::new(&repo_path).join(&path)).await;
+    let working_exists = match &working_read {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    };
+    let working_bytes = working_read.unwrap_or_default();
     if working_bytes.len() > RESOLVE_MAX_BYTES {
         return Err(AppError::InvalidArgument(
             "file is too large for AI conflict resolution".into(),
@@ -144,6 +153,7 @@ pub async fn git_conflict_sides(
         ours: stage_blob(&repo_path, 2, &path).await?,
         theirs: stage_blob(&repo_path, 3, &path).await?,
         ai_ignored,
+        working_exists,
     })
 }
 
@@ -673,6 +683,37 @@ mod tests {
             .await
             .unwrap();
         assert_deleted_and_resolved(&repo, "file.txt").await;
+    }
+
+    /// `working_exists` is what separates an emptied working file from a deleted
+    /// one, since `working` is "" for both. The wire key is asserted too: the
+    /// frontend reads `workingExists`, and a rename here would go silent.
+    #[tokio::test]
+    async fn working_exists_tracks_the_file_on_disk() {
+        let (_dir, repo) = conflicted_repo("working-exists", "file.txt", &[]).await;
+        let present = git_conflict_sides(repo.clone(), "file.txt".into(), vec![])
+            .await
+            .unwrap();
+        assert!(present.working_exists);
+        let json = serde_json::to_string(&present).unwrap();
+        assert!(
+            json.contains("\"workingExists\":true"),
+            "wire key missing: {json}"
+        );
+
+        std::fs::remove_file(Path::new(&repo).join("file.txt")).unwrap();
+        let gone = git_conflict_sides(repo, "file.txt".into(), vec![])
+            .await
+            .unwrap();
+        assert!(!gone.working_exists);
+        assert_eq!(gone.working, "", "a missing file still reads as empty");
+        // The stages survive the deletion, so the path is still conflicted.
+        assert_eq!(gone.ours.as_deref(), Some("ours\n"));
+        let json = serde_json::to_string(&gone).unwrap();
+        assert!(
+            json.contains("\"workingExists\":false"),
+            "wire key missing: {json}"
+        );
     }
 
     #[tokio::test]

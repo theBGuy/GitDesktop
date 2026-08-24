@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
 import { hasConflictMarkers } from "@/lib/ai/conflict-prompt";
-import { openWithDefault, openWithProgram } from "@/lib/git/api";
+import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
 import type { ConflictSides } from "@/lib/git/conflict";
 import {
   type ConflictChoice,
@@ -15,9 +15,11 @@ import {
 import {
   useCheckoutConflictSide,
   useConflictFile,
+  useMarkConflictResolved,
   useResolveConflict,
 } from "@/lib/git/queries";
 import { isWindows } from "@/lib/hotkeys/binding";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   useAiEnabled,
   useReviewConfigured,
@@ -28,6 +30,11 @@ import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
 
 const baseName = (path: string) => path.split("/").pop() || path;
+
+/** Compare working text against a stage blob EOL-agnostically: under autocrlf
+ *  `git show :N:path` hands back raw LF while the merge wrote the working file
+ *  CRLF, so a byte comparison calls every file edited. */
+const nlf = (s: string) => s.replaceAll("\r\n", "\n");
 
 /** The whole-file sides, worded as the header buttons word them. */
 const ACCEPT_ALL_COPY = {
@@ -78,39 +85,149 @@ const DELETION_COPY = {
   },
 } as const;
 
-/**
- * What a conflicted file shows when the parser found no regions to resolve: a
- * side with no version at this path, an empty file, or markers it can't trust.
- * Each keeps the header's whole-file actions as the way through.
- */
-function ConflictFallback({
-  path,
-  sides,
-}: {
-  path: string;
-  sides: ConflictSides;
-}) {
+/** The states a conflicted file can be in once the parser found no regions. */
+type FallbackArm =
+  | "deletion"
+  | "deletionEdited"
+  | "bothDeleted"
+  | "emptiedOnDisk"
+  | "emptiedGone"
+  | "externallyResolved"
+  | "unparsed";
+
+/** The arms where what's on disk IS the resolution, so staging it as-is is the
+ *  way through. Every other arm routes through the header's whole-file accepts. */
+const MARK_RESOLVED_ARMS: ReadonlySet<FallbackArm> = new Set<FallbackArm>([
+  "deletionEdited",
+  "emptiedOnDisk",
+  "emptiedGone",
+  "externallyResolved",
+]);
+
+/** The two working-file states with no text to show, each worded for what
+ *  staging it actually records (content vs. a removal). */
+const EMPTIED_COPY: Record<
+  "emptiedOnDisk" | "emptiedGone",
+  { state: string; action: string }
+> = {
+  emptiedOnDisk: {
+    state: "You've emptied this file",
+    action: "stages it exactly as it is on disk.",
+  },
+  emptiedGone: {
+    state: "This file is gone from your working tree",
+    action: "stages the removal.",
+  },
+};
+
+function fallbackArm(sides: ConflictSides): FallbackArm {
   // The index stages decide first: a modify/delete leaves the SURVIVING side's
   // content in the tree, marker-free, so the parser's null here means a removal
   // to accept rather than markers it failed on. Ordered ahead of the empty-file
   // check, which is a heuristic and would swallow a surviving side that is empty.
   const deleted = deletedSide(sides);
   if (deleted !== null) {
+    const survivor = sides.ours ?? sides.theirs ?? "";
+    const edited = sides.workingExists && nlf(sides.working) !== nlf(survivor);
+    return edited ? "deletionEdited" : "deletion";
+  }
+
+  if (sides.working.trim() === "") {
+    if (sides.ours == null && sides.theirs == null) return "bothDeleted";
+    return sides.workingExists ? "emptiedOnDisk" : "emptiedGone";
+  }
+
+  // Every leg is checked here rather than leaning on the arms above: an entry
+  // with no stages at all but real content is a file we can't classify, and it
+  // must land on the couldn't-parse arm instead of being called resolved.
+  if (
+    sides.ours != null &&
+    sides.theirs != null &&
+    sides.working.trim() !== "" &&
+    !hasConflictMarkers(sides.working)
+  ) {
+    return "externallyResolved";
+  }
+
+  return "unparsed";
+}
+
+/**
+ * What a conflicted file shows when the parser found no regions to resolve: a
+ * side with no version at this path, an empty file, content already resolved
+ * outside the app, or markers it can't trust. Each keeps the header's
+ * whole-file actions as the way through; the arms whose disk content is itself
+ * the resolution also offer Mark resolved.
+ */
+function ConflictFallback({
+  path,
+  sides,
+  busy,
+  onMarkResolved,
+}: {
+  path: string;
+  sides: ConflictSides;
+  busy: boolean;
+  onMarkResolved: () => void;
+}) {
+  const arm = fallbackArm(sides);
+  const markButton = MARK_RESOLVED_ARMS.has(arm) ? (
+    <Button
+      size="xs"
+      variant="outline"
+      disabled={busy}
+      onClick={onMarkResolved}
+    >
+      Mark resolved
+    </Button>
+  ) : null;
+
+  const deleted = deletedSide(sides);
+  if (deleted !== null) {
     const copy = DELETION_COPY[deleted];
+    const lead = (
+      <>
+        {copy.lead} <span className="font-medium">{copy.takesDeletion}</span>{" "}
+        takes the deletion,{" "}
+        <span className="font-medium">{copy.keepsFile}</span> keeps the file.
+      </>
+    );
     return (
       <>
-        <p className="border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
-          {copy.lead} <span className="font-medium">{copy.takesDeletion}</span>{" "}
-          takes the deletion,{" "}
-          <span className="font-medium">{copy.keepsFile}</span> keeps the file.
-        </p>
+        {arm === "deletionEdited" ? (
+          <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
+            <p className="min-w-0 flex-1">
+              {lead} You've edited this file —{" "}
+              <span className="font-medium">Mark resolved</span> keeps it
+              exactly as shown.
+            </p>
+            {markButton}
+          </div>
+        ) : (
+          <p className="border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
+            {lead}
+          </p>
+        )}
         <HighlightedCode path={path} content={sides.working || " "} />
       </>
     );
   }
 
-  if (sides.working.trim() === "") {
-    // A both-deleted (or empty) conflict — nothing to merge as text.
+  if (arm === "emptiedOnDisk" || arm === "emptiedGone") {
+    return (
+      <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
+        <p className="min-w-0 flex-1">
+          {EMPTIED_COPY[arm].state} —{" "}
+          <span className="font-medium">Mark resolved</span>{" "}
+          {EMPTIED_COPY[arm].action}
+        </p>
+        {markButton}
+      </div>
+    );
+  }
+
+  if (arm === "bothDeleted") {
+    // Nothing to merge as text, and nothing on disk worth staging as-is.
     return (
       <p className="p-4 text-xs text-muted-foreground">
         This file was deleted on one or both sides — there's nothing to merge.
@@ -118,6 +235,22 @@ function ConflictFallback({
         / <span className="font-medium">incoming</span>, or open it in your
         editor.
       </p>
+    );
+  }
+
+  if (arm === "externallyResolved") {
+    return (
+      <>
+        <div className="flex items-center gap-2 border-b bg-success/10 px-3 py-1.5 text-[11px] text-success">
+          <p className="min-w-0 flex-1">
+            No conflict markers remain — this file looks resolved. Review it,
+            then <span className="font-medium">Mark resolved</span> to stage it
+            exactly as it is on disk.
+          </p>
+          {markButton}
+        </div>
+        <HighlightedCode path={path} content={sides.working} />
+      </>
     );
   }
 
@@ -154,6 +287,7 @@ export function ConflictFileView({
   const file = useConflictFile(repoPath, path);
   const resolve = useResolveConflict(repoPath);
   const checkoutSide = useCheckoutConflictSide(repoPath);
+  const markResolve = useMarkConflictResolved(repoPath);
   const aiEnabled = useAiEnabled();
   const reviewConfigured = useReviewConfigured();
   const startResolveAi = useConflictResolve((s) => s.startOne);
@@ -167,7 +301,11 @@ export function ConflictFileView({
   // Include the post-accept refetch (file.isFetching) so the per-region buttons
   // stay disabled until fresh segments land — otherwise a fast second click
   // resolves against stale segments and resurrects an already-resolved region.
-  const busy = resolve.isPending || checkoutSide.isPending || file.isFetching;
+  const busy =
+    resolve.isPending ||
+    checkoutSide.isPending ||
+    markResolve.isPending ||
+    file.isFetching;
   // A binary / too-large conflict can't be text-merged (the backend refuses to
   // read it); offer only whole-file resolution + the editor.
   const textResolvable = !file.isError;
@@ -237,6 +375,42 @@ export function ConflictFileView({
     );
   }
 
+  // Which fallback state is on screen, and so whether Mark resolved is offered.
+  // Gated on !isError as well as data: a refetch that errors (the file turned
+  // binary/oversized) keeps the last data while the pane shows the error copy.
+  const arm =
+    file.data && !file.isError && segments === null
+      ? fallbackArm(file.data)
+      : null;
+  const canMarkResolved = arm !== null && MARK_RESOLVED_ARMS.has(arm);
+
+  async function markResolved() {
+    try {
+      await markResolve.mutateAsync(path);
+      toast.success(`Resolved ${baseName(path)}`);
+    } catch (e) {
+      // A stale click: the path can be resolved elsewhere (an AI walk, another
+      // window) between render and click, and `git add` on a path that is fully
+      // gone exits 128. Only a still-conflicted path is a real failure; a status
+      // read that itself fails falls back to surfacing the error.
+      const status = await gitStatus(repoPath).catch(() => null);
+      const resolvedElsewhere = status?.entries.every(
+        (entry) =>
+          entry.path !== path ||
+          (entry.staged !== "conflicted" && entry.unstaged !== "conflicted"),
+      );
+      if (!resolvedElsewhere) toastError(e);
+    }
+  }
+
+  // Palette-only; enabled with the button, busy state included, so the palette
+  // can't fire a second stage while one is in flight.
+  useHotkeyAction(
+    "mark-conflict-resolved",
+    markResolved,
+    canMarkResolved && !busy,
+  );
+
   // Precompute each segment's conflict ordinal (its index among conflicts, for
   // resolveBlock) up front, so the render map only reads a stable array rather
   // than mutating a counter captured by the per-region onClick lambdas.
@@ -304,7 +478,12 @@ export function ConflictFileView({
             editor.
           </p>
         ) : segments === null ? (
-          <ConflictFallback path={path} sides={file.data} />
+          <ConflictFallback
+            path={path}
+            sides={file.data}
+            busy={busy}
+            onMarkResolved={markResolved}
+          />
         ) : (
           segments.map((seg, idx) => {
             if (seg.kind === "context") {
