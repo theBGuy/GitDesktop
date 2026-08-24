@@ -1577,7 +1577,7 @@ pub async fn mr_timeline(repo_path: &str, number: u64) -> AppResult<Vec<ForgeTim
     }
 
     // Combine all classes and sort ascending by instant (undated events sort first).
-    events.sort_by_key(timeline_event_instant);
+    events.sort_by_cached_key(timeline_event_instant);
     Ok(events)
 }
 
@@ -1822,7 +1822,7 @@ pub async fn issue_timeline(repo_path: &str, number: u64) -> AppResult<Vec<Forge
     }
 
     // Combine all classes and sort ascending by instant (undated events sort first).
-    events.sort_by_key(timeline_event_instant);
+    events.sort_by_cached_key(timeline_event_instant);
     Ok(events)
 }
 
@@ -9079,7 +9079,7 @@ mod tests {
                 date: "2026-07-01T00:00:00Z".into(),
             },
         ];
-        events.sort_by_key(timeline_event_instant);
+        events.sort_by_cached_key(timeline_event_instant);
         let dates: Vec<&str> = events.iter().map(timeline_event_date).collect();
         assert_eq!(
             dates,
@@ -9101,7 +9101,7 @@ mod tests {
             date: date.to_string(),
         };
         let mut events = [ev(with_millis), ev(bare), ev("")];
-        events.sort_by_key(timeline_event_instant);
+        events.sort_by_cached_key(timeline_event_instant);
         let dates: Vec<&str> = events.iter().map(timeline_event_date).collect();
         // Undated first, then true chronological order — the reverse of the strings
         // for the dated pair.

@@ -1441,7 +1441,7 @@ pub async fn pr_activity(repo_path: &str, number: u64) -> AppResult<Vec<ForgeTim
     // Sort ascending by INSTANT, stably. Bitbucket stamps activity in the actor's
     // local offset ("…-04:00"), so a lexicographic compare of the raw strings puts
     // mixed offsets out of chronological order. Undated/unparseable events sort first.
-    events.sort_by_key(bb_timeline_instant);
+    events.sort_by_cached_key(bb_timeline_instant);
     Ok(events)
 }
 
@@ -1504,8 +1504,8 @@ fn bb_actor(u: Option<&BbUser>) -> ForgeUserRef {
     }
 }
 
-/// The date field of a `ForgeTimelineEventOut` produced by [`pr_activity`] — the sort
-/// key. Exhaustive over the union so a new variant can't silently sort as "".
+/// The date field of a `ForgeTimelineEventOut` produced by [`pr_activity`], verbatim.
+/// Exhaustive over the union so a new variant can't silently read as "".
 fn bb_timeline_date(e: &ForgeTimelineEventOut) -> &str {
     match e {
         ForgeTimelineEventOut::Merged { date, .. }
@@ -5623,7 +5623,7 @@ mod tests {
             date: date.to_string(),
         };
         let mut events = [ev(local_evening), ev(utc_late), ev("")];
-        events.sort_by_key(bb_timeline_instant);
+        events.sort_by_cached_key(bb_timeline_instant);
         let dates: Vec<&str> = events.iter().map(bb_timeline_date).collect();
         // Undated first, then the true chronological order — the reverse of the
         // strings for the dated pair.
