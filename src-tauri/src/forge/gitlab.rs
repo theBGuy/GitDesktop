@@ -1410,16 +1410,24 @@ struct GlabEventLabel {
 }
 
 /// Map one `resource_label_events` entry (MR or issue — the endpoints share a shape),
-/// or `None` once the label itself has been deleted. The endpoint returns `color` WITH
-/// a leading `#` while the `Labeled.color` contract is bare hex (the frontend renders
+/// or `None` once the label itself has been deleted, or for an action we don't model,
+/// which is skipped rather than guessed. The endpoint returns `color` WITH a leading
+/// `#` while the `Labeled.color` contract is bare hex (the frontend renders
 /// `#${color}`), so the strip is part of the mapping, not a caller's job. Pure
 /// (unit-tested).
 fn map_label_event(e: GlabLabelEvent) -> Option<ForgeTimelineEventOut> {
     let label = e.label?;
+    // Only the two known actions map; anything else (including the serde default on a
+    // malformed payload) would otherwise render as a removal that never happened.
+    let added = match e.action.as_str() {
+        "add" => true,
+        "remove" => false,
+        _ => return None,
+    };
     Some(ForgeTimelineEventOut::Labeled {
         label: label.name,
         color: label.color.trim_start_matches('#').to_string(),
-        added: e.action == "add",
+        added,
         actor: gl_actor(e.user),
         date: e.created_at,
     })
@@ -1449,7 +1457,7 @@ fn timeline_event_date(e: &ForgeTimelineEventOut) -> &str {
         | ForgeTimelineEventOut::ChangesRequested { date, .. }
         | ForgeTimelineEventOut::Unapproved { date, .. } => date,
         // The GitLab arm never produces these, but the union is shared — match
-        // exhaustively so a new variant can't silently sort as "".
+        // exhaustively so a new variant can't silently read as "".
         ForgeTimelineEventOut::ForcePushed { date, .. }
         | ForgeTimelineEventOut::ReviewRequested { date, .. }
         | ForgeTimelineEventOut::ReadyForReview { date, .. }
@@ -1602,13 +1610,21 @@ struct GlabEventMilestone {
 }
 
 /// Map one issue `resource_milestone_events` entry, or `None` when the milestone it
-/// pointed at has since been deleted (GitLab keeps the event, nulls the milestone).
-/// Pure (unit-tested).
+/// pointed at has since been deleted (GitLab keeps the event, nulls the milestone), or
+/// for an action we don't model, which is skipped rather than guessed. Pure
+/// (unit-tested).
 fn map_issue_milestone_event(e: GlabMilestoneEvent) -> Option<ForgeTimelineEventOut> {
     let milestone = e.milestone?;
+    // Only the two known actions map; anything else (including the serde default on a
+    // malformed payload) would otherwise render as a removal that never happened.
+    let added = match e.action.as_str() {
+        "add" => true,
+        "remove" => false,
+        _ => return None,
+    };
     Some(ForgeTimelineEventOut::Milestoned {
         milestone: milestone.title,
-        added: e.action == "add",
+        added,
         actor: gl_actor(e.user),
         date: e.created_at,
     })
@@ -8889,6 +8905,23 @@ mod tests {
             r#"{"action":"add","created_at":"2026-06-30T00:35:46.215Z","label":null}"#
         ))
         .is_none());
+        // An unknown or missing action is skipped, never rendered as a removal.
+        for action in [r#""relabel""#, r#""""#] {
+            assert!(
+                map_label_event(ev(&format!(
+                    r##"{{"action":{action},"created_at":"2026-06-30T00:35:46.215Z",
+                        "label":{{"name":"enhancement","color":"#5cb85c"}}}}"##
+                )))
+                .is_none(),
+                "action {action}"
+            );
+        }
+        // `action` absent entirely (serde default) is the same skip.
+        assert!(map_label_event(ev(
+            r##"{"created_at":"2026-06-30T00:35:46.215Z",
+                "label":{"name":"enhancement","color":"#5cb85c"}}"##
+        ))
+        .is_none());
     }
 
     #[test]
@@ -9018,6 +9051,22 @@ mod tests {
         assert!(map_issue_milestone_event(ev(r#"{"action":"add",
             "created_at":"2026-08-23T00:00:00Z","user":{"username":"theBGuy"},
             "milestone":null}"#))
+        .is_none());
+        // An unknown or missing action is skipped, never rendered as a removal.
+        for action in [r#""retitle""#, r#""""#] {
+            assert!(
+                map_issue_milestone_event(ev(&format!(
+                    r#"{{"action":{action},"created_at":"2026-08-23T00:00:00Z",
+                        "milestone":{{"title":"v1.0"}}}}"#
+                )))
+                .is_none(),
+                "action {action}"
+            );
+        }
+        // `action` absent entirely (serde default) is the same skip.
+        assert!(map_issue_milestone_event(ev(
+            r#"{"created_at":"2026-08-23T00:00:00Z","milestone":{"title":"v1.0"}}"#
+        ))
         .is_none());
     }
 
