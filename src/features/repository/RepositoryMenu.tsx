@@ -70,7 +70,6 @@ import {
   useRepoStarStatus,
   useRepoStatus,
   useSetRepoStar,
-  useSubmodules,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -149,11 +148,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   );
   const [branchRulesOpen, setBranchRulesOpen] = useState(false);
   const [hooksOpen, setHooksOpen] = useState(false);
-  const [submodulesOpen, setSubmodulesOpen] = useState(false);
+  // null = closed; the mode doubles as the open flag so the palette's add action
+  // can land on the form even while the manager is already open.
+  const [submodulesMode, setSubmodulesMode] = useState<"list" | "add" | null>(
+    null,
+  );
   const [worktreesOpen, setWorktreesOpen] = useState(false);
-  // Only offer the Submodules menu item when the repo actually has submodules.
-  const submodules = useSubmodules(repoPath);
-  const hasSubmodules = (submodules.data?.length ?? 0) > 0;
   const [forkOpen, setForkOpen] = useState(false);
   const [forkIntent, setForkIntent] = useState<"contribute" | "own">(
     "contribute",
@@ -361,7 +361,8 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("repository-settings", openRepoSettings, canOpenRepoSettings);
   useHotkeyAction("branch-rules", () => setBranchRulesOpen(true));
   useHotkeyAction("git-hooks", () => setHooksOpen(true));
-  useHotkeyAction("submodules", () => setSubmodulesOpen(true), hasSubmodules);
+  useHotkeyAction("submodules", () => setSubmodulesMode("list"));
+  useHotkeyAction("add-submodule", () => setSubmodulesMode("add"));
   useHotkeyAction("worktrees", () => setWorktreesOpen(true));
   useHotkeyAction("star-repository", doStar, canStar && !setStar.isPending);
   useHotkeyAction("change-remote-url", () => setRemoteUrlOpen(true));
@@ -509,12 +510,10 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <CodeIcon />
           Git hooks…
         </DropdownMenuItem>
-        {hasSubmodules && (
-          <DropdownMenuItem onClick={() => setSubmodulesOpen(true)}>
-            <CubeIcon />
-            Submodules…
-          </DropdownMenuItem>
-        )}
+        <DropdownMenuItem onClick={() => setSubmodulesMode("list")}>
+          <CubeIcon />
+          Submodules…
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => setWorktreesOpen(true)}>
           <TreeStructureIcon />
           Worktrees…
@@ -616,8 +615,14 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
       />
       <SubmodulesDialog
         repoPath={repoPath}
-        open={submodulesOpen}
-        onOpenChange={setSubmodulesOpen}
+        open={submodulesMode !== null}
+        initialMode={submodulesMode ?? "list"}
+        // Tracked, not just seeded: without it, re-firing the action for the
+        // mode already requested changes nothing and the dialog wouldn't move.
+        onModeChange={setSubmodulesMode}
+        onOpenChange={(o) => {
+          if (!o) setSubmodulesMode(null);
+        }}
       />
       <WorktreesDialog
         repoPath={repoPath}

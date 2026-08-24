@@ -226,16 +226,22 @@ pub(crate) async fn op_in_progress(repo: &str) -> bool {
 /// paused at an `edit` step is refused as well, matching autostash. Only
 /// lock-free runners, so callers may hold the repo lock across it.
 pub(crate) async fn refuse_mid_op(repo: &str) -> AppResult<()> {
+    refuse_mid_op_for(repo, "stash").await
+}
+
+/// [`refuse_mid_op`] with the refused action named, for the gate's non-stash
+/// callers: the message reaches the user verbatim, so it has to say what they
+/// actually asked for. `action` completes "Can't {action} while …".
+pub(crate) async fn refuse_mid_op_for(repo: &str, action: &str) -> AppResult<()> {
     if has_unmerged(repo).await? {
-        return Err(AppError::InvalidArgument(
-            "Can't stash while a conflict is in progress — resolve the conflicts first.".into(),
-        ));
+        return Err(AppError::InvalidArgument(format!(
+            "Can't {action} while a conflict is in progress — resolve the conflicts first."
+        )));
     }
     if op_in_progress(repo).await {
-        return Err(AppError::InvalidArgument(
-            "Can't stash while a merge, rebase, cherry-pick or revert is in progress — finish or abort it first."
-                .into(),
-        ));
+        return Err(AppError::InvalidArgument(format!(
+            "Can't {action} while a merge, rebase, cherry-pick or revert is in progress — finish or abort it first."
+        )));
     }
     Ok(())
 }

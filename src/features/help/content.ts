@@ -139,6 +139,38 @@ Click the **⋮** menu next to the repo name for repo-wide actions:
   an **alias**, copy the repo path, copy the branch name, copy the HEAD SHA, and
   remove the repo from the list.
 
+## Submodules
+
+**Submodules…** (in the ⋮ menu, or the command palette) manages the repositories this one
+references. Each row shows the submodule's folder, the commit it's checked out at,
+and a status badge — **Up to date**, **Not initialized**, **Modified**, or **Conflict**.
+Arrow keys move between rows and Enter runs the row's button, which reads **Initialize**
+for a submodule that has never been checked out and **Update** for the rest.
+
+- **Update** checks a submodule out at the commit your repo records, initializing it and
+  any nested submodules on the way; **Update all** in the footer does the whole set.
+- **Update to latest** (on a row's ⋮, or **Update all to latest** in the footer's ⋮) moves
+  a submodule to the tip of the branch it tracks instead: the branch recorded in
+  \`.gitmodules\`, or the remote's default branch when none is recorded. Nested submodules
+  follow to the commits the moved submodule records, not their own tips. That changes the
+  commit your repo points at, so it arrives as a change to review and stage in **Changes**.
+- **Add submodule…** clones another repository into a folder of this one. Give it a URL;
+  the folder defaults to the URL's last segment and the branch to the remote's default.
+  *Add submodule* is a command palette entry of its own, and opens straight onto the form.
+- **Edit URL…** repoints a submodule at a different remote. **Set branch…** picks which
+  branch *Update to latest* follows.
+- **Open as repository** makes a submodule the active repository, with its own history,
+  branches, and remote. The submodule has to be initialized first.
+- **Remove…** deletes a submodule from the working tree and \`.gitmodules\`. Its cached
+  repository data under \`.git/modules\` is kept so the submodule can be restored — tick
+  **Also delete cached repository data** in the confirmation to erase that too. A
+  submodule with local changes, or one at a different commit than this repository
+  records, asks a second time before that state is discarded.
+
+Updating fetches over the network; adding, removing, and editing stage their change for
+you to commit. When you clone a repository, the **Clone submodules** checkbox initializes
+every submodule, including nested ones, in the same pass.
+
 ## Aliases
 
 An **alias** gives a repo a friendly name shown in the lists, header, and window title —

@@ -45,7 +45,7 @@ type Row =
   | { kind: "header"; owner: string }
   | { kind: "repo"; repo: ForgeRepo };
 
-const DEFAULTS = { url: "", destination: "" };
+const DEFAULTS = { url: "", destination: "", recurseSubmodules: false };
 
 const REPO_LISTBOX_ID = "clone-repo-listbox";
 /** Stable DOM id per repo row, so the filter's aria-activedescendant can point
@@ -92,8 +92,19 @@ export function CloneRepoDialog({
         // does not inject the Atlassian API token into git.
         const clonedPath =
           tab === "url"
-            ? await cloneRepo(cloneUrl, dest)
-            : await forgeClone(provider, cloneUrl, dest, selected?.name);
+            ? await cloneRepo(
+                cloneUrl,
+                dest,
+                undefined,
+                value.recurseSubmodules,
+              )
+            : await forgeClone(
+                provider,
+                cloneUrl,
+                dest,
+                selected?.name,
+                value.recurseSubmodules,
+              );
         const info = await validateRepo(clonedPath);
         // Await the recents write so the row exists before RepositoryView mounts
         // and its open-time visibility probe persists onto it (best-effort — a
@@ -119,7 +130,7 @@ export function CloneRepoDialog({
     setSelected(null);
     setFilter("");
     form.reset(
-      { url: "", destination: defaultPath() },
+      { url: "", destination: defaultPath(), recurseSubmodules: false },
       { keepDefaultValues: true },
     );
   });
@@ -299,6 +310,20 @@ export function CloneRepoDialog({
                 </span>
               </p>
             )}
+          </div>
+
+          <div className="space-y-1">
+            <form.AppField name="recurseSubmodules">
+              {(field) => (
+                <field.CheckboxField
+                  label="Clone submodules"
+                  className="flex cursor-pointer items-center gap-2 text-xs"
+                />
+              )}
+            </form.AppField>
+            <p className="text-[11px] text-muted-foreground">
+              Initializes every submodule, including nested ones, after cloning.
+            </p>
           </div>
 
           <DialogFooter>

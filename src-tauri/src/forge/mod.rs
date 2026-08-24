@@ -1024,6 +1024,7 @@ pub async fn forge_clone(
     url: String,
     parent_dir: String,
     dir_name: Option<String>,
+    recurse_submodules: bool,
 ) -> AppResult<String> {
     // Bitbucket: on a SUCCESSFUL token seed, clone with the API URL's embedded `user@`
     // stripped — git scopes credential lookup by the URL username, so the bare host is
@@ -1051,7 +1052,14 @@ pub async fn forge_clone(
             }
         }
     };
-    crate::git::repo::clone_repo_core(&clone_url, &parent_dir, dir_name, &extra).await
+    crate::git::repo::clone_repo_core(
+        &clone_url,
+        &parent_dir,
+        dir_name,
+        recurse_submodules,
+        &extra,
+    )
+    .await
 }
 
 /// A repo's merge/pull requests, behind the provider abstraction. `state` is `"open"`

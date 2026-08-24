@@ -25,7 +25,7 @@ export interface ExploreCloneTarget {
   name: string;
 }
 
-const DEFAULTS = { destination: "" };
+const DEFAULTS = { destination: "", recurseSubmodules: false };
 
 /**
  * A clone dialog pinned to a repo chosen in Explore — same submit path as the
@@ -54,6 +54,7 @@ export function ExploreCloneDialog({
           target.cloneUrl,
           dest,
           target.name,
+          value.recurseSubmodules,
         );
         const info = await validateRepo(clonedPath);
         // Await the recents write so the row exists before RepositoryView mounts
@@ -75,7 +76,10 @@ export function ExploreCloneDialog({
     return recent ? parentDir(recent) : "";
   });
   const seedOnOpen = useEffectEvent(() => {
-    form.reset({ destination: defaultPath() }, { keepDefaultValues: true });
+    form.reset(
+      { destination: defaultPath(), recurseSubmodules: false },
+      { keepDefaultValues: true },
+    );
   });
   const open = target !== null;
   useEffect(() => {
@@ -136,6 +140,20 @@ export function ExploreCloneDialog({
                 </span>
               </p>
             )}
+          </div>
+
+          <div className="space-y-1">
+            <form.AppField name="recurseSubmodules">
+              {(field) => (
+                <field.CheckboxField
+                  label="Clone submodules"
+                  className="flex cursor-pointer items-center gap-2 text-xs"
+                />
+              )}
+            </form.AppField>
+            <p className="text-[11px] text-muted-foreground">
+              Initializes every submodule, including nested ones, after cloning.
+            </p>
           </div>
 
           <DialogFooter>

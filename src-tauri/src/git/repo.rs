@@ -198,18 +198,22 @@ pub async fn clone_repo(
     url: String,
     parent_dir: String,
     dir_name: Option<String>,
+    recurse_submodules: bool,
 ) -> AppResult<String> {
-    clone_repo_core(&url, &parent_dir, dir_name, &[]).await
+    clone_repo_core(&url, &parent_dir, dir_name, recurse_submodules, &[]).await
 }
 
 /// Clone `url` into `parent_dir/<dir_name>` (dir inferred from the URL when not
-/// given), returning the cloned path. `extra_config` are `git -c key=value`
-/// entries prepended before `clone` — e.g. a provider credential helper so a
-/// private repo authenticates (see `forge::forge_clone`).
+/// given), returning the cloned path. `recurse_submodules` checks out the repo's
+/// submodules in the same pass; without it their directories clone empty.
+/// `extra_config` are `git -c key=value` entries prepended before `clone` — e.g.
+/// a provider credential helper so a private repo authenticates (see
+/// `forge::forge_clone`).
 pub(crate) async fn clone_repo_core(
     url: &str,
     parent_dir: &str,
     dir_name: Option<String>,
+    recurse_submodules: bool,
     extra_config: &[String],
 ) -> AppResult<String> {
     if url.starts_with('-') {
@@ -228,7 +232,11 @@ pub(crate) async fn clone_repo_core(
         args.push("-c");
         args.push(c.as_str());
     }
-    args.extend_from_slice(&["clone", "--", url, dir_name.as_str()]);
+    args.push("clone");
+    if recurse_submodules {
+        args.push("--recurse-submodules");
+    }
+    args.extend_from_slice(&["--", url, dir_name.as_str()]);
     run_git(Some(parent_dir), &args, NETWORK_TIMEOUT).await?;
     let cloned = Path::new(parent_dir).join(&dir_name);
     Ok(cloned.to_string_lossy().into_owned())

@@ -1,5 +1,17 @@
-import { useState } from "react";
+import {
+  ArrowsClockwiseIcon,
+  CaretLeftIcon,
+  DotsThreeVerticalIcon,
+  FolderOpenIcon,
+  GitBranchIcon,
+  LinkIcon,
+  PlusIcon,
+  TrashIcon,
+} from "@phosphor-icons/react";
+import type { ComponentProps, MouseEvent } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,37 +22,168 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import { useSubmodules, useUpdateSubmodule } from "@/lib/git/queries";
+import { nameFromUrl } from "@/features/welcome/clone-utils";
+import {
+  useAddSubmodule,
+  useRemoveSubmodule,
+  useSetSubmoduleBranch,
+  useSetSubmoduleUrl,
+  useSubmodules,
+  useUpdateSubmodule,
+} from "@/lib/git/queries";
+import type { Submodule } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useConfirm } from "@/lib/stores/confirm";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
+import { useOpenRepoByPath } from "./useOpenRepoByPath";
 
+/** "Modified" carries the warning tokens so it can't be mistaken for the
+ *  identically-weighted "Up to date" at a glance; the labels differ too, so the
+ *  colour is emphasis rather than the meaning. */
 const STATUS: Record<
   string,
-  { label: string; variant: "secondary" | "outline" | "destructive" }
+  {
+    label: string;
+    variant: "secondary" | "outline" | "destructive";
+    className?: string;
+  }
 > = {
   ok: { label: "Up to date", variant: "secondary" },
   uninitialized: { label: "Not initialized", variant: "outline" },
-  modified: { label: "Modified", variant: "secondary" },
+  modified: {
+    label: "Modified",
+    variant: "outline",
+    className: "border-warning/40 bg-warning/10 text-warning",
+  },
   conflict: { label: "Conflict", variant: "destructive" },
 };
 
+/** The `acting` value for the whole-repo actions — no submodule path is empty. */
+const ALL = "";
+
+const BUSY_REASON = "An operation is in progress";
+
+/** A gitlink with no `.gitmodules` entry has no URL to edit and nowhere to
+ *  record a branch, so both edits would fail in git. */
+const NO_ENTRY_REASON = "no .gitmodules entry";
+
+/** Sets a hover title only when the line is actually clipped. */
+const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
+  const el = e.currentTarget;
+  el.title = el.scrollWidth > el.clientWidth ? value : "";
+};
+
+/** The submodule's folder on disk. Its path is repo-root-relative with forward
+ *  slashes, which Windows accepts mixed with the repo path's backslashes. */
+const submodulePath = (repoPath: string, sub: string) =>
+  `${repoPath.replace(/[/\\]+$/, "")}/${sub}`;
+
+/**
+ * The submodule manager: lists what the parent repo references, updates them to
+ * the recorded commit or to their tracked branch's tip, adds and removes them,
+ * edits URL and branch, and opens one as its own repository. Every mutation
+ * stages its change for the user to commit.
+ */
 export function SubmodulesDialog({
   repoPath,
   open,
   onOpenChange,
+  onModeChange,
+  initialMode = "list",
 }: {
   repoPath: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Every mode change, so the caller's `initialMode` tracks what's on screen —
+   *  without it a re-request of the mode already asked for lands as a no-op. */
+  onModeChange: (mode: "list" | "add") => void;
+  /** Which body an open lands on — the palette's "Add submodule" opens the form. */
+  initialMode?: "list" | "add";
+}) {
+  const [mode, setMode] = useState<"list" | "add">(initialMode);
+
+  // Re-seed on every open, and when the caller re-requests a mode while already
+  // open (the add action fired from the palette over an open list).
+  useEffect(() => {
+    if (open) setMode(initialMode);
+  }, [open, initialMode]);
+
+  function changeMode(next: "list" | "add") {
+    setMode(next);
+    onModeChange(next);
+  }
+
+  const handleOpenChange: NonNullable<
+    ComponentProps<typeof Dialog>["onOpenChange"]
+  > = (next, details) => {
+    // Esc in the add form backs out to the list rather than closing the manager.
+    if (!next && mode === "add" && details.reason === "escape-key") {
+      details.cancel();
+      changeMode("list");
+      return;
+    }
+    onOpenChange(next);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        {mode === "add" ? (
+          <AddSubmodule
+            repoPath={repoPath}
+            onCancel={() => changeMode("list")}
+            onAdded={() => changeMode("list")}
+          />
+        ) : (
+          <SubmoduleList
+            repoPath={repoPath}
+            onAdd={() => changeMode("add")}
+            onClose={() => onOpenChange(false)}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** List mode: every submodule as a row, its actions on an always-visible kebab. */
+function SubmoduleList({
+  repoPath,
+  onAdd,
+  onClose,
+}: {
+  repoPath: string;
+  onAdd: () => void;
+  onClose: () => void;
 }) {
   const subs = useSubmodules(repoPath);
   const update = useUpdateSubmodule(repoPath);
+  const remove = useRemoveSubmodule(repoPath);
+  const openByPath = useOpenRepoByPath();
   const list = subs.data ?? [];
+
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [urlTarget, setUrlTarget] = useState<Submodule | null>(null);
+  const [branchTarget, setBranchTarget] = useState<Submodule | null>(null);
+  // Which row a mutation is running against, so the spinner rides the acting
+  // control instead of every row at once; non-null also means "everything else
+  // is off while it runs".
+  const [acting, setActing] = useState<string | null>(null);
+  const busy = acting !== null;
 
   // Refetching may shrink `list` while `activeIndex` lingers, so clamp the
-  // stale value (keeping -1 = "nothing active yet") to keep a row focusable.
+  // stale value (keeping -1 = "nothing active yet") rather than highlight a row
+  // that no longer exists.
   const safeActive = activeIndex >= list.length ? list.length - 1 : activeIndex;
 
   const onKeyDown = listKeyboardNav<(typeof list)[number]>({
@@ -51,100 +194,648 @@ export function SubmodulesDialog({
     rowAttr: "data-sub-row",
   });
 
-  function doUpdate(path?: string) {
-    update.mutate(path, {
-      onSuccess: () =>
-        toast.success(path ? `Updated ${path}` : "Submodules updated"),
-      onError: toastError,
+  // Awaited, not per-call callbacks: react-query drops those when the dialog
+  // unmounts mid-flight, so the outcome would never reach the user.
+  async function handleUpdate(path?: string, remote = false) {
+    setActing(path ?? ALL);
+    try {
+      await update.mutateAsync({ path, remote });
+      if (remote) {
+        toast.success(
+          path ? `${path} updated to latest` : "Submodules updated to latest",
+          { description: "Review and stage the bump in Changes." },
+        );
+      } else {
+        toast.success(path ? `Updated ${path}` : "Submodules updated");
+      }
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setActing(null);
+    }
+  }
+
+  async function handleRemove(s: Submodule) {
+    const first = await useConfirm.getState().askChecked({
+      title: `Remove ${s.path}?`,
+      body: "The removal is staged for you to commit. Its cached repository data under .git/modules is kept, so the submodule can be restored, unless you delete it here.",
+      confirmLabel: "Remove",
+      confirmVariant: "destructive",
+      checkboxLabel: "Also delete cached repository data",
     });
+    if (!first.ok) return;
+
+    setActing(s.path);
+    try {
+      let outcome = await remove.mutateAsync({
+        path: s.path,
+        force: false,
+        deleteModuleData: first.checked,
+      });
+      if (outcome.refusedDirty) {
+        // Nothing was mutated — escalate rather than report a failure. The
+        // refusal is one bool covering both a dirty worktree and a checkout
+        // that has moved off the recorded commit, so the copy names both.
+        const forced = await useConfirm.getState().ask({
+          title: `Remove ${s.path}?`,
+          body: `${s.path} has local changes or is at a different commit than this repository records. Discard that state and remove?`,
+          confirmLabel: "Discard and remove",
+          confirmVariant: "destructive",
+        });
+        if (!forced) return;
+        outcome = await remove.mutateAsync({
+          path: s.path,
+          force: true,
+          deleteModuleData: first.checked,
+        });
+        if (outcome.refusedDirty) {
+          toast.error(`${s.path} wasn't removed.`);
+          return;
+        }
+      }
+      // The removal is staged either way; only the cached-data half can fail.
+      if (outcome.moduleDataError) {
+        toast.warning("Submodule removed — staged for you to commit.", {
+          description: `Its cached repository data was not deleted: ${outcome.moduleDataError}`,
+          duration: 10_000,
+        });
+      } else if (outcome.moduleDataDeleted) {
+        toast.success(
+          "Submodule removed, cached data deleted — staged for you to commit.",
+        );
+      } else {
+        toast.success("Submodule removed — staged for you to commit.");
+      }
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setActing(null);
+    }
+  }
+
+  async function handleOpenAsRepo(s: Submodule) {
+    // A submodule is an independent repository that nothing else in the app can
+    // reach, so it earns a recents row like any other opened repo.
+    await openByPath(submodulePath(repoPath, s.path), "picker");
+    onClose();
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Submodules</DialogTitle>
-          <DialogDescription>
-            Initialize and update the submodules this repository references to
-            the commit it records. Updating fetches over the network.
-          </DialogDescription>
-        </DialogHeader>
+    <>
+      <DialogHeader>
+        <DialogTitle>Submodules</DialogTitle>
+        <DialogDescription>
+          Initialize and update the submodules this repository references to the
+          commit it records, or move one to the tip of the branch it tracks.
+          Updating fetches over the network; adding, removing, and editing stage
+          the change for you to commit.
+        </DialogDescription>
+      </DialogHeader>
 
-        {/* A roving-focus list — arrow keys move between rows, Enter runs the
-            row's Initialize/Update action. */}
-        <div className="max-h-96 overflow-y-auto border" onKeyDown={onKeyDown}>
+      {/* min-w-0: DialogContent is a grid; without it this item grows to fit a
+          long URL instead of letting the rows truncate. */}
+      <div className="min-w-0 border">
+        <div
+          role="listbox"
+          aria-label="Submodules"
+          onKeyDown={onKeyDown}
+          className="max-h-96 overflow-y-auto"
+        >
           {subs.isPending ? (
             <div className="flex justify-center p-4">
               <Spinner />
             </div>
-          ) : list.length === 0 ? (
-            <p className="p-3 text-xs text-muted-foreground">
-              This repository has no submodules.
-            </p>
           ) : (
-            list.map((s, i) => {
-              const meta = STATUS[s.status] ?? {
-                label: s.status,
-                variant: "outline" as const,
-              };
-              const action =
-                s.status === "uninitialized" ? "Initialize" : "Update";
-              return (
-                <div
-                  key={s.path}
-                  data-sub-row={s.path}
-                  aria-label={`${s.path}, ${meta.label}. Press Enter to ${action.toLowerCase()}.`}
-                  tabIndex={
-                    i === safeActive || (safeActive === -1 && i === 0) ? 0 : -1
-                  }
-                  onFocus={() => setActiveIndex(i)}
-                  onKeyDown={(e) => {
-                    // Only the row itself acts on Enter — not when the child
-                    // Initialize/Update button is focused.
-                    if (
-                      e.key === "Enter" &&
-                      e.target === e.currentTarget &&
-                      !update.isPending
-                    ) {
-                      e.preventDefault();
-                      doUpdate(s.path);
-                    }
-                  }}
-                  className="flex items-center gap-2 border-b px-3 py-2 text-xs outline-none last:border-b-0 focus-visible:ring-1 focus-visible:ring-ring"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-mono font-medium">{s.path}</p>
-                    <p className="truncate text-[11px] text-muted-foreground">
-                      {s.sha.slice(0, 7)}
-                      {s.describe ? ` · ${s.describe}` : ""}
-                    </p>
-                  </div>
-                  <Badge variant={meta.variant}>{meta.label}</Badge>
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    disabled={update.isPending}
-                    onClick={() => doUpdate(s.path)}
-                  >
-                    {action}
-                  </Button>
-                </div>
-              );
-            })
+            list.map((s, i) => (
+              <SubmoduleRow
+                key={s.path}
+                submodule={s}
+                highlighted={i === safeActive}
+                acting={acting === s.path}
+                busy={busy}
+                onFocus={() => setActiveIndex(i)}
+                onUpdate={() => handleUpdate(s.path)}
+                onUpdateRemote={() => handleUpdate(s.path, true)}
+                onEditUrl={() => setUrlTarget(s)}
+                onSetBranch={() => setBranchTarget(s)}
+                onOpenAsRepo={() => handleOpenAsRepo(s)}
+                onRemove={() => handleRemove(s)}
+              />
+            ))
           )}
         </div>
+        {/* No border-t: with no rows above it there is nothing to separate, and
+            the container's own border would double up against it. */}
+        {!subs.isPending && list.length === 0 && (
+          <div className="space-y-2 p-3">
+            <p className="text-[11px] text-muted-foreground">
+              This repository has no submodules.
+            </p>
+            <Button variant="outline" size="xs" onClick={onAdd}>
+              <PlusIcon data-icon="inline-start" />
+              Add submodule
+            </Button>
+          </div>
+        )}
+      </div>
+
+      <DialogFooter className="items-center">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-muted-foreground sm:mr-auto"
+          onClick={onAdd}
+        >
+          <PlusIcon data-icon="inline-start" />
+          Add submodule…
+        </Button>
+        <Button variant="outline" onClick={onClose}>
+          Close
+        </Button>
+        <DisabledReasonButton
+          disabled={busy || list.length === 0}
+          reason={list.length === 0 ? "No submodules to update" : BUSY_REASON}
+          onClick={() => handleUpdate()}
+        >
+          {acting === ALL && <Spinner data-icon="inline-start" />}
+          Update all
+        </DisabledReasonButton>
+        {/* Hidden rather than disabled while the repo has no submodules — its
+            one item would have nothing to act on. */}
+        {list.length > 0 && (
+          <DropdownMenu>
+            {/* The reason must survive keyboard reach, so it rides the button
+                rather than a titled span around the trigger. */}
+            <DropdownMenuTrigger
+              render={
+                <DisabledReasonButton
+                  variant="outline"
+                  size="icon-sm"
+                  disabled={busy}
+                  reason={BUSY_REASON}
+                  aria-label="More submodule actions"
+                />
+              }
+            >
+              <DotsThreeVerticalIcon />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuItem onClick={() => handleUpdate(undefined, true)}>
+                <ArrowsClockwiseIcon />
+                Update all to latest
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </DialogFooter>
+
+      <EditSubmoduleUrlDialog
+        key={urlTarget?.path ?? "no-url"}
+        repoPath={repoPath}
+        submodule={urlTarget}
+        onClose={() => setUrlTarget(null)}
+      />
+
+      <SetSubmoduleBranchDialog
+        key={branchTarget?.path ?? "no-branch"}
+        repoPath={repoPath}
+        submodule={branchTarget}
+        onClose={() => setBranchTarget(null)}
+      />
+    </>
+  );
+}
+
+function SubmoduleRow({
+  submodule,
+  highlighted,
+  acting,
+  busy,
+  onFocus,
+  onUpdate,
+  onUpdateRemote,
+  onEditUrl,
+  onSetBranch,
+  onOpenAsRepo,
+  onRemove,
+}: {
+  submodule: Submodule;
+  highlighted: boolean;
+  /** This row is the one a mutation is running against. */
+  acting: boolean;
+  /** Some mutation is running — every row's actions are off until it settles. */
+  busy: boolean;
+  onFocus: () => void;
+  onUpdate: () => void;
+  onUpdateRemote: () => void;
+  onEditUrl: () => void;
+  onSetBranch: () => void;
+  onOpenAsRepo: () => void;
+  onRemove: () => void;
+}) {
+  const { path, sha, describe, url, status } = submodule;
+  const meta = STATUS[status] ?? { label: status, variant: "outline" as const };
+  const action = status === "uninitialized" ? "Initialize" : "Update";
+  const uninitialized = status === "uninitialized";
+  // `describe` falls back to a bare sha prefix on untagged checkouts — showing
+  // it beside the sha would read "553c207 · 553c207".
+  const detail = [sha.slice(0, 7), sha.startsWith(describe) ? "" : describe]
+    .filter(Boolean)
+    .join(" · ");
+  // A disabled menu item can't carry a tooltip, so its reason rides the label.
+  const itemLabel = (label: string, reason?: string) =>
+    reason ? `${label} (${reason})` : label;
+
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-1 border-b last:border-b-0",
+        highlighted ? "bg-muted" : "hover:bg-muted/60",
+      )}
+    >
+      <button
+        type="button"
+        role="option"
+        aria-selected={highlighted}
+        // Not `disabled`: the row must stay focusable so arrow-key nav can move
+        // through it while a mutation runs. onClick already refuses.
+        aria-disabled={busy || undefined}
+        data-sub-row={path}
+        onFocus={onFocus}
+        onClick={() => !busy && onUpdate()}
+        title={busy ? BUSY_REASON : `${action} ${path}`}
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left",
+          busy && "cursor-default",
+        )}
+      >
+        {/* The URL takes its own full-width line — sharing one with the commit
+            clipped it on sight. Snug leading keeps the three lines one unit,
+            and the line is dropped entirely when there is no URL. */}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-mono text-xs font-medium">
+            {path}
+          </span>
+          <span
+            className="mt-0.5 block truncate text-[11px] leading-snug text-muted-foreground"
+            onMouseEnter={clipTitle(detail)}
+          >
+            {detail}
+          </span>
+          {url && (
+            <span
+              className="block truncate text-[11px] leading-snug text-muted-foreground"
+              onMouseEnter={clipTitle(url)}
+            >
+              {url}
+            </span>
+          )}
+        </span>
+        <Badge variant={meta.variant} className={meta.className}>
+          {meta.label}
+        </Badge>
+      </button>
+
+      <DisabledReasonButton
+        variant="outline"
+        size="xs"
+        disabled={busy}
+        reason={BUSY_REASON}
+        onClick={onUpdate}
+      >
+        {acting && <Spinner data-icon="inline-start" />}
+        {action}
+      </DisabledReasonButton>
+
+      <DropdownMenu>
+        {/* The reason must survive keyboard reach, so it rides the button
+            rather than a titled span around the trigger. */}
+        <DropdownMenuTrigger
+          render={
+            <DisabledReasonButton
+              variant="ghost"
+              size="icon-sm"
+              wrapperClassName="mr-1"
+              disabled={busy}
+              reason={BUSY_REASON}
+              aria-label={`Actions for ${path}`}
+            />
+          }
+        >
+          <DotsThreeVerticalIcon />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-60">
+          <DropdownMenuItem onClick={onUpdateRemote}>
+            <ArrowsClockwiseIcon />
+            Update to latest
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={!url} onClick={onEditUrl}>
+            <LinkIcon />
+            {itemLabel("Edit URL…", url ? undefined : NO_ENTRY_REASON)}
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={!url} onClick={onSetBranch}>
+            <GitBranchIcon />
+            {itemLabel("Set branch…", url ? undefined : NO_ENTRY_REASON)}
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={uninitialized} onClick={onOpenAsRepo}>
+            <FolderOpenIcon />
+            {itemLabel(
+              "Open as repository",
+              uninitialized ? "initialize this submodule first" : undefined,
+            )}
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem variant="destructive" onClick={onRemove}>
+            <TrashIcon />
+            Remove…
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+/** Add mode: the add-a-submodule form this dialog swaps to. */
+function AddSubmodule({
+  repoPath,
+  onCancel,
+  onAdded,
+}: {
+  repoPath: string;
+  onCancel: () => void;
+  onAdded: () => void;
+}) {
+  const add = useAddSubmodule(repoPath);
+  const [url, setUrl] = useState("");
+  const [path, setPath] = useState("");
+  const [branch, setBranch] = useState("");
+
+  const trimmedUrl = url.trim();
+  // git's own default when no path is given: the URL's last segment.
+  const derivedPath = nameFromUrl(trimmedUrl);
+
+  async function handleAdd() {
+    if (!trimmedUrl || add.isPending) return;
+    try {
+      await add.mutateAsync({
+        url: trimmedUrl,
+        path: path.trim() || null,
+        branch: branch.trim() || null,
+      });
+      toast.success("Submodule added — staged for you to commit.");
+      onAdded();
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  return (
+    <>
+      <DialogHeader>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onCancel}
+            aria-label="Back to submodules"
+          >
+            <CaretLeftIcon />
+          </Button>
+          <DialogTitle>Add submodule</DialogTitle>
+        </div>
+        <DialogDescription>
+          Clones another repository into a folder of this one and records it in
+          .gitmodules. The addition is staged for you to commit.
+        </DialogDescription>
+      </DialogHeader>
+
+      <form
+        className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void handleAdd();
+        }}
+      >
+        <label htmlFor="sub-url" className="text-muted-foreground">
+          Repository URL
+        </label>
+        <Input
+          id="sub-url"
+          autoFocus
+          autoComplete="off"
+          spellCheck={false}
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://github.com/user/repo.git"
+          className="h-7 font-mono"
+        />
+        <label htmlFor="sub-path" className="text-muted-foreground">
+          Folder
+        </label>
+        <Input
+          id="sub-path"
+          autoComplete="off"
+          spellCheck={false}
+          value={path}
+          onChange={(e) => setPath(e.target.value)}
+          placeholder={derivedPath || "Optional — derived from the URL"}
+          className="h-7 font-mono"
+        />
+        <label htmlFor="sub-branch" className="text-muted-foreground">
+          Branch
+        </label>
+        <Input
+          id="sub-branch"
+          autoComplete="off"
+          spellCheck={false}
+          value={branch}
+          onChange={(e) => setBranch(e.target.value)}
+          placeholder="Optional — tracks the remote's default"
+          className="h-7 font-mono"
+        />
+      </form>
+
+      <DialogFooter className="items-center">
+        {!trimmedUrl && (
+          <span className="mr-auto text-[11px] text-muted-foreground">
+            Enter a repository URL to continue.
+          </span>
+        )}
+        <Button variant="outline" onClick={onCancel} disabled={add.isPending}>
+          Cancel
+        </Button>
+        <Button disabled={!trimmedUrl || add.isPending} onClick={handleAdd}>
+          {add.isPending && <Spinner data-icon="inline-start" />}
+          Add
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+/** Repoints a submodule at a different remote URL. */
+function EditSubmoduleUrlDialog({
+  repoPath,
+  submodule,
+  onClose,
+}: {
+  repoPath: string;
+  submodule: Submodule | null;
+  onClose: () => void;
+}) {
+  const setUrl = useSetSubmoduleUrl(repoPath);
+  const [url, setUrlValue] = useState(submodule?.url ?? "");
+
+  const trimmed = url.trim();
+  const unchanged = trimmed === (submodule?.url ?? "");
+
+  // Awaited: this dialog is remounted by a `key` flip and unmounts on close, and
+  // per-call mutation callbacks don't survive that — the outcome would be lost.
+  async function handleSave() {
+    if (!submodule || !trimmed || unchanged || setUrl.isPending) return;
+    try {
+      await setUrl.mutateAsync({ path: submodule.path, url: trimmed });
+      toast.success("Submodule URL updated — staged for you to commit.");
+      onClose();
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  return (
+    <Dialog open={submodule !== null} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit submodule URL</DialogTitle>
+          <DialogDescription>
+            Points {submodule?.path} at a different remote. Existing commits are
+            untouched; the change is staged for you to commit.
+          </DialogDescription>
+        </DialogHeader>
+
+        <form
+          className="grid grid-cols-[auto_1fr] items-center gap-x-3 text-xs"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void handleSave();
+          }}
+        >
+          <label htmlFor="sub-edit-url" className="text-muted-foreground">
+            URL
+          </label>
+          <Input
+            id="sub-edit-url"
+            autoFocus
+            autoComplete="off"
+            spellCheck={false}
+            value={url}
+            onChange={(e) => setUrlValue(e.target.value)}
+            className="h-7 font-mono"
+          />
+        </form>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Close
-          </Button>
           <Button
-            disabled={update.isPending || list.length === 0}
-            onClick={() => doUpdate()}
+            variant="outline"
+            onClick={onClose}
+            disabled={setUrl.isPending}
           >
-            {update.isPending && <Spinner data-icon="inline-start" />}
-            Update all
+            Cancel
           </Button>
+          <DisabledReasonButton
+            disabled={!trimmed || unchanged || setUrl.isPending}
+            reason={!trimmed ? "Enter a URL" : "No changes to save"}
+            onClick={handleSave}
+          >
+            {setUrl.isPending && <Spinner data-icon="inline-start" />}
+            Save
+          </DisabledReasonButton>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Sets which branch a submodule tracks for "Update to latest". */
+function SetSubmoduleBranchDialog({
+  repoPath,
+  submodule,
+  onClose,
+}: {
+  repoPath: string;
+  submodule: Submodule | null;
+  onClose: () => void;
+}) {
+  const setBranch = useSetSubmoduleBranch(repoPath);
+  const [branch, setBranchValue] = useState(submodule?.branch ?? "");
+
+  const next = branch.trim() || null;
+  const unchanged = next === (submodule?.branch ?? null);
+
+  async function handleSave() {
+    if (!submodule || unchanged || setBranch.isPending) return;
+    try {
+      await setBranch.mutateAsync({ path: submodule.path, branch: next });
+      toast.success(
+        next
+          ? `${submodule.path} now tracks ${next} — staged for you to commit.`
+          : `${submodule.path} now tracks the remote's default branch — staged for you to commit.`,
+      );
+      onClose();
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  return (
+    <Dialog open={submodule !== null} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Set submodule branch</DialogTitle>
+          <DialogDescription>
+            "Update to latest" moves {submodule?.path} to the tip of this
+            branch. Leave it empty to follow the remote's default branch.
+          </DialogDescription>
+        </DialogHeader>
+
+        <form
+          className="grid grid-cols-[auto_1fr] items-center gap-x-3 text-xs"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void handleSave();
+          }}
+        >
+          <label htmlFor="sub-branch-edit" className="text-muted-foreground">
+            Branch
+          </label>
+          <Input
+            id="sub-branch-edit"
+            autoFocus
+            autoComplete="off"
+            spellCheck={false}
+            value={branch}
+            onChange={(e) => setBranchValue(e.target.value)}
+            placeholder="Empty — the remote's default"
+            className="h-7 font-mono"
+          />
+        </form>
+
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={onClose}
+            disabled={setBranch.isPending}
+          >
+            Cancel
+          </Button>
+          <DisabledReasonButton
+            disabled={unchanged || setBranch.isPending}
+            reason="No changes to save"
+            onClick={handleSave}
+          >
+            {setBranch.isPending && <Spinner data-icon="inline-start" />}
+            Save
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

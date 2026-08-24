@@ -204,10 +204,17 @@ click to jump to it in History.
   interrupted and the exact branch + commit it started from, browsable any
   time via the *Operation history* command.
 
-Plus tag and submodule management, and releases: publish, edit, and delete
-them with asset uploads. When a **GitHub** release carries a `latest.json`
-updater manifest, editing its notes can refresh the manifest in the same
-save, so apps updating from that release show the notes you just wrote.
+Plus tag management and releases: publish, edit, and delete them with asset
+uploads. When a **GitHub** release carries a `latest.json` updater manifest,
+editing its notes can refresh the manifest in the same save, so apps updating
+from that release show the notes you just wrote.
+
+**Submodules** get a manager of their own: add and remove them, update to the
+commit your repo records or to the tip of the branch each one tracks
+(recursing into nested submodules either way), edit a submodule's URL or
+tracked branch, and open one as its own repository. Adding, removing, and
+editing stage the change for you to commit, and the clone dialog can bring
+every submodule down with the repo.
 
 ### Syncing and conflicts
 

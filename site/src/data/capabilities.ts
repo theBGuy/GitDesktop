@@ -358,7 +358,12 @@ export const capabilities: Capability[] = [
     label: "Worktree manager — create, switch, rename, lock, promote & remove",
     highlight: true,
   },
-  { group: "Repository & workspace", label: "Submodule status & update" },
+  {
+    group: "Repository & workspace",
+    label:
+      "Submodule manager — add, remove, update & track branches, edit URLs, open as repo",
+    highlight: true,
+  },
   {
     group: "Repository & workspace",
     label:

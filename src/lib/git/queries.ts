@@ -3829,9 +3829,48 @@ export function useSubmodules(repo: string) {
   });
 }
 
+/** Init + update submodules; omit `path` for all, set `remote` to move them to
+ *  the tip of the branch they track instead of the recorded commit. */
 export function useUpdateSubmodule(repo: string) {
-  return useRepoMutation(repo, (path?: string) =>
-    api.gitSubmoduleUpdate(repo, path),
+  return useRepoMutation(repo, (args: { path?: string; remote?: boolean }) =>
+    api.gitSubmoduleUpdate(repo, args.path, args.remote ?? false),
+  );
+}
+
+export function useAddSubmodule(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { url: string; path: string | null; branch: string | null }) =>
+      api.gitSubmoduleAdd(repo, args.url, args.path, args.branch),
+  );
+}
+
+/** Resolves to the removal's outcome — callers must read it: a `refusedDirty`
+ *  result mutated nothing and is not an error. */
+export function useRemoveSubmodule(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { path: string; force: boolean; deleteModuleData: boolean }) =>
+      api.gitSubmoduleRemove(
+        repo,
+        args.path,
+        args.force,
+        args.deleteModuleData,
+      ),
+  );
+}
+
+export function useSetSubmoduleUrl(repo: string) {
+  return useRepoMutation(repo, (args: { path: string; url: string }) =>
+    api.gitSubmoduleSetUrl(repo, args.path, args.url),
+  );
+}
+
+export function useSetSubmoduleBranch(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { path: string; branch: string | null }) =>
+      api.gitSubmoduleSetBranch(repo, args.path, args.branch),
   );
 }
 
