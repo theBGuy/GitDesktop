@@ -1,6 +1,6 @@
 [package]
 name = "gitdesktop"
-version = "0.9.5"
+version = "0.9.6"
 description = "A fast, native desktop Git client"
 authors = ["theBGuy"]
 edition = "2021"

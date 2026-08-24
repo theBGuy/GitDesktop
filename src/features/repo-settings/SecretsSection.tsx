@@ -260,7 +260,7 @@ function SecretsList({
       </div>
 
       <AsyncListBody
-        loading={secrets.isLoading}
+        loading={secrets.isPending}
         error={secrets.error}
         empty={secrets.data?.length === 0}
         emptyLabel="No secrets here yet."
@@ -365,7 +365,7 @@ function VariablesList({
       </div>
 
       <AsyncListBody
-        loading={variables.isLoading}
+        loading={variables.isPending}
         error={variables.error}
         empty={variables.data?.length === 0}
         emptyLabel="No variables here yet."

@@ -9,7 +9,10 @@ import {
 } from "@/lib/git/queries";
 import type { BbEnvironment } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { PipelinesDisabledBanner } from "./BitbucketVariablesSection";
+import {
+  PipelinesConfigErrorCard,
+  PipelinesDisabledBanner,
+} from "./BitbucketVariablesSection";
 import { AsyncListBody } from "./parts";
 
 /** Bitbucket deployment environments (read-only). Environments are created and
@@ -41,6 +44,10 @@ export function BitbucketEnvironmentsSection({
     } catch (e) {
       toastError(e);
     }
+  }
+
+  if (config.isError && !config.data) {
+    return <PipelinesConfigErrorCard error={config.error} />;
   }
 
   if (config.data && !enabled) {
@@ -75,7 +82,7 @@ export function BitbucketEnvironmentsSection({
       </div>
 
       <AsyncListBody
-        loading={environments.isLoading}
+        loading={environments.isPending}
         error={environments.error}
         empty={environments.data?.length === 0}
         emptyLabel="No deployment environments."

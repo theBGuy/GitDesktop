@@ -122,7 +122,7 @@ export function GitLabProtectedBranchesSection({
       </div>
 
       <AsyncListBody
-        loading={branches.isLoading}
+        loading={branches.isPending}
         error={branches.error}
         empty={branches.data?.length === 0}
         emptyLabel="No protected branches."

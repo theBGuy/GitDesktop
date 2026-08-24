@@ -195,10 +195,10 @@ export function GenerateBranchNameButton({
           size="xs"
           className="text-muted-foreground"
           disabled={!action.enabled}
+          reason={reason}
           // `reason` doubles as the enabled-state hint ("Suggest a name from…"),
           // which is where the chord belongs — a disabled button's shortcut does
           // nothing, so it isn't offered.
-          reason={action.enabled ? null : reason}
           title={action.enabled ? `${reason}${hint}` : reason}
           onClick={action.run}
         >

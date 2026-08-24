@@ -36,6 +36,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { copyText } from "@/lib/clipboard";
+import { presentError } from "@/lib/error-summary";
 import {
   useCreateWebhook,
   useDeleteWebhook,
@@ -477,7 +478,7 @@ function WebhooksSection({
       </div>
 
       <AsyncListBody
-        loading={hooks.isLoading}
+        loading={hooks.isPending}
         error={hooks.error}
         empty={hooks.data?.length === 0}
         emptyLabel="No webhooks yet."
@@ -681,7 +682,7 @@ function DeliveriesView({
         </p>
       </div>
 
-      {deliveries.isLoading && (
+      {deliveries.isPending && (
         <div className="space-y-2">
           <Skeleton className="h-9 w-full" />
           <Skeleton className="h-9 w-full" />
@@ -689,9 +690,7 @@ function DeliveriesView({
       )}
       {deliveries.isError && (
         <p className="text-xs text-destructive">
-          {deliveries.error instanceof Error
-            ? deliveries.error.message
-            : "Couldn't load deliveries."}
+          {presentError(deliveries.error).summary}
         </p>
       )}
       {deliveries.data?.length === 0 && (
@@ -790,12 +789,10 @@ function DeliveryRow({
               Redeliver
             </Button>
           </div>
-          {detail.isLoading && <Skeleton className="h-16 w-full" />}
+          {detail.isPending && <Skeleton className="h-16 w-full" />}
           {detail.isError && (
             <p className="text-[11px] text-destructive">
-              {detail.error instanceof Error
-                ? detail.error.message
-                : "Couldn't load the payload."}
+              {presentError(detail.error).summary}
             </p>
           )}
           {detail.data && (

@@ -28,6 +28,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { checkoutDetachedConfirm } from "@/features/history/commit-confirms";
 import { formatBytes } from "@/features/repository/insights/primitives";
 import { presentError } from "@/lib/error-summary";
@@ -83,6 +84,9 @@ export function TagDetailView({
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
   const remoteLabel = providerLabel(provider);
+  // Release notes autolink the same `@`/`#`/`!` references a comment does.
+  // Releases are repo-wide, so the candidate lists come off origin.
+  const mentions = useMentionCandidates({ repoPath, lens: "origin", provider });
   // Ask the provider for a release only when connected; otherwise it's just a tag.
   const release = useReleaseDetails(repoPath, ghReady ? tag : null);
   const tagList = useTagList(repoPath);
@@ -561,6 +565,7 @@ export function TagDetailView({
                     // `flex-1` set the height, and a manual drag fights the flex
                     // sizing.
                     textareaClassName="min-h-24 font-mono"
+                    mentions={mentions}
                   />
                 </div>
                 {/* GitLab has neither pre-release nor a per-release latest flag. */}

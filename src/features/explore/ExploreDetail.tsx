@@ -4,7 +4,7 @@ import {
   StarIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RelativeTime } from "@/components/relative-time";
@@ -119,6 +119,16 @@ function ExploreDetailBody({
   const starMutation = useStarRepo();
   const fork = useForkRepoByName();
   const [forked, setForked] = useState<ForgeForkResult | null>(null);
+  // The fork card below is the in-pane confirmation, but this pane is keyed per
+  // repo and unmounts on a switch — so the toast covers only that case, and the
+  // ref is what tells the two apart once the fork resolves.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const readme = useRepoReadme(
     provider,
@@ -159,10 +169,15 @@ function ExploreDetailBody({
         owner: repo.owner,
         name: repo.name,
       });
-      setForked(result);
-      toast.success(`Forked to ${result.fullName}`, {
-        description: result.ready ? undefined : FORK_NOT_READY,
-      });
+      // Still here: the card says it, with the Clone action attached. Gone: the
+      // toast is the only surface left to say it.
+      if (mounted.current) {
+        setForked(result);
+      } else {
+        toast.success(`Forked to ${result.fullName}`, {
+          description: result.ready ? undefined : FORK_NOT_READY,
+        });
+      }
     } catch (e) {
       toastError(e);
     }
@@ -293,32 +308,46 @@ function ExploreDetailBody({
         )}
       </div>
 
-      {forked && (
-        <div className="space-y-2 border border-success/40 bg-success/10 p-3">
-          <p className="text-xs font-medium">Forked to {forked.fullName}</p>
-          {!forked.ready && (
-            <p className="text-[11px] text-muted-foreground">
-              {FORK_NOT_READY}
-            </p>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() =>
-              onClone({
-                provider,
-                cloneUrl: forked.cloneUrl,
-                // Use the fork's OWN name, not repo.name: GitHub renames a
-                // colliding fork (rust → rust-1), so the local folder must
-                // follow the fork's actual name segment.
-                name: forked.fullName.split("/").pop() ?? repo.name,
-              })
-            }
-          >
-            Clone the fork
-          </Button>
-        </div>
-      )}
+      {/* The card is the only confirmation while the pane is mounted (the toast
+          that would otherwise carry it fires once this pane is gone), so it has to
+          announce itself. Mounted unconditionally: a live region created together
+          with its text announces unreliably, so the region pre-exists and only its
+          CONTENT changes, and `sr-only` keeps the empty state out of layout. */}
+      <div
+        role="status"
+        className={
+          forked
+            ? "space-y-2 border border-success/40 bg-success/10 p-3"
+            : "sr-only"
+        }
+      >
+        {forked && (
+          <>
+            <p className="text-xs font-medium">Forked to {forked.fullName}</p>
+            {!forked.ready && (
+              <p className="text-[11px] text-muted-foreground">
+                {FORK_NOT_READY}
+              </p>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                onClone({
+                  provider,
+                  cloneUrl: forked.cloneUrl,
+                  // Use the fork's OWN name, not repo.name: GitHub renames a
+                  // colliding fork (rust → rust-1), so the local folder must
+                  // follow the fork's actual name segment.
+                  name: forked.fullName.split("/").pop() ?? repo.name,
+                })
+              }
+            >
+              Clone the fork
+            </Button>
+          </>
+        )}
+      </div>
 
       {canReadme && (
         <>

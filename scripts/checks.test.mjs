@@ -245,15 +245,16 @@ test("bare-mutate-in-converted-trees leaves the awaited idiom and comments alone
 });
 
 test("bare-mutate-in-converted-trees applies to the converted trees only", () => {
-  // The tier boundary is the deliberate part: the two converted trees are in,
-  // and the ones still carrying per-call callbacks in bulk are out until their
-  // own conversion lands. Widening this is a decision, not a drive-by.
+  // The tier boundary is the deliberate part: the converted trees are in, and
+  // the ones still carrying per-call callbacks in bulk are out until their own
+  // conversion lands. Widening this is a decision, not a drive-by.
   const { appliesTo } = CHECKS.find(
     (c) => c.name === "bare-mutate-in-converted-trees",
   );
   for (const file of [
     "src/features/repo-settings/RulesetsSection.tsx",
     "src/features/explore/ExploreDetail.tsx",
+    "src/features/actions/RunDetailView.tsx",
   ]) {
     assert.equal(appliesTo(file), true, `should scan ${file}`);
   }

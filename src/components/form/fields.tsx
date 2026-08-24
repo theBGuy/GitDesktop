@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import { useFieldContext } from "@/lib/form-context";
 
 /**
@@ -115,6 +116,7 @@ export function MarkdownField({
   disabled,
   textareaClassName,
   actions,
+  mentions,
 }: {
   label?: ReactNode;
   placeholder?: string;
@@ -122,6 +124,9 @@ export function MarkdownField({
   disabled?: boolean;
   textareaClassName?: string;
   actions?: ReactNode;
+  /** Opt in to `@`/`#`/`!` autocomplete — only forms whose forge autolinks the
+   *  completed reference pass one. */
+  mentions?: MentionSource;
 }) {
   const field = useFieldContext<string>();
   const id = useId();
@@ -135,6 +140,7 @@ export function MarkdownField({
         disabled={disabled}
         textareaClassName={textareaClassName}
         actions={actions}
+        mentions={mentions}
         value={field.state.value}
         onChange={field.handleChange}
       />

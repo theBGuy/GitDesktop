@@ -3002,9 +3002,14 @@ export function useGhRepos(enabled: boolean) {
   });
 }
 
+/** Stable fallback for an unresolved {@link useForgeRepos} read, so a pending
+ *  query doesn't hand its consumers a fresh array identity every render. */
+export const EMPTY_NAMESPACES: readonly string[] = [];
+
 /** The signed-in user's repositories on a provider (GitHub via gh, GitLab via
- *  glab), for the clone browser. The provider-neutral successor to
- *  {@link useGhRepos} on that surface. */
+ *  glab), for the clone browser — and its `ownedNamespaces` feeds the repo
+ *  menu's Fork gate. The provider-neutral successor to {@link useGhRepos} on
+ *  that surface. */
 export function useForgeRepos(provider: ForgeProvider, enabled: boolean) {
   return useQuery({
     queryKey: ["forge-repos", provider] as const,

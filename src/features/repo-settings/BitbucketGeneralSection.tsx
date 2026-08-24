@@ -28,6 +28,7 @@ import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { DescriptionField } from "./DescriptionField";
+import { AsyncErrorCard } from "./parts";
 import { useGenerateRepoDescription } from "./useGenerateRepoDescription";
 
 /** The Bitbucket counterpart of {@link GeneralSettingsSection}: Bitbucket's
@@ -44,7 +45,7 @@ export function BitbucketGeneralSection({
   const settings = useBbRepoSettings(repoPath, open);
   const branches = useBranches(repoPath);
 
-  if (settings.isLoading) {
+  if (settings.isPending) {
     return (
       <div className="min-w-0 space-y-3">
         <Skeleton className="h-20 w-full" />
@@ -56,12 +57,7 @@ export function BitbucketGeneralSection({
 
   if (settings.isError || !settings.data) {
     return (
-      <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
-        <p className="font-medium text-destructive">Couldn't load settings.</p>
-        <p className="mt-1 text-muted-foreground">
-          {settings.error instanceof Error ? settings.error.message : null}
-        </p>
-      </div>
+      <AsyncErrorCard title="Couldn't load settings." error={settings.error} />
     );
   }
 

@@ -126,7 +126,7 @@ export function GitLabWebhooksSection({
       </div>
 
       <AsyncListBody
-        loading={hooks.isLoading}
+        loading={hooks.isPending}
         error={hooks.error}
         empty={hooks.data?.length === 0}
         emptyLabel="No webhooks yet."
@@ -381,7 +381,7 @@ function HookDeliveries({
       </div>
 
       <AsyncListBody
-        loading={events.isLoading}
+        loading={events.isPending}
         error={events.error}
         empty={events.data?.length === 0}
         emptyLabel="No deliveries recorded yet — send a test event."

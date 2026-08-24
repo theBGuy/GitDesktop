@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
+import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import {
   DiffContent,
@@ -59,6 +60,9 @@ interface DiffThreadWiring {
   /** File-section lookup for synthesizing a hunk on hunk-less providers, so the
    *  in-diff thread cards get the same Apply affordance. Absent = no synthesis. */
   fileDiffLookup?: (path: string) => string | undefined;
+  /** Opt in to `@`/`#`/`!` autocomplete in each card's editors. Absent = no
+   *  autocomplete. */
+  mentions?: MentionSource;
 }
 
 /**
@@ -75,6 +79,7 @@ function DiffThreadAnchor({
   provider,
   apply,
   fileDiffLookup,
+  mentions,
 }: { threads: ReviewThreadOut[] } & DiffThreadWiring) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const isExpanded = (t: ReviewThreadOut) => expanded[t.id] ?? !t.isResolved;
@@ -98,6 +103,7 @@ function DiffThreadAnchor({
           provider={provider}
           apply={apply}
           fileDiffLookup={fileDiffLookup}
+          mentions={mentions}
         />
       ))}
     </div>
@@ -126,6 +132,7 @@ export function PrFilesPane({
   provider,
   apply,
   fileDiffLookup,
+  mentions,
   blameRev,
 }: {
   files: PrFile[];
@@ -207,6 +214,7 @@ export function PrFilesPane({
                 provider={provider}
                 apply={apply}
                 fileDiffLookup={fileDiffLookup}
+                mentions={mentions}
               />
             )}
             {repoPath !== undefined &&
@@ -238,6 +246,7 @@ export function PrFilesPane({
     provider,
     apply,
     fileDiffLookup,
+    mentions,
   ]);
 
   const fileRows = files.map((file) => (

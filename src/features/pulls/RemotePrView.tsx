@@ -56,6 +56,7 @@ import { LabelsPopover } from "@/features/conversations/LabelsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
@@ -369,6 +370,7 @@ export function RemotePrView({
   // For the read-only assignee/reviewer chips (closed/merged PRs): GitHub avatars
   // are login-derived, GitLab/Bitbucket carry a real avatarUrl on the ref.
   const ghHost = useForgeGhHost(repoPath);
+  const mentions = useMentionCandidates({ repoPath, lens, provider });
   const comment = useCommentPr(repoPath, lens);
   const checkout = useCheckoutPr(repoPath, lens);
   const repoStatus = useRepoStatus(repoPath);
@@ -2764,6 +2766,7 @@ export function RemotePrView({
                 providerKey={providerKey}
                 suggestionApply={suggestionApply}
                 fileDiffLookup={fileDiffLookup}
+                mentions={mentions}
                 // Hide/Unhide stay visible but disabled through the switch. The
                 // permission reason ranks first — it's the one still true once the
                 // selected pull request is on screen.
@@ -2851,6 +2854,7 @@ export function RemotePrView({
                 provider={providerKey}
                 apply={suggestionApply}
                 fileDiffLookup={fileDiffLookup}
+                mentions={mentions}
                 revealThreadId={revealThreadId}
                 onRevealed={() => setRevealThreadId(null)}
               />
@@ -2879,6 +2883,7 @@ export function RemotePrView({
               submitLabel="Comment"
               ariaLabel="Leave a comment"
               placeholder="Leave a comment…"
+              mentions={mentions}
               busy={busy}
               // Every term of `busy` gets words, so a held Submit is never mute —
               // including the switch, where the comment would post against the
@@ -3090,6 +3095,7 @@ export function RemotePrView({
             provider={providerKey}
             apply={suggestionApply}
             fileDiffLookup={fileDiffLookup}
+            mentions={mentions}
             // gh GraphQL returns commits oldest-first, so the head is the last —
             // pin the file-row Blame at the PR's tip.
             blameRev={pr.commits.at(-1)?.oid}
@@ -3360,6 +3366,7 @@ export function RemotePrView({
         description={`Updates the title, description, and base branch of #${number} on ${remoteLabel}.`}
         contentClassName="sm:max-w-lg"
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
+        mentions={mentions}
         onGenerate={aiEnabled ? runGenerate : undefined}
         generating={prGen.generating}
         belowBody={

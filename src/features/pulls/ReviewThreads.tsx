@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { Spinner } from "@/components/ui/spinner";
 import { Thread } from "@/features/conversations/Thread";
+import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import { copyText } from "@/lib/clipboard";
 import type {
   ApplyLinesResult,
@@ -517,6 +518,7 @@ export function ReviewThreadCard({
   provider = "github",
   apply,
   fileDiffLookup,
+  mentions,
   revealTarget = false,
   onRevealed,
 }: {
@@ -543,6 +545,9 @@ export function ReviewThreadCard({
    *  (GitLab/Bitbucket) and isn't outdated, a hunk is synthesized from it so the
    *  excerpt + Apply gating work as they do for GitHub. Absent = no synthesis. */
   fileDiffLookup?: (path: string) => string | undefined;
+  /** Opt in to `@`/`#`/`!` autocomplete in the reply and edit-in-place editors —
+   *  only surfaces whose forge autolinks the completed reference pass one. */
+  mentions?: MentionSource;
 } & ThreadCallbacks) {
   const [replying, setReplying] = useState(false);
   const [replyBody, setReplyBody] = useState("");
@@ -713,6 +718,7 @@ export function ReviewThreadCard({
                     ? () => onDeleteComment(c.id)
                     : undefined
                 }
+                mentions={mentions}
                 // Splice SuggestionBlocks between markdown segments — quote and copy
                 // still act on the RAW body, so only the render changes.
                 renderBody={(body) => (
@@ -762,6 +768,7 @@ export function ReviewThreadCard({
                   }}
                   rows={2}
                   textareaClassName="max-h-32 min-h-12 resize-y"
+                  mentions={mentions}
                 />
                 <div className="flex items-center gap-2">
                   <DisabledReasonButton
@@ -861,6 +868,7 @@ export function ReviewThreadList({
   provider = "github",
   apply,
   fileDiffLookup,
+  mentions,
   revealThreadId,
   onRevealed,
 }: {
@@ -874,6 +882,9 @@ export function ReviewThreadList({
   /** File-section lookup for synthesizing a hunk on hunk-less providers, threaded
    *  to every card. Absent = no synthesis. */
   fileDiffLookup?: (path: string) => string | undefined;
+  /** Opt in to `@`/`#`/`!` autocomplete in every card's editors. Absent = no
+   *  autocomplete (any unwired surface). */
+  mentions?: MentionSource;
   /** A thread id the parent wants revealed (e.g. a timeline "View thread" jump). When
    *  it matches one of THIS list's threads, the list opens that thread's
    *  resolved-group expander + expands the card so a resolved/collapsed target isn't
@@ -1031,6 +1042,7 @@ export function ReviewThreadList({
                   provider={provider}
                   apply={apply}
                   fileDiffLookup={fileDiffLookup}
+                  mentions={mentions}
                   revealTarget={t.id === revealThreadId}
                   onRevealed={onRevealed}
                 />
@@ -1063,6 +1075,7 @@ export function ReviewThreadList({
                         provider={provider}
                         apply={apply}
                         fileDiffLookup={fileDiffLookup}
+                        mentions={mentions}
                         revealTarget={t.id === revealThreadId}
                         onRevealed={onRevealed}
                       />
@@ -1098,6 +1111,7 @@ export function ReviewThreadsBlock({
   provider = "github",
   apply,
   fileDiffLookup,
+  mentions,
   revealThreadId,
   onRevealed,
 }: {
@@ -1115,6 +1129,9 @@ export function ReviewThreadsBlock({
   /** File-section lookup for synthesizing a hunk on hunk-less providers. Absent =
    *  no synthesis. */
   fileDiffLookup?: (path: string) => string | undefined;
+  /** Opt in to `@`/`#`/`!` autocomplete in every card's editors. Absent = no
+   *  autocomplete. */
+  mentions?: MentionSource;
   /** A thread id to reveal (timeline "View thread" jump) — passed straight to the
    *  inner list, which acts only if the id is one of these residual threads. */
   revealThreadId?: string | null;
@@ -1149,6 +1166,7 @@ export function ReviewThreadsBlock({
         provider={provider}
         apply={apply}
         fileDiffLookup={fileDiffLookup}
+        mentions={mentions}
         revealThreadId={revealThreadId}
         onRevealed={onRevealed}
       />

@@ -286,6 +286,10 @@ export interface AppSettings {
    *  (`pulls:local`, `issues:remote`, …); a missing key = expanded. Global and
    *  feature-scoped, so the remote key collapses that section across every repo. */
   collapsedConversationSections: string[];
+  /** Collapse the docked comment composer on every conversation surface down to a
+   *  one-line peek strip. Global, so the reading space is reclaimed everywhere at
+   *  once; the surface's own actions stay docked either way. */
+  commentComposerCollapsed: boolean;
   /** ISO-8601 expiry the user optionally entered for a Bitbucket (Atlassian) API token —
    *  Bitbucket never reports one, so it's user-supplied. null = not provided; cleared on
    *  disconnect. */
@@ -353,6 +357,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: "system",
   diffViewMode: "unified",
   collapsedConversationSections: [],
+  commentComposerCollapsed: false,
   bitbucketTokenExpiresAt: null,
 };
 

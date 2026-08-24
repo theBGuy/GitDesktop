@@ -456,6 +456,16 @@ export const capabilities: Capability[] = [
     label: "Markdown editor — formatting toolbar & live preview",
     highlight: true,
   },
+  {
+    group: "Keyboard & Markdown",
+    label:
+      "Collapsible comment box — reclaim reading space, actions stay docked",
+  },
+  {
+    group: "Keyboard & Markdown",
+    label:
+      "@mention & #reference autocomplete — GitHub & GitLab comments, replies, release notes",
+  },
 
   // — AI · generate & review —
   {

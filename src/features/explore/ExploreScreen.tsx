@@ -22,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  EMPTY_NAMESPACES,
   useForgeProviderFeatures,
   useForgeRepos,
   useForgeSearchRepos,
@@ -48,10 +49,6 @@ import {
 
 type SortOption = "best" | "stars" | "updated";
 type ZeroMode = "yours" | "popular";
-
-/** Stable empty fallback, so a pending own-repos query doesn't hand the detail
- *  pane a fresh array identity on every render. */
-const EMPTY_NAMESPACES: readonly string[] = [];
 
 const SORT_ITEMS: Record<SortOption, string> = {
   best: "Best match",

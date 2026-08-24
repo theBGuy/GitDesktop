@@ -177,6 +177,14 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   that lived in them silently never runs. The house idiom is `form.ts`'s
   awaited-submit convention (`SquashDialog` in
   `src/features/history/RewriteDialogs.tsx` is the reference).
+- A follow-up that needs the DOM from a state flip (focus a just-revealed
+  input, re-pin a grown scroll region) never rides a bare
+  `requestAnimationFrame` from the event handler: when the state lives in
+  react-query, the notify-batched re-render can land AFTER that rAF, so the
+  callback hits a still-hidden node and silently no-ops. Arm a pending ref and
+  consume it in a `useLayoutEffect` keyed on the flipped state's commit
+  (reference: `CommentComposer`'s collapse/expand pending flags); an rAF
+  belongs inside that effect only to outlast Base UI's close-time focus-return.
 
 ## Rust / Tauri conventions
 

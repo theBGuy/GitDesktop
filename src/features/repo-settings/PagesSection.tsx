@@ -25,7 +25,7 @@ import {
 } from "@/lib/git/queries";
 import type { PagesInfo } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
-import { InlineConfirm } from "./parts";
+import { AsyncErrorCard, InlineConfirm } from "./parts";
 
 const PATHS = ["/", "/docs"];
 
@@ -46,7 +46,7 @@ export function PagesSection({
 }) {
   const pages = usePages(repoPath, open);
 
-  if (pages.isLoading) {
+  if (pages.isPending) {
     return (
       <div className="min-w-0 space-y-3">
         <Skeleton className="h-9 w-full" />
@@ -56,14 +56,11 @@ export function PagesSection({
   }
   if (pages.isError) {
     return (
-      <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
-        <p className="font-medium text-destructive">Couldn't load Pages.</p>
-        <p className="mt-1 text-muted-foreground">
-          {pages.error instanceof Error
-            ? pages.error.message
-            : "This needs repo-admin access."}
-        </p>
-      </div>
+      <AsyncErrorCard
+        title="Couldn't load Pages."
+        error={pages.error}
+        hint="This needs repo-admin access."
+      />
     );
   }
 

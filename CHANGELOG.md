@@ -12,6 +12,30 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-08-23
+
+### Fixed
+
+- Forking from Explore confirms once: the pane's fork card carries the result
+  and its Clone button, and a toast steps in only when you have already moved on
+  to another repository.
+- On **Bitbucket**, the repository menu's **Fork** action goes by the workspaces you
+  belong to, so it's offered on repositories from elsewhere and stays out of the way
+  on the ones you already have access to.
+- Repository settings name the reason a section failed to load: the message from
+  GitHub, GitLab, or Bitbucket now appears under the error heading, so a
+  permissions gap reads differently from a signed-out CLI or a network drop.
+- Repository settings sections and lists keep their loading skeletons up while
+  a fetch waits on a connection, so an offline or paused request reads as work
+  in progress.
+- The ruleset editor keeps a required-approvals count you type to a whole number
+  from 0 to 10, and a stored count outside that range stays visible until you
+  correct it.
+- Workflow-run actions report their outcome even if you move on while they're in
+  flight: re-running, cancelling, approving a held run, starting a manual job, or
+  dispatching a workflow now confirms (or explains a failure) after you switch
+  runs or close the dialog.
+
 ## [0.9.5] - 2026-08-23
 
 ### Changed
@@ -3338,7 +3362,8 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/theBGuy/GitDesktop/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/theBGuy/GitDesktop/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/theBGuy/GitDesktop/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/theBGuy/GitDesktop/compare/v0.9.2...v0.9.3

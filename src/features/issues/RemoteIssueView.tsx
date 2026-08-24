@@ -39,6 +39,7 @@ import {
   hasVisibleBody,
   Thread,
 } from "@/features/conversations/Thread";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import {
   sortTimeline,
@@ -194,6 +195,7 @@ export function RemoteIssueView({
   const canTrackTime = forgeFeatureReady(forge.data, "timeTracking");
   const canLinkIssues = forgeFeatureReady(forge.data, "issueLinks");
   const details = useIssueDetails(repoPath, number, lens);
+  const mentions = useMentionCandidates({ repoPath, lens, provider });
   const comment = useCommentIssue(repoPath, lens);
   const closeIssue = useCloseIssue(repoPath, lens);
   const reopenIssue = useReopenIssue(repoPath, lens);
@@ -642,11 +644,15 @@ export function RemoteIssueView({
           }
           reactionsHeld={detailsStale}
           reactionsReason={staleReason}
+          mentions={mentions}
         />
       ),
     });
   }
-  for (const [i, ev] of (timeline.data ?? []).entries()) {
+  // Details keep the PREVIOUS issue painted through a switch while the timeline
+  // keys on the NEW number and can resolve first — hold events until the
+  // identities agree, or the feed interleaves two issues.
+  for (const [i, ev] of (detailsStale ? [] : (timeline.data ?? [])).entries()) {
     feedEntries.push({
       date: ev.date,
       sortKey: 3,
@@ -1136,6 +1142,7 @@ export function RemoteIssueView({
           value={compose.value}
           onChange={compose.set}
           onSubmit={submitComment}
+          mentions={mentions}
           submitLabel="Comment"
           busy={busy}
           reason={composerReason}
@@ -1176,6 +1183,7 @@ export function RemoteIssueView({
         description={`Updates the title and description of #${number} on ${remoteLabel}.`}
         contentClassName="sm:max-w-lg"
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
+        mentions={mentions}
       />
 
       <DeleteCommentDialog

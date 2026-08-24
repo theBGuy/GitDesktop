@@ -21,9 +21,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { useMentionAutocomplete } from "@/components/mention-autocomplete";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { Textarea } from "@/components/ui/textarea";
+import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { cn } from "@/lib/utils";
 
@@ -233,6 +235,7 @@ export function MarkdownEditor({
   fill,
   textareaClassName,
   actions,
+  mentions,
   "aria-label": ariaLabel,
 }: {
   ref?: Ref<MarkdownEditorHandle>;
@@ -253,6 +256,10 @@ export function MarkdownEditor({
   fill?: boolean;
   textareaClassName?: string;
   actions?: ReactNode;
+  /** Opt in to `@`/`#`/`!` autocomplete. Omitted — as it is on every surface whose
+   *  forge wouldn't autolink the result — the editor adds no listener, query or
+   *  node for it. */
+  mentions?: MentionSource;
   "aria-label"?: string;
 }) {
   const [mode, setMode] = useState<"write" | "preview">("write");
@@ -261,6 +268,14 @@ export function MarkdownEditor({
   const pendingSelection = useRef<[number, number] | null>(null);
   // A focus() requested while in Preview mode, honored once Write remounts.
   const pendingFocus = useRef(false);
+
+  const mention = useMentionAutocomplete({
+    mentions,
+    textareaRef,
+    value,
+    onChange,
+    suspended: mode === "preview" || !!disabled,
+  });
 
   // Focus the textarea without the native scroll-alignment jump ("flash"), then
   // bring it into view only if it's actually off-screen, by the minimum distance
@@ -365,6 +380,9 @@ export function MarkdownEditor({
         return;
       }
     }
+    // The suggestion popover owns arrows/Enter/Tab/Escape while a token is open,
+    // between the formatting chords and the consumer's own handler.
+    if (mention.onKeyDown(e)) return;
     onKeyDown?.(e);
   }
 
@@ -464,7 +482,13 @@ export function MarkdownEditor({
         placeholder={placeholder}
         aria-label={ariaLabel}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          mention.sync(
+            e.target.value,
+            e.target.selectionStart ?? e.target.value.length,
+          );
+        }}
         onKeyDown={handleKeyDown}
         rows={rows}
         disabled={disabled}
@@ -473,7 +497,9 @@ export function MarkdownEditor({
           textareaClassName,
           mode === "preview" && "hidden",
         )}
+        {...mention.textareaProps}
       />
+      {mention.popover}
       {mode === "preview" && (
         <div
           className={cn(

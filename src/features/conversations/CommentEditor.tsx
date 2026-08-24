@@ -5,6 +5,7 @@ import {
 } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import type { MentionSource } from "./useMentionCandidates";
 
 /**
  * The inline comment editor: a markdown box with Save/Cancel swapped in for a
@@ -24,6 +25,7 @@ export function CommentEditor({
   pending,
   ariaLabel,
   textareaClassName,
+  mentions,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -36,6 +38,9 @@ export function CommentEditor({
   pending?: boolean;
   ariaLabel?: string;
   textareaClassName?: string;
+  /** Opt in to `@`/`#`/`!` autocomplete — only surfaces whose forge autolinks the
+   *  completed reference pass one. */
+  mentions?: MentionSource;
 }) {
   const editorRef = useRef<MarkdownEditorHandle>(null);
 
@@ -66,6 +71,7 @@ export function CommentEditor({
         rows={3}
         disabled={pending}
         textareaClassName={textareaClassName}
+        mentions={mentions}
       />
       <div className="flex items-center gap-2">
         <Button

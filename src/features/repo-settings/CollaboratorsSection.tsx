@@ -195,7 +195,7 @@ export function CollaboratorsSection({
       </div>
 
       <AsyncListBody
-        loading={collaborators.isLoading}
+        loading={collaborators.isPending}
         error={collaborators.error}
         empty={collaborators.data?.length === 0}
         emptyLabel="No collaborators yet."

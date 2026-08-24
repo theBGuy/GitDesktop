@@ -46,6 +46,7 @@ import {
   hasVisibleBody,
   Thread,
 } from "@/features/conversations/Thread";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { copyText } from "@/lib/clipboard";
 import type {
@@ -200,6 +201,13 @@ export function DiscussionView({
   number: number;
 }) {
   const details = useDiscussionDetails(repoPath, number);
+  // Discussions are a GitHub-only surface, and one that never carries the
+  // origin/upstream lens — the parent's discussions aren't reachable from here.
+  const mentions = useMentionCandidates({
+    repoPath,
+    lens: "origin",
+    provider: "github",
+  });
   const reactions = useDiscussionReactions(repoPath, number);
   const addComment = useAddDiscussionComment(repoPath);
   const markAnswer = useMarkDiscussionAnswer(repoPath);
@@ -813,6 +821,7 @@ export function DiscussionView({
                   }
                   reactionsHeld={detailsStale}
                   reactionsReason={staleReason}
+                  mentions={mentions}
                 />
               </div>
               {/* Every control in the row carries its own reason. */}
@@ -886,6 +895,7 @@ export function DiscussionView({
                       }
                       reactionsHeld={detailsStale}
                       reactionsReason={staleReason}
+                      mentions={mentions}
                     />
                   ))}
                   {reply.value.targetId === c.id && (
@@ -911,6 +921,7 @@ export function DiscussionView({
                         }}
                         rows={2}
                         textareaClassName="max-h-32 min-h-12 resize-y"
+                        mentions={mentions}
                       />
                       <div className="flex items-center gap-2">
                         <DisabledReasonButton
@@ -953,6 +964,7 @@ export function DiscussionView({
         submitLabel="Comment"
         ariaLabel="Add to the discussion"
         placeholder="Add to the discussion…"
+        mentions={mentions}
         busy={busy}
         reason={busyReason}
       />

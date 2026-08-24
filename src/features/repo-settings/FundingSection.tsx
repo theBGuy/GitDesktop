@@ -9,7 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { useDeleteFunding, useFunding, useSetFunding } from "@/lib/git/queries";
 import { toastError } from "@/lib/toast";
-import { InlineConfirm } from "./parts";
+import { AsyncErrorCard, InlineConfirm } from "./parts";
 
 const GITHUB_KEY = "github";
 const CUSTOM_KEY = "custom";
@@ -114,7 +114,7 @@ export function FundingSection({
 }) {
   const funding = useFunding(repoPath, open);
 
-  if (funding.isLoading) {
+  if (funding.isPending) {
     return (
       <div className="min-w-0 space-y-3">
         <Skeleton className="h-9 w-full" />
@@ -125,12 +125,7 @@ export function FundingSection({
   }
   if (funding.isError) {
     return (
-      <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
-        <p className="font-medium text-destructive">Couldn't load funding.</p>
-        <p className="mt-1 text-muted-foreground">
-          {funding.error instanceof Error ? funding.error.message : null}
-        </p>
-      </div>
+      <AsyncErrorCard title="Couldn't load funding." error={funding.error} />
     );
   }
 

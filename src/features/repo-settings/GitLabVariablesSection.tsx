@@ -158,7 +158,7 @@ export function GitLabVariablesSection({
       </div>
 
       <AsyncListBody
-        loading={variables.isLoading}
+        loading={variables.isPending}
         error={variables.error}
         empty={variables.data?.length === 0}
         emptyLabel="No CI/CD variables yet."
