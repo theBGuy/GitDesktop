@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, FixedOffset};
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
@@ -1435,8 +1437,8 @@ struct GlabStateEvent {
     created_at: String,
 }
 
-/// The date field of a `ForgeTimelineEventOut` — the sort key. Empty dates sort first
-/// (stable), which keeps undated events at the top rather than dropping them.
+/// The date field of a `ForgeTimelineEventOut`, verbatim. Exhaustive over the union so
+/// a new variant can't silently read as "".
 fn timeline_event_date(e: &ForgeTimelineEventOut) -> &str {
     match e {
         ForgeTimelineEventOut::Labeled { date, .. }
@@ -1462,6 +1464,16 @@ fn timeline_event_date(e: &ForgeTimelineEventOut) -> &str {
         | ForgeTimelineEventOut::Transferred { date, .. }
         | ForgeTimelineEventOut::MarkedAsDuplicate { date, .. } => date,
     }
+}
+
+/// The sort key for both GitLab timelines: the event's date as an INSTANT. `None` for
+/// an empty or unparseable stamp, which `Option`'s ordering places before every dated
+/// event, keeping undated events at the top rather than dropping them. Parsing rather
+/// than comparing the raw strings is what keeps the order correct regardless of offset
+/// or fractional-second width — `…:03.613Z` string-sorts BEFORE `…:03Z` ('.' < 'Z')
+/// while being the later instant.
+fn timeline_event_instant(e: &ForgeTimelineEventOut) -> Option<DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(timeline_event_date(e)).ok()
 }
 
 /// A GitLab timeline actor as a neutral user ref. GitLab identifies users by
@@ -1564,8 +1576,8 @@ pub async fn mr_timeline(repo_path: &str, number: u64) -> AppResult<Vec<ForgeTim
         }
     }
 
-    // Combine all classes and sort ascending by date (empty dates sort first).
-    events.sort_by(|a, b| timeline_event_date(a).cmp(timeline_event_date(b)));
+    // Combine all classes and sort ascending by instant (undated events sort first).
+    events.sort_by_key(timeline_event_instant);
     Ok(events)
 }
 
@@ -1809,8 +1821,8 @@ pub async fn issue_timeline(repo_path: &str, number: u64) -> AppResult<Vec<Forge
         }
     }
 
-    // Combine all classes and sort ascending by date (empty dates sort first).
-    events.sort_by(|a, b| timeline_event_date(a).cmp(timeline_event_date(b)));
+    // Combine all classes and sort ascending by instant (undated events sort first).
+    events.sort_by_key(timeline_event_instant);
     Ok(events)
 }
 
@@ -9067,12 +9079,33 @@ mod tests {
                 date: "2026-07-01T00:00:00Z".into(),
             },
         ];
-        events.sort_by(|a, b| timeline_event_date(a).cmp(timeline_event_date(b)));
+        events.sort_by_key(timeline_event_instant);
         let dates: Vec<&str> = events.iter().map(timeline_event_date).collect();
         assert_eq!(
             dates,
             vec!["", "2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z"]
         );
+    }
+
+    #[test]
+    fn timeline_sorts_by_instant_across_mixed_fractional_precision() {
+        // GitLab stamps most timestamps with millis but not all endpoints agree, and
+        // a string compare gets mixed widths backwards: '.' (0x2E) < 'Z' (0x5A), so
+        // "…:03.613Z" sorts BEFORE "…:03Z" while being the LATER instant.
+        let with_millis = "2026-07-01T00:00:03.613Z";
+        let bare = "2026-07-01T00:00:03Z";
+        assert!(with_millis < bare, "the string order is the trap");
+
+        let ev = |date: &str| ForgeTimelineEventOut::Approved {
+            actor: gl_actor(None),
+            date: date.to_string(),
+        };
+        let mut events = [ev(with_millis), ev(bare), ev("")];
+        events.sort_by_key(timeline_event_instant);
+        let dates: Vec<&str> = events.iter().map(timeline_event_date).collect();
+        // Undated first, then true chronological order — the reverse of the strings
+        // for the dated pair.
+        assert_eq!(dates, vec!["", bare, with_millis]);
     }
 
     #[test]

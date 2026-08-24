@@ -19,6 +19,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_http::reqwest;
 
@@ -1437,8 +1438,10 @@ pub async fn pr_activity(repo_path: &str, number: u64) -> AppResult<Vec<ForgeTim
         .filter_map(map_activity_entry)
         .collect();
 
-    // Sort ascending by date (empty dates sort first, stably).
-    events.sort_by(|a, b| bb_timeline_date(a).cmp(bb_timeline_date(b)));
+    // Sort ascending by INSTANT, stably. Bitbucket stamps activity in the actor's
+    // local offset ("…-04:00"), so a lexicographic compare of the raw strings puts
+    // mixed offsets out of chronological order. Undated/unparseable events sort first.
+    events.sort_by_key(bb_timeline_instant);
     Ok(events)
 }
 
@@ -1526,6 +1529,14 @@ fn bb_timeline_date(e: &ForgeTimelineEventOut) -> &str {
         | ForgeTimelineEventOut::Transferred { date, .. }
         | ForgeTimelineEventOut::MarkedAsDuplicate { date, .. } => date,
     }
+}
+
+/// The sort key behind [`pr_activity`]'s ordering: the event's date as an INSTANT.
+/// `None` for an empty or unparseable stamp, which `Option`'s ordering places before
+/// every dated event. Comparing parsed instants is what makes the order correct across
+/// Bitbucket's mixed local offsets — the raw strings don't sort chronologically.
+fn bb_timeline_instant(e: &ForgeTimelineEventOut) -> Option<DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(bb_timeline_date(e)).ok()
 }
 
 /// Map one non-deleted/non-pending comment onto a neutral thread. The body is the raw
@@ -5596,6 +5607,27 @@ mod tests {
         .is_none());
         // A comment activity carries neither update/approval/changes_requested.
         assert!(activity(r#"{"comment":{"id":1}}"#).is_none());
+    }
+
+    #[test]
+    fn activity_sort_orders_by_instant_across_mixed_offsets() {
+        // Bitbucket stamps in the actor's local offset, so string order and instant
+        // order disagree: "…T21:00:00-04:00" is 01:00Z the NEXT day, later than
+        // "…T23:00:00Z", yet it sorts first lexicographically.
+        let local_evening = "2026-07-03T21:00:00-04:00";
+        let utc_late = "2026-07-03T23:00:00Z";
+        assert!(local_evening < utc_late, "the string order is the trap");
+
+        let ev = |date: &str| ForgeTimelineEventOut::Approved {
+            actor: bb_actor(None),
+            date: date.to_string(),
+        };
+        let mut events = [ev(local_evening), ev(utc_late), ev("")];
+        events.sort_by_key(bb_timeline_instant);
+        let dates: Vec<&str> = events.iter().map(bb_timeline_date).collect();
+        // Undated first, then the true chronological order — the reverse of the
+        // strings for the dated pair.
+        assert_eq!(dates, vec!["", utc_late, local_evening]);
     }
 
     #[test]

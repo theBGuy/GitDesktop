@@ -48,7 +48,7 @@ import {
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import type { LockReason, MinimizeReason } from "@/lib/git/api";
-import { useActiveForgeGhHost } from "@/lib/git/host";
+import { useForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
   TRIAGE_ACCESS_ITEM_REASON,
@@ -236,8 +236,9 @@ export function RemoteIssueView({
     !!provider && provider !== "bitbucket",
     lens,
   );
-  // Feed-constant, so it's read once here rather than per event row.
-  const ghHost = useActiveForgeGhHost();
+  // Feed-constant, so it's read once here rather than per event row; the
+  // repo-path variant avoids the active-repo hook's second store subscription.
+  const ghHost = useForgeGhHost(repoPath);
   const toggleReactionMutation = useToggleReaction(
     repoPath,
     ["repo", repoPath, "issue", lens, number, "reactions"] as const,
@@ -657,10 +658,13 @@ export function RemoteIssueView({
           // `ForgeStatus.repo` is the ORIGIN slug, so a chip's same-repo verdict is
           // only trustworthy under the origin lens: off it, a ref living in the fork
           // matches the slug while the drill-in resolves against the upstream repo
-          // and lands on a different entity. Withholding the handler there renders
-          // every reference inert instead.
+          // and lands on a different entity. BOTH props gate on the lens — the
+          // handler so off-lens refs are inert, and selfRepo so they keep their
+          // explicit owner/name prefix instead of reading as this repo's number.
           onOpenRef={lens === "origin" ? openRef : undefined}
-          selfRepo={forge.data?.repo ?? undefined}
+          selfRepo={
+            lens === "origin" ? (forge.data?.repo ?? undefined) : undefined
+          }
         />
       ),
     });
