@@ -163,24 +163,34 @@ export const MODEL_SUGGESTIONS: Record<AiProviderId, string[]> = {
     "claude-opus-4.7",
     "claude-opus-4.6",
   ],
-  // opencode takes `provider/model`. These hosted models run keyless (no API key,
-  // cost $0) — handy defaults. With a configured provider, type e.g.
-  // `anthropic/claude-sonnet-4-6`; blank = opencode's own default.
+  // opencode takes `provider/model`. The `opencode/…` namespace is its own hosted
+  // catalog — what the CLI lists before any provider key is configured — and it
+  // rotates ids in and out within days, so these are pick-from hints rather than
+  // stable ids (blank = opencode's own default). Captured from `opencode models`
+  // (v1.18.18) on 2026-08-23. With a provider configured, type e.g.
+  // `anthropic/claude-sonnet-4-6`.
   "opencode-cli": [
-    "opencode/north-mini-code-free",
-    "opencode/deepseek-v4-flash-free",
+    "opencode/big-pickle",
+    "opencode/hy3-free",
     "opencode/mimo-v2.5-free",
+    "opencode/muse-spark-1.2-contributor-free",
     "opencode/nemotron-3-ultra-free",
+    "opencode/nemotron-3.5-lightning-free",
+    "opencode/x-preview-f-free",
   ],
 };
 
-/** CLI providers whose suggested model ids are plan-specific rather than
- *  universally valid: codex ids depend on the account's ChatGPT plan, so no
- *  single suggestion is a safe forced default. Switching to one leaves the model
- *  blank — the CLI's own account default, which always works — while the
- *  suggestions stay pick-from hints. (Contrast claude-cli `sonnet` / copilot
- *  `auto`, whose first suggestion is a universally-valid alias.) */
-const PROVIDERS_WITHOUT_DEFAULT_MODEL: readonly AiProviderId[] = ["codex-cli"];
+/** CLI providers whose suggested model ids aren't universally valid, so no single
+ *  suggestion is a safe forced default: codex ids depend on the account's ChatGPT
+ *  plan, and opencode's hosted catalog rotates ids in and out within days.
+ *  Switching to one leaves the model blank — the CLI's own account default, which
+ *  always works — while the suggestions stay pick-from hints. (Contrast claude-cli
+ *  `sonnet` / copilot `auto`, whose first suggestion is a universally-valid
+ *  alias.) */
+const PROVIDERS_WITHOUT_DEFAULT_MODEL: readonly AiProviderId[] = [
+  "codex-cli",
+  "opencode-cli",
+];
 
 /** The model id to pre-select when switching TO a provider with no remembered
  *  choice: its first suggestion, except providers whose suggestions are

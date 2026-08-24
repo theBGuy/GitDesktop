@@ -13,7 +13,6 @@ import {
   AgentPicker,
   ComposerOptions,
   ModelPicker,
-  modelsForAgent,
 } from "@/features/sessions/AgentPickers";
 import { AgentTranscript } from "@/features/sessions/AgentTranscript";
 import { selectSession } from "@/features/sessions/agentSelect";
@@ -200,7 +199,7 @@ export function PlanComposer({
                 setModel(m);
                 setModelAgent(agent);
               }}
-              models={modelsForAgent(agent)}
+              agent={agent}
             />
             <ComposerOptions effort={effort} onEffort={setEffort} />
             <div className="ml-auto flex items-center gap-2">

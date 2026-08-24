@@ -41,7 +41,6 @@ import {
   type Isolation,
   type IsolationNote,
   ModelPicker,
-  modelsForAgent,
   type RunMode,
 } from "./AgentPickers";
 import { EnsembleRunDialog } from "./EnsembleRunDialog";
@@ -257,7 +256,6 @@ export function SessionComposer({
   const model = session ? session.model : startModelForAgent;
   // Agent is fixed once a session exists; while starting, it's user-selectable.
   const agent = session ? session.agent : startAgent;
-  const models = modelsForAgent(agent);
   const onModel = session
     ? (m: string) => setModel(session.id, m)
     : (m: string) => {
@@ -973,7 +971,7 @@ export function SessionComposer({
                 />
               )}
               {(session || mode === "single") && (
-                <ModelPicker value={model} onChange={onModel} models={models} />
+                <ModelPicker value={model} onChange={onModel} agent={agent} />
               )}
               <ComposerOptions
                 effort={session || mode === "single" ? effort : undefined}

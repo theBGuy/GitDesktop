@@ -1,5 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { type UseQueryResult, useQuery } from "@tanstack/react-query";
 import { getSecret } from "@/lib/git/api";
+import { type AgentKind, kindProvider, listAgentModels } from "./agent";
 import { guardedFetch } from "./guarded-fetch";
 import { providerErrorMessage } from "./provider-error";
 import {
@@ -36,9 +37,10 @@ export interface AvailableModels {
   reason?: string;
   /** Which fallback route produced these suggestions. The four are not
    *  interchangeable to a user: no key saved yet, no base URL configured, the
-   *  request failed, or the provider listed nothing. A CLI provider has no live
-   *  catalog at all and lands on `empty`, so any consumer branching on `cause`
-   *  must handle the CLI case ahead of it. */
+   *  request failed, or the provider listed nothing. Among the CLI providers only
+   *  opencode has a catalog to list — the others reach `empty` without a request
+   *  having been made, so a consumer branching on `cause` must tell those apart
+   *  from a provider that genuinely listed nothing. */
   cause?: "no-key" | "no-base" | "failed" | "empty";
 }
 
@@ -218,9 +220,10 @@ async function fetchProviderModels(
     case "claude-cli":
     case "codex-cli":
     case "copilot-cli":
-    case "opencode-cli":
       // No live model list; the static MODEL_SUGGESTIONS aliases are used.
       return [];
+    case "opencode-cli":
+      return await listAgentModels("opencode", settings.cliPath);
   }
 }
 
@@ -244,6 +247,7 @@ export function useAvailableModels(
       settings.ollamaBaseUrl,
       settings.openaiCompatibleBaseUrl,
       allowedHosts ?? [],
+      settings.cliPath ?? null,
     ] as const,
     queryFn: async (): Promise<AvailableModels> => {
       try {
@@ -286,5 +290,43 @@ export function useAvailableModels(
     },
     enabled: opts?.enabled ?? true,
     staleTime: 5 * 60 * 1000,
+  });
+}
+
+/**
+ * Live model list for an agent CLI, for the session-side pickers, falling back
+ * to that CLI's static suggestions when it lists nothing or the probe fails.
+ * `opts.enabled` defers the probe until the user shows intent to pick a model.
+ *
+ * Deliberately carries no binary-path axis: sessions have no per-agent path
+ * override (every session start passes `binPath: null`), and the probe must
+ * target the binary the run will actually use.
+ */
+export function useAgentModels(
+  kind: AgentKind,
+  opts?: { enabled?: boolean },
+): UseQueryResult<AvailableModels> {
+  return useQuery({
+    queryKey: ["agent-models", kind] as const,
+    queryFn: async (): Promise<AvailableModels> => {
+      const fallback = MODEL_SUGGESTIONS[kindProvider(kind)];
+      try {
+        const models = await listAgentModels(kind);
+        if (models.length > 0) return { models, live: true };
+        return { models: fallback, live: false, cause: "empty" };
+      } catch (e) {
+        return {
+          models: fallback,
+          live: false,
+          reason: providerErrorMessage(e),
+          cause: "failed",
+        };
+      }
+    },
+    enabled: opts?.enabled ?? true,
+    staleTime: 5 * 60 * 1000,
+    // A refetch here spawns a process, not an HTTP GET — alt-tabbing back into
+    // the app must not re-run the CLI.
+    refetchOnWindowFocus: false,
   });
 }

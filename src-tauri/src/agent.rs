@@ -21,6 +21,9 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 pub(crate) const DETECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// A warm `opencode models` returns in ~1.5s, but a cold one waits on opencode's
+/// own catalog HTTP leg (10s timeout, two retries) before printing.
+const MODELS_TIMEOUT: Duration = Duration::from_secs(20);
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 /// Repo-aware (Tier 2) runs explore the tree with tools and take longer — a
 /// self-MCP review pulling the full diff routinely runs past ten minutes, so
@@ -106,6 +109,14 @@ impl AgentKind {
             AgentKind::Claude => Some(&["auth", "status"]),
             AgentKind::Codex => Some(&["login", "status"]),
             AgentKind::Copilot | AgentKind::Opencode => None,
+        }
+    }
+
+    /// argv for the CLI's own model-catalog listing; None = no such surface.
+    fn models_args(self) -> Option<&'static [&'static str]> {
+        match self {
+            AgentKind::Opencode => Some(&["models"]),
+            AgentKind::Claude | AgentKind::Codex | AgentKind::Copilot => None,
         }
     }
 
@@ -668,17 +679,21 @@ async fn resolve(kind: AgentKind, bin_path: Option<&str>) -> Option<PathBuf> {
 
 // --- detection -------------------------------------------------------------
 
-/// Runs a short command and returns (exit code, stdout+stderr).
-pub(crate) async fn run_capture(
+/// Runs a short command and returns (exit code, stdout, stderr) as separate
+/// streams — what a line parser needs, since a banner on stderr must not
+/// interleave into the data being parsed.
+pub(crate) async fn run_capture_parts(
     program: &Path,
     args: &[&str],
     timeout: Duration,
-) -> AppResult<(i32, String)> {
+    extra_env: &[(&str, String)],
+) -> AppResult<(i32, String, String)> {
     let mut cmd = Command::new(program);
     sanitize_child_env(&mut cmd);
     cmd.args(args)
         .env("NO_COLOR", "1")
         .env("CLICOLOR", "0")
+        .envs(extra_env.iter().map(|(k, v)| (*k, v.as_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -690,9 +705,22 @@ pub(crate) async fn run_capture(
         .await
         .map_err(|_| AppError::Timeout(timeout.as_secs()))?
         .map_err(AppError::Io)?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok((out.status.code().unwrap_or(-1), text))
+    Ok((
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    ))
+}
+
+/// Runs a short command and returns (exit code, stdout+stderr).
+pub(crate) async fn run_capture(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<(i32, String)> {
+    let (code, mut text, stderr) = run_capture_parts(program, args, timeout, &[]).await?;
+    text.push_str(&stderr);
+    Ok((code, text))
 }
 
 #[tauri::command]
@@ -728,6 +756,63 @@ pub async fn agent_detect(kind: AgentKind, bin_path: Option<String>) -> AppResul
         version,
         authed,
     })
+}
+
+/// Upper bound on ids handed to the (non-virtualized) model pickers; a
+/// credentialed opencode catalog measured 423, so this only bounds pathological
+/// output.
+const MODELS_LIMIT: usize = 2000;
+
+/// Picks model ids out of a catalog listing: one bare `provider/model` id per
+/// line, everything else dropped. The whitespace and control-character gates
+/// reject banners, warnings, `--verbose` JSON, and ANSI-wrapped ids from a
+/// wrapper that ignores `NO_COLOR`. Input order is the CLI's deliberate sort
+/// (opencode-own providers first), so it is preserved.
+fn parse_models_output(stdout: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in stdout.split('\n') {
+        let id = line.trim();
+        if id.is_empty()
+            || id.chars().any(|c| c.is_whitespace() || c < '\x20' || c == '\x7f')
+            || !id.contains('/')
+        {
+            continue;
+        }
+        if !out.iter().any(|seen| seen == id) {
+            out.push(id.to_string());
+        }
+        if out.len() == MODELS_LIMIT {
+            break;
+        }
+    }
+    out
+}
+
+/// Lists the model ids the CLI itself reports, for the model pickers. Kinds with
+/// no catalog surface answer with an empty list rather than an error, so a caller
+/// can ask about any agent unconditionally.
+#[tauri::command]
+pub async fn agent_models(kind: AgentKind, bin_path: Option<String>) -> AppResult<Vec<String>> {
+    let Some(args) = kind.models_args() else {
+        return Ok(Vec::new());
+    };
+    let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {
+        AppError::Command(format!(
+            "{} CLI not found. Install it or set its path in Settings.",
+            kind.label()
+        ))
+    })?;
+    let (code, stdout, stderr) = run_capture_parts(&binary, args, MODELS_TIMEOUT, &[]).await?;
+    if code != 0 {
+        let reason = stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{} models exited with code {code}", kind.label()));
+        return Err(AppError::Command(reason));
+    }
+    Ok(parse_models_output(&stdout))
 }
 
 // --- review ----------------------------------------------------------------
@@ -2231,10 +2316,16 @@ pub async fn agent_review(
 
     // opencode reads its MCP config from `OPENCODE_CONFIG` (no flag); the others carry
     // it in argv. Set the env only when we actually wrote an opencode config.
-    let extra_env: Vec<(&str, String)> = match (kind, &mcp_config_path) {
+    let mut extra_env: Vec<(&str, String)> = match (kind, &mcp_config_path) {
         (AgentKind::Opencode, Some(path)) => vec![("OPENCODE_CONFIG", path.clone())],
         _ => Vec::new(),
     };
+    if kind == AgentKind::Opencode {
+        // Every opencode invocation otherwise forks a detached catalog refresh,
+        // which on an app-managed run is stray-grandchild churn; the cache is
+        // refreshed by the `agent_models` probe when a user opens a model picker.
+        extra_env.push(("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()));
+    }
 
     // Codex always explores the repo, so it gets the longer agentic budget too — and
     // a self-MCP review is agentic regardless of `repo_aware` (the agent pulls the
@@ -2652,6 +2743,9 @@ pub async fn agent_session(
                 }
                 _ => Vec::new(),
             };
+        if kind == AgentKind::Opencode {
+            container_env.push(("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()));
+        }
         if opencode_research {
             // Enable opencode's Exa-backed websearch tool (webfetch works regardless).
             container_env.push(("OPENCODE_ENABLE_EXA", "1".to_string()));
@@ -2701,6 +2795,9 @@ pub async fn agent_session(
         (AgentKind::Opencode, Some(path)) => vec![("OPENCODE_CONFIG", path.clone())],
         _ => Vec::new(),
     };
+    if kind == AgentKind::Opencode {
+        host_extra_env.push(("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()));
+    }
     if opencode_research {
         // Enable opencode's Exa-backed websearch tool (webfetch works regardless).
         host_extra_env.push(("OPENCODE_ENABLE_EXA", "1".to_string()));
@@ -2947,6 +3044,101 @@ mod tests {
     const TEXT_B: &str = r#"{"type":"text","sessionID":"ses_abc","part":{"id":"p2","type":"text","text":"Second."}}"#;
     const FINISH_TOOLS: &str = r#"{"type":"step_finish","sessionID":"ses_abc","part":{"type":"step-finish","reason":"tool-calls"}}"#;
     const FINISH_STOP: &str = r#"{"type":"step_finish","sessionID":"ses_abc","part":{"type":"step-finish","reason":"stop"}}"#;
+
+    /// Real `opencode models` stdout (captured 2026-08-23, v1.18.18, uncredentialed;
+    /// the free catalog rotates within days). rustc normalizes CRLF to LF inside
+    /// string literals, so this const is LF whatever autocrlf checked the file out
+    /// as — which is what lets the cases below vary the EOLs from a known baseline.
+    const OPENCODE_MODELS_OUTPUT: &str = "opencode/big-pickle
+opencode/hy3-free
+opencode/mimo-v2.5-free
+opencode/muse-spark-1.2-contributor-free
+opencode/nemotron-3-ultra-free
+opencode/nemotron-3.5-lightning-free
+opencode/x-preview-f-free
+";
+
+    const OPENCODE_MODEL_IDS: [&str; 7] = [
+        "opencode/big-pickle",
+        "opencode/hy3-free",
+        "opencode/mimo-v2.5-free",
+        "opencode/muse-spark-1.2-contributor-free",
+        "opencode/nemotron-3-ultra-free",
+        "opencode/nemotron-3.5-lightning-free",
+        "opencode/x-preview-f-free",
+    ];
+
+    #[test]
+    fn models_output_parses_to_the_cli_ids_in_order() {
+        assert_eq!(
+            parse_models_output(OPENCODE_MODELS_OUTPUT),
+            OPENCODE_MODEL_IDS
+        );
+    }
+
+    #[test]
+    fn models_output_parses_identically_with_crlf_endings() {
+        // Pins the lexer's CRLF normalization: were the fixture to reach runtime
+        // with its own CR, this would build `\r\r\n` and the real CRLF case would
+        // go untested on a CRLF checkout.
+        assert!(!OPENCODE_MODELS_OUTPUT.contains('\r'));
+        let crlf = OPENCODE_MODELS_OUTPUT.replace('\n', "\r\n");
+        assert_eq!(parse_models_output(&crlf), OPENCODE_MODEL_IDS);
+    }
+
+    #[test]
+    fn models_output_parses_identically_without_a_trailing_newline() {
+        let unterminated = OPENCODE_MODELS_OUTPUT.trim_end_matches('\n');
+        assert!(!unterminated.ends_with(['\n', '\r']));
+        assert_eq!(parse_models_output(unterminated), OPENCODE_MODEL_IDS);
+    }
+
+    #[test]
+    fn models_output_drops_noise_and_keeps_its_neighbours() {
+        // Each reject carries a `/` except the last, so the warning and JSON lines
+        // are rejected by the whitespace gate and the wrapped id by the control gate
+        // — one line per branch rather than three that all fail the same check.
+        let out = concat!(
+            "opencode/keep-one\n",
+            "Warning: 2 providers unavailable, showing opencode/free models only\n",
+            r#"{"level":"debug","msg":"refreshed opencode/catalog"}"#,
+            "\n",
+            "\x1b[32mopencode/ansi-wrapped\x1b[0m\n",
+            "not-an-id\n",
+            "opencode/keep-two\n",
+        );
+        assert_eq!(
+            parse_models_output(out),
+            ["opencode/keep-one", "opencode/keep-two"]
+        );
+    }
+
+    #[test]
+    fn models_output_is_empty_for_empty_input() {
+        assert!(parse_models_output("").is_empty());
+        assert!(parse_models_output("\n\n  \n").is_empty());
+    }
+
+    #[test]
+    fn models_output_dedupes_to_the_first_occurrence() {
+        assert_eq!(
+            parse_models_output("b/two\na/one\nb/two\na/one\n"),
+            ["b/two", "a/one"]
+        );
+    }
+
+    #[test]
+    fn models_output_truncates_at_the_cap() {
+        let mut input = String::new();
+        for i in 0..(MODELS_LIMIT + 500) {
+            input.push_str(&format!("p/m{i}\n"));
+        }
+        let ids = parse_models_output(&input);
+        let last = format!("p/m{}", MODELS_LIMIT - 1);
+        assert_eq!(ids.len(), MODELS_LIMIT);
+        assert_eq!(ids.first().map(String::as_str), Some("p/m0"));
+        assert_eq!(ids.last().map(String::as_str), Some(last.as_str()));
+    }
 
     #[test]
     fn cancel_id_gate_accepts_uuids_and_rejects_the_rest() {

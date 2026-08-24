@@ -896,7 +896,7 @@ review via its subscription login. The full list is under
   an API key), and the **Claude Code / Codex / GitHub Copilot / opencode
   CLIs** (keyless, via your subscription, or opencode's free hosted models).
   Separate models for generation vs. review; live model lists in a
-  searchable picker.
+  searchable picker (opencode's CLI catalog included).
 - **Custom and LAN servers**: point Ollama or an OpenAI-compatible endpoint
   at a box on your network, not just `localhost`. Non-built-in hosts must be
   added to the **Allowed hosts** list (Settings → AI; one-click *Allow

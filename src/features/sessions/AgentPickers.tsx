@@ -6,7 +6,7 @@ import {
   UsersThreeIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
-import { type ReactNode, useId, useRef } from "react";
+import { type ReactNode, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -30,7 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { type AgentKind, isAgentKind } from "@/lib/ai/agent";
-import { MODEL_SUGGESTIONS } from "@/lib/ai/providers";
+import { useAgentModels } from "@/lib/ai/models";
 import type { McpServer } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
@@ -40,11 +40,6 @@ import { cn } from "@/lib/utils";
 // their own module so those surfaces don't import each other (the composer imports
 // the ensemble dialog, which needs the pickers — a cycle if they lived together).
 
-const CLAUDE_MODELS = MODEL_SUGGESTIONS["claude-cli"];
-const CODEX_MODELS = MODEL_SUGGESTIONS["codex-cli"];
-const COPILOT_MODELS = MODEL_SUGGESTIONS["copilot-cli"];
-const OPENCODE_MODELS = MODEL_SUGGESTIONS["opencode-cli"];
-
 /** Compact display labels for each agent CLI — for list rows, headers, badges. */
 export const AGENT_LABELS: Record<AgentKind, string> = {
   claude: "Claude",
@@ -53,32 +48,33 @@ export const AGENT_LABELS: Record<AgentKind, string> = {
   opencode: "opencode",
 };
 
-/** The suggested model list for an agent (each CLI exposes different models). */
-export function modelsForAgent(agent: AgentKind): string[] {
-  switch (agent) {
-    case "codex":
-      return CODEX_MODELS;
-    case "copilot":
-      return COPILOT_MODELS;
-    case "opencode":
-      return OPENCODE_MODELS;
-    default:
-      return CLAUDE_MODELS;
-  }
-}
-
-/** The model for a run: the agent's suggestions are searchable, and any other id
- *  typed here reaches the CLI verbatim (custom providers publish ids no static
- *  list can carry). `""` is the account default and shows the placeholder. */
+/** The model for a run: the agent's models are searchable — its live catalog
+ *  where the CLI can list one (opencode), else that CLI's static suggestions —
+ *  and any other id typed here reaches the CLI verbatim (custom providers publish
+ *  ids no static list can carry). `""` is the account default and shows the
+ *  placeholder. */
 export function ModelPicker({
   value,
   onChange,
-  models,
+  agent,
 }: {
   value: string;
   onChange: (m: string) => void;
-  models: string[];
+  agent: AgentKind;
 }) {
+  // Listing a CLI's catalog spawns it, so the probe waits for intent to pick a
+  // model — sticky, so the list stays put for the rest of the picker's life.
+  const [wanted, setWanted] = useState(false);
+  // Agent-tab-scoped by design: every call site renders under the agent tab's
+  // <Activity>, and a hidden subtree still fetches.
+  const agentTabShowing = useUiStore((s) => s.repoTab === "agent");
+  const available = useAgentModels(agent, {
+    enabled: wanted && agentTabShowing,
+  });
+  // Verbatim: the CLI orders its own catalog (its providers first), and the
+  // fallback is that CLI's static suggestions.
+  const models = available.data?.models ?? [];
+
   return (
     <Combobox
       items={models}
@@ -93,6 +89,9 @@ export function ModelPicker({
         if (model) onChange(model);
       }}
       openOnInputClick
+      onOpenChange={(open) => {
+        if (open) setWanted(true);
+      }}
     >
       {/* Composer-toolbar weight: quiet until focus, matching the sibling
           Select-based pickers on the same row. */}
@@ -103,12 +102,22 @@ export function ModelPicker({
         // an input has no truncation tooltip of its own.
         title={value || undefined}
         className="h-7 w-auto max-w-44 min-w-28 border-transparent text-muted-foreground hover:bg-muted dark:bg-transparent"
+        onFocus={() => setWanted(true)}
       />
       {/* The input is narrow, so the default `w-(--anchor-width)` popup clips
           long ids (e.g. `opencode/…`). Size to content, capped on-screen. */}
       <ComboboxContent className="w-fit max-w-sm">
         <ComboboxEmpty>
-          No matching models — the typed id is used as-is
+          {(() => {
+            switch (true) {
+              // `isFetching`, never `isPending` — a catalog that was never
+              // requested must not read as loading.
+              case available.isFetching:
+                return "Loading models…";
+              default:
+                return "No matching models — the typed id is used as-is";
+            }
+          })()}
         </ComboboxEmpty>
         {/* Render FUNCTION, not static rows: only this form maps the store's
             filtered items, so static children would never narrow as you type. */}

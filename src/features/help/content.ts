@@ -1823,8 +1823,9 @@ to an implementing session**.
 opens on your **Settings → AI** default agent), **model**, and **reasoning effort**
 (Low / Medium / High / Max), and send. The model box (the same one on research and plan
 runs) filters its suggestions as you type and takes any model id you type, so a custom
-provider's models work without being on the list; leave it empty for your account's
-default. The agent works in an **isolated git worktree**
+provider's models work without being on the list; for opencode it lists your CLI's full
+catalog (custom providers included). Leave it empty for your account's default. The
+agent works in an **isolated git worktree**
 — a throwaway branch (\`gd/session/…\`) that never touches your working tree — and
 commits a **checkpoint** each turn. It works in the open: the conversation shows a
 **step-by-step transcript** of each file it reads, edits, searches, and command it

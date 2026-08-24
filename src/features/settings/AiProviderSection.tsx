@@ -128,7 +128,13 @@ function ModelPicker({
   // cause) — a saved-but-rejected key must never be told to save a key.
   const hint = ((): string => {
     switch (true) {
-      case isCli:
+      // Derived, not a provider literal: a CLI with a live catalog (opencode)
+      // falls through to the loading/live branches like an HTTP provider — and
+      // a failed probe falls through so its reason surfaces.
+      case isCli &&
+        catalog?.live !== true &&
+        catalog?.cause !== "failed" &&
+        !availableModels.isPending:
         return "Model passed to the CLI — leave blank for its default";
       case availableModels.isPending:
         return "Loading models…";

@@ -11,12 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import type { AgentKind } from "@/lib/ai/agent";
 import { formatUsd, type RunCostEstimate } from "@/lib/ai/cost";
-import {
-  AgentPicker,
-  EffortPicker,
-  ModelPicker,
-  modelsForAgent,
-} from "./AgentPickers";
+import { AgentPicker, EffortPicker, ModelPicker } from "./AgentPickers";
 
 /** One arm of a best-of-N run: which agent/model/effort attacks the task. */
 export interface EnsembleArm {
@@ -133,7 +128,7 @@ function EnsembleArms({
             <ModelPicker
               value={arm.model}
               onChange={(model) => patchArm(i, { model })}
-              models={modelsForAgent(arm.agent)}
+              agent={arm.agent}
             />
             <EffortPicker
               value={arm.effort}

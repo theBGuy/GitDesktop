@@ -650,6 +650,7 @@ pub fn run() {
             hooks::git_hook_delete,
             hooks::git_run_hook_manager,
             agent::agent_detect,
+            agent::agent_models,
             health::system_health,
             agent::agent_review,
             agent::agent_review_cancel,

@@ -23,7 +23,6 @@ import {
   AgentPicker,
   ComposerOptions,
   ModelPicker,
-  modelsForAgent,
 } from "@/features/sessions/AgentPickers";
 import { AgentTranscript } from "@/features/sessions/AgentTranscript";
 import {
@@ -292,7 +291,7 @@ export function ResearchComposer({
                 setModel(m);
                 setModelAgent(agent);
               }}
-              models={modelsForAgent(agent)}
+              agent={agent}
             />
             <ComposerOptions effort={effort} onEffort={setEffort} />
             <div className="ml-auto flex items-center gap-2">
@@ -679,11 +678,7 @@ function ResearchFollowUp({ run }: { run: ResearchRun }) {
         >
           {AGENT_LABEL[run.agent]}
         </span>
-        <ModelPicker
-          value={model}
-          onChange={setModel}
-          models={modelsForAgent(run.agent)}
-        />
+        <ModelPicker value={model} onChange={setModel} agent={run.agent} />
         <span className="hidden truncate text-[11px] text-muted-foreground sm:inline">
           ↵ send · ⇧↵ newline
         </span>

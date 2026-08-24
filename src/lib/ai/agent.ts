@@ -165,6 +165,21 @@ export function providerKind(provider: AiProviderId): AgentKind | null {
   return null;
 }
 
+/** The provider id each agent kind belongs to — a total map, so a new kind can't
+ *  silently lose its provider. */
+const KIND_PROVIDERS: Record<AgentKind, AiProviderId> = {
+  claude: "claude-cli",
+  codex: "codex-cli",
+  copilot: "copilot-cli",
+  opencode: "opencode-cli",
+};
+
+/** The inverse of {@link providerKind}: the review provider id an agent kind is
+ *  configured under. */
+export function kindProvider(kind: AgentKind): AiProviderId {
+  return KIND_PROVIDERS[kind];
+}
+
 /** The agent a NEW session, plan, or research run starts on: the explicit
  *  Settings → AI default when set, else the main AI provider when it's an
  *  agent CLI, else Claude — including while settings are still loading. */
@@ -183,6 +198,11 @@ export const detectAgentCli = (kind: AgentKind, path?: string) =>
     kind,
     binPath: path?.trim() || null,
   });
+
+/** The model ids the CLI itself lists, for the model pickers' live catalog.
+ *  Empty for the kinds whose CLI exposes no catalog. */
+export const listAgentModels = (kind: AgentKind, path?: string) =>
+  invoke<string[]>("agent_models", { kind, binPath: path?.trim() || null });
 
 export interface AgentReviewArgs {
   kind: AgentKind;

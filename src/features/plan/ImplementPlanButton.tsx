@@ -6,7 +6,6 @@ import {
   AgentPicker,
   EffortPicker,
   ModelPicker,
-  modelsForAgent,
 } from "@/features/sessions/AgentPickers";
 import { clearAgentSelection } from "@/features/sessions/agentSelect";
 import { useSessionsStore } from "@/features/sessions/store";
@@ -73,11 +72,7 @@ export function ImplementPlanButton({ run }: { run: PlanRun }) {
                   setModel(""); // model lists differ between agents
                 }}
               />
-              <ModelPicker
-                value={model}
-                onChange={setModel}
-                models={modelsForAgent(agent)}
-              />
+              <ModelPicker value={model} onChange={setModel} agent={agent} />
               <EffortPicker value={effort} onChange={setEffort} />
             </div>
             <Button size="sm" className="mt-2.5 w-full" onClick={onStart}>
