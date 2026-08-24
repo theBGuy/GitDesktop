@@ -1045,6 +1045,10 @@ pub async fn open_with_program(program: String, path: String) -> AppResult<()> {
     #[cfg(target_os = "macos")]
     if is_app_bundle(&program) {
         let mut c = std::process::Command::new("open");
+        // `open` hands off to LaunchServices, which starts the app in a fresh
+        // session that doesn't inherit our environment, so the scrub only affects
+        // the `open` child itself (belt-and-braces) and no `ELECTRON_RUN_AS_NODE`
+        // removal is needed here.
         crate::agent::sanitize_child_env(&mut c);
         c.args(["-a", program.as_str(), path.as_str()])
             .spawn()
@@ -1052,9 +1056,10 @@ pub async fn open_with_program(program: String, path: String) -> AppResult<()> {
         return Ok(());
     }
     // Spawn a `.cmd`/`.bat` shim (e.g. VS Code's `code.cmd`) DIRECTLY, not via
-    // `cmd /C`: std then applies its batch-file argument escaping (CVE-2024-24576),
-    // whereas `cmd /C <shim> <path>` runs the untrusted `path` unquoted, so a
-    // space-free filename like `a&calc&b` from a cloned repo injects commands.
+    // `cmd /C`: std (≥1.77.2) then applies its batch-file argument escaping
+    // (CVE-2024-24576), whereas `cmd /C <shim> <path>` runs the untrusted `path`
+    // unquoted, so a space-free filename like `a&calc&b` from a cloned repo injects
+    // commands. A toolchain pin below that floor would silently reopen this.
     let mut cmd = std::process::Command::new(&program);
     crate::agent::sanitize_child_env(&mut cmd);
     cmd.arg(&path);
@@ -1065,10 +1070,7 @@ pub async fn open_with_program(program: String, path: String) -> AppResult<()> {
     // The `.cmd`/`.bat` extension only means anything to Windows, which spawns a
     // transient cmd.exe console to run the shim — hide it below.
     #[cfg(windows)]
-    let shim = {
-        let lower = program.to_lowercase();
-        lower.ends_with(".cmd") || lower.ends_with(".bat")
-    };
+    let shim = is_batch_file(&program);
     #[cfg(windows)]
     if shim {
         use std::os::windows::process::CommandExt;

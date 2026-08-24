@@ -4054,8 +4054,8 @@ opencode/x-preview-f-free
 
     #[test]
     fn opencode_session_dir_is_the_container_mount_point() {
-        // In a container the worktree is bind-mounted at `/workspace`; the host path
-        // names nothing inside, so the call site passes the mount point through.
+        // The builder forwards whatever `dir` it's handed verbatim into `--dir`; the
+        // container-vs-host choice is `run_dir`'s job, asserted separately.
         let args = opencode_session_args("m", "", false, "", true, true, "/workspace");
         assert_eq!(flag_value(&args, "--dir"), Some("/workspace"));
     }
