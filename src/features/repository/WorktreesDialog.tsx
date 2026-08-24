@@ -12,7 +12,6 @@ import {
   TrashIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
-import type { MouseEvent } from "react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -41,6 +40,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { normPath } from "@/lib/git/path";
 import {
@@ -66,18 +66,6 @@ import { cn } from "@/lib/utils";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
 import { PromoteWorktreeDialog } from "./PromoteWorktreeDialog";
 import { useOpenWorktree } from "./useOpenRepoByPath";
-
-/** Sets a hover title only when a Select item is actually clipped. Base UI pins
- *  the popup to the trigger width and clips `overflow-x`, and the inner item text
- *  is `whitespace-nowrap`, so the truncation lives on the ITEM element — measure
- *  `currentTarget`, not an inner span (a span-level check never fires). */
-const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
-  const el = e.currentTarget;
-  // Clear by REMOVING the attribute — an empty `title` suppresses a titled
-  // ancestor's tooltip (the row button's) over this element.
-  if (el.scrollWidth > el.clientWidth) el.title = value;
-  else el.removeAttribute("title");
-};
 
 /**
  * The user-facing Git worktree manager. Lists the repo's worktrees (agent-session
@@ -867,6 +855,10 @@ function CreateWorktree({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                {/* clipTitle rides the SelectItem, not an inner span: Base UI
+                    pins the popup to the trigger width and clips `overflow-x`,
+                    and the item text is `whitespace-nowrap`, so the truncation
+                    lives on the ITEM — a span-level check never fires. */}
                 {currentBranch &&
                   !branches.some((b) => b.name === currentBranch) && (
                     <SelectItem

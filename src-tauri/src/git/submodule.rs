@@ -320,7 +320,7 @@ pub(crate) async fn git_submodule_add_core(
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
     crate::git::ops::refuse_mid_op_for(&repo_path, "add a submodule").await?;
-    refuse_unstaged_gitmodules(&repo_path).await?;
+    refuse_unsettled_gitmodules(&repo_path).await?;
     run_git(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
     Ok(())
 }
@@ -357,7 +357,7 @@ pub(crate) async fn git_submodule_remove_core(
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
     crate::git::ops::refuse_mid_op_for(&repo_path, "remove the submodule").await?;
-    refuse_unstaged_gitmodules(&repo_path).await?;
+    refuse_unsettled_gitmodules(&repo_path).await?;
 
     // Resolve the section name before `git rm` edits `.gitmodules` out from under
     // it — the module data directory is keyed on the name, not the path. The
@@ -492,7 +492,7 @@ pub(crate) async fn git_submodule_set_url_core(
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
     crate::git::ops::refuse_mid_op_for(&repo_path, "change the submodule URL").await?;
-    refuse_unstaged_gitmodules(&repo_path).await?;
+    refuse_unsettled_gitmodules(&repo_path).await?;
 
     // A plain path, not a pathspec: `set-url` matches the `.gitmodules` entry by
     // its literal `path` value, which `:(literal)` magic would never equal.
@@ -532,7 +532,7 @@ pub(crate) async fn git_submodule_set_branch_core(
     let lock = state.repo_lock(&repo_path).await;
     let _guard = lock.lock().await;
     crate::git::ops::refuse_mid_op_for(&repo_path, "change the submodule branch").await?;
-    refuse_unstaged_gitmodules(&repo_path).await?;
+    refuse_unsettled_gitmodules(&repo_path).await?;
 
     let mut args = vec!["submodule", "set-branch"];
     match branch.as_deref() {
@@ -550,18 +550,49 @@ pub(crate) async fn git_submodule_set_branch_core(
 /// with or without `-f` — and `deinit -f` succeeds first, so the force path would
 /// strand a cleared worktree with nothing staged — and `add` (which stages the whole
 /// worktree file itself) and [`stage_gitmodules`] would otherwise sweep the user's
-/// unrelated edits into the index. `:/` costs nothing and anchors at the repo root,
-/// but does not widen the module's contract — see [`list_submodules`].
-async fn refuse_unstaged_gitmodules(repo_path: &str) -> AppResult<()> {
+/// unrelated edits, tracked or not, into the index. `:/` costs nothing and anchors at
+/// the repo root, but does not widen the module's contract — see [`list_submodules`].
+async fn refuse_unsettled_gitmodules(repo_path: &str) -> AppResult<()> {
+    // `status`, not `diff`: diff compares worktree to index, so an UNTRACKED
+    // `.gitmodules` has no index entry and reads as clean — while `submodule add`
+    // happily stages its pre-existing content (measured, git 2.51.1).
+    // `--untracked-files=normal` is explicit because `status.showUntrackedFiles=no`
+    // otherwise suppresses the `??` line and silently disarms that arm (measured).
     let out = run_git(
         Some(repo_path),
-        &["diff", "--name-only", "--", ":/.gitmodules"],
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--",
+            ":/.gitmodules",
+        ],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if !out.stdout_lossy().trim().is_empty() {
+    // Porcelain columns are `XY <path>`: X the index, Y the WORKTREE. Any non-space
+    // Y is unsettled (` M`, `??`, ` D`, `MM`); staged-only (`M `, `A `, `D `) means
+    // worktree == index, which is the state git's own staging check accepts.
+    let stdout = out.stdout_lossy();
+    let mut unsettled = false;
+    let mut untracked = false;
+    for line in stdout.lines() {
+        match line.as_bytes().get(1) {
+            Some(b' ') | None => continue,
+            Some(_) => {
+                unsettled = true;
+                untracked |= line.starts_with("??");
+            }
+        }
+    }
+    if unsettled {
         return Err(AppError::InvalidArgument(
-            "Unstaged changes to .gitmodules — stage or discard them first.".into(),
+            if untracked {
+                ".gitmodules isn't tracked yet — stage it or remove it first."
+            } else {
+                "Unstaged changes to .gitmodules — stage or discard them first."
+            }
+            .into(),
         ));
     }
     Ok(())
@@ -1019,6 +1050,69 @@ mod tests {
         assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
         assert!(!exists(&host, "libs/dep2"), "nothing was cloned");
         assert_eq!(git(&host, &["status", "--porcelain"]).await, before);
+    }
+
+    /// An UNTRACKED `.gitmodules` has no index entry, so `git diff` reads it as
+    /// clean while `submodule add` stages its pre-existing content along with the
+    /// new section — the arm a diff-based probe cannot see.
+    #[tokio::test]
+    async fn add_refuses_untracked_gitmodules() {
+        allow_file_submodules();
+        let dir = temp("add-untracked");
+        seed_repo(dir.path(), "dep").await;
+        let host = seed_repo(dir.path(), "host").await;
+        let gitmodules = dir.path().join("host/.gitmodules");
+        let sentinel = "[core]\n\tjunk = 1\n";
+        std::fs::write(&gitmodules, sentinel).unwrap();
+        assert!(
+            git(&host, &["status", "--porcelain"]).await.contains("?? .gitmodules"),
+            "fixture must start untracked"
+        );
+
+        let err = git_submodule_add_core(
+            &AppState::default(),
+            host.clone(),
+            "../dep".into(),
+            Some("libs/dep".into()),
+            None,
+        )
+        .await
+        .expect_err("an untracked .gitmodules must be refused");
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        assert!(!exists(&host, "libs/dep"), "nothing was cloned");
+        let status = git(&host, &["status", "--porcelain"]).await;
+        assert!(status.contains("?? .gitmodules"), "still untracked: {status}");
+        assert_eq!(
+            std::fs::read_to_string(&gitmodules).unwrap(),
+            sentinel,
+            "content byte-identical"
+        );
+    }
+
+    /// The allow side: staged-only means worktree == index, which is exactly what
+    /// git's own staging check accepts — the guard must not refuse it.
+    #[tokio::test]
+    async fn writers_accept_a_staged_only_gitmodules() {
+        let (dir, host, _dep) = host_with_submodule("staged-only").await;
+        let gitmodules = dir.path().join("host/.gitmodules");
+        let original = std::fs::read_to_string(&gitmodules).unwrap();
+        std::fs::write(&gitmodules, format!("{original}\n[core]\n\tjunk = 1\n")).unwrap();
+        git(&host, &["add", "--", ".gitmodules"]).await;
+        let status = git(&host, &["status", "--porcelain"]).await;
+        assert!(status.contains("M  .gitmodules"), "fixture staged-only: {status}");
+
+        git_submodule_set_branch_core(
+            &AppState::default(),
+            host.clone(),
+            "libs/dep".into(),
+            Some("release".into()),
+        )
+        .await
+        .expect("staged-only .gitmodules must be accepted");
+        assert_eq!(
+            list_submodules(&host).await.unwrap()[0].branch.as_deref(),
+            Some("release")
+        );
     }
 
     /// The fourth `.gitmodules` writer gets the same guard as add/remove/set_url.

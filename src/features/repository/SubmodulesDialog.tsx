@@ -8,8 +8,8 @@ import {
   PlusIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
-import type { ComponentProps, MouseEvent } from "react";
-import { useEffect, useState } from "react";
+import type { ComponentProps } from "react";
+import { useLayoutEffect, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +32,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { nameFromUrl } from "@/features/welcome/clone-utils";
+import { clipTitle } from "@/lib/clip-title";
 import { validateRepo } from "@/lib/git/api";
 import {
   useAddSubmodule,
@@ -76,18 +77,11 @@ const ALL = "";
 
 const BUSY_REASON = "An operation is in progress";
 
+const ADDING_REASON = "Adding the submodule…";
+
 /** A gitlink with no `.gitmodules` entry has no URL to edit and nowhere to
  *  record a branch, so both edits would fail in git. */
 const NO_ENTRY_REASON = "no .gitmodules entry";
-
-/** Sets a hover title only when the line is actually clipped. Clears the
- *  attribute rather than blanking it: an empty `title` states that the
- *  ancestor's does not apply, which would kill the row button's own tooltip. */
-const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
-  const el = e.currentTarget;
-  if (el.scrollWidth > el.clientWidth) el.title = value;
-  else el.removeAttribute("title");
-};
 
 /** The submodule's folder on disk. Its path is repo-root-relative with forward
  *  slashes, which Windows accepts mixed with the repo path's backslashes. */
@@ -117,10 +111,15 @@ export function SubmodulesDialog({
   initialMode?: "list" | "add";
 }) {
   const [mode, setMode] = useState<"list" | "add">(initialMode);
+  // Owned here, not in the form: the flag has to outlive AddSubmodule so the Esc
+  // arm below and the form's own exit affordances read one truth, including
+  // across a close and reopen while the clone is still running.
+  const add = useAddSubmodule(repoPath);
 
   // Re-seed on every open, and when the caller re-requests a mode while already
-  // open (the add action fired from the palette over an open list).
-  useEffect(() => {
+  // open (the add action fired from the palette over an open list). Layout
+  // effect, so a reopen never paints one frame of the mode it closed on.
+  useLayoutEffect(() => {
     if (open) setMode(initialMode);
   }, [open, initialMode]);
 
@@ -138,8 +137,16 @@ export function SubmodulesDialog({
   const handleOpenChange: NonNullable<
     ComponentProps<typeof Dialog>["onOpenChange"]
   > = (next, details) => {
-    // Esc in the add form backs out to the list rather than closing the manager.
-    if (!next && mode === "add" && details.reason === "escape-key") {
+    // Esc in the add form backs out to the list rather than closing the manager
+    // — but not mid-clone, where every other exit affordance is disabled and
+    // leaving the form for a sibling one would strand the running add. Escape
+    // then closes the whole manager, which the openRef guard already handles.
+    if (
+      !next &&
+      mode === "add" &&
+      !add.isPending &&
+      details.reason === "escape-key"
+    ) {
       details.cancel();
       changeMode("list");
       return;
@@ -152,7 +159,7 @@ export function SubmodulesDialog({
       <DialogContent className="sm:max-w-lg">
         {mode === "add" ? (
           <AddSubmodule
-            repoPath={repoPath}
+            add={add}
             onCancel={() => changeMode("list")}
             onAdded={() => changeMode("list")}
           />
@@ -583,15 +590,15 @@ function SubmoduleRow({
 
 /** Add mode: the add-a-submodule form this dialog swaps to. */
 function AddSubmodule({
-  repoPath,
+  add,
   onCancel,
   onAdded,
 }: {
-  repoPath: string;
+  /** Owned by the parent so its pending state outlives this form. */
+  add: ReturnType<typeof useAddSubmodule>;
   onCancel: () => void;
   onAdded: () => void;
 }) {
-  const add = useAddSubmodule(repoPath);
   const [url, setUrl] = useState("");
   const [path, setPath] = useState("");
   const [branch, setBranch] = useState("");
@@ -619,14 +626,18 @@ function AddSubmodule({
     <>
       <DialogHeader>
         <div className="flex items-center gap-2">
-          <Button
+          {/* Off mid-clone, like Cancel and the Esc arm: leaving for a sibling
+              form would strand a running add against a path this form owns. */}
+          <DisabledReasonButton
             variant="ghost"
             size="icon-sm"
+            disabled={add.isPending}
+            reason={ADDING_REASON}
             onClick={onCancel}
             aria-label="Back to submodules"
           >
             <CaretLeftIcon />
-          </Button>
+          </DisabledReasonButton>
           <DialogTitle>Add submodule</DialogTitle>
         </div>
         <DialogDescription>
@@ -714,6 +725,18 @@ function EditSubmoduleUrlDialog({
 
   const trimmed = url.trim();
   const unchanged = trimmed === (submodule?.url ?? "");
+  // Ranked so the reason names the term that actually holds Save right now — an
+  // in-flight write outranks the field state it was started from.
+  const saveReason = (() => {
+    switch (true) {
+      case setUrl.isPending:
+        return "Saving…";
+      case !trimmed:
+        return "Enter a URL";
+      default:
+        return "No changes to save";
+    }
+  })();
 
   // Awaited: this dialog is remounted by a `key` flip and unmounts on close, and
   // per-call mutation callbacks don't survive that — the outcome would be lost.
@@ -770,7 +793,7 @@ function EditSubmoduleUrlDialog({
           </Button>
           <DisabledReasonButton
             disabled={!trimmed || unchanged || setUrl.isPending}
-            reason={!trimmed ? "Enter a URL" : "No changes to save"}
+            reason={saveReason}
             onClick={handleSave}
           >
             {setUrl.isPending && <Spinner data-icon="inline-start" />}
@@ -797,6 +820,16 @@ function SetSubmoduleBranchDialog({
 
   const next = branch.trim() || null;
   const unchanged = next === (submodule?.branch ?? null);
+  // An empty field is a valid value here (track the remote default), so the only
+  // terms are the in-flight write and an unchanged field.
+  const saveReason = (() => {
+    switch (true) {
+      case setBranch.isPending:
+        return "Saving…";
+      default:
+        return "No changes to save";
+    }
+  })();
 
   async function handleSave() {
     if (!submodule || unchanged || setBranch.isPending) return;
@@ -856,7 +889,7 @@ function SetSubmoduleBranchDialog({
           </Button>
           <DisabledReasonButton
             disabled={unchanged || setBranch.isPending}
-            reason="No changes to save"
+            reason={saveReason}
             onClick={handleSave}
           >
             {setBranch.isPending && <Spinner data-icon="inline-start" />}
