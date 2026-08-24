@@ -13,7 +13,7 @@ import {
  * palette action while a composer is mounted, so it is offered exactly where
  * there is a box to collapse.
  *
- * @param onExpand run when the palette action expands the box
+ * @param onExpand run when the box is expanded
  * @param onCollapse run when it collapses. Both directions re-home focus, but to
  *   different controls, so the hook delegates rather than picking one.
  */

@@ -202,9 +202,9 @@ export function useMentionCandidates({
 
   const onActive = useCallback(() => setActive(true), []);
 
-  // The data/loading/error triples below are the whole of what `query` closes
-  // over — never the query result objects, which re-identify every render and
-  // would churn this source's identity downstream. Both list queries also leave
+  // The data/loading/error triples below are the only query state `query`
+  // closes over — never the query result objects, which re-identify every
+  // render and would churn this source's identity downstream. Both list queries also leave
   // state and limit free in their placeholder comparators, so a panel's closed-tab
   // rows can be served here until this key's own fetch lands: placeholder rows
   // read as "still loading" rather than suggesting a closed issue the completion

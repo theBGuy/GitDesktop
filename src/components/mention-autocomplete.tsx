@@ -194,7 +194,7 @@ export function useMentionAutocomplete({
   // Re-place the open token's box against the caret it already names. Placement
   // measures the DOM, so it must run from the effect rather than from a state
   // updater (React runs those during render, twice under StrictMode).
-  const replace = useEffectEvent((ta: HTMLTextAreaElement) => {
+  const rePlace = useEffectEvent((ta: HTMLTextAreaElement) => {
     if (!token) return;
     setToken({
       ...token,
@@ -209,7 +209,7 @@ export function useMentionAutocomplete({
   useLayoutEffect(() => {
     const ta = textareaRef.current;
     if (!open || !ta) return;
-    replace(ta);
+    rePlace(ta);
   }, [open, rowCount, textareaRef]);
 
   useEffect(() => {
@@ -224,7 +224,7 @@ export function useMentionAutocomplete({
         // The anchor scrolled, not the page — typing across a wrap boundary in a
         // capped composer does this. Placement nets out scrollTop, so following
         // the caret is correct where dismissing would drop the query mid-word.
-        replace(ta);
+        rePlace(ta);
         return;
       }
       setToken(null);
