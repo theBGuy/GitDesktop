@@ -333,10 +333,7 @@ fn substitute_path(tokens: &[String], path: &str) -> Vec<String> {
 }
 
 /// True when `program` ends in a Windows batch extension (`.cmd`/`.bat`,
-/// case-insensitive). Rust ≥1.77 routes batch files through `cmd.exe` (the
-/// BatBadBut CVE mitigation), which silently re-introduces a shell and `%VAR%`
-/// expansion — exactly what the shell-free custom-command mode must avoid — so
-/// a resolved batch file is rejected rather than launched.
+/// case-insensitive).
 fn is_batch_file(program: &str) -> bool {
     let lower = program.to_ascii_lowercase();
     lower.ends_with(".cmd") || lower.ends_with(".bat")
@@ -409,7 +406,9 @@ async fn launch_custom_command(command: &str, path: &str) -> AppResult<()> {
     let resolved = ensure_absolute(resolved, &std::env::current_dir().map_err(AppError::Io)?);
 
     // SECURITY: reject batch files on the RESOLVED path — a bare `foo` on PATH
-    // can resolve to `foo.cmd`, which Rust would run through cmd.exe.
+    // can resolve to `foo.cmd`, and Rust ≥1.77 routes batch files through
+    // `cmd.exe` (the BatBadBut CVE mitigation), silently reintroducing a shell
+    // and `%VAR%` expansion that the shell-free custom-command mode must avoid.
     if is_batch_file(&resolved.to_string_lossy()) {
         return Err(AppError::InvalidArgument(format!(
             "terminal command points at a batch file ({}); point at the real \
@@ -1397,7 +1396,7 @@ mod tests {
     }
 
     #[test]
-    fn is_batch_file_rejects_cmd_and_bat_case_insensitively() {
+    fn is_batch_file_matches_cmd_and_bat_case_insensitively() {
         assert!(is_batch_file("C:\\tools\\wt.cmd"));
         assert!(is_batch_file("C:\\tools\\wt.CMD"));
         assert!(is_batch_file("launch.bat"));
