@@ -5,6 +5,7 @@
 //! Reuses the user's existing CLI subscription auth, so no API key is needed.
 //! Reviews are read-only: Tier 1 exposes no tools at all.
 
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -21,8 +22,9 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 pub(crate) const DETECT_TIMEOUT: Duration = Duration::from_secs(20);
-/// A warm `opencode models` returns in ~1.5s, but a cold one waits on opencode's
-/// own catalog HTTP leg (10s timeout, two retries) before printing.
+/// A warm `opencode models` returns in ~1.5s (measured); the catalog resolves
+/// from opencode's disk cache or its binary-bundled snapshot, so the sync HTTP
+/// leg is a last resort — 20s is a bound on a hung CLI, not an expected wait.
 const MODELS_TIMEOUT: Duration = Duration::from_secs(20);
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 /// Repo-aware (Tier 2) runs explore the tree with tools and take longer — a
@@ -770,6 +772,7 @@ const MODELS_LIMIT: usize = 2000;
 /// (opencode-own providers first), so it is preserved.
 fn parse_models_output(stdout: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     for line in stdout.split('\n') {
         let id = line.trim();
         if id.is_empty()
@@ -778,7 +781,7 @@ fn parse_models_output(stdout: &str) -> Vec<String> {
         {
             continue;
         }
-        if !out.iter().any(|seen| seen == id) {
+        if seen.insert(id) {
             out.push(id.to_string());
         }
         if out.len() == MODELS_LIMIT {
@@ -2321,9 +2324,9 @@ pub async fn agent_review(
         _ => Vec::new(),
     };
     if kind == AgentKind::Opencode {
-        // Every opencode invocation otherwise forks a detached catalog refresh,
-        // which on an app-managed run is stray-grandchild churn; the cache is
-        // refreshed by the `agent_models` probe when a user opens a model picker.
+        // Long-lived app-managed runs must not fork opencode's detached catalog
+        // refresh (stray-grandchild churn). The short-lived probes keep opencode's
+        // default behavior — the `agent_models` probe is what refreshes the cache.
         extra_env.push(("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()));
     }
 

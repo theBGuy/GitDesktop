@@ -325,6 +325,13 @@ export function useAgentModels(
     },
     enabled: opts?.enabled ?? true,
     staleTime: 5 * 60 * 1000,
+    // Until the probe resolves (and whenever the query is gate-disabled), the
+    // SESSION pickers show the CLI's static suggestions — the pre-live
+    // behavior. No `cause`: this is not a settled fallback.
+    placeholderData: () => ({
+      models: MODEL_SUGGESTIONS[kindProvider(kind)],
+      live: false,
+    }),
     // A refetch here spawns a process, not an HTTP GET — alt-tabbing back into
     // the app must not re-run the CLI.
     refetchOnWindowFocus: false,

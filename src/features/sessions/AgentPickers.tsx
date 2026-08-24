@@ -108,16 +108,12 @@ export function ModelPicker({
           long ids (e.g. `opencode/…`). Size to content, capped on-screen. */}
       <ComboboxContent className="w-fit max-w-sm">
         <ComboboxEmpty>
-          {(() => {
-            switch (true) {
-              // `isFetching`, never `isPending` — a catalog that was never
-              // requested must not read as loading.
-              case available.isFetching:
-                return "Loading models…";
-              default:
-                return "No matching models — the typed id is used as-is";
-            }
-          })()}
+          {/* With placeholder suggestions always present, this renders only when
+              the typed filter matches nothing — keep the typed-id reassurance
+              and note an in-flight probe rather than replacing it. */}
+          {available.isFetching
+            ? "No matching models yet (catalog loading) — the typed id is used as-is"
+            : "No matching models — the typed id is used as-is"}
         </ComboboxEmpty>
         {/* Render FUNCTION, not static rows: only this form maps the store's
             filtered items, so static children would never narrow as you type. */}
