@@ -1407,6 +1407,22 @@ struct GlabEventLabel {
     color: String,
 }
 
+/// Map one `resource_label_events` entry (MR or issue — the endpoints share a shape),
+/// or `None` once the label itself has been deleted. The endpoint returns `color` WITH
+/// a leading `#` while the `Labeled.color` contract is bare hex (the frontend renders
+/// `#${color}`), so the strip is part of the mapping, not a caller's job. Pure
+/// (unit-tested).
+fn map_label_event(e: GlabLabelEvent) -> Option<ForgeTimelineEventOut> {
+    let label = e.label?;
+    Some(ForgeTimelineEventOut::Labeled {
+        label: label.name,
+        color: label.color.trim_start_matches('#').to_string(),
+        added: e.action == "add",
+        actor: gl_actor(e.user),
+        date: e.created_at,
+    })
+}
+
 /// One `resource_state_events` entry: `{state:"closed"|"reopened"|"merged", user,
 /// created_at}`.
 #[derive(Deserialize)]
@@ -1482,89 +1498,63 @@ fn map_approval_note(
 /// The MR's activity timeline — label add/remove, state changes, and approval-flow
 /// events — mapped onto the neutral `ForgeTimelineEventOut` union, oldest→newest.
 /// Deliberately omits commits (the frontend interleaves `pr.commits`), force-pushes
-/// (no GitLab API), and draft/ready + review-request events. Every sub-fetch is
-/// best-effort and a single `per_page=100` page, so a very busy MR truncates the
-/// oldest events of that class.
+/// (no GitLab API), and draft/ready + review-request events.
+///
+/// Every sub-fetch is best-effort and a single `per_page=100` page, and which end a
+/// busy MR truncates differs by class: `notes` defaults to newest-first, so approvals
+/// keep the NEWEST page; the `resource_*` endpoints ignore `sort` and always answer
+/// oldest-first, so those classes keep the OLDEST page. The same feed's conversation
+/// half (`view_pr`'s comment read) keeps the oldest page, so past 100 notes the merged
+/// feed pairs the oldest comments with the newest events; unifying the windows is
+/// deferred.
 pub async fn mr_timeline(repo_path: &str, number: u64) -> AppResult<Vec<ForgeTimelineEventOut>> {
     let enc = encode_project(&project_path(repo_path).await?);
+    let base = format!("projects/{enc}/merge_requests/{number}");
     let mut events: Vec<ForgeTimelineEventOut> = Vec::new();
 
-    // Label add/remove events.
-    let label_events: Vec<GlabLabelEvent> = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/merge_requests/{number}/resource_label_events?per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str(&o.stdout_lossy()).ok())
-    .unwrap_or_default();
-    for e in label_events {
-        let Some(label) = e.label else { continue };
-        events.push(ForgeTimelineEventOut::Labeled {
-            label: label.name,
-            // `resource_label_events` returns `color` WITH a leading `#`, but the
-            // `Labeled.color` contract is bare hex (the frontend renders `#${color}`)
-            // — strip it, like the file's other GitLab label producers.
-            color: label.color.trim_start_matches('#').to_string(),
-            added: e.action == "add",
-            actor: gl_actor(e.user),
-            date: e.created_at,
-        });
-    }
+    // Three independent reads on the MR-open foreground path; the terminal sort makes
+    // arrival order irrelevant, so run them concurrently.
+    let (label_events, state_events, notes) = tokio::join!(
+        async {
+            run_glab(
+                Some(repo_path),
+                &["api", &format!("{base}/resource_label_events?per_page=100")],
+                GLAB_NETWORK_TIMEOUT,
+            )
+            .await
+            .ok()
+            .and_then(|o| serde_json::from_str::<Vec<GlabLabelEvent>>(&o.stdout_lossy()).ok())
+            .unwrap_or_default()
+        },
+        async {
+            run_glab(
+                Some(repo_path),
+                &["api", &format!("{base}/resource_state_events?per_page=100")],
+                GLAB_NETWORK_TIMEOUT,
+            )
+            .await
+            .ok()
+            .and_then(|o| serde_json::from_str::<Vec<GlabStateEvent>>(&o.stdout_lossy()).ok())
+            .unwrap_or_default()
+        },
+        // Approval-flow events — system notes carry the timestamped history
+        // (see `map_approval_note`).
+        async {
+            run_glab(
+                Some(repo_path),
+                &["api", &format!("{base}/notes?per_page=100")],
+                GLAB_NETWORK_TIMEOUT,
+            )
+            .await
+            .ok()
+            .and_then(|o| serde_json::from_str::<Vec<GlabNote>>(&o.stdout_lossy()).ok())
+            .unwrap_or_default()
+        },
+    );
 
-    // State-change events (closed / reopened / merged).
-    let state_events: Vec<GlabStateEvent> = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/merge_requests/{number}/resource_state_events?per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str(&o.stdout_lossy()).ok())
-    .unwrap_or_default();
-    for e in state_events {
-        let actor = gl_actor(e.user);
-        let date = e.created_at;
-        let mapped = match e.state.as_str() {
-            // GitLab reports no close reason, so `state_reason` stays empty.
-            "closed" => ForgeTimelineEventOut::Closed {
-                actor,
-                state_reason: String::new(),
-                date,
-            },
-            "reopened" => ForgeTimelineEventOut::Reopened { actor, date },
-            "merged" => ForgeTimelineEventOut::Merged {
-                actor,
-                commit_oid: None,
-                date,
-            },
-            // Unknown/new state (e.g. "locked") — skip rather than guess.
-            _ => continue,
-        };
-        events.push(mapped);
-    }
+    events.extend(label_events.into_iter().filter_map(map_label_event));
+    events.extend(state_events.into_iter().filter_map(map_state_event));
 
-    // Approval-flow events — system notes carry the timestamped history
-    // (see `map_approval_note`).
-    let notes: Vec<GlabNote> = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/merge_requests/{number}/notes?sort=asc&per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str(&o.stdout_lossy()).ok())
-    .unwrap_or_default();
     for n in notes {
         if !n.system {
             continue;
@@ -1612,10 +1602,11 @@ fn map_issue_milestone_event(e: GlabMilestoneEvent) -> Option<ForgeTimelineEvent
     })
 }
 
-/// Map one issue `resource_state_events` entry. An issue only closes and reopens —
-/// any other state (including `merged`, which the MR arm handles) is skipped rather
-/// than guessed. Pure (unit-tested).
-fn map_issue_state_event(e: GlabStateEvent) -> Option<ForgeTimelineEventOut> {
+/// Map one `resource_state_events` entry (MR or issue — the endpoints share a shape),
+/// or `None` for a state we don't model, which is skipped rather than guessed. The
+/// `merged` arm is unreachable from the issue caller: GitLab only ever reports it on
+/// merge requests. Pure (unit-tested).
+fn map_state_event(e: GlabStateEvent) -> Option<ForgeTimelineEventOut> {
     let actor = gl_actor(e.user);
     let date = e.created_at;
     match e.state.as_str() {
@@ -1626,6 +1617,11 @@ fn map_issue_state_event(e: GlabStateEvent) -> Option<ForgeTimelineEventOut> {
             date,
         }),
         "reopened" => Some(ForgeTimelineEventOut::Reopened { actor, date }),
+        "merged" => Some(ForgeTimelineEventOut::Merged {
+            actor,
+            commit_oid: None,
+            date,
+        }),
         _ => None,
     }
 }
@@ -1728,87 +1724,82 @@ fn map_issue_system_note(
 
 /// The issue's activity timeline — label add/remove, state changes, milestone
 /// changes, and the assignment/cross-reference/duplicate/lock system notes — mapped
-/// onto the neutral `ForgeTimelineEventOut` union, oldest→newest. Every sub-fetch is
-/// best-effort and a single `per_page=100` page, so a very busy issue truncates the
-/// oldest events of that class.
+/// onto the neutral `ForgeTimelineEventOut` union, oldest→newest.
+///
+/// Every sub-fetch is best-effort and a single `per_page=100` page, and which end a
+/// busy issue truncates differs by class: `notes` defaults to newest-first, so the
+/// system-note events keep the NEWEST page; the `resource_*` endpoints ignore `sort`
+/// and always answer oldest-first, so those classes keep the OLDEST page. The same
+/// feed's conversation half (`view_issue`'s comment read) keeps the oldest page, so
+/// past 100 notes the merged feed pairs the oldest comments with the newest events;
+/// unifying the windows is deferred.
 pub async fn issue_timeline(repo_path: &str, number: u64) -> AppResult<Vec<ForgeTimelineEventOut>> {
     let enc = encode_project(&project_path(repo_path).await?);
+    let base = format!("projects/{enc}/issues/{number}");
     let mut events: Vec<ForgeTimelineEventOut> = Vec::new();
 
-    // Label add/remove events.
-    let label_events: Vec<GlabLabelEvent> = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/issues/{number}/resource_label_events?per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str(&o.stdout_lossy()).ok())
-    .unwrap_or_default();
-    for e in label_events {
-        let Some(label) = e.label else { continue };
-        events.push(ForgeTimelineEventOut::Labeled {
-            label: label.name,
-            // `resource_label_events` returns `color` WITH a leading `#`, but the
-            // `Labeled.color` contract is bare hex (the frontend renders `#${color}`).
-            color: label.color.trim_start_matches('#').to_string(),
-            added: e.action == "add",
-            actor: gl_actor(e.user),
-            date: e.created_at,
-        });
-    }
+    // Four independent reads on the issue-open foreground path; the terminal sort
+    // makes arrival order irrelevant, so run them concurrently.
+    let (label_events, state_events, milestone_events, notes) = tokio::join!(
+        async {
+            run_glab(
+                Some(repo_path),
+                &["api", &format!("{base}/resource_label_events?per_page=100")],
+                GLAB_NETWORK_TIMEOUT,
+            )
+            .await
+            .ok()
+            .and_then(|o| serde_json::from_str::<Vec<GlabLabelEvent>>(&o.stdout_lossy()).ok())
+            .unwrap_or_default()
+        },
+        async {
+            run_glab(
+                Some(repo_path),
+                &["api", &format!("{base}/resource_state_events?per_page=100")],
+                GLAB_NETWORK_TIMEOUT,
+            )
+            .await
+            .ok()
+            .and_then(|o| serde_json::from_str::<Vec<GlabStateEvent>>(&o.stdout_lossy()).ok())
+            .unwrap_or_default()
+        },
+        async {
+            run_glab(
+                Some(repo_path),
+                &[
+                    "api",
+                    &format!("{base}/resource_milestone_events?per_page=100"),
+                ],
+                GLAB_NETWORK_TIMEOUT,
+            )
+            .await
+            .ok()
+            .and_then(|o| serde_json::from_str::<Vec<GlabMilestoneEvent>>(&o.stdout_lossy()).ok())
+            .unwrap_or_default()
+        },
+        // Assignment / cross-reference / duplicate / lock events (see
+        // `map_issue_system_note`).
+        async {
+            run_glab(
+                Some(repo_path),
+                &["api", &format!("{base}/notes?per_page=100")],
+                GLAB_NETWORK_TIMEOUT,
+            )
+            .await
+            .ok()
+            .and_then(|o| serde_json::from_str::<Vec<GlabNote>>(&o.stdout_lossy()).ok())
+            .unwrap_or_default()
+        },
+    );
 
-    // State-change events. An issue never merges, so only close/reopen appear.
-    let state_events: Vec<GlabStateEvent> = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/issues/{number}/resource_state_events?per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str(&o.stdout_lossy()).ok())
-    .unwrap_or_default();
-    events.extend(state_events.into_iter().filter_map(map_issue_state_event));
-
-    // Milestone add/remove events.
-    let milestone_events: Vec<GlabMilestoneEvent> = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/issues/{number}/resource_milestone_events?per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str(&o.stdout_lossy()).ok())
-    .unwrap_or_default();
+    events.extend(label_events.into_iter().filter_map(map_label_event));
+    events.extend(state_events.into_iter().filter_map(map_state_event));
     events.extend(
         milestone_events
             .into_iter()
             .filter_map(map_issue_milestone_event),
     );
 
-    // Assignment / cross-reference / duplicate / lock events (see
-    // `map_issue_system_note`).
-    let notes: Vec<GlabNote> = run_glab(
-        Some(repo_path),
-        &[
-            "api",
-            &format!("projects/{enc}/issues/{number}/notes?sort=asc&per_page=100"),
-        ],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await
-    .ok()
-    .and_then(|o| serde_json::from_str(&o.stdout_lossy()).ok())
-    .unwrap_or_default();
     for n in notes {
         if !n.system {
             continue;
@@ -8853,18 +8844,39 @@ mod tests {
 
     #[test]
     fn label_event_color_is_stripped_to_bare_hex() {
+        let ev = |json: &str| -> GlabLabelEvent {
+            serde_json::from_str(json).expect("label event should parse")
+        };
         // `resource_label_events` returns `color` with a leading `#`; the
-        // `Labeled.color` contract is bare hex — run the same strip the mapper does.
-        let e: GlabLabelEvent = serde_json::from_str(
-            r##"{"action":"add","created_at":"2026-06-30T00:35:46.215Z",
+        // `Labeled.color` contract is bare hex.
+        match map_label_event(ev(r##"{"action":"add","created_at":"2026-06-30T00:35:46.215Z",
+            "user":{"username":"theBGuy"},
+            "label":{"name":"enhancement","color":"#5cb85c"}}"##)) {
+            Some(ForgeTimelineEventOut::Labeled {
+                label,
+                color,
+                added,
+                actor,
+                ..
+            }) => {
+                assert_eq!((label.as_str(), color.as_str()), ("enhancement", "5cb85c"));
+                assert!(added);
+                assert_eq!(actor.id, "theBGuy");
+            }
+            _ => panic!("expected Labeled"),
+        }
+        // An already-bare color is unchanged (idempotent), and `remove` is a removal.
+        assert!(matches!(
+            map_label_event(ev(r##"{"action":"remove","created_at":"2026-06-30T00:35:46.215Z",
                 "user":{"username":"theBGuy"},
-                "label":{"name":"enhancement","color":"#5cb85c"}}"##,
-        )
-        .expect("label event should parse");
-        let label = e.label.expect("label present");
-        assert_eq!(label.color.trim_start_matches('#'), "5cb85c");
-        // An already-bare color is unchanged (idempotent).
-        assert_eq!("5cb85c".trim_start_matches('#'), "5cb85c");
+                "label":{"name":"enhancement","color":"5cb85c"}}"##)),
+            Some(ForgeTimelineEventOut::Labeled { color, added: false, .. }) if color == "5cb85c"
+        ));
+        // A deleted label leaves `label: null` — the entry is skipped.
+        assert!(map_label_event(ev(
+            r#"{"action":"add","created_at":"2026-06-30T00:35:46.215Z","label":null}"#
+        ))
+        .is_none());
     }
 
     #[test]
@@ -8998,28 +9010,43 @@ mod tests {
     }
 
     #[test]
-    fn issue_state_events_map_close_reopen_only() {
-        let ev = |json: &str| -> GlabStateEvent {
-            serde_json::from_str(json).expect("state event should parse")
+    fn state_events_map_close_reopen_and_merge() {
+        let ev = |state: &str| -> GlabStateEvent {
+            serde_json::from_str(&format!(
+                r#"{{"state":"{state}","created_at":"2026-08-23T00:00:00Z",
+                    "user":{{"username":"theBGuy"}}}}"#
+            ))
+            .expect("state event should parse")
         };
+        match map_state_event(ev("closed")) {
+            Some(ForgeTimelineEventOut::Closed {
+                state_reason,
+                actor,
+                date,
+            }) => {
+                // GitLab reports no close reason.
+                assert!(state_reason.is_empty());
+                assert_eq!(actor.id, "theBGuy");
+                assert_eq!(date, "2026-08-23T00:00:00Z");
+            }
+            _ => panic!("expected Closed"),
+        }
         assert!(matches!(
-            map_issue_state_event(ev(
-                r#"{"state":"closed","created_at":"2026-08-23T00:00:00Z","user":{"username":"theBGuy"}}"#
-            )),
-            Some(ForgeTimelineEventOut::Closed { .. })
-        ));
-        assert!(matches!(
-            map_issue_state_event(ev(
-                r#"{"state":"reopened","created_at":"2026-08-23T00:00:00Z","user":{"username":"theBGuy"}}"#
-            )),
+            map_state_event(ev("reopened")),
             Some(ForgeTimelineEventOut::Reopened { .. })
         ));
-        // Issues never merge, and an unknown/new state is skipped rather than guessed.
-        assert!(map_issue_state_event(ev(
-            r#"{"state":"merged","created_at":"2026-08-23T00:00:00Z","user":{"username":"theBGuy"}}"#
-        ))
-        .is_none());
-        assert!(map_issue_state_event(ev(r#"{"state":"weird_new_state"}"#)).is_none());
+        // `merged` reaches this mapper only from the MR arm; GitLab never reports it
+        // on an issue.
+        assert!(matches!(
+            map_state_event(ev("merged")),
+            Some(ForgeTimelineEventOut::Merged {
+                commit_oid: None,
+                ..
+            })
+        ));
+        // An unknown/new state is skipped rather than guessed.
+        assert!(map_state_event(ev("weird_new_state")).is_none());
+        assert!(map_state_event(ev("")).is_none());
     }
 
     #[test]

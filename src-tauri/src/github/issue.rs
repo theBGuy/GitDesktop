@@ -1481,8 +1481,20 @@ mod tests {
         // A dropped selection is a SILENT failure — GraphQL simply omits the field
         // and `map_timeline_node` reads it as "", so pin the contract here.
         assert!(ISSUE_TIMELINE_QUERY.contains("actor{login avatarUrl(size: 48) __typename}"));
-        // source/subject/canonical, each on its Issue AND PullRequest fragment.
-        assert!(ISSUE_TIMELINE_QUERY.matches("repository{nameWithOwner}").count() >= 4);
+        // 12 = CrossReferenced `source` + Connected/Disconnected `source` and
+        // `subject` + MarkedAsDuplicate `canonical`, each on its Issue AND
+        // PullRequest fragment. TransferredEvent's `fromRepository{nameWithOwner}`
+        // is a different (capitalized) token and doesn't count here. Exact, so
+        // dropping a whole fragment fails instead of sliding under a floor.
+        assert_eq!(
+            ISSUE_TIMELINE_QUERY
+                .matches("repository{nameWithOwner}")
+                .count(),
+            12
+        );
+        // Connected/Disconnected map from `subject`; drop it and the event silently
+        // self-references, because `source` is the issue the event sits on.
+        assert_eq!(ISSUE_TIMELINE_QUERY.matches("subject{").count(), 2);
         assert!(ISSUE_TIMELINE_QUERY.contains("willCloseTarget"));
         assert!(ISSUE_TIMELINE_QUERY.contains("stateReason"));
         for item_type in [

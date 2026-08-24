@@ -1784,8 +1784,13 @@ export type ForgeTimelineEvent =
       sourceNumber: number;
       sourceTitle: string;
       /** The referring entity's `owner/name` — a cross-reference can live in another
-       *  repository, so the number alone can't address it. `""` when unknown. */
+       *  repository, so the number alone can't address it. Empty is a same-repo
+       *  GUARANTEE, not an unknown: GitHub always names the repo, and GitLab only
+       *  emits same-project references. The reference chip's gate relies on it. */
       sourceRepo: string;
+      /** Whether the referring entity would close this one on merge. Carried on the
+       *  wire so a future closing-reference treatment needs no shape change; no
+       *  renderer reads it today. */
       willClose: boolean;
       actor: ForgeUserRef;
       date: string;
@@ -1795,6 +1800,7 @@ export type ForgeTimelineEvent =
       sourceKind: string;
       sourceNumber: number;
       sourceTitle: string;
+      /** Same shape and same-repo contract as `crossReferenced`'s `sourceRepo`. */
       sourceRepo: string;
       /** true when the link was made, false when it was broken. */
       added: boolean;
@@ -1828,8 +1834,8 @@ export type ForgeTimelineEvent =
       kind: "markedAsDuplicate";
       canonicalKind: string;
       canonicalNumber: number;
-      /** The canonical entity's `owner/name` (same cross-repo reason as
-       *  `sourceRepo`); `""` when unknown. */
+      /** The canonical entity's `owner/name` — same cross-repo reason and same
+       *  empty-means-same-repo contract as `sourceRepo`. */
       canonicalRepo: string;
       actor: ForgeUserRef;
       date: string;

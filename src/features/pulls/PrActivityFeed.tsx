@@ -7,6 +7,7 @@ import {
 } from "@/features/conversations/Thread";
 import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
+import { useActiveForgeGhHost } from "@/lib/git/host";
 import type {
   ForgeProvider,
   ForgeTimelineEvent,
@@ -264,6 +265,8 @@ export function PrActivityFeed({
     wrapperReviewIds,
     wrappedThreadFor,
   } = claims;
+  // Feed-constant, so it's read once here rather than per event row.
+  const ghHost = useActiveForgeGhHost();
   // Newest commit date drives approval staleness. gh returns
   // oldest-first, but be defensive: max over all commit dates.
   const newestCommitMs = pr.commits.reduce((max, c) => {
@@ -477,7 +480,7 @@ export function PrActivityFeed({
     entries.push({
       date: ev.date,
       sortKey: 3,
-      node: <TimelineEventRow key={`event-${i}`} event={ev} />,
+      node: <TimelineEventRow key={`event-${i}`} event={ev} ghHost={ghHost} />,
     });
   }
 

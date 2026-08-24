@@ -48,6 +48,7 @@ import {
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import type { LockReason, MinimizeReason } from "@/lib/git/api";
+import { useActiveForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
   TRIAGE_ACCESS_ITEM_REASON,
@@ -235,6 +236,8 @@ export function RemoteIssueView({
     !!provider && provider !== "bitbucket",
     lens,
   );
+  // Feed-constant, so it's read once here rather than per event row.
+  const ghHost = useActiveForgeGhHost();
   const toggleReactionMutation = useToggleReaction(
     repoPath,
     ["repo", repoPath, "issue", lens, number, "reactions"] as const,
@@ -525,10 +528,10 @@ export function RemoteIssueView({
     });
   }
 
-  /** Drill into a PR/issue a timeline reference row points at. Same-repo only —
-   *  the row hands over a bare number, which addresses nothing elsewhere, and
-   *  TimelineEventRow already keeps cross-repo chips non-interactive. Each arm is
-   *  the navigation its own surface uses (Development panel / related issues). */
+  /** Drill into a PR/issue a timeline reference row points at. The bare number it
+   *  hands over resolves under the CURRENT lens, so the call site wires this only
+   *  under the origin lens (see the lens note on `onOpenRef` there). Each arm is the
+   *  navigation its own surface uses (Development panel / related issues). */
   function openRef(kind: "pr" | "issue", refNumber: number) {
     if (kind === "pr") {
       selectPr({ kind: "remote", id: String(refNumber) });
@@ -650,10 +653,13 @@ export function RemoteIssueView({
         <TimelineEventRow
           key={`event-${i}`}
           event={ev}
-          onOpenRef={openRef}
-          // ForgeStatus.repo is the ORIGIN slug, lens-unaware: under the Upstream
-          // lens an upstream-repo ref mismatches and its chip degrades to inert
-          // text — never a wrong drill-in, so the safe direction.
+          ghHost={ghHost}
+          // `ForgeStatus.repo` is the ORIGIN slug, so a chip's same-repo verdict is
+          // only trustworthy under the origin lens: off it, a ref living in the fork
+          // matches the slug while the drill-in resolves against the upstream repo
+          // and lands on a different entity. Withholding the handler there renders
+          // every reference inert instead.
+          onOpenRef={lens === "origin" ? openRef : undefined}
           selfRepo={forge.data?.repo ?? undefined}
         />
       ),

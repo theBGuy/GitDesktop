@@ -34,7 +34,6 @@ import {
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { RelativeTime } from "@/components/relative-time";
 import type { CommitRow } from "@/features/conversations/CommitsList";
-import { useActiveForgeGhHost } from "@/lib/git/host";
 import type { ForgeTimelineEvent } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { parseableDate } from "@/lib/time";
@@ -359,7 +358,9 @@ function eventPresentation(event: ForgeTimelineEvent): EventPresentation {
 /** The compact `owner/name#N` + title reference a cross-reference / link / duplicate
  *  row points at. Interactive only when the caller can navigate there AND the ref is
  *  in the viewed repo: a cross-repo number would drill into the wrong entity, so it
- *  renders as text carrying its repo prefix instead. */
+ *  renders as text carrying its repo prefix instead. An empty `chip.repo` is the
+ *  wire's same-repo GUARANTEE, not an unknown (ForgeTimelineEventOut::CrossReferenced
+ *  pins that contract), which is why it passes the gate. */
 function ReferenceChip({
   chip,
   onOpenRef,
@@ -405,10 +406,15 @@ function ReferenceChip({
  *  beside it, and a metadata row must not add a tab stop per event. */
 export function TimelineEventRow({
   event,
+  ghHost,
   onOpenRef,
   selfRepo,
 }: {
   event: ForgeTimelineEvent;
+  /** GitHub host for the actor's login-derived avatar (`null` off GitHub). Resolved
+   *  once by the feed and passed down: it's feed-constant, and reading it per row
+   *  would be one store subscription per event. */
+  ghHost: string | null;
   /** Drill into a referenced PR/issue from a reference chip. Without it the chip
    *  stays plain text. */
   onOpenRef?: (kind: "pr" | "issue", number: number) => void;
@@ -417,7 +423,6 @@ export function TimelineEventRow({
   selfRepo?: string;
 }) {
   const { Icon, tone, label, colorDot, refChip } = eventPresentation(event);
-  const ghHost = useActiveForgeGhHost();
   return (
     <div className="flex items-start gap-2 text-xs">
       <RailIcon Icon={Icon} tone={tone} label={label} />

@@ -1484,13 +1484,17 @@ fn map_activity_entry(entry: BbActivity) -> Option<ForgeTimelineEventOut> {
     }
 }
 
-/// A Bitbucket timeline actor as a neutral user ref. Participant objects carry no
-/// `username`, so the display name fills both `id` and `label` (see [`user_login`]);
-/// a missing user yields an all-empty ref, which the frontend renders as no actor.
+/// A Bitbucket timeline actor as a neutral user ref: the braced account `uuid` as
+/// `id`, [`user_login`]'s display name as `label`. A uuid-less payload falls back
+/// to the display name — a deliberate deviation from the pickers, which drop such
+/// users: a timeline row still names whoever acted. A missing user yields an
+/// all-empty ref, rendered as no actor.
 fn bb_actor(u: Option<&BbUser>) -> ForgeUserRef {
     let login = u.map(user_login).unwrap_or_default();
     ForgeUserRef {
-        id: login.clone(),
+        id: u
+            .and_then(|x| x.uuid.clone())
+            .unwrap_or_else(|| login.clone()),
         label: login,
         avatar_url: u.map(user_avatar).unwrap_or_default(),
         is_bot: false,
@@ -5525,6 +5529,7 @@ mod tests {
         .expect("approval is a timeline event");
         match ev {
             ForgeTimelineEventOut::Approved { actor, date } => {
+                assert_eq!(actor.id, "{0f39}");
                 assert_eq!(actor.label, "Casey Approver");
                 assert_eq!(actor.avatar_url, "https://bb/casey.png");
                 assert_eq!(date, "2026-07-03T21:12:55.697902-04:00");
@@ -5540,11 +5545,12 @@ mod tests {
                 "user":{"display_name":"Ada"}}}"#,
         )
         .expect("changes_requested is a timeline event");
-        // No `links.avatar` on this entry → an empty URL, never a guessed one.
+        // No `links.avatar` → empty URL, never guessed; no `uuid` → id falls back
+        // to the display name rather than shipping empty.
         assert!(matches!(
             ev,
             ForgeTimelineEventOut::ChangesRequested { actor, .. }
-                if actor.label == "Ada" && actor.avatar_url.is_empty()
+                if actor.id == "Ada" && actor.label == "Ada" && actor.avatar_url.is_empty()
         ));
     }
 

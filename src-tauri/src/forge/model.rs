@@ -629,9 +629,10 @@ pub struct ForgeUserRef {
 /// One activity-timeline event on a merge/pull request or an issue, a tagged union
 /// keyed on `kind` (camelCase). The backend maps a GitHub `timelineItems`
 /// `__typename` (or a GitLab/Bitbucket event) onto a variant; an unclassifiable node
-/// is skipped, never a panic. Every `date`/string defaults to `""` for provider
-/// nulls, so a field is absent-as-empty rather than missing — `Merged.commit_oid` is
-/// the one exception, an `Option` that is genuinely absent from the wire when unset.
+/// is skipped, never a panic. Every `date`/string defaults to `""` (and every
+/// number to `0`, every flag to `false`) for provider nulls, so a field is
+/// absent-as-empty rather than missing — `Merged.commit_oid` is the one exception,
+/// an `Option` that is genuinely absent from the wire when unset.
 ///
 /// `rename_all` renames VARIANT tags only, so `rename_all_fields` is load-bearing
 /// for the TS mirror (`src/lib/git/types.ts`): without it `Merged.commit_oid` reaches
@@ -717,7 +718,11 @@ pub enum ForgeTimelineEventOut {
     /// `CrossReferencedEvent` — another PR/issue mentioned this one. `source_kind` is
     /// `"pr"` / `"issue"` (`""` when unrecognized) and `source_repo` is the referring
     /// entity's `owner/name`: a cross-reference can live in ANOTHER repository, so the
-    /// number alone can't address it.
+    /// number alone can't address it. An EMPTY `source_repo` is a same-repo guarantee,
+    /// not an unknown — GitHub always names the repo (schema-non-null), and GitLab's
+    /// note matcher only accepts same-project reference forms. `will_close` is carried
+    /// so a future closing-reference treatment needs no wire change; no renderer
+    /// reads it yet.
     CrossReferenced {
         source_kind: String,
         source_number: u64,
@@ -728,8 +733,8 @@ pub enum ForgeTimelineEventOut {
         date: String,
     },
     /// `ConnectedEvent` (`added = true`) / `DisconnectedEvent` (`added = false`) — a
-    /// PR/issue link was made or broken. Same `source_*` shape (and cross-repo caveat)
-    /// as [`ForgeTimelineEventOut::CrossReferenced`].
+    /// PR/issue link was made or broken. Same `source_*` shape and contract (including
+    /// the empty-means-same-repo guarantee) as [`ForgeTimelineEventOut::CrossReferenced`].
     Connected {
         source_kind: String,
         source_number: u64,
@@ -760,7 +765,8 @@ pub enum ForgeTimelineEventOut {
         date: String,
     },
     /// `MarkedAsDuplicateEvent` — closed as a duplicate of the canonical entity.
-    /// `canonical_repo` carries its `owner/name` for the same cross-repo reason as
+    /// `canonical_repo` carries its `owner/name` for the same cross-repo reason — and
+    /// the same empty-means-same-repo contract — as
     /// [`ForgeTimelineEventOut::CrossReferenced`].
     MarkedAsDuplicate {
         canonical_kind: String,

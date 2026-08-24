@@ -1322,11 +1322,13 @@ to it — no default shortcut, so give it one in **Settings → Keyboard**.
 Comments share the issue with a **date-sorted activity feed**: timeline events interleave
 with the conversation oldest-to-newest, each a calm one-line entry carrying the actor's
 avatar and a relative timestamp. Labels added and removed, assignment, milestones,
-**mentioned this in** cross-references, linked pull requests, marked-as-duplicate, pin,
-lock, transfer, and close (with GitHub's close reason) or reopen all land there. A
-cross-reference, link, or duplicate row pointing inside this repository is clickable and
-jumps to the pull request or issue it names. **GitLab** issues get the same feed for
-labels, state changes, milestones, assignment, and same-project mentions.
+title renames, **mentioned this in** cross-references, linked pull requests,
+marked-as-duplicate, pin, lock, transfer, and close (with GitHub's close reason) or
+reopen all land there. A cross-reference, link, or duplicate row pointing inside this
+repository is clickable and jumps to the pull request or issue it names; browsing a
+fork's parent under the **Upstream** lens keeps those rows plain text. **GitLab**
+issues get the same feed for labels, state changes, milestones, assignment, locks,
+duplicates, and same-project mentions.
 
 - **Sub-issues** — break an issue into a parent/child checklist with completion tracking.
 - **Dependencies** — link issues as blocked-by / blocking.

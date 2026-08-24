@@ -455,13 +455,15 @@ and a fork with issues turned off offers a one-click switch to Upstream
 instead of a dead end.
 
 **Activity feed**: an issue's timeline events interleave with its comments,
-date-sorted oldest-to-newest — labels, assignees, milestones, **mentioned
-this in** cross-references, linked pull requests, marked-as-duplicate,
-pin/lock/transfer, and close (with its reason) or reopen. Each event row
-carries the actor's **avatar** and a relative timestamp, and a
-cross-reference, link, or duplicate row pointing inside the repository jumps
-to the pull request or issue it names. GitLab issues report labels, state
-changes, milestones, assignment, and same-project mentions.
+date-sorted oldest-to-newest — labels, assignees, milestones, title renames,
+**mentioned this in** cross-references, linked pull requests,
+marked-as-duplicate, pin/lock/transfer, and close (with its reason) or
+reopen. Each event row carries the actor's **avatar** and a relative
+timestamp, and a cross-reference, link, or duplicate row pointing inside the
+repository jumps to the pull request or issue it names (under a fork's
+**Upstream** lens those rows stay plain text). GitLab issues report labels,
+state changes, milestones, assignment, locks, duplicates, and same-project
+mentions.
 
 ![An issue open in GitDesktop with its description, labels, assignees, milestone, sub-issues, and a linked development branch and pull request; local and GitHub issues appear together in the sidebar.](site/src/assets/app-issues.png)
 
