@@ -3308,7 +3308,8 @@ export function useCheckoutConflictSide(repo: string) {
   );
 }
 
-/** Stages an externally-resolved conflicted file as-is (marks it resolved). */
+/** Stages a conflicted file exactly as it stands on disk — edited, emptied, or
+ *  removed — which marks the conflict resolved. */
 export function useMarkConflictResolved(repo: string) {
   return useRepoMutation(
     repo,

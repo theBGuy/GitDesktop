@@ -686,8 +686,11 @@ mod tests {
     }
 
     /// `working_exists` is what separates an emptied working file from a deleted
-    /// one, since `working` is "" for both. The wire key is asserted too: the
-    /// frontend reads `workingExists`, and a rename here would go silent.
+    /// one, since `working` is "" for both — the discriminator pair the frontend
+    /// rides on, so present, emptied and gone each get a leg (a non-NotFound read
+    /// error is its own class, reported as present at the read site). The wire key
+    /// is asserted too: the frontend reads `workingExists`, and a rename here
+    /// would go silent.
     #[tokio::test]
     async fn working_exists_tracks_the_file_on_disk() {
         let (_dir, repo) = conflicted_repo("working-exists", "file.txt", &[]).await;
@@ -696,6 +699,19 @@ mod tests {
             .unwrap();
         assert!(present.working_exists);
         let json = serde_json::to_string(&present).unwrap();
+        assert!(
+            json.contains("\"workingExists\":true"),
+            "wire key missing: {json}"
+        );
+
+        // Emptied on purpose: same "" content as a deletion, opposite verdict.
+        std::fs::write(Path::new(&repo).join("file.txt"), "").unwrap();
+        let emptied = git_conflict_sides(repo.clone(), "file.txt".into(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(emptied.working, "");
+        assert!(emptied.working_exists);
+        let json = serde_json::to_string(&emptied).unwrap();
         assert!(
             json.contains("\"workingExists\":true"),
             "wire key missing: {json}"
@@ -713,6 +729,37 @@ mod tests {
         assert!(
             json.contains("\"workingExists\":false"),
             "wire key missing: {json}"
+        );
+    }
+
+    /// Mark resolved is a plain `git add` on the unmerged path, and the UI offers
+    /// it while the working file is DELETED: git stages that removal and clears
+    /// the conflict (measured, git 2.51.1). Nothing else records this — the arm
+    /// that offers the button reads only `working_exists`.
+    #[tokio::test]
+    async fn stage_on_deleted_working_file_records_the_removal() {
+        let (_dir, repo) = conflicted_repo("stage-deleted", "file.txt", &[]).await;
+        std::fs::remove_file(Path::new(&repo).join("file.txt")).unwrap();
+        // Pins the premise: without a live conflict here the post-state asserts
+        // nothing.
+        let before = stdout_of(&repo, &["ls-files", "-u"]).await;
+        assert!(before.contains("file.txt"), "fixture not conflicted: {before}");
+
+        let state = AppState::default();
+        crate::git::stage::git_stage_core(
+            &state,
+            repo.clone(),
+            vec![crate::git::pathspec::literal("file.txt")],
+        )
+        .await
+        .unwrap();
+
+        let staged = stdout_of(&repo, &["diff", "--cached", "--name-status"]).await;
+        assert!(staged.contains("D\tfile.txt"), "deletion staged: {staged}");
+        let unmerged = stdout_of(&repo, &["ls-files", "-u"]).await;
+        assert!(
+            unmerged.trim().is_empty(),
+            "conflict left behind: {unmerged}"
         );
     }
 

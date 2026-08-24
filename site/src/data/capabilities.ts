@@ -127,7 +127,8 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Rewrite & recovery",
-    label: "In-app conflict editor — current / incoming / both",
+    label:
+      "In-app conflict editor — current / incoming / both, or mark files resolved as they stand on disk",
   },
   { group: "Rewrite & recovery", label: "Stash browser" },
   {

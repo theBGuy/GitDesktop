@@ -137,13 +137,12 @@ function fallbackArm(sides: ConflictSides): FallbackArm {
     return sides.workingExists ? "emptiedOnDisk" : "emptiedGone";
   }
 
-  // Every leg is checked here rather than leaning on the arms above: an entry
+  // Both stage checks are explicit rather than left to the arms above: an entry
   // with no stages at all but real content is a file we can't classify, and it
   // must land on the couldn't-parse arm instead of being called resolved.
   if (
     sides.ours != null &&
     sides.theirs != null &&
-    sides.working.trim() !== "" &&
     !hasConflictMarkers(sides.working)
   ) {
     return "externallyResolved";
@@ -162,15 +161,16 @@ function fallbackArm(sides: ConflictSides): FallbackArm {
 function ConflictFallback({
   path,
   sides,
+  arm,
   busy,
   onMarkResolved,
 }: {
   path: string;
   sides: ConflictSides;
+  arm: FallbackArm;
   busy: boolean;
   onMarkResolved: () => void;
 }) {
-  const arm = fallbackArm(sides);
   const markButton = MARK_RESOLVED_ARMS.has(arm) ? (
     <Button
       size="xs"
@@ -182,9 +182,10 @@ function ConflictFallback({
     </Button>
   ) : null;
 
-  const deleted = deletedSide(sides);
-  if (deleted !== null) {
-    const copy = DELETION_COPY[deleted];
+  if (arm === "deletion" || arm === "deletionEdited") {
+    // The arm doesn't carry WHICH side removed the file, and the notice names
+    // it. Both deletion arms come from a non-null `deletedSide` (asserted).
+    const copy = DELETION_COPY[deletedSide(sides) as "ours" | "theirs"];
     const lead = (
       <>
         {copy.lead} <span className="font-medium">{copy.takesDeletion}</span>{" "}
@@ -230,9 +231,9 @@ function ConflictFallback({
     // Nothing to merge as text, and nothing on disk worth staging as-is.
     return (
       <p className="p-4 text-xs text-muted-foreground">
-        This file was deleted on one or both sides — there's nothing to merge.
-        Take a side with <span className="font-medium">Accept all current</span>{" "}
-        / <span className="font-medium">incoming</span>, or open it in your
+        This file was deleted on both sides — there's nothing to merge. Take a
+        side with <span className="font-medium">Accept all current</span> /{" "}
+        <span className="font-medium">incoming</span>, or open it in your
         editor.
       </p>
     );
@@ -390,9 +391,9 @@ export function ConflictFileView({
       toast.success(`Resolved ${baseName(path)}`);
     } catch (e) {
       // A stale click: the path can be resolved elsewhere (an AI walk, another
-      // window) between render and click, and `git add` on a path that is fully
-      // gone exits 128. Only a still-conflicted path is a real failure; a status
-      // read that itself fails falls back to surfacing the error.
+      // window) between render and click, leaving NO index entry, and `git add`
+      // then exits 128 on a pathspec matching nothing. Only a still-conflicted
+      // path is a real failure; a failed status read falls back to the error.
       const status = await gitStatus(repoPath).catch(() => null);
       const resolvedElsewhere = status?.entries.every(
         (entry) =>
@@ -481,6 +482,9 @@ export function ConflictFileView({
           <ConflictFallback
             path={path}
             sides={file.data}
+            // Non-null on this branch: it's the same data + `segments === null`
+            // + not-error condition `arm` was computed under.
+            arm={arm as FallbackArm}
             busy={busy}
             onMarkResolved={markResolved}
           />

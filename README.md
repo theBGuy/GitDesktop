@@ -231,7 +231,9 @@ pushing and pulling stay manual.
   gets a conflict banner naming it, with gated Continue / Abort. Selecting
   a conflicted file opens an in-app editor: each region shows Current (ours)
   over Incoming (theirs) with Accept current / incoming / both, plus
-  whole-file Accept all current / incoming and Open in editor.
+  whole-file Accept all current / incoming and Open in editor, and Mark
+  resolved to stage a file exactly as it stands on disk when you settled it
+  outside the app (edited, emptied, or removed).
 - **AI conflict resolution**: one more option there. Ask your model to merge
   a file, review the proposal as a diff, and accept it (per file or all at
   once). Multi-provider, runs on local Ollama or a keyless Claude Code /
