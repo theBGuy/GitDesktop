@@ -116,6 +116,58 @@ pub async fn append_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> 
     Ok(added)
 }
 
+/// Removes lines from `<repo>/.gitdesktop/aiignore`, matched by exact trimmed
+/// content — the "remove rule" half of the AI excluded-files view. Returns how
+/// many LINES were removed, so a pattern the file holds twice counts twice.
+/// Matching by content rather than line number keeps it safe if the file shifted
+/// since the caller read it.
+///
+/// Trimming is git's own (`trim_ignore_pattern`), not `str::trim`: a blanket trim
+/// collapses `/notes\ ` and `/notes\` to the same key, so removing either rule
+/// would delete both lines.
+///
+/// Every other line — the `#` header, comments, blanks — is preserved byte for
+/// byte, its own line ending included, and a missing file or a pattern that
+/// matched nothing returns 0 without creating or rewriting anything. This is
+/// committed content: the working-tree file is written, nothing is staged.
+#[tauri::command]
+pub async fn remove_repo_ai_ignore(repo_path: String, patterns: Vec<String>) -> AppResult<usize> {
+    let wanted: HashSet<&str> = patterns
+        .iter()
+        .map(|p| crate::fsops::trim_ignore_pattern(p))
+        .filter(|p| !p.is_empty())
+        .collect();
+    if wanted.is_empty() {
+        return Ok(0);
+    }
+
+    let path = Path::new(&repo_path).join(".gitdesktop").join("aiignore");
+    let content = match tokio::fs::read_to_string(&path).await {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(AppError::Io(e)),
+    };
+
+    // Each kept line carries ITS OWN terminator through: this file can hold mixed
+    // endings (appends write `\n`, a checkout under core.autocrlf brings `\r\n`
+    // back), and choosing one for the whole file would rewrite every other line.
+    // `trim_ignore_pattern` strips the terminator itself, so the match key needs
+    // no separate trim.
+    let kept: Vec<&str> = content
+        .split_inclusive('\n')
+        .filter(|l| !wanted.contains(crate::fsops::trim_ignore_pattern(l)))
+        .collect();
+    let removed = content.split_inclusive('\n').count() - kept.len();
+    if removed == 0 {
+        return Ok(0);
+    }
+
+    tokio::fs::write(&path, kept.concat())
+        .await
+        .map_err(AppError::Io)?;
+    Ok(removed)
+}
+
 /// Per-repo SHARED branch rules, read from `<repo>/.gitdesktop/branch-rules.json`.
 /// Returns the raw file contents (parsed and normalized on the frontend, which
 /// owns the schema), or None when the file is absent or empty.
@@ -664,5 +716,94 @@ mod tests {
             added, 1,
             "a duplicate is accepted rather than risk a stale skip"
         );
+    }
+
+    /// Removing a rule takes out its line and nothing else: the header, the other
+    /// patterns and any hand-written comment stay exactly as the user left them,
+    /// and a pattern the file never had rewrites nothing at all.
+    #[tokio::test]
+    async fn remove_ai_ignore_drops_only_the_named_line() {
+        let (_tmp, dir) = ai_ignore_test_repo();
+        let repo = dir.to_string_lossy().into_owned();
+        let path = dir.join(".gitdesktop").join("aiignore");
+        std::fs::create_dir_all(dir.join(".gitdesktop")).unwrap();
+
+        let original = "# Files excluded from AI context\na.txt\n/secrets.env\n# a note\n";
+        std::fs::write(&path, original).unwrap();
+
+        let removed = remove_repo_ai_ignore(repo.clone(), vec!["/secrets.env".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# Files excluded from AI context\na.txt\n# a note\n"
+        );
+
+        // A pattern the file does not hold changes nothing.
+        let before = std::fs::read_to_string(&path).unwrap();
+        let removed = remove_repo_ai_ignore(repo.clone(), vec!["/nope.txt".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        // Removing the LAST line leaves an empty file, not a stray newline.
+        std::fs::write(&path, "only.txt\n").unwrap();
+        let removed = remove_repo_ai_ignore(repo.clone(), vec!["only.txt".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+
+        // A missing file is 0, and stays missing — removal never creates one.
+        std::fs::remove_file(&path).unwrap();
+        let removed = remove_repo_ai_ignore(repo, vec!["a.txt".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(removed, 0);
+        assert!(!path.exists());
+    }
+
+    /// Mixed line endings survive a removal untouched. The file is reachable on
+    /// Windows — appends write `\n`, a checkout under core.autocrlf brings `\r\n`
+    /// back — and rewriting every line to one ending would hand the user a
+    /// whole-file diff to review over a one-line change.
+    #[tokio::test]
+    async fn remove_ai_ignore_preserves_each_lines_own_ending() {
+        let (_tmp, dir) = ai_ignore_test_repo();
+        let repo = dir.to_string_lossy().into_owned();
+        let path = dir.join(".gitdesktop").join("aiignore");
+        std::fs::create_dir_all(dir.join(".gitdesktop")).unwrap();
+        // A CRLF header and CRLF survivor around an LF line, plus a final line
+        // with no terminator at all.
+        std::fs::write(&path, "# header\r\na.txt\n/secrets.env\r\nlast.txt").unwrap();
+
+        let removed = remove_repo_ai_ignore(repo, vec!["/secrets.env".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# header\r\na.txt\nlast.txt"
+        );
+    }
+
+    /// Matching is git's `trim_ignore_pattern`, not `str::trim`: a blanket trim
+    /// collapses `/notes\ ` and `/notes\` to one key, and removing either rule
+    /// would delete both lines — including the one still hiding a file.
+    #[tokio::test]
+    async fn remove_ai_ignore_keeps_the_escaped_trailing_space_distinct() {
+        let (_tmp, dir) = ai_ignore_test_repo();
+        let repo = dir.to_string_lossy().into_owned();
+        let path = dir.join(".gitdesktop").join("aiignore");
+        std::fs::create_dir_all(dir.join(".gitdesktop")).unwrap();
+        std::fs::write(&path, "/notes\\ \n/notes\\\n").unwrap();
+
+        let removed = remove_repo_ai_ignore(repo, vec!["/notes\\ ".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "/notes\\\n");
     }
 }

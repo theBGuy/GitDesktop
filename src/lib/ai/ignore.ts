@@ -3,7 +3,7 @@ import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import { trimIgnorePattern } from "@/lib/git/glob";
 
 /** Lines of a newline-joined ignore-pattern string, dropping blanks + comments. */
-function ignoreLines(patterns: string): string[] {
+export function ignoreLines(patterns: string): string[] {
   return patterns
     .split("\n")
     .map(trimIgnorePattern)
@@ -39,7 +39,7 @@ export async function aiExcludePatterns(
 /** U+FFFD, what a lossy UTF-8 decode leaves where the bytes weren't valid. Built
  *  from its code point, never written literally: the character is invisible in
  *  source and a re-encode that mangled it would silently unguard the check below. */
-const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);
+export const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);
 
 /**
  * The survivors of a bare path list under the user's AI-ignore patterns, plus

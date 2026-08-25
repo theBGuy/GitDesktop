@@ -325,6 +325,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "ai-excluded-files",
+    label: "AI excluded files",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "blame-file",
     label: "Blame file…",
     category: "Repository",

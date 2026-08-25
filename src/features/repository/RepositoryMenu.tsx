@@ -81,7 +81,10 @@ import { toastError } from "@/lib/toast";
 import { RemoteUrlDialog } from "./RemoteUrlDialog";
 import { RemoveRepoDialog, RepoAliasDialog } from "./RepoDialogs";
 import { RepoSettingsDialogFallback } from "./RepoSettingsDialogFallback";
-import { RepositoryFilesDialog } from "./RepositoryFilesDialog";
+import {
+  RepositoryFilesDialog,
+  type RepositoryFilesTab,
+} from "./RepositoryFilesDialog";
 import { SubmodulesDialog } from "./SubmodulesDialog";
 import { WorktreesDialog } from "./WorktreesDialog";
 
@@ -160,6 +163,9 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   );
   const [remoteUrlOpen, setRemoteUrlOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  // Which list the files dialog opens on; read at the open transition, so it is
+  // set before the flag rather than after.
+  const [filesTab, setFilesTab] = useState<RepositoryFilesTab>("tracked");
   const [aliasTarget, setAliasTarget] = useState<RecentRepo | null>(null);
   const [removeTarget, setRemoveTarget] = useState<RecentRepo | null>(null);
 
@@ -285,6 +291,13 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
 
   const onError = (e: unknown) => toastError(e);
 
+  // The tab is seeded in the same batch as the open flag, so the dialog reads it
+  // on the render where `open` turns true.
+  const openFiles = (tab: RepositoryFilesTab) => {
+    setFilesTab(tab);
+    setFilesOpen(true);
+  };
+
   async function openWeb(suffix = "") {
     try {
       const url = await forgeRepoUrl(repoPath);
@@ -357,7 +370,8 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
     Boolean(editor),
   );
   useHotkeyAction("repository-statistics", () => setRepoTab("insights"));
-  useHotkeyAction("manage-files", () => setFilesOpen(true));
+  useHotkeyAction("manage-files", () => openFiles("tracked"));
+  useHotkeyAction("ai-excluded-files", () => openFiles("ai"), aiEnabled);
   useHotkeyAction("automations", () => setAutomationsOpen(true), aiEnabled);
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));
   useHotkeyAction("repository-settings", openRepoSettings, canOpenRepoSettings);
@@ -484,7 +498,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <ChartBarIcon />
           Insights…
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setFilesOpen(true)}>
+        <DropdownMenuItem onClick={() => openFiles("tracked")}>
           <FilesIcon />
           Manage files…
         </DropdownMenuItem>
@@ -640,6 +654,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
         repoPath={repoPath}
         open={filesOpen}
         onOpenChange={setFilesOpen}
+        initialTab={filesTab}
       />
       <RepoAliasDialog
         key={

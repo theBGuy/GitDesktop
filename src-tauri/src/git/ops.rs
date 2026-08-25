@@ -1301,6 +1301,28 @@ pub async fn git_list_tracked(repo_path: String) -> AppResult<Vec<String>> {
         .collect())
 }
 
+/// Every untracked file git would report as new (`ls-files --others
+/// --exclude-standard`). The AI excluded-files view needs it because its corpus
+/// is tracked plus untracked: an untracked NAME is disclosure the moment the file
+/// shows up in status. Gitignored files stay out deliberately — they reach no AI
+/// feature at all (absent from status and diffs), so the corpus matches what
+/// generation actually sees. Read-only.
+#[tauri::command]
+pub async fn git_list_untracked(repo_path: String) -> AppResult<Vec<String>> {
+    let out = run_git(
+        Some(&repo_path),
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(out
+        .stdout_lossy()
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// An ignored file and the .gitignore rule responsible for ignoring it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4577,6 +4599,20 @@ mod tests {
 
     async fn rev(repo: &str, r: &str) -> String {
         git(repo, &["rev-parse", r]).await.trim().to_string()
+    }
+
+    /// The untracked listing names new files only: tracked ones are already in
+    /// the index, and a gitignored one is deliberately absent — it reaches no AI
+    /// feature, so the excluded-files corpus must not claim it as disclosure.
+    #[tokio::test]
+    async fn list_untracked_names_only_new_unignored_files() {
+        let (dir, repo) = setup_repo("untracked").await;
+        commit_file(&repo, dir.path(), ".gitignore", "secret.log\n", "rules").await;
+        std::fs::write(dir.path().join("new.txt"), "n\n").unwrap();
+        std::fs::write(dir.path().join("secret.log"), "s\n").unwrap();
+
+        let untracked = git_list_untracked(repo).await.unwrap();
+        assert_eq!(untracked, vec!["new.txt".to_string()]);
     }
 
     async fn subjects(repo: &str) -> Vec<String> {

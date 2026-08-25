@@ -2322,3 +2322,17 @@ export interface UnignoreRule {
   source: string;
   pattern: string;
 }
+
+/** Which AI-ignore rule decided a path, from git's own matcher. Covers every
+ *  path a rule decides, INCLUDING one whose decider is a `!` negation — that
+ *  path stays visible to AI, so `negated` is the gate on "is this hidden". */
+export interface AiIgnoreVerdict {
+  /** Path exactly as sent. */
+  path: string;
+  /** 0-based index into the exclude array AS PASSED of the deciding line. */
+  patternIndex: number;
+  /** The deciding line as the matcher read it (trimmed). */
+  pattern: string;
+  /** True when the deciding line is a `!` negation — the path is NOT hidden. */
+  negated: boolean;
+}

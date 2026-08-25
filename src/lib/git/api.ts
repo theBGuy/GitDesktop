@@ -7,6 +7,7 @@ import {
   coldStartSetSecret,
 } from "@/lib/test-mode";
 import type {
+  AiIgnoreVerdict,
   ApplyLinesResult,
   ApprovalState,
   AvailableProjects,
@@ -642,6 +643,10 @@ export const gitUntrack = (
 
 export const gitListTracked = (repoPath: string) =>
   invoke<string[]>("git_list_tracked", { repoPath });
+
+/** Every file in the working tree git doesn't track and doesn't ignore. */
+export const gitListUntracked = (repoPath: string) =>
+  invoke<string[]>("git_list_untracked", { repoPath });
 
 export const gitIgnoredFiles = (repoPath: string) =>
   invoke<IgnoredFile[]>("git_ignored_files", { repoPath });
@@ -3466,6 +3471,11 @@ export const readRepoAiIgnore = (repoPath: string) =>
 export const appendRepoAiIgnore = (repoPath: string, patterns: string[]) =>
   invoke<number>("append_repo_ai_ignore", { repoPath, patterns });
 
+/** Deletes lines from `<repo>/.gitdesktop/aiignore`, matched as the matcher
+ *  reads them (trimmed), returning the number actually removed. */
+export const removeRepoAiIgnore = (repoPath: string, patterns: string[]) =>
+  invoke<number>("remove_repo_ai_ignore", { repoPath, patterns });
+
 /** Which of `paths` the user's AI-ignore patterns hide, decided by git's own
  *  gitignore engine — the same matcher the diff commands filter through. For
  *  path lists the frontend holds itself (a remote PR's changed files): the paths
@@ -3476,6 +3486,21 @@ export const gitFilterAiIgnored = (
   paths: string[],
   exclude: string[],
 ) => invoke<string[]>("git_filter_ai_ignored", { repoPath, paths, exclude });
+
+/** Which rule decided each of `paths`, for the same matcher and `exclude` list
+ *  {@link gitFilterAiIgnored} filters through — the verification surface behind
+ *  the hiding. Every decided path is reported, negations included; paths no rule
+ *  touches are absent. */
+export const gitAiIgnoreVerdicts = (
+  repoPath: string,
+  paths: string[],
+  exclude: string[],
+) =>
+  invoke<AiIgnoreVerdict[]>("git_ai_ignore_verdicts", {
+    repoPath,
+    paths,
+    exclude,
+  });
 
 /** Raw contents of `<repo>/.gitdesktop/branch-rules.json`, or null if absent. */
 export const readRepoBranchRules = (repoPath: string) =>

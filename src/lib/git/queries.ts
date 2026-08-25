@@ -7,6 +7,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ignoreLines, REPLACEMENT_CHAR } from "@/lib/ai/ignore";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
@@ -165,6 +166,10 @@ const workingTreeKeys = (repo: string) =>
     ["repo", repo, "file-b64", "worktree"],
     ["repo", repo, "file-b64", ":0"],
   ] as const;
+
+/** Prefix of every {@link useAiExcludedView} key for a repo (the global-pattern
+ *  axis follows), so a rule edit invalidates the view whatever settings held. */
+const aiExcludedKey = (repo: string) => ["repo", repo, "ai-excluded"] as const;
 
 /** The families a commit (or amend) makes stale BEYOND the working tree —
  *  history, branch tips/counters, HEAD-rev blobs, and operation state, both
@@ -3571,9 +3576,54 @@ export function useAppendRepoAiIgnore(repo: string) {
     repo,
     (patterns: string[]) => api.appendRepoAiIgnore(repo, patterns),
     // Staging-class edit — only the working tree changes (the aiignore file
-    // appears/updates), so narrow like useStage/useApplySuggestion.
-    { invalidate: workingTreeKeys(repo) },
+    // appears/updates), so narrow like useStage/useApplySuggestion. The
+    // AI-excluded view reads those rules, so it goes with them.
+    { invalidate: [...workingTreeKeys(repo), aiExcludedKey(repo)] },
   );
+}
+
+/**
+ * Everything the AI-excluded view renders: the rules in force, which rule
+ * decided each candidate file, and the names no rule could have decided.
+ *
+ * `exclude` is repo rules FIRST, global LAST — the same security invariant
+ * `aiExcludePatterns` keeps, since last-match-wins and the repo file is
+ * committed content: a committed `!` must never outrank a global exclude.
+ * Verdicts index into that array, so the caller reads a rule's source from its
+ * position.
+ *
+ * A name carrying U+FFFD leaves the corpus before the IPC call and comes back
+ * as `unreadable`: generation hides such a name whatever the patterns say, so
+ * attributing it to a rule would be a lie. Keyed on the global patterns, so a
+ * settings edit produces a fresh view rather than a stale attribution.
+ */
+export function useAiExcludedView(
+  repo: string,
+  enabled: boolean,
+  globalPatterns: string,
+) {
+  return useQuery({
+    queryKey: [...aiExcludedKey(repo), globalPatterns] as const,
+    queryFn: async () => {
+      const [repoRules, tracked, untracked] = await Promise.all([
+        api.readRepoAiIgnore(repo),
+        api.gitListTracked(repo),
+        api.gitListUntracked(repo),
+      ]);
+      const globalRules = ignoreLines(globalPatterns);
+      const exclude = [...repoRules, ...globalRules];
+      const candidates = [...new Set([...tracked, ...untracked])];
+      const corpus = candidates.filter((p) => !p.includes(REPLACEMENT_CHAR));
+      const unreadable = candidates.filter((p) => p.includes(REPLACEMENT_CHAR));
+      const verdicts =
+        exclude.length > 0 && corpus.length > 0
+          ? await api.gitAiIgnoreVerdicts(repo, corpus, exclude)
+          : [];
+      return { repoRules, globalRules, verdicts, untracked, unreadable };
+    },
+    enabled,
+    staleTime: 30_000,
+  });
 }
 
 export function useUntrack(repo: string) {
@@ -3629,6 +3679,17 @@ export function useForceAdd(repo: string) {
 export function useUnignoreRules(repo: string) {
   return useRepoMutation(repo, (rules: UnignoreRule[]) =>
     api.gitUnignoreRules(repo, rules),
+  );
+}
+
+/** Deletes lines from the repo's `.gitdesktop/aiignore`. Same narrowing as
+ *  {@link useAppendRepoAiIgnore} — the file is working-tree content, and the
+ *  AI-excluded view reads the rules it holds. */
+export function useRemoveRepoAiIgnore(repo: string) {
+  return useRepoMutation(
+    repo,
+    (patterns: string[]) => api.removeRepoAiIgnore(repo, patterns),
+    { invalidate: [...workingTreeKeys(repo), aiExcludedKey(repo)] },
   );
 }
 

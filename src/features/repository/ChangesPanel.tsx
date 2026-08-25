@@ -53,7 +53,7 @@ import {
 } from "@/lib/settings/queries";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { ignoreToast, toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { ChangesContextMenuItems, type MenuTarget } from "./ChangesContextMenu";
@@ -70,27 +70,6 @@ function unstagePaths(entry: FileEntry): string[] {
   return (entry.origPath ? [entry.path, entry.origPath] : [entry.path]).map(
     literalPathspec,
   );
-}
-
-/**
- * Toast copy for a bulk ignore / AI-exclude, where `total` is the number of
- * LINES written and `added` came back from the Rust command as the count
- * actually appended — skipping lines already present (.gitignore) or already in
- * EFFECT (.gitdesktop/aiignore, where a later `!` un-ignore revives a line).
- * Lines, not selected entries: on the AI path a `\`-holding path emits a second
- * `/`-separated line, so the total can exceed the selection. Reports the honest
- * end state: nothing new when everything was already covered, a partial when
- * some were skipped.
- */
-function ignoreToast(added: number, total: number, file: string): string {
-  const entries = (n: number) => `entr${n === 1 ? "y" : "ies"}`;
-  if (added === 0)
-    return total === 1
-      ? `Entry already in ${file}`
-      : `All ${total} ${entries(total)} already in ${file}`;
-  if (added < total)
-    return `Added ${added} of ${total} ${entries(total)} to ${file}`;
-  return `Added ${added} ${entries(added)} to ${file}`;
 }
 
 type FilterKind = "included" | "excluded" | "new" | "modified" | "deleted";

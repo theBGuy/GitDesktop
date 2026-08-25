@@ -94,7 +94,10 @@ publish to GitHub, GitLab, or Bitbucket, and fork.
   GitDesktop menu. Items work from any screen.
 - **Manage files git tracks or ignores** (beyond pending changes): untrack a
   file committed by mistake (it stays on disk), or surface every ignored
-  file with the rule responsible and force-add it or remove that rule.
+  file with the rule responsible and force-add it or remove that rule. With
+  AI features on, an **AI excluded** tab does the same for your AI ignore
+  patterns: every file they hide, the rule that hid it, and removal of that
+  rule from the repo file or your global settings.
 
 <details>
 <summary><strong>GitHub repo settings</strong> (admin): rulesets, security toggles, secrets, webhooks, Pages, danger zone</summary>
@@ -960,6 +963,16 @@ review via its subscription login. The full list is under
     multi-selection) creates and updates this file for you, adding anchored
     lines like `/src/config.ts` and `/vendor/` that mean exactly what you
     picked.
+  - **See what they hide**: the repo ⋮ menu → **Manage files…** → **AI
+    excluded** lists every file your patterns currently hide, each labelled
+    with the rule that hid it and whether it came from the repo file or your
+    global settings. Above the list sit your rules in evaluation order with
+    per-rule match counts (click one to see just its files), and a warning
+    marks a `!` line that re-includes nothing. Select files and **Remove** the
+    rules behind them: repo lines leave `.gitdesktop/aiignore` (commit the
+    change), global lines leave Settings and affect every repository. The
+    **Tracked** tab's **Exclude … from AI** button excludes a whole selection
+    at once.
 - **Keys**: kept in the OS keychain (Windows Credential Manager, macOS
   Keychain, libsecret). **Hide AI** (Settings → General) hides the AI
   surfaces (finished AI activity in the dock and notification inbox
