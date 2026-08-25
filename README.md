@@ -122,8 +122,8 @@ hunks), including committing or discarding only part of a brand-new
 Ctrl+Shift+Enter (Cmd on macOS), without reaching for the button. Stage,
 unstage, or discard single files or a multi-selection from the context menu
 or the command palette; discarding a whole untracked file goes to the
-recycle bin. Commit with title + body,
-co-authors suggested from history, amend, undo, reset, and revert.
+recycle bin. Commit with title + body, co-authors suggested from history,
+amend, undo, reset, and revert.
 
 ### Branches
 
