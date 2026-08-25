@@ -48,7 +48,7 @@ import {
 import { LOGIN_COMMAND } from "@/lib/ai/cli-client";
 import { createAiClient } from "@/lib/ai/client";
 import type { ReviewContextSize } from "@/lib/ai/context-budget";
-import { useAvailableModels } from "@/lib/ai/models";
+import { modelPickerEmptyText, useAvailableModels } from "@/lib/ai/models";
 import {
   ALL_PROVIDER_IDS,
   defaultModelForProvider,
@@ -225,12 +225,7 @@ function ModelPicker({
           />
           <ComboboxContent>
             <ComboboxEmpty>
-              {/* With placeholder suggestions always present, this shows only
-                  under a typed filter, which may still be resolving — note an
-                  in-flight probe, matching the session and PR-review pickers. */}
-              {availableModels.isFetching
-                ? "No matching models yet (catalog loading) — the typed id is used as-is"
-                : "No matching models — the typed id is used as-is"}
+              {modelPickerEmptyText(availableModels.isFetching)}
             </ComboboxEmpty>
             <ComboboxList>
               {(item: string) => (

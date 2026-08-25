@@ -30,7 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { type AgentKind, isAgentKind } from "@/lib/ai/agent";
-import { useAgentModels } from "@/lib/ai/models";
+import { modelPickerEmptyText, useAgentModels } from "@/lib/ai/models";
 import type { McpServer } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
@@ -108,12 +108,7 @@ export function ModelPicker({
           long ids (e.g. `opencode/…`). Size to content, capped on-screen. */}
       <ComboboxContent className="w-fit max-w-sm">
         <ComboboxEmpty>
-          {/* With placeholder suggestions always present, this renders only when
-              the typed filter matches nothing — keep the typed-id reassurance
-              and note an in-flight probe rather than replacing it. */}
-          {available.isFetching
-            ? "No matching models yet (catalog loading) — the typed id is used as-is"
-            : "No matching models — the typed id is used as-is"}
+          {modelPickerEmptyText(available.isFetching)}
         </ComboboxEmpty>
         {/* Render FUNCTION, not static rows: only this form maps the store's
             filtered items, so static children would never narrow as you type. */}

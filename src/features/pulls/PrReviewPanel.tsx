@@ -37,7 +37,7 @@ import { Switch } from "@/components/ui/switch";
 import { detectAgentCli, providerKind } from "@/lib/ai/agent";
 import { LOGIN_COMMAND } from "@/lib/ai/cli-client";
 import { buildAiCommentBody } from "@/lib/ai/comment-branding";
-import { useAvailableModels } from "@/lib/ai/models";
+import { modelPickerEmptyText, useAvailableModels } from "@/lib/ai/models";
 import {
   defaultModelForProvider,
   PROVIDER_LABELS,
@@ -410,15 +410,8 @@ export function PrReviewPanel({
               }
             />
             <ComboboxContent>
-              {/* `isFetching`, never `isPending` — a catalog that was never
-                  requested must not read as loading. With placeholder
-                  suggestions always present this renders only under a typed
-                  filter, which may still be resolving — matching the session
-                  and Settings pickers. */}
               <ComboboxEmpty>
-                {available.isFetching
-                  ? "No matching models yet (catalog loading) — the typed id is used as-is"
-                  : "No matching models — the typed id is used as-is"}
+                {modelPickerEmptyText(available.isFetching)}
               </ComboboxEmpty>
               <ComboboxList>
                 {(item: string) => (

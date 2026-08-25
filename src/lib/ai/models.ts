@@ -353,3 +353,14 @@ export function useAgentModels(
     refetchOnReconnect: false,
   });
 }
+
+/** Empty-state copy for the model-picker comboboxes. Both hooks above keep
+ *  placeholder suggestions present, so a picker's empty state renders only under
+ *  a typed filter that matches nothing — which may just be the catalog still
+ *  resolving, so an in-flight probe is named rather than replacing the typed-id
+ *  reassurance. */
+export function modelPickerEmptyText(isFetching: boolean): string {
+  return isFetching
+    ? "No matching models yet (catalog loading) — the typed id is used as-is"
+    : "No matching models — the typed id is used as-is";
+}
