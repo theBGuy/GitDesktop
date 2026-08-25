@@ -544,14 +544,15 @@ pub(crate) async fn git_submodule_set_branch_core(
     stage_gitmodules(&repo_path).await
 }
 
-/// Refuses while `.gitmodules` carries unstaged edits — the shared pre-check for
-/// all four mutations that write that file. Two reasons, both measured on git
-/// 2.51.1: `git rm` on a submodule fails "please stage your changes to .gitmodules"
-/// with or without `-f` — and `deinit -f` succeeds first, so the force path would
-/// strand a cleared worktree with nothing staged — and `add` (which stages the whole
-/// worktree file itself) and [`stage_gitmodules`] would otherwise sweep the user's
-/// unrelated edits, tracked or not, into the index. `:/` costs nothing and anchors at
-/// the repo root, but does not widen the module's contract — see [`list_submodules`].
+/// Refuses while `.gitmodules` is unsettled — unstaged edits, or a file git isn't
+/// tracking yet — the shared pre-check for all four mutations that write that file.
+/// Two reasons, both measured on git 2.51.1: `git rm` on a submodule fails "please
+/// stage your changes to .gitmodules" with or without `-f` — and `deinit -f` succeeds
+/// first, so the force path would strand a cleared worktree with nothing staged — and
+/// `add` (which stages the whole worktree file itself) and [`stage_gitmodules`] would
+/// otherwise sweep the user's unrelated edits, tracked or not, into the index. `:/`
+/// costs nothing and anchors at the repo root, but does not widen the module's
+/// contract — see [`list_submodules`].
 async fn refuse_unsettled_gitmodules(repo_path: &str) -> AppResult<()> {
     // `status`, not `diff`: diff compares worktree to index, so an UNTRACKED
     // `.gitmodules` has no index entry and reads as clean — while `submodule add`
@@ -1020,7 +1021,11 @@ mod tests {
         )
         .await
         .expect_err("unstaged .gitmodules must be refused");
-        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        // Pins the arm, not just the variant: the two messages differ deliberately.
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("Unstaged changes")),
+            "got {err:?}"
+        );
         let status = git(&host, &["status", "--porcelain"]).await;
         assert!(status.contains(" M .gitmodules"), "still unstaged: {status}");
         assert!(!exists(&host, "libs/dep2"), "nothing was cloned");
@@ -1078,7 +1083,12 @@ mod tests {
         )
         .await
         .expect_err("an untracked .gitmodules must be refused");
-        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        // The untracked arm must not collapse into the unstaged one: "discard" is
+        // wrong advice for a file git isn't tracking.
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("isn't tracked")),
+            "got {err:?}"
+        );
         assert!(!exists(&host, "libs/dep"), "nothing was cloned");
         let status = git(&host, &["status", "--porcelain"]).await;
         assert!(status.contains("?? .gitmodules"), "still untracked: {status}");

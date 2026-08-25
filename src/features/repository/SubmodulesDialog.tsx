@@ -9,7 +9,7 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import type { ComponentProps } from "react";
-import { useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
@@ -603,6 +603,20 @@ function AddSubmodule({
   const [path, setPath] = useState("");
   const [branch, setBranch] = useState("");
 
+  // The continuation belongs to THIS mount, not to whichever form is on screen
+  // when the clone lands: closing mid-clone and reopening on the add form gives
+  // the user a second, freshly-typed form that must not be navigated away by the
+  // first one's result. The parent's open-guard can't tell the two apart.
+  const mounted = useRef(true);
+  useEffect(() => {
+    // Set in the BODY, not just initialization: StrictMode's setup→cleanup→setup
+    // cycle would otherwise leave the flag false on a mounted form in dev.
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
   const trimmedUrl = url.trim();
   // git's own default when no path is given: the URL's last segment.
   const derivedPath = nameFromUrl(trimmedUrl);
@@ -615,8 +629,9 @@ function AddSubmodule({
         path: path.trim() || null,
         branch: branch.trim() || null,
       });
+      // Reported either way — the add really did happen.
       toast.success("Submodule added — staged for you to commit.");
-      onAdded();
+      if (mounted.current) onAdded();
     } catch (e) {
       toastError(e);
     }
@@ -698,9 +713,14 @@ function AddSubmodule({
             Enter a repository URL to continue.
           </span>
         )}
-        <Button variant="outline" onClick={onCancel} disabled={add.isPending}>
+        <DisabledReasonButton
+          variant="outline"
+          disabled={add.isPending}
+          reason={ADDING_REASON}
+          onClick={onCancel}
+        >
           Cancel
-        </Button>
+        </DisabledReasonButton>
         <Button disabled={!trimmedUrl || add.isPending} onClick={handleAdd}>
           {add.isPending && <Spinner data-icon="inline-start" />}
           Add
@@ -820,16 +840,9 @@ function SetSubmoduleBranchDialog({
 
   const next = branch.trim() || null;
   const unchanged = next === (submodule?.branch ?? null);
-  // An empty field is a valid value here (track the remote default), so the only
-  // terms are the in-flight write and an unchanged field.
-  const saveReason = (() => {
-    switch (true) {
-      case setBranch.isPending:
-        return "Saving…";
-      default:
-        return "No changes to save";
-    }
-  })();
+  // No empty-field arm: an empty field is a valid value here (track the remote
+  // default), so the only terms are the in-flight write and an unchanged field.
+  const saveReason = setBranch.isPending ? "Saving…" : "No changes to save";
 
   async function handleSave() {
     if (!submodule || unchanged || setBranch.isPending) return;
