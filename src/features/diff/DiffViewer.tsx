@@ -231,6 +231,11 @@ function WorkingTreeDiff({
     clearSelection,
     hunkMode && selection !== null && !busy && discard === null,
   );
+  // The Discard confirm's `run` captured line numbers at open time — close it
+  // if the selection invalidates underneath (a refetch while the dialog is up).
+  useEffect(() => {
+    if (selection === null) setDiscard(null);
+  }, [selection]);
 
   if (!hunkMode) {
     return (

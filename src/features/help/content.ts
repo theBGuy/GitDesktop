@@ -342,11 +342,11 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
   the selection instead of replacing it, so one selection can mix added and removed lines
   across as many hunks as you like; a plain drag starts a fresh one.
   {{kbd:stage-selected-lines}} stages the selection (or unstages it, on a staged file's
-  diff) without reaching for the button.
+  diff) without reaching for the button, and the command palette offers **Clear line
+  selection**.
 - Select multiple files ({{key:mod}}-click, or Shift-click for a range), then {{secondaryclick}}
   for **Stage / Unstage / Discard / Stash** of the whole selection — or use the command
-  palette ({{kbd:command-palette}}) for Stage / Unstage selected files, or to clear a
-  line selection.
+  palette ({{kbd:command-palette}}) for Stage / Unstage selected files.
 - Filter the list by path, or by category (new / modified / deleted, included /
   excluded) with the funnel button.
 
