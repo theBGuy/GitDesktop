@@ -175,29 +175,20 @@ function WorkingTreeDiff({
   const shownDiscard = useRetained(discard);
   // The drag-selected lines to stage/unstage/discard — file-wide, since the
   // single whole-file view lets a selection span multiple hunks.
-  const [selection, setSelection] = useState<SelectedLine[] | null>(null);
-  const clearSelection = useCallback(() => setSelection(null), []);
-  // Above the `!hunkMode` early return: the hotkey hooks below must run
-  // unconditionally, and they read `busy`.
+  const [selectionState, setSelectionState] = useState<{
+    lines: SelectedLine[];
+    forText: string;
+  } | null>(null);
+  const clearSelection = useCallback(() => setSelectionState(null), []);
+  // `parsed`, `hunkMode`, and `busy` are computed above the `!hunkMode` early
+  // return because the hotkey registrations below run unconditionally and read
+  // them.
   const busy =
     applyPatch.isPending ||
     applyPartial.isPending ||
     discardUntracked.isPending;
   const selectionBinding =
     useEffectiveBindings().get("stage-selected-lines") ?? null;
-  // One contextual chord: stage the selection on an unstaged file's diff,
-  // unstage it on a staged one — mirroring the banner's primary button. Dead
-  // while the Discard confirm is open: the global listener has no dialog guard.
-  useHotkeyAction(
-    "stage-selected-lines",
-    () => applySelection({ cached: true, reverse: file.staged }),
-    selection !== null && !busy && discard === null,
-  );
-  useHotkeyAction(
-    "clear-line-selection",
-    clearSelection,
-    selection !== null && !busy && discard === null,
-  );
 
   const parsed: ParsedDiff | null = useMemo(() => {
     const data = diff.data;
@@ -220,6 +211,27 @@ function WorkingTreeDiff({
   // so part of a new file can be committed. Binary/huge untracked files have
   // `parsed === null` and still fall through to the whole-file view below.
   const hunkMode = parsed !== null && parsed.hunks.length > 0;
+  // A selection is valid only against the diff text it was dragged against —
+  // stale by text means every consumer sees no selection at the same instant.
+  const selection =
+    selectionState !== null && selectionState.forText === diff.data?.text
+      ? selectionState.lines
+      : null;
+  // One contextual chord: stage the selection on an unstaged file's diff,
+  // unstage it on a staged one — mirroring the banner's primary button. Dead
+  // while the Discard confirm is open (the global listener has no dialog guard)
+  // and while the non-staging fallback renders.
+  useHotkeyAction(
+    "stage-selected-lines",
+    () => applySelection({ cached: true, reverse: file.staged }),
+    hunkMode && selection !== null && !busy && discard === null,
+  );
+  useHotkeyAction(
+    "clear-line-selection",
+    clearSelection,
+    hunkMode && selection !== null && !busy && discard === null,
+  );
+
   if (!hunkMode) {
     return (
       <DiffSurface
@@ -443,7 +455,11 @@ function WorkingTreeDiff({
           staged={file.staged}
           busy={busy}
           selection={selection}
-          onSelect={setSelection}
+          onSelect={(lines) =>
+            setSelectionState(
+              lines === null ? null : { lines, forText: diff.data?.text ?? "" },
+            )
+          }
           onHunkAction={onHunkAction}
         />
       </div>

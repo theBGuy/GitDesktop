@@ -66,8 +66,10 @@ export const FileRow = memo(function FileRow({
         })
       }
       onKeyDown={(e) => {
-        // Space would otherwise scroll the list and leak to the window-level
-        // hotkey listener.
+        // Keys from the nested toggle button pass through untouched, or the
+        // preventDefault below would cancel its native Enter/Space activation.
+        if (e.target !== e.currentTarget) return;
+        // Space on the row itself must be swallowed or it scrolls the list.
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onSelect(entry, staged, { ctrlOrMeta: false, shift: false });
