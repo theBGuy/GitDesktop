@@ -791,8 +791,9 @@ visible after the reviewer leaves the pending-request list. A pull request that 
 merges cleanly says so under its header, and **Resolve conflicts** settles it without
 leaving the app — see *Conflicts with the base branch* below.
 
-An open pull request's side rail carries the same **Projects** row an issue gets — chips for
-the **GitHub Projects** it belongs to, and a picker to link or unlink it (see *Issues*).
+An open pull request gets a **Projects** picker alongside its **labels**, **assignees**, and
+**reviewers**: chips for the **GitHub Projects** it belongs to, and a popup to link or
+unlink it (see *Issues*).
 
 The list toolbar's **funnel** filters the list by **author or label** — type in its search
 box to narrow both groups at once, toggle any number of options (each shows its match

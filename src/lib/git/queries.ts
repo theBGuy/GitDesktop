@@ -2226,12 +2226,19 @@ export function useEditItemProjects(
       const prev = queryClient.getQueryData<ProjectItemRef[]>(key);
       if (prev) {
         const removed = new Set(args.removes.map((r) => r.itemId));
+        const kept = prev.filter((item) => !removed.has(item.itemId));
+        // An add for a board the item is already on would otherwise render a
+        // second chip until the refetch reconciles it. The write is idempotent,
+        // so skipping the placeholder is enough.
+        const onBoard = new Set(kept.map((item) => item.project.id));
         queryClient.setQueryData<ProjectItemRef[]>(key, [
-          ...prev.filter((item) => !removed.has(item.itemId)),
-          ...args.adds.map((project) => ({
-            itemId: `pending:${project.id}`,
-            project,
-          })),
+          ...kept,
+          ...args.adds
+            .filter((project) => !onBoard.has(project.id))
+            .map((project) => ({
+              itemId: `pending:${project.id}`,
+              project,
+            })),
         ]);
       }
       return { prev };
@@ -2243,7 +2250,12 @@ export function useEditItemProjects(
       if (ctx?.prev) queryClient.setQueryData<ProjectItemRef[]>(key, ctx.prev);
       toastError(e);
     },
-    onSettled: () => void queryClient.invalidateQueries({ queryKey: key }),
+    // RETURNED, not voided: react-query holds `isPending` until this promise
+    // settles, which is what lets the picker's trigger stay held across the
+    // refetch rather than freeing while the cache still holds `pending:` ids.
+    // `invalidateQueries` resolves even when the refetch errors, so there is no
+    // stuck-trigger mode.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
   });
 }
 

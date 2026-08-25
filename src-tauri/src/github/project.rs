@@ -35,8 +35,9 @@ pub struct ProjectItemRef {
 #[serde(rename_all = "camelCase")]
 pub struct AvailableProjects {
     pub projects: Vec<ProjectV2Ref>,
-    /// Either arm had more than the 50 fetched — the picker says so rather than
-    /// implying the list is complete.
+    /// The list is known to be incomplete — either arm had more than the 50
+    /// fetched, or one arm didn't answer at all (denied). The picker says so
+    /// rather than implying these are all of them.
     pub truncated: bool,
 }
 
@@ -95,6 +96,25 @@ fn available_query() -> String {
     )
 }
 
+/// The two `projectsV2` connections [`available_query`] asks for, repo-linked
+/// first — the order the merge preserves.
+const AVAILABLE_ARMS: [&str; 2] = [
+    "/data/repository/projectsV2",
+    "/data/repositoryOwner/projectsV2",
+];
+
+/// Whether this arm came back as a connection object rather than null.
+fn arm_present(value: &Value, base: &str) -> bool {
+    value.pointer(base).is_some_and(Value::is_object)
+}
+
+/// Whether either arm answered. That — not a non-empty list — is the evidence
+/// that the read partly succeeded: a repo with no boards answers with an empty
+/// `nodes`, which is a legitimate empty catalog rather than a failure to report.
+fn any_arm_present(value: &Value) -> bool {
+    AVAILABLE_ARMS.iter().any(|base| arm_present(value, base))
+}
+
 /// Merges the two arms repo-linked-first, deduped by id: an owner-level project
 /// that is also linked to the repo must keep the repo-linked position. A null arm
 /// contributes nothing — GraphQL nulls the arm it couldn't resolve (a missing
@@ -113,8 +133,13 @@ fn merge_available(value: &Value) -> AvailableProjects {
             .unwrap_or(false);
         (nodes, has_next)
     };
-    let (repo_linked, repo_more) = arm("/data/repository/projectsV2");
-    let (owner_level, owner_more) = arm("/data/repositoryOwner/projectsV2");
+    let (repo_linked, repo_more) = arm(AVAILABLE_ARMS[0]);
+    let (owner_level, owner_more) = arm(AVAILABLE_ARMS[1]);
+    // One arm answering while the other stayed silent is a partial catalog, and
+    // rides the same flag as the 50-cap: "no projects" would otherwise speak for
+    // an arm that refused to answer.
+    let half_answered =
+        arm_present(value, AVAILABLE_ARMS[0]) != arm_present(value, AVAILABLE_ARMS[1]);
 
     let mut seen = std::collections::HashSet::new();
     let projects = repo_linked
@@ -124,7 +149,7 @@ fn merge_available(value: &Value) -> AvailableProjects {
         .collect();
     AvailableProjects {
         projects,
-        truncated: repo_more || owner_more,
+        truncated: repo_more || owner_more || half_answered,
     }
 }
 
@@ -142,17 +167,18 @@ fn gh_failure(out: &GhOutput) -> AppError {
 /// Decides the catalog from a raw gh result, tolerating a partial failure:
 /// `gh api graphql` exits non-zero whenever the response carries an `errors`
 /// array even when `data` is populated (measured), which is exactly what a
-/// viewer denied only the owner's boards receives. So anything recovered wins
-/// over reporting the arm that failed, and only a call that yielded no projects
-/// AND exited non-zero errors — keeping the scope mapping on the total failure,
-/// which the frontend's scope state reads. Exit 0 with no projects is the
-/// legitimate empty catalog; unparseable output at exit 0 keeps its own error.
+/// viewer denied only the owner's boards receives. An arm that answered at all
+/// wins over reporting the arm that didn't, so only a read where NEITHER arm
+/// came back errors — and that error keeps the scope mapping's actionable
+/// wording, which the picker renders verbatim. Unparseable output at exit 0
+/// keeps its own error.
 fn available_from_output(out: &GhOutput) -> AppResult<AvailableProjects> {
     let parsed: Option<Value> = serde_json::from_str(&out.stdout_lossy()).ok();
-    match parsed.as_ref().map(merge_available) {
-        Some(a) if !a.projects.is_empty() => Ok(a),
+    match parsed {
+        Some(ref v) if any_arm_present(v) => Ok(merge_available(v)),
         _ if out.code != 0 => Err(map_scope_error(gh_failure(out))),
-        Some(a) => Ok(a),
+        // A clean exit is an answer even with both arms absent (owner not found).
+        Some(ref v) => Ok(merge_available(v)),
         None => Err(AppError::Gh(
             "could not parse the projects query".to_string(),
         )),
@@ -232,6 +258,9 @@ pub async fn gh_item_projects(
     };
     let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     let query = item_projects_query(field);
+    // Strings take `-f` (raw), never `-F`: gh's typed form reads a leading `@` as
+    // a host file path. `number` is the one `-F` here because `Int!` needs the
+    // typed form, and a `u64` can only ever format to digits.
     let out = run_gh(
         Some(&repo_path),
         &[
@@ -469,7 +498,8 @@ mod tests {
         let out = merge_available(&value);
         let ids: Vec<&str> = out.projects.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["PVT_repo"]);
-        assert!(!out.truncated);
+        // The silent arm makes this a partial catalog, not "these are all of them".
+        assert!(out.truncated);
     }
 
     #[test]
@@ -500,15 +530,96 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_repo_arm_beside_a_denied_owner_arm_is_an_empty_catalog_not_an_error() {
+        // A repo with no boards whose owner arm is forbidden: the repo arm still
+        // ANSWERED (empty `nodes`), so this is the "No projects" state, not a
+        // failure — even though the `errors` entry exits gh non-zero.
+        let out = available_from_output(&gh_out(
+            1,
+            r#"{"data":{
+                "repository":{"projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[]}},
+                "repositoryOwner":null
+            },"errors":[{"type":"FORBIDDEN","path":["repositoryOwner"],
+                "message":"Resource not accessible by integration"}]}"#,
+            "gh: Resource not accessible by integration",
+        ))
+        .expect("an arm that answered empty is an answer");
+        assert!(out.projects.is_empty());
+        // Empty, but not "there are none": the denied arm never spoke.
+        assert!(out.truncated);
+    }
+
+    #[test]
     fn a_clean_exit_with_no_boards_is_an_empty_catalog_not_an_error() {
+        // BOTH arms answered empty — the only shape that can honestly claim the
+        // catalog is complete and empty.
         let out = available_from_output(&gh_out(
             0,
-            r#"{"data":{"repository":{"projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[]}},"repositoryOwner":null}}"#,
+            r#"{"data":{"repository":{"projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[]}},"repositoryOwner":{"projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}"#,
             "",
         ))
         .expect("no projects is a legitimate answer");
         assert!(out.projects.is_empty());
         assert!(!out.truncated);
+    }
+
+    #[test]
+    fn truncation_covers_a_silent_arm_as_well_as_the_page_cap() {
+        let merged = |raw: &str| {
+            merge_available(&serde_json::from_str::<Value>(raw).expect("valid JSON")).truncated
+        };
+        const EMPTY_ARM: &str = r#"{"pageInfo":{"hasNextPage":false},"nodes":[]}"#;
+        const CAPPED_ARM: &str = r#"{"pageInfo":{"hasNextPage":true},"nodes":[]}"#;
+        let body = |repo: &str, owner: &str| {
+            format!(
+                r#"{{"data":{{"repository":{{"projectsV2":{repo}}},"repositoryOwner":{{"projectsV2":{owner}}}}}}}"#
+            )
+        };
+
+        // Both arms answered and neither is capped: the catalog is complete.
+        assert!(!merged(&body(EMPTY_ARM, EMPTY_ARM)));
+        // Either arm hitting the 50-cap truncates, as before.
+        assert!(merged(&body(CAPPED_ARM, EMPTY_ARM)));
+        assert!(merged(&body(EMPTY_ARM, CAPPED_ARM)));
+        // Exactly one arm silent truncates from either side.
+        assert!(merged(
+            r#"{"data":{"repository":{"projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[]}},"repositoryOwner":null}}"#
+        ));
+        assert!(merged(
+            r#"{"data":{"repository":null,"repositoryOwner":{"projectsV2":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}"#
+        ));
+        // Both silent is the not-found read, which claims nothing.
+        assert!(!merged(
+            r#"{"data":{"repository":null,"repositoryOwner":null}}"#
+        ));
+    }
+
+    #[test]
+    fn every_arm_pointer_names_a_field_the_queries_actually_ask_for() {
+        // Tripwire: response pointers and query text are independent literals, so a
+        // renamed field would make every arm read absent — all reads erroring — with
+        // nothing else going red. `data` is the response envelope, not a field.
+        let available = available_query();
+        for base in AVAILABLE_ARMS {
+            for field in base.split('/').filter(|s| !s.is_empty() && *s != "data") {
+                // Match the call parenthesis so `repository(` can't be satisfied by
+                // `repositoryOwner(`.
+                assert!(
+                    available.contains(&format!("{field}(")),
+                    "available_query() no longer asks for `{field}` (pointer {base})"
+                );
+            }
+        }
+        // Same drift risk on the item read, whose pointer is built per `kind`.
+        for field in ["issue", "pullRequest"] {
+            let query = item_projects_query(field);
+            for segment in ["repository", field, "projectItems"] {
+                assert!(
+                    query.contains(&format!("{segment}(")),
+                    "item_projects_query({field}) no longer asks for `{segment}`"
+                );
+            }
+        }
     }
 
     #[test]

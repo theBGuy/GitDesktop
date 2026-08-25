@@ -2061,7 +2061,8 @@ export interface ProjectItemRef {
 /** The projects an item could be added to — the repo's plus its owner's. */
 export interface AvailableProjects {
   projects: ProjectV2Ref[];
-  /** The server capped the list; the UI says so rather than implying completeness. */
+  /** The server capped the list, or one catalog arm didn't answer (denied);
+   *  the UI says so rather than implying completeness. */
   truncated: boolean;
 }
 

@@ -262,7 +262,7 @@ PR (comments and all) in one click.
   reviewers**, approve, edit, and merge (merge/squash/rebase) without the
   browser. Set labels and assignees right when you open a PR/MR (GitHub &
   GitLab), request reviewers across GitHub, GitLab & Bitbucket, see, link,
-  and unlink an open PR's **GitHub Projects** from its side rail, flip a PR
+  and unlink an open PR's **GitHub Projects** in its header, flip a PR
   between **draft and ready for review** either way on all three, and
   **create new PRs as drafts by default** (Settings → General).
 - **Linked issues**: link related issues when you open *or* edit a PR, as
