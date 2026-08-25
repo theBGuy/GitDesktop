@@ -37,7 +37,12 @@ import {
   useFileDiff,
   useRepoStatus,
 } from "@/lib/git/queries";
-import { formatBinding, isMac } from "@/lib/hotkeys/binding";
+import {
+  bindingToAriaKeyshortcuts,
+  formatBinding,
+  isMac,
+} from "@/lib/hotkeys/binding";
+import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import type { SelectedFile } from "@/lib/stores/ui";
@@ -172,6 +177,27 @@ function WorkingTreeDiff({
   // single whole-file view lets a selection span multiple hunks.
   const [selection, setSelection] = useState<SelectedLine[] | null>(null);
   const clearSelection = useCallback(() => setSelection(null), []);
+  // Above the `!hunkMode` early return: the hotkey hooks below must run
+  // unconditionally, and they read `busy`.
+  const busy =
+    applyPatch.isPending ||
+    applyPartial.isPending ||
+    discardUntracked.isPending;
+  const selectionBinding =
+    useEffectiveBindings().get("stage-selected-lines") ?? null;
+  // One contextual chord: stage the selection on an unstaged file's diff,
+  // unstage it on a staged one — mirroring the banner's primary button. Dead
+  // while the Discard confirm is open: the global listener has no dialog guard.
+  useHotkeyAction(
+    "stage-selected-lines",
+    () => applySelection({ cached: true, reverse: file.staged }),
+    selection !== null && !busy && discard === null,
+  );
+  useHotkeyAction(
+    "clear-line-selection",
+    clearSelection,
+    selection !== null && !busy && discard === null,
+  );
 
   const parsed: ParsedDiff | null = useMemo(() => {
     const data = diff.data;
@@ -218,10 +244,18 @@ function WorkingTreeDiff({
   }
 
   const onError = (e: unknown) => toastError(e);
-  const busy =
-    applyPatch.isPending ||
-    applyPartial.isPending ||
-    discardUntracked.isPending;
+  // Shortcut hints on the selection banner: `aria-keyshortcuts` keeps the chord
+  // off the accessible name, the title makes it discoverable. Both omitted when
+  // the action is unbound.
+  const selectionActionLabel = file.staged ? "Unstage" : "Stage";
+  const selectionTitle =
+    selectionBinding === null
+      ? undefined
+      : `${selectionActionLabel} (${formatBinding(selectionBinding)})`;
+  const selectionKeyshortcuts =
+    selectionBinding === null
+      ? undefined
+      : bindingToAriaKeyshortcuts(selectionBinding);
 
   function applyHunk(
     hunk: DiffHunk,
@@ -295,6 +329,8 @@ function WorkingTreeDiff({
               variant="secondary"
               size="xs"
               disabled={busy}
+              title={selectionTitle}
+              aria-keyshortcuts={selectionKeyshortcuts}
               onClick={() => applySelection({ cached: true, reverse: true })}
             >
               Unstage
@@ -305,6 +341,8 @@ function WorkingTreeDiff({
                 variant="secondary"
                 size="xs"
                 disabled={busy}
+                title={selectionTitle}
+                aria-keyshortcuts={selectionKeyshortcuts}
                 onClick={() => applySelection({ cached: true, reverse: false })}
               >
                 Stage
@@ -365,6 +403,13 @@ function WorkingTreeDiff({
               {file.staged ? "unstage" : "stage"} just those lines. Hold{" "}
               {ADDITIVE_MODIFIER} while dragging to add to the selection, so one
               selection can mix added and removed lines.
+              {selectionBinding !== null && (
+                <>
+                  {" "}
+                  Press {formatBinding(selectionBinding)} to{" "}
+                  {file.staged ? "unstage" : "stage"} the selection.
+                </>
+              )}
             </span>
             <button
               type="button"

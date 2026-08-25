@@ -341,8 +341,12 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
   then stage or discard just those. Hold {{key:mod}} while dragging and the new run joins
   the selection instead of replacing it, so one selection can mix added and removed lines
   across as many hunks as you like; a plain drag starts a fresh one.
+  {{kbd:stage-selected-lines}} stages the selection (or unstages it, on a staged file's
+  diff) without reaching for the button.
 - Select multiple files ({{key:mod}}-click, or Shift-click for a range), then {{secondaryclick}}
-  for **Stage / Unstage / Discard / Stash** of the whole selection.
+  for **Stage / Unstage / Discard / Stash** of the whole selection — or use the command
+  palette ({{kbd:command-palette}}) for Stage / Unstage selected files, or to clear a
+  line selection.
 - Filter the list by path, or by category (new / modified / deleted, included /
   excluded) with the funnel button.
 
@@ -2273,16 +2277,17 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
   {{kbd:delete-branch}} delete · {{kbd:update-from-default}} update from default ·
   {{kbd:stash-all}} stash all.
 - **Changes:** {{kbd:commit}} commit{{ai}} · {{kbd:generate-commit-message}} generate
-  with AI (the open dialog's Generate when one is up){{/ai}} · {{kbd:undo-commit}} undo
-  last commit.
+  with AI (the open dialog's Generate when one is up){{/ai}} · {{kbd:stage-selected-lines}}
+  stage/unstage the selected diff lines · {{kbd:undo-commit}} undo last commit.
 - **Pull requests:** {{kbd:create-pr}} create pull request.
 {{ai}}- **Agent:** {{kbd:agent-toggle-terminal}} toggle the session terminal.
 {{/ai}}
 Every shortcut is **rebindable** in **Settings → Keyboard**: click a binding, press a new
-combination, and if it clashes with another action the app moves it for you. Many actions
-(creating issues/releases, repository settings, stash views{{ai}}, most agent
-commands{{/ai}}) are palette-only until you bind a key. Defaults match GitHub Desktop where
-there's an equivalent.`,
+combination, and if it clashes with another action the app moves it for you. The list
+there is filterable by action name, category, or key — {{kbd:focus-filter}} jumps to the
+filter while the section is open. Many actions (creating issues/releases, repository
+settings, stash views{{ai}}, most agent commands{{/ai}}) are palette-only until you bind
+a key. Defaults match GitHub Desktop where there's an equivalent.`,
   },
   {
     id: "settings",
@@ -2330,7 +2335,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   automated run also lands a *review failed* row in the inbox (gated on the automations
   notification preference) that shows why it failed and offers a one-click **Re-run** right
   from the row, matching manual-run failures (which show their reason too).{{/ai}}
-- **Keyboard** — rebind any shortcut, with live key-capture.
+- **Keyboard** — rebind any shortcut, with live key-capture, filterable by name, category,
+  or key.
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**
   connection. **Sign in to GitHub…** and **Sign in to gitlab.com…** run the CLI's
   sign-in in-app (GitHub's one-time device code, GitLab's browser flow) — no terminal

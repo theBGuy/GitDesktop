@@ -773,6 +773,161 @@ mod tests {
         assert!(unstaged.contains("NEW B"));
     }
 
+    /// A selection spanning two hunks and both sides survives real
+    /// `git apply --cached`: the old-side line of one modification and the
+    /// new-side line of another stage independently, each hunk's unselected
+    /// line neutralized by forward semantics.
+    #[tokio::test]
+    async fn partial_patch_stages_mixed_sides_across_hunks() {
+        use crate::git::runner::run_git_input;
+
+        let _tmp = tempfile::Builder::new()
+            .prefix("gd-partial-crosshunk-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let dir = _tmp.path().to_path_buf();
+        let repo = dir.to_string_lossy().into_owned();
+        let git = |args: Vec<&'static str>| {
+            let repo = repo.clone();
+            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+        };
+
+        git(vec!["init"]).await;
+        git(vec!["config", "user.email", "t@t"]).await;
+        git(vec!["config", "user.name", "t"]).await;
+        // Two modification sites far enough apart (> 6 context lines) to force
+        // two hunks, each carrying both a `-` and a `+`.
+        let base: Vec<String> = (1..=30).map(|i| format!("line {i}")).collect();
+        let file = dir.join("file.txt");
+        std::fs::write(&file, base.join("\n") + "\n").unwrap();
+        git(vec!["add", "."]).await;
+        git(vec!["commit", "-m", "base"]).await;
+        let mut edited = base.clone();
+        edited[2] = "line 3 EDITED".into();
+        edited[24] = "line 25 EDITED".into();
+        std::fs::write(&file, edited.join("\n") + "\n").unwrap();
+        let worktree_before = std::fs::read(&file).unwrap();
+
+        let diff = git(vec!["diff", "--no-color"]).await.stdout_lossy();
+        // Pinned so a context merge can never quietly turn this into one hunk.
+        assert_eq!(
+            diff.lines().filter(|l| l.starts_with("@@")).count(),
+            2,
+            "fixture must produce two hunks:\n{diff}"
+        );
+
+        // Hunk 1's deletion (old-side line 3) plus hunk 2's addition
+        // (new-side line 25) — mixed sides, one line from each hunk.
+        let patch = build_partial_patch(&diff, &[sel(Side::Old, 3), sel(Side::New, 25)], false);
+        run_git_input(
+            Some(&repo),
+            &["apply", "--whitespace=nowarn", "--recount", "--cached", "-"],
+            Some(&patch),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        // Hunk 1: the selected `-` deletes "line 3" and its unselected `+` is
+        // dropped. Hunk 2: the unselected `-` keeps "line 25" as context and
+        // the selected `+` adds its replacement after it.
+        let mut expected = base.clone();
+        expected.remove(2);
+        let after_kept = expected
+            .iter()
+            .position(|l| l == "line 25")
+            .expect("hunk 2's old line stays in the index")
+            + 1;
+        expected.insert(after_kept, "line 25 EDITED".into());
+        let index_content = git(vec!["show", ":0:file.txt"]).await.stdout_lossy();
+        assert_eq!(index_content, expected.join("\n") + "\n");
+
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            worktree_before,
+            "staging must not touch the working tree"
+        );
+    }
+
+    /// The unstage twin: the same cross-hunk, mixed-side selection applied with
+    /// `--cached --reverse` over the STAGED diff. Unstaging half a modification
+    /// is deliberately lossy in one direction — a selected `-` restores its old
+    /// line while the paired `+` stays staged, but a selected `+` is withdrawn
+    /// without its unselected `-` bringing the old line back.
+    #[tokio::test]
+    async fn partial_patch_unstages_mixed_sides_across_hunks() {
+        use crate::git::runner::run_git_input;
+
+        let _tmp = tempfile::Builder::new()
+            .prefix("gd-partial-crosshunk-rev-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let dir = _tmp.path().to_path_buf();
+        let repo = dir.to_string_lossy().into_owned();
+        let git = |args: Vec<&'static str>| {
+            let repo = repo.clone();
+            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+        };
+
+        git(vec!["init"]).await;
+        git(vec!["config", "user.email", "t@t"]).await;
+        git(vec!["config", "user.name", "t"]).await;
+        let base: Vec<String> = (1..=30).map(|i| format!("line {i}")).collect();
+        let file = dir.join("file.txt");
+        std::fs::write(&file, base.join("\n") + "\n").unwrap();
+        git(vec!["add", "."]).await;
+        git(vec!["commit", "-m", "base"]).await;
+        let mut edited = base.clone();
+        edited[2] = "line 3 EDITED".into();
+        edited[24] = "line 25 EDITED".into();
+        std::fs::write(&file, edited.join("\n") + "\n").unwrap();
+        // Both modifications fully staged — the unstage path reads HEAD→index.
+        git(vec!["add", "file.txt"]).await;
+        let worktree_before = std::fs::read(&file).unwrap();
+
+        let diff = git(vec!["diff", "--cached", "--no-color"]).await.stdout_lossy();
+        // Pinned so a context merge can never quietly turn this into one hunk.
+        assert_eq!(
+            diff.lines().filter(|l| l.starts_with("@@")).count(),
+            2,
+            "fixture must produce two hunks:\n{diff}"
+        );
+
+        let patch = build_partial_patch(&diff, &[sel(Side::Old, 3), sel(Side::New, 25)], true);
+        run_git_input(
+            Some(&repo),
+            &["apply", "--whitespace=nowarn", "--recount", "--cached", "--reverse", "-"],
+            Some(&patch),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        // Hunk 1: the selected `-` puts "line 3" back while its unselected `+`
+        // stays staged as context. Hunk 2: the selected `+` is withdrawn and its
+        // unselected `-` was dropped, so "line 25" does NOT return.
+        let mut expected = base.clone();
+        let after_restored = expected
+            .iter()
+            .position(|l| l == "line 3")
+            .expect("hunk 1's old line returns to the index")
+            + 1;
+        expected.insert(after_restored, "line 3 EDITED".into());
+        let withdrawn = expected
+            .iter()
+            .position(|l| l == "line 25")
+            .expect("hunk 2's old line is in the base");
+        expected.remove(withdrawn);
+        let index_content = git(vec!["show", ":0:file.txt"]).await.stdout_lossy();
+        assert_eq!(index_content, expected.join("\n") + "\n");
+
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            worktree_before,
+            "unstaging must not touch the working tree"
+        );
+    }
+
     /// End-to-end check of the hunk-staging plumbing: a single hunk cut out
     /// of a two-hunk diff stages via stdin `git apply --cached` and unstages
     /// via `--reverse`. Requires git on PATH (true for this project's dev

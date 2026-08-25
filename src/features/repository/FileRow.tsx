@@ -66,8 +66,12 @@ export const FileRow = memo(function FileRow({
         })
       }
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ")
+        // Space would otherwise scroll the list and leak to the window-level
+        // hotkey listener.
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
           onSelect(entry, staged, { ctrlOrMeta: false, shift: false });
+        }
       }}
       role="option"
       aria-selected={selected}

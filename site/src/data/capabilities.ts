@@ -43,7 +43,7 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
-      "Line, hunk & file staging — drag the line numbers, mixing added and removed lines in one selection",
+      "Line, hunk & file staging — drag the line numbers or use a keybind, mixing added and removed lines in one selection",
   },
   {
     group: "Diffs & staging",
@@ -446,7 +446,7 @@ export const capabilities: Capability[] = [
   // — Keyboard & Markdown —
   {
     group: "Keyboard & Markdown",
-    label: "Command palette + rebindable keys",
+    label: "Command palette + rebindable, filterable keys",
     highlight: true,
   },
   { group: "Keyboard & Markdown", label: "Arrow-key navigation on every list" },

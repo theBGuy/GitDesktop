@@ -1,11 +1,16 @@
 import { ArrowCounterClockwiseIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { withForm } from "@/lib/form";
 import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
-import { dispatchAction } from "@/lib/hotkeys/hotkeys";
-import { ACTIONS, CATEGORY_ORDER } from "@/lib/hotkeys/registry";
+import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  ACTIONS,
+  type ActionDef,
+  CATEGORY_ORDER,
+} from "@/lib/hotkeys/registry";
 import { cn } from "@/lib/utils";
 import { settingsFormOpts } from "./settings-form";
 
@@ -22,6 +27,14 @@ export const KeyboardSection = withForm({
     const overrides = useSelector(form.store, (s) => s.values.hotkeys);
     const [recordingId, setRecordingId] = useState<string | null>(null);
     const [note, setNote] = useState<string | null>(null);
+    // View state only: the filter never touches the form, so it can't dirty
+    // the Save/Discard bar or survive into saved settings.
+    const [filter, setFilter] = useState("");
+    const filterRef = useRef<HTMLInputElement>(null);
+
+    // Settings replaces the repository view and its panels mount exclusively,
+    // so this is the only live "focus-filter" handler while Keyboard is open.
+    useHotkeyAction("focus-filter", () => filterRef.current?.focus(), true);
 
     const effective = (id: string): string | null => {
       const override = overrides[id];
@@ -95,6 +108,44 @@ export const KeyboardSection = withForm({
       return () => window.removeEventListener("keydown", handler, true);
     }, [recordingId]);
 
+    const query = filter.trim().toLowerCase();
+
+    /** Substring match over what the row shows: its label, its category, and
+     *  the binding in both display ("Ctrl+Shift+P") and canonical
+     *  ("mod+shift+p") form. "unbound" is the word for the empty binding —
+     *  from three characters on, so typing toward it narrows instead of
+     *  flashing the empty state ("un" still means the Unstage/Undo labels). */
+    function matchesQuery(action: ActionDef): boolean {
+      if (query === "") return true;
+      if (action.label.toLowerCase().includes(query)) return true;
+      if (action.category.toLowerCase().includes(query)) return true;
+      const binding = effective(action.id);
+      if (binding === null)
+        return query.length >= 3 && "unbound".startsWith(query);
+      return (
+        binding.includes(query) ||
+        formatBinding(binding).toLowerCase().includes(query)
+      );
+    }
+
+    const groups = CATEGORY_ORDER.map((category) => ({
+      category,
+      actions: ACTIONS.filter(
+        (a) => a.category === category && matchesQuery(a),
+      ),
+    })).filter((group) => group.actions.length > 0);
+    const shownCount = groups.reduce((n, group) => n + group.actions.length, 0);
+
+    // A filter that hides the recording row cancels recording: the window-level
+    // capture listener would otherwise keep swallowing keys for a row nobody
+    // can see.
+    const recordingHidden =
+      recordingId !== null &&
+      !groups.some((g) => g.actions.some((a) => a.id === recordingId));
+    useEffect(() => {
+      if (recordingHidden) setRecordingId(null);
+    }, [recordingHidden]);
+
     const overrideCount = Object.keys(overrides).length;
 
     return (
@@ -117,6 +168,25 @@ export const KeyboardSection = withForm({
           </span>
         </div>
         <div className="flex gap-2">
+          <Input
+            ref={filterRef}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            // Recording captures every keydown window-wide, so without this
+            // the first thing typed here would be read as a binding attempt.
+            onFocus={() => setRecordingId(null)}
+            placeholder="Filter shortcuts"
+            aria-label="Filter shortcuts"
+            className="h-7 flex-1"
+            autoComplete="off"
+          />
+          {/* Polite, so the filtered count queues behind the recording
+              announcements above instead of interrupting them. */}
+          <span role="status" aria-live="polite" className="sr-only">
+            {query === ""
+              ? ""
+              : `${shownCount} ${shownCount === 1 ? "shortcut" : "shortcuts"} shown`}
+          </span>
           <Button
             variant="outline"
             size="sm"
@@ -136,11 +206,16 @@ export const KeyboardSection = withForm({
             Reset all to defaults
           </Button>
         </div>
-        {CATEGORY_ORDER.map((category) => (
+        {groups.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            No shortcuts match — try an action name, category, or key.
+          </p>
+        ) : null}
+        {groups.map(({ category, actions }) => (
           <div key={category}>
             <h3 className="mb-1 text-xs font-semibold">{category}</h3>
             <div className="divide-y border">
-              {ACTIONS.filter((a) => a.category === category).map((action) => {
+              {actions.map((action) => {
                 const binding = effective(action.id);
                 const overridden = overrides[action.id] !== undefined;
                 const recording = recordingId === action.id;

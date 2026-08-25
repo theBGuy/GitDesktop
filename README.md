@@ -118,9 +118,11 @@ working-tree diff is one whole-file view with hunk- and line-level staging
 and discarding (drag across the line numbers; hold Ctrl, or Cmd on macOS, to
 add to a selection, so one selection can mix added and removed lines across
 hunks), including committing or discarding only part of a brand-new
-(untracked) file. Stage, unstage, or discard single files or a
-multi-selection from the context menu; discarding a whole untracked file
-goes to the recycle bin. Commit with title + body,
+(untracked) file. Stage or unstage a drag-made selection with
+Ctrl+Shift+Enter (Cmd on macOS), without reaching for the button. Stage,
+unstage, or discard single files or a multi-selection from the context menu
+or the command palette; discarding a whole untracked file goes to the
+recycle bin. Commit with title + body,
 co-authors suggested from history, amend, undo, reset, and revert.
 
 ### Branches
@@ -839,7 +841,8 @@ review via its subscription login. The full list is under
   and the choice is remembered until you expand it again.
 - **Keyboard-first**: rebindable shortcuts with GitHub-Desktop-compatible
   defaults, a generated cheat sheet (`Ctrl`/`⌘`+`/`), a command palette
-  (`Ctrl`/`⌘`+`K`), and arrow-key navigation everywhere.
+  (`Ctrl`/`⌘`+`K`), a filterable shortcut list in Settings (by name, category,
+  or key), and arrow-key navigation everywhere.
 - **Themes**: System, Light, Dark, and a softer **Slate** (a cool, lifted
   blue-gray) that eases eye strain; switch in **Settings → Appearance** or
   cycle from the command palette.

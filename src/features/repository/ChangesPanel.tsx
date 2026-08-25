@@ -674,6 +674,16 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
     !mutating && stagedEntries.length > 0,
   );
   useHotkeyAction(
+    "stage-selected-files",
+    stageSelected,
+    !mutating && selectedEntries.some((e) => e.unstaged !== null),
+  );
+  useHotkeyAction(
+    "unstage-selected-files",
+    unstageSelected,
+    !mutating && selectedEntries.some((e) => e.staged !== null),
+  );
+  useHotkeyAction(
     "focus-filter",
     () => filterRef.current?.focus(),
     entries.length > 0,

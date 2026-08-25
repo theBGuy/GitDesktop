@@ -600,6 +600,30 @@ export const ACTIONS = [
     category: "Changes",
     defaultBinding: null,
   },
+  {
+    id: "stage-selected-lines",
+    label: "Stage or unstage selected lines",
+    category: "Changes",
+    defaultBinding: "mod+shift+enter",
+  },
+  {
+    id: "clear-line-selection",
+    label: "Clear line selection",
+    category: "Changes",
+    defaultBinding: null,
+  },
+  {
+    id: "stage-selected-files",
+    label: "Stage selected files",
+    category: "Changes",
+    defaultBinding: null,
+  },
+  {
+    id: "unstage-selected-files",
+    label: "Unstage selected files",
+    category: "Changes",
+    defaultBinding: null,
+  },
 
   // Agent (only live on the Agent tab, which exists when AI features are on)
   {
