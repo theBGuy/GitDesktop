@@ -170,6 +170,9 @@ function WorkingTreeDiff({
     // A new (untracked) file has no committed version to revert to — the
     // confirm wording changes from "revert to last committed" to "remove".
     newFile?: boolean;
+    // The diff text the confirm's `run` was built against — see the close
+    // effect below.
+    forText: string;
   } | null>(null);
   // Declared with the hooks above the `!hunkMode` early return below.
   const shownDiscard = useRetained(discard);
@@ -231,12 +234,13 @@ function WorkingTreeDiff({
     clearSelection,
     hunkMode && selection !== null && !busy && discard === null,
   );
-  // The Discard confirm's `run` captured line numbers (or a hunk) at open
-  // time — close it if the selection invalidates underneath (a refetch while
-  // the dialog is up).
+  // Any Discard confirm's `run` captured line numbers (or a hunk) at open
+  // time — close it the moment the diff text moves on from the text it was
+  // opened against (a refetch while the dialog is up), whichever arm opened it.
+  const liveText = diff.data?.text;
   useEffect(() => {
-    if (selection === null) setDiscard(null);
-  }, [selection]);
+    if (discard !== null && discard.forText !== liveText) setDiscard(null);
+  }, [discard, liveText]);
 
   if (!hunkMode) {
     return (
@@ -313,6 +317,7 @@ function WorkingTreeDiff({
       setDiscard({
         label: hunk.header,
         newFile: untracked,
+        forText: diff.data?.text ?? "",
         run: untracked
           ? () => discardLines(hunkAddedNewLines(hunk))
           : () => applyHunk(hunk, { cached: false, reverse: true }),
@@ -374,6 +379,7 @@ function WorkingTreeDiff({
                   setDiscard({
                     label: `${selection.length} selected ${selection.length === 1 ? "line" : "lines"}`,
                     newFile: untracked,
+                    forText: diff.data?.text ?? "",
                     run: untracked
                       ? () =>
                           discardLines(
