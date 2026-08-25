@@ -1,6 +1,6 @@
 import { Popover } from "@base-ui/react/popover";
 import { CopyIcon, KanbanIcon } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
@@ -18,9 +18,13 @@ import {
   useItemProjects,
 } from "@/lib/git/queries";
 import type { ProjectV2Ref, RemoteLens } from "@/lib/git/types";
+import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
+import { cn } from "@/lib/utils";
 
 const NO_ACCESS_REASON = "You don't have write access to this project";
+const READ_ONLY_SCOPE_REASON =
+  "Your GitHub sign-in can read projects but not change them (needs the project scope)";
 
 /** A closed board still holds items, so its rows and chips stay — the state rides
  *  the label as words, never as a colour. */
@@ -44,6 +48,8 @@ export function ProjectsPopover({
   disabledReason,
 }: {
   repoPath: string;
+  /** Gates the reads. Both call sites pass `true` — the real gate is the row-level
+   *  `when` upstream, which never mounts this off GitHub. */
   enabled: boolean;
   /** Which surface this item is — the backend addresses issues and PRs apart. */
   kind: "issue" | "pr";
@@ -67,34 +73,55 @@ export function ProjectsPopover({
     scopes.data?.classic === true &&
     !scopes.data.scopes.includes("project") &&
     !scopes.data.scopes.includes("read:project");
+  // Read-only classic token: the reads work, every write 403s. Hold the rows
+  // rather than letting each toggle round-trip to a rollback + toast.
+  const readOnlyScope =
+    scopes.data?.classic === true &&
+    scopes.data.scopes.includes("read:project") &&
+    !scopes.data.scopes.includes("project");
   const canRead = enabled && !classicMissing;
 
+  // KNOWN LIMITATION, shared with LabelsPopover: a tab switch while this is open
+  // strands the popup until that tab is revisited — the <Activity> hide freezes the
+  // very subtree whose re-render would remove the portal, so no close initiated
+  // here can win. Class fix is a planned follow-up; don't re-attempt it here.
   const [open, setOpen] = useState(false);
   // The catalog is an owner-wide query; it waits for a first open rather than
   // firing for every issue the user scrolls through.
   const [hasOpened, setHasOpened] = useState(false);
   const [draft, setDraft] = useState<Set<string>>(new Set());
-  // Real-unmount backstop. KNOWN LIMITATION, shared with LabelsPopover: a tab
-  // switch while this is open strands the popup until that tab is revisited — the
-  // <Activity> hide freezes the very subtree whose re-render would remove the
-  // portal, so no close initiated here can win. Class fix is a planned follow-up;
-  // don't re-attempt it in-component.
-  useEffect(() => () => setOpen(false), []);
+  const [activeId, setActiveId] = useState<string | null>(null);
 
   const memberships = useItemProjects(repoPath, kind, number, canRead, lens);
   const available = useAvailableProjects(repoPath, canRead && hasOpened, lens);
   const editProjects = useEditItemProjects(repoPath, kind, number, lens);
-  // No second edit may be drafted while one is in flight: the cache still holds
-  // `pending:` placeholders, and unlinking one has no item id to address, so the
-  // close would drop it silently. Held until the settle refetch supplies real ids.
-  const heldReason =
-    disabledReason ??
-    (editProjects.isPending ? "Saving your last change…" : undefined);
+  // Gated on `canRead` so a disabled query — the missing-scope path, whose whole
+  // point is the popup's Reconnect button — can't hold the trigger shut forever.
+  // An ERRORED read likewise mustn't hold it: the popup owns the Retry.
+  const loadingMemberships = canRead && memberships.isPending;
+  // Ranked: the caller's reason outranks a write the viewer started, which
+  // outranks the first load.
+  const heldReason = (() => {
+    switch (true) {
+      case disabledReason !== undefined:
+        return disabledReason;
+      // No second edit may be drafted while one is in flight: the cache still
+      // holds `pending:` placeholders, and unlinking one has no item id to
+      // address, so the close would drop it silently.
+      case editProjects.isPending:
+        return "Saving your last change…";
+      case loadingMemberships:
+        return "Loading projects…";
+      default:
+        return undefined;
+    }
+  })();
 
   const items = memberships.data ?? [];
   // Rows = the open catalog plus every membership, so a board beyond the server's
-  // cap — or a closed one — is still there to be unlinked. Catalog entries win the
-  // dedup: that list is the authority on `viewerCanUpdate`.
+  // cap — or a closed one — is still there to be unlinked. OPEN catalog entries win
+  // the dedup, that list being the authority on `viewerCanUpdate`; a closed board is
+  // filtered out of the catalog first, so its membership copy represents it.
   const byId = new Map<string, ProjectV2Ref>();
   for (const project of available.data?.projects ?? []) {
     if (!project.closed) byId.set(project.id, project);
@@ -104,6 +131,43 @@ export function ProjectsPopover({
   }
   const rows = [...byId.values()];
   const readError = memberships.error ?? available.error;
+  // Locked rows are skipped by the arrow keys rather than made focus black holes:
+  // a natively-disabled checkbox can't take focus.
+  const rowLockedReason = readOnlyScope ? READ_ONLY_SCOPE_REASON : undefined;
+  const navRows = rowLockedReason
+    ? []
+    : rows.filter((project) => project.viewerCanUpdate);
+  const navIndexById = new Map(navRows.map((project, i) => [project.id, i]));
+  const activeIndex =
+    activeId === null ? -1 : (navIndexById.get(activeId) ?? -1);
+  // Nothing active yet (or the active row vanished on a refetch) parks the single
+  // tab stop on the first navigable row.
+  const focusIndex = activeIndex === -1 ? 0 : activeIndex;
+  const onRowKeyDown = listKeyboardNav({
+    items: navRows,
+    activeIndex,
+    onActivate: (project) => setActiveId(project.id),
+    rowKey: (project) => project.id,
+  });
+
+  // The only picker whose draft seeds from ASYNC data — the siblings seed from
+  // synchronous props (RemotePrView's group comment: "commits against LIVE props").
+  // A draft seeded before the memberships land would diff every existing link as
+  // unchecked and unlink them all, so three guards: the trigger holds until they
+  // settle, a late arrival unions into the draft, and the close refuses to diff
+  // against an unsettled set.
+  const unionSettledMemberships = useEffectEvent(() => {
+    setDraft((prev) => {
+      const next = new Set(prev);
+      // Union, never replace: a row that didn't exist can't have been deliberately
+      // unchecked, while an explicit toggle on a row that did must survive.
+      for (const item of items) next.add(item.project.id);
+      return next;
+    });
+  });
+  useEffect(() => {
+    if (open && memberships.isSuccess) unionSettledMemberships();
+  }, [open, memberships.isSuccess]);
 
   function toggleDraft(id: string, on: boolean) {
     setDraft((prev) => {
@@ -122,6 +186,9 @@ export function ProjectsPopover({
       return;
     }
     setOpen(false);
+    // Belt and braces on the seed hazard: an unsettled memberships read is not an
+    // empty membership set, and an untrusted applied-set must never mint removes.
+    if (!memberships.isSuccess) return;
     const applied = new Set(items.map((item) => item.project.id));
     const adds = [...draft]
       .filter((id) => !applied.has(id))
@@ -209,20 +276,36 @@ export function ProjectsPopover({
                     <p className="px-1 py-1 text-xs text-muted-foreground">
                       {available.isPending
                         ? "Loading projects…"
-                        : "No projects in this repository or its owner."}
+                        : "No open projects in this repository or its owner."}
                     </p>
                   )}
-                  {rows.map((project) => (
-                    <ProjectRow
-                      key={project.id}
-                      project={project}
-                      checked={draft.has(project.id)}
-                      onToggle={(on) => toggleDraft(project.id, on)}
-                    />
-                  ))}
-                  {rows.length > 0 && (
+                  <div
+                    className="max-h-64 overflow-y-auto"
+                    onKeyDown={onRowKeyDown}
+                  >
+                    {rows.map((project) => (
+                      <ProjectRow
+                        key={project.id}
+                        project={project}
+                        checked={draft.has(project.id)}
+                        active={activeId === project.id}
+                        rovingTab={
+                          navIndexById.get(project.id) === focusIndex ? 0 : -1
+                        }
+                        lockedReason={rowLockedReason}
+                        onToggle={(on) => toggleDraft(project.id, on)}
+                        onFocus={() => setActiveId(project.id)}
+                      />
+                    ))}
+                  </div>
+                  {/* The truncation note stands alone: a 50-cap catalog of only
+                      CLOSED boards renders zero rows, where a bare "no projects"
+                      would be a lie. */}
+                  {(rows.length > 0 || available.data?.truncated === true) && (
                     <div className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
-                      <p>Changes apply when this closes.</p>
+                      {rows.length > 0 && (
+                        <p>Changes apply when this closes.</p>
+                      )}
                       {available.data?.truncated === true && (
                         <p>Some projects aren't shown.</p>
                       )}
@@ -247,37 +330,57 @@ export function ProjectsPopover({
   );
 }
 
-/** One board's checkbox row. A board the viewer can't update is held rather than
+/** One board's checkbox row. A board the viewer can't change is held rather than
  *  hidden: the reason hovers on the row and is read out from the sr-only node,
- *  since a natively-disabled control announces neither. */
+ *  since a natively-disabled control announces neither. `lockedReason` holds EVERY
+ *  row (a read-only token) and outranks the per-board one. */
 function ProjectRow({
   project,
   checked,
+  active,
+  rovingTab,
+  lockedReason,
   onToggle,
+  onFocus,
 }: {
   project: ProjectV2Ref;
   checked: boolean;
+  active: boolean;
+  /** Roving tabindex: one tab stop for the whole list, on the active row. */
+  rovingTab: number;
+  lockedReason?: string;
   onToggle: (on: boolean) => void;
+  onFocus: () => void;
 }) {
   const label = projectLabel(project);
-  if (!project.viewerCanUpdate) {
+  const held =
+    lockedReason ?? (project.viewerCanUpdate ? null : NO_ACCESS_REASON);
+  if (held !== null) {
     return (
       <div
         aria-disabled
-        title={NO_ACCESS_REASON}
+        title={held}
         className="flex cursor-not-allowed items-center gap-2 px-1 py-1.5 text-xs opacity-50"
       >
         <Checkbox checked={checked} disabled />
         <span className="min-w-0 flex-1 truncate">{label}</span>
-        <span className="sr-only">{NO_ACCESS_REASON}</span>
+        <span className="sr-only">{held}</span>
       </div>
     );
   }
   return (
-    <label className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60">
+    <label
+      className={cn(
+        "flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60",
+        active && "bg-muted/60",
+      )}
+    >
       <Checkbox
+        data-row={project.id}
+        tabIndex={rovingTab}
         checked={checked}
         onCheckedChange={(v) => onToggle(v === true)}
+        onFocus={onFocus}
       />
       <span className="min-w-0 flex-1 truncate" title={label}>
         {label}

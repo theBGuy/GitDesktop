@@ -1362,9 +1362,11 @@ duplicates, and same-project mentions.
   issue.
 - **Projects** — chips in the side rail show which **GitHub Projects** the issue belongs to,
   and a picker links or unlinks it across the repository's projects and the owner's; your
-  changes apply when the picker closes. GitHub only, and it needs the \`project\` scope —
-  without it the picker says so and offers **Reconnect GitHub…**, or a copyable
-  \`gh auth refresh\` command already pointed at your host.
+  changes apply when the picker closes. GitHub only, and changing anything needs the
+  \`project\` scope: with just \`read:project\` the boards still show but every row is locked,
+  and with neither the picker says so and helps you get it — when your sign-in's scopes are
+  readable, that's a one-click **Reconnect GitHub…** plus a copyable \`gh auth refresh\`
+  command already pointed at your host.
 
 As on the Pull Requests tab, these follow your access on the repository: an action you
 don't have the access for — a lighter tier for labels, assignees, milestones, and

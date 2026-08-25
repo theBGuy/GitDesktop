@@ -2361,12 +2361,15 @@ export function RemotePrView({
           <span className="text-success">+{pr.additions}</span>
           <span className="text-destructive">-{pr.deletions}</span>
         </div>
-        {/* Entity-keyed pickers: each seeds a draft on open, commits it on
-            close against LIVE props, and a keyboard PR switch leaves the popover
-            open; unkeyed, the old draft lands on the new PR. Labels/assignees
-            prefix keys as SIBLINGS: duplicate keys in one children array make
-            React drop the earlier duplicates' unmount, leaking stale rows.
-            Reviewers' prefix is consistency: own wrapper div. */}
+        {/* Entity-keyed pickers — labels, assignees, projects, reviewers: each
+            seeds a draft on open, commits it on close against LIVE props, and a
+            keyboard PR switch leaves the popover open; unkeyed, the old draft
+            lands on the new PR. Projects is the exception to the seed clause: its
+            draft comes from an async query, so it holds until the memberships
+            settle and refuses to diff against an unsettled set.
+            Labels/assignees/projects prefix keys as SIBLINGS: duplicate keys in
+            one children array make React drop the earlier duplicates' unmount,
+            leaking stale rows. Reviewers' prefix is consistency: own wrapper div. */}
         {isOpen && canEditLabels ? (
           <LabelsPopover
             key={`labels-${entityKey}`}
