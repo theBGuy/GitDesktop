@@ -24,8 +24,9 @@ import { toastError } from "@/lib/toast";
  * toast to **Locate…** the folder's new home (moved on disk) or **Remove** the
  * stale row; a `source: "picker"` one is a folder the user just chose rather
  * than a recents row to repair, so it only reports that it isn't a repository.
- * Callers: the shared recents list, macOS File → Open Recent, and the folder
- * picker in {@link usePickAndOpenRepo}.
+ * Callers: the shared recents list, macOS File → Open Recent, the folder
+ * picker in {@link usePickAndOpenRepo}, and a submodule opened as its own
+ * repository from the Submodules dialog.
  */
 export function useOpenRepoByPath() {
   const openRepo = useUiStore((s) => s.openRepo);

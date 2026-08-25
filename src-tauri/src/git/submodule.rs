@@ -10,6 +10,13 @@ use crate::git::runner::{
 use crate::git::types::{Submodule, SubmoduleRemoveOutcome};
 use crate::state::AppState;
 
+/// Belongs on EVERY `status --porcelain` probe here whose emptiness is read as
+/// "clean": `status.showUntrackedFiles=no` otherwise suppresses the `??` lines and
+/// empties the answer while the worktree is dirty (measured, git 2.51.1). Both such
+/// probes — the remove path's submodule-worktree check and
+/// [`refuse_unsettled_gitmodules`] — carry it.
+const UNTRACKED_NORMAL: &str = "--untracked-files=normal";
+
 /// A caller-supplied path that git will resolve inside the repo. Rejected before
 /// it reaches argv: a leading `-` parses as an option, and an absolute or
 /// `..`-escaping path would place the submodule outside the working tree.
@@ -383,7 +390,12 @@ pub(crate) async fn git_submodule_remove_core(
         // PARENT repo's status instead (measured, git 2.51.1).
         if !dirty && worktree.join(".git").exists() {
             let dir = worktree.to_string_lossy().into_owned();
-            let out = run_git_raw(Some(&dir), &["status", "--porcelain"], DEFAULT_TIMEOUT).await?;
+            let out = run_git_raw(
+                Some(&dir),
+                &["status", "--porcelain", UNTRACKED_NORMAL],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
             // A probe that fails refuses too: nothing has been mutated yet, and the
             // user can still force.
             dirty = out.code != 0 || !out.stdout_lossy().trim().is_empty();
@@ -557,14 +569,14 @@ async fn refuse_unsettled_gitmodules(repo_path: &str) -> AppResult<()> {
     // `status`, not `diff`: diff compares worktree to index, so an UNTRACKED
     // `.gitmodules` has no index entry and reads as clean — while `submodule add`
     // happily stages its pre-existing content (measured, git 2.51.1).
-    // `--untracked-files=normal` is explicit because `status.showUntrackedFiles=no`
-    // otherwise suppresses the `??` line and silently disarms that arm (measured).
+    // [`UNTRACKED_NORMAL`] is what keeps the untracked arm armed under a
+    // `status.showUntrackedFiles=no` config.
     let out = run_git(
         Some(repo_path),
         &[
             "status",
             "--porcelain",
-            "--untracked-files=normal",
+            UNTRACKED_NORMAL,
             "--",
             ":/.gitmodules",
         ],
@@ -1336,6 +1348,33 @@ mod tests {
             std::fs::read_to_string(dir.path().join("host/libs/dep/dep.txt")).unwrap(),
             "dirty\n"
         );
+    }
+
+    /// git counts untracked files as "local modifications" for deinit, but
+    /// `status.showUntrackedFiles=no` hides them from the probe — the config lives in
+    /// the SUBMODULE's own repo here, so the fixture stays hermetic.
+    #[tokio::test]
+    async fn remove_refuses_a_submodule_dirty_only_with_untracked_files() {
+        let (dir, host, _dep) = host_with_submodule("untracked-dirty").await;
+        let child = dir.path().join("host/libs/dep").to_string_lossy().into_owned();
+        git(&child, &["config", "status.showUntrackedFiles", "no"]).await;
+        std::fs::write(dir.path().join("host/libs/dep/scratch.txt"), "sentinel\n").unwrap();
+        assert_eq!(
+            git(&child, &["status", "--porcelain"]).await,
+            "",
+            "the config must hide it from an unflagged probe, or this proves nothing"
+        );
+        let before = git(&host, &["status", "--porcelain"]).await;
+
+        let outcome =
+            git_submodule_remove_core(&AppState::default(), host.clone(), "libs/dep".into(), false, true)
+                .await
+                .unwrap();
+        assert!(outcome.refused_dirty);
+        assert!(!outcome.module_data_deleted);
+        assert_eq!(git(&host, &["status", "--porcelain"]).await, before);
+        assert!(exists(&host, "libs/dep/scratch.txt"), "untracked file survives");
+        assert!(exists(&host, ".git/modules/libs/dep"), "module data untouched");
     }
 
     #[tokio::test]
