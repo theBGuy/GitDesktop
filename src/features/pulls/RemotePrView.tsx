@@ -2366,8 +2366,9 @@ export function RemotePrView({
             keyboard PR switch leaves the popover open; unkeyed, the old draft
             lands on the new PR. Projects is the exception to the commit clause:
             its memberships come from a query rather than props, so its close
-            diffs the draft against the set SEEDED at open, never the live one —
-            live items serve only as the item-id lookup for unlinks.
+            diffs the draft against the set SEEDED at open (or at the first settle
+            after it), never the live one — live items serve only as the item-id
+            lookup for unlinks.
             Labels/assignees/projects prefix keys as SIBLINGS: duplicate keys in
             one children array make React drop the earlier duplicates' unmount,
             leaking stale rows. Reviewers' prefix is consistency: own wrapper div. */}

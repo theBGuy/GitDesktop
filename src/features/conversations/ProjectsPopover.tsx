@@ -1,6 +1,7 @@
 import { Popover } from "@base-ui/react/popover";
 import { CopyIcon, KanbanIcon } from "@phosphor-icons/react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
@@ -31,6 +32,12 @@ const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read projects but not change them (needs the project scope)";
 const UNSETTLED_REASON =
   "Can't load this item's projects yet — use Retry above";
+const DISCARDED_NOTICE =
+  "Project changes weren't applied — this item's memberships couldn't be confirmed";
+
+function sameIds(a: Set<string>, b: Set<string>): boolean {
+  return a.size === b.size && [...a].every((id) => b.has(id));
+}
 
 /** A closed board still holds items, so its rows and chips stay — the state rides
  *  the label as words, never as a colour. */
@@ -54,8 +61,10 @@ export function ProjectsPopover({
   disabledReason,
 }: {
   repoPath: string;
-  /** Gates the reads. Both call sites pass `true` — the real gate is the row-level
-   *  `when` upstream, which never mounts this off GitHub. */
+  /** Gates the reads. Both call sites pass `true`; the real gate is upstream, and
+   *  it is deliberately forgiving — it never mounts this on a KNOWN GitLab or
+   *  Bitbucket repo, but a not-yet-identified one can mount it for one contained
+   *  read rather than withholding the picker while detection settles. */
   enabled: boolean;
   /** Which surface this item is — the backend addresses issues and PRs apart. */
   kind: "issue" | "pr";
@@ -102,7 +111,13 @@ export function ProjectsPopover({
   // per RemotePrView's "commits against LIVE props"), so a membership that lands
   // mid-open is in neither set and is left alone rather than read as an unchecked
   // row and unlinked. Live items serve only as the item-id lookup for removes.
+  // Seeded at open, or at the first settle after it: opening over an ERRORED read
+  // is allowed (the popup owns the Retry), and that snapshot is empty, so a
+  // successful Retry must reseed or every real membership would render unchecked
+  // and unlinking would be a no-op. Reseeding can't lose a toggle — every row is
+  // locked for the whole pre-settle window, so there is nothing to lose.
   const [seeded, setSeeded] = useState<Set<string>>(new Set());
+  const [seededSettled, setSeededSettled] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
 
   const memberships = useItemProjects(repoPath, kind, number, canRead, lens);
@@ -191,6 +206,18 @@ export function ProjectsPopover({
       scopes: ["project"],
     });
 
+  // Reads the settled memberships at fire time, so the effect below arms on the
+  // settle edge alone rather than re-arming per render.
+  const reseedFromSettled = useEffectEvent(() => {
+    const applied = new Set(items.map((item) => item.project.id));
+    setSeeded(applied);
+    setDraft(new Set(applied));
+    setSeededSettled(true);
+  });
+  useEffect(() => {
+    if (open && !seededSettled && memberships.isSuccess) reseedFromSettled();
+  }, [open, seededSettled, memberships.isSuccess]);
+
   function toggleDraft(id: string, on: boolean) {
     setDraft((prev) => {
       const next = new Set(prev);
@@ -206,13 +233,19 @@ export function ProjectsPopover({
       const applied = new Set(items.map((item) => item.project.id));
       setSeeded(applied);
       setDraft(new Set(applied));
+      setSeededSettled(memberships.isSuccess);
       setOpen(true);
       return;
     }
     setOpen(false);
     // An unsettled read is not an empty membership set, and an untrusted set must
-    // never mint removes.
-    if (!memberships.isSuccess) return;
+    // never mint removes. The rows are locked in this state, but a background
+    // refetch can fail under a draft made while it was still good — say so, since
+    // the checkboxes were showing that draft right up to the close.
+    if (!memberships.isSuccess) {
+      if (!sameIds(draft, seeded)) toast.info(DISCARDED_NOTICE);
+      return;
+    }
     const adds = [...draft]
       .filter((id) => !seeded.has(id))
       .map((id) => byId.get(id))
