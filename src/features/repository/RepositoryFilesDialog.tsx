@@ -122,9 +122,10 @@ function hasEnclosingRule(
  *  list; the source decides which store the line comes out of. */
 type AiRuleRef = { index: number; source: "repo" | "global"; pattern: string };
 
-/** A backslash escaping an ordinary character — nearly always a Windows path
- *  separator typed where git wants `/`. */
-const ESCAPED_CHAR = /\\[A-Za-z0-9]/;
+/** An ODD run of backslashes before an alphanumeric: one escape git will eat,
+ *  nearly always a Windows separator typed where it wants `/`. An even run is a
+ *  literal backslash, which is what this app's own generated lines write. */
+const ESCAPED_CHAR = /(?:^|[^\\])(?:\\\\)*\\[A-Za-z0-9]/;
 
 /** What a pending confirm dialog will do once accepted. */
 type Pending =
@@ -311,10 +312,14 @@ export function RepositoryFilesDialog({
   }, [ai]);
 
   const ruleStats = aiDerived.stats;
-  // Removing a rule shifts every later position, so a filter left pointing past
-  // the end is dropped rather than silently re-attributed to another rule.
+  // Derived, not cleared by an effect: the tab gate holds on the render that
+  // switches tabs (the reset effect only fires after paint), and dropping a
+  // filter left pointing past the end beats re-attributing it to whichever rule
+  // a removal shifted into that position.
   const activeRule =
-    ruleFilter !== null && ruleFilter < ruleStats.length ? ruleFilter : null;
+    tab === "ai" && ruleFilter !== null && ruleFilter < ruleStats.length
+      ? ruleFilter
+      : null;
 
   const filtered = useMemo(() => {
     const lists: Record<Tab, string[]> = {
@@ -608,7 +613,9 @@ export function RepositoryFilesDialog({
   }
 
   function emptyMessage(): ReactNode {
-    if (filter) return "No files match the filter.";
+    // `q`, not the raw field: a whitespace-only filter narrows nothing, so it
+    // must not claim the filter emptied the list.
+    if (q) return "No files match the filter.";
     if (tab === "tracked") return "No tracked files.";
     if (tab === "ignored") return "Nothing is being ignored.";
     if (ruleStats.length === 0) {
@@ -985,9 +992,10 @@ function ruleStatus(rule: RuleStat): string {
  *  apart, so the folder advice is appended only where the evidence backs it. */
 function deadNegationNote(rule: RuleStat): string {
   const cause =
-    "matches nothing — no current file matches, or a later rule decides first.";
+    "matches nothing — no current file matches, or a later rule decides first";
   if (!rule.folderTrap) return cause;
-  return `${cause} A file inside an excluded folder can't be re-included; exclude with dir/* instead of dir/.`;
+  // No terminal period: it would abut the pattern and read as a literal `dir/.`
+  return `${cause}. A file inside an excluded folder can't be re-included; exclude with dir/* instead of dir/`;
 }
 
 /** One row of the rules strip. A positive rule is a button that narrows the list

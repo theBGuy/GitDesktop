@@ -94,9 +94,11 @@ pub async fn git_branch_diff_files(
     Ok(parse_numstat_z(&out.stdout_lossy()))
 }
 
-/// Both refs resolved to SHAs in ONE spawn, so every call of the AI-ignore
-/// filter's two-pass flow reads the same trees. Trees are immutable once named,
-/// which is why the branch path pins refs where the staged path re-reads instead.
+/// Both refs resolved to SHAs in ONE spawn, so the AI-ignore filter's two passes
+/// read the same trees — trees are immutable once named. Only a caller whose
+/// patterns make filtering certain pays for the spawn; an inert list keeps the
+/// ref names and rechecks instead, since it still reaches two passes when a
+/// changed name is unreadable.
 ///
 /// `^{commit}` peels an annotated tag to its commit, and turns a multi-line rev
 /// expansion (`HEAD^!`, `HEAD^@`) into a git error rather than an argument whose
@@ -147,19 +149,23 @@ pub async fn git_branch_diff(
     validate_ref(&compare)?;
     let exclude = exclude.unwrap_or_default();
 
-    let range = if crate::git::ai_ignore::has_positive_pattern(&exclude) {
+    let pinned = crate::git::ai_ignore::has_positive_pattern(&exclude);
+    let range = if pinned {
         pinned_range(&repo_path, &base, &compare).await?
     } else {
         format!("{base}...{compare}")
     };
 
-    // `recheck: false` — the range is pinned to immutable trees above.
+    // Pinned, the range names immutable trees and needs no recheck. Unpinned, the
+    // two-pass flow is still reachable — an unreadable changed name takes it with
+    // no patterns at all — and these refs can move between its passes, so that arm
+    // rechecks. The fast path never reads the flag, so the common case is unchanged.
     let filtered = crate::git::ai_ignore::filtered_diff(
         &repo_path,
         &["diff", "--no-color", &range],
         &["diff", "--numstat", "-z", &range],
         &exclude,
-        false,
+        !pinned,
     )
     .await?;
 

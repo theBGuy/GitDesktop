@@ -91,7 +91,16 @@ export async function filterPathsByAiIgnore(input: {
  * (gh tops a 100-entry GraphQL page up from REST only best-effort) while the
  * diff text still carries every file. `excludedFiles` counts the deduped hidden
  * union, not `files.length` minus the survivors, which a capped list would
- * undercount. An empty `exclude` returns the input untouched, before any IPC.
+ * undercount.
+ *
+ * A candidate carrying U+FFFD is dropped whatever the patterns say, and with no
+ * patterns configured at all: the name is a lossy decode of non-UTF-8 bytes, so
+ * it can match no rule the user could write — it fails CLOSED, ahead of the
+ * pattern check, exactly as `filterPathsByAiIgnore` does. `unreadableFiles`
+ * breaks that subset out of `excludedFiles` so a caller explaining itself can
+ * keep the two causes apart. Only decodable candidates reach the matcher; an
+ * empty `exclude` skips the IPC, though the sections are parsed either way,
+ * since the unreadable check reads the same candidate keys.
  *
  * The result is a local derivation — the input `text` is typically a cached
  * query string the Files tab and review threads want in full.
@@ -101,18 +110,30 @@ export async function filterDiffByAiIgnore<F extends { path: string }>(input: {
   text: string;
   files: F[];
   exclude: string[];
-}): Promise<{ text: string; files: F[]; excludedFiles: number }> {
+}): Promise<{
+  text: string;
+  files: F[];
+  excludedFiles: number;
+  unreadableFiles: number;
+}> {
   const { repoPath, text, files, exclude } = input;
-  if (exclude.length === 0) return { text, files, excludedFiles: 0 };
   const sections = splitUnifiedDiff(text);
   const candidates = [
     ...new Set([...sections.keys(), ...files.map((f) => f.path)]),
   ];
-  if (candidates.length === 0) return { text, files, excludedFiles: 0 };
   const hidden = new Set(
-    await gitFilterAiIgnored(repoPath, candidates, exclude),
+    candidates.filter((p) => p.includes(REPLACEMENT_CHAR)),
   );
-  if (hidden.size === 0) return { text, files, excludedFiles: 0 };
+  const unreadableFiles = hidden.size;
+  const decodable = candidates.filter((p) => !p.includes(REPLACEMENT_CHAR));
+  if (decodable.length > 0 && exclude.length > 0) {
+    for (const path of await gitFilterAiIgnored(repoPath, decodable, exclude)) {
+      hidden.add(path);
+    }
+  }
+  if (hidden.size === 0) {
+    return { text, files, excludedFiles: 0, unreadableFiles: 0 };
+  }
   // Each section keeps its own `diff --git` header, so the survivors rejoin
   // into a valid unified diff in their original order.
   const filtered = [...sections]
@@ -123,5 +144,6 @@ export async function filterDiffByAiIgnore<F extends { path: string }>(input: {
     text: filtered,
     files: files.filter((f) => !hidden.has(f.path)),
     excludedFiles: hidden.size,
+    unreadableFiles,
   };
 }

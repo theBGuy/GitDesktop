@@ -555,7 +555,7 @@ export const capabilities: Capability[] = [
     group: "AI · generate & review",
     ai: true,
     label:
-      "AI excluded files view — every hidden file with the rule that hid it, a warning on a ! line that re-includes nothing, and rule removal in place",
+      "AI excluded files view — every hidden file with the rule that hid it, a warning on a ! line that decides nothing, and rule removal in place",
   },
   {
     group: "AI · generate & review",

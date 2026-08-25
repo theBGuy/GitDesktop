@@ -34,7 +34,7 @@ use tempfile::TempPath;
 use tokio::sync::OnceCell;
 
 use crate::error::{AppError, AppResult};
-use crate::git::diff::{parse_numstat_z, parse_numstat_z_rows, DiffStatRow};
+use crate::git::diff::{parse_numstat_z_rows, DiffStatRow};
 use crate::git::runner::{run_git, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT};
 use crate::git::types::DiffStatEntry;
 
@@ -362,8 +362,8 @@ pub async fn git_ai_ignore_verdicts(
 /// U+FFFD — what a non-UTF-8 byte in a filename becomes on the way in.
 const REPLACEMENT: char = '\u{FFFD}';
 
-/// How many times [`filtered_diff`] re-runs its two passes when the tree moved
-/// underneath them.
+/// How many times [`filtered_diff`] re-runs its two passes when what they name
+/// changed underneath them.
 const MAX_ATTEMPTS: u32 = 3;
 
 /// Byte ceiling on the content pass's whole argv. The exclude list grows with
@@ -380,13 +380,17 @@ const TERM_BUDGET: usize = 16_000;
 pub struct FilteredDiff {
     pub text: String,
     pub files: Vec<DiffStatEntry>,
-    /// Changed files (rename pairs count once) the patterns hid.
+    /// Changed files (rename pairs count once) kept out of the diff — pattern
+    /// matches plus unreadable names, which hide with no patterns at all.
     pub excluded_files: u32,
 }
 
-/// Whether an AI-ignore list can hide anything — the flag a caller needs to keep
-/// its unfiltered command shape when it cannot. A list of nothing but `!` lines
-/// is inert (a negation causes no ignoring), so it takes the unfiltered path.
+/// Whether an AI-ignore list can hide anything: a list of nothing but `!` lines
+/// is inert, since a negation causes no ignoring. Its two readers give it
+/// different meanings — [`filtered_diff`] keeps its unfiltered command shape on
+/// an inert list unless a changed name is unreadable (that hides with no patterns
+/// at all), and `git_branch_diff` reads it as the pin-vs-recheck discriminant,
+/// since pinning a ref range is only worth a spawn where filtering is certain.
 pub fn has_positive_pattern(patterns: &[String]) -> bool {
     actionable_lines(patterns).1
 }
@@ -455,9 +459,10 @@ fn widened_glob_for_name(path: &str) -> String {
 /// (measured, git 2.51.1).
 ///
 /// `recheck` re-reads the names after the content pass and retries on a mismatch,
-/// for callers whose diff reads mutable state (index, working tree) — a file
-/// appearing between the passes would otherwise enter the diff unchecked.
-/// Callers over immutable trees pin their refs instead and pass `false`.
+/// for callers whose two passes can disagree — a diff over the index or working
+/// tree, or over a ref range whose refs can move — since a file appearing between
+/// them would otherwise enter the diff unchecked. Only a caller that pinned its
+/// range to immutable trees may pass `false`.
 ///
 /// Errors when the exclude terms would exceed [`TERM_BUDGET`]: an empty result
 /// there would read to every caller as "everything was ignored" while survivors
@@ -474,16 +479,27 @@ pub async fn filtered_diff(
     // `--cached --numstat` returns the same root-relative rows from a
     // subdirectory). So these spawns stay byte-identical to the unfiltered
     // command, and the common case pays nothing.
+    //
+    // The fast RETURN carries a second condition: every changed name decoded
+    // cleanly. An unreadable name is hidden with no pattern configured at all, so
+    // one here falls through to the two-pass flow — which hides it on the same
+    // unconditional rule — rather than shipping its content under a `[]` verdict.
     if !has_positive_pattern(exclude) {
         let (content, stat) = tokio::try_join!(
             run_git(Some(repo_path), content_args, DEFAULT_TIMEOUT),
             run_git(Some(repo_path), numstat_args, DEFAULT_TIMEOUT)
         )?;
-        return Ok(FilteredDiff {
-            text: content.stdout_lossy(),
-            files: parse_numstat_z(&stat.stdout_lossy()),
-            excluded_files: 0,
-        });
+        let rows = parse_numstat_z_rows(&stat.stdout_lossy());
+        if !rows
+            .iter()
+            .any(|row| row.names.iter().any(|n| n.contains(REPLACEMENT)))
+        {
+            return Ok(FilteredDiff {
+                text: content.stdout_lossy(),
+                files: rows.into_iter().map(|row| row.entry).collect(),
+                excluded_files: 0,
+            });
+        }
     }
 
     // Pin every spawn below to the working-tree toplevel. PATHSPEC elements
@@ -1774,15 +1790,9 @@ mod tests {
         rows.extend_from_slice(format!("100644 blob {blob}\tkeep.txt\n").as_bytes());
         let (base, head) = commit_tree_pair(&repo, &rows).await;
 
-        let filtered = git_branch_diff(
-            repo.clone(),
-            base.clone(),
-            head.clone(),
-            None,
-            Some(vec!["*.env".to_string()]),
-        )
-        .await
-        .unwrap();
+        let filtered = git_branch_diff(repo, base, head, None, Some(vec!["*.env".to_string()]))
+            .await
+            .unwrap();
         assert_eq!(
             filtered
                 .files
@@ -1793,16 +1803,68 @@ mod tests {
         );
         assert_eq!(filtered.excluded_files, 1);
         assert!(!filtered.text.contains("caf"), "{}", filtered.text);
+    }
 
-        // Control: unfiltered, the lossy row is present under its lossy name.
-        let all = git_branch_diff(repo, base, head, None, None).await.unwrap();
+    /// An unreadable name is hidden with NO pattern configured — the "hidden
+    /// unconditionally" rule owes nothing to the user's list. A list that hides
+    /// nothing (empty, or negations only) still takes the two-pass flow when a
+    /// changed name lost bytes, because its content would otherwise ship while
+    /// every disclosure surface reported the file withheld.
+    #[tokio::test]
+    async fn an_unreadable_name_is_hidden_even_with_no_patterns() {
+        let (_dir, repo) = seed_repo("lossy-nopattern").await;
+        let blob = seed_blob(&repo).await;
+
+        // A lone `0xE9` is not valid UTF-8, so this name arrives as
+        // `caf\u{FFFD}.env`; the fixture rides the object DB because Windows git
+        // refuses such a name in the index.
+        let mut rows: Vec<u8> = format!("100644 blob {blob}\t").into_bytes();
+        rows.extend_from_slice(b"caf\xE9.env\n");
+        rows.extend_from_slice(format!("100644 blob {blob}\tkeep.txt\n").as_bytes());
+        let (base, head) = commit_tree_pair(&repo, &rows).await;
+
+        // Two inputs, not three shapes: `git_branch_diff` unwraps `None` to an
+        // empty list, so an absent argument and an empty one are one exclude.
+        for patterns in [None, Some(vec!["!keep.txt".to_string()])] {
+            let label = format!("{patterns:?}");
+            let out = git_branch_diff(
+                repo.clone(),
+                base.clone(),
+                head.clone(),
+                None,
+                patterns.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                out.files
+                    .iter()
+                    .map(|f| f.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["keep.txt"],
+                "{label}: the lossy row is not listed"
+            );
+            assert_eq!(out.excluded_files, 1, "{label}: disclosed");
+            assert!(!out.text.contains("caf"), "{label}: {}", out.text);
+        }
+
+        // An inert list over cleanly-decodable names returns the FULL diff: the
+        // fall-through above is conditional on an unreadable name, not on the list.
+        let mut clean: Vec<u8> = format!("100644 blob {blob}\ta.txt\n").into_bytes();
+        clean.extend_from_slice(format!("100644 blob {blob}\tkeep.txt\n").as_bytes());
+        let (base, head) = commit_tree_pair(&repo, &clean).await;
+        let out = git_branch_diff(repo, base, head, None, Some(vec![]))
+            .await
+            .unwrap();
         assert_eq!(
-            all.files
+            out.files
                 .iter()
                 .map(|f| f.path.as_str())
                 .collect::<Vec<_>>(),
-            ["caf\u{FFFD}.env", "keep.txt"]
+            ["a.txt", "keep.txt"]
         );
+        assert_eq!(out.excluded_files, 0);
+        assert!(out.text.contains("+++ b/a.txt"), "{}", out.text);
     }
 
     /// A `repo_path` BELOW the toplevel still filters correctly, because the

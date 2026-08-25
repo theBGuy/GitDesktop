@@ -40,14 +40,11 @@ export function toastErrorWithNote(e: unknown, note: string) {
 }
 
 /**
- * Toast copy for a bulk ignore / AI-exclude, where `total` is the number of
- * LINES written and `added` came back from the Rust command as the count
- * actually appended — skipping lines already present (.gitignore) or already in
- * EFFECT (.gitdesktop/aiignore, where a later `!` un-ignore revives a line).
- * Lines, not selected entries: on the AI path a `\`-holding path emits a second
- * `/`-separated line, so the total can exceed the selection. Reports the honest
- * end state: nothing new when everything was already covered, a partial when
- * some were skipped.
+ * Toast copy for a bulk ignore / AI-exclude. `total` is LINES written; `added`
+ * is the Rust command's count actually appended — it skips lines already
+ * present (.gitignore) or already in EFFECT (aiignore, where a later `!`
+ * revives a line). Lines ≠ selected entries: a `\`-holding path emits a
+ * `/`-separated twin line, so `total` can exceed the selection.
  */
 export function ignoreToast(
   added: number,

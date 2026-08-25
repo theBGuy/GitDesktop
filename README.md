@@ -968,7 +968,7 @@ review via its subscription login. The full list is under
     with the rule that hid it and whether it came from the repo file or your
     global settings. Above the list sit your rules in evaluation order with
     per-rule match counts (click one to see just its files), and a warning
-    marks a `!` line that re-includes nothing. Select files and **Remove** the
+    marks a `!` line that decides nothing. Select files and **Remove** the
     rules behind them: repo lines leave `.gitdesktop/aiignore` (commit the
     change), global lines leave Settings and affect every repository. The
     **Tracked** tab's **Exclude … from AI** button excludes a whole selection
