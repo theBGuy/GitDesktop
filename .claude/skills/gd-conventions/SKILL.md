@@ -90,8 +90,11 @@ words the user reads on screen — the palette matcher is a plain substring, so
 - No hover-revealed per-row buttons — contextual actions are always-visible,
   or live in keyboard/context-menu/toolbar.
 - Truncated user/repo content gets a `title` tooltip, added
-  only-when-actually-clipped; Base UI Select clips at the POPUP — measure the
-  `SelectItem`, not the span.
+  only-when-actually-clipped via `clipTitle`/`clipTitleFromText`
+  (`src/lib/clip-title.ts`) — never inline: blanking with `title=""`
+  suppresses a titled ancestor's tooltip, and the `inline-clip-title` guard
+  in `pnpm run checks` fails on rewrites. Base UI Select clips at the
+  POPUP — put the handler on the `SelectItem`, not the span.
 - Disabled actions explain why via `DisabledReasonButton`
   (`src/components/disabled-reason-button.tsx`) — reason as tooltip + AT
   announcement; menu/popover trigger sites keep the reason on a titled span

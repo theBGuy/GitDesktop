@@ -32,6 +32,7 @@ import {
   requiresPullRequest,
 } from "@/lib/branch-rules/match";
 import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
+import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import { forgeDetectForkPrForBranch } from "@/lib/git/api";
@@ -1497,13 +1498,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               <span className="flex w-full items-center gap-2">
                 <span
                   className="min-w-0 flex-1 truncate"
-                  // Only expose the full name as a tooltip when it's actually
-                  // clipped — measured just-in-time on hover, so no per-row refs.
-                  onMouseEnter={(e) => {
-                    const el = e.currentTarget;
-                    el.title =
-                      el.scrollWidth > el.clientWidth ? branch.name : "";
-                  }}
+                  onMouseEnter={clipTitle(branch.name)}
                 >
                   {branch.name}
                   {branch.name === defaultName && (
@@ -1954,19 +1949,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 <GitBranchIcon data-icon="inline-start" />
                 <span
                   className="min-w-0 truncate"
-                  // Only expose the full label as a tooltip when it's actually
-                  // clipped — measured just-in-time on hover, so no ref needed.
-                  // Remove the attribute (not title="") when unclipped: an empty
-                  // title="" is still a title in Chromium and would suppress the
-                  // wrapper's conditional (amending) title above.
-                  onMouseEnter={(e) => {
-                    const el = e.currentTarget;
-                    if (el) {
-                      if (el.scrollWidth > el.clientWidth)
-                        el.title = currentLabel;
-                      else el.removeAttribute("title");
-                    }
-                  }}
+                  // Sits under the wrapper's conditional (amending) title — a
+                  // static or blanked title here would suppress that tooltip.
+                  onMouseEnter={clipTitle(currentLabel)}
                 >
                   {currentLabel}
                 </span>
@@ -2128,15 +2113,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                               )}
                               <span
                                 className="max-w-[45%] shrink-0 truncate text-[11px] text-muted-foreground"
-                                onMouseEnter={(e) => {
-                                  const el = e.currentTarget;
-                                  // Full path is the useful tooltip (the row already
-                                  // shows the folder name). removeAttribute, not
-                                  // title="", so an unclipped row leaves no empty tooltip.
-                                  if (el.scrollWidth > el.clientWidth)
-                                    el.title = w.path;
-                                  else el.removeAttribute("title");
-                                }}
+                                // Full path, not the folder name the row already
+                                // shows — the path is what disambiguates.
+                                onMouseEnter={clipTitle(w.path)}
                               >
                                 {baseName(w.path)}
                               </span>

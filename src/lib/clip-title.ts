@@ -13,3 +13,16 @@ export const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
   if (el.scrollWidth > el.clientWidth) el.title = value;
   else el.removeAttribute("title");
 };
+
+/**
+ * `clipTitle` for elements whose full text IS their own `textContent`: no value
+ * to pass, and clipping is measured on both axes so `line-clamp-*` (vertical)
+ * counts as clipped alongside `truncate` (horizontal). Same remove-don't-blank
+ * contract as `clipTitle`.
+ */
+export const clipTitleFromText = (e: MouseEvent<HTMLElement>) => {
+  const el = e.currentTarget;
+  if (el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight)
+    el.title = el.textContent ?? "";
+  else el.removeAttribute("title");
+};

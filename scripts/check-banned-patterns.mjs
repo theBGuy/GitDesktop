@@ -186,6 +186,18 @@ const HOVER_REVEAL_PAIRS = [
 const SET_QUERY_DATA_RE =
   /setQueryData\s*(?:<[^(]*?>)?\s*\([^;]{0,200},\s*undefined\s*[),]/g;
 
+// An inline clip-measured tooltip: a `.title` ASSIGNMENT within PAIR_GAP of an
+// overflow measure, in either order. Anchoring on the write — never a bare
+// `.title` read — is what keeps data reads (`draft.title` near a
+// scroll-to-bottom, measured on PlanView) from pairing; every
+// reimplementation writes `.title` in range of its measure. `(?!=)` keeps
+// `==`/`===` comparisons out.
+const INLINE_CLIP_TITLE_RE = new RegExp(
+  `\\.title\\s*=(?!=)[\\s\\S]{0,${PAIR_GAP}}?\\b(?:scrollWidth|scrollHeight)\\b` +
+    `|\\b(?:scrollWidth|scrollHeight)\\b[\\s\\S]{0,${PAIR_GAP}}?\\.title\\s*=(?!=)`,
+  "g",
+);
+
 // A `.mutate(` call in any spelling — the token, not the callbacks object it
 // may carry. Matching the object instead would have to recognize every way one
 // reaches the call: inline literal, hoisted variable (`.mutate(v, opts)` — the
@@ -259,6 +271,16 @@ export const CHECKS = [
     ],
     message:
       "derive the platform modifier via the hotkeys helpers (formatBinding/isMac) — new hand-rolled ctrl/meta checks need an allowlist entry with rationale",
+  },
+  {
+    name: "inline-clip-title",
+    // The helper file IS the idiom; everything else routes through it.
+    appliesTo: (file) =>
+      file !== "src/lib/clip-title.ts" && notVendoredUi(file),
+    scan: perFile(INLINE_CLIP_TITLE_RE),
+    allowlist: [],
+    message:
+      "clip-measured tooltips route through clipTitle/clipTitleFromText (src/lib/clip-title.ts) — an inline rewrite re-opens the blank-title ancestor-suppression class; if the pairing is a false positive, add an allowlist entry with rationale",
   },
   {
     name: "setQueryData-noop",

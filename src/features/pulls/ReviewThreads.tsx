@@ -1,7 +1,6 @@
 import { CaretRightIcon, CopyIcon } from "@phosphor-icons/react";
 import {
   type KeyboardEvent,
-  type MouseEvent,
   type ReactNode,
   useEffect,
   useLayoutEffect,
@@ -17,6 +16,7 @@ import { Markdown } from "@/components/ui/markdown";
 import { Spinner } from "@/components/ui/spinner";
 import { Thread } from "@/features/conversations/Thread";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
+import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import type {
   ApplyLinesResult,
@@ -28,13 +28,6 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { synthesizeThreadHunk } from "./suggestion-utils";
-
-/** Sets a hover title only when the element is actually clipped (measures
- *  `currentTarget`, not an inner span) — the file-group header truncates. */
-const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
-  const el = e.currentTarget;
-  el.title = el.scrollWidth > el.clientWidth ? value : "";
-};
 
 /**
  * File:line-anchored review threads (Copilot/CodeRabbit/human line comments on

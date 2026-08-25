@@ -13,7 +13,6 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type Dispatch,
   type KeyboardEvent,
-  type MouseEvent,
   type SetStateAction,
   useEffect,
   useRef,
@@ -25,6 +24,7 @@ import { LogBlock } from "@/components/LogBlock";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { StatusIcon, statusLabel } from "@/features/actions/status";
+import { clipTitle } from "@/lib/clip-title";
 import {
   useApproveWorkflowRun,
   useRepoWriteAccess,
@@ -95,13 +95,6 @@ function jobForCheck(
 function currentStep(job: RunJob | undefined) {
   return job?.steps.find((s) => s.status === "in_progress") ?? null;
 }
-
-/** Sets a hover title only when the name is actually clipped by `truncate`;
- *  mirrors the only-when-clipped pattern in CommitsList/WorktreesDialog. */
-const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
-  const el = e.currentTarget;
-  el.title = el.scrollWidth > el.clientWidth ? value : "";
-};
 
 /** A GitHub-Actions check's inline log tail (Skeleton → log tail), matching
  *  RunDetailView's `<pre>` idiom. Only mounted while the row is expanded, so the

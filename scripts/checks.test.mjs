@@ -42,6 +42,7 @@ function scanner(name) {
 
 const hoverReveal = scanner("hover-reveal");
 const modKey = scanner("hand-rolled-mod-key");
+const inlineClipTitle = scanner("inline-clip-title");
 const setQueryData = scanner("setQueryData-noop");
 const bareMutate = scanner("bare-mutate-in-converted-trees");
 
@@ -113,6 +114,62 @@ test("hand-rolled-mod-key flags a single raw flag and each half of a split pair"
 test("hand-rolled-mod-key ignores other modifiers and the helper's own name", () => {
   assert.deepEqual(modKey("if (e.shiftKey || e.altKey) return;"), []);
   assert.deepEqual(modKey("const label = formatBinding(binding);"), []);
+});
+
+test("inline-clip-title flags each local spelling of the clip-tooltip idiom", () => {
+  // The blank-on-else ternary — the ancestor-suppressing defect shape.
+  const ternary = [
+    "onMouseEnter={(e) => {",
+    "  const el = e.currentTarget;",
+    '  el.title = el.scrollWidth > el.clientWidth ? name : "";',
+    "}}",
+  ].join("\n");
+  assert.deepEqual(inlineClipTitle(ternary), [3]);
+  // The corrected if/else form is still an inline copy: the ratchet points
+  // both shapes at the shared helper.
+  const ifElse = [
+    "const el = e.currentTarget;",
+    "if (el.scrollWidth > el.clientWidth) el.title = value;",
+    'else el.removeAttribute("title");',
+  ].join("\n");
+  assert.deepEqual(inlineClipTitle(ifElse), [2]);
+  // The set-if-absent, both-axes variant: the guard READ doesn't pair (no
+  // assignment), but the write downstream is still in range of the measure.
+  const guarded = [
+    "if (",
+    "  !el.title &&",
+    "  (el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight)",
+    ")",
+    '  el.title = el.textContent ?? "";',
+  ].join("\n");
+  assert.deepEqual(inlineClipTitle(guarded), [3]);
+});
+
+test("inline-clip-title leaves title data reads and plain scroll code alone", () => {
+  // A `.title` read is not the idiom — only the write anchors a pair. This is
+  // the PlanView shape: a scroll-to-bottom near `{ title: draft.title }`.
+  const dataRead = [
+    "scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });",
+    "setPendingIssueDraft({ title: draft.title, body: draft.body });",
+  ].join("\n");
+  assert.deepEqual(inlineClipTitle(dataRead), []);
+  assert.deepEqual(
+    inlineClipTitle("<span onMouseEnter={clipTitle(member.title)} />"),
+    [],
+  );
+  // Scroll-stick and textarea autosize measure without touching `title`.
+  assert.deepEqual(inlineClipTitle("el.scrollTop = el.scrollHeight;"), []);
+  assert.deepEqual(
+    inlineClipTitle("ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;"),
+    [],
+  );
+});
+
+test("inline-clip-title exempts the helper file and vendored ui only", () => {
+  const { appliesTo } = CHECKS.find((c) => c.name === "inline-clip-title");
+  assert.equal(appliesTo("src/lib/clip-title.ts"), false);
+  assert.equal(appliesTo("src/components/ui/select.tsx"), false);
+  assert.equal(appliesTo("src/features/pulls/PrTimeline.tsx"), true);
 });
 
 test("setQueryData-noop catches a call wrapped across lines", () => {

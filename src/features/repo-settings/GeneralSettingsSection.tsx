@@ -16,6 +16,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { clipTitle } from "@/lib/clip-title";
 import { useActiveGhHost } from "@/lib/git/host";
 import {
   useBranches,
@@ -358,14 +359,7 @@ function GeneralForm({
             <SelectContent className="max-w-[min(20rem,80vw)]">
               {branchOptions.map((b) => (
                 <SelectItem key={b} value={b}>
-                  <span
-                    className="block truncate"
-                    // Tooltip only when the branch name is actually clipped.
-                    onMouseEnter={(e) => {
-                      const el = e.currentTarget;
-                      el.title = el.scrollWidth > el.clientWidth ? b : "";
-                    }}
-                  >
+                  <span className="block truncate" onMouseEnter={clipTitle(b)}>
                     {b}
                   </span>
                 </SelectItem>
