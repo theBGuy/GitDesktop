@@ -125,7 +125,7 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
 
   return (
     <WorkingTreeDiff
-      key={`${deferredFile.staged}:${deferredFile.path}`}
+      key={`${repoPath}:${deferredFile.staged}:${deferredFile.path}`}
       repoPath={repoPath}
       file={deferredFile}
     />
@@ -231,8 +231,9 @@ function WorkingTreeDiff({
     clearSelection,
     hunkMode && selection !== null && !busy && discard === null,
   );
-  // The Discard confirm's `run` captured line numbers at open time — close it
-  // if the selection invalidates underneath (a refetch while the dialog is up).
+  // The Discard confirm's `run` captured line numbers (or a hunk) at open
+  // time — close it if the selection invalidates underneath (a refetch while
+  // the dialog is up).
   useEffect(() => {
     if (selection === null) setDiscard(null);
   }, [selection]);
@@ -460,10 +461,8 @@ function WorkingTreeDiff({
           staged={file.staged}
           busy={busy}
           selection={selection}
-          onSelect={(lines) =>
-            setSelectionState(
-              lines === null ? null : { lines, forText: diff.data?.text ?? "" },
-            )
+          onSelect={(lines, forText) =>
+            setSelectionState(lines === null ? null : { lines, forText })
           }
           onHunkAction={onHunkAction}
         />
@@ -680,7 +679,7 @@ function StagingDiffView({
   staged: boolean;
   busy: boolean;
   selection: SelectedLine[] | null;
-  onSelect: (lines: SelectedLine[] | null) => void;
+  onSelect: (lines: SelectedLine[] | null, forText: string) => void;
   onHunkAction: (hunk: DiffHunk, kind: "stage" | "unstage" | "discard") => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -803,7 +802,9 @@ function StagingDiffView({
         const next = additiveRef.current
           ? mergeSelection(selectedRef.current, lines)
           : lines;
-        onSelectRef.current(next.length ? next : null);
+        // Stamp against the text these rows were BUILT from — the live
+        // diff.data.text can already be newer while the deferred render lags.
+        onSelectRef.current(next.length ? next : null, deferredText);
       },
     });
     paintLines(container, selectedRef.current ?? []); // re-assert after (re)mount
@@ -811,7 +812,7 @@ function StagingDiffView({
       container.removeEventListener("mousedown", onMouseDownCapture, true);
       manager.destroy();
     };
-  }, [diffFile, viewMode]);
+  }, [diffFile, viewMode, deferredText]);
 
   // Paint the committed selection from state (incl. cleared → []).
   useEffect(() => {
