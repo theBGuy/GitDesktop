@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { type ComponentProps, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -87,6 +88,7 @@ export function AssigneesPopover({
   const ghHost = useForgeGhHost(repoPath);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Map<string, ForgeUserRef>>(new Map());
+  const portalContainer = usePanelPortalContainer();
   // Per-toggle mode reads `value`; commit-on-close mode reads the local draft
   // (seeded from `value` on open). Compare by the provider's stable id.
   const checkedIds = commitOnClose
@@ -152,7 +154,7 @@ export function AssigneesPopover({
             Assignees
           </Popover.Trigger>
         </span>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner
             align="start"
             sideOffset={4}

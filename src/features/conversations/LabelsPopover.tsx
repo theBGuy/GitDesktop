@@ -1,6 +1,7 @@
 import { Popover } from "@base-ui/react/popover";
 import { TagIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
@@ -43,6 +44,7 @@ export function LabelsPopover({
   const editLabels = useEditPrLabels(repoPath, lens);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Set<string>>(new Set());
+  const portalContainer = usePanelPortalContainer();
 
   function toggleDraft(name: string, on: boolean) {
     setDraft((prev) => {
@@ -111,7 +113,7 @@ export function LabelsPopover({
             Labels
           </Popover.Trigger>
         </span>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner
             align="start"
             sideOffset={4}

@@ -9,6 +9,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { type MouseEvent, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -151,6 +152,7 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
   const settings = useSettings();
   const saveSettings = useSaveSettings();
   const stashCount = useStashCount(repoPath);
+  const portalContainer = usePanelPortalContainer();
   // A confirm dialog is open when its scope is non-null. "files" covers a
   // single right-clicked row and a multi-selection alike (1+ entries); "all"
   // is the whole working tree (from the section-header menu).
@@ -792,7 +794,7 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
                   </span>
                 )}
               </Popover.Trigger>
-              <Popover.Portal>
+              <Popover.Portal container={portalContainer}>
                 <Popover.Positioner
                   align="start"
                   sideOffset={4}

@@ -15,6 +15,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import type {
   MentionCandidate,
   MentionSource,
@@ -463,8 +464,9 @@ function emptyMessage(loading: boolean, isError: boolean): string {
   return isError ? "Couldn't load suggestions" : "No matches";
 }
 
-/** The caret-anchored suggestion listbox. Portalled to the body and fixed-
- *  positioned: the composer sits inside overflow containers that would clip it. */
+/** The caret-anchored suggestion listbox. Portalled out and fixed-positioned:
+ *  the composer sits inside overflow containers that would clip it. It lands in
+ *  the surrounding tab panel when there is one, so hiding that panel conceals it. */
 function MentionPopover({
   listId,
   listRef,
@@ -489,6 +491,8 @@ function MentionPopover({
   onPick: (candidate: MentionCandidate) => void;
   onHover: (i: number) => void;
 }) {
+  const portalContainer = usePanelPortalContainer();
+
   // Keep the keyboard-highlighted row visible while arrowing through a list that
   // is taller than the box.
   useEffect(() => {
@@ -564,6 +568,6 @@ function MentionPopover({
         ))
       )}
     </div>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }

@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -464,6 +465,7 @@ export function JiraLabelsPopover({
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const portalContainer = usePanelPortalContainer();
 
   // Jira labels can't contain whitespace — reject inline rather than let a bad
   // "create" slip through (the backend would 400).
@@ -569,7 +571,7 @@ export function JiraLabelsPopover({
           <TagIcon data-icon="inline-start" />
           Labels
         </Popover.Trigger>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner
             align="start"
             sideOffset={4}

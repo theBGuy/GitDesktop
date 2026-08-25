@@ -2,6 +2,7 @@ import { Popover } from "@base-ui/react/popover";
 import { UserCheckIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useForgeGhHost } from "@/lib/git/host";
@@ -67,6 +68,7 @@ export function ReviewersPopover({
   const ghHost = useForgeGhHost(repoPath);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Map<string, ForgeUserRef>>(new Map());
+  const portalContainer = usePanelPortalContainer();
 
   // Collision universe for the candidate rows: candidates ∪ current value, so a
   // selected colliding reviewer still gets a hint. For the chips: value ∪
@@ -124,7 +126,7 @@ export function ReviewersPopover({
             Reviewers
           </Popover.Trigger>
         </span>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner
             align="start"
             sideOffset={4}

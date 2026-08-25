@@ -2,6 +2,7 @@ import { Popover } from "@base-ui/react/popover";
 import { SmileyIcon } from "@phosphor-icons/react";
 import { type ComponentProps, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import type { Reaction } from "@/lib/git/types";
 import {
   ARIA_DISABLED_CLASS,
@@ -97,6 +98,7 @@ export function ReactionBar({
   reason?: string | null;
 }) {
   const [open, setOpen] = useState(false);
+  const portalContainer = usePanelPortalContainer();
   const reacted = new Set(
     reactions.filter((r) => r.viewerReacted).map((r) => r.content),
   );
@@ -138,7 +140,7 @@ export function ReactionBar({
         >
           <SmileyIcon className="size-4" />
         </Popover.Trigger>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner
             align="start"
             sideOffset={4}

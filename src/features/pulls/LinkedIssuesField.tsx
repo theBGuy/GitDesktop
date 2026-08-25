@@ -1,6 +1,7 @@
 import { Popover } from "@base-ui/react/popover";
 import { LinkIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { type KeyboardEvent, useRef, useState } from "react";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { IssuePicker, StateIcon } from "@/features/issues/IssueRelations";
@@ -93,6 +94,7 @@ function NativeLinkedIssuesField({
   // roved index, which sets which chip is focusable + focused.
   const [focusIndex, setFocusIndex] = useState(0);
   const chipRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const portalContainer = usePanelPortalContainer();
 
   // AI-suggested closes sort first; ties keep insertion order (stable sort).
   const ordered = [...chips].sort(
@@ -158,7 +160,7 @@ function NativeLinkedIssuesField({
             <LinkIcon data-icon="inline-start" />
             Link issue
           </Popover.Trigger>
-          <Popover.Portal>
+          <Popover.Portal container={portalContainer}>
             <Popover.Positioner
               align="end"
               sideOffset={4}
@@ -276,6 +278,7 @@ function JiraMentionsField({
   // roved index, which sets which chip is focusable + focused.
   const [focusIndex, setFocusIndex] = useState(0);
   const chipRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const portalContainer = usePanelPortalContainer();
 
   // AI-suggested chips sort first (parity with the native band's sparkle-first
   // ordering); ties keep insertion order (stable sort).
@@ -339,7 +342,7 @@ function JiraMentionsField({
             <LinkIcon data-icon="inline-start" />
             Link issue
           </Popover.Trigger>
-          <Popover.Portal>
+          <Popover.Portal container={portalContainer}>
             <Popover.Positioner
               align="end"
               sideOffset={4}

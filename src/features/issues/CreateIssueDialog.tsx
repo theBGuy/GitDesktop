@@ -300,6 +300,9 @@ export function CreateIssueDialog({
                   <TagIcon data-icon="inline-start" />
                   Labels
                 </Popover.Trigger>
+                {/* Bare portal on purpose: this hook would read the PANEL
+                    container (the reset lives below, inside DialogContent),
+                    putting the popup behind the dialog backdrop. */}
                 <Popover.Portal>
                   <Popover.Positioner
                     align="start"

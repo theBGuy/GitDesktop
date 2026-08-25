@@ -1,6 +1,7 @@
 import { Popover } from "@base-ui/react/popover";
 import { UsersIcon, XIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { parseCoAuthorInput } from "@/lib/git/co-authors";
@@ -29,6 +30,7 @@ export function CoAuthorPicker({
   // Which option the keyboard has landed on (typeahead/combobox pattern: focus
   // stays in the input, ↑/↓ move a highlight, Enter adds the highlighted one).
   const [activeIndex, setActiveIndex] = useState(0);
+  const portalContainer = usePanelPortalContainer();
 
   // The commit author is already credited — never offer them as a co-author.
   const selfEmail = identity.data?.email.toLowerCase() || null;
@@ -107,7 +109,7 @@ export function CoAuthorPicker({
           <UsersIcon data-icon="inline-start" />
           Co-authors
         </Popover.Trigger>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner
             align="start"
             sideOffset={4}

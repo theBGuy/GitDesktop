@@ -8,6 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -94,6 +95,7 @@ function SessionCanvas({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmKeepEnsemble, setConfirmKeepEnsemble] = useState(false);
   const openLocalPrCreate = useUiStore((s) => s.openLocalPrCreate);
+  const portalContainer = usePanelPortalContainer();
   // Integrated terminal state + actions (dock visibility, launch, the container
   // port popover) live in their own hook.
   const {
@@ -334,7 +336,7 @@ function SessionCanvas({
                 <TerminalWindowIcon className="size-3.5" />
                 Terminal
               </Popover.Trigger>
-              <Popover.Portal>
+              <Popover.Portal container={portalContainer}>
                 <Popover.Positioner
                   align="end"
                   sideOffset={6}

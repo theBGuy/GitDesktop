@@ -1,6 +1,7 @@
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { XIcon } from "@phosphor-icons/react";
 import * as React from "react";
+import { PanelPortalReset } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -61,7 +62,9 @@ function DialogContent({
         )}
         {...props}
       >
-        {children}
+        {/* This popup portals to the body, so floating UI inside it must not
+            portal into a tab panel the dialog covers. */}
+        <PanelPortalReset>{children}</PanelPortalReset>
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"

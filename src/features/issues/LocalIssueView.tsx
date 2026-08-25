@@ -14,6 +14,7 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -100,6 +101,7 @@ export function LocalIssueView({
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
+  const portalContainer = usePanelPortalContainer();
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {
       if (!issue) return;
@@ -230,7 +232,7 @@ export function LocalIssueView({
                   <TagIcon data-icon="inline-start" />
                   Labels
                 </Popover.Trigger>
-                <Popover.Portal>
+                <Popover.Portal container={portalContainer}>
                   <Popover.Positioner
                     align="start"
                     sideOffset={4}

@@ -20,6 +20,7 @@ import type { ReactNode } from "react";
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -145,6 +146,7 @@ export function LocalPrView({
     null,
   );
   const aiEnabled = useAiEnabled();
+  const portalContainer = usePanelPortalContainer();
   // The sub-tabs the strip renders — every writer of `section` gates on this, so
   // no path can select a tab that isn't there. A local PR has no forge, so the
   // Review tab rides the AI setting alone (no capability axis to consult).
@@ -702,7 +704,7 @@ export function LocalPrView({
                   <TagIcon data-icon="inline-start" />
                   Labels
                 </Popover.Trigger>
-                <Popover.Portal>
+                <Popover.Portal container={portalContainer}>
                   <Popover.Positioner
                     align="start"
                     sideOffset={4}

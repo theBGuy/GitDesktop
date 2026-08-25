@@ -2,6 +2,7 @@ import { Popover } from "@base-ui/react/popover";
 import { CopyIcon, KanbanIcon } from "@phosphor-icons/react";
 import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
@@ -96,10 +97,6 @@ export function ProjectsPopover({
     !scopes.data.scopes.includes("project");
   const canRead = enabled && !classicMissing;
 
-  // KNOWN LIMITATION, shared with LabelsPopover: a tab switch while this is open
-  // strands the popup until that tab is revisited — the <Activity> hide freezes the
-  // very subtree whose re-render would remove the portal, so no close initiated
-  // here can win. Class fix is a planned follow-up; don't re-attempt it here.
   const [open, setOpen] = useState(false);
   // The catalog is an owner-wide query; it waits for a first open rather than
   // firing for every issue the user scrolls through.
@@ -114,6 +111,7 @@ export function ProjectsPopover({
   const [seeded, setSeeded] = useState<Set<string>>(new Set());
   const [seededSettled, setSeededSettled] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const portalContainer = usePanelPortalContainer();
 
   const memberships = useItemProjects(repoPath, kind, number, canRead, lens);
   const available = useAvailableProjects(repoPath, canRead && hasOpened, lens);
@@ -291,7 +289,7 @@ export function ProjectsPopover({
             Projects
           </Popover.Trigger>
         </span>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner
             align="start"
             sideOffset={4}

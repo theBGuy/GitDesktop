@@ -1,6 +1,7 @@
 import { Popover } from "@base-ui/react/popover";
 import { PlayIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import {
   AgentPicker,
@@ -27,6 +28,7 @@ export function ImplementPlanButton({ run }: { run: PlanRun }) {
   const [agent, setAgent] = useState<AgentKind>(run.agent);
   const [model, setModel] = useState(run.model);
   const [effort, setEffort] = useState(run.effort);
+  const portalContainer = usePanelPortalContainer();
 
   const onStart = async () => {
     if (!run.draft) return;
@@ -56,7 +58,7 @@ export function ImplementPlanButton({ run }: { run: PlanRun }) {
         <PlayIcon weight="fill" data-icon="inline-start" />
         Implement
       </Popover.Trigger>
-      <Popover.Portal>
+      <Popover.Portal container={portalContainer}>
         <Popover.Positioner align="end" sideOffset={6} className="isolate z-50">
           <Popover.Popup className="w-80 bg-popover p-3 text-popover-foreground shadow-md ring-1 ring-foreground/10">
             <p className="text-xs font-medium">Implement with an agent</p>
