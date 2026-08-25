@@ -245,12 +245,17 @@ export function RepositoryFilesDialog({
   }, [tab, open]);
 
   // The tab an open lands on. Applied on the open transition alone, so a tab the
-  // user picks inside an open dialog isn't pulled back by a re-render.
+  // user picks inside an open dialog isn't pulled back by a re-render. Gated on
+  // aiEnabled here too — the callers all gate already, but a future opener must
+  // not be able to land the dialog on a tab whose button isn't rendered.
   const wasOpen = useRef(open);
   useEffect(() => {
-    if (open && !wasOpen.current) setTab(initialTab ?? "tracked");
+    if (open && !wasOpen.current) {
+      const target = initialTab ?? "tracked";
+      setTab(target === "ai" && !aiEnabled ? "tracked" : target);
+    }
     wasOpen.current = open;
-  }, [open, initialTab]);
+  }, [open, initialTab, aiEnabled]);
 
   // Hiding AI features takes their tab with it, mid-open included.
   useEffect(() => {
