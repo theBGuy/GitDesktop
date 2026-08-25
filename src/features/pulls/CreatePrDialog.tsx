@@ -841,9 +841,13 @@ export function CreatePrDialog({
                     <TagIcon data-icon="inline-start" />
                     Labels
                   </Popover.Trigger>
-                  {/* Bare portal on purpose: this hook would read the PANEL
-                      container (the reset lives below, inside DialogContent),
-                      putting the popup behind the dialog backdrop. */}
+                  {/* Bare on purpose: a usePanelPortalContainer() call in
+                      this component's body runs above DialogContent's
+                      PanelPortalReset, so it returns the panel container and
+                      the popup lands behind the dialog backdrop (measured;
+                      PR #254 review notes).
+                      Pickers rendered as children inside the dialog read
+                      undefined and are fine. */}
                   <Popover.Portal>
                     <Popover.Positioner
                       align="start"

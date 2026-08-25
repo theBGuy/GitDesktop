@@ -14,6 +14,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
   lazy,
+  type ReactNode,
   Suspense,
   useDeferredValue,
   useEffect,
@@ -160,6 +161,27 @@ const FINDING_KEY: {
 // correlation the map already encodes is asserted once, here.
 function findingKey(f: SelectedFinding): string {
   return (FINDING_KEY[f.type] as (finding: SelectedFinding) => string)(f);
+}
+
+// Every repo tab panel goes through this: the <Activity> + boundary pairing is
+// the invariant, and wrapping <Activity> alone re-mints the stranded-popup bug.
+// Module scope is required — declared inside RepositoryView it would be a new
+// component type each render, remounting every panel and losing the state
+// <Activity> exists to preserve (filters, selections, scroll). <Activity>
+// defers hidden panels' *effects* but NOT React Query fetches, so a heavy tab
+// like Insights gates its queries on the panel's own `active`-style props.
+function TabPanel({
+  active,
+  children,
+}: {
+  active: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <Activity mode={active ? "visible" : "hidden"}>
+      <PanelPortalBoundary>{children}</PanelPortalBoundary>
+    </Activity>
+  );
 }
 
 export function RepositoryView() {
@@ -388,12 +410,6 @@ export function RepositoryView() {
 
   if (!repoPath) return null;
 
-  // Panels live inside <Activity> so switching tabs preserves their state
-  // (filters, selections, scroll) instead of unmounting them. <Activity> defers
-  // hidden panels' *effects*, but NOT React Query fetches (those run during
-  // render/commit) — so a heavy tab like Insights must gate its queries on its
-  // own visibility, not rely on being hidden. See `active` below.
-  const mode = (tab: RepoTab) => (repoTab === tab ? "visible" : "hidden");
   const secondaryTabs = SECONDARY_TABS.filter((t) => aiEnabled || !t.ai);
   const activeSecondary = secondaryTabs.find((t) => t.tab === repoTab);
 
@@ -462,278 +478,214 @@ export function RepositoryView() {
               </DropdownMenu>
             </TabsList>
           </Tabs>
-          <Activity mode={mode("changes")}>
-            <PanelPortalBoundary>
-              <ChangesPanel repoPath={repoPath} />
-              <CommitBox repoPath={repoPath} />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("history")}>
-            <PanelPortalBoundary>
-              <HistoryPanel repoPath={repoPath} />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("compare")}>
-            <PanelPortalBoundary>
-              <ComparePanel repoPath={repoPath} />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("pulls")}>
-            <PanelPortalBoundary>
-              <PullRequestsPanel repoPath={repoPath} />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("issues")}>
-            <PanelPortalBoundary>
-              <IssuesPanel repoPath={repoPath} />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("discussions")}>
-            <PanelPortalBoundary>
-              <DiscussionsPanel repoPath={repoPath} />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("actions")}>
-            <PanelPortalBoundary>
-              <ActionsPanel
-                repoPath={repoPath}
-                active={repoTab === "actions"}
-              />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("findings")}>
-            <PanelPortalBoundary>
-              <FindingsPanel
-                repoPath={repoPath}
-                active={repoTab === "findings"}
-              />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("tags")}>
-            <PanelPortalBoundary>
-              <TagsPanel repoPath={repoPath} />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("insights")}>
-            <PanelPortalBoundary>
-              <InsightsPanel
-                repoPath={repoPath}
-                active={repoTab === "insights"}
-              />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("code-todos")}>
-            <PanelPortalBoundary>
-              <CodeTodosPanel
-                repoPath={repoPath}
-                active={repoTab === "code-todos"}
-              />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("tasks")}>
-            <PanelPortalBoundary>
-              <TasksPanel />
-            </PanelPortalBoundary>
-          </Activity>
+          <TabPanel active={repoTab === "changes"}>
+            <ChangesPanel repoPath={repoPath} />
+            <CommitBox repoPath={repoPath} />
+          </TabPanel>
+          <TabPanel active={repoTab === "history"}>
+            <HistoryPanel repoPath={repoPath} />
+          </TabPanel>
+          <TabPanel active={repoTab === "compare"}>
+            <ComparePanel repoPath={repoPath} />
+          </TabPanel>
+          <TabPanel active={repoTab === "pulls"}>
+            <PullRequestsPanel repoPath={repoPath} />
+          </TabPanel>
+          <TabPanel active={repoTab === "issues"}>
+            <IssuesPanel repoPath={repoPath} />
+          </TabPanel>
+          <TabPanel active={repoTab === "discussions"}>
+            <DiscussionsPanel repoPath={repoPath} />
+          </TabPanel>
+          <TabPanel active={repoTab === "actions"}>
+            <ActionsPanel repoPath={repoPath} active={repoTab === "actions"} />
+          </TabPanel>
+          <TabPanel active={repoTab === "findings"}>
+            <FindingsPanel
+              repoPath={repoPath}
+              active={repoTab === "findings"}
+            />
+          </TabPanel>
+          <TabPanel active={repoTab === "tags"}>
+            <TagsPanel repoPath={repoPath} />
+          </TabPanel>
+          <TabPanel active={repoTab === "insights"}>
+            <InsightsPanel
+              repoPath={repoPath}
+              active={repoTab === "insights"}
+            />
+          </TabPanel>
+          <TabPanel active={repoTab === "code-todos"}>
+            <CodeTodosPanel
+              repoPath={repoPath}
+              active={repoTab === "code-todos"}
+            />
+          </TabPanel>
+          <TabPanel active={repoTab === "tasks"}>
+            <TasksPanel />
+          </TabPanel>
           {aiEnabled && (
-            <Activity mode={mode("agent")}>
-              <PanelPortalBoundary>
-                {agentSeen && (
-                  <Suspense fallback={null}>
-                    <SessionList repoPath={repoPath} />
-                  </Suspense>
-                )}
-              </PanelPortalBoundary>
-            </Activity>
+            <TabPanel active={repoTab === "agent"}>
+              {agentSeen && (
+                <Suspense fallback={null}>
+                  <SessionList repoPath={repoPath} />
+                </Suspense>
+              )}
+            </TabPanel>
           )}
         </aside>
         <main className="min-w-0 flex-1">
-          <Activity mode={mode("changes")}>
-            <PanelPortalBoundary>
+          <TabPanel active={repoTab === "changes"}>
+            <Suspense fallback={null}>
+              <DiffViewer repoPath={repoPath} />
+            </Suspense>
+          </TabPanel>
+          <TabPanel active={repoTab === "history"}>
+            {deferredCommitHash ? (
+              <CommitDetailView repoPath={repoPath} hash={deferredCommitHash} />
+            ) : (
+              <DiffPlaceholder
+                icon={GitCommitIcon}
+                message="Select a commit to see its changes"
+              />
+            )}
+          </TabPanel>
+          <TabPanel active={repoTab === "compare"}>
+            {deferredCompareCommitHash ? (
+              <CommitDetailView
+                repoPath={repoPath}
+                hash={deferredCompareCommitHash}
+              />
+            ) : compareBranch &&
+              currentName &&
+              compareBranch !== currentName ? (
+              <BranchDiffView
+                repoPath={repoPath}
+                base={compareBranch}
+                compare={currentName}
+              />
+            ) : (
+              <DiffPlaceholder
+                icon={GitBranchIcon}
+                message="Pick a branch to compare against"
+              />
+            )}
+          </TabPanel>
+          <TabPanel active={repoTab === "pulls"}>
+            {deferredPr?.kind === "remote" ? (
+              <RemotePrView
+                repoPath={repoPath}
+                number={Number(deferredPr.id)}
+              />
+            ) : deferredPr?.kind === "local" ? (
+              <LocalPrView repoPath={repoPath} id={deferredPr.id} />
+            ) : (
+              <DiffPlaceholder
+                icon={GitPullRequestIcon}
+                message="Select a pull request"
+              />
+            )}
+          </TabPanel>
+          <TabPanel active={repoTab === "issues"}>
+            {deferredIssue?.kind === "remote" ? (
+              <RemoteIssueView
+                repoPath={repoPath}
+                number={Number(deferredIssue.id)}
+              />
+            ) : deferredIssue?.kind === "local" ? (
+              <LocalIssueView repoPath={repoPath} id={deferredIssue.id} />
+            ) : deferredIssue?.kind === "jira" ? (
+              <JiraIssueView repoPath={repoPath} issueKey={deferredIssue.id} />
+            ) : (
+              <DiffPlaceholder
+                icon={CircleDashedIcon}
+                message="Select an issue"
+              />
+            )}
+          </TabPanel>
+          <TabPanel active={repoTab === "discussions"}>
+            {deferredDiscussion ? (
+              <DiscussionView
+                repoPath={repoPath}
+                number={deferredDiscussion.number}
+              />
+            ) : (
+              <DiffPlaceholder
+                icon={ChatCircleIcon}
+                message="Select a discussion"
+              />
+            )}
+          </TabPanel>
+          <TabPanel active={repoTab === "actions"}>
+            {selectedRunId !== null ? (
+              <RunDetailView
+                key={selectedRunId}
+                repoPath={repoPath}
+                runId={selectedRunId}
+                active={repoTab === "actions"}
+              />
+            ) : (
+              <DiffPlaceholder
+                icon={PlayIcon}
+                message="Select a workflow run"
+              />
+            )}
+          </TabPanel>
+          <TabPanel active={repoTab === "findings"}>
+            {selectedFinding ? (
+              <FindingDetailView
+                key={findingKey(selectedFinding)}
+                repoPath={repoPath}
+                active={repoTab === "findings"}
+              />
+            ) : (
+              <DiffPlaceholder
+                icon={ShieldCheckIcon}
+                message="Select a finding"
+              />
+            )}
+          </TabPanel>
+          <TabPanel active={repoTab === "tags"}>
+            {deferredTag ? (
+              <TagDetailView repoPath={repoPath} tag={deferredTag.tag} />
+            ) : (
+              <DiffPlaceholder icon={TagIcon} message="Select a tag" />
+            )}
+          </TabPanel>
+          <TabPanel active={repoTab === "code-todos"}>
+            {deferredTodo ? (
+              <CodeTodoDetailView
+                repoPath={repoPath}
+                path={deferredTodo.path}
+                line={deferredTodo.line}
+                marker={deferredTodo.marker}
+                text={deferredTodo.text}
+              />
+            ) : (
+              <DiffPlaceholder icon={ListChecksIcon} message="Select a TODO" />
+            )}
+          </TabPanel>
+          <TabPanel active={repoTab === "tasks"}>
+            <TaskRunView />
+          </TabPanel>
+          <TabPanel active={repoTab === "insights"}>
+            {insightsSeen && (
               <Suspense fallback={null}>
-                <DiffViewer repoPath={repoPath} />
+                <InsightsBoard
+                  repoPath={repoPath}
+                  active={repoTab === "insights"}
+                />
               </Suspense>
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("history")}>
-            <PanelPortalBoundary>
-              {deferredCommitHash ? (
-                <CommitDetailView
-                  repoPath={repoPath}
-                  hash={deferredCommitHash}
-                />
-              ) : (
-                <DiffPlaceholder
-                  icon={GitCommitIcon}
-                  message="Select a commit to see its changes"
-                />
-              )}
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("compare")}>
-            <PanelPortalBoundary>
-              {deferredCompareCommitHash ? (
-                <CommitDetailView
-                  repoPath={repoPath}
-                  hash={deferredCompareCommitHash}
-                />
-              ) : compareBranch &&
-                currentName &&
-                compareBranch !== currentName ? (
-                <BranchDiffView
-                  repoPath={repoPath}
-                  base={compareBranch}
-                  compare={currentName}
-                />
-              ) : (
-                <DiffPlaceholder
-                  icon={GitBranchIcon}
-                  message="Pick a branch to compare against"
-                />
-              )}
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("pulls")}>
-            <PanelPortalBoundary>
-              {deferredPr?.kind === "remote" ? (
-                <RemotePrView
-                  repoPath={repoPath}
-                  number={Number(deferredPr.id)}
-                />
-              ) : deferredPr?.kind === "local" ? (
-                <LocalPrView repoPath={repoPath} id={deferredPr.id} />
-              ) : (
-                <DiffPlaceholder
-                  icon={GitPullRequestIcon}
-                  message="Select a pull request"
-                />
-              )}
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("issues")}>
-            <PanelPortalBoundary>
-              {deferredIssue?.kind === "remote" ? (
-                <RemoteIssueView
-                  repoPath={repoPath}
-                  number={Number(deferredIssue.id)}
-                />
-              ) : deferredIssue?.kind === "local" ? (
-                <LocalIssueView repoPath={repoPath} id={deferredIssue.id} />
-              ) : deferredIssue?.kind === "jira" ? (
-                <JiraIssueView
-                  repoPath={repoPath}
-                  issueKey={deferredIssue.id}
-                />
-              ) : (
-                <DiffPlaceholder
-                  icon={CircleDashedIcon}
-                  message="Select an issue"
-                />
-              )}
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("discussions")}>
-            <PanelPortalBoundary>
-              {deferredDiscussion ? (
-                <DiscussionView
-                  repoPath={repoPath}
-                  number={deferredDiscussion.number}
-                />
-              ) : (
-                <DiffPlaceholder
-                  icon={ChatCircleIcon}
-                  message="Select a discussion"
-                />
-              )}
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("actions")}>
-            <PanelPortalBoundary>
-              {selectedRunId !== null ? (
-                <RunDetailView
-                  key={selectedRunId}
-                  repoPath={repoPath}
-                  runId={selectedRunId}
-                  active={repoTab === "actions"}
-                />
-              ) : (
-                <DiffPlaceholder
-                  icon={PlayIcon}
-                  message="Select a workflow run"
-                />
-              )}
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("findings")}>
-            <PanelPortalBoundary>
-              {selectedFinding ? (
-                <FindingDetailView
-                  key={findingKey(selectedFinding)}
-                  repoPath={repoPath}
-                  active={repoTab === "findings"}
-                />
-              ) : (
-                <DiffPlaceholder
-                  icon={ShieldCheckIcon}
-                  message="Select a finding"
-                />
-              )}
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("tags")}>
-            <PanelPortalBoundary>
-              {deferredTag ? (
-                <TagDetailView repoPath={repoPath} tag={deferredTag.tag} />
-              ) : (
-                <DiffPlaceholder icon={TagIcon} message="Select a tag" />
-              )}
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("code-todos")}>
-            <PanelPortalBoundary>
-              {deferredTodo ? (
-                <CodeTodoDetailView
-                  repoPath={repoPath}
-                  path={deferredTodo.path}
-                  line={deferredTodo.line}
-                  marker={deferredTodo.marker}
-                  text={deferredTodo.text}
-                />
-              ) : (
-                <DiffPlaceholder
-                  icon={ListChecksIcon}
-                  message="Select a TODO"
-                />
-              )}
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("tasks")}>
-            <PanelPortalBoundary>
-              <TaskRunView />
-            </PanelPortalBoundary>
-          </Activity>
-          <Activity mode={mode("insights")}>
-            <PanelPortalBoundary>
-              {insightsSeen && (
+            )}
+          </TabPanel>
+          {aiEnabled && (
+            <TabPanel active={repoTab === "agent"}>
+              {agentSeen && (
                 <Suspense fallback={null}>
-                  <InsightsBoard
-                    repoPath={repoPath}
-                    active={repoTab === "insights"}
-                  />
+                  <SessionView repoPath={repoPath} />
                 </Suspense>
               )}
-            </PanelPortalBoundary>
-          </Activity>
-          {aiEnabled && (
-            <Activity mode={mode("agent")}>
-              <PanelPortalBoundary>
-                {agentSeen && (
-                  <Suspense fallback={null}>
-                    <SessionView repoPath={repoPath} />
-                  </Suspense>
-                )}
-              </PanelPortalBoundary>
-            </Activity>
+            </TabPanel>
           )}
         </main>
       </div>
