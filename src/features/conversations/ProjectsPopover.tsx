@@ -105,17 +105,12 @@ export function ProjectsPopover({
   // firing for every issue the user scrolls through.
   const [hasOpened, setHasOpened] = useState(false);
   const [draft, setDraft] = useState<Set<string>>(new Set());
-  // The memberships AS SEEN at open. The close diffs draft-vs-SEEDED — what the
-  // user actually looked at and toggled — never draft-vs-live: this is the one
-  // picker seeded from an async query (the siblings seed from synchronous props,
-  // per RemotePrView's "commits against LIVE props"), so a membership that lands
-  // mid-open is in neither set and is left alone rather than read as an unchecked
-  // row and unlinked. Live items serve only as the item-id lookup for removes.
-  // Seeded at open, or at the first settle after it: opening over an ERRORED read
-  // is allowed (the popup owns the Retry), and that snapshot is empty, so a
-  // successful Retry must reseed or every real membership would render unchecked
-  // and unlinking would be a no-op. Reseeding can't lose a toggle — every row is
-  // locked for the whole pre-settle window, so there is nothing to lose.
+  // The memberships AS SEEN at open (or at the first settle after it — opening
+  // over an ERRORED read is allowed, and that snapshot stays empty until Retry
+  // lands). The close diffs draft-vs-SEEDED, never draft-vs-live, so a
+  // membership landing mid-open is in neither set and left alone; live items
+  // serve only as the item-id lookup for removes. Reseeding on settle can't
+  // lose a toggle: every row is locked for the whole pre-settle window.
   const [seeded, setSeeded] = useState<Set<string>>(new Set());
   const [seededSettled, setSeededSettled] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -167,7 +162,9 @@ export function ProjectsPopover({
   // rows can render live while the close has no trustworthy set to diff against.
   const rowLockedReason = (() => {
     switch (true) {
-      case !memberships.isSuccess:
+      // `!seededSettled` covers the one paint between the read settling and the
+      // reseed effect running — rows must not unlock over the stale snapshot.
+      case !memberships.isSuccess || !seededSettled:
         return UNSETTLED_REASON;
       case readOnlyScope:
         return READ_ONLY_SCOPE_REASON;
