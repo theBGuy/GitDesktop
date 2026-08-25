@@ -342,8 +342,11 @@ export function RepositoryFilesDialog({
   }, [tab, tracked.data, ignored.data, aiDerived, activeRule, q]);
 
   const view = { tracked, ignored, ai: aiView }[tab];
-  const pendingLoad = view.isPending;
-  const isError = view.isError;
+  // A settings error keeps the ai view's query disabled, which reads as pending
+  // forever — surface it as the error it is instead of an endless spinner.
+  const settingsBlocked = tab === "ai" && settings.isError;
+  const pendingLoad = view.isPending && !settingsBlocked;
+  const isError = view.isError || settingsBlocked;
   const busy =
     untrack.isPending ||
     forceAdd.isPending ||
