@@ -750,7 +750,9 @@ where
 
 /// Runs a short command and returns (exit code, stdout, stderr) as separate
 /// streams — what a line parser needs, since a banner on stderr must not
-/// interleave into the data being parsed.
+/// interleave into the data being parsed. Each stream is capped at
+/// `MAX_CAPTURE_BYTES`: a child that writes past it is killed and the call
+/// fails with `AppError::Command` rather than returning a truncated capture.
 pub(crate) async fn run_capture_parts(
     program: &Path,
     args: &[&str],
@@ -789,7 +791,7 @@ pub(crate) async fn run_capture_parts(
         // output are meaningless — fail deterministically rather than let a caller
         // parse a fragment (or a racing exit 0) as a complete, successful result.
         return Err(AppError::Command(format!(
-            "{} produced more than {MAX_CAPTURE_BYTES} bytes of output",
+            "{} produced more than {MAX_CAPTURE_BYTES} bytes on stdout or stderr",
             program.display()
         )));
     }
@@ -3196,14 +3198,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_capped_truncates_and_flags_over_cap_on_stderr() {
+        // The stderr arm is a twin of the stdout arm — cover its boundary
+        // independently so a drift there can't hide behind stdout-only tests.
+        let big = vec![b'x'; 100];
+        let (mut o, mut e): (&[u8], &[u8]) = (b"", big.as_slice());
+        let (out, err, overflowed) = capture_capped(&mut o, &mut e, 16).await.unwrap();
+        assert!(out.is_empty());
+        assert_eq!(err.len(), 16);
+        assert!(overflowed);
+    }
+
+    #[tokio::test]
     async fn capture_capped_allows_output_exactly_at_cap() {
-        // Output landing exactly on the cap is within the limit, not truncation.
+        // Output landing exactly on the cap is within the limit, not truncation
+        // — on either stream (each arm carries its own boundary comparison, so
+        // an over-cap test alone can't tell `>` from `>=`).
         let exact = vec![b'y'; 16];
         let (mut o, mut e): (&[u8], &[u8]) = (exact.as_slice(), b"");
         let (out, err, overflowed) = capture_capped(&mut o, &mut e, 16).await.unwrap();
         assert_eq!(out.len(), 16);
         assert!(!overflowed);
         assert!(err.is_empty());
+
+        let (mut o, mut e): (&[u8], &[u8]) = (b"", exact.as_slice());
+        let (out, err, overflowed) = capture_capped(&mut o, &mut e, 16).await.unwrap();
+        assert_eq!(err.len(), 16);
+        assert!(!overflowed);
+        assert!(out.is_empty());
     }
 
     // Real opencode `run --format json` lines (captured 2026-06-23, v1.17.9).

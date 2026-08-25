@@ -411,11 +411,14 @@ export function PrReviewPanel({
             />
             <ComboboxContent>
               {/* `isFetching`, never `isPending` — a catalog that was never
-                  requested must not read as loading. */}
+                  requested must not read as loading. With placeholder
+                  suggestions always present this renders only under a typed
+                  filter, which may still be resolving — matching the session
+                  and Settings pickers. */}
               <ComboboxEmpty>
                 {available.isFetching
-                  ? "Loading models…"
-                  : "Uses the typed id as-is"}
+                  ? "No matching models yet (catalog loading) — the typed id is used as-is"
+                  : "No matching models — the typed id is used as-is"}
               </ComboboxEmpty>
               <ComboboxList>
                 {(item: string) => (
