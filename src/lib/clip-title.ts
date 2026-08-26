@@ -10,8 +10,9 @@ export const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
   const el = e.currentTarget;
   // Clear by REMOVING the attribute: an empty `title` states that the ancestor's
   // does not apply, which would suppress a titled parent's tooltip (HTML). An
-  // empty `value` takes the remove branch for the same reason.
-  if (value && el.scrollWidth > el.clientWidth) el.title = value;
+  // empty or whitespace-only `value` takes the remove branch for the same reason.
+  const v = value.trim();
+  if (v && el.scrollWidth > el.clientWidth) el.title = v;
   else el.removeAttribute("title");
 };
 

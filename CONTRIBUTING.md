@@ -115,7 +115,8 @@ pnpm run checks   # banned patterns · Rust invariants · IPC surface drift · g
 They run as the `guards` job in [`quality.yml`](.github/workflows/quality.yml),
 which is meant to be registered as a required check on master once it lands
 there. The checks cover banned frontend UI and state patterns (hover-revealed
-row actions, hand-rolled modifier keys, `setQueryData(key, undefined)`), the
+row actions, hand-rolled modifier keys, `setQueryData(key, undefined)`, bare
+`.mutate(` calls in the converted trees, inline clip-measured tooltips), the
 Rust refspec-argv and sync-`#[tauri::command]` invariants, and Tauri IPC drift —
 every registered command needs a caller, every `invoke()` a registration.
 
