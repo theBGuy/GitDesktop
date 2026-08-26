@@ -175,7 +175,11 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const linearLinkQ = useLinearLink(repoPath);
   const linearLink = linearLinkQ.data ?? null;
   const linearStateFilter =
-    stateFilter === "open" ? "open" : stateFilter === "closed" ? "closed" : "all";
+    stateFilter === "open"
+      ? "open"
+      : stateFilter === "closed"
+        ? "closed"
+        : "all";
   const linearIssues = useLinearIssues(repoPath, linearLink, linearStateFilter);
   const canCreateLinear = !!linearLink;
   const pendingIssueDraft = useUiStore((s) => s.pendingIssueDraft);

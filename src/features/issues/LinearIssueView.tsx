@@ -4,7 +4,8 @@ import {
   CircleDashedIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useRef } from "react";
+import { useRef, useState } from "react";
+import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -13,7 +14,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
-import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import {
   useLinearComment,
   useLinearIssue,
@@ -56,7 +56,7 @@ function CommentRow({ comment }: { comment: LinearComment }) {
           <span>(edited)</span>
         )}
       </div>
-      <Markdown text={comment.bodyMd} />
+      <Markdown>{comment.bodyMd}</Markdown>
     </div>
   );
 }
@@ -72,6 +72,7 @@ export function LinearIssueView({
   const issue = useLinearIssue(repoPath, link.data, issueIdentifier);
   const comment = useLinearComment(repoPath);
   const editorRef = useRef<MarkdownEditorHandle>(null);
+  const [draft, setDraft] = useState("");
 
   if (issue.isPending) {
     return (
@@ -87,21 +88,21 @@ export function LinearIssueView({
     return (
       <DiffPlaceholder
         icon={CircleDashedIcon}
-        heading="Couldn't load issue"
-        copy={`${issueIdentifier} could not be loaded.`}
+        message={`${issueIdentifier} could not be loaded.`}
       />
     );
   }
 
   const d = issue.data;
 
-  async function handleComment(body: string) {
-    if (!d) return;
+  async function submitComment() {
+    if (!d || !draft.trim()) return;
     await comment.mutateAsync({
       issueId: d.id,
       issueIdentifier: d.identifier,
-      bodyMd: body,
+      bodyMd: draft.trim(),
     });
+    setDraft("");
   }
 
   return (
@@ -161,19 +162,18 @@ export function LinearIssueView({
           {parseableDate(d.createdAt) && (
             <p className="text-[11px] text-muted-foreground">
               Opened <RelativeTime date={d.createdAt} />
-              {parseableDate(d.updatedAt) &&
-                d.updatedAt !== d.createdAt && (
-                  <>
-                    {" · updated "}
-                    <RelativeTime date={d.updatedAt} />
-                  </>
-                )}
+              {parseableDate(d.updatedAt) && d.updatedAt !== d.createdAt && (
+                <>
+                  {" · updated "}
+                  <RelativeTime date={d.updatedAt} />
+                </>
+              )}
             </p>
           )}
 
           {d.descriptionMd && (
             <div className="border-t pt-3">
-              <Markdown text={d.descriptionMd} />
+              <Markdown>{d.descriptionMd}</Markdown>
             </div>
           )}
         </div>
@@ -187,14 +187,17 @@ export function LinearIssueView({
         )}
       </ScrollArea>
 
-      <div className="border-t p-3">
-        <CommentComposer
-          ref={editorRef}
-          onSubmit={handleComment}
-          submitting={comment.isPending}
-          placeholder="Leave a comment…"
-        />
-      </div>
+      <CommentComposer
+        ref={editorRef}
+        value={draft}
+        onChange={setDraft}
+        onSubmit={submitComment}
+        onClear={() => setDraft("")}
+        submitLabel="Comment"
+        ariaLabel="Leave a comment"
+        placeholder="Leave a comment…"
+        busy={comment.isPending}
+      />
     </div>
   );
 }

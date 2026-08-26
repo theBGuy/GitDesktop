@@ -489,9 +489,7 @@ export function ConversationListPanel<L, R, J = never, LN = never>(props: {
           {linear && (
             <>
               <div className="flex items-center gap-1 px-3 pt-3 pb-1">
-                <p className="text-xs text-muted-foreground">
-                  {linear.header}
-                </p>
+                <p className="text-xs text-muted-foreground">{linear.header}</p>
                 {linear.headerAction && (
                   <span className="ml-auto">{linear.headerAction}</span>
                 )}

@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { keepPreviousDataForRepo } from "@/lib/git/queries";
 import {
+  linearIssueAssign,
   linearIssueComment,
   linearIssueCreate,
   linearIssueList,
   linearIssueTransition,
-  linearIssueAssign,
   linearIssueView,
   linearStoredAccount,
   linearTeams,
@@ -16,10 +16,7 @@ import {
   type LinearLink,
   setLinearLink,
 } from "./store";
-import type {
-  LinearIssueDetails,
-  LinearIssueState,
-} from "./types";
+import type { LinearIssueDetails, LinearIssueState } from "./types";
 
 const linearLinkKey = (repo: string) => ["linear-link", repo] as const;
 
@@ -39,8 +36,7 @@ function invalidateLinearForRepo(
     predicate: (q) =>
       q.queryKey[0] === "repo" &&
       q.queryKey[1] === repo &&
-      (q.queryKey[2] === "linear-issues" ||
-        q.queryKey[2] === "linear-issue"),
+      (q.queryKey[2] === "linear-issues" || q.queryKey[2] === "linear-issue"),
   });
 }
 
@@ -102,8 +98,7 @@ export function useLinearIssues(
       link?.teamKey ?? "",
       state,
     ] as const,
-    queryFn: () =>
-      linearIssueList((link as LinearLink).teamKey, state),
+    queryFn: () => linearIssueList((link as LinearLink).teamKey, state),
     enabled: !!link,
     staleTime: 30_000,
   });
@@ -122,9 +117,7 @@ export function useLinearIssue(
   });
 }
 
-export function useLinearComment(
-  repo: string,
-) {
+export function useLinearComment(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: {
@@ -133,12 +126,7 @@ export function useLinearComment(
       bodyMd: string;
     }) => linearIssueComment(args.issueId, args.bodyMd),
     onSuccess: (comment, args) => {
-      const key = [
-        "repo",
-        repo,
-        "linear-issue",
-        args.issueIdentifier,
-      ] as const;
+      const key = ["repo", repo, "linear-issue", args.issueIdentifier] as const;
       queryClient.setQueryData<LinearIssueDetails>(key, (d) =>
         d ? { ...d, comments: [...d.comments, comment] } : d,
       );
@@ -160,17 +148,15 @@ export function useLinearTransition(repo: string) {
 export function useLinearAssign(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: {
-      issueId: string;
-      assigneeId: string | null;
-    }) => linearIssueAssign(args.issueId, args.assigneeId),
+    mutationFn: (args: { issueId: string; assigneeId: string | null }) =>
+      linearIssueAssign(args.issueId, args.assigneeId),
     onSettled: () => invalidateLinearForRepo(queryClient, repo),
   });
 }
 
 export function useLinearCreateIssue(
   repo: string,
-  link: LinearLink | null | undefined,
+  _link: LinearLink | null | undefined,
 ) {
   const queryClient = useQueryClient();
   return useMutation({

@@ -274,8 +274,7 @@ pub async fn set_account(token: &str) -> AppResult<LinearAccountInfo> {
         Ok::<_, AppError>(())
     })
     .await
-    .map_err(|e| AppError::Command(format!("keyring task failed: {e}")))?
-    ?;
+    .map_err(|e| AppError::Command(format!("keyring task failed: {e}")))??;
 
     Ok(info)
 }

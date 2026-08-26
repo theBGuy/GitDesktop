@@ -14,11 +14,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
-import { linearSetAccount, linearValidateToken } from "@/lib/linear/api";
+import { linearSetAccount } from "@/lib/linear/api";
 import {
+  useClearLinearLink,
   useLinearAccount,
   useLinearTeams,
-  useClearLinearLink,
   useSaveLinearLink,
 } from "@/lib/linear/queries";
 import type { LinearLink } from "@/lib/linear/store";
@@ -26,8 +26,7 @@ import type { LinearAccountInfo, LinearTeam } from "@/lib/linear/types";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
-const LINEAR_API_KEY_URL =
-  "https://linear.app/settings/api";
+const LINEAR_API_KEY_URL = "https://linear.app/settings/api";
 
 export function RepoLinearDialog({
   repoPath,
@@ -106,9 +105,7 @@ export function RepoLinearDialog({
       },
       {
         onSuccess: () => {
-          toast.success(
-            `Linked to Linear team ${selectedTeam.key}`,
-          );
+          toast.success(`Linked to Linear team ${selectedTeam.key}`);
           onOpenChange(false);
         },
       },
@@ -125,9 +122,7 @@ export function RepoLinearDialog({
   }
 
   const canSave = selectedTeam !== null;
-  const disabledReason = !selectedTeam
-    ? "Select a team to link"
-    : null;
+  const disabledReason = !selectedTeam ? "Select a team to link" : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

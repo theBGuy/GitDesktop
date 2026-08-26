@@ -34,7 +34,11 @@ export function LinearRefRow({
     }
   }
 
-  const issues = useLinearIssues(repoPath, keys.length > 0 ? link : null, "all");
+  const issues = useLinearIssues(
+    repoPath,
+    keys.length > 0 ? link : null,
+    "all",
+  );
   const selectIssue = useUiStore((s) => s.selectIssue);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
 
@@ -72,9 +76,7 @@ export function LinearRefRow({
             <span className="shrink-0 font-mono text-muted-foreground">
               {key}
             </span>
-            {title && (
-              <span className="min-w-0 flex-1 truncate">{title}</span>
-            )}
+            {title && <span className="min-w-0 flex-1 truncate">{title}</span>}
           </button>
         );
       })}

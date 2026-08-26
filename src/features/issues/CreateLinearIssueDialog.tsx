@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
-import { useLinearCreateIssue, useLinearLink } from "@/lib/linear/queries";
+import { useLinearCreateIssue } from "@/lib/linear/queries";
 import type { LinearLink } from "@/lib/linear/store";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
@@ -42,9 +42,7 @@ export function CreateLinearIssueDialog({
   });
 
   const canSubmit = title.trim().length > 0;
-  const disabledReason = !title.trim()
-    ? "Enter a title for the issue"
-    : null;
+  const disabledReason = !title.trim() ? "Enter a title for the issue" : null;
 
   async function handleSubmit() {
     if (!canSubmit) return;
@@ -66,9 +64,7 @@ export function CreateLinearIssueDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>
-            New issue in {link.teamKey}
-          </DialogTitle>
+          <DialogTitle>New issue in {link.teamKey}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-3">

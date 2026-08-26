@@ -26,8 +26,7 @@ export const linearStoredAccount = () =>
     ? Promise.resolve<LinearStoredAccount | null>(null)
     : invoke<LinearStoredAccount | null>("linear_stored_account");
 
-export const linearClearAccount = () =>
-  invoke<void>("linear_clear_account");
+export const linearClearAccount = () => invoke<void>("linear_clear_account");
 
 export const linearTeams = () => invoke<LinearTeam[]>("linear_teams");
 
@@ -54,7 +53,5 @@ export const linearIssueCreate = (
 export const linearIssueTransition = (issueId: string, stateId: string) =>
   invoke<void>("linear_issue_transition", { issueId, stateId });
 
-export const linearIssueAssign = (
-  issueId: string,
-  assigneeId: string | null,
-) => invoke<void>("linear_issue_assign", { issueId, assigneeId });
+export const linearIssueAssign = (issueId: string, assigneeId: string | null) =>
+  invoke<void>("linear_issue_assign", { issueId, assigneeId });
