@@ -29,8 +29,8 @@ export function CommitContextMenuItems({
   hash: string;
   actions: CommitMenuActions;
 }) {
-  // Destructured so the optional `revert` narrows: TypeScript narrows a local
-  // binding, not a property read, so the guard alone would still need `?.`.
+  // Destructured so `revert` stays narrowed inside the item callbacks: a
+  // property narrowing doesn't survive into a closure, a const binding's does.
   const { checkout, revert, cherryPick, createBranch, createTag } = actions;
   return (
     <>

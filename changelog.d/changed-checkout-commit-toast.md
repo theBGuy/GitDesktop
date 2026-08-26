@@ -1,2 +1,2 @@
-- Checking out a commit now confirms with a toast naming the commit and the
+- Checking out a commit now shows a toast naming the commit and the
   detached HEAD state.

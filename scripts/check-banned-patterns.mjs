@@ -213,11 +213,8 @@ const DESTRUCTURED_MUTATE_RE = /\bconst\s*\{[^}]*\bmutate\b[^}]*\}\s*=/g;
 // next click. A fixed site holds no `preventDefault` token at all, so the helper
 // needs no exemption here and a file mixing one fixed and one broken path still
 // reports. Two deliberate bounds: `[^}]` keeps the pair inside one block, and
-// the order is set-then-prevent. Both leave a fail-open, zero instances today:
-// the reverse order reads clean, and so does a suppression path with no state
-// reset at all (a bare `preventDefault` in a contextmenu handler). Widening to
-// the handler name would need an appliesTo exclusion for the helper's own
-// definition and adds false-positive surface — declined on record.
+// the order is set-then-prevent. Each leaves a fail-open, zero instances today:
+// the reverse order, and a suppression path with no state reset at all.
 const CONTEXT_MENU_SUPPRESS_RE =
   /\bset[A-Z]\w*\(\s*null\s*\)[^}]{0,160}?\.preventDefault\s*\(\s*\)/g;
 
