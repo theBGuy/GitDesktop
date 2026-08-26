@@ -783,6 +783,74 @@ mod tests {
         assert!(stats.unstaged.is_empty());
     }
 
+    /// The premise behind the Changes panel's conflicted-row gate: numstat emits
+    /// MORE THAN ONE unstaged row for an unmerged path (measured: a zero-count
+    /// row plus the content diff), so a `.get(path)` lookup would surface an
+    /// arbitrary one of them. Pinned here
+    /// because the gate reads as unmotivated once the shape is out of view.
+    #[tokio::test]
+    async fn working_line_stats_reports_duplicate_rows_for_a_conflict() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-conflict-test-").await;
+
+        std::fs::write(dir.join("file.txt"), "a\nb\nc\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(Some(&repo), &["commit", "-qm", "seed"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+
+        // Both branches are created by name off the seed commit, so the test
+        // never depends on what `git init` called the default branch.
+        for args in [
+            vec!["checkout", "-q", "-b", "mine"],
+            vec!["checkout", "-q", "-b", "other", "mine"],
+        ] {
+            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+        }
+        std::fs::write(dir.join("file.txt"), "a\nOTHER\nc\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(Some(&repo), &["commit", "-qm", "other"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+
+        run_git(Some(&repo), &["checkout", "-q", "mine"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        std::fs::write(dir.join("file.txt"), "a\nMINE\nc\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(Some(&repo), &["commit", "-qm", "mine"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+
+        // The conflicting merge exits non-zero, which `run_git` would turn into
+        // an error — this one spawn takes the raw runner. `--no-edit` so an
+        // unexpectedly clean merge can't block on an editor.
+        let merge = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "other"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(merge.code, 0, "the merge must actually conflict");
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        let rows = stats
+            .unstaged
+            .iter()
+            .filter(|e| e.path == "file.txt")
+            .count();
+        assert!(
+            rows > 1,
+            "an unmerged path yields duplicate unstaged rows, got {rows}"
+        );
+    }
+
     const FILE_HEADER: &str = "diff --git a/f.txt b/f.txt\nindex 000..111 100644\n--- a/f.txt\n+++ b/f.txt\n";
 
     fn sel(side: Side, line: u32) -> SelectedLine {

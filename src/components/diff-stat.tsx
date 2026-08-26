@@ -29,7 +29,10 @@ export function DiffStat({
   }
   return (
     <span className={cn("shrink-0 tabular-nums", className)}>
-      <span className="text-success">+{format(added)}</span>{" "}
+      <span className="text-success">+{format(added)}</span>
+      {/* Separator for inline callers (a canonical text space). Flex callers
+          bring their own gap and never see it: a whitespace-only anonymous flex
+          item is not rendered (CSS Flexbox §4). */}{" "}
       <span className="text-destructive">-{format(deleted)}</span>
     </span>
   );

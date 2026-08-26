@@ -418,6 +418,9 @@ export function RepositoryView() {
 
   const secondaryTabs = SECONDARY_TABS.filter((t) => aiEnabled || !t.ai);
   const activeSecondary = secondaryTabs.find((t) => t.tab === repoTab);
+  // One source for panel visibility: ChangesPanel gates its line-count poll on
+  // the same flag that shows the panel, so the two can't drift apart.
+  const changesActive = repoTab === "changes";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -485,8 +488,8 @@ export function RepositoryView() {
               </DropdownMenu>
             </TabsList>
           </Tabs>
-          <TabPanel active={repoTab === "changes"}>
-            <ChangesPanel repoPath={repoPath} active={repoTab === "changes"} />
+          <TabPanel active={changesActive}>
+            <ChangesPanel repoPath={repoPath} active={changesActive} />
             <CommitBox repoPath={repoPath} />
           </TabPanel>
           <TabPanel active={repoTab === "history"}>

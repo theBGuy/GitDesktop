@@ -124,7 +124,7 @@ export function CodeFrequencyChart({ data }: { data: CodeFreqPoint[] }) {
   const dels = data.reduce((n, d) => n + d.deletions, 0);
   return (
     <ChartFigure
-      caption={`+${fmt(adds)} / −${fmt(dels)} lines across ${data.length} active week${data.length === 1 ? "" : "s"} (deletions shown below the line).`}
+      caption={`+${fmt(adds)} / -${fmt(dels)} lines across ${data.length} active week${data.length === 1 ? "" : "s"} (deletions shown below the line).`}
       table={
         <DataTable
           headers={["Week", "Additions", "Deletions"]}
