@@ -344,7 +344,7 @@ export const CHECKS = [
     ]),
     allowlist: [],
     message:
-      "Select popup rows route their clip affordance through SelectClipText (src/components/select-clip-text.tsx) — an item-level clipTitle handler is dead once the row span self-bounds, and a bare `block truncate` child never engages under the shrink-refusing ItemText; if the pairing is a false positive (stacked pickers), add an allowlist entry with rationale",
+      "Select popup rows route their clip affordance through SelectClipText (src/components/select-clip-text.tsx) — an item-level clipTitle handler is dead once the row span self-bounds, and a bare `block truncate` child never engages under the shrink-refusing ItemText; if the pairing is a false positive (a self-bounded clip span inside a rich row — its own max-w keeps the handler live), add an allowlist entry with rationale",
   },
   {
     name: "setQueryData-noop",
