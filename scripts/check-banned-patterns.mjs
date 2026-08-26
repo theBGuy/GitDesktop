@@ -204,18 +204,23 @@ const INLINE_CLIP_TITLE_RE = new RegExp(
 // clip span inside — a SelectItem (the item no longer overflows, so an
 // item-level measure can never fire), and the bare `block truncate` child
 // (never engages under the shrink-refusing ItemText). The gap is [\s\S], not
-// a same-tag [^>] bound, because prop expressions carry `=>` arrows. STACKED
-// pickers can pair one Select's last item with the next Select's trigger
-// handler — today's closest real forward gap measures 379 normalized chars
-// (2.4× PAIR_GAP), and a tighter layout false-fires loudly with the allowlist
-// as its remedy. Accepted evasions: an aliased or wrapped handler, a
-// reordered/interleaved class string, a wrapper component around SelectItem.
+// a same-tag [^>] bound, because prop expressions carry `=>` arrows; the
+// tempered `(?!</SelectItem\b)` step stops each scan at the item's closing
+// tag, so an adjacent picker's trigger handler can never pair across items.
+// Known false positive left open: a legal SELF-BOUNDED clip span inside an
+// item (TaskDialog's `max-w-64 truncate` interpreter-path sub-span — its own
+// width bound keeps the handler live) sits ~2× outside the window today; a
+// compacted row would fire loudly, with the allowlist as remedy. Accepted
+// evasions: an aliased or wrapped handler, a reordered/interleaved class
+// string, a wrapper component around SelectItem — and a bare text child with
+// no affordance at all, the shape most converted sites had, which no arm can
+// see.
 const SELECT_ITEM_CLIP_TITLE_RE = new RegExp(
-  `<SelectItem\\b[\\s\\S]{0,${PAIR_GAP}}?\\bclipTitle`,
+  `<SelectItem\\b(?:(?!</SelectItem\\b)[\\s\\S]){0,${PAIR_GAP}}?\\bclipTitle`,
   "g",
 );
 const SELECT_ITEM_BLOCK_TRUNCATE_RE = new RegExp(
-  `<SelectItem\\b[\\s\\S]{0,${PAIR_GAP}}?\\bblock truncate\\b`,
+  `<SelectItem\\b(?:(?!</SelectItem\\b)[\\s\\S]){0,${PAIR_GAP}}?\\bblock truncate\\b`,
   "g",
 );
 

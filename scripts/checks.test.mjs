@@ -209,6 +209,22 @@ test("select-item-clip-title flags the superseded item-level handler, wrapped or
     "</SelectItem>",
   ].join("\n");
   assert.deepEqual(selectItemClipTitle(deadSpan), [1]);
+  // A SELF-BOUNDED span (explicit max-w) keeps its handler LIVE — TaskDialog's
+  // interpreter-path sub-span. At close range it still pairs: the guard cannot
+  // see width bounds, so this is the known false positive the allowlist
+  // remedies. In the real tree the row's markup holds it ~2× outside the
+  // window.
+  const bounded = [
+    "<SelectItem key={i.id} value={i.id}>",
+    "  <span",
+    '    className="max-w-64 truncate font-mono"',
+    "    onMouseEnter={clipTitle(found)}",
+    "  >",
+    "    {found}",
+    "  </span>",
+    "</SelectItem>",
+  ].join("\n");
+  assert.deepEqual(selectItemClipTitle(bounded), [1]);
 });
 
 test("select-item-clip-title leaves the SelectClipText idiom and trigger handlers alone", () => {
@@ -236,14 +252,19 @@ test("select-item-clip-title leaves the SelectClipText idiom and trigger handler
     selectItemClipTitle("<button onMouseEnter={clipTitle(path)} />"),
     [],
   );
-  // A SELF-BOUNDED truncate (explicit max-w, the TaskDialog interpreter-path
-  // sub-span) engages on its own width and stays legal.
-  const bounded = [
-    "<SelectItem key={i.id} value={i.id}>",
-    '  <span className="max-w-64 truncate font-mono">{path}</span>',
-    "</SelectItem>",
+  // Tempering stops the scan at the item's closing tag: an ADJACENT picker's
+  // trigger handler right after a completed item can never pair, however
+  // compact the layout — this exact fixture fired before the tempered step.
+  const stacked = [
+    "<SelectItem value={ALL}>All</SelectItem>",
+    "</SelectContent>",
+    "</Select>",
+    "<Select value={x} onValueChange={setX}>",
+    "  <SelectTrigger>",
+    "    <SelectValue onMouseEnter={clipTitleFromText} />",
+    "  </SelectTrigger>",
   ].join("\n");
-  assert.deepEqual(selectItemClipTitle(bounded), []);
+  assert.deepEqual(selectItemClipTitle(stacked), []);
 });
 
 test("select-item-clip-title exempts vendored ui only", () => {
