@@ -638,9 +638,13 @@ mod tests {
     fn allow_file_submodules() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            std::env::set_var("GIT_CONFIG_COUNT", "1");
+            // COUNT lands LAST: git parses the pairs only once COUNT is set, so a
+            // parallel test's git spawn snapshotting the env mid-triple sees either
+            // nothing or a complete set. COUNT-first left a torn `COUNT=1, no KEY_0`
+            // window that 128'd a concurrent spawn (seen live, ubuntu matrix).
             std::env::set_var("GIT_CONFIG_KEY_0", "protocol.file.allow");
             std::env::set_var("GIT_CONFIG_VALUE_0", "always");
+            std::env::set_var("GIT_CONFIG_COUNT", "1");
         });
     }
 

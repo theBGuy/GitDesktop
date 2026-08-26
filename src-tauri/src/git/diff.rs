@@ -786,8 +786,8 @@ mod tests {
     /// The premise behind the Changes panel's conflicted-row gate: numstat emits
     /// MORE THAN ONE unstaged row for an unmerged path (measured: a zero-count
     /// row plus the content diff), so a `.get(path)` lookup would surface an
-    /// arbitrary one of them. Pinned here
-    /// because the gate reads as unmotivated once the shape is out of view.
+    /// arbitrary one of them. Pinned here because the gate reads as unmotivated
+    /// once the shape is out of view.
     #[tokio::test]
     async fn working_line_stats_reports_duplicate_rows_for_a_conflict() {
         let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-conflict-test-").await;
