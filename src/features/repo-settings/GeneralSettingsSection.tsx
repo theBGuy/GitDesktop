@@ -2,6 +2,7 @@ import { ArrowSquareOutIcon, SparkleIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { toast } from "sonner";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -16,7 +17,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { clipTitle } from "@/lib/clip-title";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useActiveGhHost } from "@/lib/git/host";
 import {
   useBranches,
@@ -176,12 +177,12 @@ function CommitMessageSelect({
         }}
       >
         <SelectTrigger id={id} className="w-full">
-          <SelectValue />
+          <SelectValue onMouseEnter={clipTitleFromText} />
         </SelectTrigger>
         <SelectContent className="max-w-[min(22rem,80vw)]">
           {opts.map((o) => (
             <SelectItem key={o.value} value={o.value}>
-              <span className="block truncate">{o.label}</span>
+              <SelectClipText>{o.label}</SelectClipText>
             </SelectItem>
           ))}
         </SelectContent>
@@ -354,15 +355,12 @@ function GeneralForm({
             }}
           >
             <SelectTrigger id="repo-default-branch" className="w-full">
-              <SelectValue />
+              <SelectValue onMouseEnter={clipTitleFromText} />
             </SelectTrigger>
             <SelectContent className="max-w-[min(20rem,80vw)]">
               {branchOptions.map((b) => (
-                // Base UI Select clips at the popup (the vendored ItemText is
-                // shrink-0, so an inner span never measures clipped) — the
-                // item is the element to measure.
-                <SelectItem key={b} value={b} onMouseEnter={clipTitle(b)}>
-                  <span className="block truncate">{b}</span>
+                <SelectItem key={b} value={b}>
+                  <SelectClipText>{b}</SelectClipText>
                 </SelectItem>
               ))}
             </SelectContent>

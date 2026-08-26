@@ -1,6 +1,7 @@
 import { formOptions } from "@tanstack/react-form";
 import { type ReactNode, useId } from "react";
 import { toast } from "sonner";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -20,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { required, withForm } from "@/lib/form";
 import {
   useCherryPickOnto,
@@ -265,12 +267,12 @@ export function CherryPickOntoDialog({
             onValueChange={(v) => v && onBranchChange(v)}
           >
             <SelectTrigger id={destId} className="w-full">
-              <SelectValue />
+              <SelectValue onMouseEnter={clipTitleFromText} />
             </SelectTrigger>
             <SelectContent>
               {branches.map((b) => (
                 <SelectItem key={b.name} value={b.name}>
-                  {b.name}
+                  <SelectClipText>{b.name}</SelectClipText>
                 </SelectItem>
               ))}
             </SelectContent>

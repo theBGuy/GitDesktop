@@ -199,6 +199,31 @@ const INLINE_CLIP_TITLE_RE = new RegExp(
   "g",
 );
 
+// The superseded Select-row tooltip shapes, both dead once SelectClipText's
+// self-bounded span owns the row: a clipTitle handler on — or a hand-rolled
+// clip span inside — a SelectItem (the item no longer overflows, so an
+// item-level measure can never fire), and the bare `block truncate` child
+// (never engages under the shrink-refusing ItemText). The gap is [\s\S], not
+// a same-tag [^>] bound, because prop expressions carry `=>` arrows; the
+// tempered `(?!</SelectItem\b)` step stops each scan at the item's closing
+// tag, so an adjacent picker's trigger handler can never pair across items.
+// Known false positive left open: a legal SELF-BOUNDED clip span inside an
+// item (TaskDialog's `max-w-64 truncate` interpreter-path sub-span — its own
+// width bound keeps the handler live) sits ~2× outside the window today; a
+// compacted row would fire loudly, with the allowlist as remedy. Accepted
+// evasions: an aliased or wrapped handler, a reordered/interleaved class
+// string, a wrapper component around SelectItem — and a bare text child with
+// no affordance at all, the shape most converted sites had, which no arm can
+// see.
+const SELECT_ITEM_CLIP_TITLE_RE = new RegExp(
+  `<SelectItem\\b(?:(?!</SelectItem\\b)[\\s\\S]){0,${PAIR_GAP}}?\\bclipTitle`,
+  "g",
+);
+const SELECT_ITEM_BLOCK_TRUNCATE_RE = new RegExp(
+  `<SelectItem\\b(?:(?!</SelectItem\\b)[\\s\\S]){0,${PAIR_GAP}}?\\bblock truncate\\b`,
+  "g",
+);
+
 // A `.mutate(` call in any spelling — the token, not the callbacks object it
 // may carry. Matching the object instead would have to recognize every way one
 // reaches the call: inline literal, hoisted variable (`.mutate(v, opts)` — the
@@ -331,6 +356,17 @@ export const CHECKS = [
     allowlist: [],
     message:
       "clip-measured tooltips route through clipTitle/clipTitleFromText (src/lib/clip-title.ts) — an inline rewrite re-opens the blank-title ancestor-suppression class; if the pairing is a false positive, add an allowlist entry with rationale",
+  },
+  {
+    name: "select-item-clip-title",
+    appliesTo: notVendoredUi,
+    scan: anyOf([
+      perFile(SELECT_ITEM_CLIP_TITLE_RE),
+      perFile(SELECT_ITEM_BLOCK_TRUNCATE_RE),
+    ]),
+    allowlist: [],
+    message:
+      "Select popup rows route their clip affordance through SelectClipText (src/components/select-clip-text.tsx) — an item-level clipTitle handler is dead once the row span self-bounds, and a bare `block truncate` child never engages under the shrink-refusing ItemText; if the pairing is a false positive (a self-bounded clip span inside a rich row — its own max-w keeps the handler live), add an allowlist entry with rationale",
   },
   {
     name: "setQueryData-noop",

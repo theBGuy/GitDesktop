@@ -1,6 +1,7 @@
 import { SparkleIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,6 +14,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitleFromText } from "@/lib/clip-title";
 import {
   useBbRepoSettings,
   useBbUpdateRepoSettings,
@@ -263,12 +265,15 @@ function BitbucketGeneralForm({
             }}
           >
             <SelectTrigger id="bb-main-branch" className="w-full">
-              <SelectValue placeholder="No default branch yet" />
+              <SelectValue
+                placeholder="No default branch yet"
+                onMouseEnter={clipTitleFromText}
+              />
             </SelectTrigger>
             <SelectContent>
               {branchOptions.map((b) => (
                 <SelectItem key={b} value={b}>
-                  {b}
+                  <SelectClipText>{b}</SelectClipText>
                 </SelectItem>
               ))}
             </SelectContent>

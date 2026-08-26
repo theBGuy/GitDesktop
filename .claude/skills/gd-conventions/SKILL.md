@@ -95,8 +95,12 @@ words the user reads on screen — the palette matcher is a plain substring, so
   only-when-actually-clipped via `clipTitle`/`clipTitleFromText`
   (`src/lib/clip-title.ts`) — never inline: blanking with `title=""`
   suppresses a titled ancestor's tooltip, and the `inline-clip-title` guard
-  in `pnpm run checks` fails on rewrites. Base UI Select clips at the
-  POPUP — put the handler on the `SelectItem`, not the span.
+  in `pnpm run checks` fails on rewrites. Base UI Select popup rows route
+  through `SelectClipText` (`src/components/select-clip-text.tsx`), which
+  must be the row's SOLE child. A bare truncate child never engages there and
+  an item-level handler is dead once the row span self-bounds (the
+  `select-item-clip-title` guard fails on both); the closed field takes
+  `onMouseEnter={clipTitleFromText}` on its `SelectValue`.
 - Per-file `+added -deleted` counts render through `DiffStat`
   (`src/components/diff-stat.tsx`) — plain numbers in, optional `isBinary`
   (a muted `bin`) and `format` (Insights abbreviates via `fmt`); never
