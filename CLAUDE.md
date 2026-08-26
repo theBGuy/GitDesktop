@@ -142,7 +142,8 @@ pnpm changelog:preview  # preview pending changelog.d/ fragments
   may stay and cite their source — a PR or run reference is fine there.) Trim any
   comment you touch to this standard.
 - **Don't edit `src/components/ui/`** — those are vendored shadcn/Base UI primitives;
-  fix at the feature/call-site level.
+  fix at the feature/call-site level, except the sanctioned local deltas inventoried
+  in `src/components/ui/README.md` (a re-vendor silently reverts them).
 - **Keyboard-first, WCAG AA** — wire arrow-key nav for any new selectable list in the
   same change; never convey meaning by color alone; keep destructive paths confirmed.
 - **React best practices** — before writing or refactoring any React component or hook,

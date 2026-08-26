@@ -194,6 +194,9 @@ export function CreatePrDialog({
   const { generate, cancel, generating } = useGeneratePrDescription(repoPath);
   const aiEnabled = useAiEnabled();
   const aiDescriptionRef = useRef(false);
+  // Whether THIS mount has seeded, so the skip below can tell a reopen (form
+  // state may hold a draft the user typed) from a fresh mount (it cannot).
+  const seededRef = useRef(false);
 
   const currentName = status.data?.branch?.name ?? null;
   // Branch options with per-branch worktree chips; drops the app-internal
@@ -407,10 +410,25 @@ export function CreatePrDialog({
     const h = defaultHead ?? currentName ?? names[0] ?? "";
     // A create still running in the background — or one that failed while the
     // dialog was closed — leaves everything the user typed in form state, and
-    // this reset would blank it on reopen. Both signals are judged against the
-    // head this seed WOULD land on: a create running on another branch must not
-    // preserve its draft in a dialog the user opened for this one.
-    if (isCreatingPrFor(repoPath, h) || consumeLastFailed(repoPath, h)) return;
+    // this reset would blank it on reopen. The draft's identity is the RETAINED
+    // form head, not this open's default: the user may have submitted a head
+    // that differs from the branch they are on now. The `||` short-circuit is
+    // deliberate — while a create is in flight the latch stays unconsumed, so a
+    // later reopen after it fails still preserves the draft.
+    if (seededRef.current) {
+      const retained = form.state.values.head || h;
+      if (
+        isCreatingPrFor(repoPath, retained) ||
+        consumeLastFailed(repoPath, retained)
+      )
+        return;
+    } else {
+      // A fresh mount holds no draft (form state died with the last one), so it
+      // always seeds — and disposes the latch for the head it is seeding, whose
+      // draft the unmount already destroyed.
+      consumeLastFailed(repoPath, h);
+    }
+    seededRef.current = true;
     aiDescriptionRef.current = false;
     setReviewers([]);
     setLabels(new Set());

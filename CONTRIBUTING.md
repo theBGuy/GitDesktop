@@ -185,7 +185,9 @@ GitDesktop is keyboard-first and aims for WCAG AA. When you add or change UI:
   force-push, merge) must confirm clearly and give feedback (Design Principle #2).
 - Don't convey meaning by color alone; keep focus indicators visible.
 - The shadcn / Base UI primitives under `src/components/ui/` are vendored — fix
-  things at the feature/call-site level rather than editing those files.
+  things at the feature/call-site level rather than editing those files, except
+  the sanctioned local deltas inventoried in `src/components/ui/README.md` (a
+  re-vendor silently reverts them).
 
 ### AI-assisted contributions
 

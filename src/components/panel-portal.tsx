@@ -86,8 +86,9 @@ export function PanelPortalBoundary({
 }
 
 /**
- * Clears the panel container for a subtree. Used inside modal popups, which
- * portal to the body: their floating UI must not land in a panel the modal covers.
+ * Clears the panel container for a subtree. Used inside modal popups: their
+ * floating UI must not land in a panel the modal covers. Base UI chains it onto
+ * the popup's own portal node instead, so pickers still stack above the modal.
  */
 export function PanelPortalReset({
   children,

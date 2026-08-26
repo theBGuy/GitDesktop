@@ -216,6 +216,8 @@ const notVendoredUi = (file) => !file.startsWith("src/components/ui/");
 // whole-file view because the guard sits on the line after the arrow. Matching
 // the first statement rather than an `open` read anywhere in the body is what
 // keeps this off the many effects that merely gate a query on the same flag.
+// Bounded by the identifier: a dialog whose flag is `isOpen` or `show` passes
+// unseen, so this catches the house spelling rather than the whole class.
 const SEED_ON_OPEN_RE =
   /use(?:Layout)?Effect\(\(\)\s*=>\s*\{\s*if\s*\(!?open\b/g;
 

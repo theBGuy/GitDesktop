@@ -14,6 +14,7 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -633,11 +634,16 @@ export function RenameWorktreeDialog({
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={move.isPending}>
+          <DisabledReasonButton
+            variant="outline"
+            onClick={onClose}
+            disabled={move.isPending}
+            reason="The rename is still running."
+          >
             {/* Nothing here can call the removal off, so "Cancel" would promise
                 more than closing this dialog does. */}
             {removing ? "Close" : "Cancel"}
-          </Button>
+          </DisabledReasonButton>
           <Button
             disabled={
               !trimmed || unchanged || invalid || move.isPending || removing
@@ -732,11 +738,16 @@ export function LockWorktreeDialog({
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={lock.isPending}>
+          <DisabledReasonButton
+            variant="outline"
+            onClick={onClose}
+            disabled={lock.isPending}
+            reason="The lock is still running."
+          >
             {/* Nothing here can call the removal off, so "Cancel" would promise
                 more than closing this dialog does. */}
             {removing ? "Close" : "Cancel"}
-          </Button>
+          </DisabledReasonButton>
           <Button onClick={handleLock} disabled={lock.isPending || removing}>
             {lock.isPending && <Spinner data-icon="inline-start" />}
             Lock

@@ -93,6 +93,8 @@ function DialogContent({
   );
   // Derived during render because a concealed panel still renders but runs no
   // effects, so the flip back to visible is the only moment an effect can see.
+  // State, not a ref: React sanctions adjusting state during render, while a
+  // render-phase ref write is exactly what the React Compiler forbids.
   const [wasConcealed, setWasConcealed] = React.useState(false);
   if (!panelActive && !wasConcealed) setWasConcealed(true);
 

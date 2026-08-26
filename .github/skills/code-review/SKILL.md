@@ -49,8 +49,9 @@ and Windows.
 ## Deliberate conventions — not defects
 
 - `src/components/ui/` is vendored (shadcn / Base UI primitives) and is never
-  edited; issues route to feature-level call sites. The vendored Button is
-  deliberately square (`rounded-none`).
+  edited; issues route to feature-level call sites, except the sanctioned local
+  deltas inventoried in `src/components/ui/README.md` (a re-vendor silently
+  reverts them). The vendored Button is deliberately square (`rounded-none`).
 - `gd/session/*` branches are filtered from every branch surface by design
   (agent sessions run on them); the filter is an invariant, not a bug.
 - Snowflake/u64 IDs cross the Tauri IPC boundary as strings (JS number
