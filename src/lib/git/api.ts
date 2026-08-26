@@ -46,6 +46,8 @@ import type {
   DraftCommentIn,
   ExternalReviewItem,
   FileDiff,
+  ForgeForkActivity,
+  ForgeForkDivergence,
   ForgeForkResult,
   ForgeProvider,
   ForgeProviderFeatures,
@@ -1240,6 +1242,22 @@ export const ghRepoTraffic = (repoPath: string) =>
 
 export const ghRepoDependencies = (repoPath: string) =>
   invoke<RepoDependencies>("gh_repo_dependencies", { repoPath });
+
+export const forgeForkActivity = (repoPath: string) =>
+  invoke<ForgeForkActivity>("forge_fork_activity", { repoPath });
+
+export const forgeForkDivergence = (
+  repoPath: string,
+  forkFullName: string,
+  baseBranch: string,
+  forkBranch: string,
+) =>
+  invoke<ForgeForkDivergence>("forge_fork_divergence", {
+    repoPath,
+    forkFullName,
+    baseBranch,
+    forkBranch,
+  });
 
 export const gitCompareBranches = (
   repoPath: string,

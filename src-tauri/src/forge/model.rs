@@ -301,6 +301,14 @@ pub struct Implemented {
     pub repo_star: bool,
     /// Reading a repo's README for the Explore preview. Wired for all three.
     pub repo_readme: bool,
+    /// Listing the open repo's forks for the Insights fork-activity card. Wired for
+    /// all three (GitHub `/forks`, GitLab `projects/…/forks`, Bitbucket `/forks`).
+    pub fork_activity: bool,
+    /// Comparing one fork's branch against the open repo's base branch (the
+    /// ahead/behind read behind each fork row). GitHub-only: GitLab's cross-project
+    /// compare returns the full commit+diff payload and Bitbucket has no cross-repo
+    /// compare endpoint.
+    pub fork_compare: bool,
 }
 
 impl Implemented {
@@ -367,6 +375,8 @@ impl Implemented {
             repo_fork_by_name: true,
             repo_star: true,
             repo_readme: true,
+            fork_activity: true,
+            fork_compare: true,
         }
     }
 
@@ -429,6 +439,8 @@ impl Implemented {
             repo_fork_by_name: false,
             repo_star: false,
             repo_readme: false,
+            fork_activity: false,
+            fork_compare: false,
         }
     }
 
@@ -518,6 +530,10 @@ impl Implemented {
                 repo_fork_by_name: true,
                 repo_star: true,
                 repo_readme: true,
+                // Fork activity reads `projects/{id}/forks`; the per-fork compare
+                // stays GitHub-only (see the field's note).
+                fork_activity: true,
+                fork_compare: false,
             },
             // Bitbucket Cloud: PRs, pipelines, repo actions, publish, the repo-settings
             // surface, and the PR-write set are wired over direct HTTP — the flags below
@@ -568,6 +584,10 @@ impl Implemented {
                 repo_search: true,
                 repo_fork_by_name: true,
                 repo_readme: true,
+                // Fork activity reads `repositories/{ws}/{slug}/forks`;
+                // `fork_compare` stays false via `..Self::none()` — Bitbucket has no
+                // cross-repo compare endpoint.
+                fork_activity: true,
                 ..Self::none()
             },
         }
@@ -888,6 +908,49 @@ pub struct ForgeForkResult {
     pub ready: bool,
 }
 
+/// One fork of the open repo, for the Insights fork-activity card.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeForkEntry {
+    /// "owner/name" (GitHub / Bitbucket) or "group/subgroup/name" (GitLab).
+    pub full_name: String,
+    pub web_url: String,
+    /// The fork's last-activity time (GitHub `pushed_at` / GitLab
+    /// `last_activity_at` / Bitbucket `updated_on`); `None` when the provider
+    /// reports none, which sorts the fork last.
+    pub active_at: Option<String>,
+    /// `None` on Bitbucket, which has no stars.
+    pub stars: Option<u64>,
+    pub is_private: bool,
+    /// The FORK's default branch — the compare head, distinct from the open repo's
+    /// [`ForgeForkActivity::default_branch`].
+    pub default_branch: Option<String>,
+}
+
+/// The fork-activity card's payload: the forge's total fork count, the open repo's
+/// default branch (the compare base), and the most-recently-active forks.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeForkActivity {
+    /// The provider's own total, which legitimately exceeds `forks.len()` (that list
+    /// is capped). `None` when the provider didn't supply it — never the fetched
+    /// page's length, which would present a partial count as the measured total.
+    pub total_count: Option<u64>,
+    /// The compare base. `None` when unavailable — from a failed read, or because
+    /// the provider never supplies it (Bitbucket, whose card has no compare).
+    pub default_branch: Option<String>,
+    /// Most-recently-active first, capped at [`crate::forge::FORK_LIST_CAP`].
+    pub forks: Vec<ForgeForkEntry>,
+}
+
+/// How far one fork's branch has diverged from a base branch on the open repo.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeForkDivergence {
+    pub ahead_by: u64,
+    pub behind_by: u64,
+}
+
 /// A provider's static feature profile — its platform [`Capabilities`] plus what
 /// GitDesktop has [`Implemented`] for it. Pure (no I/O), so the Explore view can
 /// ask "does this provider support fork/star/search?" without a repo in hand.
@@ -931,6 +994,110 @@ mod tests {
             namespace_set(["".to_string(), "octocat".to_string()]),
             vec!["octocat".to_string()]
         );
+    }
+
+    /// The fork-activity card reads these keys directly; a snake_case leak would
+    /// render an empty card with no error, so pin the whole shape.
+    #[test]
+    fn fork_activity_serializes_camel_case_wire_keys() {
+        let value = serde_json::to_value(ForgeForkActivity {
+            total_count: Some(42),
+            default_branch: Some("main".into()),
+            forks: vec![ForgeForkEntry {
+                full_name: "octocat/hello".into(),
+                web_url: "https://github.com/octocat/hello".into(),
+                active_at: Some("2026-08-01T00:00:00Z".into()),
+                stars: Some(7),
+                is_private: false,
+                default_branch: Some("trunk".into()),
+            }],
+        })
+        .expect("ForgeForkActivity serializes");
+        let obj = value.as_object().expect("activity is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["defaultBranch", "forks", "totalCount"]);
+        let entry = obj["forks"][0]
+            .as_object()
+            .expect("a fork entry is a JSON object");
+        let mut entry_keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+        entry_keys.sort_unstable();
+        assert_eq!(
+            entry_keys,
+            [
+                "activeAt",
+                "defaultBranch",
+                "fullName",
+                "isPrivate",
+                "stars",
+                "webUrl",
+            ]
+        );
+        // Counts ride as JSON numbers (far below 2^53 — no string-serialized ids here).
+        assert_eq!(obj["totalCount"], 42);
+        assert_eq!(entry["stars"], 7);
+        // An unmeasurable total ships as an explicit null — the key must still be
+        // there, and it must never be a stand-in count.
+        let degraded = serde_json::to_value(ForgeForkActivity {
+            total_count: None,
+            default_branch: None,
+            forks: Vec::new(),
+        })
+        .expect("ForgeForkActivity serializes");
+        assert!(degraded["totalCount"].is_null());
+        assert!(degraded["defaultBranch"].is_null());
+        assert_eq!(degraded["forks"], serde_json::json!([]));
+    }
+
+    /// A Bitbucket fork has no stars and may report no activity time; both must ship
+    /// as explicit nulls rather than vanishing from the wire.
+    #[test]
+    fn fork_entry_ships_absent_fields_as_null() {
+        let value = serde_json::to_value(ForgeForkEntry {
+            full_name: "team/hello".into(),
+            web_url: "https://bitbucket.org/team/hello".into(),
+            active_at: None,
+            stars: None,
+            is_private: true,
+            default_branch: None,
+        })
+        .expect("ForgeForkEntry serializes");
+        assert!(value["stars"].is_null());
+        assert!(value["activeAt"].is_null());
+        assert!(value["defaultBranch"].is_null());
+        assert_eq!(value["isPrivate"], true);
+    }
+
+    #[test]
+    fn fork_divergence_serializes_camel_case_wire_keys() {
+        let value = serde_json::to_value(ForgeForkDivergence {
+            ahead_by: 3,
+            behind_by: 12,
+        })
+        .expect("ForgeForkDivergence serializes");
+        let obj = value.as_object().expect("divergence is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["aheadBy", "behindBy"]);
+        assert_eq!(obj["aheadBy"], 3);
+        assert_eq!(obj["behindBy"], 12);
+    }
+
+    /// The `implemented` gate the card reads — `forkActivity` / `forkCompare` on the
+    /// wire, and the fork_compare flag is GitHub-only.
+    #[test]
+    fn fork_flags_ride_the_implemented_profile() {
+        let gh = Implemented::for_provider(Provider::GitHub);
+        assert!(gh.fork_activity && gh.fork_compare);
+        let gl = Implemented::for_provider(Provider::GitLab);
+        assert!(gl.fork_activity && !gl.fork_compare);
+        let bb = Implemented::for_provider(Provider::Bitbucket);
+        assert!(bb.fork_activity && !bb.fork_compare);
+        let none = Implemented::none();
+        assert!(!none.fork_activity && !none.fork_compare);
+        let value = serde_json::to_value(gh).expect("Implemented serializes");
+        assert_eq!(value["forkActivity"], true);
+        assert_eq!(value["forkCompare"], true);
     }
 
     fn actor(login: &str) -> ForgeUserRef {

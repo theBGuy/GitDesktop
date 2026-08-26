@@ -567,8 +567,12 @@ branch-vs-default), a GitHub Actions success-rate / duration trend, a
 community-health card, 14-day **traffic** (views/clones/referrers/paths,
 with push access), a **dependencies** card, and quick links to the web-only
 GitHub insights (Pulse, network, dependents, Actions metrics, stars over
-time). Charts ship one-line captions, data-table fallbacks, and keyboard
-navigation.
+time). A **Fork activity** card lists the repo's recently active direct
+forks on **GitHub, GitLab & Bitbucket** (up to ten, most recent first, each
+with its latest activity and stars), plus the total fork count and a link
+to the full list; on GitHub, a per-fork **Compare** fetches ahead/behind
+counts, so you can see which forks carry commits yours doesn't. Charts
+ship one-line captions, data-table fallbacks, and keyboard navigation.
 
 ### Explore repositories
 
@@ -594,7 +598,8 @@ releases in the same panels: MR comments, commits, and diff; an issue's
 labels/assignees/milestone rail; pipeline jobs with logs and a branch CI
 badge; release notes with asset links. Star a project ("View on GitLab" plus
 a fork link), **publish a local repo** (or local issues and PRs) to GitLab,
-and Insights charts GitLab pipelines. GitHub is unchanged.
+and Insights charts GitLab pipelines and lists the project's recently
+active forks. GitHub is unchanged.
 
 <details>
 <summary><strong>The full GitLab surface</strong>: merge requests, issues, time tracking, pipelines and releases, project settings</summary>
@@ -648,8 +653,8 @@ limit), and issues live in **Jira**; link a project (below).
 - **Pipelines**: rerun, trigger, and stop; on a repo with custom
   `pipelines.custom.*` in `bitbucket-pipelines.yml`, **pick which pipeline
   to run** (Default or a named custom one, with variables). Insights charts
-  Pipeline durations, with a link-out to Bitbucket's
-  Commits/Branches/Pipelines/Deployments.
+  Pipeline durations and lists the repo's recently active forks, with a
+  link-out to Bitbucket's Commits/Branches/Pipelines/Deployments.
 - **Repo settings** (admin): **General** (description, website, language,
   fork policy, default branch), **default reviewers**, **branch
   restrictions** (block pushes/force-pushes/deletion, restrict merges,

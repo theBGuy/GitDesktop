@@ -31,13 +31,13 @@ use crate::forge::http::{
     KEY_USERNAME,
 };
 use crate::forge::model::{
-    namespace_set, Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList,
-    ForgeSearchList, ForgeSearchRepo, ForgeStatus, ForgeTimelineEventOut, ForgeUserRef, Implemented,
-    Provider,
+    namespace_set, Capabilities, CompletedReviewerOut, ForgeForkActivity, ForgeForkEntry,
+    ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
+    ForgeTimelineEventOut, ForgeUserRef, Implemented, Provider,
 };
 use crate::forge::{
-    cap_readme, validate_owner, validate_repo_name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
-    README_CANDIDATES,
+    cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
+    FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
@@ -5310,6 +5310,70 @@ pub async fn starred(_owner: &str, _name: &str) -> AppResult<bool> {
     Ok(false)
 }
 
+// ── Fork activity (Insights) ─────────────────────────────────────────────────
+
+/// The `forks` page envelope. `size` is the repo's TOTAL fork count, which the
+/// shared [`BbPage`] doesn't carry; items stay untyped so one malformed fork can't
+/// sink the parse.
+#[derive(Deserialize)]
+struct BbForkPage {
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default = "Vec::new")]
+    values: Vec<serde_json::Value>,
+}
+
+/// One fork row from a `repositories/{ws}/{slug}/forks` item. Tolerant: a missing/empty
+/// `full_name` skips the entry. Bitbucket Cloud has no stars, so `stars` is always
+/// `None` — the same posture as [`bb_search_repo_from_value`].
+fn fork_entry_from_repo(item: &serde_json::Value) -> Option<ForgeForkEntry> {
+    use serde_json::Value;
+    let full_name = item.get("full_name").and_then(Value::as_str)?.to_string();
+    if full_name.is_empty() {
+        return None;
+    }
+    Some(ForgeForkEntry {
+        full_name,
+        web_url: item
+            .get("links")
+            .and_then(|l| l.get("html"))
+            .and_then(|h| h.get("href"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        active_at: item
+            .get("updated_on")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        stars: None,
+        is_private: item.get("is_private").and_then(Value::as_bool).unwrap_or(false),
+        default_branch: item
+            .get("mainbranch")
+            .and_then(|b| b.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// The repo's forks for the Insights card — one page at [`FORK_LIST_CAP`], server-sorted
+/// most-recently-updated first, per the module's pagination policy. The envelope's `size`
+/// is the total; Bitbucket omits it on some responses, and that absence rides through as
+/// `None` rather than the page's own length (a capped page is not a total). The card's
+/// top-level `default_branch` stays `None`: it exists to seed the per-fork compare, which
+/// Bitbucket has no endpoint for, so resolving it would cost a repo read nothing consumes.
+pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
+    let creds = http::load_credentials().await?;
+    let base = repo_base(repo_path).await?;
+    let path = format!("{base}/forks?pagelen={FORK_LIST_CAP}&sort=-updated_on");
+    let page: BbForkPage = http::bb_get_json(&creds, &path, "forks").await?;
+    let forks: Vec<ForgeForkEntry> = page.values.iter().filter_map(fork_entry_from_repo).collect();
+    Ok(ForgeForkActivity {
+        total_count: page.size,
+        default_branch: None,
+        forks,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7339,5 +7403,48 @@ definitions:
         assert_eq!(h.events, vec!["repo:push".to_string()]);
         assert!(h.active);
         assert!(!h.skip_cert_verification);
+    }
+
+    #[test]
+    fn fork_page_maps_values_and_skips_malformed() {
+        let page: BbForkPage = serde_json::from_str(
+            r#"{"size":37,"values":[
+                {"full_name":"team-b/hello","is_private":true,
+                 "updated_on":"2026-08-22T18:04:11.123456+00:00",
+                 "mainbranch":{"name":"develop"},
+                 "links":{"html":{"href":"https://bitbucket.org/team-b/hello"}}},
+                {"is_private":false},
+                {"full_name":"team-c/hello"}
+            ]}"#,
+        )
+        .expect("a fork page with one malformed value still parses");
+        assert_eq!(page.size, Some(37));
+        let forks: Vec<ForgeForkEntry> =
+            page.values.iter().filter_map(fork_entry_from_repo).collect();
+        // The nameless value is skipped, not fatal.
+        assert_eq!(forks.len(), 2);
+        let first = &forks[0];
+        assert_eq!(first.full_name, "team-b/hello");
+        assert_eq!(first.web_url, "https://bitbucket.org/team-b/hello");
+        assert_eq!(
+            first.active_at.as_deref(),
+            Some("2026-08-22T18:04:11.123456+00:00")
+        );
+        // Bitbucket Cloud has no stars, so the column is absent rather than zero.
+        assert_eq!(first.stars, None);
+        assert!(first.is_private);
+        assert_eq!(first.default_branch.as_deref(), Some("develop"));
+        // A sparse value keeps its identity and reports the rest as absent.
+        assert_eq!(forks[1].full_name, "team-c/hello");
+        assert_eq!(forks[1].active_at, None);
+        assert_eq!(forks[1].default_branch, None);
+        assert_eq!(forks[1].web_url, "");
+        // A page without `size` is a NORMAL Bitbucket response, not an error — the
+        // total rides through absent (`fork_activity` passes `page.size` straight to
+        // `total_count`), never substituting the capped page's own length.
+        let sizeless: BbForkPage =
+            serde_json::from_str(r#"{"values":[{"full_name":"team-b/hello"}]}"#).unwrap();
+        assert_eq!(sizeless.size, None);
+        assert_eq!(sizeless.values.len(), 1);
     }
 }

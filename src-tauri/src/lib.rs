@@ -468,6 +468,8 @@ pub fn run() {
             forge::forge_issue_create,
             forge::forge_pr_create,
             forge::forge_repo_url,
+            forge::forge_fork_activity,
+            forge::forge_fork_divergence,
             forge::forge_repo_star_status,
             forge::forge_repo_set_star,
             forge::forge_repo_visibility,

@@ -1773,7 +1773,8 @@ Once connected:
   variables.
 - **Insights** — the **Insights** tab works on Bitbucket repos: the local-git charts
   (commit activity, code frequency, contributors, punch card), a **Pipelines** duration
-  and success-rate chart, and a **More on Bitbucket** card that links out to the
+  and success-rate chart, a **Fork activity** card listing the repo's recently active
+  forks, and a **More on Bitbucket** card that links out to the
   **Commits**, **Branches**, **Pipelines**, and **Deployments** pages (these only render on
   the web). GitHub-only cards (community, traffic, dependencies) stay hidden.
 - **Publish a local repo** — a repo with no remote can be published to Bitbucket. From
@@ -1814,9 +1815,16 @@ Bitbucket).
 - On GitHub: **community health** (stars, forks, watchers, a health percentage),
   **traffic** (14-day views, clones, and top referrers — needs push access), and
   **dependencies**.
-- Quick links jump to the pages best viewed on the web — GitHub's Pulse, Network, Forks,
-  Dependents, and Actions; GitLab's Activity, CI/CD analytics, and value stream analytics;
-  or Bitbucket's Commits, Branches, Pipelines, and Deployments.`,
+- **Fork activity** — the repo's recently active direct forks on GitHub, GitLab, and
+  Bitbucket: up to ten, most recent first. Each row links to the fork on its forge and
+  shows how recently it has been active and how many stars it has (Bitbucket has no
+  stars); the card header counts every fork, and a footer link opens the full list on
+  the forge. On GitHub, a row's **Compare** fetches that fork's ahead/behind counts on
+  demand, so you can see which forks carry commits this repo doesn't.
+- Quick links jump to the pages best viewed on the web — GitHub's Pulse, Network,
+  Dependents, and Actions (the Network graph is where forks of forks live); GitLab's
+  Activity, CI/CD analytics, and value stream analytics; or Bitbucket's Commits,
+  Branches, Pipelines, and Deployments.`,
   },
   {
     id: "code-todos",

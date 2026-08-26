@@ -95,6 +95,14 @@ export function SectionTitle({ children }: { children: React.ReactNode }) {
   return <h3 className="mb-1 text-xs font-semibold">{children}</h3>;
 }
 
+/** An insight card's "nothing to show" line — shared so a card that decides its own
+ *  emptiness reads identically to one the board decides for. */
+export function Empty({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="py-6 text-center text-xs text-muted-foreground">{children}</p>
+  );
+}
+
 /** A bordered card for an Insights board panel. */
 export function InsightCard({
   title,

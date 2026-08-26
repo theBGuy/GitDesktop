@@ -429,6 +429,37 @@ export interface RepoDependencies {
   packages: DependencyPackage[];
 }
 
+/** One direct fork, with the activity signals every provider can supply.
+ *  `activeAt` is the provider's own recency field (GitHub `pushed_at`, GitLab
+ *  `last_activity_at`, Bitbucket `updated_on`), so the UI names the verb per
+ *  provider; `stars` is null where the platform has no star concept (Bitbucket). */
+export interface ForgeForkEntry {
+  /** "owner/name" — a GitLab fork under a subgroup reads "group/sub/name". */
+  fullName: string;
+  webUrl: string;
+  activeAt: string | null;
+  stars: number | null;
+  isPrivate: boolean;
+  /** The fork's own default branch — the compare head; null when unknown. */
+  defaultBranch: string | null;
+}
+
+/** A repo's direct forks, most-recently-active first (max 10). `totalCount` is the
+ *  provider's whole count, so it can legitimately exceed the listed rows; null when
+ *  the provider states no authoritative total (the normal case on Bitbucket). */
+export interface ForgeForkActivity {
+  totalCount: number | null;
+  /** The open repo's default branch — the compare base; null when unknown. */
+  defaultBranch: string | null;
+  forks: ForgeForkEntry[];
+}
+
+/** How far one fork's branch has moved relative to the open repo's base branch. */
+export interface ForgeForkDivergence {
+  aheadBy: number;
+  behindBy: number;
+}
+
 export interface RepoOpState {
   merging: boolean;
   rebasing: boolean;
@@ -871,6 +902,12 @@ export interface ForgeImplemented {
    *  Bitbucket (PUT `draft`) true; GitHub keeps its Ready/Convert path via
    *  `gh pr ready [--undo]` gated on `canWrite`, so it stays false here. */
   mrDraftToggle: boolean;
+  /** Listing the repo's direct forks with their activity signals (the Insights
+   *  "Fork activity" card) — built for all three providers. */
+  forkActivity: boolean;
+  /** On-demand ahead/behind between one fork's branch and this repo's base
+   *  branch. GitHub's compare API only, so false elsewhere. */
+  forkCompare: boolean;
 }
 
 /** One pull-request task (Bitbucket's PR checklist). `id`/`commentId` are numeric

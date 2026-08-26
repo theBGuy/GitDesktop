@@ -10,7 +10,6 @@ import { toastError } from "@/lib/toast";
 const LINKS: { label: string; suffix: string; publicOnly?: boolean }[] = [
   { label: "Pulse", suffix: "/pulse" },
   { label: "Network graph", suffix: "/network" },
-  { label: "Forks", suffix: "/network/members" },
   // "Dependents" only exists for public repos that others depend on; it 404s otherwise.
   { label: "Dependents", suffix: "/network/dependents", publicOnly: true },
   { label: "Actions usage", suffix: "/actions/metrics/usage" },

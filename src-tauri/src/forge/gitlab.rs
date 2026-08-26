@@ -14,13 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::forge::glab::{run_glab, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT};
 use crate::forge::model::{
-    namespace_set, Capabilities, CompletedReviewerOut, ForgeForkResult, ForgeRepo, ForgeRepoList,
-    ForgeSearchList, ForgeSearchRepo, ForgeStatus, ForgeTimelineEventOut, ForgeUserRef, Implemented,
-    Provider,
+    namespace_set, Capabilities, CompletedReviewerOut, ForgeForkActivity, ForgeForkEntry,
+    ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
+    ForgeTimelineEventOut, ForgeUserRef, Implemented, Provider,
 };
 use crate::forge::{
-    cap_readme, validate_owner, validate_repo_name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
-    README_CANDIDATES,
+    cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
+    FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
 use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
@@ -8375,6 +8375,65 @@ pub async fn repo_readme(
     Ok(None)
 }
 
+// ── Fork activity (Insights) ─────────────────────────────────────────────────
+
+/// One fork row from a `projects/{id}/forks` item. Tolerant: a missing/empty
+/// `path_with_namespace` skips the entry rather than sinking the list. An
+/// unreadable visibility reads as private, matching `from_glab_project` — the lock
+/// shows rather than a public claim we can't back.
+fn fork_entry_from_project(item: &serde_json::Value) -> Option<ForgeForkEntry> {
+    use serde_json::Value;
+    let full_name = item
+        .get("path_with_namespace")
+        .and_then(Value::as_str)?
+        .to_string();
+    if full_name.is_empty() {
+        return None;
+    }
+    let str_field = |k: &str| item.get(k).and_then(Value::as_str).map(str::to_string);
+    Some(ForgeForkEntry {
+        full_name,
+        web_url: str_field("web_url").unwrap_or_default(),
+        active_at: str_field("last_activity_at"),
+        stars: item.get("star_count").and_then(Value::as_u64),
+        is_private: item.get("visibility").and_then(Value::as_str) != Some("public"),
+        default_branch: str_field("default_branch"),
+    })
+}
+
+/// The project's forks + total fork count for the Insights card. Two independent
+/// reads, fanned out. GitLab sorts the forks endpoint server-side (it takes the
+/// project-list params), so the page comes back most-recently-active first and needs
+/// no client ranking. A failed project read leaves both totals `None` (the rows still
+/// render, and no unmeasured count is reported); a failed LIST read surfaces.
+pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    let project_endpoint = format!("projects/{enc}");
+    let forks_endpoint =
+        format!("projects/{enc}/forks?per_page={FORK_LIST_CAP}&order_by=last_activity_at");
+    let project_args = ["api", project_endpoint.as_str()];
+    let forks_args = ["api", forks_endpoint.as_str()];
+    let (project, forks) = tokio::join!(
+        run_glab(Some(repo_path), &project_args, GLAB_NETWORK_TIMEOUT),
+        run_glab(Some(repo_path), &forks_args, GLAB_NETWORK_TIMEOUT),
+    );
+    let list: serde_json::Value = serde_json::from_str(&forks?.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse the GitLab fork list: {e}")))?;
+    let forks: Vec<ForgeForkEntry> = list
+        .as_array()
+        .map(|items| items.iter().filter_map(fork_entry_from_project).collect())
+        .unwrap_or_default();
+    let project = project
+        .ok()
+        .and_then(|out| serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()).ok());
+    let (total_count, default_branch) = crate::forge::fork_totals_from_meta(project.as_ref());
+    Ok(ForgeForkActivity {
+        total_count,
+        default_branch,
+        forks,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11023,5 +11082,46 @@ mod tests {
         );
         // An answered fallback (404 = not a member) is an affirmative "no".
         assert_eq!(fields(0, None), (Some(false), Some(false), None, None, None));
+    }
+
+    #[test]
+    fn fork_entry_from_project_maps_gitlab_fields() {
+        let item = serde_json::json!({
+            "path_with_namespace": "group/sub/hello",
+            "web_url": "https://gitlab.com/group/sub/hello",
+            "last_activity_at": "2026-08-24T09:15:00.000Z",
+            "star_count": 4,
+            "visibility": "public",
+            "default_branch": "main"
+        });
+        let e = fork_entry_from_project(&item).expect("parses a well-formed fork");
+        assert_eq!(e.full_name, "group/sub/hello");
+        assert_eq!(e.web_url, "https://gitlab.com/group/sub/hello");
+        assert_eq!(e.active_at.as_deref(), Some("2026-08-24T09:15:00.000Z"));
+        assert_eq!(e.stars, Some(4));
+        assert!(!e.is_private);
+        assert_eq!(e.default_branch.as_deref(), Some("main"));
+        // `internal` is members-only, so it locks like `private` does.
+        let internal = serde_json::json!({
+            "path_with_namespace": "group/internal",
+            "visibility": "internal"
+        });
+        assert!(fork_entry_from_project(&internal).unwrap().is_private);
+        let private = serde_json::json!({
+            "path_with_namespace": "group/private",
+            "visibility": "private"
+        });
+        assert!(fork_entry_from_project(&private).unwrap().is_private);
+        // An unreadable visibility locks rather than claiming public.
+        let unknown = serde_json::json!({ "path_with_namespace": "group/unknown" });
+        let e = fork_entry_from_project(&unknown).unwrap();
+        assert!(e.is_private);
+        assert_eq!(e.stars, None);
+        assert_eq!(e.active_at, None);
+        // A malformed entry is skipped, never fatal.
+        assert!(fork_entry_from_project(&serde_json::json!({ "web_url": "x" })).is_none());
+        assert!(
+            fork_entry_from_project(&serde_json::json!({ "path_with_namespace": "" })).is_none()
+        );
     }
 }

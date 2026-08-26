@@ -22,8 +22,8 @@ use crate::forge::bitbucket::BitbucketForge;
 use crate::forge::github::GitHubForge;
 use crate::forge::gitlab::GitLabForge;
 use crate::forge::model::{
-    Capabilities, ForgeForkResult, ForgeRepoList, ForgeSearchList, ForgeStatus, Implemented,
-    Provider, ProviderFeatures,
+    Capabilities, ForgeForkActivity, ForgeForkDivergence, ForgeForkResult, ForgeRepoList,
+    ForgeSearchList, ForgeStatus, Implemented, Provider, ProviderFeatures,
 };
 
 /// A hosted-git provider GitDesktop can talk to — one method per hosted
@@ -319,6 +319,12 @@ pub(crate) const README_CANDIDATES: &[&str] = &["README.md", "readme.md", "READM
 pub(crate) const FORK_POLL_ATTEMPTS: u32 = 5;
 /// Delay between fork-readiness attempts (skipped before the first).
 pub(crate) const FORK_POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How many forks the Insights fork-activity card lists. Shared by all three
+/// providers so the card's length is provider-independent: GitLab and Bitbucket ask
+/// their server for exactly this many, GitHub ranks a larger page down to it (its
+/// `/forks` endpoint can't sort by push date).
+pub(crate) const FORK_LIST_CAP: usize = 10;
 
 /// Cap a README body at [`README_CAP`] bytes, truncating on a UTF-8 `char`
 /// boundary (never mid code-point).
@@ -2925,6 +2931,106 @@ pub async fn forge_repo_set_star(repo_path: String, starred: bool) -> AppResult<
     }
 }
 
+// ── Fork activity (Insights) ─────────────────────────────────────────────────
+
+/// The repo's most-recently-active forks plus the provider's total fork count, for
+/// the Insights fork-activity card. Wired for all three providers.
+#[tauri::command]
+pub async fn forge_fork_activity(repo_path: String) -> AppResult<ForgeForkActivity> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => gitlab::fork_activity(&repo_path).await,
+        Some((Provider::Bitbucket, _)) => bitbucket::fork_activity(&repo_path).await,
+        _ => github::fork_activity(&repo_path).await,
+    }
+}
+
+/// The card's totals — `(total_count, default_branch)` — from the provider's repo
+/// object, which GitHub and GitLab spell identically (`forks_count`,
+/// `default_branch`). An absent or unparsed object yields `(None, None)`: the fork
+/// rows still render, and a count the read couldn't measure stays absent rather than
+/// standing in the fetched page's length, which is capped and would read as the total.
+pub(crate) fn fork_totals_from_meta(
+    meta: Option<&serde_json::Value>,
+) -> (Option<u64>, Option<String>) {
+    use serde_json::Value;
+    (
+        meta.and_then(|v| v.get("forks_count"))
+            .and_then(Value::as_u64),
+        meta.and_then(|v| v.get("default_branch"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    )
+}
+
+/// The owner of a fork's `owner/name`, with BOTH segments validated through the
+/// shared path-segment grammar — the pair is interpolated into an API path. Exactly
+/// two segments: a fork row addressed for compare is GitHub-only, where nested
+/// namespaces don't exist.
+fn fork_owner_from_full_name(full_name: &str) -> AppResult<String> {
+    let mut parts = full_name.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(name), None) => {
+            validate_owner(owner)?;
+            validate_repo_name(name)?;
+            Ok(owner.to_string())
+        }
+        _ => Err(AppError::InvalidArgument(format!(
+            "invalid fork repository: {full_name}"
+        ))),
+    }
+}
+
+/// Whether a branch name is safe to interpolate into a compare `basehead`. Slashes
+/// stay legal (ordinary in ref names, and the greedy `...` capture handles them);
+/// `..` is refused because it would make the separator ambiguous, a leading `-`
+/// because it would read as a flag, and whitespace/control bytes because they can't
+/// reach argv intact. `#`, `?` and `%` are refused because the endpoint goes through
+/// a URL parser: each is git-legal in a ref yet would truncate the path at a fragment
+/// or query, or decode to a different ref — and the API would answer 200 for the
+/// WRONG branch, which renders as a confident number.
+fn validate_compare_branch(branch: &str) -> AppResult<()> {
+    if branch.is_empty()
+        || branch.starts_with('-')
+        || branch.contains("..")
+        || branch.contains(['#', '?', '%'])
+        || branch.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid branch name: {branch}"
+        )));
+    }
+    Ok(())
+}
+
+/// How far one fork's branch has diverged from a base branch on this repo. GitHub
+/// only — the other arms error, and the frontend gates the control on the
+/// `forkCompare` flag.
+#[tauri::command]
+pub async fn forge_fork_divergence(
+    repo_path: String,
+    fork_full_name: String,
+    base_branch: String,
+    fork_branch: String,
+) -> AppResult<ForgeForkDivergence> {
+    // Validate before ANY dispatch: all three values are interpolated into the
+    // compare path.
+    let fork_owner = fork_owner_from_full_name(&fork_full_name)?;
+    validate_compare_branch(&base_branch)?;
+    validate_compare_branch(&fork_branch)?;
+    match detect_non_github(&repo_path).await {
+        // GitLab's cross-project compare returns the full commit+diff payload
+        // (85.9 MB / 49 s measured on a stale fork, probed 2026-08-26) and Bitbucket
+        // has no cross-repo compare endpoint, so neither provider gets this read.
+        Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
+            "Fork compare isn't available on GitLab.".into(),
+        )),
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Fork compare isn't available on Bitbucket.".into(),
+        )),
+        _ => github::fork_divergence(&repo_path, &fork_owner, &base_branch, &fork_branch).await,
+    }
+}
+
 /// Canonicalize a provider's raw visibility string to one of the three neutral
 /// values (`public` / `private` / `internal`), case-insensitively — gh emits
 /// uppercase, GitLab lowercase. An unrecognized/empty value maps to `None` so
@@ -4393,6 +4499,69 @@ mod tests {
         // The gate also refuses an EMPTY authority, so a file:// remote no longer
         // yields its filesystem path as a bogus owner/repo slug.
         assert_eq!(remote_path("file:///srv/repos/x"), None);
+    }
+
+    #[test]
+    fn fork_totals_stay_absent_when_the_repo_read_fails() {
+        // Both providers spell the repo object's keys the same way.
+        let meta = serde_json::json!({ "forks_count": 137, "default_branch": "main" });
+        assert_eq!(
+            fork_totals_from_meta(Some(&meta)),
+            (Some(137), Some("main".to_string()))
+        );
+        // The degrade path: no repo object at all (a failed or unparsed read).
+        assert_eq!(fork_totals_from_meta(None), (None, None));
+        // A repo object missing either field reports that field absent, not zero
+        // and not an empty branch name.
+        let sparse = serde_json::json!({ "name": "hello" });
+        assert_eq!(fork_totals_from_meta(Some(&sparse)), (None, None));
+        // A zero total is a real measurement and must survive as Some(0).
+        let unforked = serde_json::json!({ "forks_count": 0, "default_branch": "trunk" });
+        assert_eq!(
+            fork_totals_from_meta(Some(&unforked)),
+            (Some(0), Some("trunk".to_string()))
+        );
+    }
+
+    #[test]
+    fn fork_owner_requires_exactly_two_safe_segments() {
+        assert_eq!(
+            fork_owner_from_full_name("octocat/hello").unwrap(),
+            "octocat"
+        );
+        // A leading dot/underscore repo is legitimate and still passes the grammar.
+        assert_eq!(fork_owner_from_full_name("octocat/.github").unwrap(), "octocat");
+        // A space, a traversal segment, or a flag-leading segment is refused.
+        assert!(fork_owner_from_full_name("bad owner/x").is_err());
+        assert!(fork_owner_from_full_name("../x").is_err());
+        assert!(fork_owner_from_full_name("-flag/x").is_err());
+        assert!(fork_owner_from_full_name("owner/-flag").is_err());
+        // Not exactly two segments: a bare name, a nested path, an empty segment.
+        assert!(fork_owner_from_full_name("octocat").is_err());
+        assert!(fork_owner_from_full_name("group/sub/name").is_err());
+        assert!(fork_owner_from_full_name("octocat/").is_err());
+        assert!(fork_owner_from_full_name("").is_err());
+    }
+
+    #[test]
+    fn compare_branch_admits_slashes_and_refuses_separator_breakers() {
+        assert!(validate_compare_branch("main").is_ok());
+        // Slashes are ordinary in ref names and must not be rejected.
+        assert!(validate_compare_branch("feature/slashed-branch").is_ok());
+        // `..` would make the `...` basehead separator ambiguous.
+        assert!(validate_compare_branch("a/b..c").is_err());
+        assert!(validate_compare_branch("..").is_err());
+        assert!(validate_compare_branch("").is_err());
+        assert!(validate_compare_branch("-flag").is_err());
+        assert!(validate_compare_branch("has space").is_err());
+        assert!(validate_compare_branch("has\ttab").is_err());
+        assert!(validate_compare_branch("has\nnewline").is_err());
+        assert!(validate_compare_branch("has\u{0}null").is_err());
+        // URL-parser hazards: `#` truncates at the fragment and `?` at the query, so
+        // the compare would silently answer for a DIFFERENT ref; `%` decodes into one.
+        assert!(validate_compare_branch("feat#1").is_err());
+        assert!(validate_compare_branch("a?b").is_err());
+        assert!(validate_compare_branch("feat%2Fx").is_err());
     }
 
     #[test]

@@ -8,11 +8,12 @@ use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::model::{
-    namespace_set, Capabilities, ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList,
-    ForgeSearchRepo, ForgeStatus, Implemented, Provider,
+    namespace_set, Capabilities, ForgeForkActivity, ForgeForkDivergence, ForgeForkEntry,
+    ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
+    Implemented, Provider,
 };
 use crate::forge::{
-    validate_owner, validate_repo_name, Forge, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
+    validate_owner, validate_repo_name, Forge, FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
 };
 use crate::github::pr::{gh_list_repos, gh_status, gh_viewer_login, GhRepo, GhStatus};
 use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
@@ -1218,6 +1219,113 @@ pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
     Ok(Some(crate::forge::cap_readme(&out.stdout_lossy())))
 }
 
+// ── Fork activity (Insights) ─────────────────────────────────────────────────
+
+/// How many forks one `/forks` page carries. GitHub can't sort that endpoint by push
+/// date (its sorts are newest|oldest|stargazers|watchers), so a wide page is ranked
+/// client-side down to [`FORK_LIST_CAP`].
+const FORKS_PER_PAGE: u32 = 100;
+
+/// One fork row from a `repos/{slug}/forks` item. Tolerant: a missing/empty
+/// `full_name` skips the entry rather than sinking the list; every other field
+/// degrades to absent.
+fn fork_entry_from_value(item: &Value) -> Option<ForgeForkEntry> {
+    let full_name = item.get("full_name").and_then(Value::as_str)?.to_string();
+    if full_name.is_empty() {
+        return None;
+    }
+    let str_field = |k: &str| item.get(k).and_then(Value::as_str).map(str::to_string);
+    Some(ForgeForkEntry {
+        full_name,
+        web_url: str_field("html_url").unwrap_or_default(),
+        active_at: str_field("pushed_at"),
+        stars: item.get("stargazers_count").and_then(Value::as_u64),
+        is_private: item.get("private").and_then(Value::as_bool).unwrap_or(false),
+        default_branch: str_field("default_branch"),
+    })
+}
+
+/// Rank forks most-recently-pushed first and cap the list. GitHub stamps every REST
+/// timestamp as `YYYY-MM-DDTHH:MM:SSZ` — one fixed-width UTC format — so comparing
+/// the strings orders the instants. A fork with no push date sorts last rather than
+/// claiming the top; the sort is stable, so ties keep GitHub's own order.
+fn rank_forks(mut forks: Vec<ForgeForkEntry>) -> Vec<ForgeForkEntry> {
+    forks.sort_by(|a, b| match (&a.active_at, &b.active_at) {
+        (Some(x), Some(y)) => y.cmp(x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    forks.truncate(FORK_LIST_CAP);
+    forks
+}
+
+/// The repo's forks + total fork count for the Insights card. Two independent reads,
+/// fanned out: the repo object supplies the totals, `/forks` the rows. A failed repo
+/// read leaves both totals `None` — the card still renders its rows, and the count it
+/// can't measure stays absent rather than reporting the fetched page's size. A failed
+/// LIST read is the card's data and surfaces.
+pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
+    // Pin the origin slug: `gh api`'s `{owner}/{repo}` placeholders resolve to the
+    // PARENT on a fork, which would list the wrong repo's forks.
+    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    let repo_endpoint = format!("repos/{slug}");
+    let forks_endpoint = format!("repos/{slug}/forks?per_page={FORKS_PER_PAGE}&sort=stargazers");
+    let repo_args = ["api", repo_endpoint.as_str()];
+    let forks_args = ["api", forks_endpoint.as_str()];
+    let (repo, forks) = tokio::join!(
+        run_gh(Some(repo_path), &repo_args, GH_TIMEOUT),
+        run_gh(Some(repo_path), &forks_args, GH_TIMEOUT),
+    );
+    let list: Value = serde_json::from_str(&forks?.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse the fork list: {e}")))?;
+    let parsed: Vec<ForgeForkEntry> = list
+        .as_array()
+        .map(|items| items.iter().filter_map(fork_entry_from_value).collect())
+        .unwrap_or_default();
+    let repo = repo
+        .ok()
+        .and_then(|out| serde_json::from_str::<Value>(&out.stdout_lossy()).ok());
+    let (total_count, default_branch) = crate::forge::fork_totals_from_meta(repo.as_ref());
+    Ok(ForgeForkActivity {
+        total_count,
+        default_branch,
+        forks: rank_forks(parsed),
+    })
+}
+
+/// How far `fork_owner`'s `fork_branch` has diverged from this repo's `base_branch`.
+/// The `{base}...{owner}:{branch}` basehead is GitHub's cross-fork compare form;
+/// branch names ride unencoded (the capture is greedy and a ref can never contain
+/// `..`, so slashed names stay unambiguous), and `per_page=1` trims the commits array
+/// while `ahead_by`/`behind_by` remain exact totals. Callers validate both branch
+/// names and the fork slug first (`forge::forge_fork_divergence`).
+pub async fn fork_divergence(
+    repo_path: &str,
+    fork_owner: &str,
+    base_branch: &str,
+    fork_branch: &str,
+) -> AppResult<ForgeForkDivergence> {
+    let slug = crate::github::gh_origin_slug(repo_path).await?;
+    let endpoint =
+        format!("repos/{slug}/compare/{base_branch}...{fork_owner}:{fork_branch}?per_page=1");
+    let out = run_gh(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await?;
+    let compare: Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse the fork comparison: {e}")))?;
+    // Both counts must come from the response: a defaulted 0/0 would render as
+    // "in sync" — a measured-looking answer nothing measured.
+    let count = |key: &str| {
+        compare
+            .get(key)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| AppError::Gh(format!("GitHub's comparison reported no {key}")))
+    };
+    Ok(ForgeForkDivergence {
+        ahead_by: count("ahead_by")?,
+        behind_by: count("behind_by")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1322,6 +1430,75 @@ mod tests {
         assert!(search_repo_from_value(&serde_json::json!({ "name": "x" })).is_none());
         // An empty full_name is also skipped.
         assert!(search_repo_from_value(&serde_json::json!({ "full_name": "" })).is_none());
+    }
+
+    #[test]
+    fn fork_entry_from_value_maps_and_skips_malformed() {
+        let item = serde_json::json!({
+            "full_name": "someone/rust",
+            "html_url": "https://github.com/someone/rust",
+            "pushed_at": "2026-08-20T10:00:00Z",
+            "stargazers_count": 12,
+            "private": true,
+            "default_branch": "trunk"
+        });
+        let e = fork_entry_from_value(&item).expect("parses a well-formed fork");
+        assert_eq!(e.full_name, "someone/rust");
+        assert_eq!(e.web_url, "https://github.com/someone/rust");
+        assert_eq!(e.active_at.as_deref(), Some("2026-08-20T10:00:00Z"));
+        assert_eq!(e.stars, Some(12));
+        assert!(e.is_private);
+        assert_eq!(e.default_branch.as_deref(), Some("trunk"));
+        // A null push date is absence, not a zero timestamp.
+        let quiet = serde_json::json!({ "full_name": "someone/quiet", "pushed_at": null });
+        let e = fork_entry_from_value(&quiet).expect("parses a fork with no push date");
+        assert_eq!(e.active_at, None);
+        assert_eq!(e.stars, None);
+        assert!(!e.is_private);
+        assert_eq!(e.web_url, "");
+        // A missing or empty full_name skips the entry rather than sinking the list.
+        assert!(fork_entry_from_value(&serde_json::json!({ "html_url": "x" })).is_none());
+        assert!(fork_entry_from_value(&serde_json::json!({ "full_name": "" })).is_none());
+    }
+
+    /// Build a fork row with just the fields ranking reads.
+    fn fork_at(name: &str, pushed_at: Option<&str>) -> ForgeForkEntry {
+        ForgeForkEntry {
+            full_name: name.to_string(),
+            web_url: String::new(),
+            active_at: pushed_at.map(str::to_string),
+            stars: None,
+            is_private: false,
+            default_branch: None,
+        }
+    }
+
+    #[test]
+    fn rank_forks_orders_by_push_date_and_sinks_the_undated() {
+        let ranked = rank_forks(vec![
+            fork_at("o/old", Some("2024-01-01T00:00:00Z")),
+            fork_at("o/none", None),
+            fork_at("o/new", Some("2026-08-25T00:00:00Z")),
+            fork_at("o/mid", Some("2025-06-30T23:59:59Z")),
+        ]);
+        let order: Vec<&str> = ranked.iter().map(|f| f.full_name.as_str()).collect();
+        assert_eq!(order, ["o/new", "o/mid", "o/old", "o/none"]);
+    }
+
+    #[test]
+    fn rank_forks_caps_the_list_keeping_the_most_recent() {
+        // 12 dated forks, ascending — the cap must keep the newest ten, newest first.
+        let mut forks: Vec<ForgeForkEntry> = (1..=12)
+            .map(|i| fork_at(&format!("o/f{i}"), Some(&format!("2026-08-{i:02}T00:00:00Z"))))
+            .collect();
+        // Two undated ones must not survive the cap ahead of a dated fork.
+        forks.push(fork_at("o/undated-a", None));
+        forks.push(fork_at("o/undated-b", None));
+        let ranked = rank_forks(forks);
+        assert_eq!(ranked.len(), FORK_LIST_CAP);
+        assert_eq!(ranked[0].full_name, "o/f12");
+        assert_eq!(ranked[FORK_LIST_CAP - 1].full_name, "o/f3");
+        assert!(!ranked.iter().any(|f| f.active_at.is_none()));
     }
 
     #[test]

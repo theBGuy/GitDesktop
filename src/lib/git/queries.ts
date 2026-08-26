@@ -785,6 +785,50 @@ export function useRepoTraffic(repo: string, enabled: boolean) {
   });
 }
 
+export function useForkActivity(repo: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["repo", repo, "insights", "forks"] as const,
+    queryFn: () => api.forgeForkActivity(repo),
+    enabled,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+/** Ahead/behind for ONE fork, keyed per fork *and* per branch pair so a default-branch
+ *  change can't serve the previous pair's counts. `enabled` carries the row's explicit
+ *  request — nothing compares until the user asks — and both branch names must be
+ *  known to have a comparison at all. */
+export function useForkDivergence(
+  repo: string,
+  forkFullName: string,
+  baseBranch: string | null,
+  forkBranch: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      "repo",
+      repo,
+      "insights",
+      "fork-compare",
+      forkFullName,
+      baseBranch ?? "",
+      forkBranch ?? "",
+    ] as const,
+    queryFn: () =>
+      api.forgeForkDivergence(
+        repo,
+        forkFullName,
+        baseBranch ?? "",
+        forkBranch ?? "",
+      ),
+    enabled: enabled && !!baseBranch && !!forkBranch,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
 export function useRepoDependencies(repo: string, enabled: boolean) {
   return useQuery({
     queryKey: ["repo", repo, "insights", "dependencies"] as const,
@@ -3020,6 +3064,8 @@ const NO_FORGE_STATUS: ForgeStatus = {
     mrThreadCreate: false,
     mrReviewSubmit: false,
     mrDraftToggle: false,
+    forkActivity: false,
+    forkCompare: false,
   },
 };
 

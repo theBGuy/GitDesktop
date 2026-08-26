@@ -323,6 +323,11 @@ export const capabilities: Capability[] = [
   {
     group: "CI, tags & releases",
     label:
+      "Fork activity — a repo's recently active forks, with ahead/behind on GitHub",
+  },
+  {
+    group: "CI, tags & releases",
+    label:
       "Findings tab — GitHub Dependabot/scanning alerts & advisories; GitLab SAST, secrets & code quality",
     highlight: true,
   },

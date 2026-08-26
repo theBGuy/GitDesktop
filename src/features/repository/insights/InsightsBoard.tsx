@@ -8,6 +8,7 @@ import {
   useCommunityInsights,
   useContributorActivity,
   useForgeStatus,
+  useForkActivity,
   usePunchCard,
   useRepoDependencies,
   useRepoTraffic,
@@ -22,22 +23,17 @@ import {
   type RunDurationPoint,
 } from "./charts";
 import { DependenciesCard } from "./DependenciesCard";
+import { ForkActivityCard } from "./ForkActivityCard";
 import {
   BitbucketLinkOutsCard,
   GitLabLinkOutsCard,
   LinkOutsCard,
 } from "./LinkOutsCard";
 import { PunchCard } from "./PunchCard";
-import { fmt, InsightCard } from "./primitives";
+import { Empty, fmt, InsightCard } from "./primitives";
 import { TrafficCard } from "./TrafficCard";
 
 const WINDOW_WEEKS = 52;
-
-function Empty({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="py-6 text-center text-xs text-muted-foreground">{children}</p>
-  );
-}
 
 function ChartSkeleton() {
   return <Skeleton className="h-40 w-full" />;
@@ -108,6 +104,12 @@ export function InsightsBoard({
   // APIs, so fire them ONLY for GitHub. A `!isGitLab` shape would (with insights
   // now enabled for Bitbucket) light them up on Bitbucket repos too.
   const canGhOnly = canGh && gh.data?.provider === "github";
+  // Fork activity is hosted-but-all-forge (like CI), so it rides its own flag
+  // rather than the GitHub-only gate; ahead/behind is a separate flag because
+  // only GitHub can compare across forks.
+  const canForks = active && forgeFeatureReady(gh.data, "forkActivity");
+  const canCompare = forgeFeatureReady(gh.data, "forkCompare");
+  const forkProvider = gh.data?.provider ?? null;
 
   // These are heavy (full-history git scans + gh calls); gate them on the
   // Insights tab being visible. <Activity> keeps this mounted while hidden but
@@ -120,6 +122,7 @@ export function InsightsBoard({
   const community = useCommunityInsights(repoPath, canGhOnly);
   const traffic = useRepoTraffic(repoPath, canGhOnly);
   const dependencies = useRepoDependencies(repoPath, canGhOnly);
+  const forkActivity = useForkActivity(repoPath, canForks);
   const runs = useWorkflowRuns(repoPath, canGh, active);
 
   const completed = (runs.data ?? []).filter((r) => r.status === "completed");
@@ -140,7 +143,10 @@ export function InsightsBoard({
     }));
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    // `h-full`, not `flex-1`: the tab host this mounts in is a block element, so
+    // a flex-item sizing hint is inert there and the grid's natural height would
+    // leak into the document instead of scrolling inside the board.
+    <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between border-b p-2">
         <h2 className="px-1 text-xs font-medium text-muted-foreground">
           Insights
@@ -233,6 +239,33 @@ export function InsightsBoard({
                   No completed{" "}
                   {isGitLab || isBitbucket ? "pipelines" : "workflow runs"} yet.
                 </Empty>
+              )}
+            </InsightCard>
+          )}
+
+          {canForks && forkProvider && (
+            <InsightCard
+              title="Fork activity"
+              action={
+                forkActivity.data?.totalCount != null && (
+                  <span className="text-[11px] text-muted-foreground tabular-nums">
+                    {fmt(forkActivity.data.totalCount)}{" "}
+                    {forkActivity.data.totalCount === 1 ? "fork" : "forks"}
+                  </span>
+                )
+              }
+            >
+              {forkActivity.isPending ? (
+                <ChartSkeleton />
+              ) : forkActivity.data ? (
+                <ForkActivityCard
+                  repoPath={repoPath}
+                  data={forkActivity.data}
+                  provider={forkProvider}
+                  canCompare={canCompare}
+                />
+              ) : (
+                <Empty>Fork activity is unavailable.</Empty>
               )}
             </InsightCard>
           )}
