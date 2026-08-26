@@ -19,7 +19,8 @@ export interface CommitMenuActions {
 /**
  * The position-independent commit actions — no amend/reset/squash/reorder, which
  * assume contiguous recent history. Shared by History's search results and the
- * Compare tab's ahead/behind lists so the two can't drift on wording or order.
+ * Compare tab's ahead/behind lists so the two can't drift on item wording or
+ * order.
  */
 export function CommitContextMenuItems({
   hash,

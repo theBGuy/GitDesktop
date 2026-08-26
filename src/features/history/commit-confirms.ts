@@ -21,7 +21,8 @@ export const checkoutCommitConfirm = (hash: string) =>
   checkoutDetachedConfirm("commit", short(hash));
 
 /** A silent checkout reads as a dead end from Compare, which flips to its
- *  detached-HEAD empty state, so every route confirms with the same sentence. */
+ *  detached-HEAD empty state, so every commit-checkout route confirms with this
+ *  same sentence. */
 export function checkoutCommitSuccessToast(hash: string) {
   return `Checked out ${short(hash)} — HEAD is detached`;
 }

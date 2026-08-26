@@ -156,8 +156,8 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     Boolean(compareBranch && compareBranch !== currentName && ahead.length > 0),
   );
 
-  // The commit the one shared context menu acts on. `onCurrentBranch` is true for
-  // an ahead commit, the only side whose changes this branch can revert.
+  // The commit the one shared context menu acts on. Revert is only OFFERED for
+  // ahead commits — the side already in this branch's history.
   const [menuTarget, setMenuTarget] = useState<{
     hash: string;
     onCurrentBranch: boolean;

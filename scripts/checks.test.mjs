@@ -44,6 +44,7 @@ const hoverReveal = scanner("hover-reveal");
 const modKey = scanner("hand-rolled-mod-key");
 const setQueryData = scanner("setQueryData-noop");
 const bareMutate = scanner("bare-mutate-in-converted-trees");
+const menuSuppression = scanner("context-menu-suppression");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -264,6 +265,58 @@ test("bare-mutate-in-converted-trees applies to the converted trees only", () =>
   ]) {
     assert.equal(appliesTo(file), false, `should not scan ${file}`);
   }
+});
+
+test("context-menu-suppression flags the state-reset-then-preventDefault shape", () => {
+  const inline = [
+    "function handleContextMenu(e) {",
+    "  const row = e.target.closest('[data-repo-path]');",
+    "  if (!row) {",
+    "    setMenuRepo(null);",
+    "    e.preventDefault();",
+    "  }",
+    "}",
+  ].join("\n");
+  assert.deepEqual(menuSuppression(inline), [4]);
+  // stopPropagation written out by hand is the same class: the constraint lives
+  // in the helper's doc comment, so an inline copy is what drifts next.
+  const handRolled = [
+    "setMenuTarget(null);",
+    "e.stopPropagation();",
+    "e.preventDefault();",
+  ].join("\n");
+  assert.deepEqual(menuSuppression(handRolled), [1]);
+});
+
+test("context-menu-suppression leaves the helper route and its definition alone", () => {
+  const fixed = [
+    "setMenuPath(null);",
+    "suppressContextMenu(e);",
+    "return;",
+  ].join("\n");
+  assert.deepEqual(menuSuppression(fixed), []);
+  // The helper itself holds the preventDefault with no state reset to pair with.
+  const helper = [
+    "export function suppressContextMenu(e) {",
+    "  e.stopPropagation();",
+    "  e.preventDefault();",
+    "}",
+  ].join("\n");
+  assert.deepEqual(menuSuppression(helper), []);
+});
+
+test("context-menu-suppression does not pair across a block boundary", () => {
+  // `[^}]` is the bound: an unrelated null reset and an unrelated preventDefault
+  // in two different handlers are not this idiom.
+  const separate = [
+    "function clearSelection() {",
+    "  setMenuRepo(null);",
+    "}",
+    "function onKeyDown(e) {",
+    "  e.preventDefault();",
+    "}",
+  ].join("\n");
+  assert.deepEqual(menuSuppression(separate), []);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {

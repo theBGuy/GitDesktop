@@ -1,3 +1,3 @@
-- Right-clicking empty space in the History list, a commit's file list, or the
-  repository list no longer opens an empty context-menu popup that swallowed the
-  next click.
+- Right-clicking empty space in the History list, a file list (commit, PR, or
+  Compare views), or the repository list no longer opens an empty,
+  click-swallowing context-menu popup.

@@ -206,6 +206,18 @@ const MUTATE_CALL_RE = /\.mutate\s*\(/;
 // so the joined view adds no reach.
 const DESTRUCTURED_MUTATE_RE = /\bconst\s*\{[^}]*\bmutate\b[^}]*\}\s*=/g;
 
+// The broken shared-ContextMenu suppression: a `setMenu<X>(null)` reset followed
+// by a bare `preventDefault()`. Base UI's trigger keeps its own same-element
+// bubble listener, so without the `stopPropagation` that `suppressContextMenu`
+// carries the menu still opens — as an empty popup whose backdrop swallows the
+// next click. A fixed site holds no `preventDefault` token at all, so the helper
+// needs no exemption here and a file mixing one fixed and one broken path still
+// reports. Two deliberate bounds: `[^}]` keeps the pair inside one block, and
+// the order is set-then-prevent (the reverse reads clean — the one fail-open,
+// zero instances today).
+const CONTEXT_MENU_SUPPRESS_RE =
+  /\bset[A-Z]\w*\(\s*null\s*\)[^}]{0,160}?\.preventDefault\s*\(\s*\)/g;
+
 // Vendored shadcn/Base UI primitives are off-limits to edit (CLAUDE.md), so a
 // hit inside them could only ever be silenced by an allowlist entry, never
 // fixed. Their CALL SITES — the app code that composes them — stay scanned.
@@ -287,6 +299,14 @@ export const CHECKS = [
     allowlist: [],
     message:
       "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close, a rail section switch, or a keyed pane remount mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
+  },
+  {
+    name: "context-menu-suppression",
+    appliesTo: notVendoredUi,
+    scan: perFile(CONTEXT_MENU_SUPPRESS_RE),
+    allowlist: [],
+    message:
+      "a shared ContextMenu's non-target right-click path routes through suppressContextMenu (src/lib/context-menu.ts) — preventDefault alone leaves Base UI's trigger handler to open the menu as an empty, click-swallowing popup",
   },
 ];
 

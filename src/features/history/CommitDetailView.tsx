@@ -49,6 +49,7 @@ import { toastError } from "@/lib/toast";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import {
   checkoutCommitConfirm,
+  checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
   revertCommitConfirm,
 } from "./commit-confirms";
@@ -241,7 +242,10 @@ export function CommitDetailView({
   // menu. All three act on the `hash` PROP for the same reason `copyHash` does.
   async function doCheckoutCommit() {
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
-    checkoutCommit.mutate(hash, { onError });
+    checkoutCommit.mutate(hash, {
+      onSuccess: () => toast.success(checkoutCommitSuccessToast(hash)),
+      onError,
+    });
   }
 
   async function doRevertCommit() {
