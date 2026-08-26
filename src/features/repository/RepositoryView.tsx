@@ -717,7 +717,8 @@ export function RepositoryView() {
       )}
       {/* Hoisted: its success handler navigates to the Pulls tab, so a
           panel-hosted instance would conceal with the tab that launched it
-          mid-close. One instance here serves every opener. */}
+          mid-close and not finish closing until that tab is next shown. One
+          instance here serves every opener. */}
       <CreateLocalPrDialog
         repoPath={repoPath}
         defaultHead={localPrCreate?.defaultHead}

@@ -211,6 +211,14 @@ const DESTRUCTURED_MUTATE_RE = /\bconst\s*\{[^}]*\bmutate\b[^}]*\}\s*=/g;
 // fixed. Their CALL SITES — the app code that composes them — stay scanned.
 const notVendoredUi = (file) => !file.startsWith("src/components/ui/");
 
+// An effect whose FIRST statement is an `open` guard — the seed-on-open shape,
+// in both its spellings (`if (open) …` / `if (!open) return`). Run over the
+// whole-file view because the guard sits on the line after the arrow. Matching
+// the first statement rather than an `open` read anywhere in the body is what
+// keeps this off the many effects that merely gate a query on the same flag.
+const SEED_ON_OPEN_RE =
+  /use(?:Layout)?Effect\(\(\)\s*=>\s*\{\s*if\s*\(!?open\b/g;
+
 // `<Activity` as a JSX open tag. The lookahead is what separates it from the
 // app's own `<ActivityDock>`/`<ActivityBell>`/`<ActivityStrip>` components, and
 // comment stripping is what keeps the many prose mentions of `<Activity>` clean.
@@ -294,6 +302,56 @@ export const CHECKS = [
       "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close, a rail section switch, or a keyed pane remount mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
   },
   {
+    name: "seed-effect-on-open",
+    // The hook itself opens with the very guard it exists to replace.
+    appliesTo: (file) => file !== "src/lib/use-seed-on-open.ts",
+    scan: perFile(SEED_ON_OPEN_RE),
+    // Three kinds of entry, none of them an open-transition reset:
+    // DATA-ARRIVAL seeds (the trigger is the value landing, which the hook's
+    // once-per-open latch would fire before), effects that already carry their
+    // own ref latch keyed on something the hook doesn't know (a scope, a task
+    // id, the previous `open`), and effects that merely tear down or register
+    // on `open` and are idempotent by construction. Every one of them is safe
+    // to repeat — the property the open-transition resets lack.
+    allowlist: [
+      // Seeds the category once the async list arrives; `if (!categoryId)`.
+      "src/features/discussions/CreateDiscussionDialog.tsx",
+      // Defaults the workflow once `dispatchable` arrives; `!workflow`.
+      "src/features/actions/RunWorkflowDialog.tsx",
+      // Seeds the Bitbucket workspace once workspaces load; empty-field only.
+      "src/features/repository/PublishDialog.tsx",
+      // Seeds the URL field once the current remote URL query resolves.
+      "src/features/repository/RemoteUrlDialog.tsx",
+      // Base reconciler: re-seeds only when the current base isn't a valid
+      // option for the active target, so it never fights the user's edit.
+      "src/features/pulls/CreatePrDialog.tsx",
+      // Re-seeds when the caller re-requests a mode while already open (the
+      // add action fired from the palette over an open list), and is a layout
+      // effect so a reopen never paints one frame of the mode it closed on.
+      "src/features/repository/SubmodulesDialog.tsx",
+      // Seeds the draft once `automations.data` arrives, behind its own latch.
+      "src/features/automations/RepoAutomationsDialog.tsx",
+      // Same, latched per SCOPE — switching scope re-seeds deliberately.
+      "src/features/branch-rules/BranchRulesDialog.tsx",
+      // Seeds the applied set once memberships settle, behind `seededSettled`.
+      "src/features/conversations/ProjectsPopover.tsx",
+      // Latched per task id, and the close arm aborts in-flight AI streams
+      // whose callbacks would otherwise resolve into the NEXT task opened.
+      "src/features/scripts/TaskDialog.tsx",
+      // Close-side only: clears the selection, a no-op while open.
+      "src/features/history/FileHistoryDialog.tsx",
+      // A scroll listener with a cleanup, plus a close-side key-set clear —
+      // re-registering on a re-show is the correct behavior, not a reset.
+      "src/components/mention-autocomplete.tsx",
+      // Prefetch loop; `prefetchQuery` honors staleTime, so a repeat is free.
+      "src/features/repository/BranchSwitcher.tsx",
+      // Registers the open dialog with the native-menu gate; add/remove pair.
+      "src/lib/hotkeys/modal-gate.ts",
+    ],
+    message:
+      "an open-transition reset must ride useSeedOnOpen (src/lib/use-seed-on-open.ts) — a hidden <Activity> tab re-mounts its effects on show, so a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires and wipes the user's draft; a data-arrival or otherwise idempotent seed needs an allowlist entry with rationale",
+  },
+  {
     name: "lone-activity-boundary",
     // Both directions ride the allowlist: a hit anywhere else is a violation,
     // and TabPanel losing its own `<Activity>` reads as a stale entry. Residual:
@@ -303,7 +361,7 @@ export const CHECKS = [
     scan: perLine(ACTIVITY_JSX_RE),
     allowlist: ["src/features/repository/RepositoryView.tsx"],
     message:
-      "a tab panel's <Activity> must be paired with PanelPortalBoundary and PanelActivityBoundary, or its dialogs and popups strand over the wrong tab — render TabPanel (RepositoryView.tsx), never a second <Activity>",
+      "a tab panel's <Activity> must be paired with PanelPortalBoundary and PanelActivityBoundary, or its dialogs and popups strand over the wrong tab — render TabPanel (RepositoryView.tsx) rather than a second <Activity>, or extend the allowlist deliberately for a non-tab Activity",
   },
 ];
 

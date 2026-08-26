@@ -48,6 +48,7 @@ import {
 } from "@/lib/settings/queries";
 import { ignoreToast, toastError, toastErrorWithNote } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
 /** Which list the dialog opens on — exported for the palette actions that route
@@ -248,14 +249,10 @@ export function RepositoryFilesDialog({
   // user picks inside an open dialog isn't pulled back by a re-render. Gated on
   // aiEnabled here too — the callers all gate already, but a future opener must
   // not be able to land the dialog on a tab whose button isn't rendered.
-  const wasOpen = useRef(open);
-  useEffect(() => {
-    if (open && !wasOpen.current) {
-      const target = initialTab ?? "tracked";
-      setTab(target === "ai" && !aiEnabled ? "tracked" : target);
-    }
-    wasOpen.current = open;
-  }, [open, initialTab, aiEnabled]);
+  useSeedOnOpen(open, () => {
+    const target = initialTab ?? "tracked";
+    setTab(target === "ai" && !aiEnabled ? "tracked" : target);
+  });
 
   // Hiding AI features takes their tab with it, mid-open included.
   useEffect(() => {

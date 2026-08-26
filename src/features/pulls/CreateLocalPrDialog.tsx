@@ -43,7 +43,7 @@ import {
 
 // Rendered exactly ONCE, hoisted in RepositoryView — never render it inside a tab
 // panel. Its success handler's `setRepoTab("pulls")` conceals a panel host with the
-// tab it left, so the dialog would stay open behind Pulls instead of closing.
+// tab it left, so the close and unmount would wait until that tab is next shown.
 export function CreateLocalPrDialog({
   repoPath,
   defaultBase,

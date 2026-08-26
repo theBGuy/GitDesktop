@@ -56,7 +56,7 @@ import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import {
   consumeLastFailed,
-  isCreatingPrInRepo,
+  isCreatingPrFor,
   settlePrCreate,
   startPrCreate,
   useIsCreatingPr,
@@ -368,8 +368,8 @@ export function CreatePrDialog({
         });
         // This dialog is panel-hosted under <Activity>, so the success path must
         // only close — never setRepoTab/selectPr, which would conceal this panel
-        // and leave the dialog open behind the tab it landed on. Want navigation?
-        // Hoist it to RepositoryView first, like CreateLocalPrDialog.
+        // mid-close and defer the close and unmount until it is next shown. Want
+        // navigation? Hoist it to RepositoryView first, like CreateLocalPrDialog.
         onOpenChange(false);
         // Draft gate: a draft PR fires no review unless the user opted into reviewing
         // drafts. A gated-out draft is NOT a lost review — an in-app Mark-ready fires
@@ -404,10 +404,13 @@ export function CreatePrDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // seeded values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
+    const h = defaultHead ?? currentName ?? names[0] ?? "";
     // A create still running in the background — or one that failed while the
     // dialog was closed — leaves everything the user typed in form state, and
-    // this reset would blank it on reopen.
-    if (isCreatingPrInRepo(repoPath) || consumeLastFailed(repoPath)) return;
+    // this reset would blank it on reopen. Both signals are judged against the
+    // head this seed WOULD land on: a create running on another branch must not
+    // preserve its draft in a dialog the user opened for this one.
+    if (isCreatingPrFor(repoPath, h) || consumeLastFailed(repoPath, h)) return;
     aiDescriptionRef.current = false;
     setReviewers([]);
     setLabels(new Set());
@@ -420,7 +423,6 @@ export function CreatePrDialog({
     // Reset the target to the default (parent) every open, so a prior fork/parent
     // choice doesn't leak into the next PR.
     setTarget("upstream");
-    const h = defaultHead ?? currentName ?? names[0] ?? "";
     const fallbackBase =
       defaultBranch.data && defaultBranch.data !== h
         ? defaultBranch.data
@@ -457,6 +459,11 @@ export function CreatePrDialog({
   // Survives this dialog closing, unlike `isSubmitting` — a create dismissed
   // mid-flight still owns the head branch until it settles.
   const creatingThisHead = useIsCreatingPr(repoPath, head);
+  // The RE-ENTRY case only. This submit claims the lane synchronously, so the
+  // flag is also true during the user's own create — which `isSubmitting`
+  // already covers, and where a "someone else is creating this" refusal would
+  // be nonsense under a spinning button.
+  const creatingElsewhere = creatingThisHead && !isSubmitting;
 
   // Fork-side fallback base, mirroring the seed logic (default branch, else first
   // non-head) — reused when reconciling back from the parent target.
@@ -1040,7 +1047,7 @@ export function CreatePrDialog({
           </div>
 
           <DialogFooter className="sm:items-center">
-            {creatingThisHead && (
+            {creatingElsewhere && (
               // Why the submit is disabled. It lives here rather than in the
               // scrollable body so it can't scroll out of view, and the button
               // points `aria-describedby` at it.
@@ -1074,11 +1081,11 @@ export function CreatePrDialog({
                       generating ||
                       nothingToMerge ||
                       baseLoading ||
-                      creatingThisHead ||
+                      creatingElsewhere ||
                       Boolean(existingPr)
                     }
                     aria-describedby={
-                      creatingThisHead ? creatingHintId : undefined
+                      creatingElsewhere ? creatingHintId : undefined
                     }
                     title={SUBMIT_HINT}
                   >

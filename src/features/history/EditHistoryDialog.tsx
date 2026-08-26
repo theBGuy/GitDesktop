@@ -201,15 +201,20 @@ export function EditHistoryDialog({
   return (
     <Dialog
       open={open}
-      // Escape and a backdrop press are ignored while the rewrite runs: it is a
-      // seconds-scale local operation whose outcome this dialog still owes the
-      // user, and unmounting mid-flight drops the hand-off to the Changes tab.
+      // Close requests are ignored while the rewrite runs: it is a seconds-scale
+      // local operation whose outcome this dialog still owes the user, and
+      // unmounting mid-flight drops the hand-off to the Changes tab.
       onOpenChange={(next) => {
         if (!next && busy) return;
         onOpenChange(next);
       }}
     >
-      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+      {/* The corner X would be a dead control while the guard above swallows
+          every close path, so it goes away for the duration. */}
+      <DialogContent
+        className="flex max-h-[85vh] flex-col sm:max-w-2xl"
+        showCloseButton={!busy}
+      >
         <DialogHeader>
           <DialogTitle>Edit history</DialogTitle>
           <DialogDescription>

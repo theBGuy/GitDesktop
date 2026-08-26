@@ -149,9 +149,12 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   one breaks Resume. Hard invariant.
 - `<Activity>`-hidden subtrees still render and fetch — gate query `enabled`
   on the active tab; gate agent-surface notifications on the tab being watched.
-- Seed-on-open dialogs use `useSeedOnOpen` (`src/lib/use-seed-on-open.ts`) — a
-  bare `useEffect(() => { if (open) seed(); }, [open])` re-fires when a hidden
-  `<Activity>` tab re-mounts its effects on show, wiping the user's draft.
+- Open-TRANSITION resets ride `useSeedOnOpen` (`src/lib/use-seed-on-open.ts`) —
+  a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires when a hidden
+  `<Activity>` tab re-mounts its effects on show, wiping the user's draft. The
+  carve-out: data-arrival seeds (`[open, thatQuery.data]`) and `onOpenChange`
+  seeds stay bare, and each must be idempotent — never stomping a user's pick.
+  The `seed-effect-on-open` guard allowlists the recorded ones.
 - Zustand + view transitions: `openRepo`/`closeRepo`/`openSettings` issue
   deferred sets that clobber a plain `set()` right after — navigate in ONE
   atomic action.

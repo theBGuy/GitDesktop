@@ -24,11 +24,12 @@ export function usePanelPortalContainer(): HTMLElement | undefined {
 }
 
 /**
- * Whether the surrounding panel is the visible one. A concealed panel hides its
- * popups by CSS alone, so anything that keeps acting on the whole document while
- * open — a modal's scroll lock, its `aria-hidden` marking of everything outside
- * it, its document-level dismissal listeners — has to stand down for as long as
- * the user cannot see it. `true` outside any panel.
+ * Whether the surrounding panel is the visible one. Defense in depth: hiding a
+ * panel does tear down its subtree's effects, taking a modal's scroll lock,
+ * `aria-hidden` marking and dismissal listeners with them — but that teardown is
+ * deferred, so the modal state has to stand down on its own for the window
+ * between the tab switch and it. Escape must never reach a concealed dialog.
+ * `true` outside any panel.
  */
 const PanelActivityContext = createContext(true);
 

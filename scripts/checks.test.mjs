@@ -45,6 +45,7 @@ const modKey = scanner("hand-rolled-mod-key");
 const setQueryData = scanner("setQueryData-noop");
 const bareMutate = scanner("bare-mutate-in-converted-trees");
 const loneActivity = scanner("lone-activity-boundary");
+const seedOnOpen = scanner("seed-effect-on-open");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -265,6 +266,31 @@ test("bare-mutate-in-converted-trees applies to the converted trees only", () =>
   ]) {
     assert.equal(appliesTo(file), false, `should not scan ${file}`);
   }
+});
+
+test("seed-effect-on-open flags both spellings of the open guard", () => {
+  const guarded = [
+    "useEffect(() => {\n  if (open) seedOnOpen();\n}, [open]);",
+    "useEffect(() => {\n  if (!open) return;\n  setTyped('');\n}, [open]);",
+    "useEffect(() => {\n  if (open && ready) seed();\n}, [open, ready]);",
+    "useLayoutEffect(() => {\n  if (open) setMode(initialMode);\n}, [open]);",
+  ];
+  for (const source of guarded)
+    assert.deepEqual(seedOnOpen(source), [1], `should flag ${source}`);
+});
+
+test("seed-effect-on-open ignores the hook and non-first-statement reads", () => {
+  assert.deepEqual(seedOnOpen("useSeedOnOpen(open, seedOnOpen);"), []);
+  // `open` read somewhere in the body is a gate, not a seed — only an effect
+  // that OPENS with the guard is the shape this check is about.
+  const gate = [
+    "useEffect(() => {",
+    "  const el = ref.current;",
+    "  if (!open || !el) return;",
+    "  place(el);",
+    "}, [open]);",
+  ].join("\n");
+  assert.deepEqual(seedOnOpen(gate), []);
 });
 
 test("lone-activity-boundary flags a JSX Activity in either spelling", () => {

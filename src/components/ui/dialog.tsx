@@ -74,14 +74,23 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  ref,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean;
 }) {
   const panelActive = usePanelActive();
-  // DialogContent owns the popup ref — no call site passes one, and re-homing
-  // focus after a conceal needs the element.
+  // Re-homing focus after a conceal needs the popup element, so this tracks it
+  // alongside — never instead of — whatever ref the caller passed.
   const popupRef = React.useRef<HTMLDivElement | null>(null);
+  const attachPopup = React.useCallback(
+    (el: HTMLDivElement | null) => {
+      popupRef.current = el;
+      if (typeof ref === "function") return ref(el);
+      if (ref) ref.current = el;
+    },
+    [ref],
+  );
   // Derived during render because a concealed panel still renders but runs no
   // effects, so the flip back to visible is the only moment an effect can see.
   const [wasConcealed, setWasConcealed] = React.useState(false);
@@ -116,7 +125,7 @@ function DialogContent({
           className,
         )}
         {...props}
-        ref={popupRef}
+        ref={attachPopup}
       >
         {/* Floating UI inside the popup must not portal into a tab panel the
             dialog covers; Base UI still chains it onto this popup's own portal

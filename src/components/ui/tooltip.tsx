@@ -2,6 +2,7 @@
 
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
 
+import { usePanelPortalContainer } from "@/components/panel-portal";
 import { cn } from "@/lib/utils";
 
 function TooltipProvider({
@@ -38,8 +39,11 @@ function TooltipContent({
     TooltipPrimitive.Positioner.Props,
     "align" | "alignOffset" | "side" | "sideOffset"
   >) {
+  // Portal into the surrounding panel like every other popup here, so a tooltip
+  // still showing at tab-switch time conceals with its tab instead of the body.
+  const container = usePanelPortalContainer();
   return (
-    <TooltipPrimitive.Portal>
+    <TooltipPrimitive.Portal container={container}>
       <TooltipPrimitive.Positioner
         align={align}
         alignOffset={alignOffset}

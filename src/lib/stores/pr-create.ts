@@ -12,11 +12,13 @@ export interface PrCreate {
 }
 
 interface PrCreateState {
-  /** repoPath → head branch → the create in flight. Keyed by repo so a repo
-   *  switch reads an empty set rather than another repo's creates, and by head
-   *  because that is what a duplicate would collide on: two creates for
-   *  DIFFERENT heads in one repo are fine — they queue on the per-repo git lock
-   *  and each opens its own PR. */
+  /** repoPath → head branch → the create in flight. The repo key is ALWAYS a
+   *  {@link normPath} spelling, applied at every entry point, so a writer
+   *  holding git's spelling and a reader holding the ui store's land in the
+   *  same bucket. Keyed by repo so a repo switch reads an empty set rather than
+   *  another repo's creates, and by head because that is what a duplicate would
+   *  collide on: two creates for DIFFERENT heads in one repo are fine — they
+   *  queue on the per-repo git lock and each opens its own PR. */
   byRepo: Record<string, Record<string, PrCreate>>;
 }
 
@@ -26,11 +28,18 @@ export const usePrCreateStore = create<PrCreateState>()(() => ({
   byRepo: {},
 }));
 
-/** Repos whose most recent create FAILED, keyed by {@link normPath}. Read once
- *  and cleared by {@link consumeLastFailed}: it exists only so the dialog that
- *  reopens after a background failure knows not to blank what the user typed.
- *  Deliberately not store state — nothing renders from it. */
+/** Repo+head pairs whose most recent create FAILED. Read once and cleared by
+ *  {@link consumeLastFailed}: it exists only so the dialog that reopens after a
+ *  background failure knows not to blank what the user typed. Per HEAD, not per
+ *  repo — a failure on one branch must not preserve its draft in a dialog the
+ *  user opened for another. Deliberately not store state: nothing renders it. */
 const lastFailed = new Set<string>();
+
+// NUL is the one separator neither a path nor a ref name can contain, so
+// ("a b", "c") and ("a", "b c") can't share a key — the same join
+// worktree-removal uses for its listener keys.
+const failKey = (repoPath: string, head: string) =>
+  `${normPath(repoPath)}\u0000${head}`;
 
 /**
  * Claims the lane for one head branch. Returns null once claimed, or the reason
@@ -44,13 +53,14 @@ export function startPrCreate(
   head: string,
   base: string,
 ): string | null {
-  if (usePrCreateStore.getState().byRepo[repoPath]?.[head])
+  const repo = normPath(repoPath);
+  if (usePrCreateStore.getState().byRepo[repo]?.[head])
     return "A pull request for this branch is already being created.";
   usePrCreateStore.setState((s) => ({
     byRepo: {
       ...s.byRepo,
-      [repoPath]: {
-        ...s.byRepo[repoPath],
+      [repo]: {
+        ...s.byRepo[repo],
         [head]: { head, base, startedAt: Date.now() },
       },
     },
@@ -66,39 +76,41 @@ export function settlePrCreate(
   outcome: "success" | "error",
 ): void {
   // Success clears the latch as well as setting it on failure: a stale flag left
-  // by an older failure would skip a legitimate reset days later, on any branch.
-  if (outcome === "error") lastFailed.add(normPath(repoPath));
-  else lastFailed.delete(normPath(repoPath));
+  // by an older failure would skip a legitimate reset days later.
+  if (outcome === "error") lastFailed.add(failKey(repoPath, head));
+  else lastFailed.delete(failKey(repoPath, head));
+  const repo = normPath(repoPath);
   usePrCreateStore.setState((s) => {
-    const repo = s.byRepo[repoPath];
-    if (!repo?.[head]) return s;
-    const { [head]: _settled, ...rest } = repo;
-    const { [repoPath]: _emptied, ...otherRepos } = s.byRepo;
+    const entries = s.byRepo[repo];
+    if (!entries?.[head]) return s;
+    const { [head]: _settled, ...rest } = entries;
+    const { [repo]: _emptied, ...otherRepos } = s.byRepo;
     return {
       byRepo:
         Object.keys(rest).length > 0
-          ? { ...s.byRepo, [repoPath]: rest }
+          ? { ...s.byRepo, [repo]: rest }
           : otherRepos,
     };
   });
 }
 
-/** True while ANY create is in flight for this repo. A FIRE-TIME check: call it
- *  where a decision is made, never to decide what a component paints — use
- *  {@link useIsCreatingPr} or {@link usePrCreates} for render. */
-export function isCreatingPrInRepo(repoPath: string): boolean {
-  const entries = usePrCreateStore.getState().byRepo[repoPath];
-  return entries !== undefined && Object.keys(entries).length > 0;
+/** True while a create for this exact head is in flight. A FIRE-TIME check:
+ *  call it where a decision is made, never to decide what a component paints —
+ *  use {@link useIsCreatingPr} or {@link usePrCreates} for render. */
+export function isCreatingPrFor(repoPath: string, head: string): boolean {
+  return Boolean(
+    usePrCreateStore.getState().byRepo[normPath(repoPath)]?.[head],
+  );
 }
 
-/** Reads and clears the failed-create latch for one repo. */
-export function consumeLastFailed(repoPath: string): boolean {
-  return lastFailed.delete(normPath(repoPath));
+/** Reads and clears the failed-create latch for one repo+head. */
+export function consumeLastFailed(repoPath: string, head: string): boolean {
+  return lastFailed.delete(failKey(repoPath, head));
 }
 
 /** The creates in flight for one repo, oldest first. */
 export function usePrCreates(repoPath: string): PrCreate[] {
-  const entries = usePrCreateStore((s) => s.byRepo[repoPath]);
+  const entries = usePrCreateStore((s) => s.byRepo[normPath(repoPath)]);
   if (!entries) return NO_CREATES;
   return Object.values(entries).sort((a, b) => a.startedAt - b.startedAt);
 }
@@ -108,5 +120,7 @@ export function useIsCreatingPr(
   repoPath: string,
   head: string | undefined,
 ): boolean {
-  return usePrCreateStore((s) => Boolean(head && s.byRepo[repoPath]?.[head]));
+  return usePrCreateStore((s) =>
+    Boolean(head && s.byRepo[normPath(repoPath)]?.[head]),
+  );
 }

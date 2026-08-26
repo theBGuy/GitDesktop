@@ -198,8 +198,8 @@ function BlameLines({
         // (all-zero sha) rows and continuation rows keep the plain gutter cell.
         const interactive = newCommit && isRealCommit(line.hash);
         // Close the dialog AND navigate in the SAME synchronous handler: from
-        // the ChangesPanel host, landing on History conceals this subtree, and a
-        // close that lands after would leave the dialog open behind Changes.
+        // the ChangesPanel host, landing on History conceals this subtree, so a
+        // close that lands after it would wait for Changes to be shown again.
         const goToCommit = () => {
           onOpenChange(false);
           openCommit(line.hash);

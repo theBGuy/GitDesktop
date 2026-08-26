@@ -96,7 +96,7 @@ export function RunWorkflowDialog({
     { id: number; key: string; value: string }[]
   >([]);
 
-  // Reset the form each time the dialog opens, defaulting to the first workflow.
+  // Reset the form each time the dialog opens.
   useSeedOnOpen(open, () => {
     setGitRef(defaultRef);
     setInputs([]);

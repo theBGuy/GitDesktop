@@ -57,8 +57,10 @@ export function PromoteLocalPrDialog({
   const pending = createPr.isPending || update.isPending || posting;
   // Shares the PR-create lane with CreatePrDialog: both push the same head and
   // open a PR for it, so either one running blocks the other (and paints the
-  // same strip above the panels).
-  const creatingHead = useIsCreatingPr(repoPath, pr.head);
+  // same strip above the panels). `!pending` narrows it to the RE-ENTRY case —
+  // promote claims the lane synchronously, so the flag is also true during this
+  // dialog's own run, where `pending` is the honest thing to show.
+  const creatingElsewhere = useIsCreatingPr(repoPath, pr.head) && !pending;
   const creatingHintId = useId();
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
@@ -165,7 +167,7 @@ export function PromoteLocalPrDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogFooter className="sm:items-center">
-          {creatingHead && (
+          {creatingElsewhere && (
             <p id={creatingHintId} className="basis-full text-xs text-warning">
               A pull request for this branch is already being created.
             </p>
@@ -186,8 +188,8 @@ export function PromoteLocalPrDialog({
           </Button>
           <Button
             onClick={promote}
-            disabled={pending || creatingHead}
-            aria-describedby={creatingHead ? creatingHintId : undefined}
+            disabled={pending || creatingElsewhere}
+            aria-describedby={creatingElsewhere ? creatingHintId : undefined}
           >
             {pending && <Spinner data-icon="inline-start" />}
             {draft ? "Publish as draft" : `Publish to ${remoteLabel}`}
