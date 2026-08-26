@@ -1,5 +1,5 @@
 import { InfoIcon, WarningIcon } from "@phosphor-icons/react";
-import { useEffect, useEffectEvent, useId, useState } from "react";
+import { useEffectEvent, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -20,6 +20,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { useCompareBranches } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
 const PREVIEW_CAP = 6;
 
@@ -73,9 +74,7 @@ export function RebaseOntoDialog({
     setNewBase(seededNew);
     setOldBase(names.find((n) => n !== seededNew) ?? "");
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   const sameBranch = Boolean(newBase) && newBase === oldBase;
   // The commits `oldBase..HEAD` — exactly what `--onto` will replay. Compares

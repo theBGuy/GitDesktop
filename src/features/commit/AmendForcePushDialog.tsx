@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
 /**
  * Asks before amending a commit that's already on the remote, since the
@@ -32,9 +33,7 @@ export function AmendForcePushDialog({
   const [dontShowAgain, setDontShowAgain] = useState(false);
 
   // Reset the checkbox each time the dialog opens.
-  useEffect(() => {
-    if (open) setDontShowAgain(false);
-  }, [open]);
+  useSeedOnOpen(open, () => setDontShowAgain(false));
 
   function confirm() {
     if (dontShowAgain && settings.data) {

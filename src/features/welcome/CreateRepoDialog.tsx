@@ -1,5 +1,5 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useEffect, useEffectEvent } from "react";
+import { useEffectEvent } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +16,7 @@ import { useGlobalDefaultBranch } from "@/lib/git/queries";
 import { useAddRecentRepo } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
 const NONE = "__none__";
 const GITIGNORE_TEMPLATES = ["Node", "Python", "Rust", "Go"];
@@ -78,9 +79,7 @@ export function CreateRepoDialog({
   });
 
   const seedOnOpen = useEffectEvent(() => form.reset(DEFAULTS));
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   async function pickParentDir() {
     const path = await openDialog({

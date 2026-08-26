@@ -115,7 +115,8 @@ pnpm run checks   # banned patterns · Rust invariants · IPC surface drift · g
 They run as the `guards` job in [`quality.yml`](.github/workflows/quality.yml),
 which is meant to be registered as a required check on master once it lands
 there. The checks cover banned frontend UI and state patterns (hover-revealed
-row actions, hand-rolled modifier keys, `setQueryData(key, undefined)`), the
+row actions, hand-rolled modifier keys, `setQueryData(key, undefined)`, bare
+`.mutate(` calls in the converted trees, inline clip-measured tooltips), the
 Rust refspec-argv and sync-`#[tauri::command]` invariants, and Tauri IPC drift —
 every registered command needs a caller, every `invoke()` a registration.
 
@@ -185,7 +186,9 @@ GitDesktop is keyboard-first and aims for WCAG AA. When you add or change UI:
   force-push, merge) must confirm clearly and give feedback (Design Principle #2).
 - Don't convey meaning by color alone; keep focus indicators visible.
 - The shadcn / Base UI primitives under `src/components/ui/` are vendored — fix
-  things at the feature/call-site level rather than editing those files.
+  things at the feature/call-site level rather than editing those files, except
+  the sanctioned local deltas inventoried in `src/components/ui/README.md` (a
+  re-vendor silently reverts them).
 
 ### AI-assisted contributions
 

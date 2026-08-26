@@ -1,6 +1,6 @@
-import type { MouseEvent } from "react";
 import { RelativeTime } from "@/components/relative-time";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { clipTitle } from "@/lib/clip-title";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -13,14 +13,6 @@ export interface CommitRow {
   author: string;
   date?: string | null;
 }
-
-/** Sets a hover title only when the subject is actually clipped by `truncate`;
- *  mirrors the only-when-clipped pattern used across the repo (WorktreesDialog,
- *  BranchSwitcher). Measures `currentTarget`, the `truncate`d element itself. */
-const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
-  const el = e.currentTarget;
-  el.title = el.scrollWidth > el.clientWidth ? value : "";
-};
 
 /**
  * The commits tab of a pull request: a scrollable list of commit rows

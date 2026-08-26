@@ -16,6 +16,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { clipTitle } from "@/lib/clip-title";
 import { useActiveGhHost } from "@/lib/git/host";
 import {
   useBranches,
@@ -357,17 +358,11 @@ function GeneralForm({
             </SelectTrigger>
             <SelectContent className="max-w-[min(20rem,80vw)]">
               {branchOptions.map((b) => (
-                <SelectItem key={b} value={b}>
-                  <span
-                    className="block truncate"
-                    // Tooltip only when the branch name is actually clipped.
-                    onMouseEnter={(e) => {
-                      const el = e.currentTarget;
-                      el.title = el.scrollWidth > el.clientWidth ? b : "";
-                    }}
-                  >
-                    {b}
-                  </span>
+                // Base UI Select clips at the popup (the vendored ItemText is
+                // shrink-0, so an inner span never measures clipped) — the
+                // item is the element to measure.
+                <SelectItem key={b} value={b} onMouseEnter={clipTitle(b)}>
+                  <span className="block truncate">{b}</span>
                 </SelectItem>
               ))}
             </SelectContent>

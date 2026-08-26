@@ -21,7 +21,10 @@ import {
   useState,
   useTransition,
 } from "react";
-import { PanelPortalBoundary } from "@/components/panel-portal";
+import {
+  PanelActivityBoundary,
+  PanelPortalBoundary,
+} from "@/components/panel-portal";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -83,6 +86,7 @@ import { cn } from "@/lib/utils";
 import { ChangesPanel } from "./ChangesPanel";
 import { InsightsPanel } from "./insights/InsightsPanel";
 import { OpRecoveryBanner } from "./OpRecoveryBanner";
+import { PrCreateBanner } from "./PrCreateBanner";
 import { RepoHeader } from "./RepoHeader";
 import { usePrNotifications } from "./usePrNotifications";
 import { useRepoVisibilityProbe } from "./useRepoVisibilityProbe";
@@ -179,7 +183,9 @@ function TabPanel({
 }) {
   return (
     <Activity mode={active ? "visible" : "hidden"}>
-      <PanelPortalBoundary>{children}</PanelPortalBoundary>
+      <PanelActivityBoundary active={active}>
+        <PanelPortalBoundary>{children}</PanelPortalBoundary>
+      </PanelActivityBoundary>
     </Activity>
   );
 }
@@ -418,6 +424,7 @@ export function RepositoryView() {
       <RepoHeader repoPath={repoPath} />
       <OpRecoveryBanner repoPath={repoPath} />
       <WorktreeRemovalBanner repoPath={repoPath} />
+      <PrCreateBanner repoPath={repoPath} />
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-96 shrink-0 flex-col border-r">
           <Tabs
@@ -708,9 +715,10 @@ export function RepositoryView() {
           }}
         />
       )}
-      {/* Hoisted: its success handler navigates to the Pulls tab, which hides whichever
-          tab launched it — a panel-hosted instance under <Activity> would have its
-          close deferred and stick open. One instance here serves every opener. */}
+      {/* Hoisted: its success handler navigates to the Pulls tab, so a
+          panel-hosted instance would conceal with the tab that launched it
+          mid-close and not finish closing until that tab is next shown. One
+          instance here serves every opener. */}
       <CreateLocalPrDialog
         repoPath={repoPath}
         defaultHead={localPrCreate?.defaultHead}

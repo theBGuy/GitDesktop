@@ -14,6 +14,7 @@ import {
   ComboboxTrigger,
   ComboboxValue,
 } from "@/components/ui/combobox";
+import { clipTitle } from "@/lib/clip-title";
 import { normPath } from "@/lib/git/path";
 import {
   useBranches,
@@ -286,15 +287,7 @@ function BaseBranchRow({
 }) {
   return (
     <ComboboxItem value={name}>
-      <span
-        className="min-w-0 flex-1 truncate"
-        // Only expose the full name as a tooltip when it's actually clipped —
-        // measured just-in-time on hover, so no per-row refs.
-        onMouseEnter={(e) => {
-          const el = e.currentTarget;
-          el.title = el.scrollWidth > el.clientWidth ? name : "";
-        }}
-      >
+      <span className="min-w-0 flex-1 truncate" onMouseEnter={clipTitle(name)}>
         {name}
         {name === currentName && (
           <span className="ml-1.5 text-[10px] text-muted-foreground">

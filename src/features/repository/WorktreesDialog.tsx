@@ -14,6 +14,7 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -582,8 +583,16 @@ export function RenameWorktreeDialog({
   }
 
   return (
-    <Dialog open={worktree !== null} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+    <Dialog
+      open={worktree !== null}
+      // Close requests are ignored while the move runs, matching the Cancel
+      // button that is already disabled for it — and the corner X goes with
+      // them, rather than sitting there dead.
+      onOpenChange={(o) => {
+        if (!o && !move.isPending) onClose();
+      }}
+    >
+      <DialogContent showCloseButton={!move.isPending}>
         <DialogHeader>
           <DialogTitle>Rename worktree</DialogTitle>
           <DialogDescription>
@@ -625,11 +634,16 @@ export function RenameWorktreeDialog({
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={move.isPending}>
+          <DisabledReasonButton
+            variant="outline"
+            onClick={onClose}
+            disabled={move.isPending}
+            reason="The rename is still running."
+          >
             {/* Nothing here can call the removal off, so "Cancel" would promise
                 more than closing this dialog does. */}
             {removing ? "Close" : "Cancel"}
-          </Button>
+          </DisabledReasonButton>
           <Button
             disabled={
               !trimmed || unchanged || invalid || move.isPending || removing
@@ -676,8 +690,16 @@ export function LockWorktreeDialog({
   }
 
   return (
-    <Dialog open={worktree !== null} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+    <Dialog
+      open={worktree !== null}
+      // Close requests are ignored while the lock runs, matching the Cancel
+      // button that is already disabled for it — and the corner X goes with
+      // them, rather than sitting there dead.
+      onOpenChange={(o) => {
+        if (!o && !lock.isPending) onClose();
+      }}
+    >
+      <DialogContent showCloseButton={!lock.isPending}>
         <DialogHeader>
           <DialogTitle>Lock worktree</DialogTitle>
           <DialogDescription>
@@ -716,11 +738,16 @@ export function LockWorktreeDialog({
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={lock.isPending}>
+          <DisabledReasonButton
+            variant="outline"
+            onClick={onClose}
+            disabled={lock.isPending}
+            reason="The lock is still running."
+          >
             {/* Nothing here can call the removal off, so "Cancel" would promise
                 more than closing this dialog does. */}
             {removing ? "Close" : "Cancel"}
-          </Button>
+          </DisabledReasonButton>
           <Button onClick={handleLock} disabled={lock.isPending || removing}>
             {lock.isPending && <Spinner data-icon="inline-start" />}
             Lock

@@ -1,11 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import {
-  type ComponentProps,
-  type ReactNode,
-  useEffect,
-  useState,
-} from "react";
+import { type ComponentProps, type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -49,6 +44,7 @@ import { deleteRepoLens } from "@/lib/repo-lens/store";
 import { settingsKeys, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { InlineConfirm } from "./parts";
 import { ScopeRefreshHint } from "./ScopeRefreshHint";
 
@@ -91,9 +87,8 @@ function DangerDialog({
   children?: ReactNode;
 }) {
   const [typed, setTyped] = useState("");
-  useEffect(() => {
-    if (open) setTyped("");
-  }, [open]);
+  useSeedOnOpen(open, () => setTyped(""));
+
   const matches = typed.trim() === confirmPhrase;
 
   return (

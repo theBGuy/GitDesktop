@@ -15,6 +15,7 @@ import { required, useAppForm } from "@/lib/form";
 import { useCreateDiscussion, useDiscussionMeta } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
 export function CreateDiscussionDialog({
   repoPath,
@@ -67,9 +68,7 @@ export function CreateDiscussionDialog({
   const ensureCategory = useEffectEvent(() => {
     if (!categoryId) form.setFieldValue("categoryId", categories[0].id);
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
   useEffect(() => {
     if (open && categories.length > 0) ensureCategory();
   }, [open, categories.length]);

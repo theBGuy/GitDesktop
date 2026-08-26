@@ -1,6 +1,6 @@
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -33,6 +33,7 @@ import {
 } from "@/lib/git/queries";
 import type { SecurityFeature, SecurityStatus } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { AsyncErrorCard, InlineConfirm } from "./parts";
 
 /** Dependabot / dependency-graph options GitHub exposes to NO repo-level API —
@@ -298,12 +299,10 @@ function DependabotDialog({
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [interval, setInterval] = useState("weekly");
-  useEffect(() => {
-    if (open) {
-      setSelected(new Set());
-      setInterval("weekly");
-    }
-  }, [open]);
+  useSeedOnOpen(open, () => {
+    setSelected(new Set());
+    setInterval("weekly");
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

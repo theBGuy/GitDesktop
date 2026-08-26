@@ -25,15 +25,11 @@ import {
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
-import {
-  type KeyboardEvent,
-  type MouseEvent,
-  type ReactNode,
-  useState,
-} from "react";
+import { type KeyboardEvent, type ReactNode, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { RelativeTime } from "@/components/relative-time";
 import type { CommitRow } from "@/features/conversations/CommitsList";
+import { clipTitle } from "@/lib/clip-title";
 import type { ForgeTimelineEvent } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { parseableDate } from "@/lib/time";
@@ -103,13 +99,6 @@ export function coalesceCommitRuns(
   flush();
   return rendered;
 }
-
-/** Sets a hover title only when the content is actually clipped by `truncate`;
- *  mirrors the only-when-clipped pattern across the repo (CommitsList). */
-const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
-  const el = e.currentTarget;
-  el.title = el.scrollWidth > el.clientWidth ? value : "";
-};
 
 /** The thin neutral rail + centered icon that every light event row hangs off.
  *  A 1px structural connective line (NOT a colored side-stripe) — the icon
@@ -389,9 +378,8 @@ function ReferenceChip({
     return <span className="flex min-w-0 items-center gap-1">{body}</span>;
   }
   return (
-    // No `title` here: the inner span's clipTitle sets title="" when the text isn't
-    // clipped, and an empty title on a descendant SUPPRESSES the ancestor's tooltip
-    // rather than deferring to it — the clipped-text tooltip is the one that matters.
+    // Deliberately no `title`: the chip's visible ref + title text already say
+    // what it opens, and the span's clipTitle supplies the full text when clipped.
     <button
       type="button"
       onClick={() => onOpenRef(kind, chip.number)}

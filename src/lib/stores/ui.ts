@@ -279,8 +279,8 @@ interface UiState {
   /** The hoisted "create local PR" dialog: null = closed; an object = open, with
    *  optional branch seeds. Lives at RepositoryView level (outside the tab
    *  <Activity> wrappers) because its success handler navigates to the Pulls tab —
-   *  a panel-hosted instance would have its close deferred by the newly-hidden
-   *  Activity subtree and stick open. */
+   *  a panel-hosted instance would conceal with the tab that launched it mid-close,
+   *  deferring its close and unmount until that tab is next shown. */
   localPrCreate: { defaultHead?: string; defaultBase?: string } | null;
   /** Selected workflow run (databaseId) on the Actions tab. */
   selectedRunId: number | null;

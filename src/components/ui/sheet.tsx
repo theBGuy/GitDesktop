@@ -1,11 +1,34 @@
 import { Dialog as SheetPrimitive } from "@base-ui/react/dialog";
 import { XIcon } from "@phosphor-icons/react";
 import * as React from "react";
+import {
+  isUserDismissal,
+  PanelPortalReset,
+  usePanelActive,
+  usePanelPortalContainer,
+} from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-function Sheet({ ...props }: SheetPrimitive.Root.Props) {
-  return <SheetPrimitive.Root data-slot="sheet" {...props} />;
+function Sheet({ modal, onOpenChange, ...props }: SheetPrimitive.Root.Props) {
+  const panelActive = usePanelActive();
+  return (
+    <SheetPrimitive.Root
+      data-slot="sheet"
+      // Same contract as Dialog (this IS a Base UI Dialog root): `modal` gates
+      // the document scroll lock and the `aria-hidden` marking outside the
+      // popup, and a concealed sheet must not take the visible tab's dismissals.
+      modal={panelActive && (modal ?? true)}
+      onOpenChange={(open, eventDetails) => {
+        if (!open && !panelActive && isUserDismissal(eventDetails.reason)) {
+          eventDetails.cancel();
+          return;
+        }
+        onOpenChange?.(open, eventDetails);
+      }}
+      {...props}
+    />
+  );
 }
 
 function SheetTrigger({ ...props }: SheetPrimitive.Trigger.Props) {
@@ -16,8 +39,17 @@ function SheetClose({ ...props }: SheetPrimitive.Close.Props) {
   return <SheetPrimitive.Close data-slot="sheet-close" {...props} />;
 }
 
-function SheetPortal({ ...props }: SheetPrimitive.Portal.Props) {
-  return <SheetPrimitive.Portal data-slot="sheet-portal" {...props} />;
+function SheetPortal({ container, ...props }: SheetPrimitive.Portal.Props) {
+  // Default to the surrounding panel so a raw portal can't strand over another
+  // tab; an explicit `null` still means "a container is coming", never the body.
+  const panelContainer = usePanelPortalContainer();
+  return (
+    <SheetPrimitive.Portal
+      data-slot="sheet-portal"
+      container={container === undefined ? panelContainer : container}
+      {...props}
+    />
+  );
 }
 
 function SheetOverlay({ className, ...props }: SheetPrimitive.Backdrop.Props) {
@@ -55,7 +87,10 @@ function SheetContent({
         )}
         {...props}
       >
-        {children}
+        {/* Floating UI inside the popup must not portal into a tab panel the
+            sheet covers; Base UI still chains it onto this popup's own portal
+            node, so pickers keep stacking above the sheet either way. */}
+        <PanelPortalReset>{children}</PanelPortalReset>
         {showCloseButton && (
           <SheetPrimitive.Close
             data-slot="sheet-close"

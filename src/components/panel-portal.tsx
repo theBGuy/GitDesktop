@@ -24,6 +24,42 @@ export function usePanelPortalContainer(): HTMLElement | undefined {
 }
 
 /**
+ * Whether the surrounding panel is the visible one. Defense in depth: hiding a
+ * panel does tear down its subtree's effects, taking a modal's scroll lock,
+ * `aria-hidden` marking and dismissal listeners with them — but that teardown is
+ * deferred, so the modal state has to stand down on its own for the window
+ * between the tab switch and it. Escape must never reach a concealed dialog.
+ * `true` outside any panel.
+ */
+const PanelActivityContext = createContext(true);
+
+/** `false` while the surrounding panel is concealed; `true` at body level. */
+export function usePanelActive(): boolean {
+  return useContext(PanelActivityContext);
+}
+
+// Base UI close reasons where the user acted on the document rather than on the
+// popup itself. While a panel is concealed these belong to the tab the user can
+// actually see, so a hidden popup must neither take them nor swallow the key.
+const USER_DISMISSAL_REASONS = ["escape-key", "outside-press", "focus-out"];
+
+/** Whether a Base UI close request came from the user acting outside the popup. */
+export function isUserDismissal(reason: string): boolean {
+  return USER_DISMISSAL_REASONS.includes(reason);
+}
+
+/** Publishes the surrounding panel's visibility to the popups inside it. */
+export function PanelActivityBoundary({
+  active,
+  children,
+}: {
+  active: boolean;
+  children: ReactNode;
+}): ReactNode {
+  return <PanelActivityContext value={active}>{children}</PanelActivityContext>;
+}
+
+/**
  * Wraps one `<Activity>` panel's content and publishes a portal target that
  * lives inside it.
  */
@@ -50,8 +86,9 @@ export function PanelPortalBoundary({
 }
 
 /**
- * Clears the panel container for a subtree. Used inside modal popups, which
- * portal to the body: their floating UI must not land in a panel the modal covers.
+ * Clears the panel container for a subtree. Used inside modal popups: their
+ * floating UI must not land in a panel the modal covers. Base UI chains it onto
+ * the popup's own portal node instead, so pickers still stack above the modal.
  */
 export function PanelPortalReset({
   children,

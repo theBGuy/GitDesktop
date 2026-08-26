@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { clipTitle } from "@/lib/clip-title";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useRepoAlias } from "@/lib/settings/queries";
@@ -66,18 +67,7 @@ export function RepoSwitcher() {
             >
               <span
                 className="min-w-0 truncate text-sm font-medium"
-                // Only expose the full name as a tooltip when it's actually
-                // clipped — measured just-in-time on hover, so no ref needed.
-                // Remove the attribute (not title="") when unclipped: an empty
-                // title="" is still a title in Chromium and would suppress any
-                // ancestor tooltip.
-                onMouseEnter={(e) => {
-                  const el = e.currentTarget;
-                  if (el) {
-                    if (el.scrollWidth > el.clientWidth) el.title = repoLabel;
-                    else el.removeAttribute("title");
-                  }
-                }}
+                onMouseEnter={clipTitle(repoLabel)}
               >
                 {repoLabel}
               </span>

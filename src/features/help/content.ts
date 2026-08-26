@@ -1124,7 +1124,11 @@ conversation comment** (under a *🗒️ Notes for reviewers* header, from your 
 before any automated review runs, and that review reads them as context; on GitHub and
 GitLab the code reviews and security audits you start yourself read them too — so a
 deliberate, documented decision isn't re-flagged. Notes present here also ground the
-**AI-generated** description{{/ai}}. Press {{key:mod+enter}} from any field to submit either the
+**AI-generated** description{{/ai}}. Creating a pull request pushes your branch first, so it
+can run for a while: close the dialog and it carries on — a line at the top of the repository
+view names the branch until it finishes, reopening the dialog keeps everything you had typed,
+and a second create for the same branch is refused while the first is still running.
+Press {{key:mod+enter}} from any field to submit either the
 **Create** or the **Edit** dialog. The **Edit** dialog also carries a **base branch**
 select, so you can **retarget** a pull request at a different branch without recreating it —
 on GitHub, GitLab, and Bitbucket alike. On a **stacked GitHub** pull request that select is

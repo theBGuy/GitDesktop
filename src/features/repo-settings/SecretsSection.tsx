@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitle } from "@/lib/clip-title";
 import {
   useDeleteSecret,
   useDeleteVariable,
@@ -145,15 +146,10 @@ export function SecretsSection({
                 <SelectItem
                   key={e}
                   value={e}
-                  // The dropdown is pinned to the narrow trigger width, so long
-                  // environment names clip. Surface the full name on hover, but
-                  // only when it's actually cut off. The clip happens at the
-                  // popup (overflow-x-hidden), not the inner span, so measure the
-                  // item itself — a span-level check wouldn't fire here.
-                  onMouseEnter={(ev) => {
-                    const el = ev.currentTarget;
-                    el.title = el.scrollWidth > el.clientWidth ? e : "";
-                  }}
+                  // The clip happens at the popup (overflow-x-hidden), not the
+                  // inner span, so the item is the element to measure — a
+                  // span-level clipTitle wouldn't fire here.
+                  onMouseEnter={clipTitle(e)}
                 >
                   <span className="block truncate">{e}</span>
                 </SelectItem>

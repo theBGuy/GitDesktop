@@ -1,5 +1,5 @@
 import { useSelector } from "@tanstack/react-store";
-import { useEffect, useEffectEvent, useId, useState } from "react";
+import { useEffectEvent, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -18,6 +18,7 @@ import { refNameWarning, sanitizeRefName } from "@/lib/git/ref-name";
 import type { FileEntry } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import {
   BaseBranchCombobox,
   useHasBaseOptions,
@@ -148,9 +149,7 @@ export function CreateBranchDialog({
     // remote value, so tracking stays on.
     setBaseIsRemote(false);
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   // One generate pair for the button and the chord — see
   // `useBranchNameGenerateAction`.

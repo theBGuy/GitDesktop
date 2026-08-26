@@ -11,6 +11,7 @@ import {
   ComboboxLabel,
   ComboboxList,
 } from "@/components/ui/combobox";
+import { clipTitle } from "@/lib/clip-title";
 import { cn } from "@/lib/utils";
 
 /** A filter row is an Author or a Label, carried as an OBJECT (never a
@@ -297,12 +298,7 @@ function FilterRow({
       </span>
       <span
         className="min-w-0 flex-1 truncate"
-        // Expose the full name as a tooltip only when actually clipped —
-        // measured just-in-time on hover, so no per-row refs.
-        onMouseEnter={(e) => {
-          const el = e.currentTarget;
-          el.title = el.scrollWidth > el.clientWidth ? item.name : "";
-        }}
+        onMouseEnter={clipTitle(item.name)}
       >
         {item.name}
       </span>

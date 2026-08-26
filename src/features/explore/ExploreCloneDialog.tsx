@@ -1,6 +1,6 @@
 import { useSelector } from "@tanstack/react-store";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useEffect, useEffectEvent } from "react";
+import { useEffectEvent } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,6 +17,7 @@ import type { ForgeProvider } from "@/lib/git/types";
 import { useAddRecentRepo, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
 /** The repo an Explore clone is pinned to. */
 export interface ExploreCloneTarget {
@@ -82,9 +83,7 @@ export function ExploreCloneDialog({
     );
   });
   const open = target !== null;
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   const values = useSelector(form.store, (s) => s.values);
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);

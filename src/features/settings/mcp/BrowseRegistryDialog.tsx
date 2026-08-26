@@ -9,12 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import {
-  type MouseEvent as ReactMouseEvent,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -28,6 +23,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { McpServer } from "@/lib/settings/api";
 import { entriesFor } from "@/lib/settings/mcp";
@@ -57,18 +53,6 @@ function runSummary(server: McpServer): string {
   return server.transport === "stdio"
     ? [server.command, ...server.args].join(" ").trim()
     : server.url;
-}
-
-/** Set a hover `title` only when the element's content is actually clipped
- *  (truncate horizontally or line-clamp vertically), so long registry strings
- *  stay readable without redundant tooltips on the short ones. */
-function markTitleIfClipped(e: ReactMouseEvent<HTMLElement>) {
-  const el = e.currentTarget;
-  if (
-    !el.title &&
-    (el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight)
-  )
-    el.title = el.textContent ?? "";
 }
 
 /**
@@ -371,7 +355,7 @@ export function BrowseRegistryDialog({
                       <div className="flex items-center gap-1.5">
                         <span
                           className="truncate font-medium"
-                          onMouseEnter={markTitleIfClipped}
+                          onMouseEnter={clipTitleFromText}
                         >
                           {c.title}
                         </span>
@@ -413,14 +397,14 @@ export function BrowseRegistryDialog({
                       </div>
                       <p
                         className="truncate font-mono text-[10px] text-muted-foreground"
-                        onMouseEnter={markTitleIfClipped}
+                        onMouseEnter={clipTitleFromText}
                       >
                         {c.registryName}
                       </p>
                       {c.server.description && (
                         <p
                           className="line-clamp-2 text-muted-foreground"
-                          onMouseEnter={markTitleIfClipped}
+                          onMouseEnter={clipTitleFromText}
                         >
                           {c.server.description}
                         </p>

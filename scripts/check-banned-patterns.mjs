@@ -186,6 +186,19 @@ const HOVER_REVEAL_PAIRS = [
 const SET_QUERY_DATA_RE =
   /setQueryData\s*(?:<[^(]*?>)?\s*\([^;]{0,200},\s*undefined\s*[),]/g;
 
+// An inline clip-measured tooltip: a `.title` ASSIGNMENT within PAIR_GAP of an
+// overflow measure, in either order. Anchoring on the write — never a bare
+// `.title` read — is what keeps data reads (`draft.title` near a
+// scroll-to-bottom, measured on PlanView) from pairing; the idiom's direct
+// spellings all write `.title` in range of their measure, while setAttribute,
+// a hoisted measure, or a JSX `title={…}` prop would evade — a tripwire, not
+// a boundary. `(?!=)` keeps `==`/`===` comparisons out.
+const INLINE_CLIP_TITLE_RE = new RegExp(
+  `\\.title\\s*=(?!=)[\\s\\S]{0,${PAIR_GAP}}?\\b(?:scrollWidth|scrollHeight)\\b` +
+    `|\\b(?:scrollWidth|scrollHeight)\\b[\\s\\S]{0,${PAIR_GAP}}?\\.title\\s*=(?!=)`,
+  "g",
+);
+
 // A `.mutate(` call in any spelling — the token, not the callbacks object it
 // may carry. Matching the object instead would have to recognize every way one
 // reaches the call: inline literal, hoisted variable (`.mutate(v, opts)` — the
@@ -222,6 +235,21 @@ const CONTEXT_MENU_SUPPRESS_RE =
 // hit inside them could only ever be silenced by an allowlist entry, never
 // fixed. Their CALL SITES — the app code that composes them — stay scanned.
 const notVendoredUi = (file) => !file.startsWith("src/components/ui/");
+
+// An effect whose FIRST statement is an `open` guard — the seed-on-open shape,
+// in both its spellings (`if (open) …` / `if (!open) return`). Run over the
+// whole-file view because the guard sits on the line after the arrow. Matching
+// the first statement rather than an `open` read anywhere in the body is what
+// keeps this off the many effects that merely gate a query on the same flag.
+// Bounded by the identifier: a dialog whose flag is `isOpen` or `show` passes
+// unseen, so this catches the house spelling rather than the whole class.
+const SEED_ON_OPEN_RE =
+  /use(?:Layout)?Effect\(\(\)\s*=>\s*\{\s*if\s*\(!?open\b/g;
+
+// `<Activity` as a JSX open tag. The lookahead is what separates it from the
+// app's own `<ActivityDock>`/`<ActivityBell>`/`<ActivityStrip>` components, and
+// comment stripping is what keeps the many prose mentions of `<Activity>` clean.
+const ACTIVITY_JSX_RE = /<Activity(?![\w$])/;
 
 export const CHECKS = [
   {
@@ -273,6 +301,16 @@ export const CHECKS = [
       "derive the platform modifier via the hotkeys helpers (formatBinding/isMac) — new hand-rolled ctrl/meta checks need an allowlist entry with rationale",
   },
   {
+    name: "inline-clip-title",
+    // The helper file IS the idiom; everything else routes through it.
+    appliesTo: (file) =>
+      file !== "src/lib/clip-title.ts" && notVendoredUi(file),
+    scan: perFile(INLINE_CLIP_TITLE_RE),
+    allowlist: [],
+    message:
+      "clip-measured tooltips route through clipTitle/clipTitleFromText (src/lib/clip-title.ts) — an inline rewrite re-opens the blank-title ancestor-suppression class; if the pairing is a false positive, add an allowlist entry with rationale",
+  },
+  {
     name: "setQueryData-noop",
     // Not a UI idiom — it applies wherever the cache is written, vendored or not.
     appliesTo: () => true,
@@ -307,6 +345,68 @@ export const CHECKS = [
     allowlist: [],
     message:
       "a shared ContextMenu's non-target right-click path routes through suppressContextMenu (src/lib/context-menu.ts) — preventDefault alone leaves Base UI's trigger handler to open the menu as an empty, click-swallowing popup",
+  },
+  {
+    name: "seed-effect-on-open",
+    // The hook itself opens with the very guard it exists to replace.
+    appliesTo: (file) => file !== "src/lib/use-seed-on-open.ts",
+    scan: perFile(SEED_ON_OPEN_RE),
+    // Three kinds of entry, none of them an open-transition reset:
+    // DATA-ARRIVAL seeds (the trigger is the value landing, which the hook's
+    // once-per-open latch would fire before), effects that already carry their
+    // own ref latch keyed on something the hook doesn't know (a scope, a task
+    // id, the previous `open`), and effects that merely tear down or register
+    // on `open` and are idempotent by construction. Every one of them is safe
+    // to repeat — the property the open-transition resets lack.
+    allowlist: [
+      // Seeds the category once the async list arrives; `if (!categoryId)`.
+      "src/features/discussions/CreateDiscussionDialog.tsx",
+      // Defaults the workflow once `dispatchable` arrives; `!workflow`.
+      "src/features/actions/RunWorkflowDialog.tsx",
+      // Seeds the Bitbucket workspace once workspaces load; empty-field only.
+      "src/features/repository/PublishDialog.tsx",
+      // Seeds the URL field once the current remote URL query resolves.
+      "src/features/repository/RemoteUrlDialog.tsx",
+      // Base reconciler: re-seeds only when the current base isn't a valid
+      // option for the active target, so it never fights the user's edit.
+      "src/features/pulls/CreatePrDialog.tsx",
+      // Re-seeds when the caller re-requests a mode while already open (the
+      // add action fired from the palette over an open list), and is a layout
+      // effect so a reopen never paints one frame of the mode it closed on.
+      "src/features/repository/SubmodulesDialog.tsx",
+      // Seeds the draft once `automations.data` arrives, behind its own latch.
+      "src/features/automations/RepoAutomationsDialog.tsx",
+      // Same, latched per SCOPE — switching scope re-seeds deliberately.
+      "src/features/branch-rules/BranchRulesDialog.tsx",
+      // Seeds the applied set once memberships settle, behind `seededSettled`.
+      "src/features/conversations/ProjectsPopover.tsx",
+      // Latched per task id, and the close arm aborts in-flight AI streams
+      // whose callbacks would otherwise resolve into the NEXT task opened.
+      "src/features/scripts/TaskDialog.tsx",
+      // Close-side only: clears the selection, a no-op while open.
+      "src/features/history/FileHistoryDialog.tsx",
+      // A scroll listener with a cleanup, plus a close-side key-set clear —
+      // re-registering on a re-show is the correct behavior, not a reset.
+      "src/components/mention-autocomplete.tsx",
+      // Prefetch loop; `prefetchQuery` honors staleTime, so a repeat is free.
+      "src/features/repository/BranchSwitcher.tsx",
+      // Registers the open dialog with the native-menu gate; add/remove pair.
+      "src/lib/hotkeys/modal-gate.ts",
+    ],
+    message:
+      "an open-transition reset must ride useSeedOnOpen (src/lib/use-seed-on-open.ts) — a hidden <Activity> tab re-mounts its effects on show, so a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires and wipes the user's draft; a data-arrival or otherwise idempotent seed needs an allowlist entry with rationale",
+  },
+  {
+    name: "lone-activity-boundary",
+    // Both directions ride the allowlist: a hit anywhere else is a violation,
+    // and TabPanel losing its own `<Activity>` reads as a stale entry. Residual:
+    // a SECOND `<Activity` added inside RepositoryView.tsx is not caught, since
+    // the allowlist works per file rather than per occurrence.
+    appliesTo: () => true,
+    scan: perLine(ACTIVITY_JSX_RE),
+    allowlist: ["src/features/repository/RepositoryView.tsx"],
+    message:
+      "a tab panel's <Activity> must be paired with PanelPortalBoundary and PanelActivityBoundary, or its dialogs and popups strand over the wrong tab — render TabPanel (RepositoryView.tsx) rather than a second <Activity>, or extend the allowlist deliberately for a non-tab Activity",
   },
 ];
 
