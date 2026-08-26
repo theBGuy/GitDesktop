@@ -358,10 +358,11 @@ function GeneralForm({
             </SelectTrigger>
             <SelectContent className="max-w-[min(20rem,80vw)]">
               {branchOptions.map((b) => (
-                <SelectItem key={b} value={b}>
-                  <span className="block truncate" onMouseEnter={clipTitle(b)}>
-                    {b}
-                  </span>
+                // Base UI Select clips at the popup (the vendored ItemText is
+                // shrink-0, so an inner span never measures clipped) — the
+                // item is the element to measure.
+                <SelectItem key={b} value={b} onMouseEnter={clipTitle(b)}>
+                  <span className="block truncate">{b}</span>
                 </SelectItem>
               ))}
             </SelectContent>

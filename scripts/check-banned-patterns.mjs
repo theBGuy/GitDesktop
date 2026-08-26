@@ -189,9 +189,10 @@ const SET_QUERY_DATA_RE =
 // An inline clip-measured tooltip: a `.title` ASSIGNMENT within PAIR_GAP of an
 // overflow measure, in either order. Anchoring on the write — never a bare
 // `.title` read — is what keeps data reads (`draft.title` near a
-// scroll-to-bottom, measured on PlanView) from pairing; every
-// reimplementation writes `.title` in range of its measure. `(?!=)` keeps
-// `==`/`===` comparisons out.
+// scroll-to-bottom, measured on PlanView) from pairing; the idiom's direct
+// spellings all write `.title` in range of their measure, while setAttribute
+// or a hoisted measure would evade — a tripwire, not a boundary. `(?!=)`
+// keeps `==`/`===` comparisons out.
 const INLINE_CLIP_TITLE_RE = new RegExp(
   `\\.title\\s*=(?!=)[\\s\\S]{0,${PAIR_GAP}}?\\b(?:scrollWidth|scrollHeight)\\b` +
     `|\\b(?:scrollWidth|scrollHeight)\\b[\\s\\S]{0,${PAIR_GAP}}?\\.title\\s*=(?!=)`,

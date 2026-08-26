@@ -378,9 +378,8 @@ function ReferenceChip({
     return <span className="flex min-w-0 items-center gap-1">{body}</span>;
   }
   return (
-    // No `title` here: the inner span's clipTitle sets title="" when the text isn't
-    // clipped, and an empty title on a descendant SUPPRESSES the ancestor's tooltip
-    // rather than deferring to it — the clipped-text tooltip is the one that matters.
+    // Deliberately no `title`: the chip's visible ref + title text already say
+    // what it opens, and the span's clipTitle supplies the full text when clipped.
     <button
       type="button"
       onClick={() => onOpenRef(kind, chip.number)}
