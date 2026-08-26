@@ -601,6 +601,11 @@ shows which branches live in other worktrees plus, when a branch has diverged, h
 is ahead of and behind your current branch. From here you can merge, rebase, or jump
 straight to opening a pull request.
 
+{{Secondaryclick}} any commit in the ahead or behind list for **Checkout commit**,
+**Cherry-pick commit**, **Create branch from commit…**, **Create tag…**, and **Copy SHA**.
+Commits in the ahead list (the ones on your branch) also offer **Revert changes in
+commit**.
+
 ## Branch rules
 
 **Branch rules…** (in the ⋮ menu) sets local protections — naming patterns, blocked

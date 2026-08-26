@@ -20,6 +20,12 @@ export function checkoutDetachedConfirm(kind: "commit" | "tag", name: string) {
 export const checkoutCommitConfirm = (hash: string) =>
   checkoutDetachedConfirm("commit", short(hash));
 
+/** A silent checkout reads as a dead end from Compare, which flips to its
+ *  detached-HEAD empty state, so every route confirms with the same sentence. */
+export function checkoutCommitSuccessToast(hash: string) {
+  return `Checked out ${short(hash)} — HEAD is detached`;
+}
+
 export const revertCommitConfirm = (hash: string) => ({
   title: `Revert commit ${short(hash)}?`,
   body: `Creates a new commit that undoes what ${short(hash)} changed, so history keeps both and nothing already recorded is rewritten. If it conflicts, the revert pauses in Changes for you to resolve.`,

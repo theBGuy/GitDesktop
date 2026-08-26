@@ -59,9 +59,11 @@ pub async fn git_log(
 }
 
 /// The `%H%x00%s%x00%an%x00%ae%x00%cI%x00%D%x00%P` log format, one commit per line.
-const LOG_FORMAT: &str = "--format=%H%x00%s%x00%an%x00%ae%x00%cI%x00%D%x00%P";
+/// Paired with `parse_commit_log`: every commit-listing path shares both, so none
+/// of them can drift into reporting empty tags or merge flags.
+pub(crate) const LOG_FORMAT: &str = "--format=%H%x00%s%x00%an%x00%ae%x00%cI%x00%D%x00%P";
 
-fn parse_commit_log(text: &str) -> Vec<CommitSummary> {
+pub(crate) fn parse_commit_log(text: &str) -> Vec<CommitSummary> {
     text.lines()
         .filter_map(|line| {
             let mut parts = line.split('\0');

@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 use crate::git::diff::{parse_numstat_z, truncate_at_char_boundary};
+use crate::git::history::{parse_commit_log, LOG_FORMAT};
 use crate::git::runner::{
     run_git, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
@@ -26,31 +27,14 @@ fn validate_ref(name: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn parse_log(text: &str) -> Vec<CommitSummary> {
-    text.lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\0');
-            Some(CommitSummary {
-                hash: parts.next()?.to_string(),
-                subject: parts.next()?.to_string(),
-                author: parts.next()?.to_string(),
-                author_email: parts.next()?.to_string(),
-                date: parts.next()?.to_string(),
-                tags: Vec::new(),
-                is_merge: false,
-            })
-        })
-        .collect()
-}
-
 async fn log_range(repo_path: &str, range: &str) -> AppResult<Vec<CommitSummary>> {
     let out = run_git(
         Some(repo_path),
-        &["log", "--format=%H%x00%s%x00%an%x00%ae%x00%cI", range],
+        &["log", LOG_FORMAT, range],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok(parse_log(&out.stdout_lossy()))
+    Ok(parse_commit_log(&out.stdout_lossy()))
 }
 
 /// Commits unique to each side of `base`/`compare`. `ahead` (compare not in
@@ -722,6 +706,50 @@ mod tests {
         run(&repo_s, &["config", "user.email", "t@t.local"]).await;
         run(&repo_s, &["config", "user.name", "T"]).await;
         (base, repo_s)
+    }
+
+    /// The comparison shares History's log format + parser, so its rows carry the
+    /// `%D` tag decorations rather than an empty list.
+    #[tokio::test]
+    async fn compare_branches_carries_tag_decorations() {
+        let (_base, repo) = seed_repo("compare-tags").await;
+        let root = std::path::Path::new(&repo);
+
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        // `git init` picks the default branch name from the host's config.
+        let base_branch = run(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        run(&repo, &["checkout", "-qb", "feature"]).await;
+        std::fs::write(root.join("feature.txt"), "feature\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "feature work"]).await;
+
+        run(&repo, &["checkout", "-q", &base_branch]).await;
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "base work"]).await;
+        run(&repo, &["tag", "v1.0"]).await;
+
+        let cmp = git_compare_branches(repo.clone(), base_branch, "feature".into())
+            .await
+            .unwrap();
+
+        assert_eq!(cmp.ahead.len(), 1, "one commit on feature only");
+        assert_eq!(cmp.behind.len(), 1, "one commit on the base branch only");
+        assert_eq!(
+            cmp.behind[0].tags,
+            vec!["v1.0".to_string()],
+            "a tagged commit reports its tag"
+        );
+        assert!(
+            cmp.ahead[0].tags.is_empty(),
+            "an untagged commit reports no tags"
+        );
     }
 
     /// `exclude` hides matching files from BOTH the diff text and the file list, and

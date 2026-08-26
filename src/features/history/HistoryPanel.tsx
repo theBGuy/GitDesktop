@@ -31,6 +31,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
 import { copyText } from "@/lib/clipboard";
+import { suppressContextMenu } from "@/lib/context-menu";
 import { useAppForm } from "@/lib/form";
 import { gitCommitDetails, gitRecentCommits } from "@/lib/git/api";
 import {
@@ -60,8 +61,10 @@ import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
+import { CommitContextMenuItems } from "./CommitContextMenu";
 import {
   checkoutCommitConfirm,
+  checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
   revertCommitConfirm,
   UNDO_ROOT_COMMIT_CONFIRM,
@@ -251,7 +254,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // the single-commit menu can't diverge on whether they ask.
   async function doCheckoutCommit(hash: string) {
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
-    checkoutCommit.mutate(hash, { onError });
+    checkoutCommit.mutate(hash, {
+      onSuccess: () => toast.success(checkoutCommitSuccessToast(hash)),
+      onError,
+    });
   }
 
   async function doRevertCommit(hash: string) {
@@ -548,7 +554,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     const index = hash ? visibleCommits.findIndex((c) => c.hash === hash) : -1;
     if (index < 0) {
       setMenuTarget(null);
-      e.preventDefault();
+      suppressContextMenu(e);
       return;
     }
     onRowContextMenu(index, visibleCommits[index].hash);
@@ -561,48 +567,28 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     if (!menuTarget) return null;
     const { commit, index } = menuTarget;
     if (searchActive) {
-      // Search results: only position-independent, single-commit actions (no
-      // amend/reset/squash/reorder, which assume contiguous recent history).
+      // Search results aren't contiguous recent history, so only the shared set.
       return (
-        <>
-          <ContextMenuItem onClick={() => doCheckoutCommit(commit.hash)}>
-            Checkout commit
-          </ContextMenuItem>
-          <ContextMenuItem onClick={() => doRevertCommit(commit.hash)}>
-            Revert changes in commit
-          </ContextMenuItem>
-          <ContextMenuItem
-            onClick={() =>
+        <CommitContextMenuItems
+          hash={commit.hash}
+          actions={{
+            checkout: doCheckoutCommit,
+            revert: doRevertCommit,
+            cherryPick: (hash) =>
               doCherryPick(
-                commit.hash,
+                hash,
                 "Nothing to cherry-pick — already on this branch.",
-              )
-            }
-          >
-            Cherry-pick commit
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            onClick={() => {
+              ),
+            createBranch: (hash) => {
               branchForm.reset({ name: "" });
-              setBranchHash(commit.hash);
-            }}
-          >
-            Create branch from commit…
-          </ContextMenuItem>
-          <ContextMenuItem
-            onClick={() => {
+              setBranchHash(hash);
+            },
+            createTag: (hash) => {
               tagForm.reset({ name: "" });
-              setTagHash(commit.hash);
-            }}
-          >
-            Create tag…
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuItem onClick={() => copyText(commit.hash, "SHA copied")}>
-            Copy SHA
-          </ContextMenuItem>
-        </>
+              setTagHash(hash);
+            },
+          }}
+        />
       );
     }
     if (selected.has(commit.hash) && selected.size > 1) {

@@ -135,6 +135,9 @@ words the user reads on screen — the palette matcher is a plain substring, so
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.
+- Shared-ContextMenu suppression for non-target right-clicks goes through
+  `suppressContextMenu` (`src/lib/context-menu.ts`) — `preventDefault` alone
+  still opens Base UI's menu as an empty popup.
 
 **Layout gotchas.** `DialogContent` is a grid — truncating flex content needs
 `min-w-0` on the grid item; cap tall dialogs at `max-h-[85vh]`. Link-styled

@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { copyText } from "@/lib/clipboard";
+import { suppressContextMenu } from "@/lib/context-menu";
 import {
   forgeRepoUrl,
   forgeRepoVisibility,
@@ -319,7 +320,7 @@ export function RepoList({
       setMenuRepo(repo);
     } else {
       setMenuRepo(null);
-      e.preventDefault();
+      suppressContextMenu(e);
     }
   }
 

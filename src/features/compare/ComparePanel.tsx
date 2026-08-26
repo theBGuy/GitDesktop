@@ -4,12 +4,19 @@ import {
   GitBranchIcon,
   GitCommitIcon,
   GitPullRequestIcon,
+  TagIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useState } from "react";
+import { type MouseEvent, useEffect, useState } from "react";
+import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import {
   Empty,
   EmptyContent,
@@ -21,22 +28,44 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CompareBranchCombobox } from "@/features/compare/CompareBranchCombobox";
+import { CommitContextMenuItems } from "@/features/history/CommitContextMenu";
+import {
+  checkoutCommitConfirm,
+  checkoutCommitSuccessToast,
+  cherryPickCommitConfirm,
+  revertCommitConfirm,
+} from "@/features/history/commit-confirms";
+import {
+  CreateRefFromCommitDialog,
+  createRefFromCommitFormOpts,
+} from "@/features/history/HistoryDialogs";
 import { CreatePrDialog } from "@/features/pulls/CreatePrDialog";
+import { suppressContextMenu } from "@/lib/context-menu";
+import { useAppForm } from "@/lib/form";
 import {
   forgeFeatureReady,
   useBranches,
+  useCheckoutCommit,
+  useCherryPick,
   useCompareBranches,
+  useCreateBranch,
+  useCreateTag,
   useDefaultBranch,
   useForgeStatus,
   useHoverPrefetch,
   usePrefetchCommit,
   usePrsForBranch,
   useRepoStatus,
+  useRevertCommit,
 } from "@/lib/git/queries";
+import { sanitizeRefName } from "@/lib/git/ref-name";
 import type { CommitSummary } from "@/lib/git/types";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
+import { toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 
 export function ComparePanel({ repoPath }: { repoPath: string }) {
@@ -126,6 +155,115 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       }),
     Boolean(compareBranch && compareBranch !== currentName && ahead.length > 0),
   );
+
+  // The commit the one shared context menu acts on. `onCurrentBranch` is true for
+  // an ahead commit, the only side whose changes this branch can revert.
+  const [menuTarget, setMenuTarget] = useState<{
+    hash: string;
+    onCurrentBranch: boolean;
+  } | null>(null);
+  const [branchHash, setBranchHash] = useState<string | null>(null);
+  const [tagHash, setTagHash] = useState<string | null>(null);
+  const shownBranchHash = useRetained(branchHash);
+  const shownTagHash = useRetained(tagHash);
+
+  const checkoutCommit = useCheckoutCommit(repoPath);
+  const revertCommit = useRevertCommit(repoPath);
+  const cherryPick = useCherryPick(repoPath);
+  const createBranch = useCreateBranch(repoPath);
+  const createTag = useCreateTag(repoPath);
+
+  const onError = (e: unknown) => toastError(e);
+
+  const branchForm = useAppForm({
+    ...createRefFromCommitFormOpts,
+    onSubmit: async ({ value }) => {
+      if (!branchHash) return;
+      const name = sanitizeRefName(value.name);
+      try {
+        await createBranch.mutateAsync({
+          name,
+          checkout: true,
+          startPoint: branchHash,
+        });
+        toast.success(`Created branch ${name}`);
+        setBranchHash(null);
+      } catch (e) {
+        onError(e);
+      }
+    },
+  });
+
+  const tagForm = useAppForm({
+    ...createRefFromCommitFormOpts,
+    onSubmit: async ({ value }) => {
+      if (!tagHash) return;
+      const name = sanitizeRefName(value.name);
+      try {
+        await createTag.mutateAsync({ name, hash: tagHash });
+        toast.success(`Created tag ${name}`);
+        setTagHash(null);
+      } catch (e) {
+        onError(e);
+      }
+    },
+  });
+
+  // The commit-level confirms are the shared ones History asks, so no route can
+  // pose a different question than its twin.
+  async function doCheckoutCommit(hash: string) {
+    if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    checkoutCommit.mutate(hash, {
+      onSuccess: () => toast.success(checkoutCommitSuccessToast(hash)),
+      onError,
+    });
+  }
+
+  async function doRevertCommit(hash: string) {
+    if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    revertCommit.mutate(hash, { onError });
+  }
+
+  async function doCherryPick(hash: string) {
+    const ok = await useConfirm
+      .getState()
+      .ask(cherryPickCommitConfirm(hash, currentName));
+    if (!ok) return;
+    cherryPick.mutate(hash, {
+      onSuccess: (applied) => {
+        if (applied) {
+          toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
+        } else {
+          toast.info(
+            "Nothing to cherry-pick — these changes are already on this branch.",
+          );
+        }
+      },
+      onError,
+    });
+  }
+
+  // One shared context menu for both lists (capture phase, so it records the
+  // right-clicked row before the menu opens). Right-clicking a commit selects it
+  // (standard desktop behavior), so the menu and the diff panel always describe
+  // the same commit; non-commit targets (the "All changes" row, headers, blank
+  // space) get no menu.
+  function handleContextMenu(e: MouseEvent) {
+    const suppress = () => {
+      setMenuTarget(null);
+      suppressContextMenu(e);
+    };
+    const hash = (e.target as HTMLElement)
+      .closest("[data-row]")
+      ?.getAttribute("data-row");
+    if (!hash) return suppress();
+    const onCurrentBranch = ahead.some((c) => c.hash === hash);
+    if (!onCurrentBranch && !behind.some((c) => c.hash === hash)) {
+      return suppress();
+    }
+    selectCompareCommit(hash);
+    setMenuTarget({ hash, onCurrentBranch });
+  }
 
   if (status.isPending || branches.isPending)
     return (
@@ -277,62 +415,111 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
         />
       )}
 
-      <div
-        className="flex min-h-0 flex-1 flex-col"
-        onKeyDown={onListKeyDown}
-        role="listbox"
-        aria-label="Compare selection"
-      >
-        <button
-          type="button"
-          data-row="all"
-          role="option"
-          aria-selected={compareCommitHash === null}
-          className={cn(
-            "flex w-full shrink-0 items-center gap-2 border-b px-3 py-2 text-left text-xs",
-            compareCommitHash === null
-              ? "bg-accent text-accent-foreground"
-              : "hover:bg-muted/60",
-          )}
-          onClick={() => selectCompareCommit(null)}
+      <ContextMenu>
+        <ContextMenuTrigger
+          render={
+            <div
+              className="flex min-h-0 flex-1 flex-col"
+              onKeyDown={onListKeyDown}
+              role="listbox"
+              aria-label="Compare selection"
+              onContextMenuCapture={handleContextMenu}
+            />
+          }
         >
-          <FilesIcon className="size-3.5 shrink-0" />
-          <span className="font-medium">All changes</span>
-        </button>
-
-        {comparison.isPending ? (
-          <div className="space-y-2 p-3">
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full" />
-          </div>
-        ) : (
-          /* overflow-hidden contains the list's natural height (vendored Root is
-             `relative`-only) so a long list can't leak a window scrollbar. */
-          <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-            <CommitSection
-              title={`${ahead.length} ahead`}
-              subtitle={`on ${currentName}, not on ${compareBranch}`}
-              commits={ahead}
-              selectedHash={compareCommitHash}
-              onSelect={selectCompareCommit}
-              onHover={onHoverCommit}
-            />
-            <CommitSection
-              title={`${behind.length} behind`}
-              subtitle={`on ${compareBranch}, not on ${currentName}`}
-              commits={behind}
-              selectedHash={compareCommitHash}
-              onSelect={selectCompareCommit}
-              onHover={onHoverCommit}
-            />
-            {ahead.length === 0 && behind.length === 0 && (
-              <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-                These branches are even.
-              </p>
+          <button
+            type="button"
+            data-row="all"
+            role="option"
+            aria-selected={compareCommitHash === null}
+            className={cn(
+              "flex w-full shrink-0 items-center gap-2 border-b px-3 py-2 text-left text-xs",
+              compareCommitHash === null
+                ? "bg-accent text-accent-foreground"
+                : "hover:bg-muted/60",
             )}
-          </ScrollArea>
-        )}
-      </div>
+            onClick={() => selectCompareCommit(null)}
+          >
+            <FilesIcon className="size-3.5 shrink-0" />
+            <span className="font-medium">All changes</span>
+          </button>
+
+          {comparison.isPending ? (
+            <div className="space-y-2 p-3">
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+            </div>
+          ) : (
+            /* overflow-hidden contains the list's natural height (vendored Root
+               is `relative`-only) so a long list can't leak a window scrollbar. */
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+              <CommitSection
+                title={`${ahead.length} ahead`}
+                subtitle={`on ${currentName}, not on ${compareBranch}`}
+                commits={ahead}
+                selectedHash={compareCommitHash}
+                onSelect={selectCompareCommit}
+                onHover={onHoverCommit}
+              />
+              <CommitSection
+                title={`${behind.length} behind`}
+                subtitle={`on ${compareBranch}, not on ${currentName}`}
+                commits={behind}
+                selectedHash={compareCommitHash}
+                onSelect={selectCompareCommit}
+                onHover={onHoverCommit}
+              />
+              {ahead.length === 0 && behind.length === 0 && (
+                <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+                  These branches are even.
+                </p>
+              )}
+            </ScrollArea>
+          )}
+        </ContextMenuTrigger>
+        <ContextMenuContent className="min-w-60">
+          {menuTarget && (
+            <CommitContextMenuItems
+              hash={menuTarget.hash}
+              actions={{
+                checkout: doCheckoutCommit,
+                revert: menuTarget.onCurrentBranch ? doRevertCommit : undefined,
+                cherryPick: doCherryPick,
+                createBranch: (hash) => {
+                  branchForm.reset({ name: "" });
+                  setBranchHash(hash);
+                },
+                createTag: (hash) => {
+                  tagForm.reset({ name: "" });
+                  setTagHash(hash);
+                },
+              }}
+            />
+          )}
+        </ContextMenuContent>
+      </ContextMenu>
+
+      <CreateRefFromCommitDialog
+        form={branchForm}
+        open={branchHash !== null}
+        onClose={() => setBranchHash(null)}
+        title="Create branch from commit"
+        description={`Creates a branch starting at ${shownBranchHash?.slice(0, 7) ?? ""} and switches to it.`}
+        fieldLabel="Branch name"
+        placeholder="feature/from-commit"
+        submitLabel="Create branch"
+      />
+
+      <CreateRefFromCommitDialog
+        form={tagForm}
+        open={tagHash !== null}
+        onClose={() => setTagHash(null)}
+        title="Create tag"
+        description={`Tags commit ${shownTagHash?.slice(0, 7) ?? ""}.`}
+        fieldLabel="Tag name"
+        placeholder="v1.0.0"
+        submitLabel="Create tag"
+      />
     </div>
   );
 }
@@ -380,6 +567,24 @@ function CommitSection({
             <span className="min-w-0 truncate" title={commit.subject}>
               {commit.subject}
             </span>
+            {commit.tags.slice(0, 2).map((tag) => (
+              <span
+                key={tag}
+                className="flex max-w-24 shrink-0 items-center gap-0.5 border px-1 py-px text-[10px] font-normal text-muted-foreground"
+                title={`tag: ${tag}`}
+              >
+                <TagIcon className="size-2.5 shrink-0" />
+                <span className="truncate">{tag}</span>
+              </span>
+            ))}
+            {commit.tags.length > 2 && (
+              <span
+                className="shrink-0 text-[10px] font-normal text-muted-foreground"
+                title={commit.tags.join(", ")}
+              >
+                +{commit.tags.length - 2}
+              </span>
+            )}
           </p>
           <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
             {commit.author} • <RelativeTime date={commit.date} />

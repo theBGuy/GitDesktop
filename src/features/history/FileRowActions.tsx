@@ -6,6 +6,7 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { suppressContextMenu } from "@/lib/context-menu";
 import { BlameDialog } from "./BlameDialog";
 import { FileHistoryDialog } from "./FileHistoryDialog";
 
@@ -58,7 +59,12 @@ export function FileRowActions({
     const path = (e.target as HTMLElement)
       .closest("[data-path]")
       ?.getAttribute("data-path");
-    setMenuPath(path ?? null);
+    if (!path) {
+      setMenuPath(null);
+      suppressContextMenu(e);
+      return;
+    }
+    setMenuPath(path);
   }
 
   return (
