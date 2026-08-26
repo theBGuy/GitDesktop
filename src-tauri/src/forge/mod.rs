@@ -14,6 +14,7 @@ pub mod gitlab_findings;
 pub mod glab;
 pub mod http;
 pub mod jira;
+pub mod linear;
 pub mod model;
 pub mod session;
 
@@ -895,6 +896,79 @@ pub async fn jira_worklog_delete(
     worklog_id: String,
 ) -> AppResult<()> {
     jira::worklog_delete(&site, &key, &worklog_id).await
+}
+
+// ── Linear ─────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn linear_validate_token(token: String) -> AppResult<linear::LinearAccountInfo> {
+    linear::validate_token(&token).await
+}
+
+#[tauri::command]
+pub async fn linear_stored_account() -> AppResult<Option<linear::LinearStoredAccount>> {
+    linear::stored_account().await
+}
+
+#[tauri::command]
+pub async fn linear_set_account(token: String) -> AppResult<linear::LinearAccountInfo> {
+    linear::set_account(&token).await
+}
+
+#[tauri::command]
+pub async fn linear_clear_account() -> AppResult<()> {
+    linear::clear_account().await
+}
+
+#[tauri::command]
+pub async fn linear_teams() -> AppResult<Vec<linear::LinearTeam>> {
+    linear::team_list(None).await
+}
+
+#[tauri::command]
+pub async fn linear_issue_list(
+    team_key: String,
+    state: String,
+) -> AppResult<Vec<linear::LinearIssueInfo>> {
+    linear::issue_list(&team_key, &state).await
+}
+
+#[tauri::command]
+pub async fn linear_issue_view(identifier: String) -> AppResult<linear::LinearIssueDetails> {
+    linear::issue_view(&identifier).await
+}
+
+#[tauri::command]
+pub async fn linear_issue_comment(
+    issue_id: String,
+    body_md: String,
+) -> AppResult<linear::LinearComment> {
+    linear::issue_comment(&issue_id, &body_md).await
+}
+
+#[tauri::command]
+pub async fn linear_issue_create(
+    team_id: String,
+    title: String,
+    description_md: Option<String>,
+) -> AppResult<linear::LinearCreatedIssue> {
+    linear::issue_create(&team_id, &title, description_md.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn linear_issue_transition(
+    issue_id: String,
+    state_id: String,
+) -> AppResult<()> {
+    linear::issue_transition(&issue_id, &state_id).await
+}
+
+#[tauri::command]
+pub async fn linear_issue_assign(
+    issue_id: String,
+    assignee_id: Option<String>,
+) -> AppResult<()> {
+    linear::issue_assign(&issue_id, assignee_id.as_deref()).await
 }
 
 /// The signed-in user's repositories on a provider, for the clone browser.

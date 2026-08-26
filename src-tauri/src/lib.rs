@@ -15,6 +15,8 @@ mod hooks;
 mod instructions;
 mod jira_field_maps;
 mod jira_links;
+#[allow(dead_code)]
+mod linear_links;
 mod link_preview;
 mod local_issues;
 mod local_prs;
@@ -329,6 +331,17 @@ pub fn run() {
             forge::jira_worklog_add,
             forge::jira_worklog_update,
             forge::jira_worklog_delete,
+            forge::linear_validate_token,
+            forge::linear_stored_account,
+            forge::linear_set_account,
+            forge::linear_clear_account,
+            forge::linear_teams,
+            forge::linear_issue_list,
+            forge::linear_issue_view,
+            forge::linear_issue_comment,
+            forge::linear_issue_create,
+            forge::linear_issue_transition,
+            forge::linear_issue_assign,
             forge::forge_list_repos,
             forge::forge_owned_namespaces,
             forge::forge_clone,
