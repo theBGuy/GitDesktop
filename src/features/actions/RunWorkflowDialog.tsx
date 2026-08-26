@@ -1,6 +1,7 @@
 import { PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useForgeStatus } from "@/lib/git/queries";
 import {
   useBbCustomPipelines,
@@ -196,12 +198,13 @@ export function RunWorkflowDialog({
                     placeholder={
                       workflows.isPending ? "Loading…" : "Select a workflow"
                     }
+                    onMouseEnter={clipTitleFromText}
                   />
                 </SelectTrigger>
                 <SelectContent>
                   {dispatchable.map((w) => (
                     <SelectItem key={w.id} value={String(w.id)}>
-                      {w.name}
+                      <SelectClipText>{w.name}</SelectClipText>
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -225,12 +228,12 @@ export function RunWorkflowDialog({
                 onValueChange={(v) => setPipeline(v ?? "")}
               >
                 <SelectTrigger id={`${idBase}-pipeline`} className="w-full">
-                  <SelectValue />
+                  <SelectValue onMouseEnter={clipTitleFromText} />
                 </SelectTrigger>
                 <SelectContent>
                   {Object.entries(pipelineItems).map(([name, label]) => (
                     <SelectItem key={name} value={name}>
-                      {label}
+                      <SelectClipText>{label}</SelectClipText>
                     </SelectItem>
                   ))}
                 </SelectContent>

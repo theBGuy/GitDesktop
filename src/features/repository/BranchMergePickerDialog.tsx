@@ -5,6 +5,7 @@ import {
   WarningIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useEffectEvent, useId, useState } from "react";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -24,6 +25,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitleFromText } from "@/lib/clip-title";
 import type { MergeConflictStrategy } from "@/lib/git/api";
 import { useMergePreview } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
@@ -212,12 +214,12 @@ export function BranchMergePickerDialog({
             onValueChange={(v) => v && setPickerBranch(v)}
           >
             <SelectTrigger id={branchSelectId} className="w-full">
-              <SelectValue />
+              <SelectValue onMouseEnter={clipTitleFromText} />
             </SelectTrigger>
             <SelectContent>
               {otherBranches.map((b) => (
                 <SelectItem key={b.name} value={b.name}>
-                  {b.name}
+                  <SelectClipText>{b.name}</SelectClipText>
                 </SelectItem>
               ))}
             </SelectContent>

@@ -1,5 +1,6 @@
 import { InfoIcon, WarningIcon } from "@phosphor-icons/react";
 import { useEffectEvent, useId, useState } from "react";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -18,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useCompareBranches } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
@@ -170,12 +172,12 @@ export function RebaseOntoDialog({
               onValueChange={(v) => v && setNewBase(v)}
             >
               <SelectTrigger id={newBaseSelectId} className="w-full">
-                <SelectValue />
+                <SelectValue onMouseEnter={clipTitleFromText} />
               </SelectTrigger>
               <SelectContent>
                 {otherBranches.map((b) => (
                   <SelectItem key={b.name} value={b.name}>
-                    {b.name}
+                    <SelectClipText>{b.name}</SelectClipText>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -192,12 +194,12 @@ export function RebaseOntoDialog({
               onValueChange={(v) => v && setOldBase(v)}
             >
               <SelectTrigger id={oldBaseSelectId} className="w-full">
-                <SelectValue />
+                <SelectValue onMouseEnter={clipTitleFromText} />
               </SelectTrigger>
               <SelectContent>
                 {otherBranches.map((b) => (
                   <SelectItem key={b.name} value={b.name}>
-                    {b.name}
+                    <SelectClipText>{b.name}</SelectClipText>
                   </SelectItem>
                 ))}
               </SelectContent>

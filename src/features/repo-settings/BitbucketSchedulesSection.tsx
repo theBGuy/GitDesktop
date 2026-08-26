@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,6 +16,7 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { clipTitleFromText } from "@/lib/clip-title";
 import {
   useBbCreateSchedule,
   useBbDeleteSchedule,
@@ -331,12 +333,15 @@ function ScheduleForm({
             }}
           >
             <SelectTrigger id="bb-schedule-branch" className="w-full">
-              <SelectValue placeholder="Select a branch" />
+              <SelectValue
+                placeholder="Select a branch"
+                onMouseEnter={clipTitleFromText}
+              />
             </SelectTrigger>
             <SelectContent>
               {branches.map((b) => (
                 <SelectItem key={b} value={b}>
-                  {b}
+                  <SelectClipText>{b}</SelectClipText>
                 </SelectItem>
               ))}
             </SelectContent>

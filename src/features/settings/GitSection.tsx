@@ -1,5 +1,6 @@
 import { useEffect, useEffectEvent } from "react";
 import { toast } from "sonner";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -8,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { required, useAppForm } from "@/lib/form";
 import {
   useGlobalAutocrlf,
@@ -232,12 +234,12 @@ export function LineEndingsSection() {
         disabled={autocrlf.isPending || setAutocrlf.isPending}
       >
         <SelectTrigger className="w-full max-w-md">
-          <SelectValue />
+          <SelectValue onMouseEnter={clipTitleFromText} />
         </SelectTrigger>
         <SelectContent className="max-w-[min(28rem,80vw)]">
           {AUTOCRLF_OPTIONS.map((o) => (
             <SelectItem key={o.value} value={o.value}>
-              <span className="block truncate">{o.label}</span>
+              <SelectClipText>{o.label}</SelectClipText>
             </SelectItem>
           ))}
         </SelectContent>

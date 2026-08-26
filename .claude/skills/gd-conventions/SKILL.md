@@ -95,8 +95,12 @@ words the user reads on screen — the palette matcher is a plain substring, so
   only-when-actually-clipped via `clipTitle`/`clipTitleFromText`
   (`src/lib/clip-title.ts`) — never inline: blanking with `title=""`
   suppresses a titled ancestor's tooltip, and the `inline-clip-title` guard
-  in `pnpm run checks` fails on rewrites. Base UI Select clips at the
-  POPUP — put the handler on the `SelectItem`, not the span.
+  in `pnpm run checks` fails on rewrites. Base UI Select popup rows route
+  through `SelectClipText` (`src/components/select-clip-text.tsx`) — a bare
+  truncate child never engages there, an item-level handler is dead once the
+  row span self-bounds (the `select-item-clip-title` guard fails on both) —
+  and the closed field takes `onMouseEnter={clipTitleFromText}` on its
+  `SelectValue`.
 - Disabled actions explain why via `DisabledReasonButton`
   (`src/components/disabled-reason-button.tsx`) — reason as tooltip + AT
   announcement; menu/popover trigger sites keep the reason on a titled span

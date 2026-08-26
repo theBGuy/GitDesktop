@@ -15,6 +15,7 @@ import {
 import { useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,7 +42,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { clipTitle } from "@/lib/clip-title";
+import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { normPath } from "@/lib/git/path";
 import {
@@ -879,29 +880,18 @@ function CreateWorktree({
             </label>
             <Select value={base} onValueChange={(v) => v && setBase(v)}>
               <SelectTrigger id="wt-base" size="sm" className="font-mono">
-                <SelectValue />
+                <SelectValue onMouseEnter={clipTitleFromText} />
               </SelectTrigger>
               <SelectContent>
-                {/* clipTitle rides the SelectItem, not an inner span: Base UI
-                    pins the popup to the trigger width and clips `overflow-x`,
-                    and the item text is `whitespace-nowrap`, so the truncation
-                    lives on the ITEM — a span-level check never fires. */}
                 {currentBranch &&
                   !branches.some((b) => b.name === currentBranch) && (
-                    <SelectItem
-                      value={currentBranch}
-                      onMouseEnter={clipTitle(currentBranch)}
-                    >
-                      {currentBranch}
+                    <SelectItem value={currentBranch}>
+                      <SelectClipText>{currentBranch}</SelectClipText>
                     </SelectItem>
                   )}
                 {branches.map((b) => (
-                  <SelectItem
-                    key={b.name}
-                    value={b.name}
-                    onMouseEnter={clipTitle(b.name)}
-                  >
-                    {b.name}
+                  <SelectItem key={b.name} value={b.name}>
+                    <SelectClipText>{b.name}</SelectClipText>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -922,16 +912,15 @@ function CreateWorktree({
                 onValueChange={(v) => v && setExisting(v)}
               >
                 <SelectTrigger id="wt-existing" size="sm" className="font-mono">
-                  <SelectValue placeholder="Select a branch" />
+                  <SelectValue
+                    placeholder="Select a branch"
+                    onMouseEnter={clipTitleFromText}
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   {available.map((b) => (
-                    <SelectItem
-                      key={b.name}
-                      value={b.name}
-                      onMouseEnter={clipTitle(b.name)}
-                    >
-                      {b.name}
+                    <SelectItem key={b.name} value={b.name}>
+                      <SelectClipText>{b.name}</SelectClipText>
                     </SelectItem>
                   ))}
                 </SelectContent>

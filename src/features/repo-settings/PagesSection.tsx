@@ -2,6 +2,7 @@ import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { toast } from "sonner";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +17,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { clipTitleFromText } from "@/lib/clip-title";
 import {
   useBranches,
   useDisablePages,
@@ -135,12 +137,15 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
             <Label htmlFor="pages-branch">Branch</Label>
             <Select value={branch} onValueChange={(v) => v && setBranch(v)}>
               <SelectTrigger id="pages-branch" className="w-44">
-                <SelectValue placeholder="Pick a branch" />
+                <SelectValue
+                  placeholder="Pick a branch"
+                  onMouseEnter={clipTitleFromText}
+                />
               </SelectTrigger>
               <SelectContent>
                 {branchNames.map((b) => (
                   <SelectItem key={b} value={b}>
-                    <span className="block truncate">{b}</span>
+                    <SelectClipText>{b}</SelectClipText>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -285,12 +290,15 @@ function PagesEnabled({
           <div className="flex items-end gap-2">
             <Select value={branch} onValueChange={(v) => v && setBranch(v)}>
               <SelectTrigger className="w-44">
-                <SelectValue placeholder="Branch" />
+                <SelectValue
+                  placeholder="Branch"
+                  onMouseEnter={clipTitleFromText}
+                />
               </SelectTrigger>
               <SelectContent>
                 {branchNames.map((b) => (
                   <SelectItem key={b} value={b}>
-                    <span className="block truncate">{b}</span>
+                    <SelectClipText>{b}</SelectClipText>
                   </SelectItem>
                 ))}
               </SelectContent>

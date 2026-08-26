@@ -1,6 +1,7 @@
 import { SparkleIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -13,6 +14,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { clipTitleFromText } from "@/lib/clip-title";
 import {
   useBranches,
   useGlRepoSettings,
@@ -286,12 +288,15 @@ function GitLabGeneralForm({
           }}
         >
           <SelectTrigger id="gl-repo-default-branch" className="w-full">
-            <SelectValue placeholder="No default branch yet" />
+            <SelectValue
+              placeholder="No default branch yet"
+              onMouseEnter={clipTitleFromText}
+            />
           </SelectTrigger>
           <SelectContent>
             {branchOptions.map((b) => (
               <SelectItem key={b} value={b}>
-                {b}
+                <SelectClipText>{b}</SelectClipText>
               </SelectItem>
             ))}
           </SelectContent>

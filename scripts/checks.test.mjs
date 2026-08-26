@@ -43,6 +43,7 @@ function scanner(name) {
 const hoverReveal = scanner("hover-reveal");
 const modKey = scanner("hand-rolled-mod-key");
 const inlineClipTitle = scanner("inline-clip-title");
+const selectItemClipTitle = scanner("select-item-clip-title");
 const setQueryData = scanner("setQueryData-noop");
 const bareMutate = scanner("bare-mutate-in-converted-trees");
 const menuSuppression = scanner("context-menu-suppression");
@@ -173,6 +174,83 @@ test("inline-clip-title exempts the helper file and vendored ui only", () => {
   assert.equal(appliesTo("src/lib/clip-title.ts"), false);
   assert.equal(appliesTo("src/components/ui/select.tsx"), false);
   assert.equal(appliesTo("src/features/pulls/PrTimeline.tsx"), true);
+});
+
+test("select-item-clip-title flags the superseded item-level handler, wrapped or not", () => {
+  assert.deepEqual(
+    selectItemClipTitle(
+      "<SelectItem key={b} value={b} onMouseEnter={clipTitle(b)}>",
+    ),
+    [1],
+  );
+  // Wrapped props (the shape the WorktreesDialog sites had): the [\s\S] gap is
+  // what reaches past the `=>` an intervening prop expression may carry.
+  const wrapped = [
+    "<SelectItem",
+    "  key={b.name}",
+    "  value={b.name}",
+    "  onMouseEnter={clipTitle(b.name)}",
+    ">",
+  ].join("\n");
+  assert.deepEqual(selectItemClipTitle(wrapped), [1]);
+  // A clip handler on a hand-rolled span INSIDE the item is the same dead
+  // shape: an unbounded span never measures clipped there either.
+  const inner = [
+    "<SelectItem key={b} value={b}>",
+    "  <span onMouseEnter={clipTitleFromText}>{b}</span>",
+    "</SelectItem>",
+  ].join("\n");
+  assert.deepEqual(selectItemClipTitle(inner), [1]);
+  // The pre-conversion dead span carries no clipTitle token at all — only the
+  // block-truncate arm sees this most-likely copy-paste regression.
+  const deadSpan = [
+    "<SelectItem key={b} value={b}>",
+    '  <span className="block truncate">{b}</span>',
+    "</SelectItem>",
+  ].join("\n");
+  assert.deepEqual(selectItemClipTitle(deadSpan), [1]);
+});
+
+test("select-item-clip-title leaves the SelectClipText idiom and trigger handlers alone", () => {
+  const converted = [
+    "<SelectItem key={b} value={b}>",
+    "  <SelectClipText>{b}</SelectClipText>",
+    "</SelectItem>",
+  ].join("\n");
+  assert.deepEqual(selectItemClipTitle(converted), []);
+  // The closed field's handler sits on SelectValue, ABOVE the items — the
+  // pairing direction (item first) is what keeps it clean.
+  const trigger = [
+    '<SelectTrigger className="w-full">',
+    "  <SelectValue onMouseEnter={clipTitleFromText} />",
+    "</SelectTrigger>",
+    "<SelectContent>",
+    "  <SelectItem key={b} value={b}>",
+    "    <SelectClipText>{b}</SelectClipText>",
+    "  </SelectItem>",
+    "</SelectContent>",
+  ].join("\n");
+  assert.deepEqual(selectItemClipTitle(trigger), []);
+  // Row-level clipTitle away from any Select stays the sanctioned idiom.
+  assert.deepEqual(
+    selectItemClipTitle("<button onMouseEnter={clipTitle(path)} />"),
+    [],
+  );
+  // A SELF-BOUNDED truncate (explicit max-w, the TaskDialog interpreter-path
+  // sub-span) engages on its own width and stays legal.
+  const bounded = [
+    "<SelectItem key={i.id} value={i.id}>",
+    '  <span className="max-w-64 truncate font-mono">{path}</span>',
+    "</SelectItem>",
+  ].join("\n");
+  assert.deepEqual(selectItemClipTitle(bounded), []);
+});
+
+test("select-item-clip-title exempts vendored ui only", () => {
+  const { appliesTo } = CHECKS.find((c) => c.name === "select-item-clip-title");
+  assert.equal(appliesTo("src/components/ui/select.tsx"), false);
+  assert.equal(appliesTo("src/components/select-clip-text.tsx"), true);
+  assert.equal(appliesTo("src/features/history/HistoryDialogs.tsx"), true);
 });
 
 test("setQueryData-noop catches a call wrapped across lines", () => {

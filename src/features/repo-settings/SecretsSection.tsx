@@ -2,6 +2,7 @@ import { PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
 import { useRelativeNow } from "@/components/relative-time";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,7 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { clipTitle } from "@/lib/clip-title";
+import { clipTitleFromText } from "@/lib/clip-title";
 import {
   useDeleteSecret,
   useDeleteVariable,
@@ -138,20 +139,13 @@ export function SecretsSection({
             disabled={!envAllowed}
           >
             <SelectTrigger id={scopeSelectId} size="sm" className="w-40">
-              <SelectValue />
+              <SelectValue onMouseEnter={clipTitleFromText} />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={REPO_SCOPE}>Repository</SelectItem>
               {(envs.data ?? []).map((e) => (
-                <SelectItem
-                  key={e}
-                  value={e}
-                  // The clip happens at the popup (overflow-x-hidden), not the
-                  // inner span, so the item is the element to measure — a
-                  // span-level clipTitle wouldn't fire here.
-                  onMouseEnter={clipTitle(e)}
-                >
-                  <span className="block truncate">{e}</span>
+                <SelectItem key={e} value={e}>
+                  <SelectClipText>{e}</SelectClipText>
                 </SelectItem>
               ))}
             </SelectContent>
