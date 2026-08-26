@@ -145,6 +145,7 @@ pub fn run() {
             git::diff::git_diff_file,
             git::diff::git_session_file_diff,
             git::diff::git_staged_diff,
+            git::diff::git_working_line_stats,
             git::diff::git_apply_patch,
             git::diff::git_apply_partial,
             git::diff::git_file_base64,

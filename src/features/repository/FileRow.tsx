@@ -1,7 +1,8 @@
 import { MinusIcon, PlusIcon } from "@phosphor-icons/react";
 import { memo } from "react";
+import { DiffStat } from "@/components/diff-stat";
 import { Button } from "@/components/ui/button";
-import type { ChangeKind, FileEntry } from "@/lib/git/types";
+import type { ChangeKind, DiffStatEntry, FileEntry } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
 
 const KIND_BADGE: Record<ChangeKind, { letter: string; className: string }> = {
@@ -29,6 +30,7 @@ export const FileRow = memo(function FileRow({
   selected,
   active,
   disabled,
+  stat,
   onSelect,
   onToggle,
 }: {
@@ -40,6 +42,9 @@ export const FileRow = memo(function FileRow({
   /** The active row whose diff is shown (keeps its toggle button visible). */
   active: boolean;
   disabled: boolean;
+  /** This row's OWN side of the diff (staged rows: index vs HEAD; unstaged:
+   *  working tree vs index). Absent = no counts to show. */
+  stat?: DiffStatEntry;
   onSelect: (
     entry: FileEntry,
     staged: boolean,
@@ -85,6 +90,14 @@ export const FileRow = memo(function FileRow({
       <span className="min-w-0 flex-1 truncate" title={label}>
         {label}
       </span>
+      {stat ? (
+        <DiffStat
+          added={stat.added}
+          deleted={stat.deleted}
+          isBinary={stat.isBinary}
+          className="text-[11px]"
+        />
+      ) : null}
       <Button
         variant="ghost"
         size="icon-xs"

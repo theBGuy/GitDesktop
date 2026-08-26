@@ -367,6 +367,11 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 
 - Click a file to see its diff. Toggle **unified / split** at the top of the diff.
 - Stage or unstage a file with the **+ / −** button on its row, or **Stage all**.
+- File rows show their own **+added -deleted** line counts, left of that button. They
+  count per side, so a file you staged and then edited again shows what's staged on
+  its Staged row and what's still outside it on its Changes row. Binary files read
+  \`bin\`; untracked files show no counts until they're staged, and conflicted rows
+  show none while the conflict is unresolved.
 - **Hunk-level staging** — in a file's diff, each hunk has its own Stage / Unstage /
   Discard buttons.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,

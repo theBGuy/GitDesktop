@@ -168,6 +168,15 @@ export interface DiffStatEntry {
   isBinary: boolean;
 }
 
+/** Per-file line counts for the working tree, one list per diff side. Untracked
+ *  paths appear on neither side — numstat only reports tracked changes. */
+export interface WorkingLineStats {
+  /** Index vs HEAD — what the Staged section's rows show. */
+  staged: DiffStatEntry[];
+  /** Working tree vs index — what the Changes section's rows show. */
+  unstaged: DiffStatEntry[];
+}
+
 export interface StagedDiff {
   text: string;
   truncated: boolean;

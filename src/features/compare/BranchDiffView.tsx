@@ -1,4 +1,5 @@
 import { useDeferredValue, useState } from "react";
+import { DiffStat } from "@/components/diff-stat";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
@@ -108,12 +109,11 @@ export function BranchDiffView({
         >
           {files.data.length} file{files.data.length === 1 ? "" : "s"}
         </span>
-        <span className={cn("text-success", PLACEHOLDER_FADE, staleDim)}>
-          +{totalAdded}
-        </span>
-        <span className={cn("text-destructive", PLACEHOLDER_FADE, staleDim)}>
-          -{totalDeleted}
-        </span>
+        <DiffStat
+          added={totalAdded}
+          deleted={totalDeleted}
+          className={cn("flex items-center gap-2", PLACEHOLDER_FADE, staleDim)}
+        />
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -153,14 +153,11 @@ export function BranchDiffView({
                   <span className="min-w-0 flex-1 truncate font-mono">
                     {file.path}
                   </span>
-                  {file.isBinary ? (
-                    <span className="shrink-0 text-muted-foreground">bin</span>
-                  ) : (
-                    <span className="shrink-0 tabular-nums">
-                      <span className="text-success">+{file.added}</span>{" "}
-                      <span className="text-destructive">-{file.deleted}</span>
-                    </span>
-                  )}
+                  <DiffStat
+                    added={file.added}
+                    deleted={file.deleted}
+                    isBinary={file.isBinary}
+                  />
                 </button>
               ))}
             </FileRowActions>

@@ -246,6 +246,28 @@ const notVendoredUi = (file) => !file.startsWith("src/components/ui/");
 const SEED_ON_OPEN_RE =
   /use(?:Layout)?Effect\(\(\)\s*=>\s*\{\s*if\s*\(!?open\b/g;
 
+// A hand-rolled diff-stat pair: a `text-success` element whose own content opens
+// with an interpolated `+` count, within PAIR_GAP of a `text-destructive` one
+// opening with a `-` count. Both minus spellings match — the ASCII hyphen the
+// canonical sites use and the U+2212 the Insights pair used.
+// Unlike the class-name checks above, the two tokens are matched as bare
+// substrings rather than through `token()`: the boundary guard would drop
+// `text-success/70` and `group-hover:text-destructive`, which are the same idiom
+// in a different Tailwind spelling. Requiring each element's own `>` is what
+// bounds the false positives instead — a class named far from any count can't
+// pair. The run to that `>` is 200 chars because a realistic `cn(...)` list with
+// conditional utilities measures 95 (probed while sizing this check); the old
+// 60 missed it.
+// Three deliberate bounds, zero instances today: the deleted-then-added order is
+// not matched, nor is a count rendered through a helper call rather than a brace
+// interpolation (`>+{fmt(n)}` matches; `>{plus(n)}` does not), nor one built in a
+// template literal (`>{`+${n}`}` — no `+` precedes the brace).
+const DIFF_STAT_PAIR_RE = new RegExp(
+  `text-success[\\s\\S]{0,200}?>\\s*\\+\\s*\\{[\\s\\S]{0,${PAIR_GAP}}?` +
+    `text-destructive[\\s\\S]{0,200}?>\\s*[-−]\\s*\\{`,
+  "g",
+);
+
 // `<Activity` as a JSX open tag. The lookahead is what separates it from the
 // app's own `<ActivityDock>`/`<ActivityBell>`/`<ActivityStrip>` components, and
 // comment stripping is what keeps the many prose mentions of `<Activity>` clean.
@@ -395,6 +417,16 @@ export const CHECKS = [
     ],
     message:
       "an open-transition reset must ride useSeedOnOpen (src/lib/use-seed-on-open.ts) — a hidden <Activity> tab re-mounts its effects on show, so a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires and wipes the user's draft; a data-arrival or otherwise idempotent seed needs an allowlist entry with rationale",
+  },
+  {
+    name: "hand-rolled-diff-stat",
+    // The component IS the idiom; everything else routes through it.
+    appliesTo: (file) =>
+      file !== "src/components/diff-stat.tsx" && notVendoredUi(file),
+    scan: perFile(DIFF_STAT_PAIR_RE),
+    allowlist: [],
+    message:
+      "`+added -deleted` counts render through DiffStat (src/components/diff-stat.tsx) — a hand-rolled pair drifts from the canonical spacing, minus glyph, and tabular digits one site at a time; a site the component genuinely can't express needs an allowlist entry with rationale",
   },
   {
     name: "lone-activity-boundary",

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { DiffStat } from "@/components/diff-stat";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -57,8 +58,11 @@ function ContributorsList({ data }: { data: ContributorChurn[] }) {
             </span>
             <span className="shrink-0 tabular-nums text-muted-foreground">
               {fmt(c.commits)} {c.commits === 1 ? "commit" : "commits"} ·{" "}
-              <span className="text-success">+{fmt(c.additions)}</span>{" "}
-              <span className="text-destructive">−{fmt(c.deletions)}</span>
+              <DiffStat
+                added={c.additions}
+                deleted={c.deletions}
+                format={fmt}
+              />
             </span>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">

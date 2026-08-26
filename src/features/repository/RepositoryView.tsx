@@ -486,7 +486,7 @@ export function RepositoryView() {
             </TabsList>
           </Tabs>
           <TabPanel active={repoTab === "changes"}>
-            <ChangesPanel repoPath={repoPath} />
+            <ChangesPanel repoPath={repoPath} active={repoTab === "changes"} />
             <CommitBox repoPath={repoPath} />
           </TabPanel>
           <TabPanel active={repoTab === "history"}>

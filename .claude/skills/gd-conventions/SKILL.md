@@ -97,6 +97,11 @@ words the user reads on screen — the palette matcher is a plain substring, so
   suppresses a titled ancestor's tooltip, and the `inline-clip-title` guard
   in `pnpm run checks` fails on rewrites. Base UI Select clips at the
   POPUP — put the handler on the `SelectItem`, not the span.
+- Per-file `+added -deleted` counts render through `DiffStat`
+  (`src/components/diff-stat.tsx`) — plain numbers in, optional `isBinary`
+  (a muted `bin`) and `format` (Insights abbreviates via `fmt`); never
+  hand-rolled, and the `hand-rolled-diff-stat` guard in `pnpm run checks`
+  fails on a new pair.
 - Disabled actions explain why via `DisabledReasonButton`
   (`src/components/disabled-reason-button.tsx`) — reason as tooltip + AT
   announcement; menu/popover trigger sites keep the reason on a titled span

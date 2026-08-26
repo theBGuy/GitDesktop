@@ -41,6 +41,7 @@ import {
   useStashPaths,
   useUnstage,
   useUntrack,
+  useWorkingLineStats,
 } from "@/lib/git/queries";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
@@ -111,7 +112,15 @@ type FlatRow =
   | { type: "header"; section: "staged" | "unstaged"; count: number }
   | { type: "file"; entry: FileEntry; staged: boolean };
 
-export function ChangesPanel({ repoPath }: { repoPath: string }) {
+export function ChangesPanel({
+  repoPath,
+  active,
+}: {
+  repoPath: string;
+  /** The Changes tab is the visible one. A `<TabPanel>`-hidden panel still
+   *  renders, so the line-count poll is gated on this rather than on mounting. */
+  active: boolean;
+}) {
   const status = useRepoStatus(repoPath);
   const stage = useStage(repoPath);
   const unstage = useUnstage(repoPath);
@@ -164,6 +173,24 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
     .map((e) => e.path);
   const canResolveConflicts =
     aiEnabled && reviewConfigured && conflictedPaths.length > 0;
+
+  const lineStats = useWorkingLineStats(repoPath, active && entries.length > 0);
+  const stagedStats = new Map(
+    (lineStats.data?.staged ?? []).map((e) => [e.path, e]),
+  );
+  const unstagedStats = new Map(
+    (lineStats.data?.unstaged ?? []).map((e) => [e.path, e]),
+  );
+  // Each row reads its OWN side, never a shared or summed number: a file staged
+  // and then re-edited shows index-vs-HEAD counts on its Staged row and
+  // worktree-vs-index counts on its Changes row. The kind gate lives here alone —
+  // numstat can't see untracked paths, and emits duplicate noise rows for
+  // conflicted ones, so both render a blank slot.
+  function statFor(entry: FileEntry, staged: boolean) {
+    const kind = staged ? entry.staged : entry.unstaged;
+    if (kind === "untracked" || kind === "conflicted") return undefined;
+    return (staged ? stagedStats : unstagedStats).get(entry.path);
+  }
 
   // Empty-state suggestions: a published repo offers "View on GitHub"; a
   // branch with commits the default branch doesn't have offers a PR. The
@@ -935,6 +962,7 @@ export function ChangesPanel({ repoPath }: { repoPath: string }) {
                             }
                             staged={row.staged}
                             disabled={mutating}
+                            stat={statFor(row.entry, row.staged)}
                             selected={selectedKeys.has(
                               keyOf(row.entry.path, row.staged),
                             )}

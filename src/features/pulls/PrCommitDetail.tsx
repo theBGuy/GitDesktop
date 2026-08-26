@@ -1,5 +1,6 @@
 import { CopyIcon } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
+import { DiffStat } from "@/components/diff-stat";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -238,18 +239,11 @@ export function PrCommitDetail({
                     <span className="min-w-0 flex-1 truncate font-mono">
                       {file.path}
                     </span>
-                    {file.isBinary ? (
-                      <span className="shrink-0 text-muted-foreground">
-                        bin
-                      </span>
-                    ) : (
-                      <span className="shrink-0 tabular-nums">
-                        <span className="text-success">+{file.added}</span>{" "}
-                        <span className="text-destructive">
-                          -{file.deleted}
-                        </span>
-                      </span>
-                    )}
+                    <DiffStat
+                      added={file.added}
+                      deleted={file.deleted}
+                      isBinary={file.isBinary}
+                    />
                   </button>
                 ))}
               </FileRowActions>

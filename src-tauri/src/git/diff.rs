@@ -433,6 +433,41 @@ pub async fn git_staged_diff(
     })
 }
 
+/// Per-file line counts for the working tree, one list per diff side.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkingLineStats {
+    /// Index vs HEAD — what the Staged section's rows show.
+    pub staged: Vec<DiffStatEntry>,
+    /// Working tree vs index — what the Changes section's rows show.
+    pub unstaged: Vec<DiffStatEntry>,
+}
+
+/// Line counts for the Changes panel's file rows, split by side so a file that
+/// is BOTH staged and re-edited reports each row's own numbers (never one
+/// shared or summed count). Read-only and lock-free like `status_core`, so it
+/// can ride the same 5s poll. Untracked paths appear on neither side: numstat
+/// only reports tracked changes, and those rows deliberately show no counts.
+#[tauri::command]
+pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineStats> {
+    let (staged, unstaged) = tokio::try_join!(
+        run_git(
+            Some(&repo_path),
+            &["diff", "--cached", "--numstat", "-z"],
+            DEFAULT_TIMEOUT,
+        ),
+        run_git(
+            Some(&repo_path),
+            &["diff", "--numstat", "-z"],
+            DEFAULT_TIMEOUT,
+        )
+    )?;
+    Ok(WorkingLineStats {
+        staged: parse_numstat_z(&staged.stdout_lossy()),
+        unstaged: parse_numstat_z(&unstaged.stdout_lossy()),
+    })
+}
+
 pub fn truncate_at_char_boundary(text: String, max: usize) -> (String, bool) {
     if text.len() <= max {
         return (text, false);
@@ -656,6 +691,96 @@ mod tests {
         .unwrap();
         assert_eq!(noop.files.len(), 3);
         assert_eq!(noop.excluded_files, 0);
+    }
+
+    /// Sets up a temp git repo with a deterministic identity. `core.autocrlf` is
+    /// pinned because these tests count LINES — an inherited global setting must
+    /// not reshape the fixture.
+    async fn init_line_stats_repo(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let tmp = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("create temp dir");
+        let dir = tmp.path().to_path_buf();
+        let repo = dir.to_string_lossy().into_owned();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t.local"],
+            vec!["config", "user.name", "T"],
+            vec!["config", "core.autocrlf", "false"],
+        ] {
+            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+        }
+        (tmp, dir, repo)
+    }
+
+    /// The panel's core invariant: a file that is staged AND re-edited reports
+    /// DIFFERENT counts per side — staged is index vs HEAD, unstaged is working
+    /// tree vs index. Untracked files appear on neither side.
+    #[tokio::test]
+    async fn working_line_stats_splits_sides_and_skips_untracked() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-test-").await;
+
+        std::fs::write(dir.join("file.txt"), "a\nb\nc\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(Some(&repo), &["commit", "-qm", "seed"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+
+        // Stage a 2-line append (index vs HEAD = +2 -0)...
+        std::fs::write(dir.join("file.txt"), "a\nb\nc\nd\ne\n").unwrap();
+        run_git(Some(&repo), &["add", "file.txt"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        // ...then edit further in the worktree (worktree vs index = +3 -1).
+        std::fs::write(dir.join("file.txt"), "a\nb\nc\nd\nE\nf\ng\n").unwrap();
+        std::fs::write(dir.join("untracked.txt"), "x\ny\n").unwrap();
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+
+        let staged = stats
+            .staged
+            .iter()
+            .find(|e| e.path == "file.txt")
+            .expect("staged side reports the file");
+        assert_eq!((staged.added, staged.deleted), (2, 0));
+        let unstaged = stats
+            .unstaged
+            .iter()
+            .find(|e| e.path == "file.txt")
+            .expect("unstaged side reports the file");
+        assert_eq!((unstaged.added, unstaged.deleted), (3, 1));
+
+        for side in [&stats.staged, &stats.unstaged] {
+            assert!(
+                !side.iter().any(|e| e.path == "untracked.txt"),
+                "numstat never reports untracked paths"
+            );
+        }
+    }
+
+    /// A brand-new repo with no commits still reports its staged counts — `git
+    /// diff --cached` falls back to the empty tree, so the command needs no
+    /// unborn-HEAD special case.
+    #[tokio::test]
+    async fn working_line_stats_handles_unborn_head() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-unborn-test-").await;
+
+        std::fs::write(dir.join("new.txt"), "one\ntwo\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        let staged = stats
+            .staged
+            .iter()
+            .find(|e| e.path == "new.txt")
+            .expect("staged side reports the file");
+        assert_eq!((staged.added, staged.deleted), (2, 0));
+        assert!(stats.unstaged.is_empty());
     }
 
     const FILE_HEADER: &str = "diff --git a/f.txt b/f.txt\nindex 000..111 100644\n--- a/f.txt\n+++ b/f.txt\n";

@@ -2,6 +2,7 @@ import { CopyIcon, DotsThreeVerticalIcon } from "@phosphor-icons/react";
 import { useDeferredValue, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
+import { DiffStat } from "@/components/diff-stat";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -342,16 +343,15 @@ export function CommitDetailView({
             <CopyIcon className="size-3" />
           </button>
           <span className="flex-1" />
-          <span
+          <DiffStat
+            added={totalAdded}
+            deleted={totalDeleted}
             className={cn(
               "flex items-center gap-2",
               PLACEHOLDER_FADE,
               staleDim,
             )}
-          >
-            <span className="text-success">+{totalAdded}</span>
-            <span className="text-destructive">-{totalDeleted}</span>
-          </span>
+          />
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -440,14 +440,11 @@ export function CommitDetailView({
                   <span className="min-w-0 flex-1 truncate font-mono">
                     {file.path}
                   </span>
-                  {file.isBinary ? (
-                    <span className="shrink-0 text-muted-foreground">bin</span>
-                  ) : (
-                    <span className="shrink-0 tabular-nums">
-                      <span className="text-success">+{file.added}</span>{" "}
-                      <span className="text-destructive">-{file.deleted}</span>
-                    </span>
-                  )}
+                  <DiffStat
+                    added={file.added}
+                    deleted={file.deleted}
+                    isBinary={file.isBinary}
+                  />
                 </button>
               ))}
             </FileRowActions>

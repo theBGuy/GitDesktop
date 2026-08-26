@@ -1,3 +1,4 @@
+import { DiffStat } from "@/components/diff-stat";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   useBranchStats,
@@ -144,12 +145,11 @@ export function InsightsPanel({
                       {fmt(branchStats.data.filesChanged)}
                     </Stat>
                     <Stat label="Lines changed">
-                      <span className="text-success">
-                        +{fmt(branchStats.data.additions)}
-                      </span>{" "}
-                      <span className="text-destructive">
-                        −{fmt(branchStats.data.deletions)}
-                      </span>
+                      <DiffStat
+                        added={branchStats.data.additions}
+                        deleted={branchStats.data.deletions}
+                        format={fmt}
+                      />
                     </Stat>
                     <Stat label="First branch commit">
                       <DateValue date={branchStats.data.firstCommitDate} />

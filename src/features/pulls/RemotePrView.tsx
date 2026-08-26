@@ -28,6 +28,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DiffStat } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { SelectControl } from "@/components/form/fields";
@@ -2358,8 +2359,11 @@ export function RemotePrView({
           <span className="font-mono">{pr.headRefName}</span>
           <span>→</span>
           <span className="font-mono">{pr.baseRefName}</span>
-          <span className="text-success">+{pr.additions}</span>
-          <span className="text-destructive">-{pr.deletions}</span>
+          <DiffStat
+            added={pr.additions}
+            deleted={pr.deletions}
+            className="flex items-center gap-2"
+          />
         </div>
         {/* Entity-keyed pickers — labels, assignees, projects, reviewers: each
             seeds a draft on open, commits it on close against LIVE props, and a

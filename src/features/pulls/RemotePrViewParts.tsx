@@ -1,5 +1,6 @@
 import { ClockIcon } from "@phosphor-icons/react";
 import { type ComponentProps, useMemo, useState } from "react";
+import { DiffStat } from "@/components/diff-stat";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -264,10 +265,7 @@ export function PrFilesPane({
       title={file.path}
     >
       <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
-      <span className="shrink-0 tabular-nums">
-        <span className="text-success">+{file.additions}</span>{" "}
-        <span className="text-destructive">-{file.deletions}</span>
-      </span>
+      <DiffStat added={file.additions} deleted={file.deletions} />
     </button>
   ));
 

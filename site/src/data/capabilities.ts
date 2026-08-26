@@ -59,6 +59,10 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Diffs & staging",
+    label: "Per-file added/deleted line counts on the changes list",
+  },
+  {
+    group: "Diffs & staging",
     label: "Commit with co-authors suggested from history; amend, undo, revert",
   },
   { group: "Diffs & staging", label: "Recoverable, recycle-bin discards" },

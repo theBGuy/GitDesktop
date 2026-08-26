@@ -48,6 +48,7 @@ const bareMutate = scanner("bare-mutate-in-converted-trees");
 const menuSuppression = scanner("context-menu-suppression");
 const loneActivity = scanner("lone-activity-boundary");
 const seedOnOpen = scanner("seed-effect-on-open");
+const diffStatPair = scanner("hand-rolled-diff-stat");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -423,6 +424,70 @@ test("lone-activity-boundary ignores same-prefixed components and prose", () => 
     loneActivity("// a hidden <Activity> subtree still fetches"),
     [],
   );
+});
+
+test("hand-rolled-diff-stat flags both minus glyphs and a wrapped class list", () => {
+  const ascii = [
+    '<span className="shrink-0 tabular-nums">',
+    '  <span className="text-success">+{file.added}</span>{" "}',
+    '  <span className="text-destructive">-{file.deleted}</span>',
+    "</span>",
+  ].join("\n");
+  assert.deepEqual(diffStatPair(ascii), [2]);
+  // The Insights spelling: U+2212, and counts routed through a formatter.
+  const unicode = [
+    '<span className="text-success">+{fmt(c.additions)}</span>{" "}',
+    '<span className="text-destructive">−{fmt(c.deletions)}</span>',
+  ].join("\n");
+  assert.deepEqual(diffStatPair(unicode), [1]);
+  // A cn()-wrapped class list, each count on its own wrapped line.
+  const wrapped = [
+    '<span className={cn("text-success", PLACEHOLDER_FADE, staleDim)}>',
+    "  +{totalAdded}",
+    "</span>",
+    '<span className={cn("text-destructive", PLACEHOLDER_FADE, staleDim)}>',
+    "  -{totalDeleted}",
+    "</span>",
+  ].join("\n");
+  assert.deepEqual(diffStatPair(wrapped), [1]);
+  // The boundary the 200-char class run exists for: a cn() list carrying
+  // conditional utilities puts 95 chars between the class name and its `>`.
+  const longList = [
+    '<span className={cn("text-success", PLACEHOLDER_FADE, staleDim,',
+    '  isActive && "font-medium", compact ? "text-[10px]" : "text-xs")}>',
+    "  +{a}",
+    "</span>",
+    '<span className={cn("text-destructive", PLACEHOLDER_FADE, staleDim,',
+    '  isActive && "font-medium", compact ? "text-[10px]" : "text-xs")}>',
+    "  -{d}",
+    "</span>",
+  ].join("\n");
+  assert.deepEqual(diffStatPair(longList), [1]);
+});
+
+test("hand-rolled-diff-stat leaves the component route and lone tokens alone", () => {
+  assert.deepEqual(
+    diffStatPair("<DiffStat added={file.added} deleted={file.deleted} />"),
+    [],
+  );
+  // A success/destructive pair with no counts between them — the ordinary use.
+  const statuses = [
+    '<span className="text-success">Passing</span>',
+    '<span className="text-destructive">{failed} failed</span>',
+  ].join("\n");
+  assert.deepEqual(diffStatPair(statuses), []);
+  // Half the idiom is not the idiom.
+  assert.deepEqual(
+    diffStatPair('<span className="text-success">+{added}</span>'),
+    [],
+  );
+});
+
+test("hand-rolled-diff-stat exempts the component file and vendored ui only", () => {
+  const { appliesTo } = CHECKS.find((c) => c.name === "hand-rolled-diff-stat");
+  assert.equal(appliesTo("src/components/diff-stat.tsx"), false);
+  assert.equal(appliesTo("src/components/ui/badge.tsx"), false);
+  assert.equal(appliesTo("src/features/repository/FileRow.tsx"), true);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {
