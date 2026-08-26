@@ -3,12 +3,13 @@ import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
 
 /** A repo's link to a Linear team. Personal app-data — never written into the
- *  repo itself — keyed by the repo's worktree-stable identity so the link is
- *  shared across the main checkout and every worktree. */
+ *  repo itself — keyed by the repo's worktree-stable identity. */
 export interface LinearLink {
-  /** The team's short key, e.g. `ENG`. */
+  /** The workspace slug, for building URLs. */
+  workspaceSlug: string;
+  /** The team key, e.g. `ENG`. */
   teamKey: string;
-  /** The team's display name, cached for the section header + picker. */
+  /** The team's display name, cached for the section header. */
   teamName: string;
 }
 
@@ -21,11 +22,6 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
-// Serialize every read-modify-write on this store (and the reload) through one
-// in-process queue — mirrors the Jira/local-issue/PR stores. Without it two
-// overlapping mutations each reload the SAME pre-flush disk snapshot (autoSave
-// persists on a ~100ms debounce) and the later write drops the earlier one's
-// change. writeLink force-saves so each reload sees a current one.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -38,19 +34,25 @@ async function reloadRaw(): Promise<void> {
   try {
     await store.reload({ ignoreDefaults: true });
   } catch {
-    // Missing/unreadable file — proceed with in-memory state; the next save()
-    // creates it.
+    // Missing/unreadable file — proceed with in-memory state.
   }
 }
 
-/** Type-guard an untrusted stored value into a LinearLink; `null` when malformed. */
 function asLink(v: unknown): LinearLink | null {
   if (!v || typeof v !== "object") return null;
   const o = v as Record<string, unknown>;
-  if (typeof o.teamKey !== "string" || typeof o.teamName !== "string") {
+  if (
+    typeof o.workspaceSlug !== "string" ||
+    typeof o.teamKey !== "string" ||
+    typeof o.teamName !== "string"
+  ) {
     return null;
   }
-  return { teamKey: o.teamKey, teamName: o.teamName };
+  return {
+    workspaceSlug: o.workspaceSlug,
+    teamKey: o.teamKey,
+    teamName: o.teamName,
+  };
 }
 
 const preferIdentity = (
@@ -58,9 +60,6 @@ const preferIdentity = (
   legacy: LinearLink,
 ): LinearLink => id ?? legacy;
 
-/** This repo's Linear link (or `null` when unlinked). Read-only path: merges in
- *  a record still under a legacy checkout-path key (folded on the next mutation),
- *  so a worktree-created link shows up right away. */
 export async function getLinearLink(repo: string): Promise<LinearLink | null> {
   const store = await getStore();
   const id = await repoIdentity(repo);
@@ -70,8 +69,6 @@ export async function getLinearLink(repo: string): Promise<LinearLink | null> {
   return asLink(await store.get(repo));
 }
 
-/** Identity store key for `repo`, folding any legacy checkout-path record onto
- *  it once. Call inside the serialized queue (after `reloadRaw`). */
 async function keyFor(repo: string): Promise<string> {
   const store = await getStore();
   return identityKeyFor<LinearLink>(
@@ -82,7 +79,6 @@ async function keyFor(repo: string): Promise<string> {
   );
 }
 
-/** Link (or re-link) `repo` to a Linear team. */
 export async function setLinearLink(
   repo: string,
   link: LinearLink,
@@ -97,8 +93,6 @@ export async function setLinearLink(
   });
 }
 
-/** Remove `repo`'s Linear link (does NOT clear the keyring credential — the
- *  account may serve other repos). */
 export async function clearLinearLink(repo: string): Promise<void> {
   return serialize(async () => {
     await reloadRaw();

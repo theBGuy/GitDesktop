@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { keepPreviousDataForRepo } from "@/lib/git/queries";
 import {
-  linearIssueAssign,
   linearIssueComment,
   linearIssueCreate,
   linearIssueList,
   linearIssueTransition,
+  linearIssueAssign,
   linearIssueView,
   linearStoredAccount,
   linearTeams,
@@ -16,11 +16,13 @@ import {
   type LinearLink,
   setLinearLink,
 } from "./store";
-import type { LinearIssueDetails, LinearIssueState } from "./types";
+import type {
+  LinearIssueDetails,
+  LinearIssueState,
+} from "./types";
 
 const linearLinkKey = (repo: string) => ["linear-link", repo] as const;
 
-/** This repo's Linear link (or `null` when unlinked). */
 export function useLinearLink(repo: string) {
   return useQuery({
     queryKey: linearLinkKey(repo),
@@ -28,8 +30,6 @@ export function useLinearLink(repo: string) {
   });
 }
 
-/** Invalidate the link query AND every Linear issue-list/issue-detail query for
- *  this repo. */
 function invalidateLinearForRepo(
   queryClient: ReturnType<typeof useQueryClient>,
   repo: string,
@@ -39,12 +39,11 @@ function invalidateLinearForRepo(
     predicate: (q) =>
       q.queryKey[0] === "repo" &&
       q.queryKey[1] === repo &&
-      (q.queryKey[2] === "linear-issues" || q.queryKey[2] === "linear-issue"),
+      (q.queryKey[2] === "linear-issues" ||
+        q.queryKey[2] === "linear-issue"),
   });
 }
 
-/** Narrow reconciliation for a single-issue write: just that issue's detail key
- *  plus the repo's linear-issues LIST keys. */
 function invalidateLinearIssue(
   queryClient: ReturnType<typeof useQueryClient>,
   repo: string,
@@ -74,7 +73,6 @@ export function useClearLinearLink(repo: string) {
   });
 }
 
-/** The stored Linear account (fast keyring check, no network); `null` when none. */
 export function useLinearAccount() {
   return useQuery({
     queryKey: ["linear-account"] as const,
@@ -82,7 +80,6 @@ export function useLinearAccount() {
   });
 }
 
-/** The viewer's teams (for the link picker). */
 export function useLinearTeams(enabled: boolean) {
   return useQuery({
     queryKey: ["linear-teams"] as const,
@@ -92,8 +89,6 @@ export function useLinearTeams(enabled: boolean) {
   });
 }
 
-/** The linked team's issues for a state filter. Enabled only when the repo is
- *  linked. */
 export function useLinearIssues(
   repo: string,
   link: LinearLink | null | undefined,
@@ -107,14 +102,13 @@ export function useLinearIssues(
       link?.teamKey ?? "",
       state,
     ] as const,
-    queryFn: () => linearIssueList((link as LinearLink).teamKey, state),
+    queryFn: () =>
+      linearIssueList((link as LinearLink).teamKey, state),
     enabled: !!link,
     staleTime: 30_000,
   });
 }
 
-/** One Linear issue's full detail. Enabled only when linked and an identifier is
- *  selected. */
 export function useLinearIssue(
   repo: string,
   link: LinearLink | null | undefined,
@@ -128,11 +122,8 @@ export function useLinearIssue(
   });
 }
 
-/** Add a comment. The returned comment is appended to the detail cache on
- *  success, and the repo's Linear caches reconcile on settle. */
 export function useLinearComment(
   repo: string,
-  link: LinearLink | null | undefined,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -142,7 +133,12 @@ export function useLinearComment(
       bodyMd: string;
     }) => linearIssueComment(args.issueId, args.bodyMd),
     onSuccess: (comment, args) => {
-      const key = ["repo", repo, "linear-issue", args.issueIdentifier] as const;
+      const key = [
+        "repo",
+        repo,
+        "linear-issue",
+        args.issueIdentifier,
+      ] as const;
       queryClient.setQueryData<LinearIssueDetails>(key, (d) =>
         d ? { ...d, comments: [...d.comments, comment] } : d,
       );
@@ -152,7 +148,6 @@ export function useLinearComment(
   });
 }
 
-/** Transition an issue to a different workflow state. */
 export function useLinearTransition(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -162,18 +157,17 @@ export function useLinearTransition(repo: string) {
   });
 }
 
-/** Set/clear the single assignee. */
 export function useLinearAssign(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { issueId: string; assigneeId: string | null }) =>
-      linearIssueAssign(args.issueId, args.assigneeId),
+    mutationFn: (args: {
+      issueId: string;
+      assigneeId: string | null;
+    }) => linearIssueAssign(args.issueId, args.assigneeId),
     onSettled: () => invalidateLinearForRepo(queryClient, repo),
   });
 }
 
-/** Create an issue. Invalidates the repo's Linear caches on settle so the new
- *  issue appears in the list. */
 export function useLinearCreateIssue(
   repo: string,
   link: LinearLink | null | undefined,
