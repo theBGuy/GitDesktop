@@ -46,6 +46,7 @@ import { useMentionCandidates } from "@/features/conversations/useMentionCandida
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
+import { LinearRefRow } from "@/features/issues/LinearRefRow";
 import { useStashReapplyRecovery } from "@/features/repository/useStashReapplyRecovery";
 import {
   isMergeMethodAllowed,
@@ -374,10 +375,10 @@ export function LocalPrView({
     );
   }
   const fileCount = diffFiles.data?.length;
-  // Shared JiraRefRow sources for both header branches (conflict-takeover +
+  // Shared ref-row sources for both header branches (conflict-takeover +
   // normal) so the two can't diverge. Branch name LAST so title/description
   // attribution wins a key that also appears in the branch name.
-  const jiraRefSources = [
+  const refSources = [
     { label: "title", text: pr.title },
     { label: "description", text: pr.body },
     { label: "branch name", text: pr.head },
@@ -640,7 +641,8 @@ export function LocalPrView({
               {pr.status}
             </Badge>
           </div>
-          <JiraRefRow repoPath={repoPath} sources={jiraRefSources} />
+          <JiraRefRow repoPath={repoPath} sources={refSources} />
+          <LinearRefRow repoPath={repoPath} sources={refSources} />
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{pr.head}</span>
             <span>→</span>
@@ -698,7 +700,8 @@ export function LocalPrView({
           )}
           {pr.archived && <Badge variant="secondary">archived</Badge>}
         </div>
-        <JiraRefRow repoPath={repoPath} sources={jiraRefSources} />
+        <JiraRefRow repoPath={repoPath} sources={refSources} />
+        <LinearRefRow repoPath={repoPath} sources={refSources} />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-mono">{pr.head}</span>
           <span>→</span>

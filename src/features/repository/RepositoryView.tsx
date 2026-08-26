@@ -59,6 +59,7 @@ import { CommitDetailView } from "@/features/history/CommitDetailView";
 import { HistoryPanel } from "@/features/history/HistoryPanel";
 import { IssuesPanel } from "@/features/issues/IssuesPanel";
 import { JiraIssueView } from "@/features/issues/JiraIssueView";
+import { LinearIssueView } from "@/features/issues/LinearIssueView";
 import { LocalIssueView } from "@/features/issues/LocalIssueView";
 import { RemoteIssueView } from "@/features/issues/RemoteIssueView";
 import { CreateLocalPrDialog } from "@/features/pulls/CreateLocalPrDialog";
@@ -87,6 +88,7 @@ import {
 } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
+import { useLinearLink } from "@/lib/linear/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useLensGate, useSetRepoLens } from "@/lib/repo-lens/queries";
 import { useScripts } from "@/lib/scripts/queries";
@@ -434,6 +436,10 @@ export function RepositoryView() {
   const jiraPerms = useJiraPermissions(repoPath ?? "", jiraLink.data);
   const canCreateJira =
     !!jiraLink.data && (jiraPerms.data?.createIssues ?? false);
+  // Linear create: gated on a linked team (no project-level permission check —
+  // Linear's API key is user-scoped). Dedupes with IssuesPanel's identical key.
+  const linearLink = useLinearLink(repoPath ?? "");
+  const canCreateLinear = !!linearLink.data;
   // Tab switches are transitions: a heavy first render of the target panel
   // never blocks the click, and hidden Activities pre-render at low priority.
   const [, startTabTransition] = useTransition();
@@ -591,6 +597,11 @@ export function RepositoryView() {
     "create-jira-issue",
     () => requestCreate("jira-issue"),
     canCreateJira,
+  );
+  useHotkeyAction(
+    "create-linear-issue",
+    () => requestCreate("linear-issue"),
+    canCreateLinear,
   );
   useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);
   useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));
@@ -997,6 +1008,11 @@ export function RepositoryView() {
               <LocalIssueView repoPath={repoPath} id={deferredIssue.id} />
             ) : deferredIssue?.kind === "jira" ? (
               <JiraIssueView repoPath={repoPath} issueKey={deferredIssue.id} />
+            ) : deferredIssue?.kind === "linear" ? (
+              <LinearIssueView
+                repoPath={repoPath}
+                issueIdentifier={deferredIssue.id}
+              />
             ) : (
               <DiffPlaceholder
                 icon={CircleDashedIcon}

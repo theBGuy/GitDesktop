@@ -70,6 +70,7 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import type { LineWidget } from "@/features/diff/DiffSurface";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
+import { LinearRefRow } from "@/features/issues/LinearRefRow";
 import { aiExcludePatterns, filterDiffByAiIgnore } from "@/lib/ai/ignore";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { prOpenEligible } from "@/lib/automations/sync";
@@ -2512,6 +2513,14 @@ export function RemotePrView({
           </Button>
         </div>
         <JiraRefRow
+          repoPath={repoPath}
+          sources={[
+            { label: "title", text: pr.title },
+            { label: "description", text: pr.body },
+            { label: "branch name", text: pr.headRefName },
+          ]}
+        />
+        <LinearRefRow
           repoPath={repoPath}
           sources={[
             { label: "title", text: pr.title },

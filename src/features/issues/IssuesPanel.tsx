@@ -33,6 +33,8 @@ import {
   useJiraPermissions,
 } from "@/lib/jira/queries";
 import { formatStoryPoints, type JiraIssueInfo } from "@/lib/jira/types";
+import { useLinearIssues, useLinearLink } from "@/lib/linear/queries";
+import type { LinearIssueInfo } from "@/lib/linear/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   useLensGate,
@@ -46,8 +48,10 @@ import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { CreateIssueDialog } from "./CreateIssueDialog";
 import { CreateJiraIssueDialog } from "./CreateJiraIssueDialog";
+import { CreateLinearIssueDialog } from "./CreateLinearIssueDialog";
 import { CreateLocalIssueDialog } from "./CreateLocalIssueDialog";
 import { RepoJiraDialog } from "./RepoJiraDialog";
+import { RepoLinearDialog } from "./RepoLinearDialog";
 
 /** Where the "New" menu's forge item creates the issue. An unrecognized or
  *  absent provider routes through gh, so GitHub is the fallback (mirrors
@@ -80,6 +84,20 @@ function BitbucketLinkJiraCta({ onLink }: { onLink: () => void }) {
  *  status name is the text (meaning is never color-only). */
 function JiraStatusChip({ issue }: { issue: JiraIssueInfo }) {
   const done = issue.statusCategory === "done";
+  const Icon = done ? CheckCircleIcon : CircleDashedIcon;
+  return (
+    <span className="inline-flex w-fit items-center gap-1 whitespace-nowrap border px-1 py-px text-[10px] text-muted-foreground">
+      <Icon
+        className={`size-3 shrink-0 ${done ? "text-merged" : "text-success"}`}
+      />
+      {issue.statusName}
+    </span>
+  );
+}
+
+function LinearStatusChip({ issue }: { issue: LinearIssueInfo }) {
+  const done =
+    issue.statusType === "completed" || issue.statusType === "cancelled";
   const Icon = done ? CheckCircleIcon : CircleDashedIcon;
   return (
     <span className="inline-flex w-fit items-center gap-1 whitespace-nowrap border px-1 py-px text-[10px] text-muted-foreground">
@@ -140,7 +158,9 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [createLocalOpen, setCreateLocalOpen] = useState(false);
   const [createJiraOpen, setCreateJiraOpen] = useState(false);
+  const [createLinearOpen, setCreateLinearOpen] = useState(false);
   const [jiraOpen, setJiraOpen] = useState(false);
+  const [linearOpen, setLinearOpen] = useState(false);
   const localIssues = useLocalIssues(repoPath);
   // A linked Jira project is a third issue source, independent of the git host.
   const jiraLink = useJiraLink(repoPath);
@@ -150,6 +170,14 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   // linked AND the user can create issues (a failed probe → `?? false` → absent).
   const jiraPerms = useJiraPermissions(repoPath, link);
   const canCreateJira = !!link && (jiraPerms.data?.createIssues ?? false);
+  // A linked Linear team is another issue source, orthogonal to the git host
+  // and Jira. Linear's API key is user-scoped, so no project-level permission.
+  const linearLinkQ = useLinearLink(repoPath);
+  const linearLink = linearLinkQ.data ?? null;
+  const linearStateFilter =
+    stateFilter === "open" ? "open" : stateFilter === "closed" ? "closed" : "all";
+  const linearIssues = useLinearIssues(repoPath, linearLink, linearStateFilter);
+  const canCreateLinear = !!linearLink;
   const pendingIssueDraft = useUiStore((s) => s.pendingIssueDraft);
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   const pendingCreate = useUiStore((s) => s.pendingCreate);
@@ -166,6 +194,12 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     canCreateJira,
   );
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));
+  useHotkeyAction(
+    "create-linear-issue",
+    () => setCreateLinearOpen(true),
+    canCreateLinear,
+  );
+  useHotkeyAction("link-linear-team", () => setLinearOpen(true));
 
   // "Reference in new issue" / "Duplicate issue" seeds + opens the create dialog.
   // Re-check the gate (like the PR panel): the seeder's own gate can lag this
@@ -190,13 +224,19 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       setCreateLocalOpen(true);
       clearPendingCreate();
     } else if (pendingCreate === "jira-issue") {
-      // Re-check the gate: RepositoryView's fallback fired from another tab, so
-      // its snapshot of the permission can lag this panel's — never open a
-      // create dialog that can't submit (mirrors the canCreateGh guard above).
       if (canCreateJira) setCreateJiraOpen(true);
       clearPendingCreate();
+    } else if (pendingCreate === "linear-issue") {
+      if (canCreateLinear) setCreateLinearOpen(true);
+      clearPendingCreate();
     }
-  }, [pendingCreate, clearPendingCreate, canOpenGhCreate, canCreateJira]);
+  }, [
+    pendingCreate,
+    clearPendingCreate,
+    canOpenGhCreate,
+    canCreateJira,
+    canCreateLinear,
+  ]);
 
   const {
     filterText,
@@ -238,14 +278,24 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
             i.summary.toLowerCase().includes(jiraQuery),
         );
 
+  // Linear issues: apply the same free-text filter. Author/label filters from
+  // the host's vocabulary exclude the section (same as Jira).
+  const linearQuery = filterText.trim().toLowerCase();
+  const visibleLinear =
+    authorFilter.size > 0 || labelFilter.size > 0
+      ? []
+      : (linearIssues.data ?? []).filter(
+          (i) =>
+            !linearQuery ||
+            i.identifier.toLowerCase().includes(linearQuery) ||
+            i.title.toLowerCase().includes(linearQuery),
+        );
+
   const { localCollapsed, remoteCollapsed, toggleLocal, toggleRemote } =
     useCollapsedSections("issues");
 
-  // Arrow keys walk the visible rows: local → remote → jira, matching the render
-  // order (navTargets is flattened for the shared keyboard-nav helper). A
-  // collapsed section's rows leave the registry (its body is unmounted), so an
-  // arrow key can never land on an invisible row. The Jira section isn't
-  // collapsible, so it always contributes.
+  // Arrow keys walk the visible rows: local → remote → jira → linear, matching
+  // the render order. Collapsed sections' rows leave the registry.
   const navTargets = [
     ...(localCollapsed
       ? []
@@ -257,6 +307,10 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
           id: String(i.number),
         }))),
     ...visibleJira.map((i) => ({ kind: "jira" as const, id: i.key })),
+    ...visibleLinear.map((i) => ({
+      kind: "linear" as const,
+      id: i.identifier,
+    })),
   ];
 
   const onListKeyDown = listKeyboardNav({
@@ -320,6 +374,12 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
             ? `Jira issue in ${link?.projectKey}…`
             : undefined,
           onJira: canCreateJira ? () => setCreateJiraOpen(true) : undefined,
+          linearLabel: canCreateLinear
+            ? `Linear issue in ${linearLink?.teamKey}…`
+            : undefined,
+          onLinear: canCreateLinear
+            ? () => setCreateLinearOpen(true)
+            : undefined,
         }}
         filterSlot={
           <ConversationFilterPopover
@@ -549,6 +609,81 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
               }
             : undefined
         }
+        linear={
+          linearLink
+            ? {
+                header: `Linear · ${linearLink.teamKey}`,
+                headerAction: (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="cursor-pointer text-muted-foreground"
+                    onClick={() => setLinearOpen(true)}
+                    title={`Edit Linear link (${linearLink.teamKey})`}
+                  >
+                    Edit
+                  </Button>
+                ),
+                pending: linearIssues.isPending,
+                isError: linearIssues.isError,
+                errorSlot: (
+                  <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
+                    <p>
+                      Couldn't load {linearLink.teamKey} — your Linear API key
+                      may have expired.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="cursor-pointer"
+                      onClick={() => setLinearOpen(true)}
+                    >
+                      Reconnect
+                    </Button>
+                  </div>
+                ),
+                items: visibleLinear,
+                itemKey: (issue: LinearIssueInfo) => issue.identifier,
+                isActive: (issue: LinearIssueInfo) =>
+                  selectedIssue?.kind === "linear" &&
+                  selectedIssue.id === issue.identifier,
+                onSelect: (issue: LinearIssueInfo) =>
+                  selectIssue({ kind: "linear", id: issue.identifier }),
+                renderRow: (issue: LinearIssueInfo) => (
+                  <>
+                    <div className="flex min-h-6 items-center gap-1.5">
+                      <LinearStatusChip issue={issue} />
+                      {issue.assignee && (
+                        <span className="ml-auto shrink-0">
+                          <ForgeUserAvatar
+                            user={issue.assignee}
+                            ghHost={null}
+                          />
+                        </span>
+                      )}
+                    </div>
+                    <p
+                      className="mt-0.5 truncate text-xs font-medium"
+                      title={issue.title}
+                    >
+                      {issue.title}
+                    </p>
+                    <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                      {issue.identifier}
+                      {parseableDate(issue.updatedAt) && (
+                        <>
+                          {" · "}
+                          <RelativeTime date={issue.updatedAt} />
+                        </>
+                      )}
+                    </p>
+                  </>
+                ),
+                skeletonRows: 3,
+                emptyLabel: `No ${stateFilter} issues in ${linearLink.teamKey} — switch the filter or view the team in Linear.`,
+              }
+            : undefined
+        }
       >
         <CreateIssueDialog
           repoPath={repoPath}
@@ -573,11 +708,25 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
             onOpenChange={setCreateJiraOpen}
           />
         )}
+        {linearLink && (
+          <CreateLinearIssueDialog
+            repoPath={repoPath}
+            link={linearLink}
+            open={createLinearOpen}
+            onOpenChange={setCreateLinearOpen}
+          />
+        )}
         <RepoJiraDialog
           repoPath={repoPath}
           open={jiraOpen}
           onOpenChange={setJiraOpen}
           existingLink={link}
+        />
+        <RepoLinearDialog
+          repoPath={repoPath}
+          open={linearOpen}
+          onOpenChange={setLinearOpen}
+          existingLink={linearLink}
         />
       </ConversationListPanel>
     </div>

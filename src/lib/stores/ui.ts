@@ -23,6 +23,7 @@ export type CreateKind =
   | "issue"
   | "local-issue"
   | "jira-issue"
+  | "linear-issue"
   | "pr"
   | "local-pr"
   | "release"
@@ -33,6 +34,7 @@ const CREATE_TAB: Record<CreateKind, RepoTab> = {
   issue: "issues",
   "local-issue": "issues",
   "jira-issue": "issues",
+  "linear-issue": "issues",
   pr: "pulls",
   "local-pr": "pulls",
   release: "tags",
@@ -60,9 +62,9 @@ export interface SelectedPr {
 }
 
 export interface SelectedIssue {
-  kind: "local" | "remote" | "jira";
-  /** Local issue id, the remote issue number as a string, or the Jira issue key
-   *  (e.g. `PROJ-123`). */
+  kind: "local" | "remote" | "jira" | "linear";
+  /** Local issue id, the remote issue number as a string, the Jira issue key
+   *  (e.g. `PROJ-123`), or the Linear issue identifier (e.g. `ENG-123`). */
   id: string;
 }
 

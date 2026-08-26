@@ -274,6 +274,16 @@ export const capabilities: Capability[] = [
     group: "Forges & trackers",
     label: "Jira keys in branches, commits & PRs link back to the Issues tab",
   },
+  {
+    group: "Forges & trackers",
+    label: "Linear — link a team, browse & create issues in-app",
+    highlight: true,
+  },
+  {
+    group: "Forges & trackers",
+    label:
+      "Linear identifiers in branches, commits & PRs link back to the Issues tab",
+  },
 
   // — Issues & discussions —
   {

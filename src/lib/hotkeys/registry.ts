@@ -312,6 +312,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "create-linear-issue",
+    label: "Create Linear issue…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "create-discussion",
     label: "Create discussion",
     category: "Repository",
@@ -362,6 +368,12 @@ export const ACTIONS = [
   {
     id: "link-jira-project",
     label: "Link Jira project…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "link-linear-team",
+    label: "Link Linear team…",
     category: "Repository",
     defaultBinding: null,
   },

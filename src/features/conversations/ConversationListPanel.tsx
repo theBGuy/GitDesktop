@@ -33,6 +33,9 @@ export interface NewMenuConfig {
    *  the user can create issues in it (permission-gated at the call site). */
   jiraLabel?: string;
   onJira?: () => void;
+  /** Optional Linear create item — present only when a Linear team is linked. */
+  linearLabel?: string;
+  onLinear?: () => void;
 }
 
 const ROW_CLASS = "block w-full border-b px-3 py-2 text-left";
@@ -84,7 +87,7 @@ function SectionHeader(props: {
  * (and thus the `data-row` keys arrow-key nav depends on) is baked in here; each
  * panel supplies only the inner row content via render props.
  */
-export function ConversationListPanel<L, R, J = never>(props: {
+export function ConversationListPanel<L, R, J = never, LN = never>(props: {
   repoPath: string;
   /** ForgeNotReady's `feature` (e.g. "pull requests"). */
   feature: string;
@@ -180,6 +183,22 @@ export function ConversationListPanel<L, R, J = never>(props: {
     /** Empty-state teaching copy when the linked project has no matching issues. */
     emptyLabel: ReactNode;
   };
+  /** Optional FOURTH section for a linked Linear team, rendered after Jira.
+   *  Rows carry `data-row="linear:<key>"` for arrow-key nav. */
+  linear?: {
+    header: ReactNode;
+    headerAction?: ReactNode;
+    pending: boolean;
+    isError: boolean;
+    errorSlot?: ReactNode;
+    items: LN[];
+    itemKey: (item: LN) => string;
+    isActive: (item: LN) => boolean;
+    onSelect: (item: LN) => void;
+    renderRow: (item: LN) => ReactNode;
+    skeletonRows: number;
+    emptyLabel: ReactNode;
+  };
   /** "Load more" for the REMOTE section: true when the remote list filled its
    *  requested limit (more may exist server-side). Renders a focusable row at the
    *  very bottom of the list; `onLoadMore` bumps the caller's limit, `loadingMore`
@@ -238,6 +257,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
     localNoun,
     remoteNoun,
     jira,
+    linear,
     hasMore,
     onLoadMore,
     loadingMore,
@@ -284,6 +304,11 @@ export function ConversationListPanel<L, R, J = never>(props: {
             {newMenu.jiraLabel && newMenu.onJira && (
               <DropdownMenuItem onClick={newMenu.onJira}>
                 {newMenu.jiraLabel}
+              </DropdownMenuItem>
+            )}
+            {newMenu.linearLabel && newMenu.onLinear && (
+              <DropdownMenuItem onClick={newMenu.onLinear}>
+                {newMenu.linearLabel}
               </DropdownMenuItem>
             )}
           </DropdownMenuContent>
@@ -461,8 +486,50 @@ export function ConversationListPanel<L, R, J = never>(props: {
             </>
           )}
 
+          {linear && (
+            <>
+              <div className="flex items-center gap-1 px-3 pt-3 pb-1">
+                <p className="text-xs text-muted-foreground">
+                  {linear.header}
+                </p>
+                {linear.headerAction && (
+                  <span className="ml-auto">{linear.headerAction}</span>
+                )}
+              </div>
+              {linear.pending ? (
+                <div className="space-y-2 p-3">
+                  {Array.from({ length: linear.skeletonRows }, (_, i) => (
+                    <Skeleton key={i} className="h-9 w-full" />
+                  ))}
+                </div>
+              ) : linear.isError ? (
+                (linear.errorSlot ?? (
+                  <p className="px-3 py-4 text-xs text-muted-foreground">
+                    Couldn't load Linear issues.
+                  </p>
+                ))
+              ) : linear.items.length === 0 ? (
+                <p className="px-3 py-4 text-xs text-muted-foreground">
+                  {linear.emptyLabel}
+                </p>
+              ) : (
+                linear.items.map((item) => (
+                  <button
+                    type="button"
+                    key={linear.itemKey(item)}
+                    data-row={`linear:${linear.itemKey(item)}`}
+                    className={rowClass(linear.isActive(item))}
+                    onClick={() => linear.onSelect(item)}
+                  >
+                    {linear.renderRow(item)}
+                  </button>
+                ))
+              )}
+            </>
+          )}
+
           {/* "Load more" for the remote section, at the very bottom of the list.
-              Only the remote list paginates (local + Jira load in full). */}
+              Only the remote list paginates (local + Jira + Linear load in full). */}
           {hasMore && onLoadMore && (
             <LoadMoreRow
               count={remoteCount ?? 0}

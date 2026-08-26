@@ -20,6 +20,7 @@ import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
+import { LinearRefRow } from "@/features/issues/LinearRefRow";
 import {
   CommitComments,
   CommitLineComposer,
@@ -399,13 +400,22 @@ export function CommitDetailView({
             are CLICKABLE links mined from the message text, and a dimmed one
             still navigates to the previous commit's issue. */}
         {!details.isPlaceholderData && (
-          <JiraRefRow
-            repoPath={repoPath}
-            sources={[
-              { label: "commit subject", text: commit.subject },
-              { label: "commit message body", text: commit.body },
-            ]}
-          />
+          <>
+            <JiraRefRow
+              repoPath={repoPath}
+              sources={[
+                { label: "commit subject", text: commit.subject },
+                { label: "commit message body", text: commit.body },
+              ]}
+            />
+            <LinearRefRow
+              repoPath={repoPath}
+              sources={[
+                { label: "commit subject", text: commit.subject },
+                { label: "commit message body", text: commit.body },
+              ]}
+            />
+          </>
         )}
       </header>
 
