@@ -73,11 +73,13 @@ function CompareCell({
     if (divergence.data) {
       pendingFocusRef.current = false;
       resultRef.current?.focus();
-    } else if (divergence.isError) {
+    } else if (divergence.isError && divergence.errorUpdatedAt) {
       pendingFocusRef.current = false;
       retryRef.current?.focus();
     }
-  }, [divergence.data, divergence.isError]);
+    // errorUpdatedAt: a repeated failure changes neither `data` nor `isError`,
+    // and a still-armed flag would let a much-later background success steal focus.
+  }, [divergence.data, divergence.isError, divergence.errorUpdatedAt]);
 
   // Resolved counts outrank an in-flight fetch: `refetchOnWindowFocus` re-runs a
   // stale compare on every alt-tab, and dropping back to a skeleton would erase
@@ -104,6 +106,7 @@ function CompareCell({
           type="button"
           size="xs"
           variant="ghost"
+          disabled={divergence.isFetching}
           aria-label={`Retry comparing ${entry.fullName} with this repository`}
           onClick={() => {
             pendingFocusRef.current = true;

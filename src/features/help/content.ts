@@ -1817,7 +1817,7 @@ Bitbucket).
   **dependencies**.
 - **Fork activity** — the repo's recently active direct forks on GitHub, GitLab, and
   Bitbucket: up to ten, most recent first. Each row links to the fork on its forge and
-  shows how recently it has been active and how many stars it has (Bitbucket has no
+  shows how recently it has been active and its stars where it has any (Bitbucket has no
   stars); the card header counts every fork, and a footer link opens the full list on
   the forge. On GitHub, a row's **Compare** fetches that fork's ahead/behind counts on
   demand, so you can see which forks carry commits this repo doesn't.

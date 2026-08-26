@@ -2986,13 +2986,15 @@ fn fork_owner_from_full_name(full_name: &str) -> AppResult<String> {
 /// because it would read as a flag, and whitespace/control bytes because they can't
 /// reach argv intact. `#`, `?` and `%` are refused because the endpoint goes through
 /// a URL parser: each is git-legal in a ref yet would truncate the path at a fragment
-/// or query, or decode to a different ref — and the API would answer 200 for the
-/// WRONG branch, which renders as a confident number.
+/// or query, or decode to a different ref — and `{`/`}` because `gh api` expands
+/// `{branch}`-style placeholders in the endpoint to local repo values. Any of these
+/// would make the API answer 200 for the WRONG branch, which renders as a
+/// confident number.
 fn validate_compare_branch(branch: &str) -> AppResult<()> {
     if branch.is_empty()
         || branch.starts_with('-')
         || branch.contains("..")
-        || branch.contains(['#', '?', '%'])
+        || branch.contains(['#', '?', '%', '{', '}'])
         || branch.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return Err(AppError::InvalidArgument(format!(
@@ -4557,6 +4559,11 @@ mod tests {
         assert!(validate_compare_branch("has\ttab").is_err());
         assert!(validate_compare_branch("has\nnewline").is_err());
         assert!(validate_compare_branch("has\u{0}null").is_err());
+        // `gh api` expands `{…}` placeholders to local repo values (probed live
+        // 2026-08-26: `branches/{branch}` resolved to the current branch).
+        assert!(validate_compare_branch("{branch}").is_err());
+        assert!(validate_compare_branch("a{b").is_err());
+        assert!(validate_compare_branch("a}b").is_err());
         // URL-parser hazards: `#` truncates at the fragment and `?` at the query, so
         // the compare would silently answer for a DIFFERENT ref; `%` decodes into one.
         assert!(validate_compare_branch("feat#1").is_err());
