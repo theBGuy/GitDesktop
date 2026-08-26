@@ -32,7 +32,9 @@ export const usePrCreateStore = create<PrCreateState>()(() => ({
  *  {@link consumeLastFailed}: it exists only so the dialog that reopens after a
  *  background failure knows not to blank what the user typed. Per HEAD, not per
  *  repo — a failure on one branch must not preserve its draft in a dialog the
- *  user opened for another. Deliberately not store state: nothing renders it. */
+ *  user opened for another. The lane has several writers but only CreatePrDialog
+ *  holds a draft this can protect, so it is the only one that latches; see the
+ *  outcome union on {@link settlePrCreate}. Not store state: nothing renders it. */
 const lastFailed = new Set<string>();
 
 // NUL is the one separator neither a path nor a ref name can contain, so
@@ -68,17 +70,24 @@ export function startPrCreate(
   return null;
 }
 
-/** Releases the lane. An "error" outcome latches {@link consumeLastFailed} so a
- *  reopen after a failure the user never saw keeps their draft. */
+/**
+ * Releases the lane. The outcome says what the caller owes
+ * {@link consumeLastFailed}, and only a caller that owns a preservable draft may
+ * speak for it:
+ * - `"error"` latches, so a reopen after a failure the user never saw keeps
+ *   their draft. CreatePrDialog's form is the only draft this protects.
+ * - `"success"` clears, because a stale flag from an older failure would skip a
+ *   legitimate reset later — and once the branch has a PR the point is moot.
+ * - `"release"` is for a lane holder with no draft to protect. It only frees the
+ *   entry, leaving an earlier create's latch standing.
+ */
 export function settlePrCreate(
   repoPath: string,
   head: string,
-  outcome: "success" | "error",
+  outcome: "success" | "error" | "release",
 ): void {
-  // Success clears the latch as well as setting it on failure: a stale flag left
-  // by an older failure would skip a legitimate reset days later.
   if (outcome === "error") lastFailed.add(failKey(repoPath, head));
-  else lastFailed.delete(failKey(repoPath, head));
+  else if (outcome === "success") lastFailed.delete(failKey(repoPath, head));
   const repo = normPath(repoPath);
   usePrCreateStore.setState((s) => {
     const entries = s.byRepo[repo];

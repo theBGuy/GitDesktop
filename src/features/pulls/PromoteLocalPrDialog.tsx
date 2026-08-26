@@ -75,7 +75,9 @@ export function PromoteLocalPrDialog({
       toast.error(refusal);
       return;
     }
-    let outcome: "success" | "error" = "error";
+    // "release", not "error": a failed promote produced no draft, so it frees
+    // the lane without latching over a real create failure for this branch.
+    let outcome: "success" | "release" = "release";
     // Once the remote PR exists, later steps (comment carry-over, closing the
     // local PR) failing must NOT re-arm the submit — retrying would open a
     // duplicate. Track it so the catch can disclose instead of re-running.
