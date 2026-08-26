@@ -21,7 +21,9 @@ Where this file and generic best practice disagree, this file wins.
    in the session scratchpad or `C:/temp`, never the repo; destructive
    experiments happen in a throwaway repo under `C:/temp`.
 3. **Don't edit `src/components/ui/`** — vendored shadcn/Base UI primitives.
-   Fix at the feature/call-site level.
+   Fix at the feature/call-site level. That folder's `README.md` inventories
+   the sanctioned local modifications (a re-vendor silently reverts them);
+   any future sanctioned edit updates it in the same change.
 4. **Never repo-wide `cargo fmt`** in `src-tauri` (~35 files of collateral).
    New files only: `rustfmt <that file>`.
 5. **Report from evidence.** Verification claims come from command output in
