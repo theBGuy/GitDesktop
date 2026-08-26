@@ -8,8 +8,20 @@ function DropdownMenu({ ...props }: MenuPrimitive.Root.Props) {
   return <MenuPrimitive.Root data-slot="dropdown-menu" {...props} />;
 }
 
-function DropdownMenuPortal({ ...props }: MenuPrimitive.Portal.Props) {
-  return <MenuPrimitive.Portal data-slot="dropdown-menu-portal" {...props} />;
+function DropdownMenuPortal({
+  container,
+  ...props
+}: MenuPrimitive.Portal.Props) {
+  // Default to the surrounding panel so a raw portal can't strand over another
+  // tab; an explicit `null` still means "a container is coming", never the body.
+  const panelContainer = usePanelPortalContainer();
+  return (
+    <MenuPrimitive.Portal
+      data-slot="dropdown-menu-portal"
+      container={container === undefined ? panelContainer : container}
+      {...props}
+    />
+  );
 }
 
 function DropdownMenuTrigger({ ...props }: MenuPrimitive.Trigger.Props) {

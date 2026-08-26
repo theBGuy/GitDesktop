@@ -1,20 +1,53 @@
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { XIcon } from "@phosphor-icons/react";
 import * as React from "react";
-import { PanelPortalReset } from "@/components/panel-portal";
+import {
+  isUserDismissal,
+  PanelPortalReset,
+  usePanelActive,
+  usePanelPortalContainer,
+} from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-function Dialog({ ...props }: DialogPrimitive.Root.Props) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />;
+function Dialog({ modal, onOpenChange, ...props }: DialogPrimitive.Root.Props) {
+  const panelActive = usePanelActive();
+  return (
+    <DialogPrimitive.Root
+      data-slot="dialog"
+      // `modal` gates both the document scroll lock and the `aria-hidden`
+      // marking of everything outside the popup, so a dialog concealed with its
+      // panel drops it and hands the visible tab back to the user.
+      modal={panelActive && (modal ?? true)}
+      onOpenChange={(open, eventDetails) => {
+        if (!open && !panelActive && isUserDismissal(eventDetails.reason)) {
+          // Cancelling also suppresses Base UI's `preventDefault()` on Escape,
+          // leaving the key to the surface the user is looking at.
+          eventDetails.cancel();
+          return;
+        }
+        onOpenChange?.(open, eventDetails);
+      }}
+      {...props}
+    />
+  );
 }
 
 function DialogTrigger({ ...props }: DialogPrimitive.Trigger.Props) {
   return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} />;
 }
 
-function DialogPortal({ ...props }: DialogPrimitive.Portal.Props) {
-  return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />;
+function DialogPortal({ container, ...props }: DialogPrimitive.Portal.Props) {
+  // Default to the surrounding panel so a raw portal can't strand over another
+  // tab; an explicit `null` still means "a container is coming", never the body.
+  const panelContainer = usePanelPortalContainer();
+  return (
+    <DialogPrimitive.Portal
+      data-slot="dialog-portal"
+      container={container === undefined ? panelContainer : container}
+      {...props}
+    />
+  );
 }
 
 function DialogClose({ ...props }: DialogPrimitive.Close.Props) {
@@ -45,6 +78,28 @@ function DialogContent({
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean;
 }) {
+  const panelActive = usePanelActive();
+  // DialogContent owns the popup ref — no call site passes one, and re-homing
+  // focus after a conceal needs the element.
+  const popupRef = React.useRef<HTMLDivElement | null>(null);
+  // Derived during render because a concealed panel still renders but runs no
+  // effects, so the flip back to visible is the only moment an effect can see.
+  const [wasConcealed, setWasConcealed] = React.useState(false);
+  if (!panelActive && !wasConcealed) setWasConcealed(true);
+
+  React.useLayoutEffect(() => {
+    if (!panelActive || !wasConcealed) return;
+    // One frame, to outlast the close-time focus-return of the menu or tab
+    // control that switched panels. The flag clears inside the frame, not
+    // before it: clearing here would re-run this effect and cancel it.
+    const frame = requestAnimationFrame(() => {
+      setWasConcealed(false);
+      const popup = popupRef.current;
+      if (popup && !popup.contains(document.activeElement)) popup.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [panelActive, wasConcealed]);
+
   return (
     <DialogPortal>
       <DialogOverlay />
@@ -61,9 +116,11 @@ function DialogContent({
           className,
         )}
         {...props}
+        ref={popupRef}
       >
-        {/* This popup portals to the body, so floating UI inside it must not
-            portal into a tab panel the dialog covers. */}
+        {/* Floating UI inside the popup must not portal into a tab panel the
+            dialog covers; Base UI still chains it onto this popup's own portal
+            node, so pickers keep stacking above the dialog either way. */}
         <PanelPortalReset>{children}</PanelPortalReset>
         {showCloseButton && (
           <DialogPrimitive.Close

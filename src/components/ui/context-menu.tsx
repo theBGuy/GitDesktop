@@ -8,9 +8,19 @@ function ContextMenu({ ...props }: ContextMenuPrimitive.Root.Props) {
   return <ContextMenuPrimitive.Root data-slot="context-menu" {...props} />;
 }
 
-function ContextMenuPortal({ ...props }: ContextMenuPrimitive.Portal.Props) {
+function ContextMenuPortal({
+  container,
+  ...props
+}: ContextMenuPrimitive.Portal.Props) {
+  // Default to the surrounding panel so a raw portal can't strand over another
+  // tab; an explicit `null` still means "a container is coming", never the body.
+  const panelContainer = usePanelPortalContainer();
   return (
-    <ContextMenuPrimitive.Portal data-slot="context-menu-portal" {...props} />
+    <ContextMenuPrimitive.Portal
+      data-slot="context-menu-portal"
+      container={container === undefined ? panelContainer : container}
+      {...props}
+    />
   );
 }
 

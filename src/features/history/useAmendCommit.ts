@@ -23,12 +23,7 @@ export function useAmendCommit(repoPath: string) {
       const details = await gitCommitDetails(repoPath, hash);
       setCommitDraft(details.subject, details.body);
       setAmending(hash);
-      // Defer the tab switch until the just-dismissed force-push dialog has
-      // finished closing: it portals to the body, so hiding History via
-      // <Activity> mid-close leaves it frozen on screen. Menus conceal with
-      // the panel and need no deferral; the no-confirm path pays the same
-      // 150ms rather than branching for it.
-      setTimeout(() => setRepoTab("changes"), 150);
+      setRepoTab("changes");
     },
     [repoPath, setCommitDraft, setAmending, setRepoTab],
   );

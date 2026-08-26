@@ -6,6 +6,7 @@ import { clipTitle } from "@/lib/clip-title";
 import { useScripts } from "@/lib/scripts/queries";
 import { INTERPRETERS } from "@/lib/scripts/types";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
 const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
@@ -30,12 +31,10 @@ export function RunTaskPicker({
   const [highlight, setHighlight] = useState(0);
   const listRef = useRef<HTMLUListElement>(null);
 
-  useEffect(() => {
-    if (open) {
-      setQuery("");
-      setHighlight(0);
-    }
-  }, [open]);
+  useSeedOnOpen(open, () => {
+    setQuery("");
+    setHighlight(0);
+  });
 
   const q = query.trim().toLowerCase();
   const items = tasks.filter(

@@ -8,6 +8,7 @@ import {
   useEffectiveBindings,
 } from "@/lib/hotkeys/hotkeys";
 import { ACTIONS, type ActionId } from "@/lib/hotkeys/registry";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
 /**
@@ -29,12 +30,10 @@ export function CommandPalette({
   const listRef = useRef<HTMLUListElement>(null);
 
   // Fresh search every time the palette opens.
-  useEffect(() => {
-    if (open) {
-      setQuery("");
-      setHighlight(0);
-    }
-  }, [open]);
+  useSeedOnOpen(open, () => {
+    setQuery("");
+    setHighlight(0);
+  });
 
   const q = query.trim().toLowerCase();
   const items = ACTIONS.filter(

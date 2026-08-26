@@ -1,5 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -17,6 +17,11 @@ import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
+import {
+  settlePrCreate,
+  startPrCreate,
+  useIsCreatingPr,
+} from "@/lib/stores/pr-create";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -50,11 +55,25 @@ export function PromoteLocalPrDialog({
   const [draft, setDraft] = useState(false);
   const [posting, setPosting] = useState(false);
   const pending = createPr.isPending || update.isPending || posting;
+  // Shares the PR-create lane with CreatePrDialog: both push the same head and
+  // open a PR for it, so either one running blocks the other (and paints the
+  // same strip above the panels).
+  const creatingHead = useIsCreatingPr(repoPath, pr.head);
+  const creatingHintId = useId();
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
   const carried = pr.comments.filter((c) => c.body.trim() && !c.hidden);
 
   async function promote() {
+    // Fire-time admission, claimed before the first await: the push plus the
+    // forge call outlives this dialog, and a second create for the same head
+    // would queue on the repo lock and then open a duplicate PR.
+    const refusal = startPrCreate(repoPath, pr.head, pr.base);
+    if (refusal) {
+      toast.error(refusal);
+      return;
+    }
+    let outcome: "success" | "error" = "error";
     // Once the remote PR exists, later steps (comment carry-over, closing the
     // local PR) failing must NOT re-arm the submit — retrying would open a
     // duplicate. Track it so the catch can disclose instead of re-running.
@@ -69,6 +88,7 @@ export function PromoteLocalPrDialog({
         draft,
       });
       created = { number, url };
+      outcome = "success";
       // Carry the local comments over, in order, so none are lost.
       failedStep = "carrying over comments";
       setPosting(true);
@@ -122,6 +142,8 @@ export function PromoteLocalPrDialog({
           action: { label: "View", onClick: () => openUrl(url) },
         },
       );
+    } finally {
+      settlePrCreate(repoPath, pr.head, outcome);
     }
   }
 
@@ -143,6 +165,11 @@ export function PromoteLocalPrDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogFooter className="sm:items-center">
+          {creatingHead && (
+            <p id={creatingHintId} className="basis-full text-xs text-warning">
+              A pull request for this branch is already being created.
+            </p>
+          )}
           <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
             <Checkbox
               checked={draft}
@@ -157,7 +184,11 @@ export function PromoteLocalPrDialog({
           >
             Cancel
           </Button>
-          <Button onClick={promote} disabled={pending}>
+          <Button
+            onClick={promote}
+            disabled={pending || creatingHead}
+            aria-describedby={creatingHead ? creatingHintId : undefined}
+          >
             {pending && <Spinner data-icon="inline-start" />}
             {draft ? "Publish as draft" : `Publish to ${remoteLabel}`}
           </Button>

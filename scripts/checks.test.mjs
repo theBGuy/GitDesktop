@@ -44,6 +44,7 @@ const hoverReveal = scanner("hover-reveal");
 const modKey = scanner("hand-rolled-mod-key");
 const setQueryData = scanner("setQueryData-noop");
 const bareMutate = scanner("bare-mutate-in-converted-trees");
+const loneActivity = scanner("lone-activity-boundary");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -264,6 +265,28 @@ test("bare-mutate-in-converted-trees applies to the converted trees only", () =>
   ]) {
     assert.equal(appliesTo(file), false, `should not scan ${file}`);
   }
+});
+
+test("lone-activity-boundary flags a JSX Activity in either spelling", () => {
+  assert.deepEqual(
+    loneActivity('<Activity mode="hidden">{kids}</Activity>'),
+    [1],
+  );
+  assert.deepEqual(loneActivity("<Activity>{kids}</Activity>"), [1]);
+});
+
+test("lone-activity-boundary ignores same-prefixed components and prose", () => {
+  for (const tag of [
+    "<ActivityDock />",
+    "<ActivityBell />",
+    "<ActivityStrip/>",
+  ])
+    assert.deepEqual(loneActivity(tag), [], `should ignore ${tag}`);
+  // The many comments naming <Activity> are what comment stripping keeps clean.
+  assert.deepEqual(
+    loneActivity("// a hidden <Activity> subtree still fetches"),
+    [],
+  );
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {

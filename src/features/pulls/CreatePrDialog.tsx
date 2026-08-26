@@ -54,7 +54,15 @@ import {
 } from "@/lib/repo-lens/queries";
 import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
+import {
+  consumeLastFailed,
+  isCreatingPrInRepo,
+  settlePrCreate,
+  startPrCreate,
+  useIsCreatingPr,
+} from "@/lib/stores/pr-create";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { ReviewersPopover } from "./ReviewersPopover";
@@ -173,6 +181,7 @@ export function CreatePrDialog({
   // and popover triggers) that carry their own aria-label, so the visible field
   // label names the surrounding group via aria-labelledby rather than htmlFor.
   const createInGroupId = useId();
+  const creatingHintId = useId();
   const reviewersGroupId = useId();
   const assigneesGroupId = useId();
   // Labels come from whichever repo the PR targets (parent's own labels when
@@ -258,6 +267,16 @@ export function CreatePrDialog({
           : undefined,
     },
     onSubmit: async ({ value }) => {
+      // Fire-time admission, claimed before the first await: the push plus the
+      // forge call runs for minutes and the user can dismiss the dialog the
+      // moment it starts, so a second attempt on the same head would queue on
+      // the repo lock and then open a duplicate PR.
+      const refusal = startPrCreate(repoPath, value.head, value.base);
+      if (refusal) {
+        toast.error(refusal);
+        return;
+      }
+      let outcome: "success" | "error" = "error";
       try {
         // Append the linked-issue chips as their exact keyword lines via the shared
         // composer (the single ref-block composition used by every create/edit save
@@ -296,6 +315,7 @@ export function CreatePrDialog({
             ? { assignees: assignees.map((a) => a.id) }
             : {}),
         });
+        outcome = "success";
         const notes = value.notes.trim();
         track({
           name: "pull_request_created",
@@ -347,9 +367,9 @@ export function CreatePrDialog({
           action: { label: "View", onClick: () => openUrl(url) },
         });
         // This dialog is panel-hosted under <Activity>, so the success path must
-        // only close — never setRepoTab/selectPr (a hidden Activity subtree would
-        // defer the close and strand the dialog). Want navigation? Hoist it to
-        // RepositoryView first, like CreateLocalPrDialog.
+        // only close — never setRepoTab/selectPr, which would conceal this panel
+        // and leave the dialog open behind the tab it landed on. Want navigation?
+        // Hoist it to RepositoryView first, like CreateLocalPrDialog.
         onOpenChange(false);
         // Draft gate: a draft PR fires no review unless the user opted into reviewing
         // drafts. A gated-out draft is NOT a lost review — an in-app Mark-ready fires
@@ -373,6 +393,8 @@ export function CreatePrDialog({
         }
       } catch (e) {
         toastError(e);
+      } finally {
+        settlePrCreate(repoPath, value.head, outcome);
       }
     },
   });
@@ -382,6 +404,10 @@ export function CreatePrDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // seeded values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
+    // A create still running in the background — or one that failed while the
+    // dialog was closed — leaves everything the user typed in form state, and
+    // this reset would blank it on reopen.
+    if (isCreatingPrInRepo(repoPath) || consumeLastFailed(repoPath)) return;
     aiDescriptionRef.current = false;
     setReviewers([]);
     setLabels(new Set());
@@ -419,9 +445,7 @@ export function CreatePrDialog({
       { keepDefaultValues: true },
     );
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   // Live head/base drive the "N commits" hint, AI generation, and submit gate.
   const head = useSelector(form.store, (s) => s.values.head);
@@ -429,6 +453,10 @@ export function CreatePrDialog({
   // Live notes feed the AI-description prompt (so a generated description can
   // reflect the reviewer notes) and the ReviewerNotesField's seeding provenance.
   const notes = useSelector(form.store, (s) => s.values.notes);
+  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  // Survives this dialog closing, unlike `isSubmitting` — a create dismissed
+  // mid-flight still owns the head branch until it settles.
+  const creatingThisHead = useIsCreatingPr(repoPath, head);
 
   // Fork-side fallback base, mirroring the seed logic (default branch, else first
   // non-head) — reused when reconciling back from the parent target.
@@ -622,6 +650,8 @@ export function CreatePrDialog({
                 generating ||
                 nothingToMerge ||
                 baseLoading ||
+                isSubmitting ||
+                creatingThisHead ||
                 Boolean(existingPr)
               )
             ) {
@@ -1010,6 +1040,17 @@ export function CreatePrDialog({
           </div>
 
           <DialogFooter className="sm:items-center">
+            {creatingThisHead && (
+              // Why the submit is disabled. It lives here rather than in the
+              // scrollable body so it can't scroll out of view, and the button
+              // points `aria-describedby` at it.
+              <p
+                id={creatingHintId}
+                className="basis-full text-xs text-warning"
+              >
+                A pull request for this branch is already being created.
+              </p>
+            )}
             <form.AppField name="draft">
               {(field) => (
                 <field.CheckboxField
@@ -1033,7 +1074,11 @@ export function CreatePrDialog({
                       generating ||
                       nothingToMerge ||
                       baseLoading ||
+                      creatingThisHead ||
                       Boolean(existingPr)
+                    }
+                    aria-describedby={
+                      creatingThisHead ? creatingHintId : undefined
                     }
                     title={SUBMIT_HINT}
                   >

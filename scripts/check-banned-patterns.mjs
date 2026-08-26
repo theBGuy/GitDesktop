@@ -211,6 +211,11 @@ const DESTRUCTURED_MUTATE_RE = /\bconst\s*\{[^}]*\bmutate\b[^}]*\}\s*=/g;
 // fixed. Their CALL SITES — the app code that composes them — stay scanned.
 const notVendoredUi = (file) => !file.startsWith("src/components/ui/");
 
+// `<Activity` as a JSX open tag. The lookahead is what separates it from the
+// app's own `<ActivityDock>`/`<ActivityBell>`/`<ActivityStrip>` components, and
+// comment stripping is what keeps the many prose mentions of `<Activity>` clean.
+const ACTIVITY_JSX_RE = /<Activity(?![\w$])/;
+
 export const CHECKS = [
   {
     name: "hover-reveal",
@@ -287,6 +292,18 @@ export const CHECKS = [
     allowlist: [],
     message:
       "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close, a rail section switch, or a keyed pane remount mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
+  },
+  {
+    name: "lone-activity-boundary",
+    // Both directions ride the allowlist: a hit anywhere else is a violation,
+    // and TabPanel losing its own `<Activity>` reads as a stale entry. Residual:
+    // a SECOND `<Activity` added inside RepositoryView.tsx is not caught, since
+    // the allowlist works per file rather than per occurrence.
+    appliesTo: () => true,
+    scan: perLine(ACTIVITY_JSX_RE),
+    allowlist: ["src/features/repository/RepositoryView.tsx"],
+    message:
+      "a tab panel's <Activity> must be paired with PanelPortalBoundary and PanelActivityBoundary, or its dialogs and popups strand over the wrong tab — render TabPanel (RepositoryView.tsx), never a second <Activity>",
   },
 ];
 

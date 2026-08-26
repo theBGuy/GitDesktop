@@ -1,5 +1,5 @@
 import { TrashIcon } from "@phosphor-icons/react";
-import { useDeferredValue, useEffect, useEffectEvent, useState } from "react";
+import { useDeferredValue, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime } from "@/components/relative-time";
@@ -32,6 +32,7 @@ import {
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
 /** Which source the left list is drawn from. */
@@ -114,9 +115,7 @@ export function StashesDialog({
   // The dialog can be opened straight to either view; seed `view` from the
   // caller's intent each time it opens (mirrors the seed-on-open idiom).
   const seedOnOpen = useEffectEvent(() => setView(initialView));
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   const list = stashes.data ?? [];
   // Default to the newest stash; fall back when the selected one is gone.

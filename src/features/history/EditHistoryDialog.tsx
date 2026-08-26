@@ -199,7 +199,16 @@ export function EditHistoryDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      // Escape and a backdrop press are ignored while the rewrite runs: it is a
+      // seconds-scale local operation whose outcome this dialog still owes the
+      // user, and unmounting mid-flight drops the hand-off to the Changes tab.
+      onOpenChange={(next) => {
+        if (!next && busy) return;
+        onOpenChange(next);
+      }}
+    >
       <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Edit history</DialogTitle>
@@ -393,9 +402,14 @@ export function EditHistoryDialog({
               </>
             )}
           </div>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <DisabledReasonButton
+            variant="outline"
+            disabled={busy}
+            reason="The rewrite is still running."
+            onClick={() => onOpenChange(false)}
+          >
             Cancel
-          </Button>
+          </DisabledReasonButton>
           <Button
             disabled={
               busy ||

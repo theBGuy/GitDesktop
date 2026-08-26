@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
 /** What the pending recovery is for: the lower-case operation word used in the
  *  copy, plus an optional phrase naming its target (e.g. `upstream/main`). */
@@ -49,9 +50,7 @@ export function StashReapplyDialog({
 
   // Reset the checkbox each time the dialog opens — it only ever shows while
   // the preference is off, so a remembered tick would be meaningless.
-  useEffect(() => {
-    if (open) setAlways(false);
-  }, [open]);
+  useSeedOnOpen(open, () => setAlways(false));
 
   return (
     <Dialog

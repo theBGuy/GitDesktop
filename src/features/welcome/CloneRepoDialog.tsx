@@ -33,6 +33,7 @@ import { useAddRecentRepo, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage, isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { nameFromUrl, parentDir } from "./clone-utils";
 
@@ -134,9 +135,7 @@ export function CloneRepoDialog({
       { keepDefaultValues: true },
     );
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   const values = useSelector(form.store, (s) => s.values);
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);

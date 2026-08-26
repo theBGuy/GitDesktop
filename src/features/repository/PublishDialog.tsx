@@ -18,6 +18,7 @@ import { useBbWorkspaces, usePublishRepo } from "@/lib/git/queries";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { useGenerateRepoDescription } from "../repo-settings/useGenerateRepoDescription";
 
 /** Bitbucket repo slugs must start alphanumeric, then allow dot/underscore/hyphen.
@@ -133,9 +134,7 @@ export function PublishDialog({
       isPrivate: true,
     }),
   );
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   // Workspaces load after the dialog opens, so seed the picker once they arrive
   // (and only while the field is still empty — never stomp a user's pick).

@@ -1,7 +1,7 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { useEffect, useEffectEvent } from "react";
+import { useEffectEvent } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,6 +31,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
@@ -41,8 +42,8 @@ import {
 } from "./useLinkedIssueChips";
 
 // Rendered exactly ONCE, hoisted in RepositoryView — never render it inside a tab
-// panel. Its success handler's `setRepoTab("pulls")` would hide a panel host's
-// <Activity> subtree and defer the `onOpenChange(false)`, stranding the dialog open.
+// panel. Its success handler's `setRepoTab("pulls")` conceals a panel host with the
+// tab it left, so the dialog would stay open behind Pulls instead of closing.
 export function CreateLocalPrDialog({
   repoPath,
   defaultBase,
@@ -197,9 +198,7 @@ export function CreateLocalPrDialog({
       { keepDefaultValues: true },
     );
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   // Live head/base drive the "N commits to merge" hint and AI generation.
   const head = useSelector(form.store, (s) => s.values.head);

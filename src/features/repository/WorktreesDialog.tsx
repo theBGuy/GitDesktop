@@ -582,7 +582,14 @@ export function RenameWorktreeDialog({
   }
 
   return (
-    <Dialog open={worktree !== null} onOpenChange={(o) => !o && onClose()}>
+    <Dialog
+      open={worktree !== null}
+      // Escape and a backdrop press are ignored while the move runs, matching
+      // the Cancel button that is already disabled for it.
+      onOpenChange={(o) => {
+        if (!o && !move.isPending) onClose();
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Rename worktree</DialogTitle>
@@ -676,7 +683,14 @@ export function LockWorktreeDialog({
   }
 
   return (
-    <Dialog open={worktree !== null} onOpenChange={(o) => !o && onClose()}>
+    <Dialog
+      open={worktree !== null}
+      // Escape and a backdrop press are ignored while the lock runs, matching
+      // the Cancel button that is already disabled for it.
+      onOpenChange={(o) => {
+        if (!o && !lock.isPending) onClose();
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Lock worktree</DialogTitle>

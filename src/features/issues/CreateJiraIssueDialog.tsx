@@ -27,6 +27,7 @@ import type { JiraLink } from "@/lib/jira/store";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { useGenerateIssueDraft } from "./useGenerateIssueDraft";
 
 /**
@@ -105,9 +106,7 @@ export function CreateJiraIssueDialog({
     form.reset({ summary: "", body: "" }, { keepDefaultValues: true });
     setCreateError(null);
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   // Default to the first creatable type once they load; clear the selection if a
   // refetch dropped the currently-picked one (e.g. project changed).

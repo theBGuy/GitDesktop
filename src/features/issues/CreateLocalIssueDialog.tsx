@@ -1,6 +1,6 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
-import { useEffect, useEffectEvent } from "react";
+import { useEffectEvent } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,6 +17,7 @@ import { useCreateLocalIssue } from "@/lib/issues/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { useGenerateIssueDraft } from "./useGenerateIssueDraft";
 
 export function CreateLocalIssueDialog({
@@ -67,9 +68,7 @@ export function CreateLocalIssueDialog({
       { keepDefaultValues: true },
     );
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   // Shared by the Draft-with-AI button and the generate chord below.
   function runGenerate() {

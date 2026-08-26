@@ -27,6 +27,7 @@ import {
 } from "@/lib/github/actions";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
 export function RunWorkflowDialog({
   repoPath,
@@ -96,12 +97,11 @@ export function RunWorkflowDialog({
   >([]);
 
   // Reset the form each time the dialog opens, defaulting to the first workflow.
-  useEffect(() => {
-    if (!open) return;
+  useSeedOnOpen(open, () => {
     setGitRef(defaultRef);
     setInputs([]);
     setPipeline("");
-  }, [open, defaultRef]);
+  });
   useEffect(() => {
     if (open && !workflow && dispatchable.length > 0) {
       setWorkflow(String(dispatchable[0].id));

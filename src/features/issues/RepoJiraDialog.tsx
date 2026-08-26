@@ -37,6 +37,7 @@ import type { JiraLink } from "@/lib/jira/store";
 import type { JiraAccountInfo, JiraProject } from "@/lib/jira/types";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
 /** Where an Atlassian API token is created (same page the Bitbucket account
  *  section links to). */
@@ -113,8 +114,7 @@ export function RepoJiraDialog({
 
   // Seed the draft from an existing link when the dialog opens; reset on close so
   // a reopen reflects persisted state, not stale in-flight edits.
-  useEffect(() => {
-    if (!open) return;
+  useSeedOnOpen(open, () => {
     if (existingLink) {
       setSiteInput(existingLink.siteHost);
       setProject({
@@ -135,7 +135,7 @@ export function RepoJiraDialog({
     setConnectError(null);
     setDebouncedQuery("");
     setShowCredentialForm(false);
-  }, [open, existingLink]);
+  });
 
   // Debounced locally, not via useDebouncedValue: the dialog stays mounted across
   // open/close, so the reset above must clear this SYNCHRONOUSLY — the search is

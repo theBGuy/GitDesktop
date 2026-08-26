@@ -8,7 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   MarkdownEditor,
@@ -64,6 +64,7 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { useGenerateReleaseNotes } from "./useGenerateReleaseNotes";
 import { findPreviousTag } from "./version";
@@ -205,9 +206,7 @@ export function CreateReleaseDialog({
     setPreviousTagOverride(null);
     // The editor remounts with the dialog (Write tab) — no explicit reset needed.
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   function createNewTag(name: string) {
     const n = name.trim();

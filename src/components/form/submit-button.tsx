@@ -6,7 +6,9 @@ import { useFormContext } from "@/lib/form-context";
 /**
  * Submit button bound to the surrounding form (use inside `<form.AppForm>`):
  * disabled until the form can submit, spinner while submitting. Extra
- * `disabled` reasons (e.g. an AI generation in flight) are OR'd in.
+ * `disabled` reasons (e.g. an AI generation in flight) are OR'd in, and every
+ * other prop reaches the Button — a caller explaining a disabled submit points
+ * `aria-describedby` at its own hint.
  */
 export function SubmitButton({
   children,

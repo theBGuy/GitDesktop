@@ -24,6 +24,41 @@ export function usePanelPortalContainer(): HTMLElement | undefined {
 }
 
 /**
+ * Whether the surrounding panel is the visible one. A concealed panel hides its
+ * popups by CSS alone, so anything that keeps acting on the whole document while
+ * open — a modal's scroll lock, its `aria-hidden` marking of everything outside
+ * it, its document-level dismissal listeners — has to stand down for as long as
+ * the user cannot see it. `true` outside any panel.
+ */
+const PanelActivityContext = createContext(true);
+
+/** `false` while the surrounding panel is concealed; `true` at body level. */
+export function usePanelActive(): boolean {
+  return useContext(PanelActivityContext);
+}
+
+// Base UI close reasons where the user acted on the document rather than on the
+// popup itself. While a panel is concealed these belong to the tab the user can
+// actually see, so a hidden popup must neither take them nor swallow the key.
+const USER_DISMISSAL_REASONS = ["escape-key", "outside-press", "focus-out"];
+
+/** Whether a Base UI close request came from the user acting outside the popup. */
+export function isUserDismissal(reason: string): boolean {
+  return USER_DISMISSAL_REASONS.includes(reason);
+}
+
+/** Publishes the surrounding panel's visibility to the popups inside it. */
+export function PanelActivityBoundary({
+  active,
+  children,
+}: {
+  active: boolean;
+  children: ReactNode;
+}): ReactNode {
+  return <PanelActivityContext value={active}>{children}</PanelActivityContext>;
+}
+
+/**
  * Wraps one `<Activity>` panel's content and publishes a portal target that
  * lives inside it.
  */

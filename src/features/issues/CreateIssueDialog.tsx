@@ -2,7 +2,7 @@ import { Popover } from "@base-ui/react/popover";
 import { SparkleIcon, TagIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffectEvent, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -29,6 +29,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import {
   AssigneesPopover,
   IssueTypeMenu,
@@ -156,9 +157,7 @@ export function CreateIssueDialog({
     setMilestone(null);
     setIssueType(null);
   });
-  useEffect(() => {
-    if (open) seedOnOpen();
-  }, [open]);
+  useSeedOnOpen(open, seedOnOpen);
 
   function toggleLabel(name: string, on: boolean) {
     setLabels((prev) => {
