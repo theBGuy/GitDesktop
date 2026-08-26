@@ -66,7 +66,8 @@ export const capabilities: Capability[] = [
   // — Branches & history —
   {
     group: "Branches & history",
-    label: "Branch compare — ahead/behind, three-dot diff, jump to PR",
+    label:
+      "Branch compare — ahead/behind, three-dot diff, jump to PR, commit menu + tags",
     highlight: true,
   },
   {

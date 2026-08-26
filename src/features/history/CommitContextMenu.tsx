@@ -29,24 +29,27 @@ export function CommitContextMenuItems({
   hash: string;
   actions: CommitMenuActions;
 }) {
+  // Destructured so the optional `revert` narrows: TypeScript narrows a local
+  // binding, not a property read, so the guard alone would still need `?.`.
+  const { checkout, revert, cherryPick, createBranch, createTag } = actions;
   return (
     <>
-      <ContextMenuItem onClick={() => actions.checkout(hash)}>
+      <ContextMenuItem onClick={() => checkout(hash)}>
         Checkout commit
       </ContextMenuItem>
-      {actions.revert && (
-        <ContextMenuItem onClick={() => actions.revert?.(hash)}>
+      {revert && (
+        <ContextMenuItem onClick={() => revert(hash)}>
           Revert changes in commit
         </ContextMenuItem>
       )}
-      <ContextMenuItem onClick={() => actions.cherryPick(hash)}>
+      <ContextMenuItem onClick={() => cherryPick(hash)}>
         Cherry-pick commit
       </ContextMenuItem>
       <ContextMenuSeparator />
-      <ContextMenuItem onClick={() => actions.createBranch(hash)}>
+      <ContextMenuItem onClick={() => createBranch(hash)}>
         Create branch from commit…
       </ContextMenuItem>
-      <ContextMenuItem onClick={() => actions.createTag(hash)}>
+      <ContextMenuItem onClick={() => createTag(hash)}>
         Create tag…
       </ContextMenuItem>
       <ContextMenuSeparator />

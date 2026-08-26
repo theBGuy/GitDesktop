@@ -177,7 +177,9 @@ PR badge.
   where each worktree row also carries a context menu with the management
   actions it supports, and a branch's own menu can remove its worktree.
 - **Compare**: a tab with a three-dot diff, commits ahead/behind,
-  merge/rebase, and jump-to-PR.
+  merge/rebase, and jump-to-PR. Each ahead/behind commit shows its tag chips
+  and carries a context menu — checkout, cherry-pick, create a branch or tag,
+  copy the SHA, plus revert for commits on your branch.
 - **Local branch-protection rules**: naming, merge methods, require-PR, and
   force-push rules, shareable via a committed file or importable from
   GitHub. A promotion-branches list marks pull requests from those branches
