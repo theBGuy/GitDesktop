@@ -100,6 +100,7 @@ export function RepoLinearDialog({
     save.mutate(
       {
         workspaceSlug: "",
+        teamId: selectedTeam.id,
         teamKey: selectedTeam.key,
         teamName: selectedTeam.name,
       },

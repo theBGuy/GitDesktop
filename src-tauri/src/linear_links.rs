@@ -11,6 +11,7 @@ const STORE_FILE: &str = "linear-links.json";
 #[serde(rename_all = "camelCase")]
 pub struct LinearLinkEntry {
     pub workspace_slug: String,
+    pub team_id: String,
     pub team_key: String,
     pub team_name: String,
 }
@@ -65,10 +66,16 @@ fn link_from_value(value: &Value) -> Option<LinearLinkEntry> {
         .get("workspaceSlug")
         .and_then(Value::as_str)?
         .to_string();
+    let team_id = obj
+        .get("teamId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let team_key = obj.get("teamKey").and_then(Value::as_str)?.to_string();
     let team_name = obj.get("teamName").and_then(Value::as_str)?.to_string();
     Some(LinearLinkEntry {
         workspace_slug,
+        team_id,
         team_key,
         team_name,
     })
@@ -105,6 +112,7 @@ mod tests {
     fn link_json() -> Value {
         json!({
             "workspaceSlug": "acme",
+            "teamId": "team-uuid-123",
             "teamKey": "ENG",
             "teamName": "Engineering",
         })

@@ -48,7 +48,7 @@ export function CreateLinearIssueDialog({
     if (!canSubmit) return;
     try {
       const result = await create.mutateAsync({
-        teamId: "",
+        teamId: link.teamId,
         title: title.trim(),
         descriptionMd: description.trim() || undefined,
       });

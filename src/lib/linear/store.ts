@@ -7,6 +7,8 @@ import { storeName } from "@/lib/test-mode";
 export interface LinearLink {
   /** The workspace slug, for building URLs. */
   workspaceSlug: string;
+  /** The team UUID from the Linear API. Required for issue creation. */
+  teamId: string;
   /** The team key, e.g. `ENG`. */
   teamKey: string;
   /** The team's display name, cached for the section header. */
@@ -50,6 +52,7 @@ function asLink(v: unknown): LinearLink | null {
   }
   return {
     workspaceSlug: o.workspaceSlug,
+    teamId: typeof o.teamId === "string" ? o.teamId : "",
     teamKey: o.teamKey,
     teamName: o.teamName,
   };
