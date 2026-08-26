@@ -9,8 +9,9 @@ import type { MouseEvent } from "react";
 export const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
   const el = e.currentTarget;
   // Clear by REMOVING the attribute: an empty `title` states that the ancestor's
-  // does not apply, which would suppress a titled parent's tooltip (HTML).
-  if (el.scrollWidth > el.clientWidth) el.title = value;
+  // does not apply, which would suppress a titled parent's tooltip (HTML). An
+  // empty `value` takes the remove branch for the same reason.
+  if (value && el.scrollWidth > el.clientWidth) el.title = value;
   else el.removeAttribute("title");
 };
 
@@ -22,7 +23,13 @@ export const clipTitle = (value: string) => (e: MouseEvent<HTMLElement>) => {
  */
 export const clipTitleFromText = (e: MouseEvent<HTMLElement>) => {
   const el = e.currentTarget;
-  if (el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight)
-    el.title = el.textContent ?? "";
+  // Empty/whitespace text takes the remove branch — assigning "" here would
+  // re-mint the blank-title suppression this helper exists to eliminate.
+  const text = el.textContent?.trim();
+  if (
+    text &&
+    (el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight)
+  )
+    el.title = text;
   else el.removeAttribute("title");
 };
