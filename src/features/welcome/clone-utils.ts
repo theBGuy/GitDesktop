@@ -9,6 +9,11 @@ export function parentDir(p: string): string {
  *  from `default_clone_dir_name` (src-tauri/src/git/repo.rs) and a submodule's
  *  from git itself — keep the separator sets in sync with that Rust twin. */
 export function nameFromUrl(url: string): string {
-  const last = url.trim().replace(/[/\\]+$/, "").split(/[/\\:]/).pop() ?? "";
+  const last =
+    url
+      .trim()
+      .replace(/[/\\]+$/, "")
+      .split(/[/\\:]/)
+      .pop() ?? "";
   return last.replace(/\.git$/, "");
 }
