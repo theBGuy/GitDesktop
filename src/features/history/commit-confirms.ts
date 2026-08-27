@@ -1,8 +1,9 @@
 /**
  * The one wording for each commit-level action that changes the working tree or
- * writes history. The History list, the commit detail view's ⋯ menu, and a tag's
- * Checkout all ask through these, so no route can pose a different question than
- * its twin. Prompts go through `useConfirm.getState().ask(...)`.
+ * writes history. The History list, the commit detail view's ⋯ menu, Compare's
+ * commit context menu, and a tag's Checkout all ask through these, so no route
+ * can pose a different question than its twin. Prompts go through
+ * `useConfirm.getState().ask(...)`.
  */
 
 const short = (hash: string) => hash.slice(0, 7);
@@ -20,11 +21,18 @@ export function checkoutDetachedConfirm(kind: "commit" | "tag", name: string) {
 export const checkoutCommitConfirm = (hash: string) =>
   checkoutDetachedConfirm("commit", short(hash));
 
-/** A silent checkout reads as a dead end from Compare, which flips to its
- *  detached-HEAD empty state, so every commit-checkout route reports success
- *  with this same sentence. */
+/** A silent checkout reads as a dead end (Compare flips to its detached-HEAD
+ *  empty state with no acknowledgment), so every checkout route — commit or
+ *  tag — reports success through this one template. */
+const checkedOutDetached = (name: string) =>
+  `Checked out ${name} — HEAD is detached`;
+
 export function checkoutCommitSuccessToast(hash: string) {
-  return `Checked out ${short(hash)} — HEAD is detached`;
+  return checkedOutDetached(short(hash));
+}
+
+export function checkoutTagSuccessToast(tag: string) {
+  return checkedOutDetached(tag);
 }
 
 export const revertCommitConfirm = (hash: string) => ({

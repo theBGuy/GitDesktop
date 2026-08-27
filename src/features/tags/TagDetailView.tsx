@@ -29,7 +29,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
-import { checkoutDetachedConfirm } from "@/features/history/commit-confirms";
+import {
+  checkoutDetachedConfirm,
+  checkoutTagSuccessToast,
+} from "@/features/history/commit-confirms";
 import { formatBytes } from "@/features/repository/insights/primitives";
 import { presentError } from "@/lib/error-summary";
 import { UPDATER_MANIFEST_NAME } from "@/lib/git/api";
@@ -216,7 +219,7 @@ export function TagDetailView({
       .ask(checkoutDetachedConfirm("tag", tag));
     if (!ok) return;
     checkout.mutate(target, {
-      onSuccess: () => toast.success(`Checked out ${tag}`),
+      onSuccess: () => toast.success(checkoutTagSuccessToast(tag)),
       onError,
     });
   }

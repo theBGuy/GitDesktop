@@ -28,8 +28,7 @@ import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
 import { useGitInstalled } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
-import { reloadLocalPrs } from "@/lib/pulls/local";
-import { reloadReviewNotes } from "@/lib/review-notes/store";
+import { MCP_WRITABLE_STORES } from "@/lib/mcp-writable-stores";
 import {
   useApplyTheme,
   useSaveSettings,
@@ -209,26 +208,16 @@ function App() {
       ({ payload: focused }) => {
         if (focused) {
           queryClient.invalidateQueries({ queryKey: ["repo"] });
-          // The MCP server (with --allow-write) can mutate local-prs.json on
-          // disk while we're unfocused; reload the in-memory store from disk
-          // BEFORE invalidating so the refetch sees the external writes.
-          reloadLocalPrs()
-            .then(() =>
-              queryClient.invalidateQueries({ queryKey: ["local-prs"] }),
-            )
-            .catch(() => {
-              // Best-effort: a failed reload just leaves the last known state.
-            });
-          // Same story for review-notes.json — the MCP server can deposit a
-          // per-branch reviewer note while we're unfocused; reload the store
-          // from disk BEFORE invalidating so the refetch sees it.
-          reloadReviewNotes()
-            .then(() =>
-              queryClient.invalidateQueries({ queryKey: ["review-notes"] }),
-            )
-            .catch(() => {
-              // Best-effort: a failed reload just leaves the last known state.
-            });
+          // The MCP server (with --allow-write) can mutate these store files on
+          // disk while we're unfocused; reload each from disk BEFORE invalidating
+          // so the refetch sees the external writes. Each store is independent.
+          for (const { reload, queryKey } of MCP_WRITABLE_STORES) {
+            reload()
+              .then(() => queryClient.invalidateQueries({ queryKey }))
+              .catch(() => {
+                // Best-effort: a failed reload just leaves the last known state.
+              });
+          }
         }
       },
     );

@@ -91,6 +91,9 @@ function TaskRow({
       onFocus={onFocus}
       onClick={editable ? onToggle : undefined}
       onKeyDown={(e) => {
+        // Keys from the nested action buttons pass through untouched, or the
+        // preventDefault below would cancel their native Enter/Space activation.
+        if (e.target !== e.currentTarget) return;
         if (!editable) return;
         if (e.key === " " || e.key === "Enter") {
           e.preventDefault();

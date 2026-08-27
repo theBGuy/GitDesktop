@@ -242,9 +242,12 @@ pub(crate) async fn clone_repo_core(
     Ok(cloned.to_string_lossy().into_owned())
 }
 
+// The separator set covers every source spelling git accepts — `/` for URLs,
+// `:` for scp-like `git@host:team/repo.git`, `\` for Windows local paths —
+// because the caller rejects any inferred name that still holds a separator.
 fn default_clone_dir_name(url: &str) -> Option<String> {
-    let trimmed = url.trim_end_matches('/');
-    let last = trimmed.rsplit(['/', ':']).next()?;
+    let trimmed = url.trim_end_matches(['/', '\\']);
+    let last = trimmed.rsplit(['/', '\\', ':']).next()?;
     let name = last.trim_end_matches(".git").trim();
     (!name.is_empty()).then(|| name.to_string())
 }
@@ -421,6 +424,41 @@ fn time_year() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     (1970 + secs / 31_557_600).to_string()
+}
+
+#[cfg(test)]
+mod clone_dir_tests {
+    use super::default_clone_dir_name;
+
+    #[test]
+    fn default_clone_dir_name_reads_a_windows_local_path() {
+        assert_eq!(default_clone_dir_name(r"C:\Users\dev\my-repo"), Some("my-repo".into()));
+    }
+
+    #[test]
+    fn default_clone_dir_name_ignores_a_trailing_backslash() {
+        assert_eq!(default_clone_dir_name(r"C:\Users\dev\my-repo\"), Some("my-repo".into()));
+    }
+
+    #[test]
+    fn default_clone_dir_name_reads_a_unc_path() {
+        assert_eq!(default_clone_dir_name(r"\\server\share\repo"), Some("repo".into()));
+    }
+
+    #[test]
+    fn default_clone_dir_name_reads_urls_and_scp_form() {
+        assert_eq!(default_clone_dir_name("C:/Users/dev/my-repo"), Some("my-repo".into()));
+        assert_eq!(
+            default_clone_dir_name("https://github.com/owner/repo.git"),
+            Some("repo".into())
+        );
+        assert_eq!(default_clone_dir_name("git@host:team/repo.git"), Some("repo".into()));
+    }
+
+    #[test]
+    fn default_clone_dir_name_rejects_a_bare_drive_root() {
+        assert_eq!(default_clone_dir_name(r"C:\"), None);
+    }
 }
 
 #[cfg(test)]
