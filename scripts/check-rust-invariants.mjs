@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Static gate for four Rust invariants that have each cost this repo a fix
+// Static gate for five Rust invariants that have each cost this repo a fix
 // round. Text-level checks over `src-tauri/src/**/*.rs` — no compiler, no deps,
 // Node built-ins only — so they run anywhere `node` does:
 //
@@ -17,6 +17,11 @@
 //      `GitOutput::full_failure_text()` is the shaping that carries both halves.
 //      Scoped to `AppError::Git` constructions on purpose: the `Gh`/`Glab`
 //      variants are tuple-shaped and their CLIs do not split a report this way.
+//   E. compare basehead — a forge-sourced ref interpolated into a
+//      `…/compare/<base>...<head>` path. `gh api` expands `{…}` as its own
+//      placeholders and a URL parser truncates at `#`/`?`, so an unvalidated
+//      segment answers 200 for the WRONG refs; fork head refs and owners are
+//      attacker-chosen. `forge::validate_compare_branch` is the chokepoint.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records. RATCHET
 // RULE: the lists only shrink by default. Adding an entry is a reviewed change —
@@ -259,6 +264,24 @@ const STDERR_ONLY_ALLOWLIST = [
   },
 ];
 
+// Check E. Both sites route every interpolated segment — base, head, and the
+// cross-repo owner sharing the head's path segment — through
+// `forge::validate_compare_branch`, verified by reading each one.
+const COMPARE_ENDPOINT_ALLOWLIST = [
+  {
+    file: "forge/github.rs",
+    fn: "fork_divergence",
+    rationale:
+      "its only caller (forge::forge_fork_divergence) validates base_branch and fork_branch with validate_compare_branch, and the owner via fork_owner_from_full_name, before dispatch",
+  },
+  {
+    file: "github/pr.rs",
+    fn: "build_divergence_compare_path",
+    rationale:
+      "validates base, head and the cross-repository owner with validate_compare_branch at fn entry",
+  },
+];
+
 // ------------------------------------------------------------------- helpers
 
 /** Every `.rs` file under `src-tauri/src`, as absolute paths. */
@@ -326,6 +349,35 @@ export function checkRefspecTemplates(file, src, lines, hits) {
       fn,
       allowlisted: allowed(REFSPEC_ALLOWLIST, file, fn),
       fix: REFSPEC_FIX,
+    });
+  }
+}
+
+// A `format!` template whose `…/compare/…` path interpolates ANYTHING after
+// the `/compare/` marker — that tail is the basehead, the only part a
+// forge-sourced ref reaches. A fully literal compare path is not a hit
+// (nothing to inject), and, like check A, a path built by `push_str`/`+` is
+// invisible here by construction — that is what the allowlist is for.
+const COMPARE_MARKER = "/compare/";
+const COMPARE_FIX =
+  "refs reaching a compare basehead route through " +
+  "forge::validate_compare_branch (gh expands `{…}` as placeholders; `#`/`?` " +
+  "truncate the path) — validate, or allowlist with rationale";
+
+export function checkCompareEndpoints(file, src, lines, hits) {
+  FORMAT_RE.lastIndex = 0;
+  for (let m = FORMAT_RE.exec(src); m; m = FORMAT_RE.exec(src)) {
+    const at = m[1].indexOf(COMPARE_MARKER);
+    if (at < 0) continue;
+    if (!m[1].slice(at + COMPARE_MARKER.length).includes("{")) continue;
+    const line = src.slice(0, m.index).split("\n").length;
+    const fn = enclosingFn(lines, line - 1);
+    hits.push({
+      file,
+      line,
+      fn,
+      allowlisted: allowed(COMPARE_ENDPOINT_ALLOWLIST, file, fn),
+      fix: COMPARE_FIX,
     });
   }
 }
@@ -679,6 +731,12 @@ function main() {
       name: "D. stderr-only AppError::Git",
       run: checkStderrOnlyGitError,
       allowlist: STDERR_ONLY_ALLOWLIST,
+      hits: [],
+    },
+    {
+      name: "E. compare basehead",
+      run: checkCompareEndpoints,
+      allowlist: COMPARE_ENDPOINT_ALLOWLIST,
       hits: [],
     },
   ];

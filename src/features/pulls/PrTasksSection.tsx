@@ -358,6 +358,7 @@ export function PrTasksSection({
     onActivate: (t) => setFocusedId(t.id),
     rowKey: (t) => t.id,
     rowAttr: "data-row",
+    ignoreTextEntry: true,
   });
 
   return (

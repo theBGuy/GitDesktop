@@ -1251,9 +1251,10 @@ fn unique_suffix() -> String {
 mod tests {
     use super::{
         branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args,
-        divergence_out_of_range, git_branches, git_create_branch_core, git_default_branch,
-        git_rename_branch_core, parse_cherry_counts, parse_upstream_track, update_branch_from,
-        validate_branch_name, validate_ref_name, BranchRewriteStatus,
+        divergence_out_of_range, git_branch_merge_states, git_branches, git_create_branch_core,
+        git_default_branch, git_rename_branch_core, parse_cherry_counts, parse_upstream_track,
+        update_branch_from, validate_branch_name, validate_ref_name, BranchRewriteStatus,
+        MergePair,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -2294,6 +2295,118 @@ mod tests {
                 divergence_out_of_range(bad, 200, 1000),
                 "{bad:?} is unreadable and must gate out"
             );
+        }
+    }
+
+    /// `git_branch_merge_states` answers a SHAPE, never an error: a name the branch
+    /// gate refuses reads as `merged: false, head_exists: false`. The rows that
+    /// discriminate are the ones `rev-parse --verify refs/heads/<name>` RESOLVES
+    /// (`feature~1`, `<base>^`, `feature^{commit}`) — ungated, those report a live
+    /// branch and an ancestor-merged verdict for a ref no branch is at.
+    #[tokio::test]
+    async fn branch_merge_states_refuse_rev_expressions_as_unmerged_and_absent() {
+        let (_base, base_dir) = temp_base("merge-states-revs");
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+
+        // Two commits on the base branch, so `<base>^` resolves; `landed` sits at
+        // that tip (merged), `feature` one commit past it (not merged).
+        let base = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        std::fs::write(repo.join("a.txt"), "second\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "second"]).await;
+        run(&repo_s, &["branch", "landed"]).await;
+        run(&repo_s, &["switch", "-qc", "feature"]).await;
+        std::fs::write(repo.join("a.txt"), "feature\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "feature edit"]).await;
+        run(&repo_s, &["switch", "-q", &base]).await;
+
+        let pair = |b: &str, h: &str| MergePair {
+            base: b.to_string(),
+            head: h.to_string(),
+        };
+        // The probe itself works: a merged branch and an unmerged one, both live.
+        let states = git_branch_merge_states(
+            repo_s.clone(),
+            vec![pair(&base, "landed"), pair(&base, "feature")],
+        )
+        .await
+        .expect("real pairs resolve");
+        assert_eq!((states[0].merged, states[0].head_exists), (true, true));
+        assert_eq!((states[1].merged, states[1].head_exists), (false, true));
+
+        // HEAD side: every rev shape and refspec metacharacter reads absent.
+        for head in [
+            "feature~1",
+            &format!("{base}^"),
+            "feature^{commit}",
+            "HEAD@{1}",
+            &format!("{base}..feature"),
+            "@",
+            "a*b",
+            "a:b",
+        ] {
+            let states = git_branch_merge_states(repo_s.clone(), vec![pair(&base, head)])
+                .await
+                .expect("a refused name is a shape, not an error");
+            assert_eq!(
+                (states[0].merged, states[0].head_exists),
+                (false, false),
+                "head {head:?}"
+            );
+        }
+
+        // BASE side: the head stays live, but nothing may be reported merged INTO a
+        // rev expression. `feature~1` and `feature^{commit}` both have `landed` as
+        // an ancestor, so an ungated base flips `merged` to true.
+        for bad_base in ["feature~1", "feature^{commit}", "@", "a*b"] {
+            let states = git_branch_merge_states(repo_s.clone(), vec![pair(bad_base, "landed")])
+                .await
+                .expect("a refused base is a shape, not an error");
+            assert_eq!(
+                (states[0].merged, states[0].head_exists),
+                (false, true),
+                "base {bad_base:?}"
+            );
+        }
+    }
+
+    /// `update_branch_from` merges into `refs/heads/<branch>` and merges `<base>`,
+    /// so both must name a BRANCH: a rev expression would resolve and merge an
+    /// ancestor. Asserts the gate's MESSAGE — the function raises `InvalidArgument`
+    /// for a self-update too, which a variant-only match could not tell apart.
+    #[tokio::test]
+    async fn update_branch_from_rejects_rev_expressions_on_both_sides() {
+        let (_base, base_dir) = temp_base("update-from-revs");
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        run(&repo_s, &["branch", "feature"]).await;
+
+        let state = AppState::default();
+        for bad in [
+            "feature~1",
+            "main^",
+            "HEAD@{1}",
+            "main..other",
+            "a^{commit}",
+            "@",
+            "a*b",
+        ] {
+            for (branch, base) in [(bad, "feature"), ("feature", bad)] {
+                let err = update_branch_from(&state, &repo_s, branch, base)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(&err, AppError::InvalidArgument(m) if m.contains("invalid branch name")),
+                    "{branch:?} from {base:?} got: {err:?}"
+                );
+            }
         }
     }
 }

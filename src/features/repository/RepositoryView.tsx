@@ -21,6 +21,7 @@ import {
   useState,
   useTransition,
 } from "react";
+import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import {
   PanelActivityBoundary,
   PanelPortalBoundary,
@@ -537,7 +538,21 @@ export function RepositoryView() {
           {aiEnabled && (
             <TabPanel active={repoTab === "agent"}>
               {agentSeen && (
-                <Suspense fallback={null}>
+                <Suspense
+                  fallback={
+                    <LazyPanelFallback
+                      name="agent sessions"
+                      className="min-h-0 flex-1 gap-1.5"
+                      rows={[
+                        "h-7 w-20",
+                        "h-8 w-full",
+                        "h-14 w-full",
+                        "h-14 w-full",
+                        "h-14 w-full",
+                      ]}
+                    />
+                  }
+                >
                   <SessionList repoPath={repoPath} />
                 </Suspense>
               )}
@@ -546,7 +561,7 @@ export function RepositoryView() {
         </aside>
         <main className="min-w-0 flex-1">
           <TabPanel active={repoTab === "changes"}>
-            <Suspense fallback={null}>
+            <Suspense fallback={<LazyPanelFallback name="the diff" />}>
               <DiffViewer repoPath={repoPath} />
             </Suspense>
           </TabPanel>
@@ -680,7 +695,20 @@ export function RepositoryView() {
           </TabPanel>
           <TabPanel active={repoTab === "insights"}>
             {insightsSeen && (
-              <Suspense fallback={null}>
+              <Suspense
+                fallback={
+                  <LazyPanelFallback
+                    name="insights"
+                    className="grid auto-rows-min grid-cols-1 gap-4 overflow-hidden p-4 xl:grid-cols-2"
+                    rows={[
+                      "h-6 w-24 xl:col-span-2",
+                      "h-52 w-full",
+                      "h-52 w-full",
+                      "h-52 w-full xl:col-span-2",
+                    ]}
+                  />
+                }
+              >
                 <InsightsBoard
                   repoPath={repoPath}
                   active={repoTab === "insights"}
@@ -691,7 +719,15 @@ export function RepositoryView() {
           {aiEnabled && (
             <TabPanel active={repoTab === "agent"}>
               {agentSeen && (
-                <Suspense fallback={null}>
+                <Suspense
+                  fallback={
+                    <LazyPanelFallback
+                      name="the agent session"
+                      className="gap-3 p-3"
+                      rows={["h-7 w-40", "h-24 w-full", "h-40 w-full"]}
+                    />
+                  }
+                >
                   <SessionView repoPath={repoPath} />
                 </Suspense>
               )}

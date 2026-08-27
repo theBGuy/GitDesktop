@@ -5,15 +5,22 @@ import { Button } from "@/components/ui/button";
 import type { ChangeKind, DiffStatEntry, FileEntry } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
 
-const KIND_BADGE: Record<ChangeKind, { letter: string; className: string }> = {
-  added: { letter: "A", className: "text-success" },
-  untracked: { letter: "U", className: "text-success" },
-  modified: { letter: "M", className: "text-warning" },
-  typechange: { letter: "T", className: "text-warning" },
-  deleted: { letter: "D", className: "text-destructive" },
-  renamed: { letter: "R", className: "text-info" },
-  copied: { letter: "C", className: "text-info" },
-  conflicted: { letter: "!", className: "text-destructive" },
+const KIND_BADGE: Record<
+  ChangeKind,
+  { letter: string; label: string; className: string }
+> = {
+  added: { letter: "A", label: "Added", className: "text-success" },
+  untracked: { letter: "U", label: "Untracked", className: "text-success" },
+  modified: { letter: "M", label: "Modified", className: "text-warning" },
+  typechange: { letter: "T", label: "Type changed", className: "text-warning" },
+  deleted: { letter: "D", label: "Deleted", className: "text-destructive" },
+  renamed: { letter: "R", label: "Renamed", className: "text-info" },
+  copied: { letter: "C", label: "Copied", className: "text-info" },
+  conflicted: {
+    letter: "!",
+    label: "Conflicted",
+    className: "text-destructive",
+  },
 };
 
 /**
@@ -84,9 +91,17 @@ export const FileRow = memo(function FileRow({
       aria-selected={selected}
       tabIndex={0}
     >
-      <span className={cn("w-3 shrink-0 font-semibold", badge.className)}>
+      <span
+        aria-hidden
+        className={cn("w-3 shrink-0 font-semibold", badge.className)}
+      >
         {badge.letter}
       </span>
+      {/* The status letter carries no meaning for assistive tech; the name span
+          sits ahead of the path so the kind is announced first, and `sr-only`
+          is absolutely positioned so it never becomes a flex item here. The
+          trailing space keeps the name from fusing with the path text. */}
+      <span className="sr-only">{badge.label} </span>
       <span className="min-w-0 flex-1 truncate" title={label}>
         {label}
       </span>

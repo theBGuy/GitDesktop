@@ -55,7 +55,12 @@ float over the new tab.
 - **`dialog.tsx`** — every delta `sheet.tsx` carries (both are Base UI
   `Dialog.Root` underneath), plus `DialogContent` re-homing focus into the
   popup when its panel returns to view, and composing the caller's `ref`
-  with its own rather than replacing it.
+  with its own rather than replacing it. It also takes an `overlayClassName`
+  prop forwarded to the backdrop it renders internally, so a caller can style
+  a backdrop it has no other handle on. That one carries no panel-portal
+  marker, so the grep above misses it — check it separately with
+  `grep -n overlayClassName src/components/ui/dialog.tsx`, which must show
+  the prop, its type, and its forward to `<DialogOverlay/>`.
 
 Deliberately unmodified: `menubar.tsx` inherits the container default by
 delegating to `DropdownMenuPortal`, so regenerating it into a direct

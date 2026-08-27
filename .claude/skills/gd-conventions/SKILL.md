@@ -71,7 +71,10 @@ leave them, don't re-flag them). Never convey meaning by color alone (WCAG AA).
 
 **Keyboard-first.** Every new selectable list gets arrow-key navigation in
 the same change (`listKeyboardNav` in `src/lib/list-keyboard-nav.ts`) — an
-invariant, not polish. Destructive paths stay behind confirmation via the
+invariant, not polish. A list container that co-hosts a text editor (inline
+edit field, reply box) passes `ignoreTextEntry` so arrows keep moving the
+caret; leave it off where arrows deliberately drive nav from a filter input.
+Destructive paths stay behind confirmation via the
 shared `useConfirm`/`ConfirmDialogHost` primitive (`src/lib/stores/confirm.ts`,
 host in `src/components/confirm-dialog-host.tsx`) — never a bespoke confirm
 dialog. Commit-level destructive prompts (checkout, revert, cherry-pick, undo)
@@ -146,6 +149,9 @@ words the user reads on screen — the palette matcher is a plain substring, so
   not a silent gap.
 - Never degrade a surface to dodge machinery: no plain `<pre>` where the app
   highlights, no spinner where skeletons exist.
+- A lazy panel's `Suspense` fallback is `LazyPanelFallback`
+  (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
+  region has no aria-busy and announces nothing to assistive tech.
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.
@@ -246,7 +252,9 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 - **User input → git refspecs/argv** routes through the existing chokepoints:
   `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline
-  refspec or re-derive the validation.
+  refspec or re-derive the validation. Refs reaching a compare-endpoint
+  basehead route through `forge::validate_compare_branch`
+  (guard: check-rust-invariants check E).
 - **Rust tests never read the real settings store** — use the
   `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
   app-data modules carry their own seams with the opposite arm order

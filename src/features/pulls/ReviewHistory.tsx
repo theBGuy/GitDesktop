@@ -92,6 +92,7 @@ export function ReviewHistory({
     activeIndex,
     onActivate: (_item, to) => setActiveIndex(to),
     rowKey: (r) => r.id,
+    ignoreTextEntry: true,
   });
 
   return (

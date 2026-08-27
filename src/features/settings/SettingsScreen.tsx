@@ -2,6 +2,7 @@ import { ArrowLeftIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { NavRail } from "@/components/NavRail";
 import { Button } from "@/components/ui/button";
 import {
@@ -291,7 +292,21 @@ export function SettingsScreen() {
                 </>
               )}
               {activePanel === "syntax" && (
-                <Suspense fallback={null}>
+                <Suspense
+                  fallback={
+                    <LazyPanelFallback
+                      name="syntax settings"
+                      className="gap-4 p-0"
+                      rows={[
+                        "h-5 w-36",
+                        "h-4 w-2/3",
+                        "h-9 w-full",
+                        "h-9 w-full",
+                        "h-24 w-full",
+                      ]}
+                    />
+                  }
+                >
                   <SyntaxSection form={form} />
                 </Suspense>
               )}

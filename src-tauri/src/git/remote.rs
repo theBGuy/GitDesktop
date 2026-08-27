@@ -1848,6 +1848,9 @@ mod tests {
     /// A destination branch name is meaningless without both an explicit branch and
     /// an explicit remote, so those combinations are refused rather than silently
     /// dropping the destination. Guarded before any git call — no repo needed.
+    /// The MESSAGE is the assertion: the remote-without-branch row would ALSO be
+    /// satisfied by the next guard's "remote requires an explicit branch", so a
+    /// variant-only match cannot tell which one refused it.
     #[tokio::test]
     async fn remote_branch_requires_both_branch_and_remote() {
         let state = AppState::default();
@@ -1868,7 +1871,7 @@ mod tests {
             .await
             .expect_err("a lone remote_branch is refused");
             assert!(
-                matches!(err, AppError::InvalidArgument(_)),
+                matches!(&err, AppError::InvalidArgument(m) if m.contains("remote branch requires")),
                 "branch={branch:?} remote={remote:?} → {err:?}"
             );
         }

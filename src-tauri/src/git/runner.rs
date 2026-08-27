@@ -228,7 +228,17 @@ pub async fn run_git_raw_input(
     let mut cmd = Command::new(&git);
     // Also covers the credential helpers git spawns in turn.
     crate::agent::sanitize_child_env(&mut cmd);
-    cmd.args(["-c", "core.quotePath=false", "-c", "color.ui=false"]);
+    // Git for Windows gates long-path support on core.longpaths — the OS
+    // LongPathsEnabled flag alone is not enough (probe-proven). Per-invocation so
+    // the user's own git config is never mutated; other platforms ignore the key.
+    cmd.args([
+        "-c",
+        "core.quotePath=false",
+        "-c",
+        "color.ui=false",
+        "-c",
+        "core.longpaths=true",
+    ]);
     cmd.args(args);
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
@@ -524,6 +534,41 @@ mod stdin_tests {
             assert_eq!(tokens[i * 4 + 1], b"1");
             assert_eq!(tokens[i * 4 + 2], b"*");
             assert_eq!(tokens[i * 4 + 3], path.as_bytes(), "record {i}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    /// The per-invocation `-c` block is a behavior contract, not a preference:
+    /// `core.longpaths` is what lets Git for Windows write past 260 chars, and
+    /// the parse/color settings are what every output parser in the app assumes.
+    /// Read back through git so the assertion covers the value REACHING the
+    /// child, not merely the argv we build.
+    #[tokio::test]
+    async fn injected_config_reaches_git() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-runner-config-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+
+        // `-c` is the command-line scope, which outranks the machine's own
+        // system/global/local config — so this holds on any dev box.
+        for (key, want) in [
+            ("core.longpaths", "true"),
+            ("core.quotepath", "false"),
+            ("color.ui", "false"),
+        ] {
+            let out = run_git(Some(&repo), &["config", "--get", key], DEFAULT_TIMEOUT)
+                .await
+                .unwrap_or_else(|e| panic!("read {key}: {e}"));
+            assert_eq!(out.stdout_lossy().trim(), want, "{key}");
         }
     }
 }

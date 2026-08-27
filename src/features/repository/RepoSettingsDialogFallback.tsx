@@ -5,6 +5,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { cn } from "@/lib/utils";
 
 /** Six rows: the shortest provider rail (GitLab) offers six sections, and the
@@ -23,11 +24,22 @@ export function RepoSettingsDialogFallback({
 }: {
   onOpenChange: (open: boolean) => void;
 }) {
+  // The chord must not reach the Changes-tab generator behind this frame. A
+  // defined `run` is what arms the hook's swallow at all; `enabled: false` is
+  // what keeps it from generating before the real dialog owns the chord.
+  const generateChord = useGenerateChord({
+    enabled: false,
+    run: () => undefined,
+  });
+
   return (
     <Dialog open onOpenChange={onOpenChange}>
       {/* Frame classes mirror RepoSettingsDialog's DialogContent: the swap to
           the loaded dialog must not resize or reposition the box. */}
-      <DialogContent className="flex h-150 max-h-[85vh] flex-col sm:max-w-3xl">
+      <DialogContent
+        className="flex h-150 max-h-[85vh] flex-col sm:max-w-3xl"
+        onKeyDown={generateChord.onKeyDown}
+      >
         <DialogHeader>
           <DialogTitle>Repository settings</DialogTitle>
           <Skeleton className="h-4 w-2/3" />

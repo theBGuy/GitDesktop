@@ -298,6 +298,15 @@ const DIFF_STAT_PAIR_RE = new RegExp(
 // comment stripping is what keeps the many prose mentions of `<Activity>` clean.
 const ACTIVITY_JSX_RE = /<Activity(?![\w$])/;
 
+// A `fallback` prop whose value is the literal `null`, on any component — the
+// converted sites were all Suspense, but an ErrorBoundary-style host trips it
+// too; allowlist deliberate cases. Run over the whole-file view because a
+// formatter puts the prop on its own line. Two blind spots, zero instances
+// today: a fallback naming a BINDING that holds null is invisible
+// (DiffSurfaceLazy forwards a `fallback` prop), and so is one built by a
+// conditional — the bare literal is the shape every converted site had.
+const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
+
 export const CHECKS = [
   {
     name: "hover-reveal",
@@ -475,6 +484,14 @@ export const CHECKS = [
     allowlist: ["src/features/repository/RepositoryView.tsx"],
     message:
       "a tab panel's <Activity> must be paired with PanelPortalBoundary and PanelActivityBoundary, or its dialogs and popups strand over the wrong tab — render TabPanel (RepositoryView.tsx) rather than a second <Activity>, or extend the allowlist deliberately for a non-tab Activity",
+  },
+  {
+    name: "null-suspense-fallback",
+    appliesTo: notVendoredUi,
+    scan: perFile(NULL_FALLBACK_RE),
+    allowlist: [],
+    message:
+      "`fallback={null}` blanks the region while the boundary is active, with no aria-busy and nothing announced to assistive tech — lazy panels use LazyPanelFallback (src/components/lazy-panel-fallback.tsx); any other fallback-taking host, or a boundary whose absence is genuinely invisible, needs an allowlist entry with rationale",
   },
 ];
 

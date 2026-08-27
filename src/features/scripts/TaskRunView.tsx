@@ -8,6 +8,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { lazy, Suspense } from "react";
+import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { Button } from "@/components/ui/button";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { clipTitle } from "@/lib/clip-title";
@@ -126,7 +127,14 @@ export function TaskRunView() {
         )}
       </div>
 
-      <Suspense fallback={null}>
+      <Suspense
+        fallback={
+          <LazyPanelFallback
+            name="the task output"
+            className="min-h-0 flex-1 p-1"
+          />
+        }
+      >
         <Terminal
           key={ptyId}
           ptyId={ptyId}

@@ -375,6 +375,12 @@ export function RepoSettingsDialog({
           // rather than on which rule the stylesheet happens to emit last.
           subdueEntrance && "data-open:animate-none!",
         )}
+        // The loading frame this replaces is its own Dialog root, so its
+        // backdrop already faded in; a second fade would re-darken the screen
+        // mid-open.
+        overlayClassName={
+          subdueEntrance ? "data-open:animate-none!" : undefined
+        }
         onKeyDown={generateChord.onKeyDown}
       >
         <DialogHeader>
