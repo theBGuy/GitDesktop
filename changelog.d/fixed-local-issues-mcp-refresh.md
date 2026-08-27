@@ -1,1 +1,2 @@
-- Local issues written by MCP agents (new issues, comments, status changes) now appear when the app window regains focus, without a restart.
+- Local issues written by MCP agents (new issues, comments, status changes) now
+  appear when the app window regains focus, without a restart.

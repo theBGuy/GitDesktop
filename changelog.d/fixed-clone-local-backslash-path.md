@@ -1,1 +1,1 @@
-- Cloning from a local Windows path with backslashes (`C:\...`) now works.
+- Cloning from a local Windows path with backslashes (`C:\...`) works.

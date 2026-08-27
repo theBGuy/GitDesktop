@@ -44,7 +44,8 @@ export function DiffStat({
       {/* Raw counts, never `format`: an abbreviating caller (Insights) still
           owes assistive tech the exact numbers. */}
       <span className="sr-only">
-        {added} added, {deleted} deleted
+        {added} {added === 1 ? "line" : "lines"} added, {deleted}{" "}
+        {deleted === 1 ? "line" : "lines"} deleted
       </span>
     </span>
   );
