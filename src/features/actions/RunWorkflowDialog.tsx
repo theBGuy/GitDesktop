@@ -116,6 +116,14 @@ export function RunWorkflowDialog({
   // value string for anything the `items` map doesn't carry, and a since-disabled
   // workflow never joins that map at all.
   const pendingInitial = useRef<string | null>(null);
+  // Whether the current selection was chosen by the preselect rather than by a
+  // person. On a cold list the workflow query resolves before the slower
+  // per-workflow probe, so that first pick is made trigger-blind; only a pick marked
+  // here may be revised once the probe lands.
+  const autoPicked = useRef(false);
+  // The ref the standing selection was made under. The seed writes it too, so the
+  // open's own seeded ref never reads as a change.
+  const pickedUnderRef = useRef(defaultRef.trim());
   // Stable row ids keep input focus/state correct when rows are removed.
   const nextId = useRef(0);
   const [inputs, setInputs] = useState<
@@ -134,12 +142,23 @@ export function RunWorkflowDialog({
     // observer stays mounted, so only a new repo key or a gcTime eviction lands here;
     // a valid pick survives every ordinary reopen.
     if (!workflows.data) setWorkflow("");
+    pickedUnderRef.current = defaultRef.trim();
     // Armed here, consumed by the preselect effect below (which runs later in this
     // same commit) once the workflow list can vouch for the id.
     pendingInitial.current = initialWorkflow ?? null;
   });
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedRef(gitRef.trim()), 400);
+    const t = setTimeout(() => {
+      const next = gitRef.trim();
+      setDebouncedRef(next);
+      if (next === pickedUnderRef.current) return;
+      pickedUnderRef.current = next;
+      // An auto-pick is only defensible for the ref it was made under, and the seeded
+      // ref at open is not a change: a LATER ref whose probe refuses the standing
+      // selection shows the hint instead of silently swapping the picker, so toggling
+      // the ref can't flip-flop what is selected.
+      autoPicked.current = false;
+    }, 400);
     return () => clearTimeout(t);
   }, [gitRef]);
 
@@ -166,23 +185,34 @@ export function RunWorkflowDialog({
     pendingInitial.current = null;
     if (wanted && offered(wanted)) {
       // Replacing a carried-over selection is the point — the caller asked for this
-      // workflow, and nothing in this open has been touched yet.
+      // workflow, and nothing in this open has been touched yet. Named intent counts
+      // as a person's pick, so the probe may not revise it.
+      autoPicked.current = false;
       setWorkflow(wanted);
       return;
     }
-    // The selection outlives repo switches, so an id can belong to another repo (or
-    // to a workflow disabled/deleted since): left standing it renders raw in the
-    // closed trigger and dispatches an id gh can't resolve. Unoffered means unset.
-    if (workflow && offered(workflow)) return;
+    // Keep the selection only while it is still offered AND is either a person's pick
+    // or an auto-pick the probe hasn't refused. The selection outlives repo switches,
+    // so an unoffered id (another repo's, or disabled/deleted since) renders raw in
+    // the closed trigger and dispatches an id gh can't resolve.
+    if (
+      workflow &&
+      offered(workflow) &&
+      !(autoPicked.current && hasNoManualTrigger(probed, workflow))
+    ) {
+      return;
+    }
     if (dispatchable.length === 0) {
       setWorkflow("");
       return;
     }
     // Prefer a runnable workflow; with every one refused, the first still gets
-    // picked so the picker shows what it refuses (the Run button stays disabled).
+    // picked so the picker shows what it refuses (the Run button stays disabled) —
+    // and re-picking the same id bails out of setState, so this can't loop.
     const pick =
       dispatchable.find((w) => !hasNoManualTrigger(probed, String(w.id))) ??
       dispatchable[0];
+    autoPicked.current = true;
     setWorkflow(String(pick.id));
   }, [
     open,
@@ -277,7 +307,13 @@ export function RunWorkflowDialog({
               <Select
                 items={workflowItems}
                 value={workflow}
-                onValueChange={(v) => v && setWorkflow(v)}
+                onValueChange={(v) => {
+                  if (!v) return;
+                  // A hand-picked workflow is final: the probe landing later may
+                  // disable the Run button but never re-picks for the user.
+                  autoPicked.current = false;
+                  setWorkflow(v);
+                }}
                 disabled={dispatchable.length === 0}
               >
                 <SelectTrigger id={`${idBase}-workflow`} className="w-full">

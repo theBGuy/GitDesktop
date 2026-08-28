@@ -8,6 +8,7 @@ import {
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
+import type { ForgeProvider } from "@/lib/git/types";
 import { isRunActive } from "@/lib/github/actions";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +19,24 @@ export function isFailureConclusion(conclusion: string): boolean {
     conclusion === "timed_out" ||
     conclusion === "startup_failure"
   );
+}
+
+/** Whether the provider calls its CI unit a pipeline rather than a workflow
+ *  run. An unrecognized host routes through `gh`, so it reads as GitHub. */
+export function isPipelineProvider(
+  provider: ForgeProvider | null | undefined,
+): boolean {
+  return provider === "gitlab" || provider === "bitbucket";
+}
+
+/** What this provider calls one CI unit. Every run-facing label and toast is
+ *  built from this, so one surface can never say "run" beside another's
+ *  "pipeline". */
+export type CiRunNoun = "run" | "pipeline";
+export function ciRunNoun(
+  provider: ForgeProvider | null | undefined,
+): CiRunNoun {
+  return isPipelineProvider(provider) ? "pipeline" : "run";
 }
 
 /** One re-run the provider offers for a run: the label users read, plus the
@@ -34,7 +53,7 @@ export type RerunOffer = {
  * Cancel is its only action.
  */
 export function rerunOffers(
-  provider: string | null | undefined,
+  provider: ForgeProvider | null | undefined,
   status: string,
   conclusion: string,
 ): RerunOffer[] {
@@ -73,7 +92,7 @@ export const RERUN_TITLES: Record<RerunOffer["kind"], string | undefined> = {
 /** The toast a started re-run shows, in the words of the provider's own
  *  operation. */
 export function rerunSuccessMessage(
-  provider: string | null | undefined,
+  provider: ForgeProvider | null | undefined,
   failedOnly: boolean,
 ): string {
   switch (true) {
@@ -91,7 +110,7 @@ export function rerunSuccessMessage(
 /** Whether Cancel applies to a run. A manual/blocked GitLab pipeline reports
  *  completed + action_required, but GitLab's cancel endpoint does cancel it. */
 export function cancelOffered(
-  provider: string | null | undefined,
+  provider: ForgeProvider | null | undefined,
   status: string,
   conclusion: string,
 ): boolean {
@@ -103,11 +122,17 @@ export function cancelOffered(
 
 /** What Cancel is called, in the provider's own noun. */
 export function cancelLabel(
-  provider: string | null | undefined,
+  provider: ForgeProvider | null | undefined,
 ): "Cancel run" | "Cancel pipeline" {
-  return provider === "gitlab" || provider === "bitbucket"
-    ? "Cancel pipeline"
-    : "Cancel run";
+  return `Cancel ${ciRunNoun(provider)}`;
+}
+
+/** The toast an accepted cancel shows — same noun as the control the user
+ *  clicked. */
+export function cancelStartedMessage(
+  provider: ForgeProvider | null | undefined,
+): string {
+  return `Cancelling ${ciRunNoun(provider)}…`;
 }
 
 /** Human label for a run/job/step's combined status + conclusion. */

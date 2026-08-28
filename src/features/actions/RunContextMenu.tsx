@@ -7,11 +7,21 @@ import { copyText } from "@/lib/clipboard";
 import { type ForgeProvider, providerLabel } from "@/lib/git/types";
 import type { WorkflowRun } from "@/lib/github/actions";
 import {
+  type CiRunNoun,
   cancelLabel,
   cancelOffered,
+  ciRunNoun,
+  isPipelineProvider,
   RERUN_TITLES,
   rerunOffers,
 } from "./status";
+
+/** Sentence-initial noun for the copy toast; the item's own label carries it
+ *  mid-sentence, where `ciRunNoun` is used directly. */
+const COPIED_URL_TOAST: Record<CiRunNoun, string> = {
+  run: "Run URL copied",
+  pipeline: "Pipeline URL copied",
+};
 
 /** Callbacks the menu items invoke — owned by the runs panel, which holds the
  *  mutations, toasts, and dialog state so this stays presentational. */
@@ -58,7 +68,8 @@ export function RunContextMenuItems({
     : [];
   const showCancel =
     canCancel && cancelOffered(provider, run.status, run.conclusion);
-  const isPipelines = provider === "gitlab" || provider === "bitbucket";
+  const isPipelines = isPipelineProvider(provider);
+  const noun = ciRunNoun(provider);
   // GitHub re-dispatches THIS run's workflow, so the item needs its database id;
   // GitLab and Bitbucket have nothing to preselect.
   const showRunAgain =
@@ -113,8 +124,10 @@ export function RunContextMenuItems({
           <ContextMenuItem onClick={() => openUrl(run.url)}>
             View on {providerLabel(provider)}
           </ContextMenuItem>
-          <ContextMenuItem onClick={() => copyText(run.url, "Run URL copied")}>
-            Copy run URL
+          <ContextMenuItem
+            onClick={() => copyText(run.url, COPIED_URL_TOAST[noun])}
+          >
+            Copy {noun} URL
           </ContextMenuItem>
         </>
       )}

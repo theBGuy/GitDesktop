@@ -152,6 +152,12 @@ words the user reads on screen — the palette matcher is a plain substring, so
 - Shared-ContextMenu suppression for non-target right-clicks goes through
   `suppressContextMenu` (`src/lib/context-menu.ts`) — `preventDefault` alone
   still opens Base UI's menu as an empty popup.
+- CI copy comes from `src/features/actions/status.tsx`, never hand-spelled: the
+  provider's noun via `ciRunNoun` (labels and toasts derive from it, so no
+  surface says "run" beside another's "pipeline"), the gitlab-or-bitbucket test
+  via `isPipelineProvider`, and the re-run offers, titles, and cancel wording
+  via `rerunOffers`/`RERUN_TITLES`/`cancelLabel` — shared so the runs list and
+  the run detail view can't drift.
 
 **Layout gotchas.** `DialogContent` is a grid — truncating flex content needs
 `min-w-0` on the grid item; cap tall dialogs at `max-h-[85vh]`. Link-styled

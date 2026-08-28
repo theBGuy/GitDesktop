@@ -262,7 +262,10 @@ export function useWorkflowDispatchable(
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "actions", "dispatchable", gitRef] as const,
+    // Deliberately OUTSIDE the `["repo", repo, "actions"]` subtree the Actions
+    // mutations invalidate: dispatch/re-run/cancel can't change a workflow's trigger
+    // declarations, and a refetch here re-runs the whole per-workflow fan-out.
+    queryKey: ["repo", repo, "actions-dispatchable", gitRef] as const,
     queryFn: () => ghWorkflowDispatchable(repo, gitRef),
     enabled: enabled && gitRef !== "",
     staleTime: 5 * 60_000,

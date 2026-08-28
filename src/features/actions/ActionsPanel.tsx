@@ -44,7 +44,13 @@ import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { RunContextMenuItems } from "./RunContextMenu";
 import { RunWorkflowDialog } from "./RunWorkflowDialog";
-import { rerunSuccessMessage, StatusIcon, statusLabel } from "./status";
+import {
+  cancelStartedMessage,
+  isPipelineProvider,
+  rerunSuccessMessage,
+  StatusIcon,
+  statusLabel,
+} from "./status";
 
 export function ActionsPanel({
   repoPath,
@@ -63,8 +69,8 @@ export function ActionsPanel({
   const provider = forge.data?.provider;
   const isGitLab = provider === "gitlab";
   // GitLab and Bitbucket both call CI "pipelines"; only GitHub says "workflow".
-  const isPipelines = provider === "gitlab" || provider === "bitbucket";
-  const canWrite = provider !== "gitlab" && provider !== "bitbucket";
+  const isPipelines = isPipelineProvider(provider);
+  const canWrite = !isPipelines;
   const canDispatch = canWrite || forgeFeatureReady(forge.data, "ciDispatch");
   // Re-run and cancel are shared writes too — same `canWrite || …` shape, read
   // here so the row context menu offers exactly what the run detail view does.
@@ -127,7 +133,7 @@ export function ActionsPanel({
   async function doCancel(runId: number) {
     try {
       await cancel.mutateAsync(runId);
-      toast.success("Cancelling run…");
+      toast.success(cancelStartedMessage(provider));
     } catch (e) {
       toastError(e);
     }

@@ -47,7 +47,9 @@ import { DebugJobDialog } from "./DebugJobDialog";
 import {
   cancelLabel,
   cancelOffered,
+  cancelStartedMessage,
   isFailureConclusion,
+  isPipelineProvider,
   RERUN_TITLES,
   rerunOffers,
   rerunSuccessMessage,
@@ -316,7 +318,7 @@ export function RunDetailView({
   // `rerunOffers`; these flags only decide whether the group renders at all.
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
-  const canWrite = provider !== "gitlab" && provider !== "bitbucket";
+  const canWrite = !isPipelineProvider(provider);
   const canRerun = canWrite || forgeFeatureReady(forge.data, "ciRerun");
   const canCancel = canWrite || forgeFeatureReady(forge.data, "ciCancel");
   // Playing a manual job is GitLab-only (no GitHub analogue here), so the flag
@@ -335,7 +337,7 @@ export function RunDetailView({
   const remoteLabel = providerLabel(provider);
   // GitLab pipelines and Bitbucket steps carry no per-job step list; only GitHub
   // jobs do — so the steps placeholder is suppressed for both.
-  const stepsExpected = provider !== "gitlab" && provider !== "bitbucket";
+  const stepsExpected = !isPipelineProvider(provider);
   const [debugJob, setDebugJob] = useState<RunJob | null>(null);
   // Dialog visibility is tracked separately from the debug session so closing
   // the dialog just hides it (the run keeps streaming) and reopening resumes.
@@ -380,7 +382,7 @@ export function RunDetailView({
   async function doCancel() {
     try {
       await cancel.mutateAsync(runId);
-      toast.success("Cancelling run…");
+      toast.success(cancelStartedMessage(provider));
     } catch (e) {
       toastError(e);
     }
