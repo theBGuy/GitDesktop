@@ -1389,7 +1389,10 @@ mod tests {
         let err = git_merge_autostash_core(&state, repo.clone(), "feat".into())
             .await
             .unwrap_err();
-        assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("conflict is in progress")),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
@@ -1415,7 +1418,10 @@ mod tests {
         let err = git_merge_autostash_core(&state, repo.clone(), "feat".into())
             .await
             .unwrap_err();
-        assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("merge, rebase, cherry-pick or revert is in progress")),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

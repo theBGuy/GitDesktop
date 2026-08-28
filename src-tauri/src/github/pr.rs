@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::forge::gitlab::null_to_default;
 use crate::forge::model::{ForgeTimelineEventOut, ForgeUserRef};
+use crate::forge::validate_compare_branch;
 use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
@@ -1132,6 +1133,43 @@ struct RawDivergenceRefs {
     head_repository_owner: Option<RawLogin>,
 }
 
+/// The compare endpoint for a PR's base…head. Every basehead segment goes
+/// through the shared grammar first: all three arrive from `gh pr view`
+/// and a fork's head ref and owner are attacker-chosen, while `gh api` expands
+/// `{…}` placeholders and a URL parser truncates at `#`/`?` — either would answer
+/// 200 for the WRONG refs. The owner rides the same validator because it occupies
+/// the same path segment; one chokepoint keeps the class closed.
+fn build_divergence_compare_path(slug: &str, refs: &RawDivergenceRefs) -> AppResult<String> {
+    validate_compare_branch(&refs.base_ref_name)?;
+    validate_compare_branch(&refs.head_ref_name)?;
+    // A fork PR's head lives in another repo, so the compare must address it as
+    // `owner:branch` — a bare branch name would resolve against the BASE repo and
+    // silently count divergence against a same-named branch there. An absent or
+    // empty owner on a cross-repo PR therefore refuses (the probe degrades to
+    // "unknown") instead of falling back to the bare-head shape.
+    let head = if refs.is_cross_repository {
+        let owner = refs
+            .head_repository_owner
+            .as_ref()
+            .map(|o| o.login.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AppError::InvalidArgument("cross-repository PR carries no head owner".into())
+            })?;
+        validate_compare_branch(owner)?;
+        format!("{owner}:{}", refs.head_ref_name)
+    } else {
+        refs.head_ref_name.clone()
+    };
+    // Branch names ride the basehead unencoded: GitHub's capture is greedy and a
+    // git ref name can never contain `..`, so the `...` separator stays
+    // unambiguous even for slashed names (probed live 2026-08-11).
+    Ok(format!(
+        "repos/{slug}/compare/{}...{head}",
+        refs.base_ref_name
+    ))
+}
+
 /// `ahead_by`/`behind_by` from the REST compare payload (snake_case on the wire,
 /// unlike the GraphQL surfaces gh's `--json` projections expose).
 #[derive(Deserialize)]
@@ -1173,22 +1211,9 @@ pub async fn gh_pr_base_divergence(
             "GitHub reported no base/head refs for #{number}"
         )));
     }
-    // A fork PR's head lives in another repo, so the compare must address it as
-    // `owner:branch` — a bare branch name would resolve against the BASE repo and
-    // compare the wrong (or a nonexistent) ref.
-    let head = match refs
-        .head_repository_owner
-        .map(|o| o.login)
-        .filter(|_| refs.is_cross_repository)
-        .filter(|s| !s.is_empty())
-    {
-        Some(owner) => format!("{owner}:{}", refs.head_ref_name),
-        None => refs.head_ref_name.clone(),
-    };
-    // Branch names ride the basehead unencoded: GitHub's capture is greedy and a
-    // git ref name can never contain `..`, so the `...` separator stays
-    // unambiguous even for slashed names (probed live 2026-08-11).
-    let endpoint = format!("repos/{slug}/compare/{}...{head}", refs.base_ref_name);
+    // Validated before the compare dispatch: the refs are API-sourced, so this is
+    // the first point they can be checked.
+    let endpoint = build_divergence_compare_path(&slug, &refs)?;
     let out = run_gh(Some(&repo_path), &["api", &endpoint], GH_NETWORK_TIMEOUT).await?;
     let compare: RawCompare = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse compare: {e}")))?;
@@ -5778,8 +5803,9 @@ mod tests {
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
         GhMergeabilityRow, PrMergeability, PrPollInfo, PrStackInfo, PrStackMember,
         ForgeTimelineEventOut,
-        batch_check_present, oid_outside_origin_graph, select_fork_pr_match, validate_branch,
-        ForkPrMatch, RawForkPr, RawLogin, RawPr,
+        batch_check_present, build_divergence_compare_path, oid_outside_origin_graph,
+        select_fork_pr_match, validate_branch,
+        ForkPrMatch, RawDivergenceRefs, RawForkPr, RawLogin, RawPr,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -6524,6 +6550,102 @@ mod tests {
                 "headRepository":{"name":"proj"}}"#,
         ] {
             assert_eq!(fork_head_identity(&parse(json)), None, "json: {json}");
+        }
+    }
+
+    /// Values that must never reach a compare basehead: `..` breaks the `...`
+    /// separator, a leading `-` reads as a flag, `#`/`?`/`%` are URL-parser hazards,
+    /// `{`/`}` expand as `gh api` placeholders, whitespace/control can't reach argv,
+    /// and an empty segment addresses the wrong ref.
+    const HOSTILE_COMPARE_REFS: [&str; 11] = [
+        "",
+        "-flag",
+        "a..b",
+        "feat#1",
+        "a?b",
+        "feat%2Fx",
+        "{branch}",
+        "a}b",
+        "has space",
+        "has\ttab",
+        "has\nnewline",
+    ];
+
+    fn divergence_refs(base: &str, head: &str, owner: Option<&str>) -> RawDivergenceRefs {
+        RawDivergenceRefs {
+            base_ref_name: base.to_string(),
+            head_ref_name: head.to_string(),
+            is_cross_repository: owner.is_some(),
+            head_repository_owner: owner.map(|login| RawLogin {
+                login: login.to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn divergence_compare_path_pins_same_repo_and_fork_basehead() {
+        assert_eq!(
+            build_divergence_compare_path("octo/proj", &divergence_refs("main", "feature/x", None))
+                .expect("valid refs"),
+            "repos/octo/proj/compare/main...feature/x"
+        );
+        // Cross-repo: the head carries its owner, or it would resolve against the base.
+        assert_eq!(
+            build_divergence_compare_path(
+                "octo/proj",
+                &divergence_refs("main", "feature/x", Some("contrib"))
+            )
+            .expect("valid refs"),
+            "repos/octo/proj/compare/main...contrib:feature/x"
+        );
+        // A cross-repo PR with an absent or empty owner refuses: a bare head would
+        // resolve against the BASE repo and count divergence against a same-named
+        // branch there.
+        let mut ownerless = divergence_refs("main", "dev", None);
+        ownerless.is_cross_repository = true;
+        for refs in [ownerless, divergence_refs("main", "dev", Some(""))] {
+            let err = build_divergence_compare_path("octo/proj", &refs)
+                .expect_err("cross-repo without owner");
+            assert!(
+                matches!(&err, AppError::InvalidArgument(m) if m.contains("no head owner")),
+                "{err:?}"
+            );
+        }
+        // Same-repo PRs report an owner too; only the cross-repo flag qualifies it.
+        let mut same_repo = divergence_refs("main", "dev", Some("contrib"));
+        same_repo.is_cross_repository = false;
+        assert_eq!(
+            build_divergence_compare_path("octo/proj", &same_repo).expect("valid refs"),
+            "repos/octo/proj/compare/main...dev"
+        );
+    }
+
+    #[test]
+    fn divergence_compare_path_refuses_hostile_refs_in_every_field() {
+        let refuses = |refs: RawDivergenceRefs, label: String| {
+            let err = build_divergence_compare_path("octo/proj", &refs).expect_err(&label);
+            assert!(
+                matches!(&err, AppError::InvalidArgument(m) if m.contains("invalid branch name")),
+                "{label}: {err:?}"
+            );
+        };
+        for hostile in HOSTILE_COMPARE_REFS {
+            refuses(
+                divergence_refs(hostile, "feature/x", None),
+                format!("base {hostile:?}"),
+            );
+            refuses(
+                divergence_refs("main", hostile, None),
+                format!("head {hostile:?}"),
+            );
+            // The empty owner errors with its own message (pinned above), so only the
+            // grammar table's non-empty rows apply to the owner field.
+            if !hostile.is_empty() {
+                refuses(
+                    divergence_refs("main", "feature/x", Some(hostile)),
+                    format!("owner {hostile:?}"),
+                );
+            }
         }
     }
 

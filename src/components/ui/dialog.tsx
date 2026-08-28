@@ -72,12 +72,16 @@ function DialogOverlay({
 
 function DialogContent({
   className,
+  overlayClassName,
   children,
   showCloseButton = true,
   ref,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean;
+  /** Reaches the backdrop this popup renders, which callers cannot otherwise
+   *  address — a dialog that swaps roots mid-open needs to subdue its fade. */
+  overlayClassName?: string;
 }) {
   const panelActive = usePanelActive();
   // Re-homing focus after a conceal needs the popup element, so this tracks it
@@ -113,7 +117,7 @@ function DialogContent({
 
   return (
     <DialogPortal>
-      <DialogOverlay />
+      <DialogOverlay className={overlayClassName} />
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         // App defaults layered on the vendored primitive (deliberate, kept in

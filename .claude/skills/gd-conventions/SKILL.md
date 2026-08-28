@@ -71,7 +71,10 @@ leave them, don't re-flag them). Never convey meaning by color alone (WCAG AA).
 
 **Keyboard-first.** Every new selectable list gets arrow-key navigation in
 the same change (`listKeyboardNav` in `src/lib/list-keyboard-nav.ts`) — an
-invariant, not polish. Destructive paths stay behind confirmation via the
+invariant, not polish. A list container that co-hosts a text editor (inline
+edit field, reply box) passes `ignoreTextEntry` so arrows keep moving the
+caret; leave it off where arrows deliberately drive nav from a filter input.
+Destructive paths stay behind confirmation via the
 shared `useConfirm`/`ConfirmDialogHost` primitive (`src/lib/stores/confirm.ts`,
 host in `src/components/confirm-dialog-host.tsx`) — never a bespoke confirm
 dialog. Commit-level destructive prompts (checkout, revert, cherry-pick, undo)
@@ -81,9 +84,18 @@ route to one of those ops imports the existing prompt, never re-spells it.
 **Command palette.** Any new tab/surface/action needs an ACTIONS entry in
 `src/lib/hotkeys/registry.ts` + `useHotkeyAction` wiring in the same change
 (`defaultBinding: null` = palette-only). Missed twice before. Labels use the
-words the user reads on screen — the palette matcher is a plain substring, so
-"AI-excluded files" missed a user typing "ai excluded" off the tab labeled
-"AI excluded" (live-caught, #255); no hyphens the UI itself doesn't show.
+words the user reads on screen. Action-text search lives in
+`src/lib/hotkeys/search.ts` (`queryTokens` + `matchesActionText`), shared by the
+palette and Settings → Keyboard so a query can't hit in one and miss in the
+other — a new surface searching ACTIONS imports it rather than re-spelling the
+match. It AND-s the query's whitespace-separated tokens over label + category
+with hyphens stripped from both sides, so word order, gaps, and hyphenation cost
+nothing ("cancel pipeline" finds "Cancel workflow run/pipeline", "rerun" finds
+"Re-run…", and #255's "ai excluded" against a tab labeled "AI excluded" would
+match today). Each token still has to be a literal substring of what remains, so
+a label built from different words than the surface shows stays unfindable.
+Keyboard's binding arms deliberately stay literal — key text means its
+separators.
 
 **Mod-key display.** Shortcut hints render via `isMac` / `formatBinding` from
 `@/lib/hotkeys/binding` — never a literal ⌘ or "Ctrl+"; only labels branch.
@@ -146,12 +158,21 @@ words the user reads on screen — the palette matcher is a plain substring, so
   not a silent gap.
 - Never degrade a surface to dodge machinery: no plain `<pre>` where the app
   highlights, no spinner where skeletons exist.
+- A lazy panel's `Suspense` fallback is `LazyPanelFallback`
+  (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
+  region has no aria-busy and announces nothing to assistive tech.
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.
 - Shared-ContextMenu suppression for non-target right-clicks goes through
   `suppressContextMenu` (`src/lib/context-menu.ts`) — `preventDefault` alone
   still opens Base UI's menu as an empty popup.
+- CI copy comes from `src/features/actions/status.tsx`, never hand-spelled: the
+  provider's noun via `ciRunNoun` (labels and toasts derive from it, so no
+  surface says "run" beside another's "pipeline"), the gitlab-or-bitbucket test
+  via `isPipelineProvider`, and the re-run offers, titles, and cancel wording
+  via `rerunOffers`/`RERUN_TITLES`/`cancelLabel` — shared so the runs list and
+  the run detail view can't drift.
 - Header meta fields (the PR header's label/value grid: labels, assignees,
   projects, reviewers) render through `MetaValueCell` / `MetaFieldLabel`
   (`src/components/meta-field-cells.tsx`) — never a hand-rolled `role="group"`
@@ -252,7 +273,9 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 - **User input → git refspecs/argv** routes through the existing chokepoints:
   `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline
-  refspec or re-derive the validation.
+  refspec or re-derive the validation. Refs reaching a compare-endpoint
+  basehead route through `forge::validate_compare_branch`
+  (guard: check-rust-invariants check E).
 - **Rust tests never read the real settings store** — use the
   `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
   app-data modules carry their own seams with the opposite arm order

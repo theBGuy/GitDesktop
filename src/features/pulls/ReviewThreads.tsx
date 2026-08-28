@@ -986,16 +986,14 @@ export function ReviewThreadList({
         }
       }
     }
-    // Arrow keys inside the reply textarea move the cursor — don't hijack them
-    // for list nav (listKeyboardNav preventDefault()s and steals focus).
-    const target = e.target as HTMLElement;
-    if (target.closest("input, textarea, [contenteditable=true]")) return;
     listKeyboardNav({
       items: navThreads,
       activeIndex,
       onActivate: (_item, to) => setActiveIndex(to),
       rowKey: (t) => t.id,
       rowAttr: "data-thread-id",
+      // Arrow keys inside the reply textarea move the cursor.
+      ignoreTextEntry: true,
     })(e);
   };
 

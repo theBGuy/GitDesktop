@@ -180,6 +180,26 @@ function pushRejectionSummary(text: string): string | null {
   return PUSH_REJECTION_SUMMARIES.find(([m]) => m.test(text))?.[1] ?? null;
 }
 
+/** Windows MAX_PATH refusals. git prints its reason as the TAIL of a diagnostic
+ *  (`fatal: cannot create directory at '<path>': Filename too long`, measured on
+ *  git 2.51.1.windows.1), so the marker is end-anchored like `: needs merge`
+ *  above — the same blob echoes paths and commit subjects, which an unanchored
+ *  phrase would match. glibc spells the same errno "File name too long", which
+ *  this deliberately does not match: the remedy below is Windows-only. */
+const LONG_PATH_MARKERS = [/: Filename too long\s*$/m];
+
+/** The app's own git calls already pass `-c core.longpaths=true` (git/runner.rs),
+ *  so a path this long fails only where that flag can't reach — hence the remedy
+ *  is aimed at the user's other tools rather than at GitDesktop. */
+const LONG_PATH_SUMMARY =
+  "Paths in this repository are longer than Windows allows by default. GitDesktop's own Git commands handle them; other tools need Windows long paths and git config --global core.longpaths true.";
+
+/** The humanized line for a path-length refusal, or null when the text carries
+ *  none. */
+function longPathSummary(text: string): string | null {
+  return LONG_PATH_MARKERS.some((m) => m.test(text)) ? LONG_PATH_SUMMARY : null;
+}
+
 /** The `git` kind is the only one carrying a stderr blob distinct from its
  *  message; every other kind folds its detail into `message` itself. */
 function gitStderr(e: AppError): string {
@@ -331,10 +351,14 @@ export function presentError(e: unknown): ErrorPresentation {
       !rolledBack && CONFLICT_MARKERS.some((m) => m.test(combined));
     // A rejection reason is read from the COMBINED text: it rides the `stderr`
     // blob, which the fall-through below deliberately never reads.
-    const summary = isConflict
-      ? conflictSummary(combined)
-      : (pushRejectionSummary(combined) ??
-        (firstMeaningfulLine(message) || label));
+    // A path-length failure outranks conflict framing: git could not write the
+    // tree, so no conflict flow is actually waiting to be resolved.
+    const summary =
+      longPathSummary(combined) ??
+      (isConflict
+        ? conflictSummary(combined)
+        : (pushRejectionSummary(combined) ??
+          (firstMeaningfulLine(message) || label)));
 
     const distinctStderr = stderr !== "" && !message.includes(stderr);
     const long =

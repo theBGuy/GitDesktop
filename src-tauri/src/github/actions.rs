@@ -44,6 +44,11 @@ pub struct WorkflowRun {
     pub conclusion: String,
     #[serde(default)]
     pub workflow_name: String,
+    /// The workflow this run belongs to, so a run row can re-dispatch its own
+    /// workflow without a name lookup. 0 on providers with no per-workflow
+    /// concept (GitLab pipelines, Bitbucket pipelines).
+    #[serde(default)]
+    pub workflow_database_id: u64,
     #[serde(default)]
     pub head_branch: String,
     #[serde(default)]
@@ -153,7 +158,7 @@ pub struct Workflow {
     pub state: String,
 }
 
-const RUN_LIST_FIELDS: &str = "databaseId,number,displayTitle,status,conclusion,workflowName,headBranch,event,createdAt,startedAt,updatedAt,url,headSha";
+const RUN_LIST_FIELDS: &str = "databaseId,number,displayTitle,status,conclusion,workflowName,workflowDatabaseId,headBranch,event,createdAt,startedAt,updatedAt,url,headSha";
 const RUN_VIEW_FIELDS: &str = "databaseId,number,displayTitle,status,conclusion,workflowName,headBranch,event,createdAt,url,headSha,jobs";
 /// Failed-step logs can run to many MB; keep the tail (failures land at the end).
 const RUN_LOG_CAP: usize = 200_000;
@@ -314,17 +319,14 @@ pub async fn gh_job_logs(repo_path: String, job_id: u64) -> AppResult<String> {
     Ok(text)
 }
 
-/// The repo's workflows, for the manual-dispatch picker.
-#[tauri::command]
-pub async fn gh_workflow_list(repo_path: String) -> AppResult<Vec<Workflow>> {
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+async fn fetch_workflows(repo_path: &str, slug: &str) -> AppResult<Vec<Workflow>> {
     let out = run_gh(
-        Some(&repo_path),
+        Some(repo_path),
         &[
             "workflow",
             "list",
             "-R",
-            &slug,
+            slug,
             "--all",
             "--json",
             "id,name,path,state",
@@ -334,6 +336,147 @@ pub async fn gh_workflow_list(repo_path: String) -> AppResult<Vec<Workflow>> {
     .await?;
     serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Gh(format!("could not parse gh workflow list: {e}")))
+}
+
+/// The repo's workflows, for the manual-dispatch picker.
+#[tauri::command]
+pub async fn gh_workflow_list(repo_path: String) -> AppResult<Vec<Workflow>> {
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    fetch_workflows(&repo_path, &slug).await
+}
+
+/// Whether a workflow's file can be addressed safely as a `gh api` endpoint
+/// segment: gh expands `{…}` in an endpoint as an owner/repo placeholder, splits
+/// the endpoint on `?` and `#` as query/fragment delimiters (all three retarget
+/// the request), and reads a leading `-` as a flag.
+fn is_probeable_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('-')
+        && !path.contains('{')
+        && !path.contains('}')
+        && !path.contains('?')
+        && !path.contains('#')
+}
+
+/// Real workflow files live here; `gh workflow list` also reports GitHub's dynamic
+/// pseudo-workflows (Dependabot, the Copilot reviewer) under other prefixes.
+const WORKFLOW_DIR: &str = ".github/workflows/";
+
+/// What the probe can decide about one workflow from its path alone.
+#[derive(Debug, PartialEq, Eq)]
+enum PathVerdict {
+    /// No user-authored file exists, so no trigger can be declared — a definite
+    /// `false`, not the 404 that fetching would produce and that reads as unknown.
+    NotDispatchable,
+    /// Unaddressable as an endpoint segment; stays unknown so it keeps being offered.
+    Unknown,
+    Fetch,
+}
+
+fn classify_workflow_path(path: &str) -> PathVerdict {
+    if !path.starts_with(WORKFLOW_DIR) {
+        PathVerdict::NotDispatchable
+    } else if is_probeable_path(path) {
+        PathVerdict::Fetch
+    } else {
+        PathVerdict::Unknown
+    }
+}
+
+/// Substring test rather than a YAML parse: every spelling of the trigger
+/// (scalar, sequence item, mapping key, quoted) carries the literal token. A
+/// mention in a comment therefore reads as `true` — the accepted false positive,
+/// since that direction keeps the workflow offered and the humanized 422 backstops it.
+fn yaml_declares_workflow_dispatch(content: &str) -> bool {
+    content.contains("workflow_dispatch")
+}
+
+/// One gh process per workflow file. The gate is PROCESS-WIDE, not per call: each
+/// settled keystroke in the ref field mints another probe, so a per-invocation cap
+/// would still let K stale invocations fork 4K processes at once. Stale probes are
+/// not cancelled, they just finish slowly.
+const DISPATCH_PROBE_CONCURRENCY: usize = 4;
+static DISPATCH_PROBE_GATE: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(DISPATCH_PROBE_CONCURRENCY);
+
+/// Which active workflows declare a `workflow_dispatch` trigger at `git_ref`.
+/// Keyed by stringified workflow id. A workflow ABSENT from the map is unknown
+/// (probe failed) — callers fail open and keep it offered.
+#[tauri::command]
+pub async fn gh_workflow_dispatchable(
+    repo_path: String,
+    git_ref: String,
+) -> AppResult<HashMap<String, bool>> {
+    validate_ref(&git_ref)?;
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    // Listed server-side: a frontend-supplied path would aim the contents fetch
+    // at a file of the caller's choosing.
+    let workflows = fetch_workflows(&repo_path, &slug).await?;
+    let ref_field = format!("ref={git_ref}");
+    let mut map = HashMap::new();
+    let mut probes: Vec<&Workflow> = Vec::new();
+    for w in workflows.iter().filter(|w| w.state == "active") {
+        match classify_workflow_path(&w.path) {
+            PathVerdict::NotDispatchable => {
+                map.insert(w.id.to_string(), false);
+            }
+            PathVerdict::Unknown => {}
+            PathVerdict::Fetch => probes.push(w),
+        }
+    }
+
+    let results = crate::forge::futures_join_all(probes.iter().map(|w| {
+        let endpoint = format!("repos/{slug}/contents/{}", w.path);
+        let repo_path = repo_path.as_str();
+        let ref_field = ref_field.as_str();
+        async move {
+            let _permit = DISPATCH_PROBE_GATE.acquire().await.ok();
+            // `--method GET` is mandatory: `gh api` with `-f` fields present
+            // defaults to POST, and only under GET do they become query
+            // params. `-f` never `-F` — `-F`'s leading-`@` magic reads host files.
+            let res = run_gh(
+                Some(repo_path),
+                &[
+                    "api",
+                    "--method",
+                    "GET",
+                    &endpoint,
+                    "-H",
+                    "Accept: application/vnd.github.raw",
+                    "-f",
+                    ref_field,
+                ],
+                GH_NETWORK_TIMEOUT,
+            )
+            .await;
+            (w.id, res)
+        }
+    }))
+    .await;
+    for (id, res) in results {
+        // A failed fetch leaves the key ABSENT — "unknown" must not read as
+        // "not dispatchable", which would hide a runnable workflow.
+        if let Ok(out) = res {
+            map.insert(
+                id.to_string(),
+                yaml_declares_workflow_dispatch(&out.stdout_lossy()),
+            );
+        }
+    }
+    Ok(map)
+}
+
+/// GitHub's 422 for a workflow without the trigger reaches the user as gh's raw
+/// HTTP line, API URL included. Lead with a plain sentence — the toast shows only
+/// the first line — and keep the raw text below it for the details view.
+fn humanize_dispatch_error(raw: &str, git_ref: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("workflow does not have") && lower.contains("workflow_dispatch") {
+        return format!(
+            "This workflow can't be run manually: it has no workflow_dispatch trigger on \"{git_ref}\".\n\n{raw}"
+        );
+    }
+    raw.to_string()
 }
 
 /// Manually dispatches a workflow (`workflow_dispatch`) on a ref, with inputs.
@@ -358,7 +501,7 @@ pub async fn gh_workflow_run(
         slug,
         workflow,
         "--ref".into(),
-        git_ref,
+        git_ref.clone(),
     ];
     for (k, v) in &inputs {
         if k.is_empty() || k.starts_with('-') {
@@ -368,7 +511,12 @@ pub async fn gh_workflow_run(
         args.push(format!("{k}={v}"));
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| match e {
+            AppError::Gh(msg) => AppError::Gh(humanize_dispatch_error(&msg, &git_ref)),
+            other => other,
+        })?;
     Ok(())
 }
 
@@ -390,6 +538,7 @@ mod tests {
             status: "completed".to_string(),
             conclusion: "success".to_string(),
             workflow_name: "rust-tests".to_string(),
+            workflow_database_id: 334_643_035,
             head_branch: "refactor/hygiene".to_string(),
             event: "pull_request".to_string(),
             created_at: "2026-08-13T09:00:00Z".to_string(),
@@ -407,6 +556,7 @@ mod tests {
                 "status": "completed",
                 "conclusion": "success",
                 "workflowName": "rust-tests",
+                "workflowDatabaseId": 334_643_035u64,
                 "headBranch": "refactor/hygiene",
                 "event": "pull_request",
                 "createdAt": "2026-08-13T09:00:00Z",
@@ -526,5 +676,78 @@ mod tests {
                 value["id"]
             );
         }
+    }
+
+    #[test]
+    fn detects_every_workflow_dispatch_spelling() {
+        assert!(yaml_declares_workflow_dispatch(
+            "name: ci\non: workflow_dispatch\njobs: {}\n"
+        ));
+        assert!(yaml_declares_workflow_dispatch(
+            "on: [push, workflow_dispatch]\n"
+        ));
+        assert!(yaml_declares_workflow_dispatch(
+            "on:\n  workflow_dispatch:\n    inputs:\n      level:\n        type: choice\n"
+        ));
+        assert!(yaml_declares_workflow_dispatch(
+            "on:\n  \"workflow_dispatch\":\n"
+        ));
+        assert!(!yaml_declares_workflow_dispatch(
+            "name: ci\non:\n  push:\n    branches: [master]\n  pull_request:\n"
+        ));
+    }
+
+    #[test]
+    fn skips_paths_gh_would_misread_as_endpoint_syntax() {
+        assert!(is_probeable_path(".github/workflows/ci.yml"));
+        assert!(!is_probeable_path("dynamic/{owner}/thing"));
+        assert!(!is_probeable_path(".github/workflows/a}b.yml"));
+        assert!(!is_probeable_path(".github/workflows/a?b.yml"));
+        assert!(!is_probeable_path(".github/workflows/a#b.yml"));
+        assert!(!is_probeable_path("-oops.yml"));
+        assert!(!is_probeable_path(""));
+    }
+
+    #[test]
+    fn pseudo_workflows_are_a_definite_no() {
+        // GitHub's dynamic entries have no file to fetch; a 404 would read as
+        // unknown and keep them offered, so they are decided from the path.
+        assert_eq!(
+            classify_workflow_path("dynamic/dependabot/dependabot-updates"),
+            PathVerdict::NotDispatchable
+        );
+        assert_eq!(
+            classify_workflow_path("dynamic/agents/copilot-pull-request-reviewer"),
+            PathVerdict::NotDispatchable
+        );
+        assert_eq!(
+            classify_workflow_path(".github/workflows/ci.yml"),
+            PathVerdict::Fetch
+        );
+        assert_eq!(
+            classify_workflow_path(".github/workflows/a?b.yml"),
+            PathVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn humanizes_only_the_missing_trigger_error() {
+        let raw = "HTTP 422: Workflow does not have 'workflow_dispatch' trigger (https://api.github.com/repos/o/r/actions/workflows/98765432/dispatches)";
+        let out = humanize_dispatch_error(raw, "master");
+        assert_eq!(
+            out.lines().next().unwrap(),
+            "This workflow can't be run manually: it has no workflow_dispatch trigger on \"master\"."
+        );
+        assert!(out.ends_with(raw), "raw text must survive verbatim: {out}");
+
+        // Case-insensitive: gh/GitHub casing is not a contract.
+        assert!(humanize_dispatch_error(
+            "http 422: workflow does not have 'WORKFLOW_DISPATCH' trigger",
+            "main"
+        )
+        .starts_with("This workflow can't be run manually"));
+
+        let unrelated = "HTTP 404: Not Found (https://api.github.com/repos/o/r/actions/workflows/1/dispatches)";
+        assert_eq!(humanize_dispatch_error(unrelated, "master"), unrelated);
     }
 }

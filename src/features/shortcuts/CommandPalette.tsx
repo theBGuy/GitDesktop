@@ -8,6 +8,7 @@ import {
   useEffectiveBindings,
 } from "@/lib/hotkeys/hotkeys";
 import { ACTIONS, type ActionId } from "@/lib/hotkeys/registry";
+import { matchesActionText, queryTokens } from "@/lib/hotkeys/search";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
@@ -35,15 +36,11 @@ export function CommandPalette({
     setHighlight(0);
   });
 
-  const q = query.trim().toLowerCase();
-  const items = ACTIONS.filter(
-    (a) =>
-      a.id !== "command-palette" &&
-      available.has(a.id) &&
-      (!q ||
-        a.label.toLowerCase().includes(q) ||
-        a.category.toLowerCase().includes(q)),
-  );
+  const tokens = queryTokens(query);
+  const items = ACTIONS.filter((a) => {
+    if (a.id === "command-palette" || !available.has(a.id)) return false;
+    return matchesActionText(tokens, a.label, a.category);
+  });
   const highlighted = items[Math.min(highlight, items.length - 1)];
 
   // Keep the highlighted row in view while arrowing through.

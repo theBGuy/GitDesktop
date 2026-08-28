@@ -23,6 +23,7 @@ import {
   staleAllowlistEntries as staleCommandEntries,
 } from "./check-dead-surface.mjs";
 import {
+  checkCompareEndpoints,
   checkRefspecTemplates,
   checkSecretArgv,
   checkStderrOnlyGitError,
@@ -50,6 +51,7 @@ const menuSuppression = scanner("context-menu-suppression");
 const loneActivity = scanner("lone-activity-boundary");
 const seedOnOpen = scanner("seed-effect-on-open");
 const diffStatPair = scanner("hand-rolled-diff-stat");
+const nullFallback = scanner("null-suspense-fallback");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -589,6 +591,31 @@ test("hand-rolled-diff-stat exempts the component file and vendored ui only", ()
   assert.equal(appliesTo("src/features/repository/FileRow.tsx"), true);
 });
 
+test("null-suspense-fallback flags the literal on one line or wrapped", () => {
+  assert.deepEqual(nullFallback("<Suspense fallback={null}>{kids}</Suspense>"), [
+    1,
+  ]);
+  // The formatter's shape: the prop on its own line, with inner spacing.
+  const wrapped = [
+    "<Suspense",
+    "  fallback={ null }",
+    ">",
+    "  <InsightsBoard />",
+    "</Suspense>",
+  ].join("\n");
+  assert.deepEqual(nullFallback(wrapped), [2]);
+});
+
+test("null-suspense-fallback leaves a real fallback and a forwarded prop alone", () => {
+  for (const source of [
+    '<Suspense fallback={<LazyPanelFallback name="Insights" />}>{kids}</Suspense>',
+    // A fallback naming a binding, not a literal — outside the check's shape.
+    "<Suspense fallback={fallback}>{kids}</Suspense>",
+    "<Suspense fallback={compact ? null : <Skeleton />}>{kids}</Suspense>",
+  ])
+    assert.deepEqual(nullFallback(source), [], `should ignore ${source}`);
+});
+
 test("an allowlist entry whose file no longer has the pattern is stale", () => {
   // Allowlisted files are scanned, not skipped: a live entry suppresses its hit
   // and stays; an entry with nothing left to suppress is reported so the ratchet
@@ -693,6 +720,39 @@ test("refspec-template check ignores format! templates with no ref marker", () =
   const hits = [];
   checkRefspecTemplates("fixture.rs", src, src.split("\n"), hits);
   assert.deepEqual(hits, []);
+});
+
+test("compare-endpoint check flags an interpolated basehead, either side", () => {
+  for (const template of [
+    "repos/{slug}/compare/{base}...{head}",
+    // Only the head interpolates — still the injectable half.
+    "repos/{slug}/compare/main...{head}",
+    "repos/{slug}/compare/{base}...{owner}:{branch}?per_page=1",
+  ]) {
+    const src = ["fn build() -> String {", `    format!("${template}")`, "}"].join(
+      "\n",
+    );
+    const hits = [];
+    checkCompareEndpoints("fixture.rs", src, src.split("\n"), hits);
+    assert.equal(hits.length, 1, `should flag ${template}`);
+    assert.equal(hits[0].fn, "build");
+    assert.equal(hits[0].allowlisted, false);
+  }
+});
+
+test("compare-endpoint check ignores a fully literal path and the slug alone", () => {
+  for (const template of [
+    // Nothing after the marker interpolates — no segment an attacker reaches.
+    "repos/{slug}/compare/main...dev",
+    "repos/{slug}/pulls/{number}",
+  ]) {
+    const src = ["fn build() -> String {", `    format!("${template}")`, "}"].join(
+      "\n",
+    );
+    const hits = [];
+    checkCompareEndpoints("fixture.rs", src, src.split("\n"), hits);
+    assert.deepEqual(hits, [], `should ignore ${template}`);
+  }
 });
 
 test("secret-shaped argv is caught next to a -f-family flag", () => {

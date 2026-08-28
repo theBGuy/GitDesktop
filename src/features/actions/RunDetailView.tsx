@@ -44,7 +44,18 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { formatDurationBetween, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { DebugJobDialog } from "./DebugJobDialog";
-import { isFailureConclusion, StatusIcon, statusLabel } from "./status";
+import {
+  cancelLabel,
+  cancelOffered,
+  cancelStartedMessage,
+  isFailureConclusion,
+  isPipelineProvider,
+  RERUN_TITLES,
+  rerunOffers,
+  rerunSuccessMessage,
+  StatusIcon,
+  statusLabel,
+} from "./status";
 
 /** `gh` writes a short "still in progress" line to the log when a job's archive
  *  isn't ready yet (it briefly races a just-finished job). Detect it so we show
@@ -303,13 +314,11 @@ export function RunDetailView({
   const aiEnabled = useAiEnabled();
   // Re-run and cancel are SHARED writes (GitHub + GitLab): `canWrite || …` keeps
   // GitHub's controls up while forge-status is pending and positively enables a
-  // ready GitLab repo. GitLab's retry restarts failed+canceled jobs only, so it
-  // gets a single "Retry pipeline" button — "Re-run all jobs" has no GitLab
-  // analogue and stays on `canWrite` (GitHub-only). GitLab pipelines also have no
-  // per-job steps, so the steps placeholder is suppressed for them.
+  // ready GitLab repo. Which re-runs each provider offers comes from
+  // `rerunOffers`; these flags only decide whether the group renders at all.
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
-  const canWrite = provider !== "gitlab" && provider !== "bitbucket";
+  const canWrite = !isPipelineProvider(provider);
   const canRerun = canWrite || forgeFeatureReady(forge.data, "ciRerun");
   const canCancel = canWrite || forgeFeatureReady(forge.data, "ciCancel");
   // Playing a manual job is GitLab-only (no GitHub analogue here), so the flag
@@ -328,7 +337,7 @@ export function RunDetailView({
   const remoteLabel = providerLabel(provider);
   // GitLab pipelines and Bitbucket steps carry no per-job step list; only GitHub
   // jobs do — so the steps placeholder is suppressed for both.
-  const stepsExpected = provider !== "gitlab" && provider !== "bitbucket";
+  const stepsExpected = !isPipelineProvider(provider);
   const [debugJob, setDebugJob] = useState<RunJob | null>(null);
   // Dialog visibility is tracked separately from the debug session so closing
   // the dialog just hides it (the run keeps streaming) and reopening resumes.
@@ -339,18 +348,15 @@ export function RunDetailView({
   const run = detail.data;
   const active = run ? isRunActive(run.status) : false;
   const failed = run ? isFailureConclusion(run.conclusion) : false;
-  // GitLab's retry also covers a canceled pipeline (its retry restarts
-  // failed + canceled jobs), so the Retry button shows for both conclusions.
-  const retryable = failed || run?.conclusion === "cancelled";
-  // Bitbucket has no rerun endpoint — "rerun" re-triggers the branch pipeline (a
-  // fresh run), which makes sense on ANY finished pipeline (success too). Show it
-  // once the run is no longer in flight (a conclusion has been recorded).
-  const bitbucketRerunnable =
-    provider === "bitbucket" && !active && !!run?.conclusion;
-  // A manual/blocked GitLab pipeline maps to completed/action_required, but
-  // GitLab's cancel endpoint does cancel it — keep Cancel available there.
-  const gitlabBlocked =
-    provider === "gitlab" && run?.conclusion === "action_required";
+  // Which re-runs this provider offers for this run, and whether Cancel applies
+  // — shared with the runs-list context menu so the offers and their wording
+  // stay identical on both surfaces.
+  const rerunChoices = run
+    ? rerunOffers(provider, run.status, run.conclusion)
+    : [];
+  const showCancel = run
+    ? cancelOffered(provider, run.status, run.conclusion)
+    : false;
   // GitHub holds a first-time contributor's fork-PR run until a maintainer
   // approves it. Which field carries that state is unverified, so accept it on
   // either — a run that never reports it simply never shows the strip.
@@ -367,19 +373,7 @@ export function RunDetailView({
   async function doRerun(failedOnly: boolean) {
     try {
       await rerun.mutateAsync({ runId, failed: failedOnly });
-      const message = (() => {
-        switch (true) {
-          case provider === "gitlab":
-            return "Retrying pipeline";
-          case provider === "bitbucket":
-            return "Triggering a new pipeline";
-          case failedOnly:
-            return "Re-running failed jobs";
-          default:
-            return "Re-running workflow";
-        }
-      })();
-      toast.success(message);
+      toast.success(rerunSuccessMessage(provider, failedOnly));
     } catch (e) {
       toastError(e);
     }
@@ -388,7 +382,7 @@ export function RunDetailView({
   async function doCancel() {
     try {
       await cancel.mutateAsync(runId);
-      toast.success("Cancelling run…");
+      toast.success(cancelStartedMessage(provider));
     } catch (e) {
       toastError(e);
     }
@@ -415,6 +409,22 @@ export function RunDetailView({
   }
 
   useHotkeyAction("approve-workflow-run", () => void doApprove(), canApprove);
+  // Palette routes to the primary offer: a full re-run (GitHub) or the single
+  // retry/rerun the pipeline forges expose, which ignore the failed-only flag.
+  useHotkeyAction(
+    "rerun-run",
+    () => void doRerun(false),
+    tabActive &&
+      !writeBlocked &&
+      canRerun &&
+      rerunChoices.length > 0 &&
+      !rerun.isPending,
+  );
+  useHotkeyAction(
+    "cancel-run",
+    () => void doCancel(),
+    tabActive && !writeBlocked && canCancel && showCancel && !cancel.isPending,
+  );
 
   // A manual GitLab job arrives as completed + action_required; with the flag
   // gate GitHub never matches (its manual approvals work differently).
@@ -469,7 +479,7 @@ export function RunDetailView({
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          {active || gitlabBlocked
+          {showCancel
             ? canCancel && (
                 <DisabledReasonButton
                   variant="outline"
@@ -483,65 +493,24 @@ export function RunDetailView({
                   ) : (
                     <ProhibitIcon data-icon="inline-start" />
                   )}
-                  Cancel run
+                  {cancelLabel(provider)}
                 </DisabledReasonButton>
               )
-            : provider === "gitlab"
-              ? canRerun &&
-                retryable && (
-                  <DisabledReasonButton
-                    variant="outline"
-                    size="sm"
-                    disabled={rerun.isPending || writeBlocked}
-                    reason={writeReason}
-                    title="Restart this pipeline's failed and canceled jobs"
-                    onClick={() => doRerun(true)}
-                  >
-                    <ArrowClockwiseIcon data-icon="inline-start" />
-                    Retry pipeline
-                  </DisabledReasonButton>
-                )
-              : provider === "bitbucket"
-                ? canRerun &&
-                  bitbucketRerunnable && (
-                    <DisabledReasonButton
-                      variant="outline"
-                      size="sm"
-                      disabled={rerun.isPending || writeBlocked}
-                      reason={writeReason}
-                      title="Trigger this pipeline's branch again"
-                      onClick={() => doRerun(true)}
-                    >
-                      <ArrowClockwiseIcon data-icon="inline-start" />
-                      Rerun pipeline
-                    </DisabledReasonButton>
-                  )
-                : canWrite && (
-                    <>
-                      <DisabledReasonButton
-                        variant="outline"
-                        size="sm"
-                        disabled={rerun.isPending || writeBlocked}
-                        reason={writeReason}
-                        onClick={() => doRerun(false)}
-                      >
-                        <ArrowClockwiseIcon data-icon="inline-start" />
-                        Re-run all jobs
-                      </DisabledReasonButton>
-                      {failed && (
-                        <DisabledReasonButton
-                          variant="outline"
-                          size="sm"
-                          disabled={rerun.isPending || writeBlocked}
-                          reason={writeReason}
-                          onClick={() => doRerun(true)}
-                        >
-                          <ArrowClockwiseIcon data-icon="inline-start" />
-                          Re-run failed jobs
-                        </DisabledReasonButton>
-                      )}
-                    </>
-                  )}
+            : canRerun &&
+              rerunChoices.map((offer) => (
+                <DisabledReasonButton
+                  key={offer.kind}
+                  variant="outline"
+                  size="sm"
+                  disabled={rerun.isPending || writeBlocked}
+                  reason={writeReason}
+                  title={RERUN_TITLES[offer.kind]}
+                  onClick={() => doRerun(offer.kind === "failed")}
+                >
+                  <ArrowClockwiseIcon data-icon="inline-start" />
+                  {offer.label}
+                </DisabledReasonButton>
+              ))}
           <DisabledReasonButton
             variant="ghost"
             size="sm"

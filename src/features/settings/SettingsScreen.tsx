@@ -2,6 +2,7 @@ import { ArrowLeftIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { NavRail } from "@/components/NavRail";
 import { Button } from "@/components/ui/button";
 import {
@@ -46,9 +47,8 @@ import { UpdatesSection } from "./UpdatesSection";
 // Loading it lazily keeps that whole chunk off the boot path — its render is
 // already gated on `activePanel === "syntax"`, so the import fires on first
 // visit, not on launch. `lazy` on the named export preserves the `form` prop's
-// full type. The fallback is null: the panel renders instantly once loaded (tens
-// of ms from local disk) and, like the other panels, shows no intermediate
-// state before its data — a spinner would flash where nothing otherwise does.
+// full type. The fallback mirrors the section's field geometry so the swap to
+// the loaded panel doesn't shift layout.
 const SyntaxSection = lazy(() =>
   import("./SyntaxSection").then((m) => ({ default: m.SyntaxSection })),
 );
@@ -291,7 +291,21 @@ export function SettingsScreen() {
                 </>
               )}
               {activePanel === "syntax" && (
-                <Suspense fallback={null}>
+                <Suspense
+                  fallback={
+                    <LazyPanelFallback
+                      name="syntax settings"
+                      className="gap-4 p-0"
+                      rows={[
+                        "h-5 w-36",
+                        "h-4 w-2/3",
+                        "h-9 w-full",
+                        "h-9 w-full",
+                        "h-24 w-full",
+                      ]}
+                    />
+                  }
+                >
                   <SyntaxSection form={form} />
                 </Suspense>
               )}

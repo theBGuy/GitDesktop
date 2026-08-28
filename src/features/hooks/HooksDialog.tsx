@@ -1,6 +1,7 @@
 import { CaretDownIcon } from "@phosphor-icons/react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -307,7 +308,13 @@ export function HooksDialog({
                   <div className="relative min-h-0 flex-1">
                     <div className="absolute inset-0">
                       <Suspense
-                        fallback={<Skeleton className="h-full w-full" />}
+                        fallback={
+                          <LazyPanelFallback
+                            name="the hook editor"
+                            className="p-0"
+                            rows={["h-full w-full"]}
+                          />
+                        }
                       >
                         <CodeEditor value={draft} onChange={setDraft} />
                       </Suspense>

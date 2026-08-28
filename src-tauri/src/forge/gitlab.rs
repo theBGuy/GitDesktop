@@ -5832,6 +5832,8 @@ fn from_glab_pipeline(p: GlabPipeline) -> WorkflowRun {
         status,
         conclusion,
         workflow_name,
+        // GitLab has no per-workflow entity; pipelines are re-run by their own id.
+        workflow_database_id: 0,
         head_branch: p.git_ref,
         event: p.source,
         // GitLab's LIST payload has no per-run start time (only the detail
@@ -7675,10 +7677,10 @@ fn map_protected_branch(pb: GlabProtectedBranch) -> GitLabProtectedBranch {
 
 /// A protection's `name` must survive as a single path segment (`update`/`delete`
 /// address it in the URL) and can't be blank.
-fn validate_branch_name(name: &str) -> AppResult<()> {
+fn validate_protection_name(name: &str) -> AppResult<()> {
     if name.trim().is_empty() {
         return Err(AppError::InvalidArgument(
-            "branch name can't be empty".into(),
+            "a branch name or wildcard pattern is required".into(),
         ));
     }
     Ok(())
@@ -7723,7 +7725,7 @@ pub async fn create_protected_branch(
     merge_access_level: u8,
     allow_force_push: bool,
 ) -> AppResult<()> {
-    validate_branch_name(name)?;
+    validate_protection_name(name)?;
     validate_protected_access_level(push_access_level)?;
     validate_protected_access_level(merge_access_level)?;
     let enc = encode_project(&project_path(repo_path).await?);
@@ -7751,7 +7753,7 @@ pub async fn update_protected_branch(
     name: &str,
     allow_force_push: bool,
 ) -> AppResult<()> {
-    validate_branch_name(name)?;
+    validate_protection_name(name)?;
     let enc = encode_project(&project_path(repo_path).await?);
     // The name rides the URL as a single path segment — percent-encode it so
     // wildcards (`*`) and `/` in wildcard names survive.
@@ -7770,7 +7772,7 @@ pub async fn update_protected_branch(
 }
 
 pub async fn delete_protected_branch(repo_path: &str, name: &str) -> AppResult<()> {
-    validate_branch_name(name)?;
+    validate_protection_name(name)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!(
         "projects/{enc}/protected_branches/{}",

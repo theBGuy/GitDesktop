@@ -24,6 +24,8 @@ jobs:
     if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     steps:
+      # Credentials stay persisted (no `persist-credentials: false` here): the
+      # bump step's `git push` authenticates with this checkout's stored token.
       - name: Checkout tap
         uses: actions/checkout@v7
         with:

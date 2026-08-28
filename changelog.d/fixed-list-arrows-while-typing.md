@@ -1,0 +1,1 @@
+- Arrow keys move the caret while typing in task and review editors.

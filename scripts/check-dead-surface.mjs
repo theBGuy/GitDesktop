@@ -20,6 +20,12 @@ const SRC = join(root, "src");
 // (2) a call site that builds the command name as a computed string, which the
 // literal-only scan below cannot see. Neither exists now — every call site in
 // the tree passes a bare string literal.
+//
+// RATCHET RULE: the list only shrinks by default. Adding an entry is a reviewed
+// change needing a rationale for which of those two classes it falls in, and an
+// entry that suppresses nothing fails as stale (`staleAllowlistEntries`
+// below) — so a leftover can never pre-authorize whatever takes that name
+// next.
 const ALLOWLIST = [];
 
 /** Registered set: the final `::` segment of every entry in the

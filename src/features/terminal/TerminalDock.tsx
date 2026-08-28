@@ -4,6 +4,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { lazy, Suspense, useState } from "react";
+import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { Button } from "@/components/ui/button";
 import type { AgentSession } from "@/features/sessions/store";
 
@@ -140,7 +141,14 @@ export function TerminalDock({
           <XIcon />
         </Button>
       </div>
-      <Suspense fallback={null}>
+      <Suspense
+        fallback={
+          <LazyPanelFallback
+            name="the terminal"
+            className="min-h-0 flex-1 p-1"
+          />
+        }
+      >
         <Terminal
           key={termKey}
           ptyId={termKey}

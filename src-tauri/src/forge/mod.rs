@@ -2990,7 +2990,7 @@ fn fork_owner_from_full_name(full_name: &str) -> AppResult<String> {
 /// `{branch}`-style placeholders in the endpoint to local repo values. Any of these
 /// would make the API answer 200 for the WRONG branch, which renders as a
 /// confident number.
-fn validate_compare_branch(branch: &str) -> AppResult<()> {
+pub(crate) fn validate_compare_branch(branch: &str) -> AppResult<()> {
     if branch.is_empty()
         || branch.starts_with('-')
         || branch.contains("..")

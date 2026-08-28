@@ -2500,7 +2500,7 @@ pub(crate) fn parse_worktree_paths(porcelain: &str) -> Vec<String> {
 
 /// Whether a worktree path is one of our resolve worktrees — its final path
 /// segment starts with `gd-resolve-`. The basename is the reliable signal:
-/// `git_merge_local_pr` names them `gd-resolve-<uuid>`, and porcelain may
+/// `git_merge_local_pr` names them `gd-resolve-<id>`, and porcelain may
 /// normalize the leading path so an app-data-root prefix check is less robust.
 fn is_resolve_worktree_path(path: &str) -> bool {
     std::path::Path::new(path)
@@ -2508,6 +2508,17 @@ fn is_resolve_worktree_path(path: &str) -> bool {
         .and_then(|s| s.to_str())
         .map(|name| name.starts_with("gd-resolve-"))
         .unwrap_or(false)
+}
+
+/// A fresh resolve-worktree id: the first 12 hex chars of a v4 uuid. Short
+/// deliberately — every path in the checkout is measured from this directory, and
+/// a full 36-char uuid spent much of Windows' 260-char budget on the name alone.
+/// A collision at 48 random bits stays unreachable, and would be refused rather
+/// than reused: `worktree add` fails on a registered or non-empty path.
+fn new_resolve_worktree_id() -> String {
+    let mut id = uuid::Uuid::new_v4().simple().to_string();
+    id.truncate(12);
+    id
 }
 
 /// Pure decision for [`git_cleanup_orphaned_resolve_worktrees`]: from all
@@ -2767,7 +2778,7 @@ pub(crate) async fn merge_local_pr(
     .await;
 
     // Create the isolated DETACHED resolve worktree at base's tip.
-    let worktree_id = uuid::Uuid::new_v4().to_string();
+    let worktree_id = new_resolve_worktree_id();
     let worktree_path = root.join(format!("gd-resolve-{worktree_id}"));
     let worktree_path = worktree_path.to_string_lossy().into_owned();
     if let Err(e) = std::fs::create_dir_all(root) {
@@ -3101,7 +3112,7 @@ pub async fn git_abort_local_pr_merge(
     Ok(())
 }
 
-/// Sweeps orphaned resolve worktrees (`gd-resolve-<uuid>`) left under the app-data
+/// Sweeps orphaned resolve worktrees (`gd-resolve-<id>`) left under the app-data
 /// root by a paused local-PR merge. The only live handle to one is a local PR's
 /// `pendingMerge`, so a crash mid-resolve (or a lost PR) orphans it with no UI path
 /// to remove it — being detached, the user-facing worktree manager excludes it. The
@@ -7102,6 +7113,26 @@ detached
         assert_eq!(all_orphans.len(), 2);
     }
 
+    /// The directory name is a Windows MAX_PATH budget item — every path inside
+    /// the checkout is measured from it — and it is also what the orphan sweep
+    /// recognizes, so both the length and the prefix are pinned here.
+    #[test]
+    fn resolve_worktree_id_is_12_hex_under_the_gd_resolve_prefix() {
+        let id = super::new_resolve_worktree_id();
+        assert_eq!(id.len(), 12, "id was {id}");
+        assert!(
+            id.bytes().all(|b| b.is_ascii_hexdigit()),
+            "id must be bare hex (no dashes, no braces): {id}"
+        );
+        assert_ne!(id, super::new_resolve_worktree_id());
+
+        let name = format!("gd-resolve-{id}");
+        assert_eq!(name.len(), 23, "name was {name}");
+        assert!(is_resolve_worktree_path(&format!(
+            "C:/data/worktrees/h/{name}"
+        )));
+    }
+
     #[test]
     fn repo_hash_is_case_insensitive_and_16_hex() {
         // Mirrors worktree.rs::repo_hash's contract: case-insensitive (Windows
@@ -8616,12 +8647,14 @@ detached
             .await
             .unwrap_err();
         assert!(err.to_string().contains("upstream"), "got: {err}");
-        // An unknown lens never reaches git at all.
+        // An unknown lens never reaches git at all. The MESSAGE again: a known lens
+        // whose remote is missing raises `InvalidArgument` too, so a variant-only
+        // assertion here passes whether the lens set or the remote lookup refused.
         let err = merge_remote_pr(&state, &repo, 5, "main", "feature", None, Some("fork"), &root)
             .await
             .unwrap_err();
         assert!(
-            matches!(err, AppError::InvalidArgument(_)),
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("unknown remote lens")),
             "got: {err:?}"
         );
 
@@ -8630,6 +8663,54 @@ detached
         let wts = git(&repo, &["worktree", "list", "--porcelain"]).await;
         assert!(!wts.contains("gd-pr-resolve-"), "{wts}");
         assert!(dir.path().join("a.txt").exists(), "the tree is untouched");
+    }
+
+    /// Finishing a resolve pushes to `refs/heads/<head>` on the lens remote, so the
+    /// head must name a BRANCH: a rev expression would resolve locally and push the
+    /// wrong commit. The gate runs before the remote lookup, and the assertion is on
+    /// its MESSAGE — this clone has no remotes, so `resolve_pr_remote` raises
+    /// `InvalidArgument` for every input and a variant-only match would be vacuous
+    /// (proven by the valid-head row below).
+    #[tokio::test]
+    async fn finish_remote_pr_resolve_rejects_rev_expressions_in_the_head() {
+        let (_dir, repo) = setup_repo("frpr-validate").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let wt = root.join("gd-pr-resolve-origin-5-abcdef").to_string_lossy().into_owned();
+        let state = AppState::default();
+
+        for bad in [
+            "feature~1",
+            "main^",
+            "HEAD@{1}",
+            "main..other",
+            "a^{commit}",
+            "@",
+            "a*b",
+            "a:b",
+        ] {
+            let err = finish_remote_pr_resolve(
+                &state, &repo, bad, &wt, "abcdef", None, None, &root,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(&err, AppError::InvalidArgument(m) if m.contains("invalid branch name")),
+                "{bad:?} got: {err:?}"
+            );
+        }
+
+        // The confounder, live: a VALID head gets the same variant from the remote
+        // lookup instead — only the message tells the two gates apart.
+        let err = finish_remote_pr_resolve(
+            &state, &repo, "feature", &wt, "abcdef", None, None, &root,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, AppError::InvalidArgument(m) if m.contains("remote does not exist")),
+            "got: {err:?}"
+        );
     }
 
     #[test]

@@ -11,6 +11,11 @@ export interface ListKeyboardNavOptions<T> {
   rowKey?: (item: T) => string;
   /** Attribute that carries `rowKey` on each row element. */
   rowAttr?: string;
+  /**
+   * Leave arrows to a text editor inside the list (caret nav wins). Opt-in:
+   * several callers deliberately drive nav from a filter input.
+   */
+  ignoreTextEntry?: boolean;
 }
 
 /**
@@ -26,10 +31,21 @@ export function listKeyboardNav<T>({
   onActivate,
   rowKey,
   rowAttr = "data-row",
+  ignoreTextEntry = false,
 }: ListKeyboardNavOptions<T>) {
   return (e: KeyboardEvent) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     if (items.length === 0) return;
+    // Ancestor walk for the form controls (a keydown can bubble from a wrapper
+    // inside an editor); isContentEditable covers every editable state — true,
+    // empty, plaintext-only — and inherits from an enclosing editing host.
+    if (
+      ignoreTextEntry &&
+      e.target instanceof HTMLElement &&
+      (e.target.closest("input, textarea") !== null ||
+        e.target.isContentEditable)
+    )
+      return;
     // Move the selection, not the scrollbar.
     e.preventDefault();
     const to =
