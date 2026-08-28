@@ -1783,7 +1783,11 @@ Once connected:
 - **Pipelines** — the **Actions** tab lists Bitbucket **Pipelines**; open one to see its
   **steps** with their **logs**. You can **rerun** a finished pipeline (re-triggers its
   branch), **trigger** a new one on a branch or tag (with optional variables), and **stop**
-  a running pipeline. When the repo's \`bitbucket-pipelines.yml\` defines **custom
+  a running pipeline. The row {{secondaryclick}} menu carries the same actions, named for
+  pipelines: **Rerun pipeline** on a finished one, **Cancel pipeline** on a running one,
+  **Run pipeline…**, **View on Bitbucket**, and **Copy pipeline URL**. They're in the
+  command palette too, with no default shortcut. When the repo's
+  \`bitbucket-pipelines.yml\` defines **custom
   pipelines** (\`pipelines.custom.*\`), the **Run pipeline** dialog adds a **Pipeline**
   picker — run the branch's **Default** pipeline or a named custom one, with the same
   variables.

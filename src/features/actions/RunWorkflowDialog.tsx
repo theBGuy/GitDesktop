@@ -31,6 +31,7 @@ import {
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { isPipelineProvider } from "./status";
 
 /** Only an explicit false refuses a workflow: a missing key — probe pending,
  *  errored, or unable to tell — keeps it offered, so a failed probe never hides
@@ -63,9 +64,9 @@ export function RunWorkflowDialog({
   // its GitHub-only `gh workflow list` query never fires), and "inputs" become
   // CI/CD variables on the new pipeline.
   const provider = useForgeStatus(repoPath).data?.provider;
-  const isPipelineProvider = provider === "gitlab" || provider === "bitbucket";
+  const isPipelines = isPipelineProvider(provider);
   const isBitbucket = provider === "bitbucket";
-  const workflows = useWorkflows(repoPath, open && !isPipelineProvider);
+  const workflows = useWorkflows(repoPath, open && !isPipelines);
   // Bitbucket custom-pipeline selectors (from the working-tree
   // `bitbucket-pipelines.yml`). When present, they're offered above the ref
   // alongside "Default" (the branch pipeline). Other providers never fetch.
@@ -165,7 +166,7 @@ export function RunWorkflowDialog({
   const dispatchProbe = useWorkflowDispatchable(
     repoPath,
     debouncedRef,
-    open && !isPipelineProvider,
+    open && !isPipelines,
   );
   const probed = dispatchProbe.data;
 
@@ -227,7 +228,7 @@ export function RunWorkflowDialog({
   // this panel, and react-query drops per-call callbacks once the observer has no
   // listeners.
   async function submit() {
-    if ((!isPipelineProvider && !workflow) || !gitRef.trim()) return;
+    if ((!isPipelines && !workflow) || !gitRef.trim()) return;
     const record: Record<string, string> = {};
     for (const { key, value } of inputs) {
       const k = key.trim();
@@ -241,7 +242,7 @@ export function RunWorkflowDialog({
       switch (true) {
         case isBitbucket:
           return pipeline;
-        case isPipelineProvider:
+        case isPipelines:
           return "";
         default:
           return workflow;
@@ -253,12 +254,9 @@ export function RunWorkflowDialog({
         gitRef: gitRef.trim(),
         inputs: record,
       });
-      toast.success(
-        isPipelineProvider ? "Pipeline started" : "Workflow dispatched",
-        {
-          description: "It may take a few seconds to appear in the runs list.",
-        },
-      );
+      toast.success(isPipelines ? "Pipeline started" : "Workflow dispatched", {
+        description: "It may take a few seconds to appear in the runs list.",
+      });
       // The toast reports the dispatch wherever the user went; the navigation only
       // applies to the dialog they are still in, so it is gated on the session that
       // started it — a close, a reopen, or a tab switch mid-dispatch would
@@ -274,21 +272,19 @@ export function RunWorkflowDialog({
   }
 
   const noneDispatchable =
-    !isPipelineProvider && !workflows.isPending && dispatchable.length === 0;
+    !isPipelines && !workflows.isPending && dispatchable.length === 0;
   const selectedNoTrigger =
-    !isPipelineProvider &&
-    workflow !== "" &&
-    hasNoManualTrigger(probed, workflow);
+    !isPipelines && workflow !== "" && hasNoManualTrigger(probed, workflow);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {isPipelineProvider ? "Run pipeline" : "Run workflow"}
+            {isPipelines ? "Run pipeline" : "Run workflow"}
           </DialogTitle>
           <DialogDescription>
-            {isPipelineProvider ? (
+            {isPipelines ? (
               "Run a new pipeline on a branch or tag."
             ) : (
               <>
@@ -301,7 +297,7 @@ export function RunWorkflowDialog({
         </DialogHeader>
 
         <div className="space-y-4">
-          {!isPipelineProvider && (
+          {!isPipelines && (
             <div className="space-y-2">
               <Label htmlFor={`${idBase}-workflow`}>Workflow</Label>
               <Select
@@ -403,7 +399,7 @@ export function RunWorkflowDialog({
           >
             <div className="flex items-center justify-between">
               <Label id={`${idBase}-inputs-label`}>
-                {isPipelineProvider ? "Variables" : "Inputs"}{" "}
+                {isPipelines ? "Variables" : "Inputs"}{" "}
                 <span className="font-normal text-muted-foreground">
                   (optional)
                 </span>
@@ -420,12 +416,12 @@ export function RunWorkflowDialog({
                 }
               >
                 <PlusIcon data-icon="inline-start" />
-                {isPipelineProvider ? "Add variable" : "Add input"}
+                {isPipelines ? "Add variable" : "Add input"}
               </Button>
             </div>
             {inputs.length === 0 ? (
               <p className="text-xs text-muted-foreground">
-                {isPipelineProvider
+                {isPipelines
                   ? "Add CI/CD variables to pass to the pipeline."
                   : "Add key/value pairs if the workflow defines inputs."}
               </p>
@@ -466,7 +462,7 @@ export function RunWorkflowDialog({
                       variant="ghost"
                       size="icon-xs"
                       aria-label={
-                        isPipelineProvider ? "Remove variable" : "Remove input"
+                        isPipelines ? "Remove variable" : "Remove input"
                       }
                       onClick={() =>
                         setInputs((prev) => prev.filter((r) => r.id !== row.id))
@@ -487,14 +483,14 @@ export function RunWorkflowDialog({
           </Button>
           <Button
             disabled={
-              (!isPipelineProvider && !workflow) ||
+              (!isPipelines && !workflow) ||
               selectedNoTrigger ||
               !gitRef.trim() ||
               runWorkflow.isPending
             }
             onClick={submit}
           >
-            {isPipelineProvider ? "Run pipeline" : "Run workflow"}
+            {isPipelines ? "Run pipeline" : "Run workflow"}
           </Button>
         </DialogFooter>
       </DialogContent>

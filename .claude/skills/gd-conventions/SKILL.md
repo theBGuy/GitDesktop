@@ -81,9 +81,13 @@ route to one of those ops imports the existing prompt, never re-spells it.
 **Command palette.** Any new tab/surface/action needs an ACTIONS entry in
 `src/lib/hotkeys/registry.ts` + `useHotkeyAction` wiring in the same change
 (`defaultBinding: null` = palette-only). Missed twice before. Labels use the
-words the user reads on screen — the palette matcher is a plain substring, so
-"AI-excluded files" missed a user typing "ai excluded" off the tab labeled
-"AI excluded" (live-caught, #255); no hyphens the UI itself doesn't show.
+words the user reads on screen. The matcher (`CommandPalette.tsx`) AND-s the
+query's whitespace-separated tokens over label + category with hyphens stripped
+from both sides, so word order, gaps, and hyphenation cost nothing ("cancel
+pipeline" finds "Cancel workflow run/pipeline", "rerun" finds "Re-run…", and
+#255's "ai excluded" against a tab labeled "AI excluded" would match today).
+Each token still has to be a literal substring of what remains, so a label built
+from different words than the surface shows stays unfindable.
 
 **Mod-key display.** Shortcut hints render via `isMac` / `formatBinding` from
 `@/lib/hotkeys/binding` — never a literal ⌘ or "Ctrl+"; only labels branch.

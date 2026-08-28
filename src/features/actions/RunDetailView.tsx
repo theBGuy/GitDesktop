@@ -414,12 +414,16 @@ export function RunDetailView({
   useHotkeyAction(
     "rerun-run",
     () => void doRerun(false),
-    tabActive && !writeBlocked && canRerun && rerunChoices.length > 0,
+    tabActive &&
+      !writeBlocked &&
+      canRerun &&
+      rerunChoices.length > 0 &&
+      !rerun.isPending,
   );
   useHotkeyAction(
     "cancel-run",
     () => void doCancel(),
-    tabActive && !writeBlocked && canCancel && showCancel,
+    tabActive && !writeBlocked && canCancel && showCancel && !cancel.isPending,
   );
 
   // A manual GitLab job arrives as completed + action_required; with the flag

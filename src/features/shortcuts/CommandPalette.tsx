@@ -35,15 +35,21 @@ export function CommandPalette({
     setHighlight(0);
   });
 
-  const q = query.trim().toLowerCase();
-  const items = ACTIONS.filter(
-    (a) =>
-      a.id !== "command-palette" &&
-      available.has(a.id) &&
-      (!q ||
-        a.label.toLowerCase().includes(q) ||
-        a.category.toLowerCase().includes(q)),
-  );
+  // Every whitespace-separated token must appear somewhere in the label +
+  // category, so a query can name words the label separates ("cancel pipeline"
+  // finds "Cancel workflow run/pipeline") instead of having to match one
+  // contiguous run of it. Hyphens drop from both sides, so a label's spelling
+  // of a compound word can't hide it from the other ("rerun" finds "Re-run…").
+  const norm = (s: string) => s.toLowerCase().replaceAll("-", "");
+  // Filter AFTER normalizing: an all-hyphen token normalizes to "", which every
+  // haystack "contains" — dropping it keeps the no-constraint path the only one.
+  const tokens = query.trim().split(/\s+/).map(norm).filter(Boolean);
+  const items = ACTIONS.filter((a) => {
+    if (a.id === "command-palette" || !available.has(a.id)) return false;
+    if (tokens.length === 0) return true;
+    const hay = norm(`${a.label} ${a.category}`);
+    return tokens.every((t) => hay.includes(t));
+  });
   const highlighted = items[Math.min(highlight, items.length - 1)];
 
   // Keep the highlighted row in view while arrowing through.
