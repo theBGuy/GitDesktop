@@ -8,6 +8,7 @@ import {
   useEffectiveBindings,
 } from "@/lib/hotkeys/hotkeys";
 import { ACTIONS, type ActionId } from "@/lib/hotkeys/registry";
+import { matchesActionText, queryTokens } from "@/lib/hotkeys/search";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
@@ -35,20 +36,10 @@ export function CommandPalette({
     setHighlight(0);
   });
 
-  // Every whitespace-separated token must appear somewhere in the label +
-  // category, so a query can name words the label separates ("cancel pipeline"
-  // finds "Cancel workflow run/pipeline") instead of having to match one
-  // contiguous run of it. Hyphens drop from both sides, so a label's spelling
-  // of a compound word can't hide it from the other ("rerun" finds "Re-run…").
-  const norm = (s: string) => s.toLowerCase().replaceAll("-", "");
-  // Filter AFTER normalizing: an all-hyphen token normalizes to "", which every
-  // haystack "contains" — dropping it keeps the no-constraint path the only one.
-  const tokens = query.trim().split(/\s+/).map(norm).filter(Boolean);
+  const tokens = queryTokens(query);
   const items = ACTIONS.filter((a) => {
     if (a.id === "command-palette" || !available.has(a.id)) return false;
-    if (tokens.length === 0) return true;
-    const hay = norm(`${a.label} ${a.category}`);
-    return tokens.every((t) => hay.includes(t));
+    return matchesActionText(tokens, a.label, a.category);
   });
   const highlighted = items[Math.min(highlight, items.length - 1)];
 

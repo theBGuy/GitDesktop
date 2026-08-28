@@ -168,7 +168,11 @@ export function RunWorkflowDialog({
     debouncedRef,
     open && !isPipelines,
   );
-  const probed = dispatchProbe.data;
+  // Verdicts are ref-scoped, and the debounce lets the input run ahead of the ref
+  // they were probed for: a mid-debounce mismatch reads as no-verdict, never as
+  // refusal. Gated at the one read, so every consumer below fails open together.
+  const probeCurrent = gitRef.trim() === debouncedRef;
+  const probed = probeCurrent ? dispatchProbe.data : undefined;
 
   useEffect(() => {
     // Only a landed list can judge an id. While the query is pending or errored

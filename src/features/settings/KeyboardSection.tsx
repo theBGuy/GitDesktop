@@ -11,6 +11,7 @@ import {
   type ActionDef,
   CATEGORY_ORDER,
 } from "@/lib/hotkeys/registry";
+import { matchesActionText, queryTokens } from "@/lib/hotkeys/search";
 import { cn } from "@/lib/utils";
 import { settingsFormOpts } from "./settings-form";
 
@@ -109,16 +110,20 @@ export const KeyboardSection = withForm({
     }, [recordingId]);
 
     const query = filter.trim().toLowerCase();
+    const tokens = queryTokens(filter);
 
-    /** Substring match over what the row shows: its label, its category, and
-     *  the binding in both display ("Ctrl+Shift+P") and canonical
-     *  ("mod+shift+p") form. "unbound" is the word for the empty binding —
-     *  from three characters on, so typing toward it narrows instead of
-     *  flashing the empty state ("un" still means the Unstage/Undo labels). */
+    /** Match over what the row shows, two ways. Label and category go through
+     *  the shared action-text search (every word present, any order, hyphens
+     *  ignored) so this list finds what the command palette finds. The binding
+     *  arms stay literal substrings of the raw query, in both display
+     *  ("Ctrl+Shift+P") and canonical ("mod+shift+p") form — tokenizing key
+     *  text would match across separators that mean something here. "unbound"
+     *  is the word for the empty binding, from three characters on, so typing
+     *  toward it narrows instead of flashing the empty state ("un" still means
+     *  the Unstage/Undo labels). */
     function matchesQuery(action: ActionDef): boolean {
       if (query === "") return true;
-      if (action.label.toLowerCase().includes(query)) return true;
-      if (action.category.toLowerCase().includes(query)) return true;
+      if (matchesActionText(tokens, action.label, action.category)) return true;
       const binding = effective(action.id);
       if (binding === null)
         return query.length >= 3 && "unbound".startsWith(query);

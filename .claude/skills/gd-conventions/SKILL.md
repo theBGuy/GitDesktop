@@ -81,13 +81,18 @@ route to one of those ops imports the existing prompt, never re-spells it.
 **Command palette.** Any new tab/surface/action needs an ACTIONS entry in
 `src/lib/hotkeys/registry.ts` + `useHotkeyAction` wiring in the same change
 (`defaultBinding: null` = palette-only). Missed twice before. Labels use the
-words the user reads on screen. The matcher (`CommandPalette.tsx`) AND-s the
-query's whitespace-separated tokens over label + category with hyphens stripped
-from both sides, so word order, gaps, and hyphenation cost nothing ("cancel
-pipeline" finds "Cancel workflow run/pipeline", "rerun" finds "Re-run…", and
-#255's "ai excluded" against a tab labeled "AI excluded" would match today).
-Each token still has to be a literal substring of what remains, so a label built
-from different words than the surface shows stays unfindable.
+words the user reads on screen. Action-text search lives in
+`src/lib/hotkeys/search.ts` (`queryTokens` + `matchesActionText`), shared by the
+palette and Settings → Keyboard so a query can't hit in one and miss in the
+other — a new surface searching ACTIONS imports it rather than re-spelling the
+match. It AND-s the query's whitespace-separated tokens over label + category
+with hyphens stripped from both sides, so word order, gaps, and hyphenation cost
+nothing ("cancel pipeline" finds "Cancel workflow run/pipeline", "rerun" finds
+"Re-run…", and #255's "ai excluded" against a tab labeled "AI excluded" would
+match today). Each token still has to be a literal substring of what remains, so
+a label built from different words than the surface shows stays unfindable.
+Keyboard's binding arms deliberately stay literal — key text means its
+separators.
 
 **Mod-key display.** Shortcut hints render via `isMac` / `formatBinding` from
 `@/lib/hotkeys/binding` — never a literal ⌘ or "Ctrl+"; only labels branch.

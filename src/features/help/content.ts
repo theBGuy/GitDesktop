@@ -1607,13 +1607,14 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
 - Click a run to see its **jobs and steps** with status and durations — a job or step
   that's still running counts its elapsed time up live.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run.
-- {{Secondaryclick}} a run in the list to act on it without opening it: the same
-  **re-run** and **cancel** offers, **Run workflow again…** (the Run dialog opens with
-  that run's workflow already picked), **View on GitHub**, and **Copy run URL**. Only
-  what applies to that run appears; if your sign-in can't push, the write actions stay
-  visible and disabled with the reason. The command palette carries these too, with no
-  default shortcut: **Run workflow/pipeline…** from anywhere in the tab, and re-run or
-  cancel for whichever run you have open.
+- {{Secondaryclick}} a run in the list for its actions without leaving the list — the
+  run is selected, so the detail pane follows. You get the same **re-run** and **cancel**
+  offers, **Run workflow again…** (the Run dialog opens with that run's workflow already
+  picked), **View on GitHub**, and **Copy run URL**. Only what applies to that run
+  appears; if your sign-in can't push, the write actions stay visible and disabled with
+  the reason. The command palette carries these too, with no default shortcut:
+  **Run workflow/pipeline…** from anywhere in the tab, and re-run or cancel for whichever
+  run you have open.
 - A run GitHub is **holding for approval** — its gate on a first-time contributor's
   fork pull request — says so in the run, and **Approve and run** (it confirms first)
   releases it. The same offer appears above the pull request's checks list,
@@ -1786,11 +1787,10 @@ Once connected:
   a running pipeline. The row {{secondaryclick}} menu carries the same actions, named for
   pipelines: **Rerun pipeline** on a finished one, **Cancel pipeline** on a running one,
   **Run pipeline…**, **View on Bitbucket**, and **Copy pipeline URL**. They're in the
-  command palette too, with no default shortcut. When the repo's
-  \`bitbucket-pipelines.yml\` defines **custom
-  pipelines** (\`pipelines.custom.*\`), the **Run pipeline** dialog adds a **Pipeline**
-  picker — run the branch's **Default** pipeline or a named custom one, with the same
-  variables.
+  command palette too, with no default shortcut. When the repo's \`bitbucket-pipelines.yml\`
+  defines **custom pipelines** (\`pipelines.custom.*\`), the **Run pipeline** dialog adds a
+  **Pipeline** picker — run the branch's **Default** pipeline or a named custom one, with
+  the same variables.
 - **Insights** — the **Insights** tab works on Bitbucket repos: the local-git charts
   (commit activity, code frequency, contributors, punch card), a **Pipelines** duration
   and success-rate chart, a **Fork activity** card listing the repo's recently active
