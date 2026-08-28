@@ -301,10 +301,10 @@ const ACTIVITY_JSX_RE = /<Activity(?![\w$])/;
 // A `fallback` prop whose value is the literal `null`, on any component — the
 // converted sites were all Suspense, but an ErrorBoundary-style host trips it
 // too; allowlist deliberate cases. Run over the whole-file view because a
-// formatter puts the prop on its own line. Two blind spots, zero instances
-// today: a fallback naming a BINDING that holds null is invisible
-// (DiffSurfaceLazy forwards a `fallback` prop), and so is one built by a
-// conditional — the bare literal is the shape every converted site had.
+// formatter puts the prop on its own line. Two blind spots, no in-repo
+// instances: a fallback naming a BINDING that holds null is invisible, and so
+// is one built by a conditional — the bare literal is the shape every
+// converted site had.
 const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
 
 export const CHECKS = [

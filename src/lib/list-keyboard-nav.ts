@@ -36,12 +36,14 @@ export function listKeyboardNav<T>({
   return (e: KeyboardEvent) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     if (items.length === 0) return;
-    // Ancestor walk, not the target alone: a keydown can bubble from a wrapper
-    // inside an editor.
+    // Ancestor walk for the form controls (a keydown can bubble from a wrapper
+    // inside an editor); isContentEditable covers every editable state — true,
+    // empty, plaintext-only — and inherits from an enclosing editing host.
     if (
       ignoreTextEntry &&
-      e.target instanceof Element &&
-      e.target.closest("input, textarea, [contenteditable=true]")
+      e.target instanceof HTMLElement &&
+      (e.target.closest("input, textarea") !== null ||
+        e.target.isContentEditable)
     )
       return;
     // Move the selection, not the scrollbar.

@@ -609,7 +609,7 @@ test("null-suspense-fallback flags the literal on one line or wrapped", () => {
 test("null-suspense-fallback leaves a real fallback and a forwarded prop alone", () => {
   for (const source of [
     '<Suspense fallback={<LazyPanelFallback name="Insights" />}>{kids}</Suspense>',
-    // DiffSurfaceLazy forwards its own `fallback` prop — a binding, not a literal.
+    // A fallback naming a binding, not a literal — outside the check's shape.
     "<Suspense fallback={fallback}>{kids}</Suspense>",
     "<Suspense fallback={compact ? null : <Skeleton />}>{kids}</Suspense>",
   ])

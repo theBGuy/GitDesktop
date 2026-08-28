@@ -47,9 +47,8 @@ import { UpdatesSection } from "./UpdatesSection";
 // Loading it lazily keeps that whole chunk off the boot path — its render is
 // already gated on `activePanel === "syntax"`, so the import fires on first
 // visit, not on launch. `lazy` on the named export preserves the `form` prop's
-// full type. The fallback is null: the panel renders instantly once loaded (tens
-// of ms from local disk) and, like the other panels, shows no intermediate
-// state before its data — a spinner would flash where nothing otherwise does.
+// full type. The fallback mirrors the section's field geometry so the swap to
+// the loaded panel doesn't shift layout.
 const SyntaxSection = lazy(() =>
   import("./SyntaxSection").then((m) => ({ default: m.SyntaxSection })),
 );

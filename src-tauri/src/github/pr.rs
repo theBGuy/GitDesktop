@@ -1144,19 +1144,22 @@ fn build_divergence_compare_path(slug: &str, refs: &RawDivergenceRefs) -> AppRes
     validate_compare_branch(&refs.head_ref_name)?;
     // A fork PR's head lives in another repo, so the compare must address it as
     // `owner:branch` — a bare branch name would resolve against the BASE repo and
-    // compare the wrong (or a nonexistent) ref.
-    let head = match refs
-        .head_repository_owner
-        .as_ref()
-        .map(|o| o.login.as_str())
-        .filter(|_| refs.is_cross_repository)
-        .filter(|s| !s.is_empty())
-    {
-        Some(owner) => {
-            validate_compare_branch(owner)?;
-            format!("{owner}:{}", refs.head_ref_name)
-        }
-        None => refs.head_ref_name.clone(),
+    // silently count divergence against a same-named branch there. An absent or
+    // empty owner on a cross-repo PR therefore refuses (the probe degrades to
+    // "unknown") instead of falling back to the bare-head shape.
+    let head = if refs.is_cross_repository {
+        let owner = refs
+            .head_repository_owner
+            .as_ref()
+            .map(|o| o.login.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AppError::InvalidArgument("cross-repository PR carries no head owner".into())
+            })?;
+        validate_compare_branch(owner)?;
+        format!("{owner}:{}", refs.head_ref_name)
+    } else {
+        refs.head_ref_name.clone()
     };
     // Branch names ride the basehead unencoded: GitHub's capture is greedy and a
     // git ref name can never contain `..`, so the `...` separator stays
@@ -6595,13 +6598,19 @@ mod tests {
             .expect("valid refs"),
             "repos/octo/proj/compare/main...contrib:feature/x"
         );
-        // An owner GitHub reports empty is not an error — it degrades to the bare head,
-        // which is what an absent owner already means.
-        assert_eq!(
-            build_divergence_compare_path("octo/proj", &divergence_refs("main", "dev", Some("")))
-                .expect("valid refs"),
-            "repos/octo/proj/compare/main...dev"
-        );
+        // A cross-repo PR with an absent or empty owner refuses: a bare head would
+        // resolve against the BASE repo and count divergence against a same-named
+        // branch there.
+        let mut ownerless = divergence_refs("main", "dev", None);
+        ownerless.is_cross_repository = true;
+        for refs in [ownerless, divergence_refs("main", "dev", Some(""))] {
+            let err = build_divergence_compare_path("octo/proj", &refs)
+                .expect_err("cross-repo without owner");
+            assert!(
+                matches!(&err, AppError::InvalidArgument(m) if m.contains("no head owner")),
+                "{err:?}"
+            );
+        }
         // Same-repo PRs report an owner too; only the cross-repo flag qualifies it.
         let mut same_repo = divergence_refs("main", "dev", Some("contrib"));
         same_repo.is_cross_repository = false;
@@ -6629,8 +6638,8 @@ mod tests {
                 divergence_refs("main", hostile, None),
                 format!("head {hostile:?}"),
             );
-            // Empty is the owner's one non-error value (see the happy-path test), so the
-            // rest of the table is what applies to it.
+            // The empty owner errors with its own message (pinned above), so only the
+            // grammar table's non-empty rows apply to the owner field.
             if !hostile.is_empty() {
                 refuses(
                     divergence_refs("main", "feature/x", Some(hostile)),

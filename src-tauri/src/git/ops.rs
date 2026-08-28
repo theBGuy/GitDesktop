@@ -2500,7 +2500,7 @@ pub(crate) fn parse_worktree_paths(porcelain: &str) -> Vec<String> {
 
 /// Whether a worktree path is one of our resolve worktrees — its final path
 /// segment starts with `gd-resolve-`. The basename is the reliable signal:
-/// `git_merge_local_pr` names them `gd-resolve-<uuid>`, and porcelain may
+/// `git_merge_local_pr` names them `gd-resolve-<id>`, and porcelain may
 /// normalize the leading path so an app-data-root prefix check is less robust.
 fn is_resolve_worktree_path(path: &str) -> bool {
     std::path::Path::new(path)
@@ -2516,7 +2516,9 @@ fn is_resolve_worktree_path(path: &str) -> bool {
 /// A collision at 48 random bits stays unreachable, and would be refused rather
 /// than reused: `worktree add` fails on a registered or non-empty path.
 fn new_resolve_worktree_id() -> String {
-    uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+    let mut id = uuid::Uuid::new_v4().simple().to_string();
+    id.truncate(12);
+    id
 }
 
 /// Pure decision for [`git_cleanup_orphaned_resolve_worktrees`]: from all
@@ -3110,7 +3112,7 @@ pub async fn git_abort_local_pr_merge(
     Ok(())
 }
 
-/// Sweeps orphaned resolve worktrees (`gd-resolve-<uuid>`) left under the app-data
+/// Sweeps orphaned resolve worktrees (`gd-resolve-<id>`) left under the app-data
 /// root by a paused local-PR merge. The only live handle to one is a local PR's
 /// `pendingMerge`, so a crash mid-resolve (or a lost PR) orphans it with no UI path
 /// to remove it — being detached, the user-facing worktree manager excludes it. The

@@ -26,9 +26,11 @@ export function LazyPanelFallback({
       aria-busy
       className={cn("flex h-full min-h-0 flex-col gap-2 p-2", className)}
     >
-      {/* aria-busy alone announces nothing outside a live region, so the state
-          gets words a screen reader will actually read. */}
-      <span className="sr-only">Loading {name}…</span>
+      {/* aria-busy alone announces nothing outside a live region; role="status"
+          makes the label a polite live region the reader speaks on mount. */}
+      <span role="status" className="sr-only">
+        Loading {name}…
+      </span>
       {/* Index key: the rows are static and never reorder, and two rows may
           share the same size classes. */}
       {rows.map((row, i) => (

@@ -1,5 +1,7 @@
 import { type ComponentProps, lazy, Suspense } from "react";
 
+import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
+
 // @git-diff-view (and DiffSurface's render graph — Shiki wiring, the
 // multi-select workaround, DiffFile building) is heavy and only needed once a
 // diff is actually shown. Loading the real module lazily keeps that whole
@@ -31,11 +33,10 @@ export type {
 } from "./DiffSurface";
 
 // The diff panes these render into already show their own placeholders /
-// skeletons before data arrives (DiffContent itself renders nothing while
-// pending), and the chunk loads in tens of ms — so the least-flashy neutral
-// fallback (nothing) is correct here; a spinner would flash where the app
-// otherwise renders no intermediate state.
-const fallback = null;
+// skeletons before data arrives, and the chunk loads in tens of ms — so the
+// fallback paints nothing (rows={[]}) while still marking the region busy and
+// naming the wait for assistive tech.
+const fallback = <LazyPanelFallback name="the diff" rows={[]} />;
 
 const DiffSurfaceLazyImpl = lazy(() =>
   import("./DiffSurface").then((m) => ({ default: m.DiffSurface })),

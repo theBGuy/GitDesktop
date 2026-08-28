@@ -7678,7 +7678,7 @@ fn map_protected_branch(pb: GlabProtectedBranch) -> GitLabProtectedBranch {
 fn validate_protection_name(name: &str) -> AppResult<()> {
     if name.trim().is_empty() {
         return Err(AppError::InvalidArgument(
-            "protection name can't be empty".into(),
+            "a branch name or wildcard pattern is required".into(),
         ));
     }
     Ok(())

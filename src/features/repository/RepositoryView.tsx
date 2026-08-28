@@ -561,7 +561,12 @@ export function RepositoryView() {
         </aside>
         <main className="min-w-0 flex-1">
           <TabPanel active={repoTab === "changes"}>
-            <Suspense fallback={<LazyPanelFallback name="the diff" />}>
+            {/* rows={[]}: this boundary is on the boot path and DiffViewer's
+                resting state is a centered placeholder — skeleton bars would
+                flash where the app otherwise paints nothing. */}
+            <Suspense
+              fallback={<LazyPanelFallback name="the diff" rows={[]} />}
+            >
               <DiffViewer repoPath={repoPath} />
             </Suspense>
           </TabPanel>
