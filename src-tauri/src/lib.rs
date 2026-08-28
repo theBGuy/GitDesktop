@@ -608,6 +608,7 @@ pub fn run() {
             github::release::gh_release_download_asset,
             github::pr::gh_branch_protections,
             github::actions::gh_workflow_list,
+            github::actions::gh_workflow_dispatchable,
             fsops::append_to_gitignore,
             fsops::read_text_file,
             fsops::delete_repo_folder,

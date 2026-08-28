@@ -419,7 +419,8 @@ export const CHECKS = [
     allowlist: [
       // Seeds the category once the async list arrives; `if (!categoryId)`.
       "src/features/discussions/CreateDiscussionDialog.tsx",
-      // Defaults the workflow once `dispatchable` arrives; `!workflow`.
+      // Defaults the workflow once `dispatchable` arrives; the caller's
+      // preselect rides a consume-once ref, the fallback keeps `!workflow`.
       "src/features/actions/RunWorkflowDialog.tsx",
       // Seeds the Bitbucket workspace once workspaces load; empty-field only.
       "src/features/repository/PublishDialog.tsx",

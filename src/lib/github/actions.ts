@@ -20,6 +20,10 @@ export interface WorkflowRun {
   updatedAt: string;
   url: string;
   headSha: string;
+  /** The workflow this run belongs to, as its own database id — the handle a
+   *  re-dispatch needs. 0 on GitLab/Bitbucket rows: neither forge has a
+   *  per-workflow concept (one pipeline config per project). */
+  workflowDatabaseId: number;
 }
 
 export interface RunStep {
@@ -156,6 +160,14 @@ export const forgeGlCiPlayJob = (repoPath: string, jobId: number) =>
 export const ghWorkflowList = (repoPath: string) =>
   invoke<Workflow[]>("gh_workflow_list", { repoPath });
 
+/** Per-workflow workflow_dispatch presence at a ref, keyed by String(workflow.id).
+ *  A MISSING key means the probe couldn't tell — callers fail open (keep offering). */
+export const ghWorkflowDispatchable = (repoPath: string, gitRef: string) =>
+  invoke<Record<string, boolean>>("gh_workflow_dispatchable", {
+    repoPath,
+    gitRef,
+  });
+
 /** Start a run: GitHub dispatches `workflow` on the ref with `inputs`; GitLab runs
  *  a new pipeline on the ref with `inputs` as variables (send `workflow` empty);
  *  Bitbucket triggers the branch pipeline, or a named CUSTOM pipeline when `workflow`
@@ -237,6 +249,24 @@ export function useWorkflows(repo: string, enabled: boolean) {
     queryFn: () => ghWorkflowList(repo),
     enabled,
     staleTime: 5 * 60_000,
+  });
+}
+
+/** Which workflows accept a manual dispatch at `gitRef` (GitHub-only). The probe
+ *  fans out one `gh` process per workflow, so it never retries — a storm on every
+ *  keystroke of a bad ref would cost more than the affordance is worth — and an
+ *  empty ref isn't probed at all. */
+export function useWorkflowDispatchable(
+  repo: string,
+  gitRef: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["repo", repo, "actions", "dispatchable", gitRef] as const,
+    queryFn: () => ghWorkflowDispatchable(repo, gitRef),
+    enabled: enabled && gitRef !== "",
+    staleTime: 5 * 60_000,
+    retry: false,
   });
 }
 

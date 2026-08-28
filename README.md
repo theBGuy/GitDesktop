@@ -53,7 +53,8 @@ instead, see [Development](#development).
   settings in the same panels; [issues in-app](#issues-and-to-dos) on GitHub
   and GitLab, or via [Jira](#jira-cloud-issues) on Bitbucket.
 - **A [GitHub Actions cockpit](#github-actions)**: runs, jobs, steps,
-  re-run / cancel / dispatch, failed-step logs, and AI debugging.
+  re-run / cancel / dispatch (from the run or a right-click on its row),
+  failed-step logs, and AI debugging.
 - **[Coding agents](#coding-agent-sessions) with guardrails**: hand tasks to
   Claude Code, Codex, Copilot, or opencode in isolated worktrees or
   containers, watch every edit, and keep the result as a branch or local PR.
@@ -509,7 +510,12 @@ with a comment you've drafted posted alongside.
 A dedicated tab with live run status, run detail, re-run (all or failed),
 cancel, manual dispatch, and inline failed-step logs (none of which GitHub
 Desktop does), plus a current-branch CI badge in the header and
-run-completion notifications.
+run-completion notifications. Right-click any run in the list to re-run or
+cancel it, run its workflow again with the picker already on that workflow,
+open it on the forge, or copy its link; those actions are in the command
+palette too. The Run workflow picker marks the workflows that can't be
+started by hand on the chosen ref, so a dispatch that would be rejected is
+visible before you run it.
 
 - **Debug failed CI with AI**: turn a failed job's logs into a streamed
   root-cause + fix, ending with a ready-to-paste prompt for a coding agent.

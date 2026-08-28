@@ -1607,6 +1607,13 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
 - Click a run to see its **jobs and steps** with status and durations — a job or step
   that's still running counts its elapsed time up live.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run.
+- {{Secondaryclick}} a run in the list to act on it without opening it: the same
+  **re-run** and **cancel** offers, **Run workflow again…** (the Run dialog opens with
+  that run's workflow already picked), **View on GitHub**, and **Copy run URL**. Only
+  what applies to that run appears; if your sign-in can't push, the write actions stay
+  visible and disabled with the reason. The command palette carries these too, with no
+  default shortcut: **Run workflow/pipeline…** from anywhere in the tab, and re-run or
+  cancel for whichever run you have open.
 - A run GitHub is **holding for approval** — its gate on a first-time contributor's
   fork pull request — says so in the run, and **Approve and run** (it confirms first)
   releases it. The same offer appears above the pull request's checks list,
@@ -1614,7 +1621,10 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
   so GitDesktop offers it there only — there's no approval action on GitLab or Bitbucket
   pipelines.
 - **Run workflow…** manually dispatches a workflow (one with a \`workflow_dispatch\`
-  trigger) on a branch you choose, including any **input parameters** it defines.
+  trigger) on a branch you choose, including any **input parameters** it defines. The
+  picker marks a workflow that has no \`workflow_dispatch\` trigger on the ref you picked
+  as **(no manual trigger)** and won't let you choose it; if the workflow you already had
+  selected turns out not to have one there, a line under the picker says so.
 - Expand any job for its **logs** — or a failed run's **failed-step logs** — inline, and
   **copy** them with the button in the log's top-right corner.
 
@@ -1626,7 +1636,8 @@ latest one. Open a pipeline to see its **jobs** (status + durations, counting up
 a job runs); expand a job for its **log** (copyable from its corner). The pipeline actions
 work here too: **Cancel** a running pipeline, **Retry** a failed or canceled one (GitLab
 restarts its failed jobs), and **Run pipeline…** starts a fresh pipeline on a branch or tag,
-with optional **CI/CD variables**. A **manual job** — one that waits for a manual trigger —
+with optional **CI/CD variables**. The row {{secondaryclick}} menu carries the same
+offers, named for pipelines. A **manual job** — one that waits for a manual trigger —
 shows a **Run job** button that plays it.
 {{ai}}
 ## Debug with AI

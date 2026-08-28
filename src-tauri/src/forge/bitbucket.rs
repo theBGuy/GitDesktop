@@ -1861,6 +1861,8 @@ fn from_bb_pipeline(p: BbPipeline, ws: &str, slug: &str) -> WorkflowRun {
         status,
         conclusion,
         workflow_name: friendly_trigger(&trigger),
+        // Bitbucket has no per-workflow entity; pipelines are re-run by build number.
+        workflow_database_id: 0,
         head_branch: ref_name.unwrap_or_default(),
         event: trigger.to_ascii_lowercase(),
         created_at: p.created_on.clone(),

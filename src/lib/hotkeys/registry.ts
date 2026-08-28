@@ -15,7 +15,8 @@ export type ActionCategory =
   | "Branches & stash"
   | "Changes"
   | "Agent"
-  | "Pull requests";
+  | "Pull requests"
+  | "Actions";
 
 export interface ActionDef {
   id: string;
@@ -799,10 +800,32 @@ export const ACTIONS = [
     category: "Pull requests",
     defaultBinding: null,
   },
+
+  // Actions
+  {
+    id: "run-workflow",
+    // Registry labels are static (no provider context here) — one label covers
+    // GitHub workflows and GitLab/Bitbucket pipelines alike.
+    label: "Run workflow/pipeline…",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "rerun-run",
+    label: "Re-run workflow run/pipeline",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "cancel-run",
+    label: "Cancel workflow run/pipeline",
+    category: "Actions",
+    defaultBinding: null,
+  },
   {
     id: "approve-workflow-run",
     label: "Approve workflow run",
-    category: "Pull requests",
+    category: "Actions",
     defaultBinding: null,
   },
 ] as const satisfies readonly ActionDef[];
@@ -817,6 +840,7 @@ export const CATEGORY_ORDER: ActionCategory[] = [
   "Changes",
   "Agent",
   "Pull requests",
+  "Actions",
 ];
 
 /**

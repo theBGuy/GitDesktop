@@ -5832,6 +5832,8 @@ fn from_glab_pipeline(p: GlabPipeline) -> WorkflowRun {
         status,
         conclusion,
         workflow_name,
+        // GitLab has no per-workflow entity; pipelines are re-run by their own id.
+        workflow_database_id: 0,
         head_branch: p.git_ref,
         event: p.source,
         // GitLab's LIST payload has no per-run start time (only the detail
