@@ -404,15 +404,16 @@ export function ProjectsPopover({
   ));
 
   if (cells) {
-    // The dash is a resolved-none claim, so only a settled read may show it: a
-    // cold fetch, a failed one and the scope-gated path all leave membership
-    // unknown, and the popup is where each is explained and repaired.
+    // Keyed on the data, not the query status: a cached list outlives a failed
+    // background refetch (the popup owns the Retry), and the dash is a
+    // resolved-none claim, so only a settled empty read may show it.
     const value = (() => {
       switch (true) {
-        case memberships.isSuccess:
+        case items.length > 0:
           return chips;
         case loadingMemberships:
           return <Skeleton className="h-5 w-24" aria-hidden />;
+        // A settled empty read never renders this: `empty` on the cell takes it.
         default:
           return (
             <span className="text-[11px] text-muted-foreground">
@@ -427,6 +428,7 @@ export function ProjectsPopover({
         <MetaValueCell
           label="Projects"
           empty={memberships.isSuccess && items.length === 0}
+          busy={loadingMemberships}
         >
           {value}
         </MetaValueCell>

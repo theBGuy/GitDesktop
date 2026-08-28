@@ -34,7 +34,12 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { SelectControl } from "@/components/form/fields";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
-import { MetaFieldLabel, MetaValueCell } from "@/components/meta-field-cells";
+import {
+  MetaFieldLabel,
+  MetaValueCell,
+  USER_CHIP_CLASS,
+  UserChip,
+} from "@/components/meta-field-cells";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -77,7 +82,6 @@ import {
   useEffectiveBranchRules,
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
-import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import {
@@ -2337,15 +2341,7 @@ export function RemotePrView({
         <MetaFieldLabel>Assignees</MetaFieldLabel>
         <MetaValueCell label="Assignees">
           {pr.assignees.map((user) => (
-            <span
-              key={user.id}
-              className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
-            >
-              <ForgeUserAvatar user={user} ghHost={ghHost} />
-              <span className="truncate" onMouseEnter={clipTitleFromText}>
-                {user.label}
-              </span>
-            </span>
+            <UserChip key={user.id} user={user} ghHost={ghHost} />
           ))}
         </MetaValueCell>
       </Fragment>,
@@ -2413,19 +2409,13 @@ export function RemotePrView({
             .map((user) => {
               const hint = userRefHint(user, humanReviewers);
               return (
-                <span
+                <UserChip
                   key={user.id}
+                  user={user}
+                  ghHost={ghHost}
+                  hint={hint}
                   title={hint ? `${user.label} (${hint})` : undefined}
-                  className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
-                >
-                  <ForgeUserAvatar user={user} ghHost={ghHost} />
-                  <span className="truncate" onMouseEnter={clipTitleFromText}>
-                    {user.label}
-                    {hint && (
-                      <span className="text-muted-foreground"> · {hint}</span>
-                    )}
-                  </span>
-                </span>
+                />
               );
             })}
           {botReviewers.map((user) => (
@@ -3711,11 +3701,7 @@ function CompletedReviewerChip({
   const { Icon, tone, word } = reviewStatePresentation(reviewer.state);
   const name = `${reviewer.label} — ${word}`;
   return (
-    <span
-      title={name}
-      aria-label={name}
-      className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
-    >
+    <span title={name} aria-label={name} className={USER_CHIP_CLASS}>
       <Icon aria-hidden className={cn("size-3 shrink-0", tone)} />
       {reviewer.isBot ? (
         <RobotIcon aria-hidden className="size-3 shrink-0" />
@@ -3748,11 +3734,7 @@ function BotReviewerChip({
 }) {
   const name = `${user.label} — review requested from a bot, managed on the forge`;
   return (
-    <span
-      title={name}
-      aria-label={name}
-      className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
-    >
+    <span title={name} aria-label={name} className={USER_CHIP_CLASS}>
       <ForgeUserAvatar user={user} ghHost={ghHost} decorative />
       <span className="truncate">{user.label}</span>
       <RobotIcon aria-hidden className="size-3 shrink-0" />

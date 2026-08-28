@@ -2,11 +2,10 @@ import { Popover } from "@base-ui/react/popover";
 import { UserCheckIcon } from "@phosphor-icons/react";
 import { Children, type ReactNode, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
-import { MetaValueCell } from "@/components/meta-field-cells";
+import { MetaValueCell, UserChip } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { clipTitleFromText } from "@/lib/clip-title";
 import { useForgeGhHost } from "@/lib/git/host";
 import { useReviewerCandidates } from "@/lib/git/queries";
 import type { ForgeUserRef, RemoteLens } from "@/lib/git/types";
@@ -192,23 +191,16 @@ export function ReviewersPopover({
       </Popover.Portal>
     </Popover.Root>
   );
-  // Bounded by its container so one long name can't set a narrow column's
-  // min-content width. The clip tooltip REMOVES its own title when nothing is
-  // cut, leaving the chip's disambiguating one (when it has a hint) to show.
   const chips = value.map((user) => {
     const hint = userRefHint(user, chipUniverse);
     return (
-      <span
+      <UserChip
         key={user.id}
+        user={user}
+        ghHost={ghHost}
+        hint={hint}
         title={hint ? `${user.label} (${hint})` : undefined}
-        className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
-      >
-        <ForgeUserAvatar user={user} ghHost={ghHost} />
-        <span className="truncate" onMouseEnter={clipTitleFromText}>
-          {user.label}
-          {hint && <span className="text-muted-foreground"> · {hint}</span>}
-        </span>
-      </span>
+      />
     );
   });
 
