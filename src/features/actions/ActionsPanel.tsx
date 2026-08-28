@@ -68,7 +68,6 @@ export function ActionsPanel({
   const ghReady = forgeFeatureReady(forge.data, "ci");
   const provider = forge.data?.provider;
   const isGitLab = provider === "gitlab";
-  // GitLab and Bitbucket both call CI "pipelines"; only GitHub says "workflow".
   const isPipelines = isPipelineProvider(provider);
   const canWrite = !isPipelines;
   const canDispatch = canWrite || forgeFeatureReady(forge.data, "ciDispatch");
