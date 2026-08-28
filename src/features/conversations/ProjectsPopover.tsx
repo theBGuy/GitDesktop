@@ -2,6 +2,7 @@ import { Popover } from "@base-ui/react/popover";
 import { CopyIcon, KanbanIcon } from "@phosphor-icons/react";
 import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
+import { MetaValueCell } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -60,6 +61,7 @@ export function ProjectsPopover({
   contentId,
   lens,
   disabledReason,
+  cells = false,
 }: {
   repoPath: string;
   /** Gates the reads. Both call sites pass `true`; the real gate is upstream, and
@@ -78,6 +80,10 @@ export function ProjectsPopover({
    *  its action needs, or the surface is still loading the entity. The trigger
    *  stays visible but disabled and this text explains why. Absent = editable. */
   disabledReason?: string;
+  /** Emit the trigger and the chips as two SIBLING elements rather than one
+   *  inline row, so a caller's label/value grid can place each in its own
+   *  column. Default renders the inline row. */
+  cells?: boolean;
 }) {
   const host = useActiveGhHost();
   const scopes = useGhScopes(host);
@@ -264,138 +270,151 @@ export function ProjectsPopover({
     }
   }
 
-  return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      {/* Trigger first, so it never shifts as chips come and go. A natively
-          disabled button swallows `title`, so the reason rides a wrapping span. */}
-      <Popover.Root open={open} onOpenChange={handleOpenChange}>
-        <span
-          title={heldReason}
-          className={
-            heldReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+  // Trigger first, so it never shifts as chips come and go. A natively disabled
+  // button swallows `title`, so the reason rides a wrapping span.
+  const trigger = (
+    <Popover.Root open={open} onOpenChange={handleOpenChange}>
+      <span
+        title={heldReason}
+        className={
+          heldReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+        }
+      >
+        <Popover.Trigger
+          disabled={!!heldReason}
+          render={
+            <Button variant="ghost" size="xs" aria-label="Edit projects" />
           }
         >
-          <Popover.Trigger
-            disabled={!!heldReason}
-            render={
-              <Button variant="ghost" size="xs" aria-label="Edit projects" />
-            }
-          >
-            {editProjects.isPending ? (
-              <Spinner data-icon="inline-start" />
+          {editProjects.isPending ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <KanbanIcon data-icon="inline-start" />
+          )}
+          Projects
+        </Popover.Trigger>
+      </span>
+      <Popover.Portal container={portalContainer}>
+        <Popover.Positioner
+          align="start"
+          sideOffset={4}
+          className="isolate z-50"
+        >
+          <Popover.Popup className="w-80 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
+            <p className="px-1 pb-1.5 text-xs font-medium">Projects</p>
+            {classicMissing ? (
+              <ScopeGapBlock host={host} onReconnect={reconnectForProjectScope}>
+                Projects need the <span className="font-mono">project</span>{" "}
+                scope, which your GitHub sign-in is missing.
+              </ScopeGapBlock>
             ) : (
-              <KanbanIcon data-icon="inline-start" />
-            )}
-            Projects
-          </Popover.Trigger>
-        </span>
-        <Popover.Portal container={portalContainer}>
-          <Popover.Positioner
-            align="start"
-            sideOffset={4}
-            className="isolate z-50"
-          >
-            <Popover.Popup className="w-80 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-              <p className="px-1 pb-1.5 text-xs font-medium">Projects</p>
-              {classicMissing ? (
-                <ScopeGapBlock
-                  host={host}
-                  onReconnect={reconnectForProjectScope}
-                >
-                  Projects need the <span className="font-mono">project</span>{" "}
-                  scope, which your GitHub sign-in is missing.
-                </ScopeGapBlock>
-              ) : (
-                <>
-                  {readError !== null && (
-                    <div className="px-1 py-1 text-xs">
-                      <p className="text-muted-foreground">
-                        {presentError(readError).summary}
-                      </p>
-                      <Button
-                        variant="outline"
-                        size="xs"
-                        className="mt-1.5"
-                        onClick={() => {
-                          memberships.refetch();
-                          available.refetch();
-                        }}
-                      >
-                        Retry
-                      </Button>
-                    </div>
-                  )}
-                  {readOnlyScope && (
-                    <div className="mb-1 border-b pb-1">
-                      <ScopeGapBlock
-                        host={host}
-                        onReconnect={reconnectForProjectScope}
-                      >
-                        Changing projects needs the{" "}
-                        <span className="font-mono">project</span> scope, which
-                        your GitHub sign-in is missing.
-                      </ScopeGapBlock>
-                    </div>
-                  )}
-                  {/* Not gated on an empty list: membership rows render from
+              <>
+                {readError !== null && (
+                  <div className="px-1 py-1 text-xs">
+                    <p className="text-muted-foreground">
+                      {presentError(readError).summary}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      className="mt-1.5"
+                      onClick={() => {
+                        memberships.refetch();
+                        available.refetch();
+                      }}
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                )}
+                {readOnlyScope && (
+                  <div className="mb-1 border-b pb-1">
+                    <ScopeGapBlock
+                      host={host}
+                      onReconnect={reconnectForProjectScope}
+                    >
+                      Changing projects needs the{" "}
+                      <span className="font-mono">project</span> scope, which
+                      your GitHub sign-in is missing.
+                    </ScopeGapBlock>
+                  </div>
+                )}
+                {/* Not gated on an empty list: membership rows render from
                       their own query, so the catalog can still be in flight
                       under a list that already looks complete. `canRead` keeps a
                       DISABLED query — permanently "pending" — from reading as one. */}
-                  {canRead && available.isPending && (
+                {canRead && available.isPending && (
+                  <p className="px-1 py-1 text-xs text-muted-foreground">
+                    Loading projects…
+                  </p>
+                )}
+                {rows.length === 0 &&
+                  readError === null &&
+                  !(canRead && available.isPending) && (
                     <p className="px-1 py-1 text-xs text-muted-foreground">
-                      Loading projects…
+                      No open projects in this repository or its owner.
                     </p>
                   )}
-                  {rows.length === 0 &&
-                    readError === null &&
-                    !(canRead && available.isPending) && (
-                      <p className="px-1 py-1 text-xs text-muted-foreground">
-                        No open projects in this repository or its owner.
-                      </p>
-                    )}
-                  <div
-                    className="max-h-64 overflow-y-auto"
-                    onKeyDown={onRowKeyDown}
-                  >
-                    {rows.map((project) => (
-                      <ProjectRow
-                        key={project.id}
-                        project={project}
-                        checked={draft.has(project.id)}
-                        active={activeId === project.id}
-                        rovingTab={
-                          navIndexById.get(project.id) === focusIndex ? 0 : -1
-                        }
-                        lockedReason={rowLockedReason}
-                        onToggle={(on) => toggleDraft(project.id, on)}
-                        onFocus={() => setActiveId(project.id)}
-                      />
-                    ))}
-                  </div>
-                  {/* The truncation note stands alone: a 50-cap catalog of only
+                <div
+                  className="max-h-64 overflow-y-auto"
+                  onKeyDown={onRowKeyDown}
+                >
+                  {rows.map((project) => (
+                    <ProjectRow
+                      key={project.id}
+                      project={project}
+                      checked={draft.has(project.id)}
+                      active={activeId === project.id}
+                      rovingTab={
+                        navIndexById.get(project.id) === focusIndex ? 0 : -1
+                      }
+                      lockedReason={rowLockedReason}
+                      onToggle={(on) => toggleDraft(project.id, on)}
+                      onFocus={() => setActiveId(project.id)}
+                    />
+                  ))}
+                </div>
+                {/* The truncation note stands alone: a 50-cap catalog of only
                       CLOSED boards renders zero rows, where a bare "no projects"
                       would be a lie. */}
-                  {(showApplyNote || showTruncated) && (
-                    <div className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
-                      {showApplyNote && <p>Changes apply when this closes.</p>}
-                      {showTruncated && <p>Some projects aren't shown.</p>}
-                    </div>
-                  )}
-                </>
-              )}
-            </Popover.Popup>
-          </Popover.Positioner>
-        </Popover.Portal>
-      </Popover.Root>
-      {items.map((item) => (
-        <span
-          key={item.itemId}
-          className="inline-flex max-w-full items-center border px-1.5 py-0.5 text-[11px] text-muted-foreground"
-          title={projectLabel(item.project)}
-        >
-          <span className="truncate">{projectLabel(item.project)}</span>
-        </span>
-      ))}
+                {(showApplyNote || showTruncated) && (
+                  <div className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
+                    {showApplyNote && <p>Changes apply when this closes.</p>}
+                    {showTruncated && <p>Some projects aren't shown.</p>}
+                  </div>
+                )}
+              </>
+            )}
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+  const chips = items.map((item) => (
+    <span
+      key={item.itemId}
+      className="inline-flex max-w-full items-center border px-1.5 py-0.5 text-[11px] text-muted-foreground"
+      title={projectLabel(item.project)}
+    >
+      <span className="truncate">{projectLabel(item.project)}</span>
+    </span>
+  ));
+
+  if (cells) {
+    return (
+      <>
+        {trigger}
+        <MetaValueCell label="Projects" empty={items.length === 0}>
+          {chips}
+        </MetaValueCell>
+      </>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {trigger}
+      {chips}
     </div>
   );
 }

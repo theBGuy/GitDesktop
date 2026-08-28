@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { type ComponentProps, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { MetaValueCell } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -71,6 +72,7 @@ export function AssigneesPopover({
   commitOnClose = false,
   lens,
   disabledReason,
+  cells = false,
 }: {
   repoPath: string;
   enabled: boolean;
@@ -83,6 +85,10 @@ export function AssigneesPopover({
    *  its action needs, or the surface is still loading the entity. The trigger
    *  stays visible but disabled and this text explains why. Absent = editable. */
   disabledReason?: string;
+  /** Emit the trigger and the chips as two SIBLING elements rather than one
+   *  inline row, so a caller's label/value grid can place each in its own
+   *  column. Default renders the inline row. */
+  cells?: boolean;
 }) {
   const users = useAssignableUsers(repoPath, enabled, lens);
   const ghHost = useForgeGhHost(repoPath);
@@ -133,68 +139,84 @@ export function AssigneesPopover({
 
   const loaded = users.data ?? [];
 
-  return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <Popover.Root open={open} onOpenChange={handleOpenChange}>
-        {/* A natively disabled button swallows `title`, so the reason rides a
-            wrapping span. */}
-        <span
-          title={disabledReason}
-          className={
-            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+  const trigger = (
+    <Popover.Root open={open} onOpenChange={handleOpenChange}>
+      {/* A natively disabled button swallows `title`, so the reason rides a
+          wrapping span. */}
+      <span
+        title={disabledReason}
+        className={
+          disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+        }
+      >
+        <Popover.Trigger
+          disabled={!!disabledReason}
+          render={
+            <Button variant="ghost" size="xs" aria-label="Edit assignees" />
           }
         >
-          <Popover.Trigger
-            disabled={!!disabledReason}
-            render={
-              <Button variant="ghost" size="xs" aria-label="Edit assignees" />
-            }
-          >
-            <UserPlusIcon data-icon="inline-start" />
-            Assignees
-          </Popover.Trigger>
-        </span>
-        <Popover.Portal container={portalContainer}>
-          <Popover.Positioner
-            align="start"
-            sideOffset={4}
-            className="isolate z-50"
-          >
-            <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-              <p className="px-1 pb-1.5 text-xs font-medium">Assignees</p>
-              {loaded.length === 0 && (
-                <p className="px-1 py-1 text-xs text-muted-foreground">
-                  {users.isPending ? "Loading…" : "No assignable users."}
-                </p>
-              )}
-              {loaded.map((user) => (
-                <label
-                  key={user.id}
-                  className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
-                >
-                  <Checkbox
-                    checked={checkedIds.has(user.id)}
-                    onCheckedChange={(v) => toggle(user, v === true)}
-                  />
-                  <ForgeUserAvatar user={user} ghHost={ghHost} />
-                  <span className="flex-1 truncate" title={user.label}>
-                    {user.label}
-                  </span>
-                </label>
-              ))}
-            </Popover.Popup>
-          </Popover.Positioner>
-        </Popover.Portal>
-      </Popover.Root>
-      {value.map((user) => (
-        <span
-          key={user.id}
-          className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+          <UserPlusIcon data-icon="inline-start" />
+          Assignees
+        </Popover.Trigger>
+      </span>
+      <Popover.Portal container={portalContainer}>
+        <Popover.Positioner
+          align="start"
+          sideOffset={4}
+          className="isolate z-50"
         >
-          <ForgeUserAvatar user={user} ghHost={ghHost} />
-          {user.label}
-        </span>
-      ))}
+          <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
+            <p className="px-1 pb-1.5 text-xs font-medium">Assignees</p>
+            {loaded.length === 0 && (
+              <p className="px-1 py-1 text-xs text-muted-foreground">
+                {users.isPending ? "Loading…" : "No assignable users."}
+              </p>
+            )}
+            {loaded.map((user) => (
+              <label
+                key={user.id}
+                className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
+              >
+                <Checkbox
+                  checked={checkedIds.has(user.id)}
+                  onCheckedChange={(v) => toggle(user, v === true)}
+                />
+                <ForgeUserAvatar user={user} ghHost={ghHost} />
+                <span className="flex-1 truncate" title={user.label}>
+                  {user.label}
+                </span>
+              </label>
+            ))}
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+  const chips = value.map((user) => (
+    <span
+      key={user.id}
+      className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+    >
+      <ForgeUserAvatar user={user} ghHost={ghHost} />
+      {user.label}
+    </span>
+  ));
+
+  if (cells) {
+    return (
+      <>
+        {trigger}
+        <MetaValueCell label="Assignees" empty={value.length === 0}>
+          {chips}
+        </MetaValueCell>
+      </>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {trigger}
+      {chips}
     </div>
   );
 }

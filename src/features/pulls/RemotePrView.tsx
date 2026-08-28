@@ -18,6 +18,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  Fragment,
   type ReactNode,
   useEffect,
   useEffectEvent,
@@ -33,6 +34,7 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { SelectControl } from "@/components/form/fields";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
+import { MetaFieldLabel, MetaValueCell } from "@/components/meta-field-cells";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -2267,9 +2269,178 @@ export function RemotePrView({
           ? "No merge method is enabled by both this repository's settings and its branch rules"
           : `Merge this ${prNoun}`);
 
+  // The header's meta fields, row-major, as label/value pairs for the grid
+  // below: an editable field emits its trigger as the label cell and its chips
+  // as the value cell (`cells`), a read-only one a static label plus chips.
+  // Entity-keyed pickers — labels, assignees, projects, reviewers: each seeds a
+  // draft on open, commits it on close against LIVE props, and a keyboard PR
+  // switch leaves the popover open; unkeyed, the old draft lands on the new PR.
+  // Projects is the exception to the commit clause: its memberships come from a
+  // query rather than props, so its close diffs the draft against the set SEEDED
+  // at open (or at the first settle after it), never the live one — live items
+  // serve only as the item-id lookup for unlinks.
+  // Every field prefixes its key: duplicate keys in one children array make React
+  // drop the earlier duplicates' unmount, leaking stale rows.
+  const metaCells: ReactNode[] = [];
+  if (isOpen && canEditLabels) {
+    metaCells.push(
+      <LabelsPopover
+        key={`labels-${entityKey}`}
+        cells
+        repoPath={repoPath}
+        enabled
+        number={number}
+        target="mr"
+        labelableId={pr.id}
+        labels={pr.labels}
+        lens={lens}
+        disabledReason={pickerReason}
+      />,
+    );
+  } else if (pr.labels.length > 0) {
+    metaCells.push(
+      <Fragment key="labels-static">
+        <MetaFieldLabel>Labels</MetaFieldLabel>
+        <MetaValueCell label="Labels">
+          {pr.labels.map((label) => (
+            <LabelChip key={label.name} label={label} />
+          ))}
+        </MetaValueCell>
+      </Fragment>,
+    );
+  }
+  // Assignee picker (GitHub + GitLab). A closed/merged PR falls back to
+  // read-only chips, like the labels field.
+  if (isOpen && canEditAssignees) {
+    metaCells.push(
+      <AssigneesPopover
+        key={`assignees-${entityKey}`}
+        cells
+        repoPath={repoPath}
+        enabled
+        value={pr.assignees}
+        commitOnClose
+        lens={lens}
+        disabledReason={pickerReason}
+        onChange={(next) =>
+          setAssignees.mutate(
+            { number, assignees: next },
+            { onError: toastError },
+          )
+        }
+      />,
+    );
+  } else if (pr.assignees.length > 0) {
+    metaCells.push(
+      <Fragment key="assignees-static">
+        <MetaFieldLabel>Assignees</MetaFieldLabel>
+        <MetaValueCell label="Assignees">
+          {pr.assignees.map((user) => (
+            <span
+              key={user.id}
+              className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+            >
+              <ForgeUserAvatar user={user} ghHost={ghHost} />
+              {user.label}
+            </span>
+          ))}
+        </MetaValueCell>
+      </Fragment>,
+    );
+  }
+  // GitHub Projects membership (GitHub-only). Unlike labels/assignees it has no
+  // read-only fallback: its chips come from their own query rather than from
+  // `pr`, so a closed PR would pay a fetch to show them.
+  if (isOpen && providerKey === "github") {
+    metaCells.push(
+      <ProjectsPopover
+        key={`projects-${entityKey}`}
+        cells
+        repoPath={repoPath}
+        enabled
+        kind="pr"
+        number={number}
+        contentId={pr.id}
+        lens={lens}
+        disabledReason={pickerReason}
+      />,
+    );
+  }
+  // Reviewers (all three providers). A closed/merged PR falls back to read-only
+  // chips. Bot requests (e.g. Copilot) are display-only and split out here so the
+  // popover's onChange — which emits its `value` as the desired set — can never
+  // ride a bot through; they share the value cell as the picker's children.
+  if (isOpen && canEditReviewers) {
+    metaCells.push(
+      <ReviewersPopover
+        key={`reviewers-${entityKey}`}
+        cells
+        repoPath={repoPath}
+        number={number}
+        enabled
+        value={humanReviewers}
+        lens={lens}
+        disabledReason={pickerReason}
+        onChange={(next) =>
+          setReviewers.mutate(
+            { number, reviewers: next },
+            { onError: toastError },
+          )
+        }
+      >
+        {botReviewers.map((user) => (
+          <BotReviewerChip key={user.id} user={user} ghHost={ghHost} />
+        ))}
+        {completedReviewers.map((reviewer) => (
+          <CompletedReviewerChip
+            key={reviewer.login}
+            reviewer={reviewer}
+            ghHost={ghHost}
+          />
+        ))}
+      </ReviewersPopover>,
+    );
+  } else if (pr.reviewers.length > 0 || completedReviewers.length > 0) {
+    metaCells.push(
+      <Fragment key="reviewers-static">
+        <MetaFieldLabel>Reviewers</MetaFieldLabel>
+        <MetaValueCell label="Reviewers">
+          {humanReviewers
+            .filter((h) => !completedLogins.has(h.id))
+            .map((user) => {
+              const hint = userRefHint(user, humanReviewers);
+              return (
+                <span
+                  key={user.id}
+                  title={hint ? `${user.label} (${hint})` : undefined}
+                  className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+                >
+                  <ForgeUserAvatar user={user} ghHost={ghHost} />
+                  {user.label}
+                  {hint && (
+                    <span className="text-muted-foreground"> · {hint}</span>
+                  )}
+                </span>
+              );
+            })}
+          {botReviewers.map((user) => (
+            <BotReviewerChip key={user.id} user={user} ghHost={ghHost} />
+          ))}
+          {completedReviewers.map((reviewer) => (
+            <CompletedReviewerChip
+              key={reviewer.login}
+              reviewer={reviewer}
+              ghHost={ghHost}
+            />
+          ))}
+        </MetaValueCell>
+      </Fragment>,
+    );
+  }
+
   return (
     <div className="flex h-full flex-col">
-      <header className="space-y-2 border-b px-4 py-3">
+      <header className="@container space-y-2 border-b px-4 py-3">
         <div className="flex items-start gap-2">
           <h2 className="text-sm font-medium">
             {pr.title}{" "}
@@ -2365,152 +2536,15 @@ export function RemotePrView({
             className="flex items-center gap-2"
           />
         </div>
-        {/* Entity-keyed pickers — labels, assignees, projects, reviewers: each
-            seeds a draft on open, commits it on close against LIVE props, and a
-            keyboard PR switch leaves the popover open; unkeyed, the old draft
-            lands on the new PR. Projects is the exception to the commit clause:
-            its memberships come from a query rather than props, so its close
-            diffs the draft against the set SEEDED at open (or at the first settle
-            after it), never the live one — live items serve only as the item-id
-            lookup for unlinks.
-            Labels/assignees/projects prefix keys as SIBLINGS: duplicate keys in
-            one children array make React drop the earlier duplicates' unmount,
-            leaking stale rows. Reviewers' prefix is consistency: own wrapper div. */}
-        {isOpen && canEditLabels ? (
-          <LabelsPopover
-            key={`labels-${entityKey}`}
-            repoPath={repoPath}
-            enabled
-            number={number}
-            target="mr"
-            labelableId={pr.id}
-            labels={pr.labels}
-            lens={lens}
-            disabledReason={pickerReason}
-          />
-        ) : (
-          pr.labels.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              {pr.labels.map((label) => (
-                <LabelChip key={label.name} label={label} />
-              ))}
-            </div>
-          )
-        )}
-        {/* Assignee picker (GitHub + GitLab). A closed/merged PR falls back to
-            read-only chips, like the labels row. */}
-        {isOpen && canEditAssignees ? (
-          <AssigneesPopover
-            key={`assignees-${entityKey}`}
-            repoPath={repoPath}
-            enabled
-            value={pr.assignees}
-            commitOnClose
-            lens={lens}
-            disabledReason={pickerReason}
-            onChange={(next) =>
-              setAssignees.mutate(
-                { number, assignees: next },
-                { onError: toastError },
-              )
-            }
-          />
-        ) : (
-          pr.assignees.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              {pr.assignees.map((user) => (
-                <span
-                  key={user.id}
-                  className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
-                >
-                  <ForgeUserAvatar user={user} ghHost={ghHost} />
-                  {user.label}
-                </span>
-              ))}
-            </div>
-          )
-        )}
-        {/* GitHub Projects membership (GitHub-only). Unlike labels/assignees it has
-            no read-only fallback: its chips come from their own query rather than
-            from `pr`, so a closed PR would pay a fetch to show them. */}
-        {isOpen && providerKey === "github" ? (
-          <ProjectsPopover
-            key={`projects-${entityKey}`}
-            repoPath={repoPath}
-            enabled
-            kind="pr"
-            number={number}
-            contentId={pr.id}
-            lens={lens}
-            disabledReason={pickerReason}
-          />
-        ) : null}
-        {/* Reviewers picker (all three providers). A closed/merged PR falls back to
-            read-only chips. Bot requests (e.g. Copilot) are display-only and split out
-            here so the popover's onChange — which emits its `value` as the desired
-            set — can never ride a bot through. */}
-        {isOpen && canEditReviewers ? (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <ReviewersPopover
-              key={`reviewers-${entityKey}`}
-              repoPath={repoPath}
-              number={number}
-              enabled
-              value={humanReviewers}
-              lens={lens}
-              disabledReason={pickerReason}
-              onChange={(next) =>
-                setReviewers.mutate(
-                  { number, reviewers: next },
-                  { onError: toastError },
-                )
-              }
-            />
-            {botReviewers.map((user) => (
-              <BotReviewerChip key={user.id} user={user} ghHost={ghHost} />
-            ))}
-            {completedReviewers.map((reviewer) => (
-              <CompletedReviewerChip
-                key={reviewer.login}
-                reviewer={reviewer}
-                ghHost={ghHost}
-              />
-            ))}
+        {/* One label/value grid for every meta field, two pairs wide until the
+            PANEL (not the viewport) is too narrow for them — the PR view's width
+            tracks its panel, so this is a container query. `minmax(0,…)` lets a
+            dense chip cell shrink instead of overflowing the header. */}
+        {metaCells.length > 0 ? (
+          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 text-xs @3xl:grid-cols-[auto_minmax(0,1fr)_auto_minmax(0,1fr)]">
+            {metaCells}
           </div>
-        ) : (
-          (pr.reviewers.length > 0 || completedReviewers.length > 0) && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              {humanReviewers
-                .filter((h) => !completedLogins.has(h.id))
-                .map((user) => {
-                  const hint = userRefHint(user, humanReviewers);
-                  return (
-                    <span
-                      key={user.id}
-                      title={hint ? `${user.label} (${hint})` : undefined}
-                      className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
-                    >
-                      <ForgeUserAvatar user={user} ghHost={ghHost} />
-                      {user.label}
-                      {hint && (
-                        <span className="text-muted-foreground"> · {hint}</span>
-                      )}
-                    </span>
-                  );
-                })}
-              {botReviewers.map((user) => (
-                <BotReviewerChip key={user.id} user={user} ghHost={ghHost} />
-              ))}
-              {completedReviewers.map((reviewer) => (
-                <CompletedReviewerChip
-                  key={reviewer.login}
-                  reviewer={reviewer}
-                  ghHost={ghHost}
-                />
-              ))}
-            </div>
-          )
-        )}
+        ) : null}
         {/* GitLab-only time-tracking summary; a popover with estimate/add-spent
             while the MR is open, static once closed. */}
         {canTrackTime && (

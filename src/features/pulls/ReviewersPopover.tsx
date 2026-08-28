@@ -1,7 +1,8 @@
 import { Popover } from "@base-ui/react/popover";
 import { UserCheckIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { Children, type ReactNode, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { MetaValueCell } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -48,6 +49,8 @@ export function ReviewersPopover({
   onChange,
   lens,
   disabledReason,
+  cells = false,
+  children,
 }: {
   repoPath: string;
   number: number | null;
@@ -60,6 +63,16 @@ export function ReviewersPopover({
    *  its action needs, or the surface is still loading the entity. The trigger
    *  stays visible but disabled and this text explains why. Absent = editable. */
   disabledReason?: string;
+  /** Emit the trigger and the chips as two SIBLING elements rather than one
+   *  inline row, so a caller's label/value grid can place each in its own
+   *  column. Default renders the inline row. */
+  cells?: boolean;
+  /** `cells` mode only: display-only reviewer chips the caller owns (bot
+   *  requests, completed reviews), rendered after this picker's own chips so the
+   *  whole field reads as one value. Pass them as bare children, never wrapped
+   *  in a Fragment: the empty-cell test drops null/undefined/booleans but counts
+   *  a Fragment as content whatever is inside it. */
+  children?: ReactNode;
 }) {
   const candidates = useReviewerCandidates(repoPath, number, enabled, lens);
   // GitHub reviewer ids are logins (avatars served at `<host>/<login>.png`), so the
@@ -105,87 +118,109 @@ export function ReviewersPopover({
     if (changed) onChange([...draft.values()]);
   }
 
-  return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <Popover.Root open={open} onOpenChange={handleOpenChange}>
-        {/* A natively disabled button swallows `title`, so the reason rides a
-            wrapping span. */}
-        <span
-          title={disabledReason}
-          className={
-            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+  const trigger = (
+    <Popover.Root open={open} onOpenChange={handleOpenChange}>
+      {/* A natively disabled button swallows `title`, so the reason rides a
+          wrapping span. */}
+      <span
+        title={disabledReason}
+        className={
+          disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+        }
+      >
+        <Popover.Trigger
+          disabled={!!disabledReason}
+          render={
+            <Button variant="ghost" size="xs" aria-label="Edit reviewers" />
           }
         >
-          <Popover.Trigger
-            disabled={!!disabledReason}
-            render={
-              <Button variant="ghost" size="xs" aria-label="Edit reviewers" />
-            }
-          >
-            <UserCheckIcon data-icon="inline-start" />
-            Reviewers
-          </Popover.Trigger>
-        </span>
-        <Popover.Portal container={portalContainer}>
-          <Popover.Positioner
-            align="start"
-            sideOffset={4}
-            className="isolate z-50"
-          >
-            <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-              <p className="px-1 pb-1.5 text-xs font-medium">Reviewers</p>
-              {(candidates.data ?? []).length === 0 && (
-                <p className="px-1 py-1 text-xs text-muted-foreground">
-                  {candidates.isPending
-                    ? "Loading…"
-                    : candidates.isError
-                      ? "Couldn't load workspace members."
-                      : "No eligible reviewers — the workspace has no other members."}
-                </p>
-              )}
-              {loaded.map((user) => {
-                const hint = userRefHint(user, rowUniverse);
-                return (
-                  <label
-                    key={user.id}
-                    title={hint ? `${user.label} (${hint})` : undefined}
-                    className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
+          <UserCheckIcon data-icon="inline-start" />
+          Reviewers
+        </Popover.Trigger>
+      </span>
+      <Popover.Portal container={portalContainer}>
+        <Popover.Positioner
+          align="start"
+          sideOffset={4}
+          className="isolate z-50"
+        >
+          <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
+            <p className="px-1 pb-1.5 text-xs font-medium">Reviewers</p>
+            {(candidates.data ?? []).length === 0 && (
+              <p className="px-1 py-1 text-xs text-muted-foreground">
+                {candidates.isPending
+                  ? "Loading…"
+                  : candidates.isError
+                    ? "Couldn't load workspace members."
+                    : "No eligible reviewers — the workspace has no other members."}
+              </p>
+            )}
+            {loaded.map((user) => {
+              const hint = userRefHint(user, rowUniverse);
+              return (
+                <label
+                  key={user.id}
+                  title={hint ? `${user.label} (${hint})` : undefined}
+                  className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
+                >
+                  <Checkbox
+                    checked={draft.has(user.id)}
+                    onCheckedChange={(v) => toggle(user, v === true)}
+                  />
+                  <ForgeUserAvatar user={user} ghHost={ghHost} />
+                  <span
+                    className="flex-1 truncate"
+                    title={hint ? `${user.label} (${hint})` : user.label}
                   >
-                    <Checkbox
-                      checked={draft.has(user.id)}
-                      onCheckedChange={(v) => toggle(user, v === true)}
-                    />
-                    <ForgeUserAvatar user={user} ghHost={ghHost} />
-                    <span
-                      className="flex-1 truncate"
-                      title={hint ? `${user.label} (${hint})` : user.label}
-                    >
-                      {user.label}
-                      {hint && (
-                        <span className="text-muted-foreground"> · {hint}</span>
-                      )}
-                    </span>
-                  </label>
-                );
-              })}
-            </Popover.Popup>
-          </Popover.Positioner>
-        </Popover.Portal>
-      </Popover.Root>
-      {value.map((user) => {
-        const hint = userRefHint(user, chipUniverse);
-        return (
-          <span
-            key={user.id}
-            title={hint ? `${user.label} (${hint})` : undefined}
-            className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
-          >
-            <ForgeUserAvatar user={user} ghHost={ghHost} />
-            {user.label}
-            {hint && <span className="text-muted-foreground"> · {hint}</span>}
-          </span>
-        );
-      })}
+                    {user.label}
+                    {hint && (
+                      <span className="text-muted-foreground"> · {hint}</span>
+                    )}
+                  </span>
+                </label>
+              );
+            })}
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+  const chips = value.map((user) => {
+    const hint = userRefHint(user, chipUniverse);
+    return (
+      <span
+        key={user.id}
+        title={hint ? `${user.label} (${hint})` : undefined}
+        className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+      >
+        <ForgeUserAvatar user={user} ghHost={ghHost} />
+        {user.label}
+        {hint && <span className="text-muted-foreground"> · {hint}</span>}
+      </span>
+    );
+  });
+
+  if (cells) {
+    // Caller-owned chips count toward the cell being populated, so a PR whose
+    // only reviewers are bots or finished reviews shows them, not the dash.
+    // `toArray` over `count`: it drops null/undefined/booleans, so a caller's
+    // `{cond && chips}` can't report content while rendering none.
+    const empty = value.length === 0 && Children.toArray(children).length === 0;
+    return (
+      <>
+        {trigger}
+        <MetaValueCell label="Reviewers" empty={empty}>
+          {chips}
+          {children}
+        </MetaValueCell>
+      </>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {trigger}
+      {chips}
     </div>
   );
 }
