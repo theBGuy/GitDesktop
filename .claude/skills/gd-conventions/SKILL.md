@@ -178,8 +178,8 @@ separators.
   (`src/components/meta-field-cells.tsx`) — never a hand-rolled `role="group"`
   value cell or a re-spelled empty-dash placeholder. A forge user inside one of
   those cells is a `UserChip` from the same module — never a hand-rolled
-  avatar + truncating-label span — and any sibling chip with its own markup
-  wears the shared `USER_CHIP_CLASS` box so adjacent chips can't drift. The
+  avatar + truncating-label span — and any chip that shares a value cell with
+  another but keeps its own markup wears the `USER_CHIP_CLASS` box. The
   pickers emit those two cells only under their `cells` prop; unset, each still
   renders its own inline trigger+chips row. Scope is that grid alone:
   `MrTimeTracking` (GitLab-only) deliberately keeps its own full-width row below

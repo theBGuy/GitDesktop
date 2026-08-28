@@ -57,8 +57,9 @@ export function MetaValueCell({
   );
 }
 
-/** The chip box shared by every chip that can sit in one meta value cell — a
- *  user, a bot request, a completed review — so adjacent chips can't drift. */
+/** The chip box shared by every chip that can share one value cell with
+ *  another — a user, a bot request, a completed review — so adjacent chips
+ *  can't drift. */
 export const USER_CHIP_CLASS =
   "inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground";
 
