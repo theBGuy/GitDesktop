@@ -1133,8 +1133,8 @@ struct RawDivergenceRefs {
     head_repository_owner: Option<RawLogin>,
 }
 
-/// The compare endpoint for a PR's base…head. Every interpolated segment goes
-/// through the shared basehead grammar first: all three arrive from `gh pr view`
+/// The compare endpoint for a PR's base…head. Every basehead segment goes
+/// through the shared grammar first: all three arrive from `gh pr view`
 /// and a fork's head ref and owner are attacker-chosen, while `gh api` expands
 /// `{…}` placeholders and a URL parser truncates at `#`/`?` — either would answer
 /// 200 for the WRONG refs. The owner rides the same validator because it occupies

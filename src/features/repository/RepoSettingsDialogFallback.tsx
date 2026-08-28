@@ -58,9 +58,8 @@ export function RepoSettingsDialogFallback({
             aria-busy
             className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto pr-1"
           >
-            {/* aria-busy alone announces nothing outside a live region;
-                role="status" makes the label a polite live region the reader
-                speaks on mount. */}
+            {/* aria-busy alone has no text; role="status" gives the busy
+                region words for readers that announce it. */}
             <span role="status" className="sr-only">
               Loading repository settings…
             </span>

@@ -2,6 +2,7 @@ import { PlusIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,7 +20,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { clipTitle } from "@/lib/clip-title";
@@ -550,7 +550,15 @@ export function TaskDialog({
             )}
 
             <div className="h-48 overflow-hidden rounded-md border">
-              <Suspense fallback={<Skeleton className="h-full w-full" />}>
+              <Suspense
+                fallback={
+                  <LazyPanelFallback
+                    name="the script editor"
+                    className="p-0"
+                    rows={["h-full w-full"]}
+                  />
+                }
+              >
                 <CodeEditor value={body} onChange={setBody} />
               </Suspense>
             </div>

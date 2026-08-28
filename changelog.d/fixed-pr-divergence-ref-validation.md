@@ -1,2 +1,2 @@
-- Fork branch names with special characters can no longer skew a PR's
-  divergence check.
+- A PR's divergence count comes from an exact base…head comparison; a fork
+  head that can't be addressed exactly reads as unknown.
