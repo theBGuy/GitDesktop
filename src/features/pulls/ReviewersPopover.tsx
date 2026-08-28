@@ -6,6 +6,7 @@ import { MetaValueCell } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useForgeGhHost } from "@/lib/git/host";
 import { useReviewerCandidates } from "@/lib/git/queries";
 import type { ForgeUserRef, RemoteLens } from "@/lib/git/types";
@@ -63,17 +64,23 @@ export function ReviewersPopover({
    *  its action needs, or the surface is still loading the entity. The trigger
    *  stays visible but disabled and this text explains why. Absent = editable. */
   disabledReason?: string;
-  /** Emit the trigger and the chips as two SIBLING elements rather than one
-   *  inline row, so a caller's label/value grid can place each in its own
-   *  column. Default renders the inline row. */
-  cells?: boolean;
-  /** `cells` mode only: display-only reviewer chips the caller owns (bot
-   *  requests, completed reviews), rendered after this picker's own chips so the
-   *  whole field reads as one value. Pass them as bare children, never wrapped
-   *  in a Fragment: the empty-cell test drops null/undefined/booleans but counts
-   *  a Fragment as content whatever is inside it. */
-  children?: ReactNode;
-}) {
+} & (
+  | {
+      /** Emit the trigger and the chips as two SIBLING elements rather than one
+       *  inline row, so a caller's label/value grid can place each in its own
+       *  column. */
+      cells: true;
+      /** Display-only reviewer chips the caller owns (bot requests, completed
+       *  reviews), rendered after this picker's own chips so the whole field
+       *  reads as one value. Pass them as bare children, never wrapped in a
+       *  Fragment: the empty-cell test drops null/undefined/booleans but counts
+       *  a Fragment as content whatever is inside it. */
+      children?: ReactNode;
+    }
+  // Children have nowhere to render outside `cells`, so the type refuses them
+  // rather than dropping them silently.
+  | { cells?: false; children?: never }
+)) {
   const candidates = useReviewerCandidates(repoPath, number, enabled, lens);
   // GitHub reviewer ids are logins (avatars served at `<host>/<login>.png`), so the
   // avatar is login-derived there; off GitHub it's the initial fallback unless the
@@ -185,17 +192,22 @@ export function ReviewersPopover({
       </Popover.Portal>
     </Popover.Root>
   );
+  // Bounded by its container so one long name can't set a narrow column's
+  // min-content width. The clip tooltip REMOVES its own title when nothing is
+  // cut, leaving the chip's disambiguating one (when it has a hint) to show.
   const chips = value.map((user) => {
     const hint = userRefHint(user, chipUniverse);
     return (
       <span
         key={user.id}
         title={hint ? `${user.label} (${hint})` : undefined}
-        className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+        className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
       >
         <ForgeUserAvatar user={user} ghHost={ghHost} />
-        {user.label}
-        {hint && <span className="text-muted-foreground"> · {hint}</span>}
+        <span className="truncate" onMouseEnter={clipTitleFromText}>
+          {user.label}
+          {hint && <span className="text-muted-foreground"> · {hint}</span>}
+        </span>
       </span>
     );
   });

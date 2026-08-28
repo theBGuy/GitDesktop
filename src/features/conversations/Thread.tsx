@@ -15,6 +15,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Markdown } from "@/components/ui/markdown";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import type { MinimizeReason } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
@@ -322,15 +323,19 @@ export function Thread({
   );
 }
 
+/** A repo label as a chip. Bounded by its container so one long name can't set a
+ *  narrow column's min-content width; the tooltip appears only once cut. */
 export function LabelChip({ label }: { label: RepoLabel }) {
   return (
-    <span className="flex items-center gap-1 border px-1.5 py-0.5 text-[11px]">
+    <span className="flex max-w-full items-center gap-1 border px-1.5 py-0.5 text-[11px]">
       <span
         aria-hidden
         className="size-2 shrink-0 rounded-full"
         style={{ backgroundColor: `#${label.color}` }}
       />
-      {label.name}
+      <span className="truncate" onMouseEnter={clipTitleFromText}>
+        {label.name}
+      </span>
     </span>
   );
 }

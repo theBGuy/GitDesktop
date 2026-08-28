@@ -17,6 +17,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
   useAssignableUsers,
@@ -192,13 +193,17 @@ export function AssigneesPopover({
       </Popover.Portal>
     </Popover.Root>
   );
+  // Bounded by its container so one long name can't set a narrow column's
+  // min-content width; the tooltip appears only once the name is cut.
   const chips = value.map((user) => (
     <span
       key={user.id}
-      className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+      className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
     >
       <ForgeUserAvatar user={user} ghHost={ghHost} />
-      {user.label}
+      <span className="truncate" onMouseEnter={clipTitleFromText}>
+        {user.label}
+      </span>
     </span>
   ));
 

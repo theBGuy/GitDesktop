@@ -108,8 +108,10 @@ export function LabelsPopover({
           disabled={!!disabledReason}
           render={<Button variant="ghost" size="xs" aria-label="Edit labels" />}
         >
+          {/* size-3 explicitly: the Button's own icon rule skips a sized
+              element, and a 16px swap would widen the label column mid-write. */}
           {editLabels.isPending ? (
-            <Spinner data-icon="inline-start" />
+            <Spinner className="size-3" data-icon="inline-start" />
           ) : (
             <TagIcon data-icon="inline-start" />
           )}

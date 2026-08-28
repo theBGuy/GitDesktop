@@ -77,6 +77,7 @@ import {
   useEffectiveBranchRules,
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import {
@@ -2338,10 +2339,12 @@ export function RemotePrView({
           {pr.assignees.map((user) => (
             <span
               key={user.id}
-              className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+              className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
             >
               <ForgeUserAvatar user={user} ghHost={ghHost} />
-              {user.label}
+              <span className="truncate" onMouseEnter={clipTitleFromText}>
+                {user.label}
+              </span>
             </span>
           ))}
         </MetaValueCell>
@@ -2413,13 +2416,15 @@ export function RemotePrView({
                 <span
                   key={user.id}
                   title={hint ? `${user.label} (${hint})` : undefined}
-                  className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+                  className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
                 >
                   <ForgeUserAvatar user={user} ghHost={ghHost} />
-                  {user.label}
-                  {hint && (
-                    <span className="text-muted-foreground"> · {hint}</span>
-                  )}
+                  <span className="truncate" onMouseEnter={clipTitleFromText}>
+                    {user.label}
+                    {hint && (
+                      <span className="text-muted-foreground"> · {hint}</span>
+                    )}
+                  </span>
                 </span>
               );
             })}
@@ -2440,7 +2445,7 @@ export function RemotePrView({
 
   return (
     <div className="flex h-full flex-col">
-      <header className="@container space-y-2 border-b px-4 py-3">
+      <header className="@container/pr-header space-y-2 border-b px-4 py-3">
         <div className="flex items-start gap-2">
           <h2 className="text-sm font-medium">
             {pr.title}{" "}
@@ -2541,7 +2546,7 @@ export function RemotePrView({
             tracks its panel, so this is a container query. `minmax(0,…)` lets a
             dense chip cell shrink instead of overflowing the header. */}
         {metaCells.length > 0 ? (
-          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 text-xs @3xl:grid-cols-[auto_minmax(0,1fr)_auto_minmax(0,1fr)]">
+          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 text-xs @3xl/pr-header:grid-cols-[auto_minmax(0,1fr)_auto_minmax(0,1fr)]">
             {metaCells}
           </div>
         ) : null}
@@ -3709,7 +3714,7 @@ function CompletedReviewerChip({
     <span
       title={name}
       aria-label={name}
-      className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+      className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
     >
       <Icon aria-hidden className={cn("size-3 shrink-0", tone)} />
       {reviewer.isBot ? (
@@ -3726,7 +3731,7 @@ function CompletedReviewerChip({
           decorative
         />
       )}
-      {reviewer.label}
+      <span className="truncate">{reviewer.label}</span>
     </span>
   );
 }
@@ -3746,10 +3751,10 @@ function BotReviewerChip({
     <span
       title={name}
       aria-label={name}
-      className="inline-flex items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
+      className="inline-flex max-w-full items-center gap-1 border py-0.5 pr-1.5 pl-0.5 text-[11px] text-muted-foreground"
     >
       <ForgeUserAvatar user={user} ghHost={ghHost} decorative />
-      {user.label}
+      <span className="truncate">{user.label}</span>
       <RobotIcon aria-hidden className="size-3 shrink-0" />
     </span>
   );

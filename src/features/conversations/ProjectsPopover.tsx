@@ -6,6 +6,7 @@ import { MetaValueCell } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
@@ -286,8 +287,10 @@ export function ProjectsPopover({
             <Button variant="ghost" size="xs" aria-label="Edit projects" />
           }
         >
+          {/* size-3 explicitly: the Button's own icon rule skips a sized
+              element, and a 16px swap would widen the label column mid-write. */}
           {editProjects.isPending ? (
-            <Spinner data-icon="inline-start" />
+            <Spinner className="size-3" data-icon="inline-start" />
           ) : (
             <KanbanIcon data-icon="inline-start" />
           )}
@@ -401,11 +404,31 @@ export function ProjectsPopover({
   ));
 
   if (cells) {
+    // The dash is a resolved-none claim, so only a settled read may show it: a
+    // cold fetch, a failed one and the scope-gated path all leave membership
+    // unknown, and the popup is where each is explained and repaired.
+    const value = (() => {
+      switch (true) {
+        case memberships.isSuccess:
+          return chips;
+        case loadingMemberships:
+          return <Skeleton className="h-5 w-24" aria-hidden />;
+        default:
+          return (
+            <span className="text-[11px] text-muted-foreground">
+              unavailable
+            </span>
+          );
+      }
+    })();
     return (
       <>
         {trigger}
-        <MetaValueCell label="Projects" empty={items.length === 0}>
-          {chips}
+        <MetaValueCell
+          label="Projects"
+          empty={memberships.isSuccess && items.length === 0}
+        >
+          {value}
         </MetaValueCell>
       </>
     );

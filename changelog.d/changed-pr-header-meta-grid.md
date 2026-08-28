@@ -1,3 +1,3 @@
-- Pull request and merge request headers now arrange labels, assignees, projects,
-  and reviewers in a label/value grid that packs two fields per line and drops to
-  one as the panel narrows.
+- Pull request and merge request headers now arrange the meta fields your forge
+  provides (labels, assignees, projects, reviewers) in a label/value grid — two
+  fields per line where the panel has room, one where it doesn't.

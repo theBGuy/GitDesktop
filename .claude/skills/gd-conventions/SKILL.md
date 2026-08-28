@@ -178,7 +178,10 @@ separators.
   (`src/components/meta-field-cells.tsx`) — never a hand-rolled `role="group"`
   value cell or a re-spelled empty-dash placeholder. The pickers emit those two
   cells only under their `cells` prop; unset, each still renders its own inline
-  trigger+chips row.
+  trigger+chips row. Scope is that grid alone: `MrTimeTracking` (GitLab-only)
+  deliberately keeps its own full-width row below it, and form-dialog field
+  groups (CreatePrDialog / CreateIssueDialog's `Label` + `aria-labelledby`
+  wrappers) are a richer separate pattern this rule doesn't govern.
 
 **Layout gotchas.** `DialogContent` is a grid — truncating flex content needs
 `min-w-0` on the grid item; cap tall dialogs at `max-h-[85vh]`. Link-styled
