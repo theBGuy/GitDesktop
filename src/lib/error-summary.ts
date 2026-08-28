@@ -192,7 +192,7 @@ const LONG_PATH_MARKERS = [/: Filename too long\s*$/m];
  *  so a path this long fails only where that flag can't reach — hence the remedy
  *  is aimed at the user's other tools rather than at GitDesktop. */
 const LONG_PATH_SUMMARY =
-  "Paths in this repository are longer than Windows normally allows. GitDesktop enables long paths for its own Git commands — to use this repository with other tools, turn on Windows long paths and set git config --global core.longpaths true.";
+  "Paths in this repository are longer than Windows allows by default. GitDesktop's own Git commands handle them; other tools need Windows long paths and git config --global core.longpaths true.";
 
 /** The humanized line for a path-length refusal, or null when the text carries
  *  none. */
