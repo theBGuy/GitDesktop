@@ -255,7 +255,8 @@ teammate's work, published with an ordinary fast-forward push. Both
 commits survive. This is what the pull would have done had it drawn the
 boundary from the graph instead of the diary. (A bare `git rebase` with
 no upstream argument defaults to the same fork-point rule as pull, so
-name the upstream when it matters.)
+name the upstream when it matters.) If you stashed at the start,
+`git stash pop` brings that work back; the incident is over.
 
 A `(forced update)` line in any fetch or pull output is the only
 warning you get. When you see it, stop pulling by reflex. Read what moved
