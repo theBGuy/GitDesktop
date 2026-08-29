@@ -1,0 +1,1 @@
+- GitDesktop windows can now be resized below the previous fixed width limit for split-screen layouts.
