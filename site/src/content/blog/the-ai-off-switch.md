@@ -51,7 +51,7 @@ Only the optional layer disappears.
 
 ## Agency matters
 
-I think AI is genuinely useful. I also think people should decide when it
+I think AI is useful. I also think people should decide when it
 belongs in their workflow. So GitDesktop never calls a model on its own. The
 only thing that runs automatically is an automation you turned on yourself.
 

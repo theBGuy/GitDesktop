@@ -109,9 +109,9 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. ignore src-tauri & site (their own toolchains), tool dirs, and
-      //    doc/config globs — no reloads for files the bundle doesn't use.
-      //    **/*.md covers CHANGELOG.md (imported ?raw by WhatsNew): accepted,
-      //    it's edited at release time, not during dev.
+      //    doc/config globs the dev server shouldn't restart on. **/*.md
+      //    knowingly covers CHANGELOG.md (imported ?raw by WhatsNew) —
+      //    accepted: it's edited at release time, not during dev.
       ignored: [
         "**/src-tauri/**",
         "**/site/**",

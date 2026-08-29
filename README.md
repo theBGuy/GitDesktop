@@ -469,9 +469,9 @@ assignees, and milestones. On GitHub, add **projects** (GitHub Projects,
 repo and owner level), issue type, sub-issues, dependencies (blocked-by /
 blocking), and development links (linked and closing PRs and branches, plus
 create-a-branch); on GitLab, related issues. Close or reopen with a comment
-you've drafted posted alongside; duplicate, transfer (move, on GitLab),
-pin/unpin (GitHub), lock/unlock, or delete. On a **fork**, the same
-**Fork | Upstream** lens as the PR tab browses the parent repository's
+you've drafted posted alongside; duplicate, transfer (called *move* on
+GitLab), pin/unpin (GitHub), lock/unlock, or delete. On a **fork**, the
+same **Fork | Upstream** lens as the PR tab browses the parent repository's
 issues (creating one under the Upstream lens opens it **on the parent**),
 and a fork with issues turned off offers a one-click switch to Upstream
 instead of a dead end.
