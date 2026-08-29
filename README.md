@@ -270,15 +270,15 @@ pushing and pulling stay manual.
 
 ### Pull requests
 
-Full read + write for GitHub, GitLab & Bitbucket PRs, plus **local PRs**:
-the same workflow against any two branches with no remote at all, promotable
-to a real GitHub or GitLab PR (comments and all) in one click.
+The full pull-request loop on GitHub, GitLab & Bitbucket, plus **local
+PRs**: the same workflow against any two branches with no remote at all,
+promotable to a real GitHub or GitLab PR (comments and all) in one click.
 
-- **Open, edit, merge**: review, comment, label, **assign**, **request
-  reviewers**, approve, edit, and merge (merge/squash/rebase) without the
-  browser. Set labels and assignees right when you open a PR/MR (GitHub &
-  GitLab), request reviewers across GitHub, GitLab & Bitbucket, see, link,
-  and unlink an open PR's **GitHub Projects** in its header, flip a PR
+- **Open, edit, merge**: review, comment, approve, edit, and merge
+  (merge/squash/rebase) without the browser. Labels and assignees on GitHub &
+  GitLab (set them when you open a PR/MR or any time after), request
+  reviewers across GitHub, GitLab & Bitbucket, see, link, and unlink an
+  open PR's **GitHub Projects** in its header, flip a PR
   between **draft and ready for review** either way on all three, and
   **create new PRs as drafts by default** (Settings → General).
 - **Linked issues**: link related issues when you open *or* edit a PR, as
@@ -466,12 +466,12 @@ remote needed; publishable to GitHub, GitLab, or linked Jira in one click).
 Browse, create, and edit (drafting with AI from your repo's issue
 templates), react with emoji, and manage the full metadata: labels,
 assignees, milestones, **projects** (GitHub Projects, repo and owner level),
-issue type, sub-issues, and dependencies (blocked-by / blocking) on GitHub,
-related issues on GitLab, and development links (linked and closing PRs and
-branches, plus create-a-branch). Close or
-reopen with a comment you've drafted posted alongside; duplicate, transfer,
-pin/unpin, lock/unlock, or delete. On a **fork**, the same
-**Fork | Upstream** lens as the PR tab browses the parent repository's
+issue type, sub-issues, dependencies (blocked-by / blocking), and
+development links (linked and closing PRs and branches, plus
+create-a-branch) on GitHub, and related issues on GitLab. Close or reopen
+with a comment you've drafted posted alongside; duplicate, transfer (move,
+on GitLab), pin/unpin (GitHub), lock/unlock, or delete. On a **fork**, the
+same **Fork | Upstream** lens as the PR tab browses the parent repository's
 issues (creating one under the Upstream lens opens it **on the parent**),
 and a fork with issues turned off offers a one-click switch to Upstream
 instead of a dead end.

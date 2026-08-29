@@ -319,7 +319,7 @@ export const capabilities: Capability[] = [
   {
     group: "CI, tags & releases",
     label:
-      "Tags, releases & cross-platform assets — edit notes, sync the updater manifest (GitHub & GitLab)",
+      "Tags, releases & cross-platform assets — edit notes (GitHub & GitLab), sync the updater manifest (GitHub)",
   },
   {
     group: "CI, tags & releases",

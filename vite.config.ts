@@ -119,7 +119,8 @@ export default defineConfig(async () => ({
         "**/.claude/**",
         "**/.agents/**",
         "**/.impeccable/**",
-        "**/.vscode/**"
+        "**/.vscode/**",
+        "**/*.md",
       ],
     },
   },
