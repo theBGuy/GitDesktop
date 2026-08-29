@@ -108,11 +108,13 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri` & `site` since we don't want to trigger reloads when those files change
+      // 3. ignore src-tauri & site (their own toolchains), tool dirs, and
+      //    doc/config globs — no reloads for files the bundle doesn't use.
+      //    **/*.md covers CHANGELOG.md (imported ?raw by WhatsNew): accepted,
+      //    it's edited at release time, not during dev.
       ignored: [
         "**/src-tauri/**",
         "**/site/**",
-        "*.md",
         "*.yml",
         "*.yaml",
         "**/.github/**",

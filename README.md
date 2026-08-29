@@ -274,13 +274,13 @@ The full pull-request loop on GitHub, GitLab & Bitbucket, plus **local
 PRs**: the same workflow against any two branches with no remote at all,
 promotable to a real GitHub or GitLab PR (comments and all) in one click.
 
-- **Open, edit, merge**: review, comment, approve, edit, and merge
-  (merge/squash/rebase) without the browser. Labels and assignees on GitHub &
-  GitLab (set them when you open a PR/MR or any time after), request
-  reviewers across GitHub, GitLab & Bitbucket, see, link, and unlink an
-  open PR's **GitHub Projects** in its header, flip a PR
-  between **draft and ready for review** either way on all three, and
-  **create new PRs as drafts by default** (Settings → General).
+- **Open, edit, merge**: review, comment, approve, edit, and merge (merge &
+  squash on all three; rebase on GitHub, fast-forward on Bitbucket) without
+  the browser. Labels and assignees on GitHub & GitLab (set them when you
+  open a PR/MR or any time after), request reviewers across GitHub, GitLab &
+  Bitbucket, see, link, and unlink an open PR's **GitHub Projects** in its
+  header, flip a PR between **draft and ready for review** either way on all
+  three, and **create new PRs as drafts by default** (Settings → General).
 - **Linked issues**: link related issues when you open *or* edit a PR, as
   chips **auto-detected** from your branch name and commits (a `fix/123-…`
   branch seeds `#123`) or picked by hand. Each chip toggles between
@@ -464,14 +464,14 @@ close the window.
 A dedicated tab for GitHub & GitLab issues and private **local to-dos** (no
 remote needed; publishable to GitHub, GitLab, or linked Jira in one click).
 Browse, create, and edit (drafting with AI from your repo's issue
-templates), react with emoji, and manage the full metadata: labels,
-assignees, milestones, **projects** (GitHub Projects, repo and owner level),
-issue type, sub-issues, dependencies (blocked-by / blocking), and
-development links (linked and closing PRs and branches, plus
-create-a-branch) on GitHub, and related issues on GitLab. Close or reopen
-with a comment you've drafted posted alongside; duplicate, transfer (move,
-on GitLab), pin/unpin (GitHub), lock/unlock, or delete. On a **fork**, the
-same **Fork | Upstream** lens as the PR tab browses the parent repository's
+templates), react with emoji, and manage the shared metadata: labels,
+assignees, and milestones. On GitHub, add **projects** (GitHub Projects,
+repo and owner level), issue type, sub-issues, dependencies (blocked-by /
+blocking), and development links (linked and closing PRs and branches, plus
+create-a-branch); on GitLab, related issues. Close or reopen with a comment
+you've drafted posted alongside; duplicate, transfer (move, on GitLab),
+pin/unpin (GitHub), lock/unlock, or delete. On a **fork**, the same
+**Fork | Upstream** lens as the PR tab browses the parent repository's
 issues (creating one under the Upstream lens opens it **on the parent**),
 and a fork with issues turned off offers a one-click switch to Upstream
 instead of a dead end.
@@ -777,13 +777,13 @@ touches your checkout.
   criteria, and verify plan, with cited paths validated against your tree so
   hallucinations are flagged. If the plan leaves decisions open, answer them
   in an inline panel (pick a suggestion or write your own) and **refine**
-  the plan with your choices. Then file it as a local or GitHub issue, or
-  hand it **straight to a write-capable agent session** to implement.
-  Nothing is changed during planning; it never writes.
-- **From issue to implementation**: an **Implement** button on any local or
-  GitHub issue (and on a finished plan) seeds the agent composer with the
-  spec, so you pick the agent and confirm; then it builds it in an isolated
-  worktree.
+  the plan with your choices. Then file it as a local, GitHub, or GitLab
+  issue, or hand it **straight to a write-capable agent session** to
+  implement. Nothing is changed during planning; it never writes.
+- **From issue to implementation**: a **Solve with agent** button on any
+  local, GitHub, or GitLab issue (and **Implement** on a finished plan)
+  seeds the agent composer with the spec, so you pick the agent and
+  confirm; then it builds it in an isolated worktree.
 
 ### MCP servers
 
