@@ -1597,6 +1597,51 @@ mod tests {
         );
     }
 
+    /// An upstream branch deleted on the forge. Without a pruning fetch the stale
+    /// tracking ref survives, every rev in the probe resolves against it, and the
+    /// rebase onto that stale tip succeeds — reporting a pull that bare git
+    /// refuses outright. The prune is what turns this back into git's own error.
+    #[tokio::test]
+    async fn a_rebase_pull_whose_upstream_branch_was_deleted_falls_back_to_bare_pull() {
+        let (_guard, base, origin_s, url) = seeded_origin("upstream-deleted").await;
+        let base_s = base.to_string_lossy().into_owned();
+        run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"]).await;
+        let clone = base.join("clone");
+        let clone_s = clone.to_string_lossy().into_owned();
+        run(&clone_s, &["config", "core.autocrlf", "false"]).await;
+        run(&clone_s, &["config", "user.email", "t@t.local"]).await;
+        run(&clone_s, &["config", "user.name", "T"]).await;
+
+        // The branch goes away on the remote, as a merged-and-deleted PR head does.
+        run(&origin_s, &["update-ref", "-d", "refs/heads/main"]).await;
+        assert!(
+            !head_of(&clone_s, "refs/remotes/origin/main").await.is_empty(),
+            "the clone still holds a tracking ref, which is what makes this silent"
+        );
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+            .await
+            .expect_err("a branch that no longer exists upstream cannot be pulled");
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected git's own error, got {err:?}");
+        };
+        assert!(
+            stderr.contains("no such ref was fetched"),
+            "bare pull's own refusal must reach the user: {stderr}"
+        );
+        assert!(
+            run_git(
+                Some(&clone_s),
+                &["rev-parse", "--verify", "refs/remotes/origin/main"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .is_err(),
+            "and the guard's fetch pruned the stale tracking ref on its way out"
+        );
+    }
+
     /// git's refusal wording for a dirty-tree rebase, which `isDirtyTreeRefusal`
     /// (src/lib/error-summary.ts) matches to offer the stash-and-retry recovery.
     /// The explicit rebase says "cannot rebase" where bare pull said "cannot pull

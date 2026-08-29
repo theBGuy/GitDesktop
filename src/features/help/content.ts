@@ -688,7 +688,7 @@ right on the **Push** and **Pull** buttons.
 
 - **Fetch** ({{kbd:fetch}}) updates your view of the remote without changing your branch.
 - **Pull** ({{kbd:pull}}) is fast-forward only by design — it won't create surprise merge
-  commits; the menu's caret offers rebase and merge when you've diverged.
+  commits; the menu's caret offers rebase and merge for reconciling a diverged branch.
 - **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
   see **Publish branch** instead.
 

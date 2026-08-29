@@ -10,11 +10,25 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import type { PullDecision, PullWouldDrop } from "@/lib/git/api";
+import { parseableDate } from "@/lib/time";
 import { useRetained } from "@/lib/use-retained";
 
 /** "1 commit" / "3 commits". */
 function commitCount(n: number): string {
   return `${n} commit${n === 1 ? "" : "s"}`;
+}
+
+/** A commit's author date in the user's locale ("Aug 28, 2026"), or `""` when
+ *  the payload carried nothing usable. `isPullWouldDrop` deliberately does not
+ *  verify this field, so an absent or unparseable one must render as nothing
+ *  rather than "Invalid Date". Static per commit — no clock read, no ticker. */
+function commitDate(authorDate: string): string {
+  if (!authorDate || !parseableDate(authorDate)) return "";
+  return new Date(authorDate).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 /** Everything an answer says: the verb on its button, the sentence explaining
@@ -86,7 +100,7 @@ export function PullRebaseDropDialog({
         // The corner X would be dead while the guard above swallows every close
         // path, so it goes away for the duration.
         showCloseButton={!busy}
-        initialFocus={keepRef}
+        initialFocus={() => keepRef.current}
       >
         <DialogHeader>
           <DialogTitle>Keep or drop these commits?</DialogTitle>
@@ -103,16 +117,24 @@ export function PullRebaseDropDialog({
             aria-label={`${commitCount(count)} at risk`}
             className="max-h-40 space-y-1 overflow-y-auto rounded-md border bg-muted/30 p-2"
           >
-            {shown?.commits.map((c) => (
-              <li key={c.sha} className="flex gap-2 text-xs">
-                <span className="shrink-0 font-mono text-muted-foreground">
-                  {c.sha.slice(0, 7)}
-                </span>
-                <span className="min-w-0 truncate" title={c.subject}>
-                  {c.subject}
-                </span>
-              </li>
-            ))}
+            {shown?.commits.map((c) => {
+              const date = commitDate(c.authorDate);
+              return (
+                <li key={c.sha} className="flex gap-2 text-xs">
+                  <span className="shrink-0 font-mono text-muted-foreground">
+                    {c.sha.slice(0, 7)}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate" title={c.subject}>
+                    {c.subject}
+                  </span>
+                  {date !== "" && (
+                    <span className="shrink-0 text-muted-foreground">
+                      {date}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
 
           <dl className="space-y-1.5 text-xs">

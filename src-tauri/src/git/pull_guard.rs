@@ -381,6 +381,12 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 /// exactly as it found it. `None` re-stands-down (the branch changed under the
 /// lock, or the upstream ref doesn't resolve post-fetch).
 ///
+/// The fetch PRUNES, which the stand-down below depends on: without it, an
+/// upstream branch deleted on the forge leaves its tracking ref behind, every
+/// rev here resolves against that stale tip, and the rebase reports success for a
+/// pull that bare git refuses outright ("no such ref was fetched"). Pruned, the
+/// upstream ref stops resolving and that refusal is what the user sees.
+///
 /// The caller must already hold the repo lock, so every step here uses the
 /// lock-free runners — `run_git_mutating*` would re-acquire it and deadlock.
 pub(crate) async fn probe(
@@ -394,8 +400,13 @@ pub(crate) async fn probe(
         return Ok(None);
     }
     if target.remote != "." {
-        let out = run_git_with_creds_once(repo, cred, &["fetch", &target.remote], NETWORK_TIMEOUT)
-            .await?;
+        let out = run_git_with_creds_once(
+            repo,
+            cred,
+            &["fetch", "--prune", &target.remote],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
         if out.code != 0 {
             return Err(AppError::Git {
                 code: out.code,
@@ -622,6 +633,12 @@ async fn drop_label(repo: &str, keep_base: &str, drop_base: &str, branch: &str) 
 ///
 /// The branch is the VALIDATED one, not a fresh read: recording decide-time HEAD
 /// would hide exactly the mix-up the identity check exists to catch.
+///
+/// `pre_op_tip` is the pre-op HEAD, duplicating `original_sha` — the house shape
+/// for an op that moves a single ref (`rewrite_commits` and `rebase_edit` both
+/// pass their `orig`/`original_sha` twice). The slot is a reset-rollback target,
+/// so the upstream tip is the one sha it must never hold: resetting there is
+/// exactly the drop the user might want undone.
 async fn begin_drop_journal(
     repo: &str,
     decided: &Decided,
@@ -639,7 +656,7 @@ async fn begin_drop_journal(
         &label,
         Some(decided.branch.clone()),
         expected_tip,
-        Some(&decided.new_tip),
+        Some(expected_tip),
     )
     .await
 }
@@ -1543,7 +1560,14 @@ mod tests {
         // sequencer commands draw is a separate question from this one.
         assert_eq!(entry.status, "failed");
         assert_eq!(entry.original_sha, shas.expected_tip);
-        assert_eq!(entry.pre_op_tip.as_deref(), Some(shas.new_tip.as_str()));
+        // The rollback slot holds the PRE-op tip, never the upstream's: resetting
+        // to the upstream tip would redo the very drop a recovery is undoing.
+        assert_eq!(
+            entry.pre_op_tip.as_deref(),
+            Some(shas.expected_tip.as_str()),
+            "the rollback target is where the branch stood before the drop"
+        );
+        assert_ne!(entry.pre_op_tip.as_deref(), Some(shas.new_tip.as_str()));
         assert!(
             entry.error.is_some_and(|e| e.contains("a.txt")),
             "the record carries what stopped it"

@@ -42,6 +42,11 @@ export function usePullDropGuard(
   const decided = usePullRebaseDecided(repoPath);
   const [refusal, setRefusal] = useState<PullWouldDrop | null>(null);
   const [running, setRunning] = useState<PullDecision | null>(null);
+  // `running` is set synchronously before the mutation is fired, while
+  // `isPending` only turns true once react-query flushes its own notification —
+  // one render frame apart. Taking either as busy closes that window, in which
+  // the buttons would still be live and a close still honored.
+  const busy = decided.isPending || running !== null;
 
   /** Take `e` if it's the fork-point refusal; `false` means the caller still
    *  owns the error and should present it normally. */
@@ -112,11 +117,11 @@ export function usePullDropGuard(
   return {
     handleError,
     handleRecoveryError,
-    pending: decided.isPending,
+    pending: busy,
     dialog: (
       <PullRebaseDropDialog
         refusal={refusal}
-        busy={decided.isPending}
+        busy={busy}
         running={running}
         onCancel={() => setRefusal(null)}
         onDecide={(decision) => void decide(decision)}
