@@ -138,7 +138,7 @@ async fn graphql(token: &str, query: &str, variables: Value) -> AppResult<Value>
         .unwrap_or_default();
     let resp = client()
         .post(API_URL)
-        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(reqwest::header::AUTHORIZATION, token)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body)
         .send()
@@ -164,14 +164,16 @@ async fn graphql(token: &str, query: &str, variables: Value) -> AppResult<Value>
             .and_then(|e| e.get("message"))
             .and_then(Value::as_str)
         {
-            return Err(AppError::Command(msg.to_string()));
+            return Err(AppError::Command(format!("Linear API: {msg}")));
         }
     }
 
-    payload
-        .get("data")
-        .cloned()
-        .ok_or_else(|| AppError::Command("Linear returned no data".to_string()))
+    match payload.get("data") {
+        Some(data) if !data.is_null() => Ok(data.clone()),
+        _ => Err(AppError::Command(
+            "Linear returned no data (authentication may have failed)".to_string(),
+        )),
+    }
 }
 
 fn linear_error_from_body(body: &str, status: u16) -> AppError {
@@ -336,8 +338,8 @@ pub async fn issue_list(team_key: &str, state: &str) -> AppResult<Vec<LinearIssu
     };
 
     let query = r#"
-        query($teamKey: String!, $filter: IssueFilter) {
-          team(key: $teamKey) {
+        query($teamId: String!, $filter: IssueFilter) {
+          team(id: $teamId) {
             issues(first: 50, filter: $filter, orderBy: updatedAt) {
               nodes {
                 identifier title url createdAt updatedAt estimate
@@ -353,15 +355,20 @@ pub async fn issue_list(team_key: &str, state: &str) -> AppResult<Vec<LinearIssu
         }
     "#;
 
-    let variables = json!({ "teamKey": team_key, "filter": filter });
+    let variables = json!({ "teamId": team_key, "filter": filter });
     let data = graphql(&token, query, variables).await?;
 
-    let nodes = data
-        .get("team")
-        .and_then(|t| t.get("issues"))
+    let team = data.get("team").filter(|v| !v.is_null()).ok_or_else(|| {
+        AppError::Command(format!(
+            "Linear team '{team_key}' not found — check the linked team key"
+        ))
+    })?;
+
+    let nodes = team
+        .get("issues")
         .and_then(|i| i.get("nodes"))
         .and_then(Value::as_array)
-        .ok_or_else(|| AppError::Command("Linear returned no issues".to_string()))?;
+        .ok_or_else(|| AppError::Command("Linear returned no issues for this team".to_string()))?;
 
     Ok(nodes.iter().filter_map(parse_issue_info).collect())
 }
