@@ -585,8 +585,8 @@ it's non-destructive (it applies the stash, never dropping or committing anythin
 can safely preview and recover work you thought was gone.
 
 **Operation history** (in the branch ⋮ menu, or the command palette) opens a
-journal of the *risky* operations GitDesktop runs — local PR merges, cherry-picks, history
-edits, interactive rebases, and a rebase pull that drops commits — each recorded with the
+journal of the *risky* operations GitDesktop runs: local PR merges, cherry-picks, history
+edits, interactive rebases, and a rebase pull that drops commits. Each is recorded with the
 exact branch and commit it started from, and whether it finished, failed, is paused on
 conflicts, is still pending, or **ended outside the app** (a cherry-pick you continued or
 aborted in a terminal, which the journal only knows is over). If one of these operations is

@@ -138,10 +138,10 @@ export function OperationHistoryDialog({
           <div className="min-h-0 flex-1" />
         ) : list.length === 0 ? (
           <p className="flex-1 px-2 py-8 text-center text-xs text-muted-foreground">
-            No operations recorded yet. GitDesktop journals risky operations —
-            local PR merges, cherry-picks, history edits, interactive rebases,
-            and a rebase pull that drops commits — here, capturing the state
-            each one started from so you can trace or recover them.
+            No operations recorded yet. GitDesktop journals risky operations
+            here: local PR merges, cherry-picks, history edits, interactive
+            rebases, and a rebase pull that drops commits. Each is recorded with
+            the state it started from, so you can trace or recover it.
           </p>
         ) : (
           <ScrollArea className="min-h-0 flex-1 border">
