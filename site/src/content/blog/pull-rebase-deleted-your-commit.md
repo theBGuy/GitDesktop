@@ -115,7 +115,9 @@ d5c109a search@{0}: pull --rebase (finish): refs/heads/search onto d5c109ab3f488
 97d747a search@{2}: clone: from …/origin.git
 ```
 
-`search@{1}` is the branch as it stood before the pull rewrote it. Move back:
+`search@{1}` is the branch as it stood before the pull rewrote it. If
+your tree isn't clean, `git stash --include-untracked` first —
+`--hard` throws away uncommitted changes. Then move back:
 
 ```sh
 $ git reset --hard search@{1}
@@ -131,8 +133,7 @@ $ git status -sb
 If you'd already committed new work on top of the pulled branch
 before noticing, reset would take it down with the pull's result; in
 that case `git cherry-pick 5a818d0` brings the lost commit onto the
-current state instead. And `--hard` throws away uncommitted changes
-too, so if the tree isn't clean, `git stash` first.
+current state instead.
 
 Ahead 1, behind 1 is the divergence the pull was supposed to resolve,
 now out in the open: you have a commit missing from the remote, the
