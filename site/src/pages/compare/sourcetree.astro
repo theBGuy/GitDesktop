@@ -198,6 +198,14 @@ const groups: Group[] = [
         },
       },
       {
+        label: "Ask before a pull drops your commits",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "a rebase pull that would drop pushed commits stops and names them",
+        },
+      },
+      {
         label: "Recover dropped stashes",
         them: {
           state: "no",
@@ -245,7 +253,7 @@ const groups: Group[] = [
 const faqs = [
   {
     q: "Is GitDesktop a good Sourcetree alternative?",
-    a: "For Git work, yes. GitDesktop covers the fundamentals Sourcetree is loved for (staging by file, hunk, or line, interactive rebase, stashes, submodules) and adds what Sourcetree hands to the browser: creating, reviewing, and merging pull requests, CI runs (with GitHub and GitLab step logs in-app), and issues, across GitHub, GitLab, and Bitbucket. On Bitbucket, issues go through a linked Jira project. It's free, open source (Apache-2.0), and needs no vendor account. If you rely on Mercurial or git-flow, Sourcetree keeps those. The table above is honest about it.",
+    a: "For Git work, yes. GitDesktop covers the fundamentals Sourcetree is loved for (staging by file, hunk, or line, interactive rebase, stashes, submodules) and adds what Sourcetree hands to the browser: creating, reviewing, and merging pull requests, CI runs (with GitHub and GitLab step logs in-app), and issues, across GitHub, GitLab, and Bitbucket. On Bitbucket, issues go through a linked Jira project. It's free, open source (Apache-2.0), and needs no vendor account. If you rely on Mercurial or git-flow, Sourcetree keeps those. The table above says as much.",
   },
   {
     q: "Is there a Sourcetree for Linux?",

@@ -195,6 +195,14 @@ const groups: Group[] = [
         },
       },
       {
+        label: "Ask before a pull drops your commits",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "a rebase pull that would drop pushed commits stops and names them",
+        },
+      },
+      {
         label: "Operation journal & crash recovery",
         them: { state: "no" },
         gd: {

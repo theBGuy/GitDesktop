@@ -681,8 +681,9 @@ const forges = [
           <p class="mt-2 max-w-[48ch] text-sm leading-relaxed text-muted">
             Divergence routes to a guarded force push, never a plain
             <code class="text-ink">--force</code> — where your Git can check it, the pair refuses
-            to overwrite work your branch doesn't include; pull is
-            <code class="text-ink">--ff-only</code>.
+            to overwrite work your branch doesn't include. Plain pull is
+            <code class="text-ink">--ff-only</code>, and a rebase pull that would drop
+            your pushed commits stops to ask, with the commits named.
           </p>
         </div>
         <div class="min-w-0">
