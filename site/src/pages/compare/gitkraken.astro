@@ -2,8 +2,8 @@
 // GitDesktop vs GitKraken — the strongest competitor in the set, and the
 // sharpest free-tier boundary: GitKraken Community covers public GitHub and
 // GitLab repos only, so every private-repo searcher for "gitkraken
-// alternative" is winnable. Re-grounded 2026-08-28 against GitKraken Desktop
-// 12.4.0 (still current; release date in GK_RELEASED) via primary sources:
+// alternative" is winnable. Re-grounded against GitKraken Desktop 12.4.0 on
+// the date in VERIFIED_ON (current then; release date in GK_RELEASED) via:
 // help.gitkraken.com release notes and integration pages plus the
 // gitkraken.com/pricing plan matrix. That page's dollar figures don't render
 // to a fetcher, so this page cites the free-tier boundary and never prices.
@@ -148,11 +148,11 @@ const groups: Group[] = [
         },
       },
       {
-        label: "Dependabot alerts & security advisories",
+        label: "Security findings in-app",
         them: { state: "no" },
         gd: {
           state: "yes",
-          note: "a Findings tab, with code- and secret-scanning results",
+          note: "Dependabot alerts, advisories, code & secret scanning (GitHub); SAST, secrets & code quality (GitLab)",
         },
       },
     ],
