@@ -1,10 +1,15 @@
 import { useState } from "react";
 import { toast } from "sonner";
 import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
-import type { AutostashOutcome, PullMode } from "@/lib/git/api";
+import type {
+  AutostashOutcome,
+  PullDecisionShas,
+  PullMode,
+} from "@/lib/git/api";
 import {
   useMergeAutostash,
   usePullAutostash,
+  usePullRebaseDecidedAutostash,
   useRebaseAutostash,
   useRebaseOntoAutostash,
 } from "@/lib/git/queries";
@@ -97,7 +102,10 @@ export type StashReapplyRun =
   | { op: "pull"; mode: PullMode }
   | { op: "merge"; ref: string }
   | { op: "rebase"; ref: string }
-  | { op: "rebaseOnto"; newBase: string; oldBase: string };
+  | { op: "rebaseOnto"; newBase: string; oldBase: string }
+  // Carries the SHAs verbatim from the guard that asked the question: the
+  // dirty-tree retry has to answer about the same state the user decided on.
+  | ({ op: "pullRebaseDecided" } & PullDecisionShas);
 
 /** One surface's pending recovery: what to say, and what to run. */
 export interface StashReapplyRequest {
@@ -114,7 +122,18 @@ export interface StashReapplyRequest {
    *  run, so it must confirm back even where the ordinary path stays silent. */
   plainMessage: string;
   run: StashReapplyRun;
+  /** Last look at an error this recovery's own run threw, before it becomes a
+   *  plain toast. Returning true means the caller took it and will present it
+   *  itself — the retried command can raise its own structured refusals (a
+   *  rebase pull's fork-point guard runs on the compound too), and those deserve
+   *  their dialog rather than a dead-end toast. */
+  onUnhandledError?: (e: unknown) => boolean;
 }
+
+/** One mounted recovery, as another hook on the same surface consumes it — the
+ *  guard that fires BEFORE a dirty-tree refusal hands its own retry back here
+ *  rather than mounting a second recovery (and a second dialog). */
+export type StashReapplyRecovery = ReturnType<typeof useStashReapplyRecovery>;
 
 /**
  * The classify → prompt → retry → report choreography shared by every surface
@@ -136,13 +155,15 @@ export function useStashReapplyRecovery(repoPath: string) {
   const mergeAutostash = useMergeAutostash(repoPath);
   const rebaseAutostash = useRebaseAutostash(repoPath);
   const rebaseOntoAutostash = useRebaseOntoAutostash(repoPath);
+  const pullDecidedAutostash = usePullRebaseDecidedAutostash(repoPath);
   const [request, setRequest] = useState<StashReapplyRequest | null>(null);
 
   const pending =
     pullAutostash.isPending ||
     mergeAutostash.isPending ||
     rebaseAutostash.isPending ||
-    rebaseOntoAutostash.isPending;
+    rebaseOntoAutostash.isPending ||
+    pullDecidedAutostash.isPending;
 
   function runCompound(run: StashReapplyRun): Promise<AutostashOutcome> {
     switch (run.op) {
@@ -157,6 +178,8 @@ export function useStashReapplyRecovery(repoPath: string) {
           newBase: run.newBase,
           oldBase: run.oldBase,
         });
+      case "pullRebaseDecided":
+        return pullDecidedAutostash.mutateAsync(run);
     }
   }
 
@@ -173,7 +196,7 @@ export function useStashReapplyRecovery(repoPath: string) {
     try {
       reportAutostashOutcome(await runCompound(req.run), copy);
     } catch (e) {
-      toastError(e);
+      if (!req.onUnhandledError?.(e)) toastError(e);
     } finally {
       setRequest(null);
     }

@@ -826,6 +826,89 @@ export const gitSwitchAutostash = (
     reapply,
   });
 
+/** One commit a rebase pull would rewrite away (mirrors the Rust
+ *  `DroppedCommit` in git/pull_guard.rs). */
+export interface DroppedCommit {
+  sha: string;
+  subject: string;
+  author: string;
+  authorDate: string;
+}
+
+/** The structured refusal a rebase pull throws when the upstream was rewritten
+ *  and replaying would rewrite local commits away. Wire shape pinned by the Rust
+ *  test `pull_rebase_would_drop_serializes_to_the_pinned_wire_shape` (error.rs);
+ *  narrow a thrown value to it with `isPullWouldDrop` (lib/error-summary.ts).
+ *
+ *  Deliberately outside the `AppError` union: its `kind` carries a payload no
+ *  generic error presenter reads, and every consumer reaches it through the
+ *  classifier instead. */
+export interface PullWouldDrop {
+  kind: "pullRebaseWouldDrop";
+  message: string;
+  /** Short local branch name (`main`). */
+  branch: string;
+  /** Short upstream name (`origin/main`). */
+  upstream: string;
+  /** The local branch's tip when the guard ran — the decision's `expectedTip`. */
+  branchTip: string;
+  /** The upstream tip a rebase would land on. */
+  newTip: string;
+  /** Base BELOW the doomed commits, so a rebase from it replays them — `keep`. */
+  mergeBase: string;
+  /** Base ABOVE them, so a rebase from it leaves them behind — `drop`. */
+  forkPoint: string;
+  commits: DroppedCommit[];
+}
+
+/** The user's answer to the pull guard. Mirrors the two words Rust's
+ *  `decided_base` accepts; anything else is refused there. */
+export type PullDecision = "keep" | "drop";
+
+/** What a decided pull rebases against. Every SHA is copied verbatim off the
+ *  `PullWouldDrop` that raised the question — the app auto-fetches in the
+ *  background, so re-deriving any of them would answer about a different state
+ *  than the user was shown. */
+export interface PullDecisionShas {
+  /** The branch the guard asked about, so the answer can only ever land on it. */
+  branch: string;
+  decision: PullDecision;
+  newTip: string;
+  keepBase: string;
+  dropBase: string;
+  expectedTip: string;
+}
+
+/** Phase B of a guarded rebase pull. Rejects with a `PULL_DECISION_STALE`
+ *  message when the branch moved since the guard ran. */
+export const gitPullRebaseDecided = (
+  repoPath: string,
+  decided: PullDecisionShas,
+) =>
+  invoke<void>("git_pull_rebase_decided", {
+    repoPath,
+    branch: decided.branch,
+    decision: decided.decision,
+    newTip: decided.newTip,
+    keepBase: decided.keepBase,
+    dropBase: decided.dropBase,
+    expectedTip: decided.expectedTip,
+  });
+
+export const gitPullRebaseDecidedAutostash = (
+  repoPath: string,
+  decided: PullDecisionShas,
+) =>
+  invoke<AutostashOutcome>("git_pull_rebase_decided_autostash", {
+    repoPath,
+    branch: decided.branch,
+    decision: decided.decision,
+    newTip: decided.newTip,
+    keepBase: decided.keepBase,
+    dropBase: decided.dropBase,
+    expectedTip: decided.expectedTip,
+  });
+
 /** Which guarantee a completed push actually ran under (mirrors the Rust
  *  `PushGuard` in git/remote.rs). Only meaningful when `force` is set: a
  *  non-force push has no lease to degrade and reports the neutral

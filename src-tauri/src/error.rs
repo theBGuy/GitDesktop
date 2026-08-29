@@ -14,6 +14,13 @@ pub enum AppError {
         paths: Vec<String>,
         report: String,
     },
+    /// A rebase-mode pull was refused because git's own fork-point verdict would
+    /// have rewritten commits away with no conflict and no warning. Every SHA the
+    /// decision needs rides along, so the follow-up rebase pins them rather than
+    /// re-resolving refs the app's auto-fetch can move. Boxed: eight inline fields
+    /// would push every `AppResult` in the crate past clippy's `result_large_err`.
+    #[error("{}", .0.message)]
+    PullRebaseWouldDrop(Box<crate::git::pull_guard::WouldDrop>),
     #[error("not a git repository: {0}")]
     NotARepo(String),
     #[error("git executable not found")]
@@ -75,6 +82,9 @@ impl Serialize for AppError {
             // Stable serialized kind — `presentError` branches on it BEFORE the
             // prose markers to name the paused operation from `op`.
             AppError::Conflict { .. } => "conflict",
+            // Stable serialized kind — the frontend branches on it to open the
+            // keep-or-drop decision instead of presenting an error.
+            AppError::PullRebaseWouldDrop(_) => "pullRebaseWouldDrop",
             AppError::NotARepo(_) => "notARepo",
             AppError::GitNotFound => "gitNotFound",
             AppError::GhNotFound => "ghNotFound",
@@ -105,6 +115,18 @@ impl Serialize for AppError {
                 map.serialize_entry("op", op)?;
                 map.serialize_entry("paths", paths)?;
                 map.serialize_entry("report", report)?;
+            }
+            // Hand-written so every key's casing is explicit: `rename_all` does
+            // not cover fields, and the decision UI reads by name each of the
+            // seven keys this arm adds.
+            AppError::PullRebaseWouldDrop(d) => {
+                map.serialize_entry("branch", &d.branch)?;
+                map.serialize_entry("upstream", &d.upstream)?;
+                map.serialize_entry("branchTip", &d.branch_tip)?;
+                map.serialize_entry("newTip", &d.new_tip)?;
+                map.serialize_entry("mergeBase", &d.merge_base)?;
+                map.serialize_entry("forkPoint", &d.fork_point)?;
+                map.serialize_entry("commits", &d.commits)?;
             }
             _ => {}
         }
@@ -145,6 +167,57 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&err).unwrap(),
             r#"{"kind":"git","message":"boom","code":1,"stderr":"boom"}"#
+        );
+    }
+
+    /// The decision UI reads all nine keys off this error and hands the branch and
+    /// four SHAs straight back to `git_pull_rebase_decided`, so a casing slip here
+    /// silently loses the commits the user was asked about. Pinned for one and
+    /// for two commits — the plural arm is what a multi-commit rewrite produces.
+    #[test]
+    fn pull_rebase_would_drop_serializes_to_the_pinned_wire_shape() {
+        use crate::git::pull_guard::{DroppedCommit, WouldDrop};
+
+        let victim = DroppedCommit {
+            sha: "1111111111111111111111111111111111111111".to_string(),
+            subject: "V the victim".to_string(),
+            author: "Ada".to_string(),
+            author_date: "2026-08-28T23:37:38-04:00".to_string(),
+        };
+        let second = DroppedCommit {
+            sha: "2222222222222222222222222222222222222222".to_string(),
+            subject: "also doomed".to_string(),
+            author: "Bob".to_string(),
+            author_date: "2026-08-27T10:00:00+00:00".to_string(),
+        };
+        let err = |commits: Vec<DroppedCommit>, message: &str| {
+            AppError::PullRebaseWouldDrop(Box::new(WouldDrop {
+                message: message.to_string(),
+                branch: "main".to_string(),
+                upstream: "origin/main".to_string(),
+                branch_tip: "1111111111111111111111111111111111111111".to_string(),
+                new_tip: "3333333333333333333333333333333333333333".to_string(),
+                merge_base: "4444444444444444444444444444444444444444".to_string(),
+                fork_point: "1111111111111111111111111111111111111111".to_string(),
+                commits,
+            }))
+        };
+
+        assert_eq!(
+            serde_json::to_string(&err(
+                vec![victim.clone()],
+                "Pulling with rebase would drop 1 commit that origin/main no longer contains."
+            ))
+            .unwrap(),
+            r#"{"kind":"pullRebaseWouldDrop","message":"Pulling with rebase would drop 1 commit that origin/main no longer contains.","branch":"main","upstream":"origin/main","branchTip":"1111111111111111111111111111111111111111","newTip":"3333333333333333333333333333333333333333","mergeBase":"4444444444444444444444444444444444444444","forkPoint":"1111111111111111111111111111111111111111","commits":[{"sha":"1111111111111111111111111111111111111111","subject":"V the victim","author":"Ada","authorDate":"2026-08-28T23:37:38-04:00"}]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&err(
+                vec![victim, second],
+                "Pulling with rebase would drop 2 commits that origin/main no longer contains."
+            ))
+            .unwrap(),
+            r#"{"kind":"pullRebaseWouldDrop","message":"Pulling with rebase would drop 2 commits that origin/main no longer contains.","branch":"main","upstream":"origin/main","branchTip":"1111111111111111111111111111111111111111","newTip":"3333333333333333333333333333333333333333","mergeBase":"4444444444444444444444444444444444444444","forkPoint":"1111111111111111111111111111111111111111","commits":[{"sha":"1111111111111111111111111111111111111111","subject":"V the victim","author":"Ada","authorDate":"2026-08-28T23:37:38-04:00"},{"sha":"2222222222222222222222222222222222222222","subject":"also doomed","author":"Bob","authorDate":"2026-08-27T10:00:00+00:00"}]}"#
         );
     }
 

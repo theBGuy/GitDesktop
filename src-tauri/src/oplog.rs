@@ -1,6 +1,6 @@
-//! Operation journal ("opslog"): a durable, per-repo record of the four compound
+//! Operation journal ("opslog"): a durable, per-repo record of the five compound
 //! rollback git operations (local-PR merge, cherry-pick-onto, rewrite-commits,
-//! interactive rebase-edit). If one is interrupted by a crash or restart mid-op, a
+//! interactive rebase-edit, pull-rebase drop). If one is interrupted by a crash or restart mid-op, a
 //! `"pending"` record survives on disk and [`git_oplog_check`] points the user at
 //! their pre-op state on relaunch.
 //!
@@ -60,7 +60,8 @@ const HISTORY_CAP: usize = 50;
 pub struct OpLogEntry {
     /// uuid v4.
     pub id: String,
-    /// Machine key: `"merge_local_pr"` | `"cherry_pick_onto"` | `"rewrite_commits"` | `"rebase_edit"`.
+    /// Machine key: `"merge_local_pr"` | `"cherry_pick_onto"` | `"rewrite_commits"` |
+    /// `"rebase_edit"` | `"pull_rebase_drop"`.
     pub op: String,
     /// Human summary, e.g. `"Squash-merge feature → main"`.
     pub label: String,

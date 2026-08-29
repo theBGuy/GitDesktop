@@ -4034,6 +4034,21 @@ export function useSwitchAutostash(repo: string) {
   );
 }
 
+/** Phase B of a guarded rebase pull, plus its stash → run → reapply twin. Same
+ *  whole-repo invalidation as the plain pull: both move HEAD and rewrite the
+ *  working tree. */
+export function usePullRebaseDecided(repo: string) {
+  return useRepoMutation(repo, (decided: api.PullDecisionShas) =>
+    api.gitPullRebaseDecided(repo, decided),
+  );
+}
+
+export function usePullRebaseDecidedAutostash(repo: string) {
+  return useRepoMutation(repo, (decided: api.PullDecisionShas) =>
+    api.gitPullRebaseDecidedAutostash(repo, decided),
+  );
+}
+
 /** Outcome of an "Update from upstream" run, for an honest toast. `branch` is
  *  the upstream default branch name (no `upstream/` prefix). */
 export type UpstreamUpdateOutcome =

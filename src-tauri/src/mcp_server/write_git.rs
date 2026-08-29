@@ -26,6 +26,8 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{app_err, ensure_not_flag, json_result, GitDesktopMcp, SESSION_BRANCH_PREFIX};
+use crate::error::AppError;
+use crate::git::pull_guard::{DroppedCommit, WouldDrop};
 use crate::git::remote::PushGuard;
 
 /// Refuses a branch name that names a GitDesktop agent-session branch, with an
@@ -168,6 +170,176 @@ struct PullArgs {
     /// top). Anything else (including omitted) stays the safe fast-forward-only pull.
     #[serde(default)]
     mode: Option<String>,
+    /// Answer to the rebase guard's keep-or-drop question: "keep" or "drop".
+    /// Only acted on when a rebase-mode pull's fork-point guard fires — but it is
+    /// always validated, and "drop" always requires --allow-destructive, even on a
+    /// pull the guard never reaches. Omit it on the first call: the guard's report
+    /// names the commits at stake and spells out the re-call. Must travel with
+    /// `expectedDropShas`.
+    #[serde(default)]
+    decision: Option<String>,
+    /// The commits the answer is answering about — the 7-character shas the guard's
+    /// report printed (full shas are accepted too). Required whenever `decision` is
+    /// set, and checked against the guard's fresh verdict before anything runs: an
+    /// upstream that rewrote again in between yields a different set, and the answer
+    /// is refused with the new report rather than applied to commits nobody saw.
+    // The struct has no `rename_all`, so the wire name is spelled explicitly to match
+    // the documented `expectedDropShas` field (as `noTrack` is on CreateBranchArgs).
+    #[serde(default, rename = "expectedDropShas")]
+    expected_drop_shas: Option<Vec<String>>,
+}
+
+/// The only two answers the guard's report offers. Checked at the tool boundary so a
+/// misspelled one is refused rather than silently ignored on the (far more common)
+/// pull where the guard never fires. Pure string logic, like the session-branch guard.
+fn ensure_pull_decision(decision: &str) -> Result<(), McpError> {
+    if decision != "keep" && decision != "drop" {
+        return Err(McpError::invalid_params(
+            format!("unknown pull decision {decision:?}; the rebase guard takes \"keep\" or \"drop\""),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// The echoed shas an answered pull must carry, or an error naming the re-call. An
+/// empty list counts as missing: the guard only ever fires with commits to name, so
+/// no report can produce one, and the recipe is the more useful thing to say back.
+fn ensure_expected_drop_shas(shas: Option<Vec<String>>) -> Result<Vec<String>, McpError> {
+    let shas = shas.filter(|s| !s.is_empty()).ok_or_else(|| {
+        McpError::invalid_params(
+            "an answered pull must name the commits it is answering about: pass \
+             expectedDropShas, the sha list from the report you are answering — e.g. pull \
+             {\"mode\": \"rebase\", \"decision\": \"keep\", \"expectedDropShas\": [\"1111111\"]}.",
+            None,
+        )
+    })?;
+    for sha in &shas {
+        // Non-hex is refused here rather than left to the comparison, where it could
+        // only ever miss — and a miss reports that the UPSTREAM moved, blaming the
+        // wrong thing for what is a malformed argument.
+        if !(4..=40).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "expectedDropShas entry {sha:?} is not a commit sha (4 to 40 hex characters)"
+                ),
+                None,
+            ));
+        }
+    }
+    Ok(shas)
+}
+
+/// Whether the caller's echoed shas still describe the set this guard run found.
+///
+/// Prefix matching, because the report prints 7 characters. Each prefix must land on
+/// its OWN fresh commit and on only one of them: a set that grew, shrank, or was
+/// replaced can then never pass by matching a survivor twice, which is the whole
+/// point — the answer authorized THAT list, not this one.
+fn echo_matches(expected: &[String], fresh: &[DroppedCommit]) -> bool {
+    if expected.len() != fresh.len() {
+        return false;
+    }
+    let mut claimed = vec![false; fresh.len()];
+    for prefix in expected {
+        let prefix = prefix.to_ascii_lowercase();
+        let mut hits = fresh
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.sha.to_ascii_lowercase().starts_with(&prefix));
+        let Some((idx, _)) = hits.next() else {
+            return false;
+        };
+        if hits.next().is_some() || claimed[idx] {
+            return false;
+        }
+        claimed[idx] = true;
+    }
+    true
+}
+
+/// The commit's sha as the report prints it. The full one stays a `get` away in case
+/// a sha is somehow shorter than 7 characters.
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
+/// The re-call the guard's report ends on, carrying the shas to echo back. A literal
+/// argument object rather than prose: the caller is an agent, the second call has to
+/// name `mode` again or it drops back to a fast-forward-only pull that never reaches
+/// the guard, and the echo is what ties the answer to this exact list.
+fn pull_decision_recipe(shorts: &[&str]) -> String {
+    let echo = shorts
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Call pull again with your answer, echoing those shas:\n  \
+         pull {{\"mode\": \"rebase\", \"decision\": \"keep\", \"expectedDropShas\": [{echo}]}}\n  \
+         pull {{\"mode\": \"rebase\", \"decision\": \"drop\", \"expectedDropShas\": [{echo}]}}    \
+         (drop also requires --allow-destructive)"
+    )
+}
+
+/// The guard's refusal as tool text: the commits at stake, what each answer does to
+/// them, and the exact re-call. A SUCCESS result rather than an MCP error — the
+/// question IS this call's output, and an error reads as a pull that failed.
+fn would_drop_report(drop: &WouldDrop) -> String {
+    let message = &drop.message;
+    let upstream = &drop.upstream;
+    let shorts = drop
+        .commits
+        .iter()
+        .map(|c| short_sha(&c.sha))
+        .collect::<Vec<_>>();
+    let commits = drop
+        .commits
+        .iter()
+        .zip(&shorts)
+        .map(|(c, short)| format!("  {short} {} — {}", c.subject, c.author))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let recipe = pull_decision_recipe(&shorts);
+    format!(
+        "{message}\n\n{commits}\n\n\
+         Your branch and working tree are untouched — only the fetch this check needed has \
+         run.\n\n\
+         keep: the commits are replayed on top of {upstream}'s new tip, so the branch keeps \
+         them (an ordinary rebase).\n\
+         drop: the commits leave the branch, replaced by the rewrite {upstream} already \
+         published.\n\n\
+         {recipe}"
+    )
+}
+
+/// The refusal when the echoed shas no longer describe what the guard just found.
+/// Leads with why the answer went unused, then hands over the current report — an
+/// agent that re-reads the list and re-echoes is exactly the loop this wants.
+fn stale_echo_report(drop: &WouldDrop) -> String {
+    format!(
+        "The at-risk commits changed since the report you answered, so your answer was not \
+         applied.\n\n{}",
+        would_drop_report(drop)
+    )
+}
+
+/// The decided pull's success text, naming what the answer did to the commits.
+fn decided_pull_text(decision: &str, drop: &WouldDrop) -> String {
+    let count = drop.commits.len();
+    let noun = if count == 1 { "commit" } else { "commits" };
+    let upstream = &drop.upstream;
+    if decision == "keep" {
+        format!(
+            "pulled with rebase; kept {count} {noun} {upstream} no longer contains (replayed on \
+             top of its new tip)"
+        )
+    } else {
+        format!(
+            "pulled with rebase; dropped {count} {noun} {upstream} replaced (recorded in \
+             Operation history)"
+        )
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -512,8 +684,16 @@ impl GitDesktopMcp {
     #[tool(
         description = "Pull from the current branch's upstream in the bound repository. `mode` \
                        reconciles a diverged branch: \"merge\" or \"rebase\"; omitted stays \
-                       fast-forward-only (the safe default). Conflicts surface in the normal \
-                       conflict state. Requires --allow-git-write.",
+                       fast-forward-only (the safe default). A rebase-mode pull is guarded: when \
+                       the upstream's history was rewritten past commits still on your branch \
+                       (git's fork-point rule would replay those away with no conflict and no \
+                       warning), the pull stops after fetching, without touching your branch or \
+                       working tree, and returns them, plus the re-call that keeps or drops \
+                       them. That re-call passes `decision` together with `expectedDropShas` \
+                       (the sha list from the report you are answering), and is refused with a \
+                       fresh report if the at-risk set changed in between; \"drop\" additionally \
+                       requires --allow-destructive. Conflicts surface in the normal conflict \
+                       state. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn pull(
@@ -521,11 +701,67 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<PullArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
+        // The answer and the shas it answers about are validated as ONE thing, so no
+        // later step has to hold "the echo is present because the decision was".
+        let answer = match args.decision {
+            Some(decision) => {
+                ensure_pull_decision(&decision)?;
+                // A decided drop rewrites commits off the branch, so the ladder is
+                // checked here — before the pull runs — rather than after the guard
+                // has already fetched on a call that can't be allowed to finish.
+                if decision == "drop" {
+                    self.ensure_destructive()?;
+                }
+                Some((decision, ensure_expected_drop_shas(args.expected_drop_shas)?))
+            }
+            None => None,
+        };
         let mode = args.mode.unwrap_or_default();
-        crate::git::remote::git_pull_core(&self.state, self.repo.clone(), mode)
+        // Only a rebase-mode pull runs the guard at all, so only it can report that
+        // the guard found nothing — the other modes never asked.
+        let rebasing = mode == "rebase";
+        let drop = match crate::git::remote::git_pull_core(&self.state, self.repo.clone(), mode)
             .await
-            .map_err(app_err)?;
-        ok_text("pulled")
+        {
+            Ok(()) => {
+                return ok_text(match (&answer, rebasing) {
+                    (None, _) => "pulled",
+                    (Some(_), true) => {
+                        "pulled — no decision was needed (the rebase guard found nothing at risk)"
+                    }
+                    (Some(_), false) => {
+                        "pulled — this wasn't a rebase-mode pull, so the guard never ran and your \
+                         answer was not used."
+                    }
+                })
+            }
+            Err(AppError::PullRebaseWouldDrop(drop)) => drop,
+            Err(other) => return Err(app_err(other)),
+        };
+        let Some((decision, echoed)) = answer else {
+            return ok_text(would_drop_report(&drop));
+        };
+        // The guard re-probed just now, so the answer is checked against THIS run's
+        // verdict: an upstream that rewrote again since the report produces a
+        // different set, and acting would spend consent given for other commits.
+        if !echo_matches(&echoed, &drop.commits) {
+            return ok_text(stale_echo_report(&drop));
+        }
+        // Every SHA comes from THIS guard run: re-resolving HEAD or the upstream
+        // here would decide about a state the caller was never shown.
+        crate::git::pull_guard::git_pull_rebase_decided_core(
+            &self.state,
+            self.repo.clone(),
+            drop.branch.clone(),
+            decision.clone(),
+            drop.new_tip.clone(),
+            drop.merge_base.clone(),
+            drop.fork_point.clone(),
+            drop.branch_tip.clone(),
+        )
+        .await
+        .map_err(app_err)?;
+        ok_text(decided_pull_text(&decision, &drop))
     }
 
     #[tool(
@@ -1042,7 +1278,21 @@ mod tests {
             "--allow-git-write"
         );
         assert_gated!(
-            h.pull(Parameters(PullArgs { mode: None })),
+            h.pull(Parameters(PullArgs {
+                mode: None,
+                decision: None,
+                expected_drop_shas: None
+            })),
+            "--allow-git-write"
+        );
+        // A decided drop is destructive, and with BOTH flags missing the git-write
+        // gate is still the first one it meets.
+        assert_gated!(
+            h.pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("drop".into()),
+                expected_drop_shas: None
+            })),
             "--allow-git-write"
         );
         assert_gated!(h.fetch(), "--allow-git-write");
@@ -1149,6 +1399,13 @@ mod tests {
         assert_destructive_gated!(h.discard_all_changes());
         assert_destructive_gated!(h.reset_to_commit(Parameters(ShaArgs { sha: "abc".into() })));
         assert_destructive_gated!(h.force_push());
+        // `pull` is destructive only for a decided DROP, and the gate fires before
+        // the pull runs — this handler is bound to a path that isn't a repo at all.
+        assert_destructive_gated!(h.pull(Parameters(PullArgs {
+            mode: Some("rebase".into()),
+            decision: Some("drop".into()),
+            expected_drop_shas: None,
+        })));
         assert_destructive_gated!(h.delete_remote_branch(Parameters(DeleteRemoteBranchArgs {
             remote: "origin".into(),
             name: "b".into(),
@@ -1257,6 +1514,630 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "branch": "feature", "remote": "upstream" }))
                 .unwrap();
         assert_eq!(explicit.remote.as_deref(), Some("upstream"));
+    }
+
+    /// `decision` is optional on the wire (#[serde(default)]): absent → None, so an
+    /// existing agent's `pull {mode}` keeps behaving exactly as before.
+    #[test]
+    fn pull_args_decision_defaults_none_and_parses_value() {
+        let absent: PullArgs = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(absent.decision, None);
+        assert_eq!(absent.expected_drop_shas, None);
+
+        let explicit: PullArgs = serde_json::from_value(serde_json::json!({
+            "mode": "rebase",
+            "decision": "keep",
+            "expectedDropShas": ["1111111", "2222222"],
+        }))
+        .unwrap();
+        assert_eq!(explicit.decision.as_deref(), Some("keep"));
+        assert_eq!(
+            explicit.expected_drop_shas,
+            Some(vec!["1111111".to_string(), "2222222".to_string()]),
+            "the wire name is camelCase, as the recipe prints it"
+        );
+    }
+
+    /// Only the two words the report offers decide anything — a near-miss is refused
+    /// rather than ignored, which on a non-firing pull would look like it worked.
+    #[test]
+    fn pull_decision_guard_takes_only_keep_and_drop() {
+        assert!(ensure_pull_decision("keep").is_ok());
+        assert!(ensure_pull_decision("drop").is_ok());
+        for bad in ["", "Keep", "keep ", "kepe", "vaporize"] {
+            let err = ensure_pull_decision(bad).expect_err("a near-miss decides nothing");
+            assert!(err.to_string().contains("keep"), "{bad:?} → {err}");
+        }
+    }
+
+    /// The report an agent acts on: the count and upstream, one line per commit, both
+    /// faces of the question, and the exact re-call. Pure string shaping, so it is
+    /// pinned here rather than inferred from a fixture's SHAs.
+    #[test]
+    fn would_drop_report_names_the_commits_and_the_recall() {
+        use crate::git::pull_guard::{DroppedCommit, WouldDrop};
+
+        let report = would_drop_report(&WouldDrop {
+            message: "Pulling with rebase would drop 2 commits that origin/main no longer contains."
+                .into(),
+            branch: "main".into(),
+            upstream: "origin/main".into(),
+            branch_tip: "1111111111111111111111111111111111111111".into(),
+            new_tip: "3333333333333333333333333333333333333333".into(),
+            merge_base: "4444444444444444444444444444444444444444".into(),
+            fork_point: "1111111111111111111111111111111111111111".into(),
+            commits: vec![
+                DroppedCommit {
+                    sha: "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    subject: "V the victim".into(),
+                    author: "Ada".into(),
+                    author_date: "2026-08-28T23:37:38-04:00".into(),
+                },
+                DroppedCommit {
+                    sha: "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    subject: "also doomed".into(),
+                    author: "Bob".into(),
+                    author_date: "2026-08-27T10:00:00+00:00".into(),
+                },
+            ],
+        });
+
+        assert_eq!(
+            report,
+            "Pulling with rebase would drop 2 commits that origin/main no longer contains.\n\
+             \n\
+             \x20 1111111 V the victim — Ada\n\
+             \x20 2222222 also doomed — Bob\n\
+             \n\
+             Your branch and working tree are untouched — only the fetch this check needed has run.\n\
+             \n\
+             keep: the commits are replayed on top of origin/main's new tip, so the branch keeps them (an ordinary rebase).\n\
+             drop: the commits leave the branch, replaced by the rewrite origin/main already published.\n\
+             \n\
+             Call pull again with your answer, echoing those shas:\n\
+             \x20 pull {\"mode\": \"rebase\", \"decision\": \"keep\", \"expectedDropShas\": [\"1111111\", \"2222222\"]}\n\
+             \x20 pull {\"mode\": \"rebase\", \"decision\": \"drop\", \"expectedDropShas\": [\"1111111\", \"2222222\"]}    (drop also requires --allow-destructive)"
+        );
+    }
+
+    /// The echo is a bijection onto the fresh set: same count, each prefix landing on
+    /// its own commit. The arms below are the ones a real upstream can produce
+    /// between a report and its answer, plus the two a hand-written echo can.
+    #[test]
+    fn echo_matches_only_a_one_to_one_prefix_mapping() {
+        let commit = |sha: &str| DroppedCommit {
+            sha: sha.into(),
+            subject: "s".into(),
+            author: "a".into(),
+            author_date: "2026-08-28T23:37:38-04:00".into(),
+        };
+        let fresh = vec![commit("1111111aaaa"), commit("2222222bbbb")];
+
+        assert!(echo_matches(
+            &["1111111".to_string(), "2222222".to_string()],
+            &fresh
+        ));
+        // Order is the caller's to choose; the mapping is what matters.
+        assert!(echo_matches(
+            &["2222222".to_string(), "1111111".to_string()],
+            &fresh
+        ));
+        // Full shas and upper case are both accepted spellings of the same commit.
+        assert!(echo_matches(
+            &["1111111AAAA".to_string(), "2222222bbbb".to_string()],
+            &fresh
+        ));
+
+        // The set shrank, or grew, since the report.
+        assert!(!echo_matches(&["1111111".to_string()], &fresh));
+        assert!(!echo_matches(
+            &[
+                "1111111".to_string(),
+                "2222222".to_string(),
+                "3333333".to_string()
+            ],
+            &fresh
+        ));
+        // A prefix that names nothing here.
+        assert!(!echo_matches(
+            &["1111111".to_string(), "9999999".to_string()],
+            &fresh
+        ));
+        // One commit claimed twice can never stand in for two.
+        assert!(!echo_matches(
+            &["1111111".to_string(), "1111111".to_string()],
+            &fresh
+        ));
+
+        // Two commits that collide at seven characters: the shared prefix names no
+        // ONE of them, so it names none, and only the full shas can answer.
+        let twins = vec![commit("1111111aaaa"), commit("1111111bbbb")];
+        assert!(!echo_matches(
+            &["1111111".to_string(), "1111111bbbb".to_string()],
+            &twins
+        ));
+        assert!(echo_matches(
+            &["1111111aaaa".to_string(), "1111111bbbb".to_string()],
+            &twins
+        ));
+    }
+
+    /// The echo is required with an answer and has to look like shas — a malformed
+    /// one is refused here rather than reported as an upstream that moved.
+    #[test]
+    fn expected_drop_shas_are_required_and_hex() {
+        assert_eq!(
+            ensure_expected_drop_shas(Some(vec!["1111111".into()])).unwrap(),
+            vec!["1111111".to_string()]
+        );
+
+        for missing in [None, Some(vec![])] {
+            let err = ensure_expected_drop_shas(missing)
+                .expect_err("an answer without its shas is not an answer");
+            assert!(err.to_string().contains("expectedDropShas"), "{err}");
+        }
+        for bad in ["", "abc", "zzzzzzz", "1111111 ", &"a".repeat(41)] {
+            let err = ensure_expected_drop_shas(Some(vec![bad.to_string()]))
+                .expect_err("only a sha can name a commit");
+            assert!(err.to_string().contains("hex characters"), "{bad:?} → {err}");
+        }
+    }
+
+    // --- The rebase guard, end to end through the tool (temp repos, git on PATH). ---
+
+    async fn git(repo: &str, args: &[&str]) -> String {
+        crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    async fn subjects(repo: &str) -> Vec<String> {
+        git(repo, &["log", "--format=%s"])
+            .await
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    async fn configure(repo: &str) {
+        git(repo, &["config", "core.autocrlf", "false"]).await;
+        git(repo, &["config", "user.email", "t@t.local"]).await;
+        git(repo, &["config", "user.name", "T"]).await;
+    }
+
+    /// The one text block a tool result carries.
+    fn text_of(result: &CallToolResult) -> String {
+        result
+            .content
+            .first()
+            .and_then(ContentBlock::as_text)
+            .expect("the tool returns one text block")
+            .text
+            .clone()
+    }
+
+    /// A bare origin, a teammate's `work` clone, and the clone the handler binds to —
+    /// in which the user has PUSHED a commit the teammate then force-pushed away.
+    /// That push is what arms the trap: it writes the commit into the clone's
+    /// `refs/remotes/origin/main` reflog, which is where fork-point finds it.
+    async fn vaporize_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-mcp-pull-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let root = dir.path().to_string_lossy().into_owned();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        let url = format!(
+            "file://{}",
+            dir.path()
+                .join("origin.git")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+
+        git(&root, &["init", "-q", "-b", "main", "work"]).await;
+        let work_dir = dir.path().join("work");
+        let work = work_dir.to_string_lossy().into_owned();
+        configure(&work).await;
+        std::fs::write(work_dir.join("a.txt"), "base\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "base"]).await;
+        git(&work, &["remote", "add", "origin", &url]).await;
+        git(&work, &["push", "-q", "-u", "origin", "main"]).await;
+
+        git(
+            &root,
+            &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"],
+        )
+        .await;
+        let clone_dir = dir.path().join("clone");
+        let clone = clone_dir.to_string_lossy().into_owned();
+        configure(&clone).await;
+
+        // The user commits and PUSHES V.
+        std::fs::write(clone_dir.join("v.txt"), "v\n").unwrap();
+        git(&clone, &["add", "-A"]).await;
+        git(&clone, &["commit", "-qm", "V the victim"]).await;
+        git(&clone, &["push", "-q"]).await;
+
+        // The teammate rewrites origin's history over it.
+        git(&work, &["fetch", "-q"]).await;
+        git(&work, &["reset", "-q", "--hard", "origin/main~1"]).await;
+        std::fs::write(work_dir.join("r.txt"), "r\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "teammate rewrite"]).await;
+        git(&work, &["push", "-q", "--force"]).await;
+
+        (dir, clone)
+    }
+
+    /// A clone that is merely BEHIND its upstream — the rebase pull the guard has to
+    /// stay out of the way of.
+    async fn behind_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-mcp-pull-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let root = dir.path().to_string_lossy().into_owned();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        let url = format!(
+            "file://{}",
+            dir.path()
+                .join("origin.git")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+
+        git(&root, &["init", "-q", "-b", "main", "work"]).await;
+        let work_dir = dir.path().join("work");
+        let work = work_dir.to_string_lossy().into_owned();
+        configure(&work).await;
+        std::fs::write(work_dir.join("a.txt"), "base\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "base"]).await;
+        git(&work, &["remote", "add", "origin", &url]).await;
+        git(&work, &["push", "-q", "-u", "origin", "main"]).await;
+
+        git(
+            &root,
+            &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"],
+        )
+        .await;
+        let clone = dir.path().join("clone").to_string_lossy().into_owned();
+        configure(&clone).await;
+
+        // Upstream moves ahead; the clone has nothing of its own.
+        std::fs::write(work_dir.join("b.txt"), "b\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "upstream work"]).await;
+        git(&work, &["push", "-q"]).await;
+
+        (dir, clone)
+    }
+
+    /// The MCP caller is an agent, so the guard's refusal has to arrive as readable
+    /// TEXT it can act on — not an error — and the repo must be exactly as it was.
+    #[tokio::test]
+    async fn pull_rebase_guard_reports_the_dropped_commits_as_text() {
+        let (_dir, clone) = vaporize_repo("report").await;
+        let before = git(&clone, &["rev-parse", "HEAD"]).await;
+        let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, false);
+
+        let result = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: None,
+                expected_drop_shas: None,
+            }))
+            .await
+            .expect("the guard's question is this call's output, not a failure");
+        let text = text_of(&result);
+
+        let victim = git(&clone, &["rev-parse", "--short=7", "HEAD"]).await;
+        let victim = victim.trim();
+        assert!(
+            text.contains("would drop 1 commit that origin/main no longer contains"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("{victim} V the victim — T")),
+            "every dropped commit is named `sha7 subject — author`: {text}"
+        );
+        assert!(
+            text.contains("Your branch and working tree are untouched"),
+            "{text}"
+        );
+        assert!(text.contains("keep: the commits are replayed"), "{text}");
+        assert!(text.contains("drop: the commits leave the branch"), "{text}");
+        assert!(
+            text.contains(&format!(
+                r#"pull {{"mode": "rebase", "decision": "keep", "expectedDropShas": ["{victim}"]}}"#
+            )),
+            "the re-call must be copyable, echo included: {text}"
+        );
+        assert!(
+            text.contains(&format!(
+                r#"pull {{"mode": "rebase", "decision": "drop", "expectedDropShas": ["{victim}"]}}"#
+            )),
+            "{text}"
+        );
+
+        assert_eq!(git(&clone, &["rev-parse", "HEAD"]).await, before);
+        assert_eq!(
+            subjects(&clone).await,
+            vec!["V the victim", "base"],
+            "the refusal touched nothing"
+        );
+        assert!(git(&clone, &["status", "--porcelain"]).await.trim().is_empty());
+    }
+
+    /// The at-risk commit as the guard's report would print it — what an answering
+    /// call has to echo back.
+    async fn at_risk_sha(repo: &str) -> String {
+        git(repo, &["rev-parse", "--short=7", "HEAD"])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    /// Keeping replays the commit on top of the new upstream tip. It rewrites nothing
+    /// away, so it stays at the pull tool's own tier (no --allow-destructive).
+    #[tokio::test]
+    async fn pull_rebase_decision_keep_replays_the_commit() {
+        let (_dir, clone) = vaporize_repo("keep").await;
+        let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, false);
+
+        let result = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("keep".into()),
+                expected_drop_shas: Some(vec![at_risk_sha(&clone).await]),
+            }))
+            .await
+            .expect("keeping rebases cleanly");
+        assert_eq!(
+            text_of(&result),
+            "pulled with rebase; kept 1 commit origin/main no longer contains (replayed on top \
+             of its new tip)"
+        );
+        assert_eq!(
+            subjects(&clone).await,
+            vec!["V the victim", "teammate rewrite", "base"]
+        );
+    }
+
+    /// Dropping is the answer that rewrites commits away, so it needs the destructive
+    /// tier — and with it, the commit really does leave the branch.
+    #[tokio::test]
+    async fn pull_rebase_decision_drop_removes_the_commit_once_the_tier_is_granted() {
+        let (_dir, clone) = vaporize_repo("drop").await;
+        let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, true);
+
+        let result = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("drop".into()),
+                expected_drop_shas: Some(vec![at_risk_sha(&clone).await]),
+            }))
+            .await
+            .expect("dropping rebases cleanly");
+        assert_eq!(
+            text_of(&result),
+            "pulled with rebase; dropped 1 commit origin/main replaced (recorded in Operation \
+             history)"
+        );
+        assert_eq!(subjects(&clone).await, vec!["teammate rewrite", "base"]);
+        assert!(
+            crate::oplog::git_oplog_list(clone.clone())
+                .await
+                .expect("the journal must be readable")
+                .iter()
+                .any(|e| e.op == "pull_rebase_drop"),
+            "the destructive answer is the one the journal records"
+        );
+    }
+
+    /// The tier is checked BEFORE the pull runs: a refused drop never fetches, and the
+    /// commit it was aimed at is still on the branch. The echo is well-formed here, so
+    /// the refusal can only be the tier's.
+    #[tokio::test]
+    async fn pull_rebase_decision_drop_is_refused_without_the_destructive_tier() {
+        let (_dir, clone) = vaporize_repo("drop-gated").await;
+        let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, false);
+
+        let err = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("drop".into()),
+                expected_drop_shas: Some(vec![at_risk_sha(&clone).await]),
+            }))
+            .await
+            .expect_err("dropping commits needs the destructive tier");
+        assert!(
+            err.to_string().contains("--allow-destructive"),
+            "got: {err}"
+        );
+        assert_eq!(subjects(&clone).await, vec!["V the victim", "base"]);
+    }
+
+    /// An answer with no echoed shas is refused at the boundary — before the pull —
+    /// and told what to send. Consent has to name what it is consenting to.
+    #[tokio::test]
+    async fn pull_refuses_an_answer_that_echoes_no_shas() {
+        let (_dir, clone) = vaporize_repo("no-echo").await;
+        let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, true);
+
+        let err = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("drop".into()),
+                expected_drop_shas: None,
+            }))
+            .await
+            .expect_err("an answer must name the commits it answers about");
+        assert!(err.to_string().contains("expectedDropShas"), "got: {err}");
+        assert_eq!(subjects(&clone).await, vec!["V the victim", "base"]);
+    }
+
+    /// The echo counts have to agree: an answer written against a two-commit report
+    /// never lands on a one-commit verdict, whichever way the set moved.
+    #[tokio::test]
+    async fn pull_refuses_an_echo_whose_count_disagrees() {
+        let (_dir, clone) = vaporize_repo("echo-count").await;
+        let victim = at_risk_sha(&clone).await;
+        let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, true);
+
+        let result = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("drop".into()),
+                expected_drop_shas: Some(vec![victim.clone(), "9999999".into()]),
+            }))
+            .await
+            .expect("a changed set is a question, not a failure");
+        let text = text_of(&result);
+        assert!(
+            text.starts_with("The at-risk commits changed since the report you answered"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("{victim} V the victim — T")),
+            "the fresh report has to come back with it: {text}"
+        );
+        assert_eq!(
+            subjects(&clone).await,
+            vec!["V the victim", "base"],
+            "a refused answer changes nothing"
+        );
+    }
+
+    /// A prefix that names none of the fresh commits is refused the same way — the
+    /// count alone can agree while the commits behind it are different ones.
+    #[tokio::test]
+    async fn pull_refuses_an_echoed_sha_that_matches_nothing() {
+        let (_dir, clone) = vaporize_repo("echo-miss").await;
+        let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, true);
+
+        let result = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("drop".into()),
+                expected_drop_shas: Some(vec!["dead".into()]),
+            }))
+            .await
+            .expect("a changed set is a question, not a failure");
+        let text = text_of(&result);
+        assert!(
+            text.starts_with("The at-risk commits changed since the report you answered"),
+            "{text}"
+        );
+        assert_eq!(subjects(&clone).await, vec!["V the victim", "base"]);
+    }
+
+    /// A malformed echo is an argument error, not an upstream that moved: saying "the
+    /// commits changed" there would blame the wrong thing.
+    #[tokio::test]
+    async fn pull_refuses_a_non_hex_echoed_sha() {
+        let h = GitDesktopMcp::with_options("/tmp/x".to_string(), false, false, true, true);
+
+        let err = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("keep".into()),
+                expected_drop_shas: Some(vec!["not-a-sha".into()]),
+            }))
+            .await
+            .expect_err("only a sha can name a commit");
+        assert!(err.to_string().contains("hex characters"), "got: {err}");
+    }
+
+    /// A decision on a rebase pull with nothing at risk is a no-op, and says so — an
+    /// agent that re-calls with an answer must not be left guessing whether it applied.
+    #[tokio::test]
+    async fn pull_reports_when_no_decision_was_needed() {
+        let (_dir, clone) = behind_repo("no-decision").await;
+        let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, true);
+
+        let result = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("drop".into()),
+                expected_drop_shas: Some(vec!["1111111".into()]),
+            }))
+            .await
+            .expect("a clean rebase pull is unaffected by the guard");
+        assert_eq!(
+            text_of(&result),
+            "pulled — no decision was needed (the rebase guard found nothing at risk)"
+        );
+        assert_eq!(subjects(&clone).await, vec!["upstream work", "base"]);
+    }
+
+    /// Only a rebase-mode pull ever runs the guard, so only it can report on what the
+    /// guard found. Merge and fast-forward answer for themselves: the question was
+    /// never asked, and claiming "nothing at risk" would be a verdict nobody reached.
+    #[tokio::test]
+    async fn pull_says_a_non_rebase_pull_never_consulted_the_guard() {
+        for mode in [None, Some("merge".to_string())] {
+            let tag = format!("no-guard-{}", mode.as_deref().unwrap_or("ff"));
+            let (_dir, clone) = behind_repo(&tag).await;
+            let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, true);
+
+            let result = h
+                .pull(Parameters(PullArgs {
+                    mode,
+                    decision: Some("drop".into()),
+                    expected_drop_shas: Some(vec!["1111111".into()]),
+                }))
+                .await
+                .expect("the answer is unused, not an error");
+            assert_eq!(
+                text_of(&result),
+                "pulled — this wasn't a rebase-mode pull, so the guard never ran and your answer \
+                 was not used."
+            );
+            assert_eq!(subjects(&clone).await, vec!["upstream work", "base"]);
+        }
+    }
+
+    /// Every pull with nothing at risk keeps its old one-word result — the
+    /// fast-forward default, an explicit merge, and a clean rebase alike.
+    #[tokio::test]
+    async fn pulls_with_nothing_at_risk_are_unchanged() {
+        for mode in [None, Some("merge".to_string()), Some("rebase".to_string())] {
+            let tag = mode.clone().unwrap_or_else(|| "ff".into());
+            let (_dir, clone) = behind_repo(&tag).await;
+            let h = GitDesktopMcp::with_options(clone.clone(), false, false, true, false);
+
+            let result = h
+                .pull(Parameters(PullArgs {
+                    mode,
+                    decision: None,
+                    expected_drop_shas: None,
+                }))
+                .await
+                .expect("a clone that is merely behind pulls cleanly");
+            assert_eq!(text_of(&result), "pulled");
+            assert_eq!(subjects(&clone).await, vec!["upstream work", "base"]);
+        }
+    }
+
+    /// A decision word the guard doesn't take is refused at the boundary, before any
+    /// git runs — silently ignoring it would look like the answer was applied.
+    #[tokio::test]
+    async fn pull_refuses_an_unknown_decision_word() {
+        let h = GitDesktopMcp::with_options("/tmp/x".to_string(), false, false, true, true);
+
+        let err = h
+            .pull(Parameters(PullArgs {
+                mode: Some("rebase".into()),
+                decision: Some("vaporize".into()),
+                expected_drop_shas: Some(vec!["1111111".into()]),
+            }))
+            .await
+            .expect_err("only keep and drop decide anything");
+        assert!(err.to_string().contains("unknown pull decision"), "got: {err}");
     }
 
     /// With the gates OPEN, a gd/session/* target is still refused BEFORE any git runs —

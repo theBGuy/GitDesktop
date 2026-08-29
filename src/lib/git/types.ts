@@ -488,7 +488,12 @@ export type RepoOp = "merge" | "rebase" | "cherry-pick" | "revert";
  */
 export interface OpLogEntry {
   id: string;
-  op: "merge_local_pr" | "cherry_pick_onto" | "rewrite_commits" | "rebase_edit";
+  op:
+    | "merge_local_pr"
+    | "cherry_pick_onto"
+    | "rewrite_commits"
+    | "rebase_edit"
+    | "pull_rebase_drop";
   /** Human label, e.g. "Squash-merge feature → main". */
   label: string;
   /** "paused" = handed to you mid-op (a stopped cherry-pick), neither in-flight nor

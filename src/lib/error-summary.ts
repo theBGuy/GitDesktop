@@ -1,3 +1,4 @@
+import type { DroppedCommit, PullWouldDrop } from "@/lib/git/api";
 import { type AppError, isAppError } from "@/lib/tauri/invoke";
 
 /** A humanized error, split into what a toast shows (a calm one-liner) and what
@@ -18,6 +19,7 @@ export interface ErrorPresentation {
 const KIND_LABELS: Record<AppError["kind"], string> = {
   git: "Git error",
   conflict: "Merge conflict",
+  pullRebaseWouldDrop: "Pull blocked",
   notARepo: "Not a Git repository",
   gitNotFound: "Git not found",
   ghNotFound: "GitHub CLI not found",
@@ -222,6 +224,69 @@ export function isDirtyTreeRefusal(e: unknown): boolean {
   return DIRTY_TREE_MARKERS.some((m) => lower.includes(m));
 }
 
+/** The `PullWouldDrop` string fields the decision flow actually consumes — the
+ *  five SHAs and refs it hands back to git, plus the message it may present. */
+const PULL_WOULD_DROP_STRINGS = [
+  "message",
+  "branch",
+  "upstream",
+  "branchTip",
+  "newTip",
+  "mergeBase",
+  "forkPoint",
+] as const satisfies readonly (keyof PullWouldDrop)[];
+
+/** A commit entry the dialog can render. `author`/`authorDate` are declared on
+ *  `DroppedCommit` but deliberately NOT checked: nothing displays them, so a
+ *  Rust rename there should degrade an unread field rather than fail the whole
+ *  classifier and strand the user on a dead-end toast. */
+function isDroppedCommit(c: unknown): c is DroppedCommit {
+  if (typeof c !== "object" || c === null) return false;
+  const r = c as Record<string, unknown>;
+  return typeof r.sha === "string" && typeof r.subject === "string";
+}
+
+/**
+ * Whether a thrown value is the rebase-pull fork-point refusal, narrowed to the
+ * payload the decision dialog reads. The fields it acts on are checked rather
+ * than trusted — five of them go back to git as rebase arguments, and an empty
+ * commit list would ask the user about nothing — so a payload that cannot answer
+ * the question reads as `false` and keeps the ordinary error presentation.
+ */
+export function isPullWouldDrop(e: unknown): e is PullWouldDrop {
+  if (typeof e !== "object" || e === null) return false;
+  const r = e as Record<string, unknown>;
+  if (r.kind !== "pullRebaseWouldDrop") return false;
+  if (!PULL_WOULD_DROP_STRINGS.every((k) => typeof r[k] === "string"))
+    return false;
+  return (
+    Array.isArray(r.commits) &&
+    r.commits.length > 0 &&
+    r.commits.every(isDroppedCommit)
+  );
+}
+
+/** Marker the decided pull commands lead a moved-branch refusal with (Rust's
+ *  `PULL_DECISION_STALE`, git/pull_guard.rs) — keep the literal in step. */
+const PULL_DECISION_STALE_MARKER = "PULL_DECISION_STALE";
+
+/** What to tell the user when a decision outlived the state it was made about.
+ *  Every SHA the answer pinned is gone, so the remedy is a fresh pull rather
+ *  than a retry — shared so the direct and stash-retry paths cannot drift. */
+export const PULL_DECISION_STALE_MESSAGE = "The branch moved — pull again.";
+
+/** Whether `e` is a decided pull refused because the branch moved underneath it.
+ *  Reads the raw message: Rust prefixes the marker onto an ordinary `command`
+ *  error rather than giving it a kind of its own. */
+export function isStalePullDecision(e: unknown): boolean {
+  const message = isAppError(e)
+    ? (e.message ?? "")
+    : e instanceof Error
+      ? e.message
+      : String(e);
+  return message.includes(PULL_DECISION_STALE_MARKER);
+}
+
 /** Lines that echo a commit subject behind a real diagnostic prefix: the op word
  *  in `could not apply <sha>… rebase the parser` is user text, not git's. */
 const SUBJECT_ECHO_LINE = /^(?:error: )?[Cc]ould not (?:apply|revert) /;
@@ -316,6 +381,14 @@ function nonEmptyLineCount(text: string): number {
 export function presentError(e: unknown): ErrorPresentation {
   if (isAppError(e)) {
     const label = KIND_LABELS[e.kind];
+    // Keyed on the kind rather than on `isPullWouldDrop`, so a payload too
+    // malformed to open the decision dialog still gets the one human sentence
+    // Rust already wrote for it instead of falling through to raw git output.
+    if (e.kind === "pullRebaseWouldDrop") {
+      const message = e.message ?? "";
+      return { label, summary: message, fullText: message, long: false };
+    }
+
     // The structured variant first: the Rust layer already named the paused
     // operation, so nothing is inferred from prose. The markers below stay for
     // `git`-kind errors — every producer not carrying the structured variant.

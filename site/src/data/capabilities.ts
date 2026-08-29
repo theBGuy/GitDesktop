@@ -397,6 +397,12 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Repository & workspace",
+    label:
+      "Fork-point guard — a rebase pull asks before an upstream rewrite drops your commits",
+    highlight: true,
+  },
+  {
+    group: "Repository & workspace",
     label: "Auto-fetch — quiet background sync, never auto-pulls",
     highlight: true,
   },

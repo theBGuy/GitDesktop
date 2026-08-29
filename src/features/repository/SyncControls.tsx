@@ -59,6 +59,7 @@ import { formatRelativeTime } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { PublishRepoControl, usePublishProviders } from "./PublishRepoControl";
+import { usePullDropGuard } from "./usePullDropGuard";
 import { useStashReapplyRecovery } from "./useStashReapplyRecovery";
 
 /** What a force push fell back to, for the guarantees weaker than the intended
@@ -85,6 +86,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const push = usePush(repoPath);
   const updateUpstream = useUpdateFromUpstream(repoPath);
   const recovery = useStashReapplyRecovery(repoPath);
+  // Shares that recovery: a decided re-run can still hit a dirty tree, and one
+  // stash prompt on this surface is the whole point of handing it down.
+  const pullDropGuard = usePullDropGuard(repoPath, recovery);
   const markFetched = useFetchStatusStore((s) => s.markFetched);
   const lastFetchedAt = useLastFetchedAt(repoPath);
   // Effective bindings drive the discoverability hints on the sync buttons:
@@ -172,7 +176,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     updateUpstream.isPending ||
     hardReset.isPending ||
     detecting ||
-    recovery.pending;
+    recovery.pending ||
+    pullDropGuard.pending;
   const onError = (e: unknown) => toastError(e);
 
   // One entry point for every fetch — manual (button/hotkey) and automatic —
@@ -312,10 +317,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     return undefined;
   }
 
-  // A pull refused because it would overwrite uncommitted changes isn't a dead
-  // end: offer (or, with the preference on, just run) stash → pull → reapply.
-  // Every other error keeps its normal toast. Triggered by the refusal itself,
-  // never pre-flighted.
+  // Two refusals a pull can recover from, in the order they can occur. The
+  // fork-point guard runs before git touches the tree, so it is asked first; the
+  // dirty-tree recovery only ever sees refusals from the run itself. Every other
+  // error keeps its normal toast. Both are triggered by the refusal, never
+  // pre-flighted.
   function doPull(mode: PullMode) {
     const plain = pullSuccessMessage(mode);
     pull.mutate(mode, {
@@ -323,6 +329,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         if (plain) toast.success(plain);
       },
       onError: (e) => {
+        if (pullDropGuard.handleError(e)) return;
         const taken = recovery.handleError(e, {
           operationLabel: "pull",
           reappliedMessage: "Pulled and reapplied your changes.",
@@ -330,6 +337,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           // deliberately still has to confirm itself.
           plainMessage: plain ?? "Pulled.",
           run: { op: "pull", mode },
+          // The retried pull re-runs the fork-point guard before it stashes, so
+          // a rebase pull can raise the decision here too.
+          onUnhandledError: pullDropGuard.handleRecoveryError,
         });
         if (!taken) onError(e);
       },
@@ -714,6 +724,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       />
 
       {recovery.dialog}
+      {pullDropGuard.dialog}
     </div>
   );
 }

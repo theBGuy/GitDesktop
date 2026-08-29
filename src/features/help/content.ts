@@ -586,11 +586,11 @@ can safely preview and recover work you thought was gone.
 
 **Operation history** (in the branch ⋮ menu, or the command palette) opens a
 journal of the *risky* operations GitDesktop runs — local PR merges, cherry-picks, history
-edits, and interactive rebases — each recorded with the exact branch and commit it started
-from, and whether it finished, failed, is paused on conflicts, is still pending, or
-**ended outside the app** (a cherry-pick you continued or aborted in a terminal, which the
-journal only knows is over). If one of these operations is interrupted (a crash or a
-restart mid-op), a calm recovery line
+edits, interactive rebases, and a rebase pull that drops commits — each recorded with the
+exact branch and commit it started from, and whether it finished, failed, is paused on
+conflicts, is still pending, or **ended outside the app** (a cherry-pick you continued or
+aborted in a terminal, which the journal only knows is over). If one of these operations is
+interrupted (a crash or a restart mid-op), a calm recovery line
 appears above the **Changes** list naming what was interrupted and the state it started
 from. That notice only informs — it never resets or continues anything on its own (the
 git-native **Continue**/**Abort** for an in-progress merge, rebase, cherry-pick, or revert
@@ -688,7 +688,7 @@ right on the **Push** and **Pull** buttons.
 
 - **Fetch** ({{kbd:fetch}}) updates your view of the remote without changing your branch.
 - **Pull** ({{kbd:pull}}) is fast-forward only by design — it won't create surprise merge
-  commits.
+  commits; the menu's caret offers rebase and merge when you've diverged.
 - **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
   see **Publish branch** instead.
 
@@ -710,6 +710,20 @@ Tick **Always stash and reapply** in the prompt — or turn on **Automatically s
 reapply on pull, merge, rebase, and branch updates** under **Settings → General** — and
 those operations recover on their own, with no prompt. Either way it only kicks in when
 uncommitted changes would otherwise block the operation.
+
+## Safer pull with rebase
+
+The Pull menu's caret offers **Pull with rebase**, which replays your local commits on top
+of the upstream's. Before it runs, GitDesktop checks whether the upstream's history was
+rewritten past commits that are still on your branch, which is the case where Git's own
+fork-point rule replays them away with no conflict to stop it. When there are any, the pull
+stops, names those commits, and asks whether to keep or drop them: keeping replays them on
+top of the new upstream tip, dropping leaves them behind. Nothing moves until you answer,
+uncommitted changes included (the check runs before any stash), so cancelling leaves the
+branch exactly as it was. A drop is recorded in **Operation history**, along with the commit
+your branch was on before it ran. Rebase pulls with nothing at risk never ask. And if your
+branch moves while the question is open (a commit made in another window, say), answering
+is refused so you can pull again and see where things stand.
 
 ## Update a fork from upstream
 
@@ -2057,9 +2071,9 @@ revert, cherry-pick, and tags — plus two always-on reads it pairs with: list s
 preview a merge's outcome. On top of that, **Allow destructive** (\`--allow-destructive\`,
 which requires \`--allow-git-write\` too — on its own it grants nothing) unlocks the
 **irreversible** operations: delete a branch, discard changes, reset, force-push (with
-lease), delete a remote branch, drop a stash, and delete a tag. Agent-session branches
-(\`gd/session/*\`) are refused by the branch-mutating tools, so an in-flight agent session is
-never broken.
+lease), delete a remote branch, drop a stash, delete a tag, and drop commits on a guarded
+rebase pull. Agent-session branches (\`gd/session/*\`) are refused by the branch-mutating
+tools, so an in-flight agent session is never broken.
 
 The server also exposes GitDesktop's own **AI generation recipes** (always on, no flag):
 \`generate_commit_message\`, \`generate_pr_description\`, and \`generate_branch_name\` each hand

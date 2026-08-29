@@ -472,6 +472,14 @@ pub(crate) async fn git_pull_core(
     // would each pay for an unmerged probe that can only come back empty.
     // A refused `--ff-only` leaves nothing unmerged, so its label never surfaces.
     let op = if mode == "rebase" { "rebase" } else { "merge" };
+    // Rebase mode runs the two-phase guard first — bare `git pull --rebase`
+    // computes its own fork point and can silently drop a pushed commit a
+    // force-push rewrote away (git::pull_guard). `false` means the guard stood
+    // down (detached HEAD, no upstream, unrelated histories, a tree mid-op) and
+    // this pull runs byte-identically to before.
+    if mode == "rebase" && crate::git::pull_guard::guarded_pull(state, &repo_path).await? {
+        return Ok(());
+    }
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
     let already_unmerged = crate::git::ops::unmerged_paths(&repo_path).await;
     if let Err(err) =
@@ -1205,6 +1213,493 @@ mod tests {
             !crate::git::ops::op_state(&clone_s).await.unwrap().rebasing,
             "no rebase was ever started — naming one would contradict the banner"
         );
+    }
+
+    // --- The fork-point guard on a rebase-mode pull. ---
+
+    /// A clone whose PUSHED commit `V` the upstream then force-pushed away — the
+    /// state a bare `git pull --rebase` replays out of existence. Returns the
+    /// fixture guard, the clone's path, V's sha, and the rewritten origin tip.
+    ///
+    /// The push is what arms it: it writes V into the clone's
+    /// `refs/remotes/origin/main` reflog, which is where fork-point reads it.
+    async fn vaporize_clone(tag: &str) -> (tempfile::TempDir, String, String, String) {
+        let (guard, base, _origin_s, url) = seeded_origin(tag).await;
+        let base_s = base.to_string_lossy().into_owned();
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+
+        run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"]).await;
+        let clone = base.join("clone");
+        let clone_s = clone.to_string_lossy().into_owned();
+        run(&clone_s, &["config", "core.autocrlf", "false"]).await;
+        run(&clone_s, &["config", "user.email", "t@t.local"]).await;
+        run(&clone_s, &["config", "user.name", "T"]).await;
+
+        std::fs::write(clone.join("v.txt"), "v\n").unwrap();
+        run(&clone_s, &["add", "-A"]).await;
+        run(&clone_s, &["commit", "-qm", "V the victim"]).await;
+        run(&clone_s, &["push", "-q"]).await;
+        let victim = run(&clone_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        run(&work_s, &["fetch", "-q"]).await;
+        run(&work_s, &["reset", "-q", "--hard", "origin/main~1"]).await;
+        std::fs::write(work.join("r.txt"), "r\n").unwrap();
+        run(&work_s, &["add", "-A"]).await;
+        run(&work_s, &["commit", "-qm", "teammate rewrite"]).await;
+        run(&work_s, &["push", "-q", "--force"]).await;
+        let rewritten = run(&work_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        (guard, clone_s, victim, rewritten)
+    }
+
+    async fn head_of(repo: &str, rev: &str) -> String {
+        run(repo, &["rev-parse", rev]).await.trim().to_string()
+    }
+
+    async fn subjects(repo: &str) -> Vec<String> {
+        run(repo, &["log", "--format=%s"])
+            .await
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The whole point: a teammate's force-push over a commit the user already
+    /// pushed makes bare `git pull --rebase` drop it silently ("Successfully
+    /// rebased", no conflict). The guard refuses instead, naming the commit — and
+    /// leaves the branch and the working tree exactly where it found them.
+    #[tokio::test]
+    async fn a_rebase_pull_refuses_to_vaporize_a_force_pushed_commit() {
+        let (_guard, clone_s, victim, rewritten) = vaporize_clone("vaporize").await;
+        assert_eq!(
+            head_of(&clone_s, "refs/remotes/origin/main").await,
+            victim,
+            "the clone has not seen the rewrite yet — the guard's own fetch must"
+        );
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+            .await
+            .expect_err("a pull that would drop a pushed commit must refuse");
+        let AppError::PullRebaseWouldDrop(drop) = &err else {
+            panic!("expected a would-drop refusal, got {err:?}");
+        };
+        assert_eq!(drop.branch, "main");
+        assert_eq!(drop.upstream, "origin/main");
+        assert_eq!(drop.branch_tip, victim);
+        assert_eq!(
+            drop.fork_point, victim,
+            "V is the fork point the reflog remembers"
+        );
+        assert_eq!(drop.new_tip, rewritten);
+        assert_eq!(
+            drop.merge_base,
+            head_of(&clone_s, &format!("{victim}~1")).await,
+            "the merge base is V's parent — the last commit both sides share"
+        );
+        assert_eq!(drop.commits.len(), 1, "{:?}", drop.commits);
+        assert_eq!(drop.commits[0].sha, victim);
+        assert_eq!(drop.commits[0].subject, "V the victim");
+        assert_eq!(drop.commits[0].author, "T");
+        assert!(
+            drop.commits[0].author_date.starts_with("20"),
+            "the ISO author date must be populated: {:?}",
+            drop.commits[0].author_date
+        );
+
+        // The guard fetched (that is how it learned of the rewrite) and then
+        // touched nothing else.
+        assert_eq!(head_of(&clone_s, "refs/remotes/origin/main").await, rewritten);
+        assert_eq!(head_of(&clone_s, "HEAD").await, victim);
+        assert_eq!(subjects(&clone_s).await.first().unwrap(), "V the victim");
+        assert!(
+            run(&clone_s, &["status", "--porcelain"]).await.trim().is_empty(),
+            "the working tree is untouched"
+        );
+        assert!(run(&clone_s, &["stash", "list"]).await.trim().is_empty());
+        assert!(!crate::git::ops::op_state(&clone_s).await.unwrap().rebasing);
+    }
+
+    /// A rewrite can take more than one commit with it, and the decision UI lists
+    /// them — newest first, the order `git log` walks the range in.
+    #[tokio::test]
+    async fn a_rebase_pull_names_every_commit_a_rewrite_would_take() {
+        let (_guard, base, _origin_s, url) = seeded_origin("multi-drop").await;
+        let base_s = base.to_string_lossy().into_owned();
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+        run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"]).await;
+        let clone = base.join("clone");
+        let clone_s = clone.to_string_lossy().into_owned();
+        run(&clone_s, &["config", "core.autocrlf", "false"]).await;
+        run(&clone_s, &["config", "user.email", "t@t.local"]).await;
+        run(&clone_s, &["config", "user.name", "T"]).await;
+
+        // Two commits, both PUSHED — so both sit in the tracking ref's reflog.
+        for (file, subject) in [("v1.txt", "V1 the first"), ("v2.txt", "V2 the second")] {
+            std::fs::write(clone.join(file), "v\n").unwrap();
+            run(&clone_s, &["add", "-A"]).await;
+            run(&clone_s, &["commit", "-qm", subject]).await;
+        }
+        run(&clone_s, &["push", "-q"]).await;
+        let v1 = head_of(&clone_s, "HEAD~1").await;
+        let v2 = head_of(&clone_s, "HEAD").await;
+
+        run(&work_s, &["fetch", "-q"]).await;
+        run(&work_s, &["reset", "-q", "--hard", "origin/main~2"]).await;
+        std::fs::write(work.join("r.txt"), "r\n").unwrap();
+        run(&work_s, &["add", "-A"]).await;
+        run(&work_s, &["commit", "-qm", "teammate rewrite"]).await;
+        run(&work_s, &["push", "-q", "--force"]).await;
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+            .await
+            .expect_err("two doomed commits must refuse just as one does");
+        let AppError::PullRebaseWouldDrop(drop) = &err else {
+            panic!("expected a would-drop refusal, got {err:?}");
+        };
+        assert_eq!(drop.commits.len(), 2, "{:?}", drop.commits);
+        assert_eq!(
+            drop.commits.iter().map(|c| c.sha.as_str()).collect::<Vec<_>>(),
+            vec![v2.as_str(), v1.as_str()],
+            "newest first"
+        );
+        assert_eq!(drop.commits[0].subject, "V2 the second");
+        assert_eq!(drop.commits[1].subject, "V1 the first");
+        assert!(
+            drop.message.contains("2 commits"),
+            "the summary counts them: {}",
+            drop.message
+        );
+        assert_eq!(head_of(&clone_s, "HEAD").await, v2, "nothing was touched");
+    }
+
+    /// A tree left mid-merge has a CLEAN index (`git merge --no-commit` stages
+    /// without conflicting), so only the in-progress probe catches it. The guard
+    /// stands down and git's own refusal — which names the unfinished merge —
+    /// reaches the user, instead of `rebase --onto`'s "you have unstaged changes",
+    /// which the frontend would offer to stash-recover over a live merge.
+    #[tokio::test]
+    async fn a_rebase_pull_mid_merge_stands_down_to_bare_pull() {
+        let (_guard, clone_s, victim, _rewritten) = vaporize_clone("mid-op").await;
+        run(&clone_s, &["switch", "-q", "-c", "side", "HEAD~1"]).await;
+        std::fs::write(std::path::Path::new(&clone_s).join("s.txt"), "s\n").unwrap();
+        run(&clone_s, &["add", "-A"]).await;
+        run(&clone_s, &["commit", "-qm", "side"]).await;
+        run(&clone_s, &["switch", "-q", "main"]).await;
+        run(&clone_s, &["merge", "--no-commit", "--no-ff", "side"]).await;
+        assert!(
+            run(&clone_s, &["ls-files", "--unmerged"]).await.trim().is_empty(),
+            "the fixture's merge must be paused with a CLEAN index"
+        );
+        assert!(crate::git::ops::op_state(&clone_s).await.unwrap().merging);
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+            .await
+            .expect_err("git refuses to pull over an unfinished merge");
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected git's own error, got {err:?}");
+        };
+        assert!(
+            stderr.contains("MERGE_HEAD exists"),
+            "bare pull's own refusal must survive: {stderr}"
+        );
+        assert!(
+            !crate::git::ops::op_state(&clone_s).await.unwrap().rebasing,
+            "and no rebase was started over the paused merge"
+        );
+        assert_eq!(head_of(&clone_s, "HEAD").await, victim);
+    }
+
+    /// A detached HEAD has no upstream to compare against, so the guard stands
+    /// down and git says so in its own words.
+    #[tokio::test]
+    async fn a_rebase_pull_on_a_detached_head_stands_down_to_bare_pull() {
+        let (_guard, clone_s, victim, _rewritten) = vaporize_clone("detached").await;
+        run(&clone_s, &["switch", "-q", "--detach"]).await;
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+            .await
+            .expect_err("git refuses a pull with no branch to rebase");
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected git's own error, got {err:?}");
+        };
+        assert!(
+            stderr.to_lowercase().contains("not currently on a branch"),
+            "bare pull's own refusal must survive: {stderr}"
+        );
+        assert_eq!(head_of(&clone_s, "HEAD").await, victim);
+    }
+
+    /// A branch tracking another LOCAL branch has no remote to fetch from, so the
+    /// guard runs its verdict and skips phase A's fetch. The repo has no remote at
+    /// all, which is what makes a skipped fetch provable: any attempt would fail.
+    #[tokio::test]
+    async fn a_rebase_pull_tracking_a_local_branch_never_fetches() {
+        let (_base, base) = temp_base("local-upstream");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        run(&repo_s, &["branch", "-M", "main"]).await;
+        run(&repo_s, &["switch", "-q", "-c", "dev"]).await;
+        std::fs::write(repo.join("dev.txt"), "dev\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "dev work"]).await;
+        run(&repo_s, &["switch", "-q", "main"]).await;
+        run(&repo_s, &["branch", "--set-upstream-to=dev", "main"]).await;
+        assert!(
+            run(&repo_s, &["remote"]).await.trim().is_empty(),
+            "no remote exists, so a fetch could only fail"
+        );
+
+        let state = AppState::default();
+        git_pull_core(&state, repo_s.clone(), "rebase".into())
+            .await
+            .expect("a local-branch upstream pulls without any network step");
+        assert_eq!(
+            head_of(&repo_s, "refs/heads/main").await,
+            head_of(&repo_s, "refs/heads/dev").await,
+            "main fast-forwarded onto its local upstream"
+        );
+    }
+
+    /// Fork-point's protective face, which is why this is a question and not a
+    /// silent policy: the upstream deliberately amended its OWN commit, so
+    /// replaying the local copy would duplicate it. The guard still asks — the
+    /// user is the one who knows which happened.
+    #[tokio::test]
+    async fn a_rebase_pull_reports_a_deliberate_upstream_amend() {
+        let (_guard, base, _origin_s, url) = seeded_origin("amend").await;
+        let base_s = base.to_string_lossy().into_owned();
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+
+        // X lands upstream first, so the clone starts with it.
+        std::fs::write(work.join("x.txt"), "x\n").unwrap();
+        run(&work_s, &["add", "-A"]).await;
+        run(&work_s, &["commit", "-qm", "X the amended"]).await;
+        run(&work_s, &["push", "-q"]).await;
+        run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"]).await;
+        let clone = base.join("clone");
+        let clone_s = clone.to_string_lossy().into_owned();
+        run(&clone_s, &["config", "core.autocrlf", "false"]).await;
+        run(&clone_s, &["config", "user.email", "t@t.local"]).await;
+        run(&clone_s, &["config", "user.name", "T"]).await;
+        let old_x = head_of(&clone_s, "HEAD").await;
+
+        // A local, unpushed commit on top of X.
+        std::fs::write(clone.join("v.txt"), "v\n").unwrap();
+        run(&clone_s, &["add", "-A"]).await;
+        run(&clone_s, &["commit", "-qm", "my local work"]).await;
+
+        // Upstream amends X and force-pushes.
+        std::fs::write(work.join("x.txt"), "x amended\n").unwrap();
+        run(&work_s, &["commit", "-q", "--amend", "-am", "X the amended"]).await;
+        run(&work_s, &["push", "-q", "--force"]).await;
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+            .await
+            .expect_err("an upstream rewrite is always the user's call");
+        let AppError::PullRebaseWouldDrop(drop) = &err else {
+            panic!("expected a would-drop refusal, got {err:?}");
+        };
+        assert_eq!(drop.commits.len(), 1, "{:?}", drop.commits);
+        assert_eq!(
+            drop.commits[0].sha, old_x,
+            "the stale copy of X is what would go"
+        );
+        assert_eq!(drop.commits[0].subject, "X the amended");
+    }
+
+    /// The case that must stay promptless: with nothing being rewritten away, a
+    /// guarded pull has to land in the same state bare `git pull --rebase` did —
+    /// both when the branch is merely behind and when it has diverged.
+    #[tokio::test]
+    async fn a_rebase_pull_with_nothing_to_drop_matches_bare_pull() {
+        for diverged in [false, true] {
+            let tag = if diverged { "same-diverged" } else { "same-behind" };
+            let (_guard, base, _origin_s, url) = seeded_origin(tag).await;
+            let base_s = base.to_string_lossy().into_owned();
+            let work = base.join("work");
+            let work_s = work.to_string_lossy().into_owned();
+
+            let mut clones = Vec::new();
+            for name in ["guarded", "bare"] {
+                run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, name]).await;
+                let c = base.join(name).to_string_lossy().into_owned();
+                run(&c, &["config", "core.autocrlf", "false"]).await;
+                run(&c, &["config", "user.email", "t@t.local"]).await;
+                run(&c, &["config", "user.name", "T"]).await;
+                if diverged {
+                    // A different file from upstream's, so the replay is clean.
+                    std::fs::write(base.join(name).join("mine.txt"), "mine\n").unwrap();
+                    run(&c, &["add", "-A"]).await;
+                    run(&c, &["commit", "-qm", "my local work"]).await;
+                }
+                clones.push(c);
+            }
+
+            // Ordinary upstream progress — no rewrite anywhere.
+            std::fs::write(work.join("a.txt"), "upstream\n").unwrap();
+            run(&work_s, &["commit", "-qam", "upstream moves on"]).await;
+            run(&work_s, &["push", "-q"]).await;
+
+            let state = AppState::default();
+            git_pull_core(&state, clones[0].clone(), "rebase".into())
+                .await
+                .expect("a pull with nothing to drop must not prompt");
+            run(&clones[1], &["pull", "--rebase", "-q"]).await;
+
+            assert_eq!(
+                subjects(&clones[0]).await,
+                subjects(&clones[1]).await,
+                "diverged={diverged}: the guarded pull's history must match bare pull's"
+            );
+            assert_eq!(
+                run(&clones[0], &["ls-files"]).await,
+                run(&clones[1], &["ls-files"]).await,
+                "diverged={diverged}: and so must the tree"
+            );
+            if !diverged {
+                assert_eq!(
+                    head_of(&clones[0], "HEAD").await,
+                    head_of(&clones[0], "refs/remotes/origin/main").await,
+                    "a behind-only pull still fast-forwards onto the upstream tip"
+                );
+            }
+        }
+    }
+
+    /// No upstream to compare against is no fork-point question, so the guard
+    /// stands down and git's own tracking-information error reaches the user
+    /// unchanged.
+    #[tokio::test]
+    async fn a_rebase_pull_without_an_upstream_falls_back_to_bare_pull() {
+        let (_guard, clone_s, _victim, _rewritten) = vaporize_clone("no-upstream").await;
+        run(&clone_s, &["switch", "-q", "-c", "untracked-branch"]).await;
+
+        let state = AppState::default();
+        let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+            .await
+            .expect_err("git refuses a pull with nothing to pull from");
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected git's own error, got {err:?}");
+        };
+        assert!(
+            stderr.to_lowercase().contains("no tracking information"),
+            "bare pull's own refusal must survive: {stderr}"
+        );
+    }
+
+    /// git's refusal wording for a dirty-tree rebase, which `isDirtyTreeRefusal`
+    /// (src/lib/error-summary.ts) matches to offer the stash-and-retry recovery.
+    /// The explicit rebase says "cannot rebase" where bare pull said "cannot pull
+    /// with rebase" — both are in that list, and this is what keeps them there.
+    /// Twin of `refusal_stderr_still_matches_the_frontend_markers` (autostash.rs).
+    const REBASE_UNSTAGED: &str = "cannot rebase: you have unstaged changes";
+    const REBASE_STAGED: &str = "cannot rebase: your index contains uncommitted changes";
+
+    /// A clone one commit behind its upstream, with a dirty TRACKED file the
+    /// upstream's commit does not touch. Non-overlapping on purpose: rebase
+    /// refuses on any dirty tracked file, so the refusal arm still fires, while an
+    /// autostash arm can reapply cleanly instead of conflicting on the same lines.
+    /// Returns the guard and the clone's path.
+    async fn behind_clone_with_dirty_tree(tag: &str) -> (tempfile::TempDir, String) {
+        let (guard, base, _origin_s, url) = seeded_origin(tag).await;
+        let base_s = base.to_string_lossy().into_owned();
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+
+        // A second tracked file, published BEFORE the clone so the clone has one
+        // to dirty that the upstream commit below leaves alone.
+        std::fs::write(work.join("b.txt"), "b\n").unwrap();
+        run(&work_s, &["add", "-A"]).await;
+        run(&work_s, &["commit", "-qm", "add b"]).await;
+        run(&work_s, &["push", "-q"]).await;
+
+        run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"]).await;
+        let clone = base.join("clone");
+        let clone_s = clone.to_string_lossy().into_owned();
+        run(&clone_s, &["config", "core.autocrlf", "false"]).await;
+        run(&clone_s, &["config", "user.email", "t@t.local"]).await;
+        run(&clone_s, &["config", "user.name", "T"]).await;
+
+        std::fs::write(work.join("a.txt"), "upstream\n").unwrap();
+        run(&work_s, &["commit", "-qam", "upstream moves on"]).await;
+        run(&work_s, &["push", "-q"]).await;
+
+        std::fs::write(clone.join("b.txt"), "dirty\n").unwrap();
+        (guard, clone_s)
+    }
+
+    #[tokio::test]
+    async fn a_guarded_rebase_pull_still_refuses_a_dirty_tree_recoverably() {
+        let (_guard, clone_s) = behind_clone_with_dirty_tree("dirty-refusal").await;
+        // Both autostash keys off, pinned locally so the machine's own git config
+        // can't decide this test's outcome. `pull.autoStash` stays unset, which is
+        // the arm that passes NO flag and lets `rebase.autoStash` govern.
+        run(&clone_s, &["config", "rebase.autoStash", "false"]).await;
+
+        let state = AppState::default();
+        for (stage, marker) in [(false, REBASE_UNSTAGED), (true, REBASE_STAGED)] {
+            if stage {
+                run(&clone_s, &["add", "b.txt"]).await;
+            }
+            let err = git_pull_core(&state, clone_s.clone(), "rebase".into())
+                .await
+                .expect_err("git must not clobber uncommitted work");
+            let AppError::Git { stderr, .. } = &err else {
+                panic!("expected a plain git error, got {err:?}");
+            };
+            assert!(
+                stderr.to_lowercase().contains(marker),
+                "git no longer emits {marker:?} — the frontend's stash-and-retry recovery is \
+                 now blind to this refusal. Actual stderr:\n{stderr}"
+            );
+        }
+    }
+
+    /// Bare `git pull --rebase` honors `pull.autoStash`, and falls back to
+    /// `rebase.autoStash` when it is unset. The guarded pull replaced that one
+    /// command with a fetch plus a rebase, so it has to translate the first key
+    /// (a bare rebase ignores it) and stay out of the way of the second.
+    #[tokio::test]
+    async fn a_guarded_rebase_pull_honors_the_autostash_config() {
+        for (tag, key) in [("autostash-pull", "pull.autoStash"), ("autostash-rebase", "rebase.autoStash")] {
+            let (_guard, clone_s) = behind_clone_with_dirty_tree(tag).await;
+            run(&clone_s, &["config", key, "true"]).await;
+
+            let state = AppState::default();
+            git_pull_core(&state, clone_s.clone(), "rebase".into())
+                .await
+                .unwrap_or_else(|e| panic!("{key}=true must let the pull through: {e}"));
+
+            assert_eq!(
+                head_of(&clone_s, "HEAD").await,
+                head_of(&clone_s, "refs/remotes/origin/main").await,
+                "{key}: the pull landed"
+            );
+            assert_eq!(
+                std::fs::read_to_string(std::path::Path::new(&clone_s).join("b.txt")).unwrap(),
+                "dirty\n",
+                "{key}: and git put the uncommitted change back"
+            );
+            assert_eq!(
+                std::fs::read_to_string(std::path::Path::new(&clone_s).join("a.txt")).unwrap(),
+                "upstream\n",
+                "{key}: with the upstream's own change applied under it"
+            );
+            assert!(
+                run(&clone_s, &["stash", "list"]).await.trim().is_empty(),
+                "{key}: the autostash entry is not left behind"
+            );
+        }
     }
 
     // --- Pure arg-building for a named-branch push. ---

@@ -45,7 +45,10 @@ pub enum AutostashOutcome {
 /// `git stash push --include-untracked` (parity with `git_stash_all_core`).
 /// `false` when git found nothing to stash: it exits 0 without creating an entry,
 /// so this stdout line is the only signal (`run_git` pins `LC_ALL=C`).
-async fn autostash_push(repo: &str) -> AppResult<bool> {
+///
+/// `pub(crate)` for `git::pull_guard`, whose decided-pull compound is this
+/// module's shape run from another entry point.
+pub(crate) async fn autostash_push(repo: &str) -> AppResult<bool> {
     let out = run_git(
         Some(repo),
         &["stash", "push", "--include-untracked"],
@@ -69,7 +72,10 @@ async fn autostash_pop(repo: &str) -> AppResult<GitOutput> {
 ///
 /// `op_name` is the paused operation the no-stash arm reports — `classify_failure`'s
 /// closed set, spelled as the matching plain core spells it.
-async fn settle(
+///
+/// `pub(crate)` for `git::pull_guard`, whose decided-pull compound settles the
+/// same way this module's do.
+pub(crate) async fn settle(
     repo: &str,
     op_name: &str,
     stashed: bool,
@@ -179,6 +185,14 @@ pub(crate) async fn git_pull_autostash_core(
     // mode it RAN. A refused `--ff-only` leaves nothing unmerged, so its label
     // never surfaces.
     let paused = if mode == "rebase" { "rebase" } else { "merge" };
+    // Rebase mode runs the two-phase guard first — bare `git pull --rebase` can
+    // silently drop a pushed commit a force-push rewrote away (git::pull_guard).
+    // `None` means the guard stood down and this pull proceeds unchanged.
+    if mode == "rebase" {
+        if let Some(outcome) = crate::git::pull_guard::guarded_pull_autostash(state, &repo_path).await? {
+            return Ok(outcome);
+        }
+    }
     // A read that shells out to git itself — resolve it BEFORE taking the lock.
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
 
@@ -590,6 +604,88 @@ mod tests {
         );
         assert!(crate::git::ops::op_state(&clone).await.unwrap().rebasing);
         assert!(!stash_list(&clone).await.is_empty());
+    }
+
+    /// The clone has PUSHED `V`, and the upstream has since force-pushed over it
+    /// — the state a bare `git pull --rebase` replays out of existence. Returns
+    /// the fixture guard, the clone's path, and V's sha.
+    async fn setup_vaporize(marker: &str) -> (tempfile::TempDir, String, String) {
+        let (dir, work, clone) = setup_clone(marker).await;
+        let work_dir = dir.path().join("work");
+        let clone_dir = dir.path().join("clone");
+
+        write(&clone_dir, "v.txt", "v\n");
+        commit_all(&clone, "V the victim").await;
+        git(&clone, &["push"]).await;
+        let victim = git(&clone, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        git(&work, &["fetch"]).await;
+        git(&work, &["reset", "--hard", "origin/main~1"]).await;
+        write(&work_dir, "r.txt", "r\n");
+        commit_all(&work, "teammate rewrite").await;
+        git(&work, &["push", "--force"]).await;
+        (dir, clone, victim)
+    }
+
+    /// Phase A runs BEFORE the stash, so a refused pull leaves the dirty tree
+    /// exactly as it was — nothing stashed, nothing to settle.
+    #[tokio::test]
+    async fn pull_autostash_refuses_a_would_drop_before_stashing() {
+        let (dir, clone, victim) = setup_vaporize("would-drop").await;
+        let clone_dir = dir.path().join("clone");
+        write(&clone_dir, "b.txt", "dirty\n");
+
+        let state = AppState::default();
+        let err = git_pull_autostash_core(&state, clone.clone(), "rebase".into())
+            .await
+            .expect_err("a pull that would drop a pushed commit must refuse");
+        assert!(
+            matches!(&err, AppError::PullRebaseWouldDrop(d) if d.commits.len() == 1),
+            "{err:?}"
+        );
+        assert!(
+            stash_list(&clone).await.is_empty(),
+            "the refusal comes before the stash"
+        );
+        assert_eq!(read(&clone_dir, "b.txt"), "dirty\n");
+        assert_eq!(git(&clone, &["rev-parse", "HEAD"]).await.trim(), victim);
+    }
+
+    /// And with nothing being rewritten away, the compound behaves exactly as it
+    /// did: stash, rebase, reapply.
+    #[tokio::test]
+    async fn pull_autostash_rebases_and_reapplies_when_nothing_would_drop() {
+        let (dir, work, clone) = setup_clone("rebase-reapply").await;
+        write(&dir.path().join("work"), "a.txt", "upstream\n");
+        commit_all(&work, "upstream").await;
+        git(&work, &["push"]).await;
+
+        let clone_dir = dir.path().join("clone");
+        write(&clone_dir, "b.txt", "local commit\n");
+        commit_all(&clone, "local").await;
+        write(&clone_dir, "c.txt", "dirty\n");
+
+        let state = AppState::default();
+        let outcome = git_pull_autostash_core(&state, clone.clone(), "rebase".into())
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, AutostashOutcome::Reapplied),
+            "{outcome:?}"
+        );
+        assert_eq!(read(&clone_dir, "a.txt"), "upstream\n");
+        assert_eq!(read(&clone_dir, "b.txt"), "local commit\n");
+        assert_eq!(read(&clone_dir, "c.txt"), "dirty\n");
+        assert!(stash_list(&clone).await.is_empty());
+        // The local commit was replayed on top of the upstream one.
+        assert_eq!(
+            git(&clone, &["log", "--format=%s"])
+                .await
+                .lines()
+                .take(2)
+                .collect::<Vec<_>>(),
+            vec!["local", "upstream"]
+        );
     }
 
     // ---- merge ------------------------------------------------------------

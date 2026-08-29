@@ -1,7 +1,7 @@
 import { getTransport } from "@/lib/transport";
 
 /** The kinds whose wire shape is kind + message alone (Rust `AppError`
- *  serializes a payload only for the two members below). */
+ *  serializes a payload only for the three members below). */
 type PlainErrorKind =
   | "notARepo"
   | "gitNotFound"
@@ -33,6 +33,11 @@ export type AppError =
       paths: string[];
       report: string;
     }
+  /** A rebase pull refused because replaying would rewrite local commits away.
+   *  Only `message` is declared here: the seven-key decision payload is read
+   *  exclusively through `isPullWouldDrop`, which narrows to `PullWouldDrop`
+   *  (lib/git/api.ts) — declaring it twice would let the two shapes drift. */
+  | { kind: "pullRebaseWouldDrop"; message: string }
   | { kind: PlainErrorKind; message: string };
 
 export function isAppError(e: unknown): e is AppError {

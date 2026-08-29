@@ -8,6 +8,7 @@ import {
   PauseCircleIcon,
   PencilSimpleIcon,
   ProhibitIcon,
+  ScissorsIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
 import type { ComponentType } from "react";
@@ -36,6 +37,7 @@ const OP_META: Record<string, { name: string; Icon: IconType }> = {
   cherry_pick_onto: { name: "Cherry-pick", Icon: GitCommitIcon },
   rewrite_commits: { name: "Edit history", Icon: PencilSimpleIcon },
   rebase_edit: { name: "Interactive rebase", Icon: GitBranchIcon },
+  pull_rebase_drop: { name: "Pull — dropped commits", Icon: ScissorsIcon },
 };
 
 /** Status → glyph + word + tone. Meaning is carried by the shape AND the word,

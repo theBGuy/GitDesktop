@@ -591,8 +591,8 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             </span>
             <p className="text-xs text-muted-foreground">
               {allowDestructive
-                ? "Adds --allow-destructive — agents can discard changes, reset, force-push (with lease), and force-delete branches and tags. Can permanently discard uncommitted work."
-                : "Irreversible operations (discard, reset, force-push, force deletions) stay blocked even with git writes on."}
+                ? "Adds --allow-destructive — agents can discard changes, reset, force-push (with lease), force-delete branches and tags, and drop commits on a guarded rebase pull. Can permanently discard uncommitted work."
+                : "Irreversible operations (discard, reset, force-push, force deletions, dropping commits on a rebase pull) stay blocked even with git writes on."}
             </p>
           </div>
 
