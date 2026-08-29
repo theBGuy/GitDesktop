@@ -1,0 +1,499 @@
+---
+// GitDesktop vs GitKraken — the strongest competitor in the set, and the
+// sharpest free-tier boundary: GitKraken Community covers public GitHub and
+// GitLab repos only, so every private-repo searcher for "gitkraken
+// alternative" is winnable. Re-grounded 2026-08-28 against GitKraken Desktop
+// 12.4.0 (released 2026-08-05, still current) via primary sources:
+// help.gitkraken.com release notes and integration pages plus the
+// gitkraken.com/pricing plan matrix. That page's dollar figures don't render
+// to a fetcher, so this page cites the free-tier boundary and never prices.
+// When a row changes upstream, update the stamp in the same edit — a stale
+// comparison is worse than none.
+import { Image } from "astro:assets";
+import appGithubPr from "../../assets/app-github-pr.png";
+import CompareTable from "../../components/CompareTable.astro";
+import SiteLayout from "../../layouts/SiteLayout.astro";
+import type { Group } from "../../lib/compare";
+
+const base = import.meta.env.BASE_URL;
+const repo = "https://github.com/theBGuy/GitDesktop";
+const download = `${base}download/`;
+
+const VERIFIED_ON = "August 28, 2026";
+const GK_VERSION = "12.4.0";
+
+const groups: Group[] = [
+  {
+    title: "Where you can use it",
+    rows: [
+      {
+        label: "Private repositories on the free plan",
+        them: {
+          state: "no",
+          note: "the Community plan covers public GitHub & GitLab repos only",
+        },
+        gd: { state: "yes", note: "free on any repository; there is no paid plan" },
+      },
+      {
+        label: "Self-hosted forges without a paid tier",
+        them: { state: "no", note: "GitLab Self-Managed needs Pro or higher" },
+        gd: {
+          state: "yes",
+          note: "GitHub Enterprise & self-managed GitLab via gh and glab",
+        },
+      },
+      {
+        label: "Works without a vendor account",
+        them: {
+          state: "no",
+          note: "every plan, including the free one, runs through a GitKraken account",
+        },
+        gd: { state: "yes", note: "sign in only to the forges you use" },
+      },
+      {
+        label: "Forges",
+        them: {
+          state: "yes",
+          note: "GitHub, GitLab, Bitbucket, Azure DevOps + Data Center variants",
+        },
+        gd: {
+          state: "yes",
+          note: "GitHub, GitLab & Bitbucket, with the full PR / CI / issue loop",
+        },
+      },
+    ],
+  },
+  {
+    title: "Pull requests",
+    rows: [
+      {
+        label: "Approve or request changes in-app",
+        them: { state: "no", note: "review happens on gitkraken.dev, in the browser" },
+        gd: { state: "yes", note: "with resolvable threads, on all three forges" },
+      },
+      {
+        label: "Line-anchored review comments",
+        them: {
+          state: "partial",
+          note: "view & suggest only; its GitHub docs say full in-app review and commenting are not available",
+        },
+        gd: {
+          state: "yes",
+          note: "single lines or dragged ranges; drafts batch and survive a restart",
+        },
+      },
+      {
+        label: "Apply a reviewer's suggestion locally",
+        them: { state: "no" },
+        gd: { state: "yes", note: "straight to your working tree" },
+      },
+      {
+        label: "Merge a PR in-app",
+        them: { state: "yes" },
+        gd: {
+          state: "yes",
+          note: "merge & squash on all three; rebase (GitHub), fast-forward (Bitbucket)",
+        },
+      },
+      {
+        label: "Stacked PRs",
+        them: { state: "no" },
+        gd: { state: "yes", note: "create, extend & dissolve stacks (GitHub)" },
+      },
+      {
+        label: "Local PRs with no remote at all",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "review & merge offline, promote to GitHub or GitLab later",
+        },
+      },
+    ],
+  },
+  {
+    title: "CI, releases & findings",
+    rows: [
+      {
+        label: "Browse & control CI runs",
+        them: { state: "partial", note: "build status on PRs and branches" },
+        gd: {
+          state: "yes",
+          note: "an Actions tab: re-run, cancel, dispatch, failed-step logs inline",
+        },
+      },
+      {
+        label: "Debug a failed CI run with AI",
+        them: { state: "no" },
+        gd: { state: "yes", note: "the failing step's log, explained in-app" },
+      },
+      {
+        label: "Publish releases",
+        them: { state: "no" },
+        gd: { state: "yes", note: "create, edit & upload assets for GitHub releases" },
+      },
+      {
+        label: "Dependabot alerts & security advisories",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "a Findings tab, with code- and secret-scanning results",
+        },
+      },
+    ],
+  },
+  {
+    title: "Issues & trackers",
+    rows: [
+      {
+        label: "Issue trackers",
+        them: {
+          state: "yes",
+          note: "GitHub, GitLab, Jira, Trello & Azure Boards; view-only on the free plan",
+        },
+        gd: {
+          state: "yes",
+          note: "GitHub & GitLab with sub-issues and dependencies; Jira Cloud linked per repo; local issues too",
+        },
+      },
+      {
+        label: "GitHub Discussions",
+        them: { state: "no" },
+        gd: { state: "yes", note: "read, comment, mark answers" },
+      },
+    ],
+  },
+  {
+    title: "History & safety",
+    rows: [
+      {
+        label: "Commit graph",
+        them: { state: "yes", note: "the signature feature" },
+        gd: { state: "no", note: "history is a searchable list, by design" },
+      },
+      {
+        label: "Predict a merge before running it",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "fast-forward / clean / conflicts, previewed in memory",
+        },
+      },
+      {
+        label: "Operation journal & crash recovery",
+        them: { state: "no" },
+        gd: { state: "yes", note: "risky operations are journaled and recoverable" },
+      },
+      {
+        label: "Recover dropped stashes",
+        them: { state: "no" },
+        gd: { state: "yes", note: "a git fsck scan finds and restores them" },
+      },
+      {
+        label: "Git-flow",
+        them: { state: "yes", note: "built in" },
+        gd: { state: "no" },
+      },
+      {
+        label: "Git LFS UI",
+        them: { state: "yes" },
+        gd: { state: "no", note: "system git-lfs works; no dedicated UI" },
+      },
+    ],
+  },
+  {
+    title: "AI — your keys or their credits",
+    rows: [
+      {
+        label: "AI without a paid plan",
+        them: {
+          state: "no",
+          note: "its help center: GitKraken AI requires a paid subscription",
+        },
+        gd: {
+          state: "yes",
+          note: "your own keys, local Ollama, or keyless CLI agents",
+        },
+      },
+      {
+        label: "Unmetered",
+        them: { state: "no", note: "weekly AI credit caps per user, by tier" },
+        gd: { state: "yes", note: "no credits anywhere in the app" },
+      },
+      {
+        label: "Bring your own key",
+        them: { state: "partial", note: "supported, but the paid plan still applies" },
+        gd: {
+          state: "yes",
+          note: "Anthropic, OpenAI, Google, OpenRouter, or any OpenAI-compatible endpoint",
+        },
+      },
+      {
+        label: "AI code review & security audit in-app",
+        them: { state: "no", note: "AI review lives on gitkraken.dev" },
+        gd: {
+          state: "yes",
+          note: "on a dedicated review model, postable as a PR comment",
+        },
+      },
+      {
+        label: "Keep files out of AI context",
+        them: { state: "no" },
+        gd: { state: "yes", note: "gitignore-style AI-ignore patterns" },
+      },
+      {
+        label: "Hide every AI surface",
+        them: { state: "partial", note: "GitKraken AI has a local off switch" },
+        gd: { state: "yes", note: "one setting; automations pause with it" },
+      },
+    ],
+  },
+  {
+    title: "Coding agents",
+    rows: [
+      {
+        label: "Delegate to agents in parallel worktrees",
+        them: {
+          state: "yes",
+          note: "Claude Code, Codex, Copilot, Gemini & OpenCode",
+        },
+        gd: { state: "yes", note: "Claude Code, Codex, Copilot & opencode" },
+      },
+      {
+        label: "Container-sandboxed agent sessions",
+        them: { state: "no", note: "worktree isolation only" },
+        gd: { state: "yes", note: "opt-in Docker or Podman per session" },
+      },
+    ],
+  },
+];
+
+const faqs = [
+  {
+    q: "Is GitDesktop a free GitKraken alternative?",
+    a: "For the Git and forge loop, yes. GitDesktop is free, open source (Apache-2.0), works on private repositories, needs no vendor account, and keeps pull-request review, CI, and issues in the app across GitHub, GitLab, and Bitbucket. It does not have GitKraken's commit graph, multi-repo Workspaces, Launchpad board, or GitLens editor presence — the table above counts both directions.",
+  },
+  {
+    q: "Is GitKraken free for private repositories?",
+    a: "No. GitKraken's integration docs limit the free Community plan to public GitHub and GitLab repositories; self-hosted servers such as GitLab Self-Managed need a paid tier, and cloud issue trackers are view-only. Working on private repositories means a per-seat subscription. GitDesktop has no repository-visibility restriction and no paid plan.",
+  },
+  {
+    q: "Does GitKraken AI work without a paid plan?",
+    a: "No. GitKraken's help center states that GitKraken AI requires a paid GitKraken subscription, usage is metered in weekly credits per user, and bringing your own API key still sits behind the plan. GitDesktop's AI runs on your own Anthropic, OpenAI, Google, or OpenRouter key, a local Ollama model, or a keyless CLI agent such as Claude Code — unmetered, and hidden entirely by one setting if you want no AI at all.",
+  },
+  {
+    q: "Can GitKraken approve pull requests in the desktop app?",
+    a: "No. Since version 12.3, GitKraken Desktop links out to gitkraken.dev for code review — its GitHub integration docs say full in-app code review and commenting are not available. GitDesktop runs the whole review in the app on GitHub, GitLab, and Bitbucket: line-anchored comments, suggestions applied to your working tree, approve or request changes, and the merge.",
+  },
+];
+---
+
+<SiteLayout
+  title="GitDesktop vs GitKraken — an honest comparison"
+  description="GitDesktop vs GitKraken, verified August 2026: private repos on the free plan, the PR review loop in-app, unmetered AI on your own keys, sandboxed agents — plus what GitKraken still does better."
+  ogTitle="GitDesktop vs GitKraken"
+  ogDescription="Free on private repos, review in-app, AI without a meter — an honest, dated comparison."
+  breadcrumbs={[{ name: "GitDesktop vs GitKraken", path: "/compare/gitkraken/" }]}
+>
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <p data-reveal class="text-sm text-faint"><span class="text-add" aria-hidden="true">//</span> compare</p>
+      <h1
+        data-reveal
+        style="transition-delay:60ms"
+        class="mt-5 max-w-[24ch] text-[clamp(1.9rem,4.5vw,3rem)] font-semibold tracking-tight"
+      >
+        GitDesktop vs GitKraken
+      </h1>
+      {/* Answer-first: the paragraph a search snippet or answer engine lifts. */}
+      <p
+        data-reveal
+        style="transition-delay:120ms"
+        class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
+      >
+        GitDesktop is a free, open-source GitKraken alternative that works where
+        GitKraken's free plan doesn't:
+        <span class="text-ink">private repositories</span>. No vendor account,
+        no per-seat plan, no AI credit meter. The pull-request loop (review,
+        approve, merge, CI) stays in the app across
+        <span class="text-ink">GitHub, GitLab, and Bitbucket</span>, and AI runs
+        on your own keys, your own subscriptions, or your own hardware. Or stays
+        hidden.
+      </p>
+      <p data-reveal style="transition-delay:180ms" class="mt-5 max-w-[66ch] text-sm text-muted">
+        Verified against GitKraken Desktop {GK_VERSION} (current release, dated
+        August 5, 2026) and GitKraken's help center and plan pages on
+        {VERIFIED_ON}. Something stale?
+        <a href={`${repo}/issues`} class="text-mint underline-offset-4 hover:underline"
+          >Open an issue</a
+        >.
+      </p>
+    </div>
+  </section>
+
+  <!-- Fairness first: the honest column is what makes the table credible. -->
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Where GitKraken still wins
+      </h2>
+      <ul data-reveal style="transition-delay:80ms" class="mt-8 max-w-[70ch] space-y-4">
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">The commit graph.</span> GitKraken's
+            signature feature, and often the whole reason a team picks it.
+            GitDesktop deliberately ships a searchable history list instead; if
+            you think in graphs, GitKraken is the tool for it.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Multi-repo Workspaces and Launchpad.</span>
+            Named groups of repositories with cross-repo actions, and one board
+            of PRs, issues, and WIP across forges and trackers. GitDesktop is
+            one repo at a time. (Launchpad needs a cloud workspace; team views
+            sit on higher tiers.)
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">It reaches into your editor.</span> GitLens
+            puts GitKraken inside VS Code, Cursor, and Windsurf. GitDesktop is
+            its own window.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Forge and tracker breadth.</span> Azure
+            DevOps and Bitbucket Data Center on the forge side; Jira Data Center
+            and Trello on the tracker side. GitDesktop stops at GitHub, GitLab,
+            Bitbucket, and Jira Cloud.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Agent breadth and controls.</span> Five agent
+            CLIs including Gemini, per-repo setup commands that prepare a fresh
+            worktree before each session, and per-action permission prompts in
+            the panel. GitDesktop answers with container sandboxing, plan mode,
+            and research mode, but the breadth is theirs.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">The enterprise motion.</span> SSO, on-premise
+            options, and org-level AI governance, for teams that need controls
+            above the individual seat.
+          </span>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Feature by feature
+      </h2>
+      <p data-reveal class="mt-5 max-w-[66ch] leading-relaxed text-body">
+        Both clients cover the fundamentals: clone, stage by file, hunk, or
+        line, commit, branch, stash, sync, resolve conflicts, rebase
+        interactively. The table keeps to where they diverge, in both
+        directions.
+      </p>
+
+      <CompareTable competitor="GitKraken" groups={groups} />
+
+      <p class="mt-6 max-w-[66ch] text-sm leading-relaxed text-muted">
+        Every GitKraken cell traces to a primary GitKraken source (its release
+        notes, help center, or plan pages), checked on the date above. Rows
+        where both clients are simply fine were left out on purpose. Also
+        compared:
+        <a
+          href={`${base}compare/github-desktop/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >GitDesktop vs GitHub Desktop</a
+        > and <a
+          href={`${base}compare/sourcetree/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >GitDesktop vs Sourcetree</a
+        >.
+      </p>
+    </div>
+  </section>
+
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <div class="max-w-2xl">
+        <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+          The part GitKraken hands to the browser
+        </h2>
+        <p data-reveal class="mt-5 leading-relaxed text-body">
+          GitKraken's own 12.3 release notes: "The in-app pull request review
+          mode has been replaced with links to a more full-featured review
+          experience on gitkraken.dev." In GitDesktop that experience never left
+          the app — conversation, line comments, approval, and the merge sit
+          next to your staging and history, on GitHub, GitLab, and Bitbucket.
+        </p>
+      </div>
+      <figure data-reveal style="transition-delay:120ms" class="window mt-10">
+        <Image
+          src={appGithubPr}
+          alt="A pull request in GitDesktop: CI checks with per-job status, an automated review, and the merge action — the review loop GitKraken sends to gitkraken.dev"
+          widths={[720, 1080, 1440]}
+          sizes="(min-width: 1024px) 1100px, 94vw"
+          format="webp"
+          quality={82}
+          loading="lazy"
+        />
+      </figure>
+    </div>
+  </section>
+
+  <!-- Visible Q&A — extraction-shaped HTML on purpose (no FAQPage JSON-LD:
+       Google removed FAQ rich results sitewide in May 2026; retrieval reads
+       the visible text). -->
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Common questions
+      </h2>
+      <div data-reveal style="transition-delay:80ms" class="mt-8 grid gap-x-12 gap-y-10 lg:grid-cols-2">
+        {
+          faqs.map((f) => (
+            <div class="min-w-0">
+              <h3 class="text-lg text-ink">{f.q}</h3>
+              <p class="mt-3 max-w-[58ch] text-[15px] leading-relaxed text-body">{f.a}</p>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="relative overflow-hidden">
+    <div class="grid-bg pointer-events-none absolute inset-0 opacity-60"></div>
+    <div class="relative mx-auto max-w-6xl px-5 py-16 text-center md:py-20">
+      <h2 data-reveal class="text-balance text-2xl tracking-tight sm:text-3xl">
+        Try the whole loop.
+      </h2>
+      <p data-reveal style="transition-delay:80ms" class="mx-auto mt-5 max-w-[48ch] leading-relaxed text-body">
+        Free, open source, and nothing to sign up for. Keep GitKraken installed;
+        GitDesktop needs no migration, no account, and no seat.
+      </p>
+      <div data-reveal style="transition-delay:140ms" class="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <a href={download} class="rounded-lg bg-mint px-6 py-3 font-medium text-mint-ink transition-opacity hover:opacity-90">
+          Download GitDesktop
+        </a>
+        <a href={`${base}features/`} class="rounded-lg border border-line-2 px-6 py-3 font-medium text-ink transition-colors hover:bg-surface">
+          See every feature
+        </a>
+      </div>
+    </div>
+  </section>
+</SiteLayout>
