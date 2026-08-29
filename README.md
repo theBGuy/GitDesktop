@@ -704,7 +704,7 @@ priority, labels, and original/remaining estimates.
   allow simply don't appear.
 - **Linked in**: issue keys (e.g. `PROJ-123`) spotted in your branch name,
   commits, and PR titles surface as a **referenced Jira issues** row that
-  jumps to the issue; a **local issue** can be promoted to Jira (comments
+  jumps to the issue; a **local issue** can be published to Jira (comments
   carry over, with a back-link).
 
 </details>
