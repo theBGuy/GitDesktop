@@ -32,11 +32,17 @@ const groups: Group[] = [
           state: "no",
           note: "the Community plan covers public GitHub & GitLab repos only",
         },
-        gd: { state: "yes", note: "free on any repository; there is no paid plan" },
+        gd: {
+          state: "yes",
+          note: "free on any repository; there is no paid plan",
+        },
       },
       {
         label: "Self-hosted forges without a paid tier",
-        them: { state: "no", note: "GitLab Self-Managed needs Pro or higher" },
+        them: {
+          state: "no",
+          note: "self-hosted integrations need paid tiers; GitLab Self-Managed is Pro+",
+        },
         gd: {
           state: "yes",
           note: "GitHub Enterprise & self-managed GitLab via gh and glab",
@@ -54,11 +60,11 @@ const groups: Group[] = [
         label: "Forges",
         them: {
           state: "yes",
-          note: "GitHub, GitLab, Bitbucket, Azure DevOps + Data Center variants",
+          note: "GitHub (+ Enterprise), GitLab (+ Self-Managed), Bitbucket (+ Data Center), Azure DevOps",
         },
         gd: {
           state: "yes",
-          note: "GitHub, GitLab & Bitbucket, with the full PR / CI / issue loop",
+          note: "GitHub, GitLab & Bitbucket — Bitbucket issues via linked Jira",
         },
       },
     ],
@@ -68,8 +74,14 @@ const groups: Group[] = [
     rows: [
       {
         label: "Approve or request changes in-app",
-        them: { state: "no", note: "review happens on gitkraken.dev, in the browser" },
-        gd: { state: "yes", note: "with resolvable threads, on all three forges" },
+        them: {
+          state: "no",
+          note: "review happens on gitkraken.dev, in the browser",
+        },
+        gd: {
+          state: "yes",
+          note: "on all three forges; thread resolution on GitHub & GitLab",
+        },
       },
       {
         label: "Line-anchored review comments",
@@ -129,7 +141,10 @@ const groups: Group[] = [
       {
         label: "Publish releases",
         them: { state: "no" },
-        gd: { state: "yes", note: "create, edit & upload assets for GitHub releases" },
+        gd: {
+          state: "yes",
+          note: "create, edit & upload assets for GitHub releases",
+        },
       },
       {
         label: "Dependabot alerts & security advisories",
@@ -181,7 +196,10 @@ const groups: Group[] = [
       {
         label: "Operation journal & crash recovery",
         them: { state: "no" },
-        gd: { state: "yes", note: "risky operations are journaled and recoverable" },
+        gd: {
+          state: "yes",
+          note: "risky operations are journaled and recoverable",
+        },
       },
       {
         label: "Recover dropped stashes",
@@ -221,7 +239,10 @@ const groups: Group[] = [
       },
       {
         label: "Bring your own key",
-        them: { state: "partial", note: "supported, but the paid plan still applies" },
+        them: {
+          state: "partial",
+          note: "supported, but the paid plan still applies",
+        },
         gd: {
           state: "yes",
           note: "Anthropic, OpenAI, Google, OpenRouter, or any OpenAI-compatible endpoint",
@@ -242,7 +263,10 @@ const groups: Group[] = [
       },
       {
         label: "Hide every AI surface",
-        them: { state: "partial", note: "GitKraken AI has a local off switch" },
+        them: {
+          state: "partial",
+          note: "a local GitKraken AI disable; not a whole-app hide",
+        },
         gd: { state: "yes", note: "one setting; automations pause with it" },
       },
     ],
@@ -254,7 +278,7 @@ const groups: Group[] = [
         label: "Delegate to agents in parallel worktrees",
         them: {
           state: "yes",
-          note: "Claude Code, Codex, Copilot, Gemini & OpenCode",
+          note: "Claude Code, Codex, Copilot, Gemini & opencode",
         },
         gd: { state: "yes", note: "Claude Code, Codex, Copilot & opencode" },
       },
@@ -270,7 +294,7 @@ const groups: Group[] = [
 const faqs = [
   {
     q: "Is GitDesktop a free GitKraken alternative?",
-    a: "For the Git and forge loop, yes. GitDesktop is free, open source (Apache-2.0), works on private repositories, needs no vendor account, and keeps pull-request review, CI, and issues in the app across GitHub, GitLab, and Bitbucket. It does not have GitKraken's commit graph, multi-repo Workspaces, Launchpad board, or GitLens editor presence — the table above counts both directions.",
+    a: "For the Git and forge loop, yes. GitDesktop is free, open source (Apache-2.0), works on private repositories, needs no vendor account, and keeps pull-request review, CI, and issues in the app across GitHub, GitLab, and Bitbucket (on Bitbucket, issues go through a linked Jira project). It does not have GitKraken's commit graph, multi-repo Workspaces, Launchpad board, or GitLens editor presence — the sections above count both directions.",
   },
   {
     q: "Is GitKraken free for private repositories?",
@@ -310,8 +334,8 @@ const faqs = [
         style="transition-delay:120ms"
         class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
       >
-        GitDesktop is a free, open-source GitKraken alternative that works where
-        GitKraken's free plan doesn't:
+        GitDesktop is a free, open-source GitKraken alternative built for the
+        repositories GitKraken's free plan doesn't cover:
         <span class="text-ink">private repositories</span>. No vendor account,
         no per-seat plan, no AI credit meter. The pull-request loop (review,
         approve, merge, CI) stays in the app across
@@ -410,8 +434,8 @@ const faqs = [
       <CompareTable competitor="GitKraken" groups={groups} />
 
       <p class="mt-6 max-w-[66ch] text-sm leading-relaxed text-muted">
-        Every GitKraken cell traces to a primary GitKraken source (its release
-        notes, help center, or plan pages), checked on the date above. Rows
+        Every GitKraken cell was checked against GitKraken's own release notes,
+        help center, and plan pages on the date above. Rows
         where both clients are simply fine were left out on purpose. Also
         compared:
         <a
