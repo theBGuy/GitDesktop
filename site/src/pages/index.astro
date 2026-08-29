@@ -678,11 +678,12 @@ const forges = [
           </p>
         </div>
         <div class="min-w-0">
-          <h3 class="text-ink"><code class="text-ink">--force-with-lease --force-if-includes</code> by default.</h3>
+          <h3 class="text-ink">Guarded pushes and pulls.</h3>
           <p class="mt-2 max-w-[48ch] text-sm leading-relaxed text-muted">
-            Divergence routes to a guarded force push, never a plain
-            <code class="text-ink">--force</code> — where your Git can check it, the pair refuses
-            to overwrite work your branch doesn't include. Plain pull is
+            Divergence routes to
+            <code class="text-ink">--force-with-lease --force-if-includes</code>, never a
+            plain <code class="text-ink">--force</code> — where your Git can check it, the
+            pair refuses to overwrite work your branch doesn't include. Plain pull is
             <code class="text-ink">--ff-only</code>, and a rebase pull that would drop
             your pushed commits stops to ask, with the commits named.
           </p>

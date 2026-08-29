@@ -105,7 +105,7 @@ force-pushed a minute ago.
 
 ## The rescue
 
-Reason later; commit first. The branch's reflog (the local diary of
+Reason later; rescue the commit first. The branch's reflog (the local diary of
 the positions `search` has held in your clone) still lists it:
 
 ```sh
@@ -131,12 +131,13 @@ $ git status -sb
 If you'd already committed new work on top of the pulled branch
 before noticing, reset would take it down with the pull's result; in
 that case `git cherry-pick 5a818d0` brings the lost commit onto the
-current state instead.
+current state instead. And `--hard` throws away uncommitted changes
+too, so if the tree isn't clean, `git stash` first.
 
 Ahead 1, behind 1 is the divergence the pull was supposed to resolve,
 now out in the open: you have a commit missing from the remote, the
-remote has one you haven't integrated. It still needs resolving, and
-it will get it, properly, two sections down. First, the reason.
+remote has one you haven't integrated. It still needs resolving; that
+happens in *Integrating it properly*, below. First, the reason.
 
 ## Why the rebase threw it away
 
@@ -226,12 +227,14 @@ one — and your own push made sure it can.
 
 ## Integrating it properly
 
-So the fix has to happen outside the pull. Reset out of the traced
-demonstration, then rebase onto the explicit name — naming the
-upstream is exactly what makes rebase use the plain merge-base boundary:
+So the fix has to happen outside the pull. First, back to the rescued
+commit — by hash this time: if you skipped the traced demonstration,
+your reflog positions differ from mine, and the hash is correct on
+either path. Then rebase onto the explicit name — naming the upstream
+is what makes rebase use the plain merge-base boundary:
 
 ```sh
-$ git reset --hard search@{1}
+$ git reset --hard 5a818d0
 HEAD is now at 5a818d0 Rank exact matches first
 $ git rebase origin/search
 Successfully rebased and updated refs/heads/search.
