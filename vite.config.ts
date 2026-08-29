@@ -109,7 +109,7 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. ignore src-tauri & site (their own toolchains), tool dirs, and
-      //    doc/config globs the dev server shouldn't restart on. **/*.md
+      //    doc/config globs the dev server shouldn't reload on. **/*.md
       //    knowingly covers CHANGELOG.md (imported ?raw by WhatsNew) —
       //    accepted: it's edited at release time, not during dev.
       ignored: [
@@ -117,12 +117,12 @@ export default defineConfig(async () => ({
         "**/site/**",
         "*.yml",
         "*.yaml",
+        "**/*.md",
         "**/.github/**",
         "**/.claude/**",
         "**/.agents/**",
         "**/.impeccable/**",
         "**/.vscode/**",
-        "**/*.md",
       ],
     },
   },

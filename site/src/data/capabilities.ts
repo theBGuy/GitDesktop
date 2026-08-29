@@ -314,7 +314,7 @@ export const capabilities: Capability[] = [
   {
     group: "CI, tags & releases",
     label:
-      "GitLab & Bitbucket Pipelines — runs in-app, re-run, cancel & trigger; job logs on GitLab",
+      "GitLab & Bitbucket pipelines — runs, job logs, re-run, cancel & trigger, in-app",
   },
   {
     group: "CI, tags & releases",
