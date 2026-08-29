@@ -3,12 +3,12 @@
 // sharpest free-tier boundary: GitKraken Community covers public GitHub and
 // GitLab repos only, so every private-repo searcher for "gitkraken
 // alternative" is winnable. Re-grounded 2026-08-28 against GitKraken Desktop
-// 12.4.0 (released 2026-08-05, still current) via primary sources:
+// 12.4.0 (still current; release date in GK_RELEASED) via primary sources:
 // help.gitkraken.com release notes and integration pages plus the
 // gitkraken.com/pricing plan matrix. That page's dollar figures don't render
 // to a fetcher, so this page cites the free-tier boundary and never prices.
-// When a row changes upstream, update the stamp in the same edit — a stale
-// comparison is worse than none.
+// When a row changes upstream, update the stamps (VERIFIED_ON / GK_VERSION /
+// GK_RELEASED) in the same edit — a stale comparison is worse than none.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
 import CompareTable from "../../components/CompareTable.astro";
@@ -21,6 +21,7 @@ const download = `${base}download/`;
 
 const VERIFIED_ON = "August 28, 2026";
 const GK_VERSION = "12.4.0";
+const GK_RELEASED = "August 5, 2026";
 
 const groups: Group[] = [
   {
@@ -143,7 +144,7 @@ const groups: Group[] = [
         them: { state: "no" },
         gd: {
           state: "yes",
-          note: "create, edit & upload assets for GitHub releases",
+          note: "create, edit & upload assets (GitHub & GitLab)",
         },
       },
       {
@@ -167,7 +168,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "yes",
-          note: "GitHub & GitLab with sub-issues and dependencies; Jira Cloud linked per repo; local issues too",
+          note: "GitHub & GitLab in-app (sub-issues & dependencies on GitHub, related issues on GitLab); Jira Cloud linked per repo; local issues too",
         },
       },
       {
@@ -245,7 +246,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "yes",
-          note: "Anthropic, OpenAI, Google, OpenRouter, or any OpenAI-compatible endpoint",
+          note: "Anthropic, OpenAI, Google AI Studio, OpenRouter, or any OpenAI-compatible endpoint",
         },
       },
       {
@@ -302,7 +303,7 @@ const faqs = [
   },
   {
     q: "Does GitKraken AI work without a paid plan?",
-    a: "No. GitKraken's help center states that GitKraken AI requires a paid GitKraken subscription, usage is metered in weekly credits per user, and bringing your own API key still sits behind the plan. GitDesktop's AI runs on your own Anthropic, OpenAI, Google, or OpenRouter key, a local Ollama model, or a keyless CLI agent such as Claude Code — unmetered, and hidden entirely by one setting if you want no AI at all.",
+    a: "No. GitKraken's help center states that GitKraken AI requires a paid GitKraken subscription, usage is metered in weekly credits per user, and bringing your own API key still sits behind the plan. GitDesktop's AI runs on your own Anthropic, OpenAI, Google AI Studio, or OpenRouter key, a local Ollama model, or a keyless CLI agent such as Claude Code — unmetered, and hidden entirely by one setting if you want no AI at all.",
   },
   {
     q: "Can GitKraken approve pull requests in the desktop app?",
@@ -345,7 +346,7 @@ const faqs = [
       </p>
       <p data-reveal style="transition-delay:180ms" class="mt-5 max-w-[66ch] text-sm text-muted">
         Verified against GitKraken Desktop {GK_VERSION} (current release, dated
-        August 5, 2026) and GitKraken's help center and plan pages on
+        {GK_RELEASED}) and GitKraken's help center and plan pages on
         {VERIFIED_ON}. Something stale?
         <a href={`${repo}/issues`} class="text-mint underline-offset-4 hover:underline"
           >Open an issue</a
