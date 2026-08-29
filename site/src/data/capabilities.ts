@@ -156,7 +156,7 @@ export const capabilities: Capability[] = [
   // — Pull requests & review —
   {
     group: "Pull requests & review",
-    label: "GitHub PRs + private, offline local PRs",
+    label: "PRs on GitHub, GitLab & Bitbucket + private, offline local PRs",
     highlight: true,
   },
   {
@@ -273,7 +273,7 @@ export const capabilities: Capability[] = [
   // — Issues & discussions —
   {
     group: "Issues & discussions",
-    label: "GitHub issues & private local to-dos",
+    label: "GitHub & GitLab issues, plus private local to-dos",
   },
   {
     group: "Issues & discussions",
@@ -283,7 +283,8 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Issues & discussions",
-    label: "Issue types, sub-issues & dependencies",
+    label:
+      "Issue types, sub-issues & dependencies on GitHub; related issues on GitLab",
   },
   {
     group: "Issues & discussions",
@@ -318,7 +319,7 @@ export const capabilities: Capability[] = [
   {
     group: "CI, tags & releases",
     label:
-      "Tags, releases & cross-platform assets — edit notes, sync the updater manifest",
+      "Tags, releases & cross-platform assets — edit notes, sync the updater manifest (GitHub & GitLab)",
   },
   {
     group: "CI, tags & releases",

@@ -270,9 +270,9 @@ pushing and pulling stay manual.
 
 ### Pull requests
 
-Full read + write for GitHub PRs, plus **local PRs**: the same workflow
-against any two branches with no remote at all, promotable to a real GitHub
-PR (comments and all) in one click.
+Full read + write for GitHub, GitLab & Bitbucket PRs, plus **local PRs**:
+the same workflow against any two branches with no remote at all, promotable
+to a real GitHub or GitLab PR (comments and all) in one click.
 
 - **Open, edit, merge**: review, comment, label, **assign**, **request
   reviewers**, approve, edit, and merge (merge/squash/rebase) without the
@@ -461,13 +461,14 @@ close the window.
 
 ### Issues and to-dos
 
-A dedicated tab for GitHub issues and private **local to-dos** (no remote
-needed; publishable to GitHub in one click). Browse, create, and edit
-(drafting with AI from your repo's issue templates), react with emoji, and
-manage the full metadata: labels, assignees, milestones, **projects**
-(GitHub Projects, repo and owner level), issue type, sub-issues,
-dependencies (blocked-by / blocking), and development links (linked and
-closing PRs and branches, plus create-a-branch). Close or
+A dedicated tab for GitHub & GitLab issues and private **local to-dos** (no
+remote needed; publishable to GitHub, GitLab, or linked Jira in one click).
+Browse, create, and edit (drafting with AI from your repo's issue
+templates), react with emoji, and manage the full metadata: labels,
+assignees, milestones, **projects** (GitHub Projects, repo and owner level),
+issue type, sub-issues, and dependencies (blocked-by / blocking) on GitHub,
+related issues on GitLab, and development links (linked and closing PRs and
+branches, plus create-a-branch). Close or
 reopen with a comment you've drafted posted alongside; duplicate, transfer,
 pin/unpin, lock/unlock, or delete. On a **fork**, the same
 **Fork | Upstream** lens as the PR tab browses the parent repository's
@@ -496,8 +497,8 @@ them by file, and lets you filter by text/path or marker. Select one for a
 syntax-highlighted excerpt with blame attribution (who wrote the line, and
 how long ago); then **open it in your editor**, **copy its `path:line`**, or
 **promote it to a local issue**, pre-filled with the comment and a
-`path:line` reference, from where it's publishable to GitHub or Jira like
-any other local issue.
+`path:line` reference, from where it's publishable to GitHub, GitLab, or
+Jira like any other local issue.
 
 ### Discussions
 
