@@ -51,9 +51,9 @@ Only the optional layer disappears.
 
 ## Agency matters
 
-I think AI is genuinely useful. I also think people should decide when it
-belongs in their workflow. So GitDesktop never calls a model on its own. The
-only thing that runs automatically is an automation you turned on yourself.
+I think AI is useful. I also think people should decide when it belongs in
+their workflow. So GitDesktop never calls a model on its own. The only thing
+that runs automatically is an automation you turned on yourself.
 
 When you do use it, you choose where the requests go. Bring your own API
 key. Run Ollama locally, so the calls never leave your machine. Or don't
