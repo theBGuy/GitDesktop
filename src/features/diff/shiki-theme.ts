@@ -87,8 +87,10 @@ export const gdDiff = {
       // `string.other.*` and its list markers as `variable.*`, so those already
       // colour above; these carry the rest. `markup.code` is deliberately
       // unmapped — it wraps a whole fenced block and would tint the embedded
-      // language's plain text.
-      scope: ["markup.heading", "entity.name.section"],
+      // language's plain text. `entity.name.section` is deliberately NOT here:
+      // heading text nests it under `markup.heading`, and TOML uses it for
+      // `[table]` headers, which this theme must not restyle.
+      scope: ["markup.heading"],
       settings: { foreground: "var(--gd-syn-func)", fontStyle: "bold" },
     },
     {

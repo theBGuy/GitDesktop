@@ -823,20 +823,26 @@ mod tests {
     const NOT_LIVE: &dyn Fn() -> bool = &|| false;
     const LIVE: &dyn Fn() -> bool = &|| true;
 
-    /// A [`LiveOps`] built from plain answers: these tests pin which direction each
-    /// signal points, never a real marker probe (the arms that need one build their
-    /// own).
-    fn live_ops(
-        cherry_picking: bool,
-        pick_probe: bool,
-        rebasing: bool,
-        rebase_probe: bool,
-    ) -> LiveOps<'static> {
+    /// Nothing in flight — the baseline every stale-pause test starts from and names
+    /// one field of (`LiveOps { rebasing: true, ..quiet_ops() }`), so each call reads
+    /// as the signal it is flipping rather than as four positional booleans. These
+    /// tests pin which direction each signal points; the arms that need a real marker
+    /// probe build their own.
+    fn quiet_ops() -> LiveOps<'static> {
         LiveOps {
-            cherry_picking,
-            rebasing,
-            pick_in_progress: if pick_probe { LIVE } else { NOT_LIVE },
-            rebase_in_progress: if rebase_probe { LIVE } else { NOT_LIVE },
+            cherry_picking: false,
+            rebasing: false,
+            pick_in_progress: NOT_LIVE,
+            rebase_in_progress: NOT_LIVE,
+        }
+    }
+
+    /// A probe answer as a [`LiveOps`] field, for the one test that sweeps both.
+    fn probe(live: bool) -> &'static dyn Fn() -> bool {
+        if live {
+            LIVE
+        } else {
+            NOT_LIVE
         }
     }
 
@@ -1331,9 +1337,19 @@ mod tests {
 
         // Nothing to do on either arm: a pick is in progress (so the pause stands), and
         // the pending op is genuinely interrupted (so it stays pending).
-        let returned =
-            reconcile_at(&path, repo, true, true, "feature", &live_ops(true, true, false, false))
-                .unwrap();
+        let returned = reconcile_at(
+                &path,
+                repo,
+                true,
+                true,
+                "feature",
+                &LiveOps {
+                    cherry_picking: true,
+                    pick_in_progress: LIVE,
+                    ..quiet_ops()
+                },
+            )
+            .unwrap();
         assert_eq!(returned.len(), 1);
         assert_eq!(returned[0].id, "interrupted");
 
@@ -1539,8 +1555,7 @@ mod tests {
             ],
         );
 
-        let returned =
-            reconcile(repo, false, false, "main", &live_ops(false, false, false, false)).unwrap();
+        let returned = reconcile(repo, false, false, "main", &quiet_ops()).unwrap();
         assert!(returned.is_empty());
         // Sparing the newest would leave `close_paused_pick` a stale handle to
         // misattribute the user's next in-app pick to.
@@ -1564,8 +1579,7 @@ mod tests {
         // A merge is mid-flight — which is why the pause verdict reads
         // `cherry_picking` and not repo-wide `mid_op`: this merge says nothing about
         // whether a cherry-pick ended.
-        let returned = reconcile(repo, true, false, "feature", &live_ops(false, false, false, false))
-            .unwrap();
+        let returned = reconcile(repo, true, false, "feature", &quiet_ops()).unwrap();
         assert_eq!(returned.len(), 1, "{returned:?}");
         assert_eq!(returned[0].id, "interrupted-merge");
         assert_eq!(returned[0].status, "pending");
@@ -1583,8 +1597,7 @@ mod tests {
             vec![drop_record("stale-drop", "2026-01-01T00:00:00.000Z", "paused")],
         );
 
-        let returned = reconcile(repo, false, false, "main", &live_ops(false, false, false, false))
-            .unwrap();
+        let returned = reconcile(repo, false, false, "main", &quiet_ops()).unwrap();
         assert!(returned.is_empty(), "a pause is not an interrupt: {returned:?}");
         assert_eq!(stored_entry(repo, "stale-drop")["status"], "concluded");
     }
@@ -1594,20 +1607,31 @@ mod tests {
     /// alone spares it — the stale op-state flag, or the locked re-probe.
     #[test]
     fn a_live_paused_pull_drop_is_never_concluded() {
-        for (flag, probe) in [(true, false), (false, true)] {
-            let repo = format!(r"C:\oplog\live-pull-drop-{flag}-{probe}");
+        for (flag, probe_live) in [(true, false), (false, true)] {
+            let repo = format!(r"C:\oplog\live-pull-drop-{flag}-{probe_live}");
             seed_entries(
                 &repo,
                 vec![drop_record("live-drop", "2026-01-01T00:00:00.000Z", "paused")],
             );
 
             let returned =
-                reconcile(&repo, true, false, "main", &live_ops(false, false, flag, probe)).unwrap();
+                reconcile(
+                    &repo,
+                    true,
+                    false,
+                    "main",
+                    &LiveOps {
+                        rebasing: flag,
+                        rebase_in_progress: probe(probe_live),
+                        ..quiet_ops()
+                    },
+                )
+                .unwrap();
             assert!(returned.is_empty());
             assert_eq!(
                 stored_entry(&repo, "live-drop")["status"],
                 "paused",
-                "flag={flag} probe={probe}"
+                "flag={flag} probe={probe_live}"
             );
         }
     }
@@ -1627,13 +1651,33 @@ mod tests {
 
         // A rebase is live, no pick is: only the pick's record retires.
         seed_entries(repo, seeded());
-        reconcile(repo, true, false, "main", &live_ops(false, false, true, false)).unwrap();
+        reconcile(
+            repo,
+            true,
+            false,
+            "main",
+            &LiveOps {
+                rebasing: true,
+                ..quiet_ops()
+            },
+        )
+        .unwrap();
         assert_eq!(stored_entry(repo, "the-drop")["status"], "paused");
         assert_eq!(stored_entry(repo, "the-pick")["status"], "concluded");
 
         // And the mirror image.
         seed_entries(repo, seeded());
-        reconcile(repo, true, false, "main", &live_ops(true, false, false, false)).unwrap();
+        reconcile(
+            repo,
+            true,
+            false,
+            "main",
+            &LiveOps {
+                cherry_picking: true,
+                ..quiet_ops()
+            },
+        )
+        .unwrap();
         assert_eq!(stored_entry(repo, "the-pick")["status"], "paused");
         assert_eq!(stored_entry(repo, "the-drop")["status"], "concluded");
     }

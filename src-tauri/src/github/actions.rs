@@ -425,30 +425,45 @@ const DISPATCH_PROBE_TTL: ProbeTtl = ProbeTtl {
     absent: Duration::from_secs(300),
 };
 
-/// Cache map keyed by `(slug, workflow_path, git_ref)`; value is
+/// Cache map keyed by `(repo_path, slug, workflow_path, git_ref)`; value is
 /// `(probe time, declares workflow_dispatch)`.
-type DispatchProbeCache = Mutex<HashMap<(String, String, String), (Instant, bool)>>;
+type DispatchProbeCache = Mutex<HashMap<(String, String, String, String), (Instant, bool)>>;
 
-/// Per-`(slug, workflow file, ref)` cache of the last probe verdict and when it was
-/// taken. Re-probing the same key overwrites in place, but `git_ref` is a user-typed
-/// axis, so distinct refs mint entries that live for the process lifetime — slow
-/// unbounded growth, unlike the closed (repo, remote) key space of `REMOTE_URL_CACHE`
-/// this mirrors. An entry is two short strings and a bool, so no eviction machinery is
-/// warranted at this size. Only PARSED verdicts are stored: an erred fetch leaves the
-/// key absent so it re-probes and keeps failing open.
+/// Per-`(repo, slug, workflow file, ref)` cache of the last probe verdict and when it was
+/// taken. `repo_path` is in the key because the slug alone is NOT host-qualified —
+/// `gh_origin_slug` resolves through `forge::remote_path`, which strips the authority, so
+/// an Enterprise remote and a github.com remote sharing an `owner/repo` path would
+/// otherwise collide and one repo's `false` could hide the other's workflow. Re-probing
+/// the same key overwrites in place, but `git_ref` is a user-typed axis, so distinct refs
+/// mint entries that live for the process lifetime — slow unbounded growth, unlike the
+/// closed (repo, remote) key space of `REMOTE_URL_CACHE` this mirrors. An entry is a few
+/// short strings and a bool, so no eviction machinery is warranted at this size. Only
+/// PARSED verdicts are stored: an erred fetch leaves the key absent so it re-probes and
+/// keeps failing open.
 static DISPATCH_PROBE_CACHE: OnceLock<DispatchProbeCache> = OnceLock::new();
 
 fn dispatch_probe_cache() -> &'static DispatchProbeCache {
     DISPATCH_PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Return the cached verdict for `(slug, path, git_ref)` only if an entry exists AND it
-/// was probed less than its direction's window ago — the stored verdict picks the window,
-/// so one cache serves both. The lock is held only long enough to read the value.
-fn probe_cache_get(slug: &str, path: &str, git_ref: &str, ttl: ProbeTtl) -> Option<bool> {
+/// Return the cached verdict for `(repo_path, slug, path, git_ref)` only if an entry
+/// exists AND it was probed less than its direction's window ago — the stored verdict
+/// picks the window, so one cache serves both. The lock is held only long enough to
+/// read the value.
+fn probe_cache_get(
+    repo_path: &str,
+    slug: &str,
+    path: &str,
+    git_ref: &str,
+    ttl: ProbeTtl,
+) -> Option<bool> {
     let guard = dispatch_probe_cache().lock().unwrap();
-    let (probed_at, verdict) =
-        guard.get(&(slug.to_string(), path.to_string(), git_ref.to_string()))?;
+    let (probed_at, verdict) = guard.get(&(
+        repo_path.to_string(),
+        slug.to_string(),
+        path.to_string(),
+        git_ref.to_string(),
+    ))?;
     let window = if *verdict { ttl.declared } else { ttl.absent };
     if probed_at.elapsed() < window {
         Some(*verdict)
@@ -457,10 +472,16 @@ fn probe_cache_get(slug: &str, path: &str, git_ref: &str, ttl: ProbeTtl) -> Opti
     }
 }
 
-/// Record `verdict` as the current answer for `(slug, path, git_ref)`, stamped now.
-fn probe_cache_put(slug: &str, path: &str, git_ref: &str, verdict: bool) {
+/// Record `verdict` as the current answer for `(repo_path, slug, path, git_ref)`,
+/// stamped now.
+fn probe_cache_put(repo_path: &str, slug: &str, path: &str, git_ref: &str, verdict: bool) {
     dispatch_probe_cache().lock().unwrap().insert(
-        (slug.to_string(), path.to_string(), git_ref.to_string()),
+        (
+            repo_path.to_string(),
+            slug.to_string(),
+            path.to_string(),
+            git_ref.to_string(),
+        ),
         (Instant::now(), verdict),
     );
 }
@@ -470,6 +491,7 @@ fn probe_cache_put(slug: &str, path: &str, git_ref: &str, verdict: bool) {
 /// never takes a [`DISPATCH_PROBE_GATE`] permit nor spawns a gh process.
 fn plan_probes<'a>(
     workflows: &'a [Workflow],
+    repo_path: &str,
     slug: &str,
     git_ref: &str,
     ttl: ProbeTtl,
@@ -482,7 +504,7 @@ fn plan_probes<'a>(
                 map.insert(w.id.to_string(), false);
             }
             PathVerdict::Unknown => {}
-            PathVerdict::Fetch => match probe_cache_get(slug, &w.path, git_ref, ttl) {
+            PathVerdict::Fetch => match probe_cache_get(repo_path, slug, &w.path, git_ref, ttl) {
                 Some(verdict) => {
                     map.insert(w.id.to_string(), verdict);
                 }
@@ -510,7 +532,8 @@ pub async fn gh_workflow_dispatchable(
     // at a file of the caller's choosing.
     let workflows = fetch_workflows(&repo_path, &slug).await?;
     let ref_field = format!("ref={git_ref}");
-    let (mut map, probes) = plan_probes(&workflows, &slug, &git_ref, DISPATCH_PROBE_TTL);
+    let (mut map, probes) =
+        plan_probes(&workflows, &repo_path, &slug, &git_ref, DISPATCH_PROBE_TTL);
 
     let results = crate::forge::futures_join_all(probes.iter().map(|w| {
         let endpoint = format!("repos/{slug}/contents/{}", w.path);
@@ -547,7 +570,7 @@ pub async fn gh_workflow_dispatchable(
         // of the cache, so the next call re-probes instead of pinning the failure.
         if let Ok(out) = res {
             let verdict = yaml_declares_workflow_dispatch(&out.stdout_lossy());
-            probe_cache_put(&slug, path, &git_ref, verdict);
+            probe_cache_put(&repo_path, &slug, path, &git_ref, verdict);
             map.insert(id.to_string(), verdict);
         }
     }
@@ -835,35 +858,40 @@ mod tests {
     };
 
     /// The cache is process-wide and shared by every test in this binary, so each test
-    /// keys its entries under its own slug.
+    /// keys its entries under its own repo path and slug.
     #[test]
     fn probe_verdicts_are_served_within_the_ttl_and_expire_after_it() {
         let ttl = DISPATCH_PROBE_TTL;
-        let (slug, path, git_ref) = ("o/ttl", ".github/workflows/ci.yml", "master");
+        let (repo, slug, path, git_ref) = (
+            "C:/repos/ttl",
+            "o/ttl",
+            ".github/workflows/ci.yml",
+            "master",
+        );
 
         // An unprobed file — the shape an erred fetch also leaves behind, since only a
         // parsed verdict is ever stored — reads as absent, i.e. unknown.
-        assert_eq!(probe_cache_get(slug, path, git_ref, ttl), None);
+        assert_eq!(probe_cache_get(repo, slug, path, git_ref, ttl), None);
 
-        probe_cache_put(slug, path, git_ref, true);
-        assert_eq!(probe_cache_get(slug, path, git_ref, ttl), Some(true));
-        assert_eq!(probe_cache_get(slug, path, git_ref, EXPIRED), None);
+        probe_cache_put(repo, slug, path, git_ref, true);
+        assert_eq!(probe_cache_get(repo, slug, path, git_ref, ttl), Some(true));
+        assert_eq!(probe_cache_get(repo, slug, path, git_ref, EXPIRED), None);
 
         // `false` round-trips as a hit, not as an absence.
-        probe_cache_put(slug, path, git_ref, false);
-        assert_eq!(probe_cache_get(slug, path, git_ref, ttl), Some(false));
-        assert_eq!(probe_cache_get(slug, path, git_ref, EXPIRED), None);
+        probe_cache_put(repo, slug, path, git_ref, false);
+        assert_eq!(probe_cache_get(repo, slug, path, git_ref, ttl), Some(false));
+        assert_eq!(probe_cache_get(repo, slug, path, git_ref, EXPIRED), None);
     }
 
     #[test]
     fn a_false_verdict_expires_before_a_true_one_of_the_same_age() {
-        let slug = "o/directions";
+        let (repo, slug) = ("C:/repos/directions", "o/directions");
         let (yes, no) = (
             ".github/workflows/enabled.yml",
             ".github/workflows/disabled.yml",
         );
-        probe_cache_put(slug, yes, "master", true);
-        probe_cache_put(slug, no, "master", false);
+        probe_cache_put(repo, slug, yes, "master", true);
+        probe_cache_put(repo, slug, no, "master", false);
 
         // Both entries are the same age; only the verdict decides which window applies.
         // This window is past the `false` one and still inside the `true` one.
@@ -872,12 +900,12 @@ mod tests {
             absent: Duration::ZERO,
         };
         assert_eq!(
-            probe_cache_get(slug, yes, "master", past_the_short_window),
+            probe_cache_get(repo, slug, yes, "master", past_the_short_window),
             Some(true),
             "a true verdict still holds inside the long window"
         );
         assert_eq!(
-            probe_cache_get(slug, no, "master", past_the_short_window),
+            probe_cache_get(repo, slug, no, "master", past_the_short_window),
             None,
             "a false verdict must expire with the short window, so a workflow enabled \
              since the probe stops being hidden"
@@ -885,7 +913,7 @@ mod tests {
 
         // Inside both windows nothing has expired yet.
         assert_eq!(
-            probe_cache_get(slug, no, "master", DISPATCH_PROBE_TTL),
+            probe_cache_get(repo, slug, no, "master", DISPATCH_PROBE_TTL),
             Some(false)
         );
 
@@ -899,29 +927,38 @@ mod tests {
     #[test]
     fn every_key_axis_misses_independently() {
         let ttl = DISPATCH_PROBE_TTL;
-        probe_cache_put("o/keys", ".github/workflows/ci.yml", "master", true);
+        let (repo, slug, ci) = ("C:/repos/keys", "o/keys", ".github/workflows/ci.yml");
+        probe_cache_put(repo, slug, ci, "master", true);
 
         assert_eq!(
-            probe_cache_get("o/keys", ".github/workflows/ci.yml", "dev", ttl),
+            probe_cache_get(repo, slug, ci, "dev", ttl),
             None,
             "a different ref must re-probe"
         );
         assert_eq!(
-            probe_cache_get("o/keys", ".github/workflows/release.yml", "master", ttl),
+            probe_cache_get(repo, slug, ".github/workflows/release.yml", "master", ttl),
             None,
             "a different workflow file must re-probe"
         );
         assert_eq!(
-            probe_cache_get("other/keys", ".github/workflows/ci.yml", "master", ttl),
+            probe_cache_get(repo, "other/keys", ci, "master", ttl),
             None,
-            "a different repo must re-probe"
+            "a different slug must re-probe"
+        );
+        // The host-collision guard: `gh_origin_slug` strips the authority, so a GHE
+        // remote and a github.com remote can present the SAME slug. Two checkouts on
+        // that slug must not share a verdict.
+        assert_eq!(
+            probe_cache_get("C:/repos/keys-enterprise", slug, ci, "master", ttl),
+            None,
+            "the same slug in a different checkout must re-probe, not inherit"
         );
     }
 
     #[test]
     fn a_cached_verdict_never_reaches_the_fan_out() {
         let ttl = DISPATCH_PROBE_TTL;
-        let slug = "o/fanout";
+        let (repo, slug) = ("C:/repos/fanout", "o/fanout");
         let workflows = vec![
             workflow(1, ".github/workflows/ci.yml", "active"),
             workflow(2, ".github/workflows/release.yml", "active"),
@@ -929,7 +966,7 @@ mod tests {
             workflow(4, ".github/workflows/retired.yml", "disabled_manually"),
         ];
 
-        let (map, probes) = plan_probes(&workflows, slug, "master", ttl);
+        let (map, probes) = plan_probes(&workflows, repo, slug, "master", ttl);
         assert_eq!(
             probes.iter().map(|w| w.id).collect::<Vec<_>>(),
             vec![1, 2],
@@ -938,8 +975,8 @@ mod tests {
         assert_eq!(map.get("3"), Some(&false));
         assert_eq!(map.len(), 1, "only the path-decided workflow is in the map");
 
-        probe_cache_put(slug, ".github/workflows/ci.yml", "master", true);
-        let (map, probes) = plan_probes(&workflows, slug, "master", ttl);
+        probe_cache_put(repo, slug, ".github/workflows/ci.yml", "master", true);
+        let (map, probes) = plan_probes(&workflows, repo, slug, "master", ttl);
         assert_eq!(
             probes.iter().map(|w| w.id).collect::<Vec<_>>(),
             vec![2],
@@ -951,11 +988,26 @@ mod tests {
             "its verdict comes from the cache"
         );
 
-        let (_, probes) = plan_probes(&workflows, slug, "dev", ttl);
+        let (_, probes) = plan_probes(&workflows, repo, slug, "dev", ttl);
         assert_eq!(
             probes.iter().map(|w| w.id).collect::<Vec<_>>(),
             vec![1, 2],
             "another ref is a different key, so it fans out again"
+        );
+
+        // Same slug, different checkout — the host-collision guard, exercised through
+        // the fan-out path rather than the cache functions alone.
+        let (_, probes) = plan_probes(
+            &workflows,
+            "C:/repos/fanout-enterprise",
+            slug,
+            "master",
+            ttl,
+        );
+        assert_eq!(
+            probes.iter().map(|w| w.id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "a different checkout on the same slug must not inherit cached verdicts"
         );
     }
 

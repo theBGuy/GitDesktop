@@ -202,20 +202,13 @@ function longPathSummary(text: string): string | null {
   return LONG_PATH_MARKERS.some((m) => m.test(text)) ? LONG_PATH_SUMMARY : null;
 }
 
-/** GitHub's secret push protection refusing a push. Measured verbatim from a
- *  real rejection (github.com over HTTPS, 2026-08-11): the block arrives as
- *  `remote:`-prefixed lines carrying a `- GITHUB PUSH PROTECTION` section whose
- *  violation bullet reads `- Push cannot contain secrets`.
- *
- *  The `GH013` code that heads the same block is deliberately NOT a marker: it
- *  covers every repository rule violation, so a branch-name or signature rule
- *  would borrow advice about secrets. The secret-type banner, the file locations
- *  and the unblock URL all vary per detection and stay in Details.
- *
- *  Anchored at line start only — GitHub pads every `remote:` line with trailing
- *  spaces, which an end-anchored marker would miss. Paired with the Rust canary
- *  `push_protection_stderr_still_matches_the_frontend_markers` (git/remote.rs),
- *  which pins these line shapes against the measured stderr. */
+/** GitHub's secret push protection refusing a push (block measured verbatim,
+ *  2026-08-11). The `GH013` code heading the block is deliberately NOT a marker:
+ *  it covers every repository rule violation, so a branch-name rule would borrow
+ *  advice about secrets. Start-anchored only — GitHub pads every `remote:` line
+ *  with trailing spaces. The Rust canary
+ *  `push_protection_stderr_still_matches_the_frontend_markers` (git/remote.rs)
+ *  pins these shapes against the measured stderr. */
 const PUSH_PROTECTION_MARKERS = [
   /^[ \t]*remote:[ \t]*-[ \t]*GITHUB PUSH PROTECTION\b/m,
   /^[ \t]*remote:[ \t]*-[ \t]*Push cannot contain secrets\b/m,
@@ -225,7 +218,7 @@ const PUSH_PROTECTION_MARKERS = [
  *  cheap remedy — rewriting the commit — is still open. Saying that is the
  *  point: a user who reads this as a transient failure retries past it. */
 const PUSH_PROTECTION_SUMMARY =
-  "GitHub blocked this push because it detected a likely secret, so nothing was pushed. Remove the secret from the commits and push again, or if it is a false positive, open the unblock link GitHub printed in the details.";
+  "GitHub blocked this push because it detected a likely secret, so the commits were not added to the repository. Remove the secret from the commits and push again, or if it is a false positive, open the unblock link GitHub printed in the details.";
 
 /** The humanized line for a push blocked by secret push protection, or null when
  *  the text carries no such block. */

@@ -174,37 +174,21 @@ async fn submodule_recurse(repo: &str) -> bool {
     out.code == 0 && out.stdout_lossy().trim() == "true"
 }
 
-/// The submodule worktree update a rebase-mode `git pull` runs after its rebase, and
-/// the one thing the guard's plain `git rebase` cannot do for itself.
+/// The submodule worktree update a rebase-mode `git pull` runs after its rebase —
+/// the one thing the guard's plain `git rebase` cannot do for itself:
+/// `submodule.recurse`'s supported-command list (git-config) omits `rebase`, and
+/// the step pull runs for it is `git submodule update --recursive --rebase`
+/// (measured via GIT_TRACE, git 2.51.1.windows.1).
 ///
-/// Semantics taken from git's own docs, not from the argv: `submodule.recurse` is
-/// "A boolean indicating if commands should enable the `--recurse-submodules` option
-/// by default", and its supported-command list is checkout, fetch, grep, pull, push,
-/// read-tree, reset, restore and switch — `rebase` is absent, which is why the
-/// guard's phases lose the behavior. Pull's `--recurse-submodules` "controls if new
-/// commits of populated submodules should be fetched, and if the working trees of
-/// active submodules should be updated, too … If the checkout is done via rebase,
-/// local submodule commits are rebased as well" (git-pull). The step pull runs for
-/// that second half is `git submodule update --recursive --rebase` (measured through
-/// `GIT_TRACE`, git 2.51.1.windows.1).
+/// The fetch half needs nothing: the guard's plain `git fetch` inherits
+/// `submodule.recurse` like pull's own, and forcing `--recurse-submodules` would
+/// recurse where `fetch.recurseSubmodules=no` makes plain pull not (measured).
 ///
-/// The FETCH half needs nothing here: the guard's probe fetch is a plain
-/// `git fetch` in the user's own repo, so it already inherits `submodule.recurse`
-/// exactly as pull's own flagless `git fetch` does — and forcing an explicit
-/// `--recurse-submodules` would recurse where a `fetch.recurseSubmodules=no` makes
-/// plain pull not (both measured on the same git).
-///
-/// WHEN it runs is parity too, and both directions are measured on that git rather
-/// than reasoned: a rebase that CONFLICTS gets no submodule step (pull's trace ends
-/// at `git rebase`, and the submodule stays put), while a rebase that landed gets one
-/// even if the AUTOSTASH reapply then conflicted — pull prints "Applying autostash
-/// resulted in conflicts", exits 0, and still runs the step, leaving the submodule
-/// updated beside the unmerged paths. So the gate here is "did the rebase land", not
-/// "is the tree clean"; [`fold_submodule_failure`] is what keeps that from costing
-/// the reapply report.
-///
-/// `submodule update` clones and fetches what a moved pointer needs, so it takes the
-/// network budget.
+/// The gate is "did the rebase land", not "is the tree clean" — both directions
+/// measured on that git: a conflicted rebase gets no submodule step, while a landed
+/// rebase gets one even when the autostash reapply conflicted (pull exits 0 and
+/// still runs it). [`fold_submodule_failure`] keeps that from costing the reapply
+/// report. Clones and fetches what a moved pointer needs, so network budget.
 async fn update_submodules_after_rebase(repo: &str) -> AppResult<()> {
     if !submodule_recurse(repo).await {
         return Ok(());
@@ -247,6 +231,8 @@ fn fold_submodule_failure(
     let Err(failure) = submodule else {
         return result;
     };
+    // Every arm is spelled out, with no `Ok(_)` catch-all: a new outcome variant must
+    // then come here for a decision rather than defaulting into the discarding arm.
     match result {
         Ok(AutostashOutcome::ReapplyConflicted {
             stderr,
@@ -255,9 +241,22 @@ fn fold_submodule_failure(
             stderr: format!("{stderr}\n{failure}"),
             conflicted,
         }),
-        Ok(_) => Err(failure),
-        // The step only runs on a landed rebase, so a failed one never reaches here.
-        stopped => stopped,
+        // The landed outcomes that carry nothing the error does not, so the failure IS
+        // the result. `StashedOnly` is landed too and belongs here even though neither
+        // caller can produce it (both settle with `reapply: true`) — listing it keeps
+        // the arm about what the outcome MEANS, not about which callers exist.
+        Ok(
+            AutostashOutcome::Reapplied
+            | AutostashOutcome::NothingStashed
+            | AutostashOutcome::StashedOnly,
+        ) => Err(failure),
+        // Not landed: both carry the stderr naming a retained stash or a paused
+        // rebase, which no submodule error would tell the user about. Unreachable
+        // while both callers gate the step on the rebase having landed — matched
+        // explicitly so that guarantee is the compiler's, not the caller's.
+        stopped @ (Ok(AutostashOutcome::OpFailedRestored { .. })
+        | Ok(AutostashOutcome::OpFailedStashKept { .. })
+        | Err(_)) => stopped,
     }
 }
 
@@ -788,6 +787,25 @@ fn settled_journal_error(result: &AppResult<AutostashOutcome>) -> Option<String>
     }
 }
 
+/// Whether a settled compound HANDED the tree to the user rather than ending — the
+/// journal's pause condition, and the compound's answer to the plain core's
+/// `AppError::Conflict`.
+///
+/// `in_progress` is the whole discrimination, not decoration: it is true only when
+/// the rebase stopped and left itself for the user to continue or abort. The same
+/// variant with `in_progress: false` means the op is OVER and the stash was kept
+/// because the RESTORE-pop failed — a real failure with nothing waiting on the user,
+/// which must journal as one.
+fn settled_paused(result: &AppResult<AutostashOutcome>) -> bool {
+    matches!(
+        result,
+        Ok(AutostashOutcome::OpFailedStashKept {
+            in_progress: true,
+            ..
+        })
+    )
+}
+
 /// Phase B: rebase onto the SHAs the user decided on, keeping or dropping the
 /// commits the fork-point verdict would have rewritten away. `branch` is the one
 /// the refusal named — the decision only means anything on that ref.
@@ -953,16 +971,9 @@ pub(crate) async fn git_pull_rebase_decided_autostash_core(
     } else {
         result
     };
-    // The compound's conflict shape: the rebase stopped and left itself in progress
-    // for the user to continue or abort, which the plain core reports as
-    // `AppError::Conflict`. A stash kept for any OTHER reason is a real failure.
-    if matches!(
-        result,
-        Ok(AutostashOutcome::OpFailedStashKept {
-            in_progress: true,
-            ..
-        })
-    ) {
+    // The compound's conflict shape — see [`settled_paused`]. A stash kept for any
+    // OTHER reason is a real failure.
+    if settled_paused(&result) {
         crate::oplog::pause(&repo_path, &op_id).await;
     } else {
         crate::oplog::finish(&repo_path, &op_id, settled_journal_error(&result)).await;
@@ -1206,6 +1217,40 @@ mod tests {
             settled_journal_error(&Ok(AutostashOutcome::NothingStashed)),
             None
         );
+    }
+
+    /// `in_progress` is the whole pause discrimination: the SAME variant with it
+    /// false means the op ended and the stash was kept because the restore-pop
+    /// failed, which is a failure to journal, not a hand-off to the user. An
+    /// integration fixture cannot pin that half — a conflicted rebase always leaves
+    /// itself in progress — so the predicate is pinned here instead.
+    #[test]
+    fn settled_paused_is_only_a_rebase_left_in_progress() {
+        assert!(settled_paused(&Ok(AutostashOutcome::OpFailedStashKept {
+            stderr: "conflict".into(),
+            in_progress: true
+        })));
+        assert!(
+            !settled_paused(&Ok(AutostashOutcome::OpFailedStashKept {
+                stderr: "the restore-pop failed".into(),
+                in_progress: false
+            })),
+            "the op is over — nothing is waiting on the user"
+        );
+        // No other settled shape is a pause, failed or landed.
+        assert!(!settled_paused(&Ok(AutostashOutcome::OpFailedRestored {
+            stderr: "restored".into()
+        })));
+        assert!(
+            !settled_paused(&Ok(AutostashOutcome::ReapplyConflicted {
+                stderr: "pop".into(),
+                conflicted: true
+            }))
+        );
+        assert!(!settled_paused(&Ok(AutostashOutcome::Reapplied)));
+        assert!(!settled_paused(&Ok(AutostashOutcome::NothingStashed)));
+        assert!(!settled_paused(&Ok(AutostashOutcome::StashedOnly)));
+        assert!(!settled_paused(&Err(AppError::Command("boom".into()))));
     }
 
     #[test]
@@ -1782,6 +1827,50 @@ mod tests {
         let entry = drop_entry(&clone).await;
         assert_eq!(entry.status, "failed");
         assert_eq!(entry.error.as_deref(), Some("aborted by user"));
+    }
+
+    /// The COMPOUND's pause predicate is a different shape from the plain core's
+    /// `AppError::Conflict`: the conflict arrives as an `Ok` outcome, and only
+    /// `in_progress` separates a rebase left for the user from a stash kept because
+    /// the restore-pop itself failed. Matching the wrong variant — or dropping that
+    /// narrowing — would journal a paused pull as "failed" with nothing to catch it.
+    #[tokio::test]
+    async fn a_conflicted_drop_under_autostash_pauses_its_record() {
+        let (dir, clone, shas) = colliding_fixture("drop-conflict-autostash", true).await;
+        // Uncommitted work, so the compound actually stashes: with a clean tree
+        // `settle` takes its no-stash path and reports the conflict as an Err instead.
+        std::fs::write(dir.path().join("clone").join("dirty.txt"), "dirty\n").unwrap();
+
+        let state = AppState::default();
+        let outcome = git_pull_rebase_decided_autostash_core(
+            &state,
+            clone.clone(),
+            "main".into(),
+            "drop".into(),
+            shas.new_tip,
+            shas.keep_base,
+            shas.drop_base,
+            shas.expected_tip.clone(),
+        )
+        .await
+        .expect("a paused rebase settles as an outcome, not an error");
+        assert!(
+            matches!(
+                outcome,
+                AutostashOutcome::OpFailedStashKept {
+                    in_progress: true,
+                    ..
+                }
+            ),
+            "the rebase stopped and left itself in progress: {outcome:?}"
+        );
+        assert!(crate::git::ops::op_state(&clone).await.unwrap().rebasing);
+
+        let entry = drop_entry(&clone).await;
+        assert_eq!(entry.status, "paused", "not a failure — it is waiting on the user");
+        assert!(entry.finished_at.is_none(), "a paused op has not ended");
+        assert!(entry.error.is_none());
+        assert_eq!(entry.original_sha, shas.expected_tip);
     }
 
     /// The autostash variant stashes the dirty tree across the rebase and puts it

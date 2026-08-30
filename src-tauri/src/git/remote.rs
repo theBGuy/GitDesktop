@@ -2048,15 +2048,26 @@ hint: Updates were rejected because the tip of your current branch is behind
 ";
 
     /// Whether `report` carries a `remote:` bullet whose text opens with
-    /// `label`, mirroring `PUSH_PROTECTION_MARKERS` (src/lib/error-summary.ts)
-    /// in shape: optional indent, the `remote:` prefix, the `-` bullet,
-    /// then the text — and no end anchor, since git pads the line.
+    /// `label`, matching `PUSH_PROTECTION_MARKERS` (src/lib/error-summary.ts)
+    /// exactly: space/tab indent only, the `remote:` prefix, the `-` bullet,
+    /// the label at a word boundary — and no end anchor, since git pads the
+    /// line. Looser matching here would let the canary pass stderr the
+    /// frontend rejects, which is the one direction it must not be loose in.
     fn has_remote_bullet(report: &str, label: &str) -> bool {
+        fn eat(s: &str) -> &str {
+            s.trim_start_matches([' ', '\t'])
+        }
         report.lines().any(|l| {
-            l.trim_start()
+            eat(l)
                 .strip_prefix("remote:")
-                .and_then(|r| r.trim_start().strip_prefix('-'))
-                .is_some_and(|r| r.trim_start().starts_with(label))
+                .and_then(|r| eat(r).strip_prefix('-'))
+                .and_then(|r| eat(r).strip_prefix(label))
+                .is_some_and(|rest| {
+                    !rest
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                })
         })
     }
 
@@ -2080,6 +2091,14 @@ hint: Updates were rejected because the tip of your current branch is behind
                  own presentation"
             );
         }
+        assert!(
+            !has_remote_bullet(
+                "remote: - GITHUB PUSH PROTECTIONAL",
+                "GITHUB PUSH PROTECTION"
+            ),
+            "the label matched past its word boundary — the frontend's \\b would refuse \
+             this line, so the canary must too"
+        );
         assert!(
             PUSH_PROTECTION_STDERR
                 .lines()

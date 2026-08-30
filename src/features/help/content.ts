@@ -588,9 +588,9 @@ can safely preview and recover work you thought was gone.
 journal of the *risky* operations GitDesktop runs: local PR merges, cherry-picks, history
 edits, interactive rebases, and a rebase pull that drops commits. Each is recorded with the
 exact branch and commit it started from, and whether it finished, failed, is paused on
-conflicts, is still pending, or **ended outside the app** (a cherry-pick or rebase pull you
-continued or aborted in a terminal, which the journal only knows is over). If one of these operations is
-interrupted (a crash or a restart mid-op), a calm recovery line
+conflicts, is still pending, or **ended outside the app** (a cherry-pick or rebase pull
+you continued or aborted in a terminal, which the journal only knows is over). If one of
+these operations is interrupted (a crash or a restart mid-op), a calm recovery line
 appears above the **Changes** list naming what was interrupted and the state it started
 from. That notice only informs — it never resets or continues anything on its own (the
 git-native **Continue**/**Abort** for an in-progress merge, rebase, cherry-pick, or revert
@@ -1273,8 +1273,8 @@ or GitLab read that couldn't get through.
 A **local PR** is the same review workflow against any two branches with **no remote at
 all** — describe it in Markdown, comment, label, approve, close or reopen (posting your
 drafted comment alongside), and merge locally. Local PRs are private to you and never
-written into the repo. When you're ready, **promote** a local PR to a real GitHub PR or
-GitLab MR in one click, history preserved.
+written into the repo. When you're ready, **promote** a local PR to a real pull request
+on GitHub or Bitbucket, or a merge request on GitLab, in one click, history preserved.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA

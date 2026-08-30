@@ -303,9 +303,9 @@ export function CreateLocalPrDialog({
           <DialogHeader>
             <DialogTitle>New local pull request</DialogTitle>
             <DialogDescription>
-              Propose merging one branch into another and review it locally —
-              nothing leaves your machine. Merge it later with a{" "}
-              <span className="font-mono">--no-ff</span> commit.
+              Propose merging one branch into another and review it locally.
+              Merge it later with a <span className="font-mono">--no-ff</span>{" "}
+              commit.
             </DialogDescription>
           </DialogHeader>
 
