@@ -133,9 +133,10 @@ $ git status -sb
 If you'd already committed new work on top of the pulled branch
 before noticing, reset would take it down with the pull's result; in
 that case `git cherry-pick 5a818d0` brings the lost commit onto the
-current state instead. A branch repaired that way already sits on top
-of `origin/search`, so there is nothing left to integrate: skip the
-reset below and just `git push`.
+current state instead. A branch repaired that way already sits on
+top of `origin/search`, so there is nothing left to integrate: skip
+the reset below, `git push`, and `git stash pop` if you stashed
+at the start.
 
 Ahead 1, behind 1 is the divergence the pull was supposed to resolve,
 now out in the open: you have a commit missing from the remote, the
