@@ -931,11 +931,11 @@ review via its subscription login. The full list is under
   the version it wants, with an Update link. It also shows a live readout
   of the window's current position, size, and display (with copy-coords).
 - **Narrow windows and split-screen**: the window goes down to 640px wide,
-  so GitDesktop can sit beside your editor in a tiled layout. The sidebar
-  narrows with the window and collapses to an icon rail
-  (`Ctrl`/`⌘`+`Shift`+`B`), the file list beside a diff collapses on demand
-  or when its pane is tight, and the commit box pops out into a roomier
-  dialog reachable from any tab.
+  so GitDesktop can sit beside your editor in a tiled layout. The
+  sidebar narrows with the window and collapses to an icon rail
+  (`Ctrl`/`⌘`+`Shift`+`B`), the file list beside a diff collapses on
+  demand or when its pane is tight, and the commit box pops out into a
+  roomier dialog reachable from any tab.
 - **Window memory**: GitDesktop reopens at the size and position you left
   it, and maximized if it was, validated against your current monitors so
   an unplugged display can't strand it off-screen. Your layout is saved as
