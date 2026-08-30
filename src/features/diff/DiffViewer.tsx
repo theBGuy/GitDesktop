@@ -74,6 +74,7 @@ import {
 import { fileExt } from "./diff-lang";
 import { ImagePanes } from "./ImageDiff";
 import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
+import { useHiddenTriggerFocus } from "./use-hidden-trigger-focus";
 
 /** Working-tree diff for the file selected in the changes panel. */
 export function DiffViewer({ repoPath }: { repoPath: string }) {
@@ -198,18 +199,11 @@ function WorkingTreeDiff({
   // the trigger under @md like the read-only surface does, so below that width
   // the action is the only route to it.
   const [langOpen, setLangOpen] = useState(false);
-  const langWrapRef = useRef<HTMLSpanElement>(null);
-  const controlsRef = useRef<HTMLSpanElement>(null);
-  // Closing below @md re-hides the trigger in the same commit, so Base UI's
-  // focus-return lands on a display:none node and focus falls to <body>. Catch
-  // exactly that case — `offsetParent === null` means the wrapper really went
-  // away — and leave the normal return-to-trigger alone at wider widths.
-  const returnFocusIfTriggerHidden = () =>
-    requestAnimationFrame(() => {
-      if (langWrapRef.current?.offsetParent === null) {
-        controlsRef.current?.focus();
-      }
-    });
+  const {
+    wrapRef: langWrapRef,
+    controlsRef,
+    returnFocusIfTriggerHidden,
+  } = useHiddenTriggerFocus();
   // `parsed`, `hunkMode`, and `busy` are computed above the `!hunkMode` early
   // return because the hotkey registrations below run unconditionally and read
   // them.

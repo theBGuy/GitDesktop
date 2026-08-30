@@ -59,6 +59,7 @@ import {
 } from "./shiki-highlighter";
 import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
 import { ensureCustomLanguages } from "./syntax";
+import { useHiddenTriggerFocus } from "./use-hidden-trigger-focus";
 import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
 
 /**
@@ -1227,18 +1228,11 @@ export function DiffContent({
   // The picker's trigger is hidden below @md, so the palette action is its only
   // route at narrow widths — which makes the open state the toolbar's to own.
   const [langOpen, setLangOpen] = useState(false);
-  const langWrapRef = useRef<HTMLSpanElement>(null);
-  const controlsRef = useRef<HTMLSpanElement>(null);
-  // Closing below @md re-hides the trigger in the same commit, so Base UI's
-  // focus-return lands on a display:none node and focus falls to <body>. Catch
-  // exactly that case — `offsetParent === null` means the wrapper really went
-  // away — and leave the normal return-to-trigger alone at wider widths.
-  const returnFocusIfTriggerHidden = () =>
-    requestAnimationFrame(() => {
-      if (langWrapRef.current?.offsetParent === null) {
-        controlsRef.current?.focus();
-      }
-    });
+  const {
+    wrapRef: langWrapRef,
+    controlsRef,
+    returnFocusIfTriggerHidden,
+  } = useHiddenTriggerFocus();
   // Computed above the early-return chain (which the `emptyDiff` arm joins, so
   // the text is trimmed once) because the registration below is a hook: offer
   // the action only in the states that actually render the picker.
