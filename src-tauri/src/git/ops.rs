@@ -6227,6 +6227,82 @@ mod tests {
         );
     }
 
+    /// The probe `op_continue` consults while holding the repo lock: a rebase that
+    /// STOPPED must read true and an aborted one false, or a guarded pull's drop
+    /// record closes at the wrong moment — mid-rebase, or never. Both marker dirs
+    /// count, because the probe is an OR over the pair: the default merge backend
+    /// writes `rebase-merge`, `--apply` writes `rebase-apply`.
+    #[tokio::test]
+    async fn rebase_marker_probe_tracks_a_paused_rebase() {
+        let (dir, repo) = setup_repo("rebase-marker").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+        git(&repo, &["switch", "feature"]).await;
+
+        assert!(!rebase_marker_present(&repo), "nothing is rebasing yet");
+
+        for backend in [Vec::new(), vec!["--apply"]] {
+            let mut argv = vec!["rebase"];
+            argv.extend(backend.iter().copied());
+            argv.push(&base);
+            let out = run_git_raw(Some(&repo), &argv, DEFAULT_TIMEOUT).await.unwrap();
+            assert_ne!(out.code, 0, "the rebase should conflict: {argv:?}");
+            assert!(
+                rebase_marker_present(&repo),
+                "a stopped rebase leaves its marker dir: {argv:?}"
+            );
+            git(&repo, &["rebase", "--abort"]).await;
+            assert!(
+                !rebase_marker_present(&repo),
+                "and the abort clears it: {argv:?}"
+            );
+        }
+    }
+
+    /// The rebase twin of the pick probe above: the same spawn-free lookup has to
+    /// follow a linked worktree's one-line `gitdir:` pointer, or a guarded pull
+    /// paused in a worktree would read as finished and close its record mid-rebase.
+    #[tokio::test]
+    async fn rebase_marker_probe_follows_a_worktrees_gitdir_pointer() {
+        let (dir, repo) = setup_repo("worktree-rebase-marker").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+        let feature_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+        let tip = rev(&repo, "HEAD").await;
+
+        let link_dir = tempfile::Builder::new()
+            .prefix("gd-worktree-rebase-marker-")
+            .tempdir()
+            .expect("create temp dir");
+        let link = link_dir.path().join("linked").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "--detach", &link, &feature_tip]).await;
+        assert!(
+            !rebase_marker_present(&link),
+            "nothing is rebasing in the fresh worktree"
+        );
+
+        let out = run_git_raw(Some(&link), &["rebase", &tip], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(out.code, 0, "the rebase inside the worktree should conflict");
+        assert!(
+            rebase_marker_present(&link),
+            "the worktree's own marker must be found through its gitdir pointer"
+        );
+        assert!(
+            !rebase_marker_present(&repo),
+            "and the main checkout has no rebase of its own"
+        );
+
+        git(&repo, &["worktree", "remove", "--force", &link]).await;
+    }
+
     /// Conflicted revert / cherry-pick / rebase all split ONE report across both
     /// streams: the diagnostic on stderr, the conflicted-file list on stdout. An
     /// error carrying either alone looks populated while dropping exactly what

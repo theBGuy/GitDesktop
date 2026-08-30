@@ -188,7 +188,8 @@ async fn submodule_recurse(repo: &str) -> bool {
 /// measured on that git: a conflicted rebase gets no submodule step, while a landed
 /// rebase gets one even when the autostash reapply conflicted (pull exits 0 and
 /// still runs it). [`fold_submodule_failure`] keeps that from costing the reapply
-/// report. Clones and fetches what a moved pointer needs, so network budget.
+/// report. `submodule update` clones and fetches what a moved pointer needs,
+/// so it runs on `NETWORK_TIMEOUT`.
 async fn update_submodules_after_rebase(repo: &str) -> AppResult<()> {
     if !submodule_recurse(repo).await {
         return Ok(());

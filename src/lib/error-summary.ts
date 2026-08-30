@@ -214,9 +214,9 @@ const PUSH_PROTECTION_MARKERS = [
   /^[ \t]*remote:[ \t]*-[ \t]*Push cannot contain secrets\b/m,
 ];
 
-/** GitHub refuses the push whole, so the secret is still only local and the
- *  cheap remedy — rewriting the commit — is still open. Saying that is the
- *  point: a user who reads this as a transient failure retries past it. */
+/** GitHub refuses the ref update, so the commits never land and the cheap
+ *  remedy — rewriting them — is still open. Saying that is the point: a user
+ *  who reads this as a transient failure retries past it. */
 const PUSH_PROTECTION_SUMMARY =
   "GitHub blocked this push because it detected a likely secret, so the commits were not added to the repository. Remove the secret from the commits and push again, or if it is a false positive, open the unblock link GitHub printed in the details.";
 
