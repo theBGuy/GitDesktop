@@ -276,7 +276,8 @@ pushing and pulling stay manual.
 
 The full pull-request loop on GitHub, GitLab & Bitbucket, plus **local
 PRs**: the same workflow against any two branches with no remote at all,
-promotable to a real GitHub, GitLab, or Bitbucket PR (comments and all) in one click.
+promotable to a real GitHub, GitLab, or Bitbucket PR (comments and all)
+in one click.
 
 - **Open, edit, merge**: review, comment, approve, edit, and merge (merge &
   squash on all three; rebase on GitHub, fast-forward on Bitbucket) without
