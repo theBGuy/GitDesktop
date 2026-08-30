@@ -59,8 +59,8 @@ const STATUS_META: Record<
     Icon: ProhibitIcon,
     tone: "text-muted-foreground",
   },
-  // A cherry-pick finished or abandoned in a terminal: over, but the journal never
-  // saw how it ended, so it reads as neither Done nor Failed.
+  // A paused op (cherry-pick or rebase pull) finished or abandoned in a terminal:
+  // over, but the journal never saw how it ended, so it reads as neither Done nor Failed.
   concluded: {
     label: "Ended outside the app",
     Icon: ArrowSquareOutIcon,

@@ -86,9 +86,10 @@ async fn absolute_git_dir(repo: &str) -> Option<std::path::PathBuf> {
     (!dir.is_empty()).then(|| std::path::PathBuf::from(dir))
 }
 
-/// Whether `CHERRY_PICK_HEAD` is present, resolved without spawning git — for the
-/// commit path, which pays this on EVERY commit and must not grow a `rev-parse`
-/// child for it. Anything unreadable answers "no pick", never an error.
+/// The dir holding `repo`'s op markers, resolved without spawning git — for the
+/// paths that pay this on EVERY commit or while holding a lock and must not grow a
+/// `rev-parse` child for it. `None` for anything unreadable, which callers must read
+/// as "no markers", never as an error.
 ///
 /// A linked worktree or submodule replaces `.git` with a one-line `gitdir:` pointer
 /// to the dir holding ITS markers, and that path may be relative to the tree holding
@@ -96,25 +97,37 @@ async fn absolute_git_dir(repo: &str) -> Option<std::path::PathBuf> {
 /// for a worktree under `worktree.useRelativePaths` / `--relative-paths`
 /// (`gitdir: ../<main>/.git/worktrees/<name>`); measured, git 2.51.1. Joining on the
 /// repo path resolves those and leaves an absolute pointer untouched.
+fn marker_dir(repo: &str) -> Option<std::path::PathBuf> {
+    let repo_root = Path::new(repo);
+    let dot_git = repo_root.join(".git");
+    match std::fs::metadata(&dot_git) {
+        Ok(meta) if meta.is_dir() => Some(dot_git),
+        Ok(_) => std::fs::read_to_string(&dot_git)
+            .ok()?
+            .trim()
+            .strip_prefix("gitdir:")
+            .map(|dir| repo_root.join(dir.trim())),
+        Err(_) => None,
+    }
+}
+
+/// Whether `CHERRY_PICK_HEAD` is present, resolved without spawning git (see
+/// [`marker_dir`]).
 ///
 /// Narrower than [`op_state`] on purpose: it answers only "is a single-commit pick
 /// stopped here", the state `cherry-pick <hash>` leaves and `git commit` clears. The
 /// sequencer-only pick (`cherry-pick -n`, no marker) is deliberately outside it.
 pub(crate) fn cherry_pick_marker_present(repo: &str) -> bool {
-    let repo_root = Path::new(repo);
-    let dot_git = repo_root.join(".git");
-    let git_dir = match std::fs::metadata(&dot_git) {
-        Ok(meta) if meta.is_dir() => dot_git,
-        Ok(_) => match std::fs::read_to_string(&dot_git) {
-            Ok(text) => match text.trim().strip_prefix("gitdir:") {
-                Some(dir) => repo_root.join(dir.trim()),
-                None => return false,
-            },
-            Err(_) => return false,
-        },
-        Err(_) => return false,
-    };
-    git_dir.join("CHERRY_PICK_HEAD").exists()
+    marker_dir(repo).is_some_and(|dir| dir.join("CHERRY_PICK_HEAD").exists())
+}
+
+/// Whether a rebase is stopped here, resolved without spawning git (see
+/// [`marker_dir`]) — the same `rebase-merge`/`rebase-apply` pair [`op_state`] reads,
+/// for the callers that need the verdict while holding a lock.
+pub(crate) fn rebase_marker_present(repo: &str) -> bool {
+    marker_dir(repo).is_some_and(|dir| {
+        dir.join("rebase-merge").exists() || dir.join("rebase-apply").exists()
+    })
 }
 
 /// True when an interactive rebase is paused at an `edit` instruction (the last
@@ -275,14 +288,28 @@ pub(crate) async fn op_abort(state: &AppState, repo_path: &str, op: &str) -> App
             stderr: out.full_failure_text(),
         });
     }
-    // Closes the stop arm's paused record as the user's own abandonment. The verdict
-    // is only right for the record this abort actually ended: a pick concluded
-    // outside the app leaves a stale paused record until the next `git_oplog_check`
-    // that finds no pick in progress retires it via `conclude_stale_pauses` — until
-    // then, this call would close it as "aborted by user" (the accepted cost of
-    // keying on the newest paused record rather than an op id).
-    if op == "cherry-pick" {
-        crate::oplog::close_paused_pick(repo_path, crate::oplog::PausedOutcome::Aborted).await;
+    // Closes the stop arm's paused record as the user's own abandonment: a cherry-pick
+    // owns a `cherry_pick_onto` record, a rebase owns a guarded pull's
+    // `pull_rebase_drop` one. Each closes only its OWN op's record, so the two can
+    // never take each other's disposition.
+    //
+    // The accepted cost, unchanged from when only picks paused but now with a second
+    // op's trigger surface: the handle is the newest paused record of that op, not an
+    // op id, so a STALE one — left by an op continued or aborted outside the app —
+    // would be closed as "aborted by user" by the next in-app abort of its kind. The
+    // rebase arm widens WHICH aborts can do that (any in-app rebase abort, not just a
+    // guarded pull's), never what it can reach: only an already-stale record, and only
+    // until the next `git_oplog_check` that finds no op of its kind in progress
+    // retires it via `conclude_stale_pauses`.
+    match op {
+        "cherry-pick" => {
+            crate::oplog::close_paused_pick(repo_path, crate::oplog::PausedOutcome::Aborted).await
+        }
+        "rebase" => {
+            crate::oplog::close_paused_pull_drop(repo_path, crate::oplog::PausedOutcome::Aborted)
+                .await
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -354,11 +381,24 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
     }
     // A cherry-pick that reaches here is over, so a `cherry_pick_onto` record the
     // stop arm left "paused" is closed as done. This is one of the two in-app routes
-    // that end a pick — the commit box is the other, and closes it too. A pick
-    // concluded from a terminal keeps its record paused until the next
-    // `git_oplog_check` that finds no pick in progress retires it.
-    if op == "cherry-pick" {
-        crate::oplog::close_paused_pick(repo_path, crate::oplog::PausedOutcome::Continued).await;
+    // that end a pick — the commit box is the other, and closes it too.
+    //
+    // A rebase owns a guarded pull's `pull_rebase_drop` record and is the arm that
+    // needs the marker check: `--continue` can stop AGAIN at the next commit it
+    // replays, and closing then would report a pull the user is still resolving as
+    // done. Each op closes only its own record, and the same stale-handle cost
+    // `op_abort` documents applies here: an op ended outside the app keeps its record
+    // paused until the next `git_oplog_check` that finds none of its kind in progress
+    // retires it, and until then an in-app continue of that kind would close it.
+    match op {
+        "cherry-pick" => {
+            crate::oplog::close_paused_pick(repo_path, crate::oplog::PausedOutcome::Continued).await
+        }
+        "rebase" if !rebase_marker_present(repo_path) => {
+            crate::oplog::close_paused_pull_drop(repo_path, crate::oplog::PausedOutcome::Continued)
+                .await
+        }
+        _ => {}
     }
     Ok(true)
 }
@@ -3229,7 +3269,7 @@ pub struct RemotePrResolveHandle {
 }
 
 /// Whether a worktree path is one of our REMOTE-PR resolve worktrees — basename
-/// `gd-pr-resolve-<remote>-<number>-<uuid>`. Matches on the bare `gd-pr-resolve-`
+/// `gd-pr-resolve-<remote>-<number>-<id>`. Matches on the bare `gd-pr-resolve-`
 /// prefix so it covers EVERY remote/number, and deliberately does NOT match
 /// [`is_resolve_worktree_path`]'s `gd-resolve-`, keeping the local-PR orphan sweep
 /// away from a remote resolve holding the user's resolutions.
@@ -3465,7 +3505,10 @@ pub(crate) async fn merge_remote_pr(
     // worktree IS the durable resume handle (`find` rediscovers it), and the
     // oplog's interrupted-check keys on the MAIN repo's branch, which this flow
     // never touches — a paused resolve would read as interrupted forever.
-    let worktree_id = uuid::Uuid::new_v4().to_string();
+    // The local resolve mint's short id, shared deliberately: this directory name
+    // is the base every path in the checkout is measured from, and the remote
+    // prefix already spends 14 chars of Windows' 260-char budget before the id.
+    let worktree_id = new_resolve_worktree_id();
     let worktree_path = root.join(format!(
         "{}{worktree_id}",
         pr_resolve_prefix(remote, number)
@@ -3589,7 +3632,7 @@ pub(crate) async fn finish_remote_pr_resolve(
     let remote = resolve_pr_remote(repo_path, lens).await?;
     ensure_pr_resolve_worktree(root, worktree_path)?;
     // Parse the identity this module itself encodes into the directory name —
-    // `gd-pr-resolve-<remote>-<number>-<uuid>` — rather than suffix-matching the
+    // `gd-pr-resolve-<remote>-<number>-<id>` — rather than suffix-matching the
     // id: an empty id makes `ends_with` vacuously true, and a partial one matches
     // any worktree whose name happens to end that way. The remote segment is what
     // stops one lens from finishing (and pushing) another lens's resolve.
@@ -3602,8 +3645,10 @@ pub(crate) async fn finish_remote_pr_resolve(
             "this resolve worktree does not belong to the {remote} remote"
         )));
     };
-    // `<number>-<uuid>`: the number is digits, so the FIRST `-` ends it and
-    // everything after is the id (a uuid, which contains `-` itself).
+    // `<number>-<id>`: the number is digits, so the FIRST `-` ends it and
+    // everything after is the id. Taking the WHOLE tail rather than the next
+    // segment is what keeps worktrees minted before the id shortened — a full
+    // 36-char uuid, dashes and all — finishable without a migration.
     let parsed_id = rest
         .split_once('-')
         .filter(|(number, _)| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
@@ -7569,6 +7614,88 @@ detached
         assert!(third.conflicts.is_empty(), "got: {:?}", third.conflicts);
     }
 
+    /// The remote-PR resolve directory is the same Windows MAX_PATH budget item
+    /// the local `gd-resolve-` mint was shortened for — every path in the checkout
+    /// is measured from it — so the minted name's length is pinned here, at the
+    /// mint itself (composing the prefix by hand would not notice a regression).
+    #[tokio::test]
+    async fn remote_pr_resolve_worktree_name_is_12_hex_under_the_pr_prefix() {
+        let (dir, _origin, repo, _bare) = setup_repo_with_origin("rpr-name").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let outcome = merge_remote_pr(&state, &repo, 42, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+
+        let wt = outcome.worktree_path.clone().expect("worktree path set");
+        let name = Path::new(&wt).file_name().unwrap().to_string_lossy().into_owned();
+        let prefix = pr_resolve_prefix("origin", 42);
+        let id = name
+            .strip_prefix(&prefix)
+            .unwrap_or_else(|| panic!("name {name} under prefix {prefix}"));
+        assert_eq!(id.len(), 12, "id was {id}");
+        assert!(
+            id.bytes().all(|b| b.is_ascii_hexdigit()),
+            "id must be bare hex (no dashes, no braces): {id}"
+        );
+        // `gd-pr-resolve-` (14) + `origin` (6) + `-` + a 2-digit number + `-` + 12.
+        assert_eq!(name.len(), 36, "name was {name}");
+        // The id handed to the frontend is the one in the path, or a resume would
+        // fail its match check.
+        assert_eq!(outcome.worktree_id.as_deref(), Some(id));
+    }
+
+    /// Resolve worktrees minted before the id shortened are still on disk with a
+    /// full 36-char uuid tail, and this flow ships no migration: `finish` parses
+    /// the id as the whole post-number tail, so such a name still pushes.
+    #[tokio::test]
+    async fn finish_remote_pr_resolve_still_accepts_a_legacy_uuid_name() {
+        let (dir, _origin, repo, bare) = setup_repo_with_origin("rpr-legacy").await;
+        let base = push_conflicting_pair(&repo, dir.path(), "origin").await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+        // `finish` reads the head tip from the remote-tracking ref the start step
+        // would have fetched; this fixture skips that step.
+        git(&repo, &["fetch", "origin"]).await;
+
+        let legacy_id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(legacy_id.len(), 36, "the old mint's shape: {legacy_id}");
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let wt = root
+            .join(format!("{}{legacy_id}", pr_resolve_prefix("origin", 8)))
+            .to_string_lossy()
+            .into_owned();
+        let head_tip = rev(&repo, "refs/remotes/origin/feature").await;
+        let base_tip = rev(&repo, &format!("refs/remotes/origin/{base}")).await;
+        git(&repo, &["worktree", "add", "--detach", &wt, &head_tip]).await;
+        let merged = run_git_raw(
+            Some(&wt),
+            &["merge", "--no-ff", "-m", "Merge base into feature", &base_tip],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(merged.code, 0, "the fixture merge conflicts as the flow's does");
+
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+
+        let state = AppState::default();
+        let done = finish_remote_pr_resolve(
+            &state, &repo, "feature", &wt, &legacy_id, None, None, &root,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.status, "pushed");
+        let pushed = done.pushed_sha.clone().expect("pushed sha");
+        assert_ne!(pushed, head_before, "the PR head advanced");
+        assert_eq!(rev(&bare, "refs/heads/feature").await, pushed);
+    }
+
     /// Abort tears the worktree down and pushes nothing; `find` locates the live
     /// worktree by (remote, number) beforehand and reports none afterwards. The
     /// local-PR orphan sweep must NOT claim it (its `gd-resolve-` prefix
@@ -7794,7 +7921,7 @@ detached
 
         // An EMPTY id must be refused, not accepted: every path "ends with" the
         // empty string, so a suffix match would wave it through. A partial id is
-        // refused for the same reason — the id must be the whole uuid segment.
+        // refused for the same reason — the id must match the whole trailing segment.
         for bad_id in ["", &wt_id[wt_id.len() - 4..]] {
             let err = finish_remote_pr_resolve(
                 &state, &repo, "feature", &wt, bad_id, None, None, &root,

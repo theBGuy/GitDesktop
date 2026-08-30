@@ -6,8 +6,6 @@ import {
   CheckCircleIcon,
   CheckIcon,
   DotsThreeIcon,
-  GithubLogoIcon,
-  GitlabLogoIcon,
   GitMergeIcon,
   InfoIcon,
   PencilSimpleIcon,
@@ -21,6 +19,7 @@ import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { usePanelPortalContainer } from "@/components/panel-portal";
+import { ProviderIcon } from "@/components/provider-icon";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -68,6 +67,7 @@ import {
   useRepoStatus,
   useUpdateBranchFrom,
 } from "@/lib/git/queries";
+import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import type { PrSection } from "@/lib/pulls/pr-section";
@@ -205,6 +205,11 @@ export function LocalPrView({
   });
   const [promoteOpen, setPromoteOpen] = useState(false);
   const ghStatus = useForgeStatus(repoPath);
+  const provider = ghStatus.data?.provider;
+  // Promote copy names the detected forge. The label spans all three providers;
+  // the noun stays two-way because only GitLab calls it a merge request.
+  const promoteLabel = providerLabel(provider);
+  const promoteNoun = provider === "gitlab" ? "merge request" : "pull request";
   // Linked-issue chips on the local-PR edit path: the chips OWN the trailing ref
   // block (peeled at open, re-composed on save). A local PR's `Closes #N` lines
   // survive promotion verbatim into the real forge PR, so these become real
@@ -1067,15 +1072,15 @@ export function LocalPrView({
                 variant="outline"
                 size="sm"
                 onClick={() => setPromoteOpen(true)}
-                title={`Push the branch and open this ${ghStatus.data?.provider === "gitlab" ? "merge request on GitLab" : "PR on GitHub"}`}
+                title={`Push the branch and open this ${promoteNoun} on ${promoteLabel}`}
               >
-                {ghStatus.data?.provider === "gitlab" ? (
-                  <GitlabLogoIcon data-icon="inline-start" />
-                ) : (
-                  <GithubLogoIcon data-icon="inline-start" />
-                )}
-                Publish to{" "}
-                {ghStatus.data?.provider === "gitlab" ? "GitLab" : "GitHub"}
+                {/* ProviderIcon forwards no attributes, so the wrapper carries the
+                    `data-icon` the button's leading-icon padding keys off. An unset
+                    provider takes the same GitHub default providerLabel does. */}
+                <span data-icon="inline-start" className="flex">
+                  <ProviderIcon provider={provider ?? "github"} />
+                </span>
+                Publish to {promoteLabel}
               </Button>
             )}
             {/* The label swaps while a note rides along: the action changed

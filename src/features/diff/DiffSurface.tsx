@@ -1226,7 +1226,10 @@ export function DiffContent({
             <span className="shrink-0">(truncated — diff too large)</span>
           )}
         </span>
-        <span className="flex shrink-0 items-center gap-1.5">
+        {/* min-h-7 pins the cluster to the language picker's h-7 trigger, so an
+            extensionless file — where the picker renders nothing and only the
+            xs (h-6) mode toggle remains — doesn't shrink the row by 4px. */}
+        <span className="flex min-h-7 shrink-0 items-center gap-1.5">
           <DiffLanguagePicker filePath={filePath} />
           <DiffModeToggle />
         </span>

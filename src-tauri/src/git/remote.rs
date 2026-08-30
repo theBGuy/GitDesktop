@@ -2005,6 +2005,89 @@ mod tests {
         );
     }
 
+    /// A push GitHub's secret push protection refused, from a real GH013
+    /// rejection measured on this machine (github.com over HTTPS, 2026-08-11).
+    /// The flagged secret's own value never appears in the block, and the
+    /// unblock id is a placeholder here; two purely informational `(?)` notes
+    /// GitHub prints between the violation list and the locations are trimmed.
+    /// GitHub pads every one of these lines with trailing spaces, dropped here
+    /// because an editor would strip them back out anyway — which is the reason
+    /// the frontend markers, and `has_remote_bullet` below, never end-anchor.
+    const PUSH_PROTECTION_STDERR: &str = "\
+remote: error: GH013: Repository rule violations found for refs/heads/feat/security-findings-phase-3.
+remote:
+remote: - GITHUB PUSH PROTECTION
+remote:   —————————————————————————————————————————
+remote:     Resolve the following violations before pushing again
+remote:
+remote:     - Push cannot contain secrets
+remote:
+remote:
+remote:       —— GitLab Access Token ———————————————————————————————
+remote:        locations:
+remote:          - commit: 64a012e497764a53e38949a968553daa2d8f51a3
+remote:            path: src-tauri/src/forge/gitlab_findings.rs:1151
+remote:
+remote:        (?) To push, remove secret from commit(s) or follow this URL to allow the secret.
+remote:        https://github.com/theBGuy/GitDesktop/security/secret-scanning/unblock-secret/<id>
+remote:
+remote:
+To https://github.com/theBGuy/GitDesktop.git
+ ! [remote rejected] feat/security-findings-phase-3 -> feat/security-findings-phase-3 (push declined due to repository rule violations)
+error: failed to push some refs to 'https://github.com/theBGuy/GitDesktop.git'
+";
+
+    /// A branch simply behind its remote: the negative control for the block
+    /// above. It shares the `failed to push some refs` tail, so anything the
+    /// frontend anchors on has to come from the push-protection block itself.
+    const NON_FAST_FORWARD_STDERR: &str = "\
+To https://github.com/theBGuy/GitDesktop.git
+ ! [rejected]        main -> main (non-fast-forward)
+error: failed to push some refs to 'https://github.com/theBGuy/GitDesktop.git'
+hint: Updates were rejected because the tip of your current branch is behind
+";
+
+    /// Whether `report` carries a `remote:` bullet whose text opens with
+    /// `label`, mirroring `PUSH_PROTECTION_MARKERS` (src/lib/error-summary.ts)
+    /// in shape: optional indent, the `remote:` prefix, the `-` bullet,
+    /// then the text — and no end anchor, since git pads the line.
+    fn has_remote_bullet(report: &str, label: &str) -> bool {
+        report.lines().any(|l| {
+            l.trim_start()
+                .strip_prefix("remote:")
+                .and_then(|r| r.trim_start().strip_prefix('-'))
+                .is_some_and(|r| r.trim_start().starts_with(label))
+        })
+    }
+
+    /// Canary for the frontend's push-protection markers: `pushProtectionSummary`
+    /// (src/lib/error-summary.ts) can only turn a blocked push into one human
+    /// line while GitHub still prints these two bullets, so the measured stderr
+    /// and the marker shapes are pinned together here. `GH013` is asserted apart
+    /// from them on purpose — it heads every repository rule violation, not just
+    /// secrets, so the frontend must never classify on it alone.
+    #[test]
+    fn push_protection_stderr_still_matches_the_frontend_markers() {
+        for label in ["GITHUB PUSH PROTECTION", "Push cannot contain secrets"] {
+            assert!(
+                has_remote_bullet(PUSH_PROTECTION_STDERR, label),
+                "the `{label}` bullet is gone — the frontend summary is now blind to a \
+                 blocked push. Actual stderr:\n{PUSH_PROTECTION_STDERR}"
+            );
+            assert!(
+                !has_remote_bullet(NON_FAST_FORWARD_STDERR, label),
+                "`{label}` matched a plain non-fast-forward rejection, which must keep its \
+                 own presentation"
+            );
+        }
+        assert!(
+            PUSH_PROTECTION_STDERR
+                .lines()
+                .any(|l| l.trim_start().starts_with("remote: error: GH013:")),
+            "the fixture no longer carries the GH013 code it was measured from"
+        );
+    }
+
     /// The wire values the TS `PushGuard` union (src/lib/git/api.ts) mirrors: the
     /// success toast keys on these exact strings, so a variant rename that skips
     /// the mirror would silently stop reporting a degraded force push.

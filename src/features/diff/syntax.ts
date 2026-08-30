@@ -76,6 +76,7 @@ const LABELS: Record<string, string> = {
   yaml: "YAML",
   ini: "INI / TOML",
   markdown: "Markdown",
+  mdx: "MDX",
   sql: "SQL",
   dockerfile: "Dockerfile",
   makefile: "Makefile",

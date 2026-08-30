@@ -14,6 +14,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { forgePrComment } from "@/lib/git/api";
 import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
+import { providerLabel } from "@/lib/git/types";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
@@ -27,11 +28,12 @@ import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 
 /**
- * Publishes a local PR to the repo's provider (GitHub or GitLab): pushes the head
- * branch, opens a real PR/MR with the same title/description, **re-posts its
- * comments** (so nothing is lost), then closes the local PR with a link to its
- * successor. Fires no automations — the local PR's creation was the pr-open
- * trigger point (see CreateLocalPrDialog), so promoting it would double-run them.
+ * Publishes a local PR to the repo's provider (GitHub, GitLab, or Bitbucket):
+ * pushes the head branch, opens a real PR/MR with the same title/description,
+ * **re-posts its comments** (so nothing is lost), then closes the local PR with
+ * a link to its successor. Fires no automations — the local PR's creation was
+ * the pr-open trigger point (see CreateLocalPrDialog), so promoting it would
+ * double-run them.
  */
 export function PromoteLocalPrDialog({
   repoPath,
@@ -50,7 +52,9 @@ export function PromoteLocalPrDialog({
   const setLens = useSetRepoLens(repoPath);
   const forge = useForgeStatus(repoPath);
   const isGitLab = forge.data?.provider === "gitlab";
-  const remoteLabel = isGitLab ? "GitLab" : "GitHub";
+  // The label names the detected forge (all three); the noun stays two-way
+  // because only GitLab calls it a merge request.
+  const remoteLabel = providerLabel(forge.data?.provider);
   const prNoun = isGitLab ? "merge request" : "pull request";
   const [draft, setDraft] = useState(false);
   const [posting, setPosting] = useState(false);

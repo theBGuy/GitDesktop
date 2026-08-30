@@ -66,10 +66,11 @@ pub struct OpLogEntry {
     /// Human summary, e.g. `"Squash-merge feature → main"`.
     pub label: String,
     /// `"pending"` | `"done"` | `"failed"` | `"dismissed"` | `"paused"` | `"concluded"`.
-    /// `"paused"` = handed to the user mid-op (a stopped cherry-pick), so it is
-    /// neither in-flight nor finished until they continue or abort it;
-    /// `"concluded"` = that pick ended outside the app, so the journal knows only
-    /// that it is over (see [`conclude_stale_pauses`]).
+    /// `"paused"` = handed to the user mid-op (a stopped cherry-pick or the rebase
+    /// of a decided pull drop — see [`PAUSABLE_OPS`]), so it is neither in-flight
+    /// nor finished until they continue or abort it; `"concluded"` = that op ended
+    /// outside the app, so the journal knows only that it is over (see
+    /// [`conclude_stale_pauses`]).
     pub status: String,
     /// `now_iso()` captured at [`begin`].
     pub started_at: String,
@@ -317,16 +318,61 @@ fn apply_close(obj: &mut Map<String, Value>, outcome: &PausedOutcome, now: Strin
     obj.insert("error".to_string(), error);
 }
 
-/// The id of the NEWEST `"paused"` cherry-pick entry in `entries`, if any. Sorts in
-/// place (the caller owns a store copy), so callers may pass unsorted store order.
-fn newest_paused_pick(entries: &mut [Value]) -> Option<String> {
+/// The journal op a stopped cherry-pick leaves a `"paused"` record for.
+const CHERRY_PICK_ONTO: &str = "cherry_pick_onto";
+/// The journal op a decided pull's DROP arm leaves a `"paused"` record for when its
+/// rebase stops on a conflict.
+const PULL_REBASE_DROP: &str = "pull_rebase_drop";
+
+/// Every op whose record can sit `"paused"`. Each is retired only against ITS OWN
+/// live-op signal ([`LiveOps::is_live`]): a rebase in progress says nothing about a
+/// stopped pick, and vice versa.
+const PAUSABLE_OPS: [&str; 2] = [CHERRY_PICK_ONTO, PULL_REBASE_DROP];
+
+/// What the stale-pause verdict knows about ops still in flight, one pair per
+/// [`PAUSABLE_OPS`] entry.
+///
+/// The `bool`s are the caller's earlier [`crate::git::ops::op_state`] read, already
+/// two git subprocesses old by the time the lock is held, so they may only SPARE
+/// records; the closures re-probe the marker files under the lock and are
+/// authoritative for "still live" (see [`conclude_stale_pauses`]).
+pub(crate) struct LiveOps<'a> {
+    pub cherry_picking: bool,
+    pub rebasing: bool,
+    pub pick_in_progress: &'a dyn Fn() -> bool,
+    pub rebase_in_progress: &'a dyn Fn() -> bool,
+}
+
+impl LiveOps<'_> {
+    /// Whether an op of `op`'s kind is still in flight — either signal saying yes
+    /// spares its records. An op with no probe here is never retired on a guess.
+    fn is_live(&self, op: &str) -> bool {
+        if op == CHERRY_PICK_ONTO {
+            self.cherry_picking || (self.pick_in_progress)()
+        } else if op == PULL_REBASE_DROP {
+            self.rebasing || (self.rebase_in_progress)()
+        } else {
+            true
+        }
+    }
+}
+
+/// Whether `entry` is a `"paused"` record of `op`.
+fn is_paused_op(entry: &Value, op: &str) -> bool {
+    entry.get("status").and_then(Value::as_str) == Some("paused")
+        && entry.get("op").and_then(Value::as_str) == Some(op)
+}
+
+/// The id of the NEWEST `"paused"` `op` entry in `entries`, if any. Sorts in place
+/// (the caller owns a store copy), so callers may pass unsorted store order.
+///
+/// Scoped to one op rather than to "any pause": a stale paused record of ANOTHER
+/// op would otherwise stand in as this one's close handle and take its disposition.
+fn newest_paused_op(entries: &mut [Value], op: &str) -> Option<String> {
     sort_newest_first(entries);
     entries
         .iter()
-        .find(|e| {
-            e.get("op").and_then(Value::as_str) == Some("cherry_pick_onto")
-                && e.get("status").and_then(Value::as_str) == Some("paused")
-        })
+        .find(|e| is_paused_op(e, op))
         .and_then(|e| e.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -355,27 +401,27 @@ fn is_interrupted(
     mid_op || tree_dirty || !on_home
 }
 
-/// Conclude every STALE `"paused"` cherry-pick record in `list` — one whose pick was
-/// finished or abandoned OUTSIDE the app (a terminal `git cherry-pick
-/// --continue`/`--abort`), which otherwise leaves the record paused forever: immortal
-/// under [`cap_history`], a live handle [`close_paused_pick`] misattributes to the
-/// next in-app pick, and a permanent lie in Operation history.
+/// Conclude every STALE `"paused"` record in `list` — one whose op was finished or
+/// abandoned OUTSIDE the app (a terminal `git cherry-pick --continue`/`--abort`, a
+/// terminal `git rebase --continue`/`--abort`), which otherwise leaves the record
+/// paused forever: immortal under [`cap_history`], a live handle
+/// [`close_paused_op`] misattributes to the next in-app op of its kind, and a
+/// permanent lie in Operation history.
 ///
-/// The verdict is deliberately narrower than `mid_op`: a concurrent merge or rebase
-/// says nothing about a pick. It comes from TWO reads, and either one saying "a pick
-/// is live" spares the records. `cherry_picking` is the caller's earlier op-state
-/// read, which by the time we hold the lock is two git subprocesses old — a pick that
-/// paused in that window would have its brand-new record concluded permanently, and
-/// the user's later Continue/Abort would then find no handle to close. So
-/// `pick_in_progress` re-probes under the lock and is authoritative for that
-/// direction; it must answer whether `CHERRY_PICK_HEAD` exists for THIS repo, which
-/// is exactly the marker a paused (single-hash) pick leaves.
+/// Each op is judged against its OWN signals, never `mid_op`: a concurrent merge
+/// says nothing about a pick, and a live rebase says nothing about one either. Both
+/// signals per op come from [`LiveOps`], and either one saying "live" spares that
+/// op's records — the `bool` is the caller's earlier op-state read, two git
+/// subprocesses old by the time we hold the lock (an op that paused in that window
+/// would have its brand-new record concluded permanently, leaving the user's later
+/// Continue/Abort no handle to close), so the closure re-probes the marker files
+/// under the lock and is authoritative for that direction.
 ///
 /// Residual, accepted: git can finish an in-app continue between that probe and
-/// [`close_paused_pick`]'s own locked RMW, so a check landing in those few
+/// [`close_paused_op`]'s own locked RMW, so a check landing in those few
 /// milliseconds concludes the record first and the close then no-ops. Both run
 /// in-process and the window is order-of-ms; the cost is one history row reading
-/// "Ended outside the app" for a pick that ended inside it.
+/// "Ended outside the app" for an op that ended inside it.
 ///
 /// ALL stale records are concluded, not just the pre-newest ones — leaving any behind
 /// keeps the close-handle misattribution alive.
@@ -383,34 +429,19 @@ fn is_interrupted(
 /// Status-write ONLY: the journal never mutates git to "recover" (module contract), and
 /// `finishedAt` stays null because a reconcile observes THAT the op ended, never when.
 /// Answers whether anything changed, so a no-op check doesn't rewrite the file.
-fn conclude_stale_pauses(
-    list: &mut [Value],
-    cherry_picking: bool,
-    pick_in_progress: impl Fn() -> bool,
-) -> bool {
-    fn is_paused_pick(entry: &Value) -> bool {
-        entry.get("status").and_then(Value::as_str) == Some("paused")
-            // Every paused record is a cherry-pick today; asserting the op keeps the
-            // verdict honest if another op ever learns to pause.
-            && entry.get("op").and_then(Value::as_str) == Some("cherry_pick_onto")
-    }
-
-    // Probe only when there is something to conclude — the common check touches no
-    // filesystem beyond the store it already read.
-    if !list.iter().any(is_paused_pick) {
-        return false;
-    }
-    if cherry_picking || pick_in_progress() {
-        return false;
-    }
+fn conclude_stale_pauses(list: &mut [Value], live: &LiveOps<'_>) -> bool {
     let mut changed = false;
-    for entry in list.iter_mut() {
-        if !is_paused_pick(entry) {
+    for op in PAUSABLE_OPS {
+        // Probe only when there is something to conclude — the common check touches
+        // no filesystem beyond the store it already read.
+        if !list.iter().any(|e| is_paused_op(e, op)) || live.is_live(op) {
             continue;
         }
-        if let Some(obj) = entry.as_object_mut() {
-            obj.insert("status".to_string(), Value::String("concluded".to_string()));
-            changed = true;
+        for entry in list.iter_mut().filter(|e| is_paused_op(e, op)) {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("status".to_string(), Value::String("concluded".to_string()));
+                changed = true;
+            }
         }
     }
     changed
@@ -420,27 +451,18 @@ fn conclude_stale_pauses(
 /// still-`"pending"` entries newest-first (0 or 1). `mid_op` = a merge, cherry-pick,
 /// rebase or revert is currently in progress ([`RepoOpState::mid_op`]);
 /// `tree_dirty` = tracked changes are present (catches a mid-squash interrupt
-/// git_op_state can't see); `current_branch` = the branch HEAD is on now;
-/// `cherry_picking` and the `pick_in_progress` re-probe gate the stale-pause arm
-/// alone, and the probe runs INSIDE the lock (see [`conclude_stale_pauses`]).
+/// git_op_state can't see); `current_branch` = the branch HEAD is on now; `live`
+/// gates the stale-pause arm alone, and its probes run INSIDE the lock (see
+/// [`conclude_stale_pauses`]).
 /// Guarded by [`OPLOG_LOCK`] plus the cross-process store lock.
 fn reconcile(
     repo: &str,
     mid_op: bool,
     tree_dirty: bool,
     current_branch: &str,
-    cherry_picking: bool,
-    pick_in_progress: impl Fn() -> bool,
+    live: &LiveOps<'_>,
 ) -> AppResult<Vec<OpLogEntry>> {
-    reconcile_at(
-        &store_path()?,
-        repo,
-        mid_op,
-        tree_dirty,
-        current_branch,
-        cherry_picking,
-        pick_in_progress,
-    )
+    reconcile_at(&store_path()?, repo, mid_op, tree_dirty, current_branch, live)
 }
 
 /// The store logic behind [`reconcile`], taking an explicit path so a test can drive it
@@ -452,8 +474,7 @@ fn reconcile_at(
     mid_op: bool,
     tree_dirty: bool,
     current_branch: &str,
-    cherry_picking: bool,
-    pick_in_progress: impl Fn() -> bool,
+    live: &LiveOps<'_>,
 ) -> AppResult<Vec<OpLogEntry>> {
     let now = now_iso();
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
@@ -466,7 +487,7 @@ fn reconcile_at(
         return Ok(Vec::new());
     };
 
-    let mut changed = conclude_stale_pauses(list, cherry_picking, pick_in_progress);
+    let mut changed = conclude_stale_pauses(list, live);
 
     // Indices of pending entries, newest-first by startedAt. Strictly `"pending"`:
     // a live `"paused"` op was handed to the user and is owned by the conflict
@@ -597,7 +618,7 @@ pub async fn finish(repo: &str, id: &Option<String>, error: Option<String>) {
 
 /// Best-effort: if `id` is `Some`, flip that entry to `"paused"` — the op did not
 /// end, it was handed to the user to resolve, so it is neither a failure nor a
-/// recovery candidate until [`close_paused_pick`] closes it. Swallow+log like
+/// recovery candidate until [`close_paused_op`] closes it. Swallow+log like
 /// [`finish`].
 pub(crate) async fn pause(repo: &str, id: &Option<String>) {
     let Some(id) = id else {
@@ -612,16 +633,27 @@ pub(crate) async fn pause(repo: &str, id: &Option<String>) {
 }
 
 /// Best-effort: close `repo`'s newest `"paused"` cherry-pick entry now that the user
-/// has ended the pick in-app. No paused entry → no-op.
-///
-/// The handle is the newest paused record, not the specific pick, so it can only be
-/// as accurate as the store is current: [`conclude_stale_pauses`] retires the records
-/// of picks ended outside the app on the next [`git_oplog_check`] that finds no pick
-/// in progress, which is what keeps one from standing in as this op's handle.
+/// has ended the pick in-app. The named shorthand every in-app pick route calls.
 pub(crate) async fn close_paused_pick(repo: &str, outcome: PausedOutcome) {
+    close_paused_op(repo, CHERRY_PICK_ONTO, outcome).await;
+}
+
+/// Best-effort: close `repo`'s newest `"paused"` pull-rebase-drop entry now that the
+/// user has ended the guarded pull's rebase in-app.
+pub(crate) async fn close_paused_pull_drop(repo: &str, outcome: PausedOutcome) {
+    close_paused_op(repo, PULL_REBASE_DROP, outcome).await;
+}
+
+/// Best-effort: close `repo`'s newest `"paused"` `op` entry. No paused entry → no-op.
+///
+/// The handle is the newest paused record of that op, not the specific run, so it can
+/// only be as accurate as the store is current: [`conclude_stale_pauses`] retires the
+/// records of ops ended outside the app on the next [`git_oplog_check`] that finds
+/// none in progress, which is what keeps one from standing in as this op's handle.
+async fn close_paused_op(repo: &str, op: &'static str, outcome: PausedOutcome) {
     let (repo, now) = (repo.to_string(), now_iso());
     let result = crate::store_lock::locked_store_task(move || {
-        close_newest_paused_pick(&repo, &outcome, now)
+        close_newest_paused_op(&repo, op, &outcome, now)
     })
     .await;
     if let Err(e) = result {
@@ -633,7 +665,12 @@ pub(crate) async fn close_paused_pick(repo: &str, outcome: PausedOutcome) {
 /// them (find the handle, release, re-take to mutate) lets two concurrent closes
 /// resolve the same newest-paused id and both write it — the second overwriting the
 /// first's disposition.
-fn close_newest_paused_pick(repo: &str, outcome: &PausedOutcome, now: String) -> AppResult<()> {
+fn close_newest_paused_op(
+    repo: &str,
+    op: &str,
+    outcome: &PausedOutcome,
+    now: String,
+) -> AppResult<()> {
     let path = store_path()?;
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
     let _store_lock = crate::store_lock::lock_store(&path);
@@ -644,9 +681,9 @@ fn close_newest_paused_pick(repo: &str, outcome: &PausedOutcome, now: String) ->
     let Some(list) = store.get_mut(&key).and_then(Value::as_array_mut) else {
         return Ok(());
     };
-    // Resolve the handle on a copy: `newest_paused_pick` sorts what it is given, and
+    // Resolve the handle on a copy: `newest_paused_op` sorts what it is given, and
     // the stored order is the file's own (readers sort for themselves).
-    let Some(id) = newest_paused_pick(&mut list.clone()) else {
+    let Some(id) = newest_paused_op(&mut list.clone(), op) else {
         return Ok(());
     };
     let Some(obj) = list
@@ -715,11 +752,11 @@ pub async fn git_oplog_check(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
     // `op_in_progress`, whose Err arm answers `true` — that would manufacture an
     // interrupt from a failed read, which the two probes below refuse to do.
     let mid_op = state.mid_op();
-    // The stale-pause verdict keys on the pick flag ALONE, not `mid_op` — see
-    // `conclude_stale_pauses`. This read goes stale across the two git subprocesses
-    // below, so `reconcile` re-probes the marker under the lock; this one only
-    // short-circuits.
-    let cherry_picking = state.cherry_picking;
+    // The stale-pause verdict keys on each op's OWN flag, not `mid_op` — see
+    // `conclude_stale_pauses`. These reads go stale across the two git subprocesses
+    // below, so `reconcile` re-probes the markers under the lock; these only
+    // short-circuit.
+    let (cherry_picking, rebasing) = (state.cherry_picking, state.rebasing);
     // A squash-merge leaves none of those markers, so git_op_state alone misses a
     // mid-squash interrupt. Corroborate with a *tracked*-dirty check (untracked is
     // allowed — mirrors ensure_clean_tree) + the current branch.
@@ -740,17 +777,23 @@ pub async fn git_oplog_check(repo_path: String) -> AppResult<Vec<OpLogEntry>> {
     .map(|o| o.stdout_lossy().trim().to_string())
     .unwrap_or_default();
     // The store RMW blocks on the cross-process lock's retry budget, so it runs off the
-    // async runtime; the marker re-probe is built inside the job, which keeps it on the
-    // same thread as the lock it must run under.
+    // async runtime; the marker re-probes are built inside the job, which keeps them on
+    // the same thread as the lock they must run under.
     crate::store_lock::locked_store_task(move || {
+        // FS-only (no subprocess), so they are cheap to run while holding the store lock.
+        let pick = || crate::git::ops::cherry_pick_marker_present(&repo_path);
+        let rebase = || crate::git::ops::rebase_marker_present(&repo_path);
         reconcile(
             &repo_path,
             mid_op,
             tree_dirty,
             &current_branch,
-            cherry_picking,
-            // FS-only (no subprocess), so it is cheap to run while holding the store lock.
-            || crate::git::ops::cherry_pick_marker_present(&repo_path),
+            &LiveOps {
+                cherry_picking,
+                rebasing,
+                pick_in_progress: &pick,
+                rebase_in_progress: &rebase,
+            },
         )
     })
     .await
@@ -776,6 +819,26 @@ mod tests {
     // These tests exercise the pure store logic against a temp file, driving the
     // SAME read/mutate/write helpers the public fns use but with an explicit path,
     // so they never touch the real app-data store.
+
+    const NOT_LIVE: &dyn Fn() -> bool = &|| false;
+    const LIVE: &dyn Fn() -> bool = &|| true;
+
+    /// A [`LiveOps`] built from plain answers: these tests pin which direction each
+    /// signal points, never a real marker probe (the arms that need one build their
+    /// own).
+    fn live_ops(
+        cherry_picking: bool,
+        pick_probe: bool,
+        rebasing: bool,
+        rebase_probe: bool,
+    ) -> LiveOps<'static> {
+        LiveOps {
+            cherry_picking,
+            rebasing,
+            pick_in_progress: if pick_probe { LIVE } else { NOT_LIVE },
+            rebase_in_progress: if rebase_probe { LIVE } else { NOT_LIVE },
+        }
+    }
 
     fn tmp_store() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::Builder::new()
@@ -1051,6 +1114,22 @@ mod tests {
         })
     }
 
+    /// Build a wire record for a `pull_rebase_drop` entry at `status`.
+    fn drop_record(id: &str, started_at: &str, status: &str) -> Value {
+        json!({
+            "id": id,
+            "op": "pull_rebase_drop",
+            "label": "Drop 1 commit rewritten away on origin/main",
+            "status": status,
+            "startedAt": started_at,
+            "finishedAt": null,
+            "originalRef": "main",
+            "originalSha": "abc123",
+            "preOpTip": "abc123",
+            "error": null,
+        })
+    }
+
     #[test]
     fn pause_marks_the_entry_without_finishing_it() {
         let (_tmp, path) = tmp_store();
@@ -1100,7 +1179,8 @@ mod tests {
         write_store(&path, &store).unwrap();
 
         let mut entries = repo_entries(&read_store(&path).unwrap(), repo);
-        let id = newest_paused_pick(&mut entries).expect("the paused pick must be found");
+        let id = newest_paused_op(&mut entries, CHERRY_PICK_ONTO)
+            .expect("the paused pick must be found");
         assert_eq!(id, "new-paused", "a newer finished entry is not the handle");
 
         let mut s = read_store(&path).unwrap();
@@ -1157,8 +1237,8 @@ mod tests {
                 "startedAt": "2026-01-03T00:00:00.000Z",
             }),
         ];
-        assert!(newest_paused_pick(&mut entries).is_none());
-        assert!(newest_paused_pick(&mut Vec::new()).is_none());
+        assert!(newest_paused_op(&mut entries, CHERRY_PICK_ONTO).is_none());
+        assert!(newest_paused_op(&mut Vec::new(), CHERRY_PICK_ONTO).is_none());
     }
 
     #[test]
@@ -1251,7 +1331,9 @@ mod tests {
 
         // Nothing to do on either arm: a pick is in progress (so the pause stands), and
         // the pending op is genuinely interrupted (so it stays pending).
-        let returned = reconcile_at(&path, repo, true, true, "feature", true, || true).unwrap();
+        let returned =
+            reconcile_at(&path, repo, true, true, "feature", &live_ops(true, true, false, false))
+                .unwrap();
         assert_eq!(returned.len(), 1);
         assert_eq!(returned[0].id, "interrupted");
 
@@ -1416,9 +1498,19 @@ mod tests {
         );
 
         // `cherry_picking: false` is the stale pre-race read; the pick is live NOW.
-        let returned = reconcile(&repo, false, false, "target", false, || {
-            crate::git::ops::cherry_pick_marker_present(&repo)
-        })
+        let pick = || crate::git::ops::cherry_pick_marker_present(&repo);
+        let returned = reconcile(
+            &repo,
+            false,
+            false,
+            "target",
+            &LiveOps {
+                cherry_picking: false,
+                rebasing: false,
+                pick_in_progress: &pick,
+                rebase_in_progress: NOT_LIVE,
+            },
+        )
         .unwrap();
 
         assert!(returned.is_empty());
@@ -1447,7 +1539,8 @@ mod tests {
             ],
         );
 
-        let returned = reconcile(repo, false, false, "main", false, || false).unwrap();
+        let returned =
+            reconcile(repo, false, false, "main", &live_ops(false, false, false, false)).unwrap();
         assert!(returned.is_empty());
         // Sparing the newest would leave `close_paused_pick` a stale handle to
         // misattribute the user's next in-app pick to.
@@ -1471,11 +1564,96 @@ mod tests {
         // A merge is mid-flight — which is why the pause verdict reads
         // `cherry_picking` and not repo-wide `mid_op`: this merge says nothing about
         // whether a cherry-pick ended.
-        let returned = reconcile(repo, true, false, "feature", false, || false).unwrap();
+        let returned = reconcile(repo, true, false, "feature", &live_ops(false, false, false, false))
+            .unwrap();
         assert_eq!(returned.len(), 1, "{returned:?}");
         assert_eq!(returned[0].id, "interrupted-merge");
         assert_eq!(returned[0].status, "pending");
         assert_eq!(stored_entry(repo, "stale-pick")["status"], "concluded");
+    }
+
+    /// A guarded pull's DROP arm pauses too, so a rebase ended OUTSIDE the app must
+    /// retire its record exactly as a terminal cherry-pick retires a pick's —
+    /// otherwise the row is cap-immortal and a permanent lie in Operation history.
+    #[test]
+    fn a_stale_paused_pull_drop_is_concluded_by_the_next_check() {
+        let repo = r"C:\oplog\stale-pull-drop";
+        seed_entries(
+            repo,
+            vec![drop_record("stale-drop", "2026-01-01T00:00:00.000Z", "paused")],
+        );
+
+        let returned = reconcile(repo, false, false, "main", &live_ops(false, false, false, false))
+            .unwrap();
+        assert!(returned.is_empty(), "a pause is not an interrupt: {returned:?}");
+        assert_eq!(stored_entry(repo, "stale-drop")["status"], "concluded");
+    }
+
+    /// NEGATIVE CONTROL for the arm above: while the rebase the drop paused on is
+    /// still live, its record is the handle Continue/Abort needs. Either signal
+    /// alone spares it — the stale op-state flag, or the locked re-probe.
+    #[test]
+    fn a_live_paused_pull_drop_is_never_concluded() {
+        for (flag, probe) in [(true, false), (false, true)] {
+            let repo = format!(r"C:\oplog\live-pull-drop-{flag}-{probe}");
+            seed_entries(
+                &repo,
+                vec![drop_record("live-drop", "2026-01-01T00:00:00.000Z", "paused")],
+            );
+
+            let returned =
+                reconcile(&repo, true, false, "main", &live_ops(false, false, flag, probe)).unwrap();
+            assert!(returned.is_empty());
+            assert_eq!(
+                stored_entry(&repo, "live-drop")["status"],
+                "paused",
+                "flag={flag} probe={probe}"
+            );
+        }
+    }
+
+    /// Every pausable op is judged against its OWN signals. One shared verdict would
+    /// retire whichever op is not the live one — and for a drop that means
+    /// concluding the record the very check after its rebase paused.
+    #[test]
+    fn a_paused_record_is_judged_against_its_own_ops_signals() {
+        let repo = r"C:\oplog\per-op-pause-verdict";
+        let seeded = || {
+            vec![
+                pick_record("the-pick", "2026-01-01T00:00:00.000Z", "paused"),
+                drop_record("the-drop", "2026-01-02T00:00:00.000Z", "paused"),
+            ]
+        };
+
+        // A rebase is live, no pick is: only the pick's record retires.
+        seed_entries(repo, seeded());
+        reconcile(repo, true, false, "main", &live_ops(false, false, true, false)).unwrap();
+        assert_eq!(stored_entry(repo, "the-drop")["status"], "paused");
+        assert_eq!(stored_entry(repo, "the-pick")["status"], "concluded");
+
+        // And the mirror image.
+        seed_entries(repo, seeded());
+        reconcile(repo, true, false, "main", &live_ops(true, false, false, false)).unwrap();
+        assert_eq!(stored_entry(repo, "the-pick")["status"], "paused");
+        assert_eq!(stored_entry(repo, "the-drop")["status"], "concluded");
+    }
+
+    /// A close handle never crosses ops: the NEWER paused drop must not stand in for
+    /// the pick an in-app Continue/Abort just ended, or it takes that disposition.
+    #[test]
+    fn a_close_handle_never_crosses_ops() {
+        let mut entries = vec![
+            pick_record("the-pick", "2026-01-01T00:00:00.000Z", "paused"),
+            drop_record("the-drop", "2026-01-02T00:00:00.000Z", "paused"),
+        ];
+        assert_eq!(
+            newest_paused_op(&mut entries, CHERRY_PICK_ONTO).as_deref(),
+            Some("the-pick")
+        );
+        assert_eq!(
+            newest_paused_op(&mut entries, PULL_REBASE_DROP).as_deref(),
+            Some("the-drop")
+        );
     }
 
     #[test]

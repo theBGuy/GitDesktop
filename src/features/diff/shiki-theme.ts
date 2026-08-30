@@ -82,5 +82,30 @@ export const gdDiff = {
       scope: ["entity.other.attribute-name"],
       settings: { foreground: "var(--gd-syn-attr)" },
     },
+    {
+      // Prose markup (mdx today). MDX scopes its bold/italic/link as
+      // `string.other.*` and its list markers as `variable.*`, so those already
+      // colour above; these carry the rest. `markup.code` is deliberately
+      // unmapped — it wraps a whole fenced block and would tint the embedded
+      // language's plain text.
+      scope: ["markup.heading", "entity.name.section"],
+      settings: { foreground: "var(--gd-syn-func)", fontStyle: "bold" },
+    },
+    {
+      scope: ["markup.bold"],
+      settings: { foreground: "var(--gd-syn-variable)", fontStyle: "bold" },
+    },
+    {
+      scope: ["markup.italic"],
+      settings: { foreground: "var(--gd-syn-variable)", fontStyle: "italic" },
+    },
+    {
+      scope: ["markup.quote"],
+      settings: { foreground: "var(--gd-syn-comment)", fontStyle: "italic" },
+    },
+    {
+      scope: ["markup.inline.raw", "markup.raw"],
+      settings: { foreground: "var(--gd-syn-string)" },
+    },
   ],
 } satisfies ThemeRegistration;

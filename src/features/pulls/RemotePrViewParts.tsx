@@ -330,7 +330,7 @@ export function MergePrDialog({
   open: boolean;
   onClose: () => void;
   number: number;
-  /** "GitHub" / "GitLab" — where the merge happens. */
+  /** Provider name ("GitHub" / "GitLab" / "Bitbucket") — where the merge happens. */
   host: string;
   /** "pull request" / "merge request". */
   prNoun: string;

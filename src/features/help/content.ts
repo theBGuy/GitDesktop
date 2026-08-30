@@ -588,8 +588,8 @@ can safely preview and recover work you thought was gone.
 journal of the *risky* operations GitDesktop runs: local PR merges, cherry-picks, history
 edits, interactive rebases, and a rebase pull that drops commits. Each is recorded with the
 exact branch and commit it started from, and whether it finished, failed, is paused on
-conflicts, is still pending, or **ended outside the app** (a cherry-pick you continued or
-aborted in a terminal, which the journal only knows is over). If one of these operations is
+conflicts, is still pending, or **ended outside the app** (a cherry-pick or rebase pull you
+continued or aborted in a terminal, which the journal only knows is over). If one of these operations is
 interrupted (a crash or a restart mid-op), a calm recovery line
 appears above the **Changes** list naming what was interrupted and the state it started
 from. That notice only informs — it never resets or continues anything on its own (the

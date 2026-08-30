@@ -61,6 +61,7 @@ const EXT_LANG: Record<string, string> = {
   // of the approximate fallbacks (toml/tf as ini, svelte as xml) used before.
   astro: "astro",
   svelte: "svelte",
+  mdx: "mdx",
   prisma: "prisma",
   sol: "solidity",
   wgsl: "wgsl",

@@ -52,6 +52,7 @@ import { toastError } from "@/lib/toast";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
+import { cn } from "@/lib/utils";
 import {
   DIFF_MAX_LINE_CHARS,
   DIFF_MEGA_LINE_CHARS,
@@ -221,7 +222,7 @@ function WorkingTreeDiff({
       ? selectionState.lines
       : null;
   // One contextual chord: stage the selection on an unstaged file's diff,
-  // unstage it on a staged one — mirroring the banner's primary button. Dead
+  // unstage it on a staged one — mirroring the toolbar's primary button. Dead
   // while the Discard confirm is open (the global listener has no dialog guard)
   // and while the non-staging fallback renders.
   useHotkeyAction(
@@ -266,7 +267,7 @@ function WorkingTreeDiff({
   }
 
   const onError = (e: unknown) => toastError(e);
-  // Shortcut hints on the selection banner: `aria-keyshortcuts` keeps the chord
+  // Shortcut hints on the selection action: `aria-keyshortcuts` keeps the chord
   // off the accessible name, the title makes it discoverable. Both omitted when
   // the action is unbound.
   const selectionActionLabel = file.staged ? "Unstage" : "Stage";
@@ -278,6 +279,12 @@ function WorkingTreeDiff({
     selectionBinding === null
       ? undefined
       : bindingToAriaKeyshortcuts(selectionBinding);
+  // One source for the count: the visible copy can be truncated by a narrow
+  // pane, and the announcement must carry the full text regardless.
+  const selectionCountText =
+    selection === null
+      ? ""
+      : `${selection.length} ${selection.length === 1 ? "line" : "lines"} selected`;
 
   function applyHunk(
     hunk: DiffHunk,
@@ -329,82 +336,120 @@ function WorkingTreeDiff({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
+      {/* The selection actions take over this row rather than opening one of
+          their own: a row that mounts below the toolbar pushes the whole diff
+          down on mouseup, moving the lines the user just dragged across. */}
+      <div
+        className={cn(
+          "flex items-center justify-between gap-2 border-b px-3 py-1.5",
+          // Full-width tint marks selection mode; the count text carries the
+          // same state in words, so the cue is never colour alone.
+          selection && "bg-primary/10",
+        )}
+      >
         <span
           className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
           title={file.path}
         >
           {file.path}
         </span>
-        <span className="flex shrink-0 items-center gap-1.5">
-          <DiffLanguagePicker filePath={file.path} />
-          <DiffModeToggle />
-        </span>
-      </div>
-      {selection && (
-        <div className="flex items-center gap-2 border-b bg-primary/10 px-3 py-1 text-[11px]">
-          <span className="flex-1 font-medium">
-            {selection.length} {selection.length === 1 ? "line" : "lines"}{" "}
-            selected
-          </span>
-          {file.staged ? (
-            <Button
-              variant="secondary"
-              size="xs"
-              disabled={busy}
-              title={selectionTitle}
-              aria-keyshortcuts={selectionKeyshortcuts}
-              onClick={() => applySelection({ cached: true, reverse: true })}
-            >
-              Unstage
-            </Button>
-          ) : (
+        {/* min-h-7 pins the cluster to the language picker's h-7 trigger: the
+            xs (h-6) selection buttons — and an extensionless file, where the
+            picker renders nothing — would otherwise shrink the row by 4px.
+            The selection arm drops shrink-0 so a narrow pane takes width from
+            the count (which truncates) instead of overflowing the row; every
+            Button is shrink-0 by default, so the actions are the floor and
+            can never be squeezed or clipped. */}
+        <span
+          className={cn(
+            "flex min-h-7 items-center gap-1.5",
+            selection === null && "shrink-0",
+          )}
+        >
+          {selection ? (
             <>
-              <Button
-                variant="secondary"
-                size="xs"
-                disabled={busy}
-                title={selectionTitle}
-                aria-keyshortcuts={selectionKeyshortcuts}
-                onClick={() => applySelection({ cached: true, reverse: false })}
+              <span
+                className="min-w-0 truncate font-medium text-[11px]"
+                title={selectionCountText}
               >
-                Stage
-              </Button>
+                {selectionCountText}
+              </span>
+              {file.staged ? (
+                <Button
+                  variant="secondary"
+                  size="xs"
+                  disabled={busy}
+                  title={selectionTitle}
+                  aria-keyshortcuts={selectionKeyshortcuts}
+                  onClick={() =>
+                    applySelection({ cached: true, reverse: true })
+                  }
+                >
+                  Unstage
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    variant="secondary"
+                    size="xs"
+                    disabled={busy}
+                    title={selectionTitle}
+                    aria-keyshortcuts={selectionKeyshortcuts}
+                    onClick={() =>
+                      applySelection({ cached: true, reverse: false })
+                    }
+                  >
+                    Stage
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="text-destructive"
+                    disabled={busy}
+                    onClick={() =>
+                      setDiscard({
+                        label: `${selection.length} selected ${selection.length === 1 ? "line" : "lines"}`,
+                        newFile: untracked,
+                        forText: diff.data?.text ?? "",
+                        run: untracked
+                          ? () =>
+                              discardLines(
+                                selection
+                                  .filter((s) => s.side === "new")
+                                  .map((s) => s.line),
+                              )
+                          : () =>
+                              applySelection({ cached: false, reverse: true }),
+                      })
+                    }
+                  >
+                    Discard…
+                  </Button>
+                </>
+              )}
               <Button
                 variant="ghost"
                 size="xs"
-                className="text-destructive"
                 disabled={busy}
-                onClick={() =>
-                  setDiscard({
-                    label: `${selection.length} selected ${selection.length === 1 ? "line" : "lines"}`,
-                    newFile: untracked,
-                    forText: diff.data?.text ?? "",
-                    run: untracked
-                      ? () =>
-                          discardLines(
-                            selection
-                              .filter((s) => s.side === "new")
-                              .map((s) => s.line),
-                          )
-                      : () => applySelection({ cached: false, reverse: true }),
-                  })
-                }
+                onClick={clearSelection}
               >
-                Discard…
+                Clear
               </Button>
             </>
+          ) : (
+            <>
+              <DiffLanguagePicker filePath={file.path} />
+              <DiffModeToggle />
+            </>
           )}
-          <Button
-            variant="ghost"
-            size="xs"
-            disabled={busy}
-            onClick={clearSelection}
-          >
-            Clear
-          </Button>
-        </div>
-      )}
+        </span>
+      </div>
+      {/* Mounted unconditionally so the count announces as a live update; the
+          visible count above is deliberately not the live region, which would
+          announce the same text twice. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {selectionCountText}
+      </span>
       <div className="ph-no-capture min-h-0 flex-1 overflow-auto">
         {file.path.toLowerCase().endsWith(".svg") && (
           <div className="border-b">

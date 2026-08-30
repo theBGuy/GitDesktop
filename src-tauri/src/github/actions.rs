@@ -4,6 +4,8 @@
 //! working directory, like the PR commands.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -399,9 +401,104 @@ const DISPATCH_PROBE_CONCURRENCY: usize = 4;
 static DISPATCH_PROBE_GATE: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(DISPATCH_PROBE_CONCURRENCY);
 
+/// How long a probe verdict stays trusted, per direction — the two stale directions
+/// cost differently, so they get different windows.
+#[derive(Debug, Clone, Copy)]
+struct ProbeTtl {
+    /// Window for a `true` verdict (the file declares the trigger).
+    declared: Duration,
+    /// Window for a `false` verdict.
+    absent: Duration,
+}
+
+/// A workflow file's trigger block at a given ref changes on the order of releases, not
+/// keystrokes, so a generous window is what keeps a repo's whole picker off the network
+/// for a working session. The directions are asymmetric: a stale `true` merely re-offers
+/// a workflow whose dispatch then refuses with the humanized 422, while a stale `false`
+/// HIDES an action the user may have just enabled (`RunWorkflowDialog` refuses only on an
+/// explicit `false`). This window bounds the staleness a frontend refetch can RE-ADOPT:
+/// the two caches compose, since a refetch landing just inside it re-serves that verdict
+/// for another frontend staleTime. Worst-case hide is therefore `absent` + one staleTime
+/// (~600s), half of the ~900s a symmetric long window would give.
+const DISPATCH_PROBE_TTL: ProbeTtl = ProbeTtl {
+    declared: Duration::from_secs(600),
+    absent: Duration::from_secs(300),
+};
+
+/// Cache map keyed by `(slug, workflow_path, git_ref)`; value is
+/// `(probe time, declares workflow_dispatch)`.
+type DispatchProbeCache = Mutex<HashMap<(String, String, String), (Instant, bool)>>;
+
+/// Per-`(slug, workflow file, ref)` cache of the last probe verdict and when it was
+/// taken. Re-probing the same key overwrites in place, but `git_ref` is a user-typed
+/// axis, so distinct refs mint entries that live for the process lifetime — slow
+/// unbounded growth, unlike the closed (repo, remote) key space of `REMOTE_URL_CACHE`
+/// this mirrors. An entry is two short strings and a bool, so no eviction machinery is
+/// warranted at this size. Only PARSED verdicts are stored: an erred fetch leaves the
+/// key absent so it re-probes and keeps failing open.
+static DISPATCH_PROBE_CACHE: OnceLock<DispatchProbeCache> = OnceLock::new();
+
+fn dispatch_probe_cache() -> &'static DispatchProbeCache {
+    DISPATCH_PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Return the cached verdict for `(slug, path, git_ref)` only if an entry exists AND it
+/// was probed less than its direction's window ago — the stored verdict picks the window,
+/// so one cache serves both. The lock is held only long enough to read the value.
+fn probe_cache_get(slug: &str, path: &str, git_ref: &str, ttl: ProbeTtl) -> Option<bool> {
+    let guard = dispatch_probe_cache().lock().unwrap();
+    let (probed_at, verdict) =
+        guard.get(&(slug.to_string(), path.to_string(), git_ref.to_string()))?;
+    let window = if *verdict { ttl.declared } else { ttl.absent };
+    if probed_at.elapsed() < window {
+        Some(*verdict)
+    } else {
+        None
+    }
+}
+
+/// Record `verdict` as the current answer for `(slug, path, git_ref)`, stamped now.
+fn probe_cache_put(slug: &str, path: &str, git_ref: &str, verdict: bool) {
+    dispatch_probe_cache().lock().unwrap().insert(
+        (slug.to_string(), path.to_string(), git_ref.to_string()),
+        (Instant::now(), verdict),
+    );
+}
+
+/// Split the active workflows into verdicts already decided and the files that still
+/// need a contents fetch. Cache hits are resolved HERE, before the fan-out, so a hit
+/// never takes a [`DISPATCH_PROBE_GATE`] permit nor spawns a gh process.
+fn plan_probes<'a>(
+    workflows: &'a [Workflow],
+    slug: &str,
+    git_ref: &str,
+    ttl: ProbeTtl,
+) -> (HashMap<String, bool>, Vec<&'a Workflow>) {
+    let mut map = HashMap::new();
+    let mut probes: Vec<&Workflow> = Vec::new();
+    for w in workflows.iter().filter(|w| w.state == "active") {
+        match classify_workflow_path(&w.path) {
+            PathVerdict::NotDispatchable => {
+                map.insert(w.id.to_string(), false);
+            }
+            PathVerdict::Unknown => {}
+            PathVerdict::Fetch => match probe_cache_get(slug, &w.path, git_ref, ttl) {
+                Some(verdict) => {
+                    map.insert(w.id.to_string(), verdict);
+                }
+                None => probes.push(w),
+            },
+        }
+    }
+    (map, probes)
+}
+
 /// Which active workflows declare a `workflow_dispatch` trigger at `git_ref`.
 /// Keyed by stringified workflow id. A workflow ABSENT from the map is unknown
-/// (probe failed) — callers fail open and keep it offered.
+/// (probe failed) — callers fail open and keep it offered. Per-file verdicts are
+/// served from [`DISPATCH_PROBE_CACHE`] within [`DISPATCH_PROBE_TTL`]'s per-direction
+/// window; the workflow LIST is always re-read, so a newly added workflow shows up
+/// immediately.
 #[tauri::command]
 pub async fn gh_workflow_dispatchable(
     repo_path: String,
@@ -413,22 +510,13 @@ pub async fn gh_workflow_dispatchable(
     // at a file of the caller's choosing.
     let workflows = fetch_workflows(&repo_path, &slug).await?;
     let ref_field = format!("ref={git_ref}");
-    let mut map = HashMap::new();
-    let mut probes: Vec<&Workflow> = Vec::new();
-    for w in workflows.iter().filter(|w| w.state == "active") {
-        match classify_workflow_path(&w.path) {
-            PathVerdict::NotDispatchable => {
-                map.insert(w.id.to_string(), false);
-            }
-            PathVerdict::Unknown => {}
-            PathVerdict::Fetch => probes.push(w),
-        }
-    }
+    let (mut map, probes) = plan_probes(&workflows, &slug, &git_ref, DISPATCH_PROBE_TTL);
 
     let results = crate::forge::futures_join_all(probes.iter().map(|w| {
         let endpoint = format!("repos/{slug}/contents/{}", w.path);
         let repo_path = repo_path.as_str();
         let ref_field = ref_field.as_str();
+        let path = w.path.as_str();
         async move {
             let _permit = DISPATCH_PROBE_GATE.acquire().await.ok();
             // `--method GET` is mandatory: `gh api` with `-f` fields present
@@ -449,18 +537,18 @@ pub async fn gh_workflow_dispatchable(
                 GH_NETWORK_TIMEOUT,
             )
             .await;
-            (w.id, res)
+            (w.id, path, res)
         }
     }))
     .await;
-    for (id, res) in results {
+    for (id, path, res) in results {
         // A failed fetch leaves the key ABSENT — "unknown" must not read as
-        // "not dispatchable", which would hide a runnable workflow.
+        // "not dispatchable", which would hide a runnable workflow — and stays out
+        // of the cache, so the next call re-probes instead of pinning the failure.
         if let Ok(out) = res {
-            map.insert(
-                id.to_string(),
-                yaml_declares_workflow_dispatch(&out.stdout_lossy()),
-            );
+            let verdict = yaml_declares_workflow_dispatch(&out.stdout_lossy());
+            probe_cache_put(&slug, path, &git_ref, verdict);
+            map.insert(id.to_string(), verdict);
         }
     }
     Ok(map)
@@ -727,6 +815,147 @@ mod tests {
         assert_eq!(
             classify_workflow_path(".github/workflows/a?b.yml"),
             PathVerdict::Unknown
+        );
+    }
+
+    fn workflow(id: u64, path: &str, state: &str) -> Workflow {
+        Workflow {
+            id,
+            name: format!("wf-{id}"),
+            path: path.to_string(),
+            state: state.to_string(),
+        }
+    }
+
+    /// Both windows zero — every entry reads as expired whatever its verdict, which is
+    /// how these tests stand in for elapsed-past-TTL without sleeping.
+    const EXPIRED: ProbeTtl = ProbeTtl {
+        declared: Duration::ZERO,
+        absent: Duration::ZERO,
+    };
+
+    /// The cache is process-wide and shared by every test in this binary, so each test
+    /// keys its entries under its own slug.
+    #[test]
+    fn probe_verdicts_are_served_within_the_ttl_and_expire_after_it() {
+        let ttl = DISPATCH_PROBE_TTL;
+        let (slug, path, git_ref) = ("o/ttl", ".github/workflows/ci.yml", "master");
+
+        // An unprobed file — the shape an erred fetch also leaves behind, since only a
+        // parsed verdict is ever stored — reads as absent, i.e. unknown.
+        assert_eq!(probe_cache_get(slug, path, git_ref, ttl), None);
+
+        probe_cache_put(slug, path, git_ref, true);
+        assert_eq!(probe_cache_get(slug, path, git_ref, ttl), Some(true));
+        assert_eq!(probe_cache_get(slug, path, git_ref, EXPIRED), None);
+
+        // `false` round-trips as a hit, not as an absence.
+        probe_cache_put(slug, path, git_ref, false);
+        assert_eq!(probe_cache_get(slug, path, git_ref, ttl), Some(false));
+        assert_eq!(probe_cache_get(slug, path, git_ref, EXPIRED), None);
+    }
+
+    #[test]
+    fn a_false_verdict_expires_before_a_true_one_of_the_same_age() {
+        let slug = "o/directions";
+        let (yes, no) = (
+            ".github/workflows/enabled.yml",
+            ".github/workflows/disabled.yml",
+        );
+        probe_cache_put(slug, yes, "master", true);
+        probe_cache_put(slug, no, "master", false);
+
+        // Both entries are the same age; only the verdict decides which window applies.
+        // This window is past the `false` one and still inside the `true` one.
+        let past_the_short_window = ProbeTtl {
+            declared: Duration::from_secs(600),
+            absent: Duration::ZERO,
+        };
+        assert_eq!(
+            probe_cache_get(slug, yes, "master", past_the_short_window),
+            Some(true),
+            "a true verdict still holds inside the long window"
+        );
+        assert_eq!(
+            probe_cache_get(slug, no, "master", past_the_short_window),
+            None,
+            "a false verdict must expire with the short window, so a workflow enabled \
+             since the probe stops being hidden"
+        );
+
+        // Inside both windows nothing has expired yet.
+        assert_eq!(
+            probe_cache_get(slug, no, "master", DISPATCH_PROBE_TTL),
+            Some(false)
+        );
+
+        // The shipped windows really are asymmetric, and `absent` is pinned to one
+        // frontend staleTime (`5 * 60_000` in `useWorkflowDispatchable`) — the composed
+        // worst-case hide is that window plus one more staleTime.
+        assert!(DISPATCH_PROBE_TTL.absent < DISPATCH_PROBE_TTL.declared);
+        assert_eq!(DISPATCH_PROBE_TTL.absent, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn every_key_axis_misses_independently() {
+        let ttl = DISPATCH_PROBE_TTL;
+        probe_cache_put("o/keys", ".github/workflows/ci.yml", "master", true);
+
+        assert_eq!(
+            probe_cache_get("o/keys", ".github/workflows/ci.yml", "dev", ttl),
+            None,
+            "a different ref must re-probe"
+        );
+        assert_eq!(
+            probe_cache_get("o/keys", ".github/workflows/release.yml", "master", ttl),
+            None,
+            "a different workflow file must re-probe"
+        );
+        assert_eq!(
+            probe_cache_get("other/keys", ".github/workflows/ci.yml", "master", ttl),
+            None,
+            "a different repo must re-probe"
+        );
+    }
+
+    #[test]
+    fn a_cached_verdict_never_reaches_the_fan_out() {
+        let ttl = DISPATCH_PROBE_TTL;
+        let slug = "o/fanout";
+        let workflows = vec![
+            workflow(1, ".github/workflows/ci.yml", "active"),
+            workflow(2, ".github/workflows/release.yml", "active"),
+            workflow(3, "dynamic/dependabot/dependabot-updates", "active"),
+            workflow(4, ".github/workflows/retired.yml", "disabled_manually"),
+        ];
+
+        let (map, probes) = plan_probes(&workflows, slug, "master", ttl);
+        assert_eq!(
+            probes.iter().map(|w| w.id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "cold: both real files fetch"
+        );
+        assert_eq!(map.get("3"), Some(&false));
+        assert_eq!(map.len(), 1, "only the path-decided workflow is in the map");
+
+        probe_cache_put(slug, ".github/workflows/ci.yml", "master", true);
+        let (map, probes) = plan_probes(&workflows, slug, "master", ttl);
+        assert_eq!(
+            probes.iter().map(|w| w.id).collect::<Vec<_>>(),
+            vec![2],
+            "warm: the cached file must not enter the fan-out at all"
+        );
+        assert_eq!(
+            map.get("1"),
+            Some(&true),
+            "its verdict comes from the cache"
+        );
+
+        let (_, probes) = plan_probes(&workflows, slug, "dev", ttl);
+        assert_eq!(
+            probes.iter().map(|w| w.id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "another ref is a different key, so it fans out again"
         );
     }
 

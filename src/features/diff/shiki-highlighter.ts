@@ -69,7 +69,8 @@ export function isShikiLang(id: string): boolean {
  * Languages Shiki bundles that highlight.js lacks (or renders poorly), offered
  * as built-in picker options. Each value is a dynamic loader that imports the
  * full grammar bundle from `@shikijs/langs` — the language plus every grammar it
- * embeds (astro/vue frontmatter = TS, <style> = CSS, expressions = TSX). The
+ * embeds (astro/vue frontmatter = TS, <style> = CSS, expressions = TSX), except
+ * mdx, which ships none and composes its own (see its entry). The
  * grammars are imported lazily (~557KB, jsx+tsx dominating) so they stay off the
  * startup chunk and load only when a diff of that language is first opened. The
  * key matches the bundle's own grammar name (Shiki's filename convention), which
@@ -86,6 +87,23 @@ const BUILTIN_LANGS: Record<
   // tsx/jsx render via Shiki because highlight.js's typescript/javascript
   // grammars don't tokenize JSX (the markup stayed plain).
   jsx: () => import("@shikijs/langs/jsx"),
+  // MDX's bundle is the mdx grammar alone — all 42 of its embeds are lazy — so
+  // the ESM header and every fenced block would render plain. Register the ones
+  // a diff needs: tsx for the header/JSX, ts/js and sql for the fences devs
+  // actually write, markdown for shared prose internals; mdx last so its own
+  // grammar wins a name collision. The remaining lazy embeds stay unregistered
+  // and those fences render plain — pulling all 42 would cost megabytes.
+  mdx: async () => {
+    const bundles = await Promise.all([
+      import("@shikijs/langs/tsx"),
+      import("@shikijs/langs/typescript"),
+      import("@shikijs/langs/javascript"),
+      import("@shikijs/langs/markdown"),
+      import("@shikijs/langs/sql"),
+      import("@shikijs/langs/mdx"),
+    ]);
+    return { default: bundles.flatMap((b) => b.default) };
+  },
   prisma: () => import("@shikijs/langs/prisma"),
   // Rust renders via Shiki because highlight.js's flat tokenizer can mis-scope
   // a lifetime/char-literal sequence and swallow the rest of the file as one

@@ -496,9 +496,9 @@ export interface OpLogEntry {
     | "pull_rebase_drop";
   /** Human label, e.g. "Squash-merge feature → main". */
   label: string;
-  /** "paused" = handed to you mid-op (a stopped cherry-pick), neither in-flight nor
-   *  finished. "concluded" = that pick ended outside the app, so the journal knows
-   *  only that it is over (no finish time). */
+  /** "paused" = handed to you mid-op (a stopped cherry-pick or a conflicted rebase
+   *  pull), neither in-flight nor finished. "concluded" = that op ended outside the
+   *  app, so the journal knows only that it is over (no finish time). */
   status: "pending" | "done" | "failed" | "dismissed" | "paused" | "concluded";
   /** ISO timestamp the op started. */
   startedAt: string;

@@ -108,8 +108,8 @@ export function CreateLocalIssueDialog({
           <DialogHeader>
             <DialogTitle>New local issue</DialogTitle>
             <DialogDescription>
-              A private to-do for this repository, kept on your machine — no
-              GitHub involved. Publish it later if it's worth sharing.
+              A private to-do for this repository, kept on your machine. Publish
+              it later if it's worth sharing.
             </DialogDescription>
           </DialogHeader>
 

@@ -157,6 +157,110 @@ async fn plain_autostash_flag(repo: &str) -> Option<&'static str> {
 /// The compounds' flag: they stash and reapply themselves, so git must not.
 const COMPOUND_AUTOSTASH: Option<&str> = Some("--no-autostash");
 
+/// Whether the user's `submodule.recurse` is on. Read through git's own `--bool`
+/// resolution, so system/global/local precedence and every spelling of true stay
+/// git's verdict rather than ours; absent, unreadable or non-boolean reads as false,
+/// which is the key's documented default ("Defaults to false", git-config).
+async fn submodule_recurse(repo: &str) -> bool {
+    let Ok(out) = run_git_raw(
+        Some(repo),
+        &["config", "--bool", "submodule.recurse"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    else {
+        return false;
+    };
+    out.code == 0 && out.stdout_lossy().trim() == "true"
+}
+
+/// The submodule worktree update a rebase-mode `git pull` runs after its rebase, and
+/// the one thing the guard's plain `git rebase` cannot do for itself.
+///
+/// Semantics taken from git's own docs, not from the argv: `submodule.recurse` is
+/// "A boolean indicating if commands should enable the `--recurse-submodules` option
+/// by default", and its supported-command list is checkout, fetch, grep, pull, push,
+/// read-tree, reset, restore and switch — `rebase` is absent, which is why the
+/// guard's phases lose the behavior. Pull's `--recurse-submodules` "controls if new
+/// commits of populated submodules should be fetched, and if the working trees of
+/// active submodules should be updated, too … If the checkout is done via rebase,
+/// local submodule commits are rebased as well" (git-pull). The step pull runs for
+/// that second half is `git submodule update --recursive --rebase` (measured through
+/// `GIT_TRACE`, git 2.51.1.windows.1).
+///
+/// The FETCH half needs nothing here: the guard's probe fetch is a plain
+/// `git fetch` in the user's own repo, so it already inherits `submodule.recurse`
+/// exactly as pull's own flagless `git fetch` does — and forcing an explicit
+/// `--recurse-submodules` would recurse where a `fetch.recurseSubmodules=no` makes
+/// plain pull not (both measured on the same git).
+///
+/// WHEN it runs is parity too, and both directions are measured on that git rather
+/// than reasoned: a rebase that CONFLICTS gets no submodule step (pull's trace ends
+/// at `git rebase`, and the submodule stays put), while a rebase that landed gets one
+/// even if the AUTOSTASH reapply then conflicted — pull prints "Applying autostash
+/// resulted in conflicts", exits 0, and still runs the step, leaving the submodule
+/// updated beside the unmerged paths. So the gate here is "did the rebase land", not
+/// "is the tree clean"; [`fold_submodule_failure`] is what keeps that from costing
+/// the reapply report.
+///
+/// `submodule update` clones and fetches what a moved pointer needs, so it takes the
+/// network budget.
+async fn update_submodules_after_rebase(repo: &str) -> AppResult<()> {
+    if !submodule_recurse(repo).await {
+        return Ok(());
+    }
+    let out = run_git_raw(
+        Some(repo),
+        &["submodule", "update", "--recursive", "--rebase"],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
+    Ok(())
+}
+
+/// Fold a failed submodule step into the compound's own report, so the step can run
+/// on a conflicted REAPPLY (which is parity — see
+/// [`update_submodules_after_rebase`]) without that outcome being thrown away.
+///
+/// `ReapplyConflicted` is the one outcome the user MUST still see: it names a
+/// retained stash and unmerged paths, which no `AppError` from a submodule checkout
+/// would tell them about, so the step's failure is appended to its detail instead of
+/// replacing it. Every other landed outcome carries nothing the error does not, so
+/// there the failure IS the result and is never swallowed.
+///
+/// That arm is defensive rather than common: with the index left unmerged by the
+/// conflicted pop, `git submodule update` skips the submodules it would have to CLONE
+/// and exits 0 (measured, git 2.51.1.windows.1), so it often has nothing to fail at.
+/// It can still act — and so still fail — on an already-cloned submodule whose new
+/// sha needs a fetch, which is the path pull was measured taking with unmerged paths
+/// present.
+fn fold_submodule_failure(
+    result: AppResult<AutostashOutcome>,
+    submodule: AppResult<()>,
+) -> AppResult<AutostashOutcome> {
+    let Err(failure) = submodule else {
+        return result;
+    };
+    match result {
+        Ok(AutostashOutcome::ReapplyConflicted {
+            stderr,
+            conflicted,
+        }) => Ok(AutostashOutcome::ReapplyConflicted {
+            stderr: format!("{stderr}\n{failure}"),
+            conflicted,
+        }),
+        Ok(_) => Err(failure),
+        // The step only runs on a landed rebase, so a failed one never reaches here.
+        stopped => stopped,
+    }
+}
+
 /// The current branch's short name, or `None` on a detached HEAD.
 async fn current_branch(repo: &str) -> Option<String> {
     let out = run_git_raw(
@@ -497,6 +601,9 @@ pub(crate) async fn guarded_pull(state: &AppState, repo: &str) -> AppResult<bool
         )
         .await);
     }
+    // Only after a rebase that LANDED — a conflicted pull runs no submodule step
+    // either (measured), and the tree is mid-rebase.
+    update_submodules_after_rebase(repo).await?;
     Ok(true)
 }
 
@@ -528,7 +635,15 @@ pub(crate) async fn guarded_pull_autostash(
         DEFAULT_TIMEOUT,
     )
     .await;
-    settle(repo, "rebase", stashed, true, op).await.map(Some)
+    let result = settle(repo, "rebase", stashed, true, op).await;
+    // `settled_journal_error` is exactly the "did the rebase itself land" verdict a
+    // conflicted REAPPLY still passes, which is the gate pull uses too — the stash
+    // comes back before the submodule step runs either way.
+    if settled_journal_error(&result).is_none() {
+        let submodule = update_submodules_after_rebase(repo).await;
+        return fold_submodule_failure(result, submodule).map(Some);
+    }
+    result.map(Some)
 }
 
 /// Which base the user's answer rebases from: `keep` starts below the rewritten-away
@@ -751,12 +866,26 @@ pub(crate) async fn git_pull_rebase_decided_core(
         .await),
         Ok(_) => Ok(()),
     };
-    crate::oplog::finish(
-        &repo_path,
-        &op_id,
-        result.as_ref().err().map(ToString::to_string),
-    )
-    .await;
+    // The submodule step belongs to THIS op as far as the journal is concerned, so it
+    // runs BEFORE the record closes: settling first would leave a green "done" row
+    // behind a call the caller saw fail.
+    let result = match result {
+        Ok(()) => update_submodules_after_rebase(&repo_path).await,
+        stopped => stopped,
+    };
+    // A conflict did not END the op — it handed the tree to the user, who still has
+    // to continue or abort it. The record pauses exactly as the cherry-pick stop
+    // arm's does; every other failure is a real failure.
+    if matches!(result, Err(AppError::Conflict { .. })) {
+        crate::oplog::pause(&repo_path, &op_id).await;
+    } else {
+        crate::oplog::finish(
+            &repo_path,
+            &op_id,
+            result.as_ref().err().map(ToString::to_string),
+        )
+        .await;
+    }
     result
 }
 
@@ -815,7 +944,29 @@ pub(crate) async fn git_pull_rebase_decided_autostash_core(
     let op_id =
         begin_drop_journal(&repo_path, &decided, &keep_base, &drop_base, &expected_tip).await;
     let result = decided_autostash_run(&repo_path, &decided).await;
-    crate::oplog::finish(&repo_path, &op_id, settled_journal_error(&result)).await;
+    // Submodule step first, folded into the result, so the record below closes on the
+    // SAME verdict the caller receives — a settle-then-step order journals "done" for
+    // a call that goes on to return an error.
+    let result = if settled_journal_error(&result).is_none() {
+        let submodule = update_submodules_after_rebase(&repo_path).await;
+        fold_submodule_failure(result, submodule)
+    } else {
+        result
+    };
+    // The compound's conflict shape: the rebase stopped and left itself in progress
+    // for the user to continue or abort, which the plain core reports as
+    // `AppError::Conflict`. A stash kept for any OTHER reason is a real failure.
+    if matches!(
+        result,
+        Ok(AutostashOutcome::OpFailedStashKept {
+            in_progress: true,
+            ..
+        })
+    ) {
+        crate::oplog::pause(&repo_path, &op_id).await;
+    } else {
+        crate::oplog::finish(&repo_path, &op_id, settled_journal_error(&result)).await;
+    }
     result
 }
 
@@ -1522,13 +1673,10 @@ mod tests {
         assert!(crate::git::ops::op_state(&clone).await.unwrap().rebasing);
     }
 
-    /// The destructive arm's conflict: dropping V still replays the local commit
-    /// above it, which can collide. The journal entry the drop opened has to be
-    /// closed — a record left `"pending"` would show up as an interrupted op on
-    /// the next launch, offering recovery for a rebase the user is mid-resolve on.
-    #[tokio::test]
-    async fn decided_drop_that_conflicts_pauses_a_rebase_and_closes_its_record() {
-        let (_dir, clone, shas) = colliding_fixture("drop-conflict", true).await;
+    /// Drive a decided DROP to its conflict: dropping V still replays the local
+    /// commit above it, which collides with the rewritten upstream.
+    async fn conflicted_drop(marker: &str) -> (tempfile::TempDir, String, DecisionShas) {
+        let (dir, clone, shas) = colliding_fixture(marker, true).await;
 
         let state = AppState::default();
         let err = git_pull_rebase_decided_core(
@@ -1537,8 +1685,8 @@ mod tests {
             "main".into(),
             "drop".into(),
             shas.new_tip.clone(),
-            shas.keep_base,
-            shas.drop_base,
+            shas.keep_base.clone(),
+            shas.drop_base.clone(),
             shas.expected_tip.clone(),
         )
         .await
@@ -1549,16 +1697,35 @@ mod tests {
         assert_eq!(op, "rebase");
         assert_eq!(paths, &vec!["a.txt".to_string()]);
         assert!(crate::git::ops::op_state(&clone).await.unwrap().rebasing);
+        (dir, clone, shas)
+    }
 
-        let entry = crate::oplog::git_oplog_list(clone.clone())
+    /// `repo`'s journaled drop record.
+    async fn drop_entry(repo: &str) -> crate::oplog::OpLogEntry {
+        crate::oplog::git_oplog_list(repo.to_string())
             .await
             .expect("the journal must be readable")
             .into_iter()
             .find(|e| e.op == "pull_rebase_drop")
-            .expect("a drop must be journaled even when it stops");
-        // Recorded as failed rather than paused: the paused-op distinction the
-        // sequencer commands draw is a separate question from this one.
-        assert_eq!(entry.status, "failed");
+            .expect("a drop must be journaled even when it stops")
+    }
+
+    /// The destructive arm's conflict did not END the drop — it handed the tree to
+    /// the user, who still has to continue or abort it. The record takes the same
+    /// `"paused"` disposition a stopped cherry-pick gets: neither a failure that
+    /// hasn't happened, nor a `"pending"` row offering recovery for a rebase the
+    /// user is mid-resolve on.
+    #[tokio::test]
+    async fn decided_drop_that_conflicts_pauses_a_rebase_and_its_record() {
+        let (_dir, clone, shas) = conflicted_drop("drop-conflict").await;
+
+        let entry = drop_entry(&clone).await;
+        assert_eq!(entry.status, "paused");
+        assert!(entry.finished_at.is_none(), "a paused op has not ended");
+        assert!(
+            entry.error.is_none(),
+            "the conflict lives in the banner, not in a failure line"
+        );
         assert_eq!(entry.original_sha, shas.expected_tip);
         // The rollback slot holds the PRE-op tip, never the upstream's: resetting
         // to the upstream tip would redo the very drop a recovery is undoing.
@@ -1569,16 +1736,52 @@ mod tests {
         );
         assert_ne!(entry.pre_op_tip.as_deref(), Some(shas.new_tip.as_str()));
         assert!(
-            entry.error.is_some_and(|e| e.contains("a.txt")),
-            "the record carries what stopped it"
-        );
-        assert!(
             crate::oplog::git_oplog_check(clone.clone())
                 .await
                 .unwrap()
                 .is_empty(),
-            "and it is no longer pending, so relaunch offers no recovery for it"
+            "and it is not pending, so relaunch offers no recovery for it"
         );
+        assert_eq!(
+            drop_entry(&clone).await.status,
+            "paused",
+            "a check must not retire the handle of a rebase that is still live"
+        );
+    }
+
+    /// Continuing the paused rebase in-app ends the drop, so `op_continue`'s rebase
+    /// arm closes its record done — the mirror of the route a pick already has.
+    #[tokio::test]
+    async fn continuing_a_paused_drop_closes_its_record() {
+        let (dir, clone, _shas) = conflicted_drop("drop-continue").await;
+        std::fs::write(dir.path().join("clone").join("a.txt"), "resolved\n").unwrap();
+        git(&clone, &["add", "a.txt"]).await;
+
+        let state = AppState::default();
+        assert!(crate::git::ops::op_continue(&state, &clone, "rebase")
+            .await
+            .expect("the resolved rebase continues to completion"));
+        assert!(!crate::git::ops::op_state(&clone).await.unwrap().rebasing);
+        assert_eq!(drop_entry(&clone).await.status, "done");
+    }
+
+    /// Aborting it abandons the drop, journaled the way every user-abandoned op is.
+    #[tokio::test]
+    async fn aborting_a_paused_drop_closes_its_record() {
+        let (_dir, clone, shas) = conflicted_drop("drop-abort").await;
+
+        let state = AppState::default();
+        crate::git::ops::op_abort(&state, &clone, "rebase")
+            .await
+            .expect("the paused rebase aborts");
+        assert_eq!(
+            rev(&clone, "HEAD").await,
+            shas.expected_tip,
+            "the abort restored the branch"
+        );
+        let entry = drop_entry(&clone).await;
+        assert_eq!(entry.status, "failed");
+        assert_eq!(entry.error.as_deref(), Some("aborted by user"));
     }
 
     /// The autostash variant stashes the dirty tree across the rebase and puts it
@@ -1612,5 +1815,307 @@ mod tests {
             "dirty\n"
         );
         assert!(git(&clone, &["stash", "list"]).await.trim().is_empty());
+    }
+
+    // ---- submodule parity ---------------------------------------------------
+
+    /// The gate is git's own boolean resolution, so every spelling of true counts
+    /// and anything non-boolean reads as the key's documented default, false.
+    #[tokio::test]
+    async fn submodule_recurse_reads_gits_own_boolean() {
+        let (_dir, clone, _shas) = decided_fixture("submodule-config").await;
+
+        assert!(!submodule_recurse(&clone).await, "unset defaults to false");
+        git(&clone, &["config", "submodule.recurse", "yes"]).await;
+        assert!(submodule_recurse(&clone).await);
+        git(&clone, &["config", "submodule.recurse", "false"]).await;
+        assert!(!submodule_recurse(&clone).await);
+        git(&clone, &["config", "submodule.recurse", "sometimes"]).await;
+        assert!(!submodule_recurse(&clone).await);
+    }
+
+    /// git refuses `file://` transport for submodule CLONE, and a repo-local
+    /// `protocol.file.allow` does not lift it — only a command-line `-c` does
+    /// (measured, git 2.51.1.windows.1). The fixture's own setup commands carry it;
+    /// nothing under test needs it, because the clone already holds every object the
+    /// parity step checks out.
+    const ALLOW_FILE_SUBMODULE: &str = "protocol.file.allow=always";
+
+    /// A superproject carrying one submodule, cloned so the clone is the repo under
+    /// test: it has a local commit (so the guard has something to rebase) while
+    /// upstream has moved the pointer to a second submodule commit. Returns the
+    /// fixture guard, the clone, and that second submodule sha.
+    ///
+    /// Both submodule commits are pushed BEFORE anything clones, so the clone's
+    /// submodule object store already holds the one the bump records.
+    async fn submodule_fixture(marker: &str) -> (tempfile::TempDir, String, String) {
+        let dir = temp(marker);
+        let root = dir.path().to_string_lossy().into_owned();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "sub.git"]).await;
+        git(&root, &["init", "-q", "--bare", "-b", "main", "super.git"]).await;
+        let url = |name: &str| {
+            format!(
+                "file://{}",
+                dir.path().join(name).to_string_lossy().replace('\\', "/")
+            )
+        };
+
+        // The submodule's own upstream.
+        git(&root, &["init", "-q", "-b", "main", "sub-work"]).await;
+        let sub_dir = dir.path().join("sub-work");
+        let sub = sub_dir.to_string_lossy().into_owned();
+        configure(&sub).await;
+        std::fs::write(sub_dir.join("s.txt"), "s1\n").unwrap();
+        git(&sub, &["add", "-A"]).await;
+        git(&sub, &["commit", "-qm", "s1"]).await;
+        git(&sub, &["remote", "add", "origin", &url("sub.git")]).await;
+        git(&sub, &["push", "-q", "-u", "origin", "main"]).await;
+        let s1 = rev(&sub, "HEAD").await;
+        std::fs::write(sub_dir.join("s.txt"), "s2\n").unwrap();
+        git(&sub, &["commit", "-qam", "s2"]).await;
+        git(&sub, &["push", "-q"]).await;
+        let s2 = rev(&sub, "HEAD").await;
+
+        // The superproject, recording the submodule at s1.
+        git(&root, &["init", "-q", "-b", "main", "super-work"]).await;
+        let work_dir = dir.path().join("super-work");
+        let work = work_dir.to_string_lossy().into_owned();
+        configure(&work).await;
+        std::fs::write(work_dir.join("a.txt"), "base\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "base"]).await;
+        git(
+            &work,
+            &[
+                "-c",
+                ALLOW_FILE_SUBMODULE,
+                "submodule",
+                "add",
+                "-q",
+                &url("sub.git"),
+                "sub",
+            ],
+        )
+        .await;
+        let work_sub = work_dir.join("sub").to_string_lossy().into_owned();
+        git(&work_sub, &["checkout", "-q", &s1]).await;
+        git(&work, &["add", "sub"]).await;
+        git(&work, &["commit", "-qm", "add the submodule"]).await;
+        git(&work, &["remote", "add", "origin", &url("super.git")]).await;
+        git(&work, &["push", "-q", "-u", "origin", "main"]).await;
+
+        // The clone under test, plus a local commit so the guard has a rebase to run.
+        git(
+            &root,
+            &[
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                ALLOW_FILE_SUBMODULE,
+                "clone",
+                "-q",
+                "--recurse-submodules",
+                &url("super.git"),
+                "clone",
+            ],
+        )
+        .await;
+        let clone_dir = dir.path().join("clone");
+        let clone = clone_dir.to_string_lossy().into_owned();
+        configure(&clone).await;
+        std::fs::write(clone_dir.join("mine.txt"), "mine\n").unwrap();
+        git(&clone, &["add", "-A"]).await;
+        git(&clone, &["commit", "-qm", "local commit"]).await;
+
+        // Upstream moves the pointer to s2, leaving the clone's worktree behind.
+        git(&work_sub, &["checkout", "-q", &s2]).await;
+        git(&work, &["add", "sub"]).await;
+        git(&work, &["commit", "-qm", "bump the submodule"]).await;
+        git(&work, &["push", "-q"]).await;
+
+        (dir, clone, s2)
+    }
+
+    /// `submodule.recurse=true` asks git to keep submodule worktrees in step with
+    /// the pointer, which the guard's plain `git rebase` cannot do — `rebase` is not
+    /// one of the commands that key enables `--recurse-submodules` for. The parity
+    /// step is what moves the submodule after the superproject records it.
+    #[tokio::test]
+    async fn a_guarded_pull_updates_submodules_when_the_user_asked_for_it() {
+        let (dir, clone, s2) = submodule_fixture("submodule-recurse").await;
+        git(&clone, &["config", "submodule.recurse", "true"]).await;
+        let sub = dir
+            .path()
+            .join("clone")
+            .join("sub")
+            .to_string_lossy()
+            .into_owned();
+        let before = rev(&sub, "HEAD").await;
+        assert_ne!(before, s2, "the fixture must leave the submodule behind");
+
+        let state = AppState::default();
+        assert!(
+            guarded_pull(&state, &clone)
+                .await
+                .expect("the guarded pull rebases cleanly"),
+            "the guard must engage, or this test proves nothing"
+        );
+
+        assert_eq!(
+            rev(&clone, "HEAD:sub").await,
+            s2,
+            "the superproject records the new submodule commit"
+        );
+        assert_eq!(
+            rev(&sub, "HEAD").await,
+            s2,
+            "and the submodule worktree is checked out at it"
+        );
+    }
+
+    /// Commit a submodule that can never be checked out — a gitlink whose object is
+    /// absent and a URL git will not use — and register it, so the parity step fails
+    /// deterministically and offline. `update-index --cacheinfo` accepts a gitlink
+    /// with no local object, and the entry survives a `rebase --onto` (both measured,
+    /// git 2.51.1.windows.1), which is what lets the failure land AFTER the rebase.
+    ///
+    /// Returns the new tip, since the extra commit moves HEAD past the one a decision
+    /// fixture pinned.
+    async fn commit_a_broken_submodule(repo: &str, dir: &std::path::Path) -> String {
+        std::fs::write(
+            dir.join(".gitmodules"),
+            "[submodule \"brk\"]\n\tpath = brk\n\turl = file:///gd-no-such-submodule\n",
+        )
+        .unwrap();
+        git(
+            repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,0123456789012345678901234567890123456789,brk",
+            ],
+        )
+        .await;
+        git(repo, &["add", ".gitmodules"]).await;
+        git(repo, &["commit", "-qm", "a submodule that cannot resolve"]).await;
+        git(repo, &["submodule", "init"]).await;
+        git(repo, &["config", "submodule.recurse", "true"]).await;
+        rev(repo, "HEAD").await
+    }
+
+    /// The journal row and the returned result must never disagree. The rebase lands,
+    /// the parity step then fails, and the record has to close on THAT verdict — a
+    /// record settled before the step would show a green Done row for a call the
+    /// caller saw fail.
+    #[tokio::test]
+    async fn a_submodule_failure_after_a_landed_rebase_journals_the_failure() {
+        let (dir, clone, shas) = decided_fixture("submodule-step-fails").await;
+        let expected_tip =
+            commit_a_broken_submodule(&clone, &dir.path().join("clone")).await;
+
+        let state = AppState::default();
+        let err = git_pull_rebase_decided_core(
+            &state,
+            clone.clone(),
+            "main".into(),
+            "drop".into(),
+            shas.new_tip,
+            shas.keep_base,
+            shas.drop_base,
+            expected_tip,
+        )
+        .await
+        .expect_err("the submodule step cannot resolve its gitlink");
+        assert!(
+            matches!(&err, AppError::Git { .. }),
+            "the step's own failure reaches the caller: {err:?}"
+        );
+
+        // The rebase itself landed — this is a failure AFTER it, not instead of it.
+        assert_eq!(
+            log_subjects(&clone).await.get(1).map(String::as_str),
+            Some("teammate rewrite"),
+            "the drop replayed onto the rewritten upstream"
+        );
+        let entry = drop_entry(&clone).await;
+        assert_eq!(entry.status, "failed", "the row agrees with the result");
+        assert!(
+            entry.error.is_some_and(|e| e.contains("brk")),
+            "and it carries what actually stopped it"
+        );
+    }
+
+    /// The fold's contract, driven directly. An integration fixture cannot reach it
+    /// reliably: the conflicted pop leaves the index unmerged, and `git submodule
+    /// update` then skips the submodules it would have to clone and exits 0
+    /// (measured) — so the fixture version of this test passed without the fold ever
+    /// running, which its negative control is what caught.
+    #[test]
+    fn a_submodule_failure_never_replaces_a_conflicted_reapply() {
+        let boom = || AppError::Command("submodule brk exploded".into());
+
+        let folded = fold_submodule_failure(
+            Ok(AutostashOutcome::ReapplyConflicted {
+                stderr: "pop conflicted on a.txt".into(),
+                conflicted: true,
+            }),
+            Err(boom()),
+        )
+        .expect("the reapply report survives the failing step");
+        let AutostashOutcome::ReapplyConflicted { stderr, conflicted } = folded else {
+            panic!("the outcome must keep its variant");
+        };
+        assert!(conflicted, "and its discriminant");
+        assert!(stderr.contains("pop conflicted on a.txt"), "{stderr}");
+        assert!(stderr.contains("submodule brk exploded"), "{stderr}");
+
+        // An outcome carrying nothing the error does not: the failure IS the result,
+        // so it can never be swallowed.
+        for outcome in [
+            AutostashOutcome::Reapplied,
+            AutostashOutcome::NothingStashed,
+        ] {
+            let err = fold_submodule_failure(Ok(outcome), Err(boom()))
+                .expect_err("a failure with nothing to preserve is never swallowed");
+            assert!(err.to_string().contains("submodule brk exploded"), "{err}");
+        }
+
+        // A clean step changes nothing.
+        assert!(matches!(
+            fold_submodule_failure(Ok(AutostashOutcome::Reapplied), Ok(())),
+            Ok(AutostashOutcome::Reapplied)
+        ));
+    }
+
+    /// The flip side: with `submodule.recurse` unset the guard must leave submodule
+    /// worktrees where the user left them — a bare `git pull` does not recurse
+    /// either, and that default is the whole reason the step is gated.
+    #[tokio::test]
+    async fn a_guarded_pull_leaves_submodules_alone_by_default() {
+        let (dir, clone, s2) = submodule_fixture("submodule-default").await;
+        let sub = dir
+            .path()
+            .join("clone")
+            .join("sub")
+            .to_string_lossy()
+            .into_owned();
+        let before = rev(&sub, "HEAD").await;
+
+        let state = AppState::default();
+        assert!(guarded_pull(&state, &clone)
+            .await
+            .expect("the guarded pull rebases cleanly"));
+
+        assert_eq!(
+            rev(&clone, "HEAD:sub").await,
+            s2,
+            "the pointer still moves — that is the rebase's own work"
+        );
+        assert_eq!(
+            rev(&sub, "HEAD").await,
+            before,
+            "the worktree stays where the user left it"
+        );
     }
 }
