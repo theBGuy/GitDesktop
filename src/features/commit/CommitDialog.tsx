@@ -20,6 +20,7 @@ import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
+import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { CoAuthorPicker } from "./CoAuthorPicker";
@@ -58,6 +59,13 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
   const open = useUiStore((s) => s.commitDialogOpen);
   const closeCommitDialog = useUiStore((s) => s.closeCommitDialog);
   const openSettings = useUiStore((s) => s.openSettings);
+  const repoTab = useUiStore((s) => s.repoTab);
+  const settings = useSettings();
+  // The one state with no commit surface mounted: a collapsed sidebar hides the
+  // Changes panel, and Activity tears CommitBox's registration down with it.
+  // This dialog is hoisted for exactly that, so the chord registers here.
+  const noCommitSurface =
+    repoTab === "changes" && (settings.data?.sidebarCollapsed ?? false);
   const {
     title,
     body,
@@ -84,6 +92,7 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
     doCommit,
   } = useCommitSubmit(repoPath, {
     active: open,
+    commitHotkeyFallback: noCommitSurface,
     onCommitted: closeCommitDialog,
   });
   // Same query (and cache entry) the Changes panel's rows read, so a file's
@@ -202,7 +211,7 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
             <ScrollArea className="min-h-0 flex-1 overflow-hidden border">
               <ul className="py-1">
                 {stagedEntries.map((entry) => {
-                  const badge = KIND_BADGE[entry.staged ?? "modified"];
+                  const badge = KIND_BADGE[entry.staged];
                   const label = entry.origPath
                     ? `${entry.origPath} → ${entry.path}`
                     : entry.path;

@@ -6,7 +6,7 @@ import { requiresPullRequest } from "@/lib/branch-rules/match";
 import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
 import { useCommit, useRepoStatus } from "@/lib/git/queries";
-import type { FileEntry } from "@/lib/git/types";
+import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { commitDraftKey, useUiStore } from "@/lib/stores/ui";
@@ -27,12 +27,17 @@ export function useCommitSubmit(
   repoPath: string,
   {
     active = true,
+    commitHotkeyFallback = false,
     onCommitted,
   }: {
     /** Whether this surface's hotkey registrations are live. The dialog passes
      *  its open state so a closed-but-mounted instance registers nothing
      *  enabled; the inline box is live for as long as it's mounted. */
     active?: boolean;
+    /** Keeps the `commit` chord alone live while this surface is closed, for
+     *  the state where NO commit surface is mounted to hold it. Commit-only by
+     *  design: a generation streams into a field, so it needs one on screen. */
+    commitHotkeyFallback?: boolean;
     /** Runs when a commit lands — the dialog closes itself on it. */
     onCommitted?: () => void;
   } = {},
@@ -71,8 +76,12 @@ export function useCommitSubmit(
   const locked = branchName
     ? requiresPullRequest(rulesConfig, branchName)
     : false;
-  const stagedEntries: FileEntry[] =
-    status.data?.entries.filter((e) => e.staged !== null) ?? [];
+  // Narrowed at the filter, so consumers read `staged` as a plain ChangeKind and
+  // can't paper over a mis-typed entry with a fallback kind.
+  const stagedEntries: (FileEntry & { staged: ChangeKind })[] =
+    status.data?.entries.filter(
+      (e): e is FileEntry & { staged: ChangeKind } => e.staged !== null,
+    ) ?? [];
   const stagedCount = stagedEntries.length;
   // amending without staged changes is valid (message-only edit)
   const canCommit =
@@ -104,7 +113,11 @@ export function useCommitSubmit(
   // The commit hotkey (Ctrl+Enter by default) fires through the global
   // dispatcher even from the title/body fields — modifier combos are
   // allowed in text fields — so rebinding it in Settings works everywhere.
-  useHotkeyAction("commit", doCommit, active && canCommit && !generating);
+  useHotkeyAction(
+    "commit",
+    doCommit,
+    (active || commitHotkeyFallback) && canCommit && !generating,
+  );
   useHotkeyAction(
     "generate-commit-message",
     generate,

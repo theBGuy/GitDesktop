@@ -1,13 +1,6 @@
 import { type RefCallback, useCallback, useRef, useState } from "react";
 
 /**
- * Narrowest container that still fits a side-by-side diff: below it a split
- * view keeps under ~40 monospace columns per side once the ~91px of line-number
- * and marker gutters are taken out, so the surfaces fall back to unified.
- */
-export const SPLIT_MIN_CONTAINER_PX = 672;
-
-/**
  * Measures the BORDER-box width of the element the returned ref is attached to
  * — the same box `getBoundingClientRect` reports, so the first measurement and
  * every observed one agree even on a padded or bordered element. Width is React

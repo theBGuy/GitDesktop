@@ -14,9 +14,11 @@ import type { UseQueryResult } from "@tanstack/react-query";
 import { type ComponentType, useState } from "react";
 import { Markdown } from "@/components/ui/markdown";
 import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
+import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import type { AgentToolKind, TranscriptSegment } from "@/lib/ai/agent";
 import { useSessionFileDiff } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
+import { useContainerWidth } from "@/lib/use-container-width";
 import { cn } from "@/lib/utils";
 import { AgentNarration } from "./AgentNarration";
 
@@ -157,6 +159,10 @@ function InlineDiff({
   repoPath?: string;
   diff: UseQueryResult<FileDiff>;
 }) {
+  // A transcript step's diff sits inside the conversation column, which is
+  // narrower than a diff pane at any window size — measure it so split never
+  // renders below two legible columns.
+  const [paneRef, paneWidth] = useContainerWidth<HTMLDivElement>();
   let body: React.ReactNode;
   if (diff.isPending) {
     body = <InlineNote>Loading diff…</InlineNote>;
@@ -172,12 +178,16 @@ function InlineDiff({
         filePath={filePath}
         text={diff.data.text}
         repoPath={repoPath}
+        forceUnified={paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX}
       />
     );
   }
   // ph-no-capture: the diff is user code/paths — keep it out of session replay.
   return (
-    <div className="ph-no-capture max-h-96 overflow-auto border-t border-border/60 text-xs">
+    <div
+      ref={paneRef}
+      className="ph-no-capture max-h-96 overflow-auto border-t border-border/60 text-xs"
+    >
       {body}
     </div>
   );

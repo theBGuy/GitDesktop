@@ -32,10 +32,7 @@ import type { CustomLanguage } from "@/lib/settings/api";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { useEffectiveSyntax } from "@/lib/syntax/queries";
-import {
-  SPLIT_MIN_CONTAINER_PX,
-  useContainerWidth,
-} from "@/lib/use-container-width";
+import { useContainerWidth } from "@/lib/use-container-width";
 import { useIsDark } from "@/lib/use-is-dark";
 import {
   capDiffText,
@@ -60,6 +57,7 @@ import {
   SYNTAX_LINE_CAP,
   shikiDiffHighlighter,
 } from "./shiki-highlighter";
+import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
 import { ensureCustomLanguages } from "./syntax";
 import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
 
@@ -1229,6 +1227,18 @@ export function DiffContent({
   // The picker's trigger is hidden below @md, so the palette action is its only
   // route at narrow widths — which makes the open state the toolbar's to own.
   const [langOpen, setLangOpen] = useState(false);
+  const langWrapRef = useRef<HTMLSpanElement>(null);
+  const controlsRef = useRef<HTMLSpanElement>(null);
+  // Closing below @md re-hides the trigger in the same commit, so Base UI's
+  // focus-return lands on a display:none node and focus falls to <body>. Catch
+  // exactly that case — `offsetParent === null` means the wrapper really went
+  // away — and leave the normal return-to-trigger alone at wider widths.
+  const returnFocusIfTriggerHidden = () =>
+    requestAnimationFrame(() => {
+      if (langWrapRef.current?.offsetParent === null) {
+        controlsRef.current?.focus();
+      }
+    });
   // Computed above the early-return chain (which the `emptyDiff` arm joins, so
   // the text is trimmed once) because the registration below is a hook: offer
   // the action only in the states that actually render the picker.
@@ -1283,33 +1293,50 @@ export function DiffContent({
       className="ph-no-capture @container/diff-pane flex h-full flex-col"
     >
       <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
-        {/* The truncation notice rides an sr-only sibling rather than visible
-            text: as visible text it was ~200px that refused to shrink, painting
-            over the controls on any pane under ~1155px. */}
         <span
           className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
           title={filePath}
         >
           {filePath}
         </span>
+        {/* ~200px of unshrinkable text, so it shows only where the pane has the
+            room; the sr-only twin carries it at every width, and `aria-hidden`
+            on the visible copy keeps the two from announcing twice. */}
         {data.isTruncated && (
-          <span className="sr-only">(truncated — diff too large)</span>
+          <>
+            <span aria-hidden className="hidden shrink-0 @2xl/diff-pane:inline">
+              (truncated — diff too large)
+            </span>
+            <span className="sr-only">(truncated — diff too large)</span>
+          </>
         )}
         {/* min-h-7 pins the cluster to the language picker's h-7 trigger, so an
             extensionless file — where the picker renders nothing and only the
-            xs (h-6) mode toggle remains — doesn't shrink the row by 4px. */}
-        <span className="flex min-h-7 shrink-0 items-center gap-1.5">
+            xs (h-6) mode toggle remains — doesn't shrink the row by 4px.
+            tabIndex/outline-none make it a silent landing spot for focus when
+            the picker closes with its trigger already hidden. */}
+        <span
+          ref={controlsRef}
+          tabIndex={-1}
+          className="flex min-h-7 shrink-0 items-center gap-1.5 outline-none"
+        >
           {/* The only variable-width control here (its label follows the
               language name), so it's the one that goes under @md — leaving the
               row a fixed floor. It must stay laid out while its popup is open,
               though: Base UI anchors to the trigger, and a display:none trigger
               positions the popup at 0,0. `empty:hidden` keeps the row's gap off
               an extensionless file, where the picker renders nothing. */}
-          <span className="hidden @md/diff-pane:flex empty:hidden has-[[data-popup-open]]:flex">
+          <span
+            ref={langWrapRef}
+            className="hidden @md/diff-pane:flex empty:hidden has-[[data-popup-open]]:flex"
+          >
             <DiffLanguagePicker
               filePath={filePath}
               open={langOpen}
-              onOpenChange={setLangOpen}
+              onOpenChange={(open) => {
+                setLangOpen(open);
+                if (!open) returnFocusIfTriggerHidden();
+              }}
             />
           </span>
           <DiffModeToggle splitDisabled={narrowPane} />

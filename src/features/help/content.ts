@@ -414,8 +414,9 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 - **The file list beside a diff collapses** to a thin strip, handing the diff the whole
   pane. Use the caret above the list, or *Collapse or expand the diff file list*
   (palette-only by default — bind a key in Settings); a pane too narrow to hold both
-  collapses it for you. You'll find that list on a commit's files, in **Compare**, and
-  on a pull request's **Files** and **Commits** tabs.
+  collapses it for you. You'll find that list on a commit's files, in **Compare**, on a
+  pull request's **Files** and **Commits** tabs, and anywhere else a file list
+  sits beside a diff.
 
 ## Committing
 

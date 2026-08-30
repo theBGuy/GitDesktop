@@ -49,10 +49,7 @@ import type { SelectedFile } from "@/lib/stores/ui";
 import { useUiStore } from "@/lib/stores/ui";
 import { useEffectiveSyntax } from "@/lib/syntax/queries";
 import { toastError } from "@/lib/toast";
-import {
-  SPLIT_MIN_CONTAINER_PX,
-  useContainerWidth,
-} from "@/lib/use-container-width";
+import { useContainerWidth } from "@/lib/use-container-width";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
@@ -76,6 +73,7 @@ import {
 } from "./DiffSurface";
 import { fileExt } from "./diff-lang";
 import { ImagePanes } from "./ImageDiff";
+import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
 
 /** Working-tree diff for the file selected in the changes panel. */
 export function DiffViewer({ repoPath }: { repoPath: string }) {
@@ -196,9 +194,22 @@ function WorkingTreeDiff({
     forText: string;
   } | null>(null);
   const clearSelection = useCallback(() => setSelectionState(null), []);
-  // Owned here so the palette action can open the picker; the trigger itself is
-  // always visible in this toolbar, so this is the action's only reason to exist.
+  // Owned here so the palette action can open the picker: this toolbar folds
+  // the trigger under @md like the read-only surface does, so below that width
+  // the action is the only route to it.
   const [langOpen, setLangOpen] = useState(false);
+  const langWrapRef = useRef<HTMLSpanElement>(null);
+  const controlsRef = useRef<HTMLSpanElement>(null);
+  // Closing below @md re-hides the trigger in the same commit, so Base UI's
+  // focus-return lands on a display:none node and focus falls to <body>. Catch
+  // exactly that case — `offsetParent === null` means the wrapper really went
+  // away — and leave the normal return-to-trigger alone at wider widths.
+  const returnFocusIfTriggerHidden = () =>
+    requestAnimationFrame(() => {
+      if (langWrapRef.current?.offsetParent === null) {
+        controlsRef.current?.focus();
+      }
+    });
   // `parsed`, `hunkMode`, and `busy` are computed above the `!hunkMode` early
   // return because the hotkey registrations below run unconditionally and read
   // them.
@@ -384,10 +395,14 @@ function WorkingTreeDiff({
             The selection arm drops shrink-0 so a narrow pane takes width from
             the count (which truncates) instead of overflowing the row; every
             Button is shrink-0 by default, so the actions are the floor and
-            can never be squeezed or clipped. */}
+            can never be squeezed or clipped. tabIndex/outline-none make this a
+            silent landing spot for focus when the picker closes with its
+            trigger already hidden. */}
         <span
+          ref={controlsRef}
+          tabIndex={-1}
           className={cn(
-            "flex min-h-7 items-center gap-1.5",
+            "flex min-h-7 items-center gap-1.5 outline-none",
             selection === null && "shrink-0",
           )}
         >
@@ -470,11 +485,17 @@ function WorkingTreeDiff({
                   since Base UI anchors to the trigger and a display:none
                   trigger positions the popup at 0,0. `empty:hidden` keeps the
                   row's gap off an extensionless file. */}
-              <span className="hidden @md/staging-pane:flex empty:hidden has-[[data-popup-open]]:flex">
+              <span
+                ref={langWrapRef}
+                className="hidden @md/staging-pane:flex empty:hidden has-[[data-popup-open]]:flex"
+              >
                 <DiffLanguagePicker
                   filePath={file.path}
                   open={langOpen}
-                  onOpenChange={setLangOpen}
+                  onOpenChange={(open) => {
+                    setLangOpen(open);
+                    if (!open) returnFocusIfTriggerHidden();
+                  }}
                 />
               </span>
               <DiffModeToggle splitDisabled={narrowPane} />

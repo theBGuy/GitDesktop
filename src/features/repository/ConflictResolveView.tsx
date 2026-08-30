@@ -12,6 +12,7 @@ import { ButtonGroup } from "@/components/ui/button-group";
 import { Spinner } from "@/components/ui/spinner";
 import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
+import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import {
   buildConflictPrompt,
   extractResolvedContent,
@@ -30,6 +31,7 @@ import { useResolveConflict } from "@/lib/git/queries";
 import { useReviewConfigured, useSettings } from "@/lib/settings/queries";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
+import { useContainerWidth } from "@/lib/use-container-width";
 import { useLatestRef } from "@/lib/use-latest-ref";
 
 type Phase = "loading" | "streaming" | "ready" | "blocked" | "idle";
@@ -70,6 +72,9 @@ export function ConflictResolveView({
   // navigate-away) can't settle the shared state the newer run now owns.
   const genRef = useRef(0);
   const textRef = useLatestRef(text);
+  // The resolve view shares the diff pane's width budget, so the preview takes
+  // the same legibility gate: below it, render unified.
+  const [paneRef, paneWidth] = useContainerWidth<HTMLDivElement>();
 
   const markersLeft = phase === "ready" && hasConflictMarkers(proposed);
 
@@ -265,7 +270,7 @@ export function ConflictResolveView({
       )}
 
       {/* Body */}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div ref={paneRef} className="min-h-0 flex-1 overflow-auto">
         {phase === "blocked" ? (
           <p className="p-4 text-xs text-muted-foreground">
             <span className="font-mono">{baseName(path)}</span> matches your AI
@@ -293,6 +298,9 @@ export function ConflictResolveView({
               filePath={path}
               text={previewDiff}
               repoPath={repoPath}
+              forceUnified={
+                paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX
+              }
             />
           ) : (
             <HighlightedCode

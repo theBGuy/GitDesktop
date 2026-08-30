@@ -80,6 +80,9 @@ export function DetailRail({
   const refocus = useRef<boolean | null>(null);
 
   const narrow = rowWidth !== null && rowWidth < RAIL_MIN_CONTAINER_PX;
+  // Guarded state-during-render reset — React sanctions this over an effect,
+  // which would paint one stale strip frame after the row regains room; same
+  // idiom as ui/dialog.tsx and confirm-dialog-host.tsx.
   if (!narrow && transientExpand) setTransientExpand(false);
   const expanded = narrow
     ? transientExpand
