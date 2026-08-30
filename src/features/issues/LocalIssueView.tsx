@@ -184,9 +184,13 @@ export function LocalIssueView({
   return (
     <div className="flex h-full flex-col">
       <header className="space-y-2 border-b px-4 py-3">
-        <div className="flex items-start gap-2">
-          <h2 className="text-sm font-medium">{issue.title}</h2>
-          <span className="flex-1" />
+        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
+            the actions would stay put and the title collapse instead. Growing also
+            replaces the spacer that used to right-align them. */}
+        <div className="flex flex-wrap items-start gap-2">
+          <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
+            {issue.title}
+          </h2>
           <PlanIssueButton title={issue.title} body={issue.body} />
           {isOpen && (
             <SolveIssueButton
@@ -360,7 +364,7 @@ export function LocalIssueView({
         submitLabel="Comment"
       />
 
-      <div className="flex items-center gap-2 border-t p-3">
+      <div className="flex flex-wrap items-center gap-2 border-t p-3">
         <Button
           variant="outline"
           size="sm"

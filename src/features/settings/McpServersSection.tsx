@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { isHostAllowed, normalizeHost } from "@/lib/ai/allowed-hosts";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { withForm } from "@/lib/form";
 import { deleteMcpSecret } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
@@ -210,7 +211,7 @@ export const McpServersSection = withForm({
 
     return (
       <section className="space-y-4">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-sm font-medium">MCP servers</h2>
             <p className="text-xs text-muted-foreground">
@@ -221,7 +222,7 @@ export const McpServersSection = withForm({
               servers on your machine. Secrets are stored in your OS keychain.
             </p>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex items-center gap-2">
             <Button
               variant="ghost"
               size="sm"
@@ -316,7 +317,13 @@ export const McpServersSection = withForm({
                       }}
                       className="flex items-center gap-2 rounded border px-3 py-2 outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     >
-                      <span className="shrink-0 font-mono text-xs font-medium">
+                      {/* Truncatable, not shrink-0: an unbounded name is the
+                          row's width floor, and the badges beside it are the
+                          part that must never be clipped. */}
+                      <span
+                        className="min-w-0 truncate font-mono text-xs font-medium"
+                        onMouseEnter={clipTitleFromText}
+                      >
                         {server.name}
                       </span>
                       <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground uppercase">

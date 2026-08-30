@@ -89,6 +89,13 @@ three primary views — **Changes**, **History**, and **Pull Requests** — and 
 and **Insights**. The More button shows the active secondary tab's name, so the
 rail always says where you are.
 
+The lists those tabs open (changes, commits, pull requests) fill the **sidebar** down
+the left. It narrows as you narrow the window, and collapses to a strip of tab icons:
+use the button at the end of the tab row, {{kbd:toggle-sidebar}}, or the command
+palette. Collapsed, the detail pane takes the full width and the icons still switch
+tabs; your filters, selections, and scroll position are all where you left them when
+you expand it again.
+
 Switch tabs with the number keys ({{kbd:tab-changes}} through {{kbd:tab-insights}}; see
 *Keyboard & navigation*). Issues, Discussions, Actions, and Tags need \`gh\` and a
 GitHub remote; **Findings** works on a GitHub remote with \`gh\` or a GitLab one with
@@ -180,7 +187,9 @@ contributors, language makeup, activity, traffic), open **Insights** from the me
 
 The app remembers each window's **position and size** across launches, including which
 monitor it was on. Your layout is saved as you arrange the window, so an unexpected
-shutdown doesn't lose it. See **Settings → About** for the current coordinates.`,
+shutdown doesn't lose it. The window goes down to a narrow, split-screen width, so
+GitDesktop can sit beside your editor on half a screen. See **Settings → About** for
+the current coordinates.`,
   },
   {
     id: "explore",
@@ -390,13 +399,23 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 ## The diff viewer
 
 - **Syntax highlighting** for most languages, with a per-file **language override** if a
-  file is detected wrong (or turn highlighting off).
+  file is detected wrong (or turn highlighting off). A narrow pane drops the override's
+  button from the toolbar; *Change diff language…* in the command palette (palette-only
+  by default — bind a key in **Settings → Keyboard**) still opens the picker.
 - **Image diffs** render side by side.
 - Very large diffs are capped (with a **Show full diff** escape hatch) so a huge file
   never freezes the view.
 - Files that look **generated or minified** (one enormous line — bundles, source maps,
   \`.tsbuildinfo\`) show a placeholder instead of freezing the view — **Show diff anyway**
   renders a safely shortened version.
+- **Split renders as unified** while the pane is too narrow for two readable columns;
+  hover the **Split** button and it says so. Your preference is kept either way, so
+  widening the pane brings the split view back.
+- **The file list beside a diff collapses** to a thin strip, handing the diff the whole
+  pane. Use the caret above the list, or *Collapse or expand the diff file list*
+  (palette-only by default — bind a key in Settings); a pane too narrow to hold both
+  collapses it for you. You'll find that list on a commit's files, in **Compare**, and
+  on a pull request's **Files** and **Commits** tabs.
 
 ## Committing
 
@@ -405,6 +424,11 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 
 - **Co-authors** — add collaborators; the picker suggests people from the repo's history
   and writes proper \`Co-authored-by:\` trailers.
+- **Pop the box out** into a dialog with room to write and your staged files listed
+  beside it: use the commit box's **Open commit dialog** button, or the same command
+  in the palette (palette-only by default — bind a key in Settings). That list is
+  read-only; staging stays in the **Changes** panel. The palette route reaches the
+  dialog from any tab, and with the sidebar collapsed.
 {{ai}}- **Generate with AI** ({{kbd:generate-commit-message}}) — write the summary and
   description from your staged diff (see *AI & automations*).
 {{/ai}}- After committing, **Undo** ({{kbd:undo-commit}}) reverses the last commit and

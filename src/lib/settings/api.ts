@@ -290,6 +290,12 @@ export interface AppSettings {
    *  one-line peek strip. Global, so the reading space is reclaimed everywhere at
    *  once; the surface's own actions stay docked either way. */
   commentComposerCollapsed: boolean;
+  /** Collapse the file-list rail on the diff detail views. Only applies where the
+   *  pane is wide enough to show the rail at all; narrower panes hide it regardless. */
+  diffFileListCollapsed: boolean;
+  /** Collapse the repository view's left sidebar down to an icon rail. User-toggled
+   *  only — the app never collapses or expands it on the user's behalf. */
+  sidebarCollapsed: boolean;
   /** ISO-8601 expiry the user optionally entered for a Bitbucket (Atlassian) API token —
    *  Bitbucket never reports one, so it's user-supplied. null = not provided; cleared on
    *  disconnect. */
@@ -358,6 +364,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   diffViewMode: "unified",
   collapsedConversationSections: [],
   commentComposerCollapsed: false,
+  diffFileListCollapsed: false,
+  sidebarCollapsed: false,
   bitbucketTokenExpiresAt: null,
 };
 

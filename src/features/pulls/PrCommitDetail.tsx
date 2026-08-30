@@ -1,5 +1,6 @@
 import { CopyIcon } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
+import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -209,8 +210,8 @@ export function PrCommitDetail({
       ) : diff.isError ? (
         <DiffPlaceholder message="Could not load this commit's changes" />
       ) : (
-        <div className="flex min-h-0 flex-1">
-          <aside className="flex w-72 shrink-0 flex-col border-r">
+        <DetailRailRow>
+          <DetailRail ariaLabel="Changed files">
             <p className="border-b px-3 py-1.5 text-xs text-muted-foreground">
               {files.length} changed file{files.length === 1 ? "" : "s"}
             </p>
@@ -248,7 +249,7 @@ export function PrCommitDetail({
                 ))}
               </FileRowActions>
             </ScrollArea>
-          </aside>
+          </DetailRail>
           <main className="flex min-w-0 flex-1 flex-col">
             <div className="min-h-0 flex-1">
               {effectivePath && fileDiff ? (
@@ -275,7 +276,7 @@ export function PrCommitDetail({
               lens={lens}
             />
           </main>
-        </div>
+        </DetailRailRow>
       )}
     </div>
   );

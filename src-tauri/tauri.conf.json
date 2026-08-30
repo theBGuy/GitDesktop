@@ -15,7 +15,7 @@
         "title": "GitDesktop",
         "width": 1280,
         "height": 800,
-        "minWidth": 960,
+        "minWidth": 640,
         "minHeight": 600
       }
     ],

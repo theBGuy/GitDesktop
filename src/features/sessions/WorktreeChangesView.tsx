@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useDeferredValue, useState } from "react";
+import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
@@ -103,8 +104,8 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
         </span>
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <aside className="flex w-72 shrink-0 flex-col border-r">
+      <DetailRailRow>
+        <DetailRail ariaLabel="Changed files">
           {/* overflow-hidden contains the list's natural height (vendored Root is
               `relative`-only) so a long file list can't leak a window scrollbar. */}
           <ScrollArea className="min-h-0 flex-1 overflow-hidden">
@@ -133,7 +134,7 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
               ))}
             </div>
           </ScrollArea>
-        </aside>
+        </DetailRail>
         <main className="min-w-0 flex-1">
           {deferredPath ? (
             <DiffSurface
@@ -149,7 +150,7 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
             <DiffPlaceholder message="Select a file to see its changes" />
           )}
         </main>
-      </div>
+      </DetailRailRow>
     </div>
   );
 }

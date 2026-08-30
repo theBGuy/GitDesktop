@@ -151,7 +151,7 @@ export function InsightsBoard({
     // a flex-item sizing hint is inert there and the grid's natural height would
     // leak into the document instead of scrolling inside the board.
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center justify-between border-b p-2">
+      <div className="flex flex-wrap items-center justify-between border-b p-2">
         <h2 className="px-1 text-xs font-medium text-muted-foreground">
           Insights
         </h2>

@@ -22,14 +22,20 @@ import {
   useRef,
   useState,
 } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { useFileAtRev } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import type { CustomLanguage } from "@/lib/settings/api";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { useEffectiveSyntax } from "@/lib/syntax/queries";
+import {
+  SPLIT_MIN_CONTAINER_PX,
+  useContainerWidth,
+} from "@/lib/use-container-width";
 import { useIsDark } from "@/lib/use-is-dark";
 import {
   capDiffText,
@@ -42,7 +48,7 @@ import {
 import { DiffErrorBoundary } from "./DiffErrorBoundary";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
 import { DiffPlaceholder } from "./DiffPlaceholder";
-import { diffLang } from "./diff-lang";
+import { diffLang, fileExt } from "./diff-lang";
 import { djb2 } from "./highlight-worker-shared";
 import { installHljsGapIsolation } from "./hljs-gap-isolation";
 import { ImageDiff, ImagePanes, type ImageRevs, imageMime } from "./ImageDiff";
@@ -160,32 +166,49 @@ function decodeBase64Utf8(b64: string): string {
 }
 
 /** The persisted Unified/Split preference toggle. */
-export function DiffModeToggle() {
+export function DiffModeToggle({
+  splitDisabled = false,
+}: {
+  /** The pane is too narrow to render split (see {@link SPLIT_MIN_CONTAINER_PX}).
+   *  The active segment follows what's ON SCREEN, so Unified reads as active
+   *  while the override holds — and because it does, its write is withheld too:
+   *  a persisted `split` must survive the narrow pane that hid it, so neither
+   *  button may touch the preference while the override stands in for it. */
+  splitDisabled?: boolean;
+}) {
   const settings = useSettings();
   const saveSettings = useSaveSettings();
   const viewMode = settings.data?.diffViewMode ?? "unified";
+  const effectiveViewMode = splitDisabled ? "unified" : viewMode;
   return (
+    // DisabledReasonButton's wrapper span has no `data-slot`, so it opts out of
+    // ButtonGroup's border-collapse/rounding child selectors — this call site
+    // owns the seam on the Button instead (same arrangement as SyncControls).
     <ButtonGroup>
       <Button
-        variant={viewMode === "unified" ? "secondary" : "ghost"}
+        variant={effectiveViewMode === "unified" ? "secondary" : "ghost"}
         size="xs"
         onClick={() =>
+          !splitDisabled &&
           settings.data &&
           saveSettings.mutate({ ...settings.data, diffViewMode: "unified" })
         }
       >
         Unified
       </Button>
-      <Button
-        variant={viewMode === "split" ? "secondary" : "ghost"}
+      <DisabledReasonButton
+        variant={effectiveViewMode === "split" ? "secondary" : "ghost"}
         size="xs"
+        disabled={splitDisabled}
+        reason="Pane too narrow for split view"
+        className="border-l-0 focus-visible:relative focus-visible:z-10"
         onClick={() =>
           settings.data &&
           saveSettings.mutate({ ...settings.data, diffViewMode: "split" })
         }
       >
         Split
-      </Button>
+      </DisabledReasonButton>
     </ButtonGroup>
   );
 }
@@ -203,6 +226,7 @@ export function GitDiffView({
   contentRevs,
   lineAnchors,
   lineWidget,
+  forceUnified,
 }: {
   filePath: string;
   text: string;
@@ -213,6 +237,9 @@ export function GitDiffView({
   lineAnchors?: DiffLineAnchor[];
   /** Inline composer opened from a diff line. Absent = plain read-only diff. */
   lineWidget?: LineWidget;
+  /** Render unified whatever the preference says — the measuring pane sets this
+   *  when it's too narrow for split. Omitted = follow the preference. */
+  forceUnified?: boolean;
 }) {
   return (
     <DiffErrorBoundary resetKey={`${filePath} ${text.length}`}>
@@ -223,6 +250,7 @@ export function GitDiffView({
         contentRevs={contentRevs}
         lineAnchors={lineAnchors}
         lineWidget={lineWidget}
+        forceUnified={forceUnified}
       />
     </DiffErrorBoundary>
   );
@@ -603,6 +631,7 @@ function RenderedDiff({
   contentRevs,
   lineAnchors,
   lineWidget,
+  forceUnified,
 }: {
   filePath: string;
   text: string;
@@ -610,10 +639,15 @@ function RenderedDiff({
   contentRevs?: DiffContentRevs;
   lineAnchors?: DiffLineAnchor[];
   lineWidget?: LineWidget;
+  forceUnified?: boolean;
 }) {
   const settings = useSettings();
   const isDark = useIsDark();
-  const viewMode = settings.data?.diffViewMode ?? "unified";
+  // The narrow-pane override renders unified without ever writing the setting,
+  // so widening the pane restores the user's split preference on its own.
+  const viewMode = forceUnified
+    ? "unified"
+    : (settings.data?.diffViewMode ?? "unified");
 
   // Large diffs are capped (the renderer isn't virtualized — see cap-diff.ts);
   // "Show full diff" opts into the whole thing. Reset when the file changes so
@@ -1184,6 +1218,34 @@ export function DiffContent({
   /** Inline composer opened from a diff line (PR review). Absent = read-only. */
   lineWidget?: LineWidget;
 }) {
+  // The pane measures itself: this surface mounts at widths from a full window
+  // down to a rail-flanked column, and both the split gate and the toolbar's
+  // container queries key off THIS box, not the viewport.
+  const [paneRef, paneWidth] = useContainerWidth<HTMLDivElement>();
+  // Pre-measure (`null`) is deliberately NOT an override, so the first paint
+  // matches the persisted preference instead of flashing split→unified→split.
+  const narrowPane = paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX;
+
+  // The picker's trigger is hidden below @md, so the palette action is its only
+  // route at narrow widths — which makes the open state the toolbar's to own.
+  const [langOpen, setLangOpen] = useState(false);
+  // Computed above the early-return chain (which the `emptyDiff` arm joins, so
+  // the text is trimmed once) because the registration below is a hook: offer
+  // the action only in the states that actually render the picker.
+  const emptyDiff = data !== undefined && data.text.trim() === "";
+  const showsToolbar =
+    !isPending &&
+    !isError &&
+    data !== undefined &&
+    data.filePath === filePath &&
+    !data.isBinary &&
+    !emptyDiff;
+  useHotkeyAction(
+    "change-diff-language",
+    () => setLangOpen(true),
+    showsToolbar && Boolean(fileExt(filePath)),
+  );
+
   // Diffs load near-instantly from local git, so a skeleton only adds a flash
   // and a layout shift on the way to the real content — render nothing until
   // it's ready.
@@ -1203,7 +1265,7 @@ export function DiffContent({
     }
     return <DiffPlaceholder message="Binary file — no text diff available" />;
   }
-  if (!data.text.trim()) {
+  if (emptyDiff) {
     return <DiffPlaceholder message="No changes to show" />;
   }
 
@@ -1216,22 +1278,41 @@ export function DiffContent({
   return (
     // ph-no-capture: blocks the whole pane (file path + diff body) from session
     // replay — this is user code/paths. See src/components/Redacted.tsx.
-    <div className="ph-no-capture flex h-full flex-col">
+    <div
+      ref={paneRef}
+      className="ph-no-capture @container/diff-pane flex h-full flex-col"
+    >
       <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
-        <span className="flex min-w-0 flex-1 items-center gap-1 font-mono text-xs text-muted-foreground">
-          <span className="min-w-0 truncate" title={filePath}>
-            {filePath}
-          </span>
-          {data.isTruncated && (
-            <span className="shrink-0">(truncated — diff too large)</span>
-          )}
+        {/* The truncation notice rides an sr-only sibling rather than visible
+            text: as visible text it was ~200px that refused to shrink, painting
+            over the controls on any pane under ~1155px. */}
+        <span
+          className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
+          title={filePath}
+        >
+          {filePath}
         </span>
+        {data.isTruncated && (
+          <span className="sr-only">(truncated — diff too large)</span>
+        )}
         {/* min-h-7 pins the cluster to the language picker's h-7 trigger, so an
             extensionless file — where the picker renders nothing and only the
             xs (h-6) mode toggle remains — doesn't shrink the row by 4px. */}
         <span className="flex min-h-7 shrink-0 items-center gap-1.5">
-          <DiffLanguagePicker filePath={filePath} />
-          <DiffModeToggle />
+          {/* The only variable-width control here (its label follows the
+              language name), so it's the one that goes under @md — leaving the
+              row a fixed floor. It must stay laid out while its popup is open,
+              though: Base UI anchors to the trigger, and a display:none trigger
+              positions the popup at 0,0. `empty:hidden` keeps the row's gap off
+              an extensionless file, where the picker renders nothing. */}
+          <span className="hidden @md/diff-pane:flex empty:hidden has-[[data-popup-open]]:flex">
+            <DiffLanguagePicker
+              filePath={filePath}
+              open={langOpen}
+              onOpenChange={setLangOpen}
+            />
+          </span>
+          <DiffModeToggle splitDisabled={narrowPane} />
         </span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
@@ -1253,6 +1334,7 @@ export function DiffContent({
           contentRevs={data.isTruncated ? undefined : contentRevs}
           lineAnchors={lineAnchors}
           lineWidget={lineWidget}
+          forceUnified={narrowPane}
         />
       </div>
     </div>

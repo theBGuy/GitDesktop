@@ -2,22 +2,30 @@ import {
   CaretDownIcon,
   ChatCircleIcon,
   CircleDashedIcon,
+  DotsThreeIcon,
+  FilesIcon,
   GitBranchIcon,
   GitCommitIcon,
   GitPullRequestIcon,
   ListChecksIcon,
   PlayIcon,
   ShieldCheckIcon,
+  SidebarSimpleIcon,
   TagIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
+  type KeyboardEvent,
   lazy,
   type ReactNode,
   Suspense,
   useDeferredValue,
   useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
   useState,
   useTransition,
 } from "react";
@@ -39,6 +47,7 @@ import { useRunNotifications } from "@/features/actions/useRunNotifications";
 import { CodeTodoDetailView } from "@/features/code-todos/CodeTodoDetailView";
 import { CodeTodosPanel } from "@/features/code-todos/CodeTodosPanel";
 import { CommitBox } from "@/features/commit/CommitBox";
+import { CommitDialog } from "@/features/commit/CommitDialog";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
 import { ComparePanel } from "@/features/compare/ComparePanel";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
@@ -72,11 +81,22 @@ import {
   useForgeStatus,
   useRepoStatus,
 } from "@/lib/git/queries";
-import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  bindingToAriaKeyshortcuts,
+  formatBinding,
+} from "@/lib/hotkeys/binding";
+import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
+import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useLensGate, useSetRepoLens } from "@/lib/repo-lens/queries";
 import { useScripts } from "@/lib/scripts/queries";
-import { useAiEnabled, useRepoAlias } from "@/lib/settings/queries";
+import {
+  settingsKeys,
+  useAiEnabled,
+  useRepoAlias,
+  useSaveSettings,
+  useSettings,
+} from "@/lib/settings/queries";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
 import {
   type RepoTab,
@@ -130,7 +150,7 @@ const DiffViewer = lazy(() =>
 );
 
 // Secondary surfaces live behind a "More ▾" overflow so the three primary tabs
-// keep their full labels in the fixed-width rail. The trigger shows the active
+// keep their full labels in the narrow tab rail. The trigger shows the active
 // secondary tab's name (e.g. "Issues ▾") so the rail still says where you are.
 // Compare keeps its `mod+3` shortcut here — the number keys bind per-tab, not by
 // rail position, so it stays reachable exactly like the other secondary tabs.
@@ -191,6 +211,168 @@ function TabPanel({
   );
 }
 
+// The collapsed sidebar's icon rail. Icons follow the surfaces' house pairings:
+// the changes list is FilesIcon (ComparePanel's "All changes" row), a commit is
+// GitCommitIcon, a pull request GitPullRequestIcon — the same glyphs the detail
+// placeholders in this file use.
+const RAIL_TABS: {
+  id: "changes" | "history" | "pulls";
+  label: string;
+  icon: typeof FilesIcon;
+}[] = [
+  { id: "changes", label: "Changes", icon: FilesIcon },
+  { id: "history", label: "History", icon: GitCommitIcon },
+  { id: "pulls", label: "PRs", icon: GitPullRequestIcon },
+];
+
+type RailId = (typeof RAIL_TABS)[number]["id"] | "more";
+
+const RAIL_IDS: RailId[] = ["changes", "history", "pulls", "more"];
+
+const RAIL_BUTTON_CLASS =
+  "relative flex h-9 w-full shrink-0 items-center justify-center outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
+// Active carries a shape cue as well as the tokens — the edge bar is the
+// vendored tab trigger's `after:` underline turned onto the rail's right edge.
+const RAIL_ACTIVE_CLASS =
+  "bg-accent text-accent-foreground after:absolute after:inset-y-0 after:right-0 after:w-0.5 after:bg-foreground";
+const RAIL_IDLE_CLASS =
+  "text-muted-foreground hover:bg-muted/60 hover:text-foreground";
+
+/**
+ * The four tab affordances of the collapsed sidebar: the three primary tabs plus
+ * the same More overflow menu. Module scope (like TabPanel) so it isn't a fresh
+ * component type each render. Selection stays in settings/ui state; the rail only
+ * owns which of its buttons the roving tabindex sits on.
+ */
+function SidebarRail({
+  repoTab,
+  onChangeTab,
+  onSelectSecondary,
+  secondaryTabs,
+  activeSecondaryLabel,
+  taskRunning,
+  toggle,
+}: {
+  repoTab: RepoTab;
+  onChangeTab: (tab: RepoTab) => void;
+  /** Picking a secondary tab also expands the sidebar — its list is the surface. */
+  onSelectSecondary: (tab: RepoTab) => void;
+  secondaryTabs: { tab: RepoTab; label: string }[];
+  activeSecondaryLabel: string | null;
+  taskRunning: boolean;
+  /** The expand control, pinned to the rail's foot. An action, not a tab: it
+   *  stays out of the arrow-key order and is reached by Tab. */
+  toggle: ReactNode;
+}) {
+  const activeId: RailId =
+    RAIL_TABS.find((t) => t.id === repoTab)?.id ?? "more";
+  // The roving target follows the active surface until an arrow key moves it:
+  // More opens a menu rather than switching tabs, so focus there has no
+  // selection to derive itself from.
+  const [focusedId, setFocusedId] = useState<RailId | null>(null);
+  const currentId = focusedId ?? activeId;
+  const railNav = listKeyboardNav<RailId>({
+    items: RAIL_IDS,
+    activeIndex: RAIL_IDS.indexOf(currentId),
+    onActivate: (id) => {
+      setFocusedId(id);
+      if (id !== "more") onChangeTab(id);
+    },
+    rowKey: (id) => id,
+    rowAttr: "data-rail-tab",
+  });
+  // Capture phase: the More button is a Base UI menu trigger, which opens the
+  // menu on ArrowUp/ArrowDown and stops the event before it could bubble to the
+  // rail. Arrows rove the rail; Enter/Space/click still open the menu.
+  function onKeyDownCapture(e: KeyboardEvent) {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    if (!(e.target instanceof HTMLElement)) return;
+    // Only the tab buttons rove — the toggle shares the rail but is an action.
+    if (e.target.closest("[data-rail-tab]") === null) return;
+    // An open menu owns the arrows: a pointer-opened popup can leave focus on
+    // the trigger, and its own list navigation must win there.
+    if (e.target.closest("[data-popup-open]") !== null) return;
+    e.stopPropagation();
+    railNav(e);
+  }
+
+  const moreLabel = activeSecondaryLabel ?? "More tabs";
+  const moreRunning = taskRunning && repoTab !== "tasks";
+
+  return (
+    <nav
+      aria-label="Repository tabs"
+      className="flex min-h-0 flex-1 flex-col overflow-y-auto"
+      onKeyDownCapture={onKeyDownCapture}
+    >
+      {RAIL_TABS.map(({ id, label, icon: Icon }) => (
+        <button
+          key={id}
+          type="button"
+          data-rail-tab={id}
+          tabIndex={id === currentId ? 0 : -1}
+          aria-current={id === activeId ? "page" : undefined}
+          aria-label={label}
+          title={label}
+          onClick={() => {
+            setFocusedId(id);
+            onChangeTab(id);
+          }}
+          className={cn(
+            RAIL_BUTTON_CLASS,
+            id === activeId ? RAIL_ACTIVE_CLASS : RAIL_IDLE_CLASS,
+          )}
+        >
+          <Icon className="size-4" />
+        </button>
+      ))}
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          title={moreRunning ? `${moreLabel} — a task is running` : moreLabel}
+          render={
+            <button
+              type="button"
+              data-rail-tab="more"
+              tabIndex={currentId === "more" ? 0 : -1}
+              aria-current={activeId === "more" ? "page" : undefined}
+              aria-label={moreLabel}
+              onClick={() => setFocusedId("more")}
+              className={cn(
+                RAIL_BUTTON_CLASS,
+                activeId === "more" ? RAIL_ACTIVE_CLASS : RAIL_IDLE_CLASS,
+              )}
+            />
+          }
+        >
+          <DotsThreeIcon className="size-4" weight="bold" />
+          {moreRunning && (
+            <span
+              className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary ring-2 ring-background"
+              aria-hidden
+            />
+          )}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" side="right" className="min-w-44">
+          {secondaryTabs.map(({ tab, label }) => (
+            <DropdownMenuItem
+              key={tab}
+              onClick={() => onSelectSecondary(tab)}
+              className={cn(
+                repoTab === tab && "bg-accent text-accent-foreground",
+              )}
+            >
+              {label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {/* `mt-auto`: the toggle sits at the rail's foot, separated from the tabs
+          by whatever height is left, without a row of its own. */}
+      <div className="mt-auto">{toggle}</div>
+    </nav>
+  );
+}
+
 export function RepositoryView() {
   const repoPath = useUiStore((s) => s.repoPath);
   const closeRepo = useUiStore((s) => s.closeRepo);
@@ -210,6 +392,7 @@ export function RepositoryView() {
   const selectedTodo = useUiStore((s) => s.selectedTodo);
   const localPrCreate = useUiStore((s) => s.localPrCreate);
   const closeLocalPrCreate = useUiStore((s) => s.closeLocalPrCreate);
+  const openCommitDialog = useUiStore((s) => s.openCommitDialog);
   // The detail panes run off deferred selections so rapidly arrowing a list
   // (commits, PRs) only loads + renders the item landed on, not every one
   // passed. The lists' own highlights use the live values, so they stay snappy.
@@ -276,6 +459,22 @@ export function RepositoryView() {
   const hasTasks = (scripts.data?.tasks.length ?? 0) > 0;
   // A running task shows a dot on the "More" trigger when you're on another tab.
   const taskRunning = useTaskRunStore((s) => s.activeRun?.status === "running");
+  // Sidebar collapse: persisted, and only ever flipped by the user (the toggle,
+  // the shortcut, or the palette) — the app never collapses it on their behalf.
+  const settings = useSettings();
+  const saveSettings = useSaveSettings();
+  const queryClient = useQueryClient();
+  const sidebarCollapsed = settings.data?.sidebarCollapsed ?? false;
+  const sidebarRef = useRef<HTMLElement>(null);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+  const sidebarPanelsId = useId();
+  const sidebarBinding = useEffectiveBindings().get("toggle-sidebar") ?? null;
+  // Holds the collapse value whose commit should hand focus to the toggle (null
+  // = nothing pending). Each mode renders its own toggle, so the hand-off can
+  // only happen once the new one exists — and it is consumed on that commit
+  // rather than from a frame scheduled in the handler, because the preference
+  // lives in react-query, whose notify-batched re-render can land after one.
+  const refocusToggleRef = useRef<boolean | null>(null);
 
   // OS notifications for PR/check and workflow-run events while this repo is open.
   usePrNotifications(repoPath ?? "");
@@ -294,6 +493,45 @@ export function RepositoryView() {
     startTabTransition(() => setRepoTab(tab));
   }
 
+  /** The one writer for the collapse preference.
+   *  @returns whether it actually changed — false while settings are still
+   *  loading, or when the preference already held `next`. Callers arming
+   *  follow-up work on the transition gate on it. */
+  function setSidebarCollapsed(next: boolean): boolean {
+    const current = settings.data;
+    if (!current || current.sidebarCollapsed === next) return false;
+    // Focus sitting in the sidebar is about to be hidden (the panels) or
+    // unmounted (this mode's toggle, the rail), so it can't be re-homed until
+    // the new mode has rendered its own toggle — arm the hand-off for that
+    // commit rather than focusing a node this flip is about to take away.
+    if (sidebarRef.current?.contains(document.activeElement)) {
+      refocusToggleRef.current = next;
+    }
+    const updated = { ...current, sidebarCollapsed: next };
+    // Patch the cache before persisting: the flip has to land this render, or a
+    // fast double-press reads the stale value and re-issues it — one flip, not
+    // two. A failed write refetches the stored truth back over the patch.
+    queryClient.setQueryData(settingsKeys.settings, updated);
+    saveSettings.mutate(updated, {
+      onError: () =>
+        queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+    });
+    return true;
+  }
+
+  function toggleSidebar() {
+    setSidebarCollapsed(!sidebarCollapsed);
+  }
+
+  // A secondary tab's own list IS the sidebar, so picking one from the collapsed
+  // rail expands it — selecting into a hidden list would be a dead end. The menu
+  // returns focus to the rail trigger it is about to unmount, so the toggle
+  // claims it instead.
+  function selectSecondaryFromRail(tab: RepoTab) {
+    changeTab(tab);
+    if (setSidebarCollapsed(false)) refocusToggleRef.current = false;
+  }
+
   // Tab switching mirrors GitHub Desktop's Ctrl+1–4 by default.
   useHotkeyAction("tab-changes", () => changeTab("changes"));
   useHotkeyAction("tab-history", () => changeTab("history"));
@@ -309,6 +547,7 @@ export function RepositoryView() {
   useHotkeyAction("tab-tasks", () => changeTab("tasks"));
   // The Agent tab only exists when AI features are shown (palette-only binding).
   useHotkeyAction("tab-agent", () => changeTab("agent"), aiEnabled);
+  useHotkeyAction("toggle-sidebar", toggleSidebar);
   useHotkeyAction("back-to-repositories", closeRepo);
   // Palette "Run a task…": open the picker from any tab (only when there are
   // tasks to run and running is enabled).
@@ -344,6 +583,10 @@ export function RepositoryView() {
   useHotkeyAction("create-tag", () => requestCreate("tag"));
   // Palette-only "Blame file…": open the fuzzy tracked-file picker from any tab.
   useHotkeyAction("blame-file", () => setBlamePickerOpen(true));
+  // Palette "Open commit dialog": enabled whenever a repo is open — the dialog
+  // explains an un-committable state itself, so opening it empty still tells the
+  // user where they stand.
+  useHotkeyAction("open-commit-dialog", openCommitDialog);
 
   // Fork/upstream lens (PR + Issues surfaces). Wired ONCE here — not in the
   // panels, which can be mounted together under <Activity> (double-register).
@@ -406,6 +649,15 @@ export function RepositoryView() {
       .setTitle(`${title} — ${APP_TITLE}`)
       .catch(() => undefined);
   }, [repoName, alias, headLabel]);
+  useLayoutEffect(() => {
+    if (refocusToggleRef.current !== sidebarCollapsed) return;
+    refocusToggleRef.current = null;
+    // One frame, inside the commit that rendered the new mode's toggle: a Base
+    // UI menu returns focus to its (now unmounted) trigger as it closes and
+    // would otherwise win.
+    requestAnimationFrame(() => sidebarToggleRef.current?.focus());
+  }, [sidebarCollapsed]);
+
   // Reset to the bare title only when the repo view unmounts (repo closed).
   useEffect(() => {
     return () => {
@@ -419,9 +671,52 @@ export function RepositoryView() {
 
   const secondaryTabs = SECONDARY_TABS.filter((t) => aiEnabled || !t.ai);
   const activeSecondary = secondaryTabs.find((t) => t.tab === repoTab);
+  // Tooltip = the action with its effective shortcut appended, e.g. "Collapse
+  // sidebar (Ctrl+Shift+B)"; unbound leaves the bare label. `aria-keyshortcuts`
+  // carries the chord on the ARIA channel so it stays out of the button's name.
+  const sidebarToggleLabel = sidebarCollapsed
+    ? "Expand sidebar"
+    : "Collapse sidebar";
+  const sidebarToggleTitle =
+    sidebarBinding === null
+      ? sidebarToggleLabel
+      : `${sidebarToggleLabel} (${formatBinding(sidebarBinding)})`;
+  // One toggle with two homes — the tab row while expanded, the icon rail's foot
+  // while collapsed — and exactly one mounted at a time (each home renders under
+  // the opposite condition), so both can carry the ref the focus-return effect
+  // aims at.
+  function sidebarToggleButton(className: string) {
+    return (
+      <button
+        ref={sidebarToggleRef}
+        type="button"
+        aria-label={sidebarToggleLabel}
+        aria-expanded={!sidebarCollapsed}
+        aria-controls={sidebarPanelsId}
+        aria-keyshortcuts={
+          sidebarBinding === null
+            ? undefined
+            : bindingToAriaKeyshortcuts(sidebarBinding)
+        }
+        title={sidebarToggleTitle}
+        onClick={toggleSidebar}
+        className={className}
+      >
+        <SidebarSimpleIcon className="size-4" />
+      </button>
+    );
+  }
+  // Panel activity for the ASIDE's tabs: a collapsed sidebar draws none of them,
+  // and Activity defers a hidden panel's effects but not its queries — so the
+  // polls and scans (line counts, runs, findings, the TODO git-grep) stand down
+  // with the panel that would show them. The main pane keeps its own condition:
+  // its detail view is what the user is looking at while the sidebar is closed.
+  function sidebarTabActive(tab: RepoTab): boolean {
+    return repoTab === tab && !sidebarCollapsed;
+  }
   // One source for panel visibility: ChangesPanel gates its line-count poll on
   // the same flag that shows the panel, so the two can't drift apart.
-  const changesActive = repoTab === "changes";
+  const changesActive = sidebarTabActive("changes");
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -430,134 +725,180 @@ export function RepositoryView() {
       <WorktreeRemovalBanner repoPath={repoPath} />
       <PrCreateBanner repoPath={repoPath} />
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-96 shrink-0 flex-col border-r">
-          <Tabs
-            value={repoTab}
-            onValueChange={(value) => changeTab(value as RepoTab)}
-          >
-            <TabsList className="w-full">
-              <TabsTrigger value="changes" className="min-w-0 flex-1">
-                Changes
-              </TabsTrigger>
-              <TabsTrigger value="history" className="min-w-0 flex-1">
-                History
-              </TabsTrigger>
-              <TabsTrigger value="pulls" className="min-w-0 flex-1">
-                PRs
-              </TabsTrigger>
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  title={
-                    taskRunning && repoTab !== "tasks"
-                      ? "A task is running"
-                      : undefined
-                  }
-                  render={
-                    <button
-                      type="button"
-                      aria-label="More tabs"
-                      className={cn(
-                        "relative inline-flex h-[calc(100%-1px)] shrink-0 items-center justify-center gap-1 rounded-none border border-transparent px-2 text-xs font-medium whitespace-nowrap text-foreground/60 transition-all hover:text-foreground data-popup-open:text-foreground dark:text-muted-foreground dark:hover:text-foreground [&_svg]:size-4 [&_svg]:shrink-0",
-                        activeSecondary &&
-                          "bg-background text-foreground dark:border-input dark:bg-input/30 dark:text-foreground",
-                      )}
-                    />
-                  }
-                >
-                  {taskRunning && repoTab !== "tasks" && (
-                    <span
-                      className="size-1.5 shrink-0 rounded-full bg-primary"
-                      aria-hidden
-                    />
-                  )}
-                  {activeSecondary?.label ?? "More"}
-                  <CaretDownIcon data-icon="inline-end" />
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-44">
-                  {secondaryTabs.map(({ tab, label }) => (
-                    <DropdownMenuItem
-                      key={tab}
-                      onClick={() => changeTab(tab)}
-                      className={cn(
-                        repoTab === tab && "bg-accent text-accent-foreground",
-                      )}
-                    >
-                      {label}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </TabsList>
-          </Tabs>
-          <TabPanel active={changesActive}>
-            <ChangesPanel repoPath={repoPath} active={changesActive} />
-            <CommitBox repoPath={repoPath} />
-          </TabPanel>
-          <TabPanel active={repoTab === "history"}>
-            <HistoryPanel repoPath={repoPath} />
-          </TabPanel>
-          <TabPanel active={repoTab === "compare"}>
-            <ComparePanel repoPath={repoPath} />
-          </TabPanel>
-          <TabPanel active={repoTab === "pulls"}>
-            <PullRequestsPanel repoPath={repoPath} />
-          </TabPanel>
-          <TabPanel active={repoTab === "issues"}>
-            <IssuesPanel repoPath={repoPath} />
-          </TabPanel>
-          <TabPanel active={repoTab === "discussions"}>
-            <DiscussionsPanel repoPath={repoPath} />
-          </TabPanel>
-          <TabPanel active={repoTab === "actions"}>
-            <ActionsPanel repoPath={repoPath} active={repoTab === "actions"} />
-          </TabPanel>
-          <TabPanel active={repoTab === "findings"}>
-            <FindingsPanel
-              repoPath={repoPath}
-              active={repoTab === "findings"}
-            />
-          </TabPanel>
-          <TabPanel active={repoTab === "tags"}>
-            <TagsPanel repoPath={repoPath} />
-          </TabPanel>
-          <TabPanel active={repoTab === "insights"}>
-            <InsightsPanel
-              repoPath={repoPath}
-              active={repoTab === "insights"}
-            />
-          </TabPanel>
-          <TabPanel active={repoTab === "code-todos"}>
-            <CodeTodosPanel
-              repoPath={repoPath}
-              active={repoTab === "code-todos"}
-            />
-          </TabPanel>
-          <TabPanel active={repoTab === "tasks"}>
-            <TasksPanel />
-          </TabPanel>
-          {aiEnabled && (
-            <TabPanel active={repoTab === "agent"}>
-              {agentSeen && (
-                <Suspense
-                  fallback={
-                    <LazyPanelFallback
-                      name="agent sessions"
-                      className="min-h-0 flex-1 gap-1.5"
-                      rows={[
-                        "h-7 w-20",
-                        "h-8 w-full",
-                        "h-14 w-full",
-                        "h-14 w-full",
-                        "h-14 w-full",
-                      ]}
-                    />
-                  }
-                >
-                  <SessionList repoPath={repoPath} />
-                </Suspense>
-              )}
-            </TabPanel>
+        {/* The sidebar shares the window's shrink with the content pane: it
+            gives up width down to a 288px floor (the narrowest that still fits
+            its toolbars) instead of the content pane absorbing every pixel. */}
+        <aside
+          ref={sidebarRef}
+          className={cn(
+            "flex shrink-0 flex-col border-r",
+            sidebarCollapsed ? "w-12" : "w-[clamp(288px,32vw,384px)]",
           )}
+        >
+          {sidebarCollapsed && (
+            <SidebarRail
+              repoTab={repoTab}
+              onChangeTab={changeTab}
+              onSelectSecondary={selectSecondaryFromRail}
+              secondaryTabs={secondaryTabs}
+              activeSecondaryLabel={activeSecondary?.label ?? null}
+              taskRunning={taskRunning}
+              toggle={sidebarToggleButton(
+                cn(RAIL_BUTTON_CLASS, RAIL_IDLE_CLASS),
+              )}
+            />
+          )}
+          {/* Hidden, never unmounted: the panels keep the state their Activity
+              wrappers exist to preserve (filters, selections, scroll) across a
+              collapse round-trip, and `hidden` also takes them out of the tab
+              order and the accessibility tree. */}
+          <div
+            id={sidebarPanelsId}
+            className={cn(
+              "flex min-h-0 flex-1 flex-col",
+              sidebarCollapsed && "hidden",
+            )}
+          >
+            <Tabs
+              value={repoTab}
+              onValueChange={(value) => changeTab(value as RepoTab)}
+            >
+              <TabsList className="w-full">
+                <TabsTrigger value="changes" className="min-w-0 flex-1">
+                  <span className="min-w-0 truncate">Changes</span>
+                </TabsTrigger>
+                <TabsTrigger value="history" className="min-w-0 flex-1">
+                  <span className="min-w-0 truncate">History</span>
+                </TabsTrigger>
+                <TabsTrigger value="pulls" className="min-w-0 flex-1">
+                  <span className="min-w-0 truncate">PRs</span>
+                </TabsTrigger>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    title={
+                      taskRunning && repoTab !== "tasks"
+                        ? "A task is running"
+                        : undefined
+                    }
+                    render={
+                      <button
+                        type="button"
+                        aria-label="More tabs"
+                        className={cn(
+                          "relative inline-flex h-[calc(100%-1px)] shrink-0 items-center justify-center gap-1 rounded-none border border-transparent px-2 text-xs font-medium whitespace-nowrap text-foreground/60 transition-all hover:text-foreground data-popup-open:text-foreground dark:text-muted-foreground dark:hover:text-foreground [&_svg]:size-4 [&_svg]:shrink-0",
+                          activeSecondary &&
+                            "bg-background text-foreground dark:border-input dark:bg-input/30 dark:text-foreground",
+                        )}
+                      />
+                    }
+                  >
+                    {taskRunning && repoTab !== "tasks" && (
+                      <span
+                        className="size-1.5 shrink-0 rounded-full bg-primary"
+                        aria-hidden
+                      />
+                    )}
+                    <span className="max-w-24 truncate">
+                      {activeSecondary?.label ?? "More"}
+                    </span>
+                    <CaretDownIcon data-icon="inline-end" />
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="min-w-44">
+                    {secondaryTabs.map(({ tab, label }) => (
+                      <DropdownMenuItem
+                        key={tab}
+                        onClick={() => changeTab(tab)}
+                        className={cn(
+                          repoTab === tab && "bg-accent text-accent-foreground",
+                        )}
+                      >
+                        {label}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                {/* Rides the tab row rather than a strip of its own: the three
+                    triggers are `flex-1 min-w-0` and truncate, so this and the
+                    More button (both `shrink-0`) come out of label width. */}
+                {!sidebarCollapsed &&
+                  sidebarToggleButton(
+                    "inline-flex h-[calc(100%-1px)] w-7 shrink-0 items-center justify-center rounded-none border border-transparent text-foreground/60 outline-none transition-all hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset dark:text-muted-foreground dark:hover:text-foreground [&_svg]:shrink-0",
+                  )}
+              </TabsList>
+            </Tabs>
+            <TabPanel active={changesActive}>
+              <ChangesPanel repoPath={repoPath} active={changesActive} />
+              <CommitBox repoPath={repoPath} />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("history")}>
+              <HistoryPanel repoPath={repoPath} />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("compare")}>
+              <ComparePanel repoPath={repoPath} />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("pulls")}>
+              <PullRequestsPanel repoPath={repoPath} />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("issues")}>
+              <IssuesPanel repoPath={repoPath} />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("discussions")}>
+              <DiscussionsPanel repoPath={repoPath} />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("actions")}>
+              <ActionsPanel
+                repoPath={repoPath}
+                active={sidebarTabActive("actions")}
+              />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("findings")}>
+              <FindingsPanel
+                repoPath={repoPath}
+                active={sidebarTabActive("findings")}
+              />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("tags")}>
+              <TagsPanel repoPath={repoPath} />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("insights")}>
+              <InsightsPanel
+                repoPath={repoPath}
+                active={sidebarTabActive("insights")}
+              />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("code-todos")}>
+              <CodeTodosPanel
+                repoPath={repoPath}
+                active={sidebarTabActive("code-todos")}
+              />
+            </TabPanel>
+            <TabPanel active={sidebarTabActive("tasks")}>
+              <TasksPanel />
+            </TabPanel>
+            {aiEnabled && (
+              <TabPanel active={sidebarTabActive("agent")}>
+                {agentSeen && (
+                  <Suspense
+                    fallback={
+                      <LazyPanelFallback
+                        name="agent sessions"
+                        className="min-h-0 flex-1 gap-1.5"
+                        rows={[
+                          "h-7 w-20",
+                          "h-8 w-full",
+                          "h-14 w-full",
+                          "h-14 w-full",
+                          "h-14 w-full",
+                        ]}
+                      />
+                    }
+                  >
+                    <SessionList repoPath={repoPath} />
+                  </Suspense>
+                )}
+              </TabPanel>
+            )}
+          </div>
         </aside>
         <main className="min-w-0 flex-1">
           <TabPanel active={repoTab === "changes"}>
@@ -772,6 +1113,10 @@ export function RepositoryView() {
           if (!o) closeLocalPrCreate();
         }}
       />
+      {/* Hoisted: the commit path that outlives the inline box. A collapsed
+          sidebar hides the aside's panels, so CommitBox's <Activity> tears down
+          its effects and its `commit` hotkey with them. */}
+      <CommitDialog repoPath={repoPath} />
       {/* Palette "Run a task…" picker + the shared run-confirmation dialog.
           Hoisted here so both are reachable from any tab. */}
       <RunTaskPicker

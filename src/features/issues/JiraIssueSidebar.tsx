@@ -70,8 +70,13 @@ export function JiraIssueSidebar({
 
   return (
     <aside
+      // Stacked below the body once JiraIssueView's pane drops under 672px, where
+      // it keeps its own scroller (the body's ScrollArea is a sibling, so a single
+      // shared scroll would mean moving the rail inside it). The cap is what keeps
+      // that scroller reachable: uncapped, `shrink-0` takes the rail's full natural
+      // height and leaves the body none.
       className={cn(
-        "w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4",
+        "w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4 @max-2xl/jira-detail:max-h-[45%] @max-2xl/jira-detail:w-full @max-2xl/jira-detail:border-t @max-2xl/jira-detail:border-l-0",
         className,
       )}
     >

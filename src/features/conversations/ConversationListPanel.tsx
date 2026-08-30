@@ -242,7 +242,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-1 border-b p-2">
+      <div className="flex flex-wrap items-center gap-1 border-b p-2">
         {(["open", "closed"] as const).map((s) => (
           <Button
             key={s}

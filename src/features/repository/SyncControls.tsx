@@ -229,7 +229,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // carries the reason + remedy AND the count — the count needs a full-contrast
   // home while the button itself sits at disabled opacity. The chains pick the
   // first matching state; `undefined` means the visible label alone suffices
-  // (enabled + synced), so no tooltip and no aria-label are emitted.
+  // (enabled + synced), so no tooltip is emitted and the aria-label falls back
+  // to that bare label — it can't fall back to the CONTENT, which is hidden
+  // below `md`.
   const aheadCount = head?.ahead ?? 0;
   const behindCount = head?.behind ?? 0;
   const pushLabel = diverged
@@ -284,9 +286,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // today's value — the raw description, possibly undefined. `aria-keyshortcuts`
   // carries the shortcut on the proper ARIA channel so it stays OUT of each
   // button's accessible name — for Push/Pull that name is the description-only
-  // `aria-label`; Fetch sets none, so its name is the visible "Fetch" label
-  // (deliberate: its description is the volatile "Last fetched …" string, which
-  // must stay tooltip-only, never a name). Omitted when unbound.
+  // `aria-label`; Fetch pins its own to the same word as its visible label,
+  // because below `md` that label is hidden and the volatile "Last fetched …"
+  // title would otherwise become the name. Omitted when unbound.
   const pushBinding = bindings.get("push") ?? null;
   const pullBinding = bindings.get("pull") ?? null;
   const fetchBinding = bindings.get("fetch") ?? null;
@@ -517,8 +519,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           size="sm"
           disabled={busy}
           title={fetchHintTitle}
+          aria-label="Fetch"
           aria-keyshortcuts={fetchKeyshortcuts}
-          className="focus-visible:relative focus-visible:z-10"
+          // max-md:pr-1.5 re-centers the glyph once the label is hidden: the
+          // sm size is px-2.5 and the leading-icon rule already pulls the left
+          // side to pl-1.5, so without this the icon sits 4px off-center.
+          className="focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
           onClick={() => doFetch(false)}
         >
           {fetchRemote.isPending ? (
@@ -526,7 +532,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           ) : (
             <ArrowsClockwiseIcon data-icon="inline-start" />
           )}
-          Fetch
+          {/* Labels drop below `md` so the header fits a 640px window; every
+              icon, count, and accessible name stays put at every width. */}
+          <span className="hidden md:inline">Fetch</span>
         </DisabledReasonButton>
         <DisabledReasonButton
           variant="outline"
@@ -536,9 +544,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           // description, so a describedby copy would read it twice; the wrapper
           // still hovers `pullTitle`, shortcut included.
           title={pullTitle}
-          aria-label={pullDescription}
+          aria-label={pullDescription ?? "Pull"}
           aria-keyshortcuts={pullKeyshortcuts}
-          className="border-l-0 focus-visible:relative focus-visible:z-10"
+          className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
           onClick={() => doPull("ffOnly")}
         >
           {/* Covers the recovery compounds too: with the preference on they
@@ -548,7 +556,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           ) : (
             <ArrowDownIcon data-icon="inline-start" />
           )}
-          Pull
+          <span className="hidden md:inline">Pull</span>
           {behindCount > 0 && (
             <span
               aria-hidden="true"
@@ -622,9 +630,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           size="sm"
           disabled={busy || detached}
           title={pushTitle}
-          aria-label={pushDescription}
+          aria-label={pushDescription ?? pushLabel}
           aria-keyshortcuts={pushKeyshortcuts}
-          className="border-l-0 focus-visible:relative focus-visible:z-10"
+          className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
           onClick={() => {
             if (diverged) {
               setForceConfirmOpen(true);
@@ -640,7 +648,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           ) : (
             <ArrowUpIcon data-icon="inline-start" />
           )}
-          {pushLabel}
+          <span className="hidden md:inline">{pushLabel}</span>
           {aheadCount > 0 && (
             <span
               aria-hidden="true"

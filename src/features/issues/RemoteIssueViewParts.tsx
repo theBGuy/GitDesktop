@@ -71,7 +71,12 @@ export type IssueRailRow = {
  *  can't be unconditional. */
 export function IssueRail({ rows }: { rows: IssueRailRow[] }) {
   return (
-    <aside className="w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4">
+    // Stacked below the body once RemoteIssueView's pane drops under 672px, where
+    // it keeps its own scroller (the body's ScrollArea is a sibling, so a single
+    // shared scroll would mean moving the rail inside it). The cap is what keeps
+    // that scroller reachable: uncapped, `shrink-0` takes the rail's full natural
+    // height and leaves the body none.
+    <aside className="w-64 shrink-0 space-y-4 overflow-y-auto border-l p-4 @max-2xl/issue-detail:max-h-[45%] @max-2xl/issue-detail:w-full @max-2xl/issue-detail:border-t @max-2xl/issue-detail:border-l-0">
       {rows.map((row) => {
         if (!row.when) return null;
         return row.heading === undefined ? (

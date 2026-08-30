@@ -23,6 +23,8 @@ export function LanguagePicker({
   autoLabel,
   onClear,
   triggerClassName,
+  open: openProp,
+  onOpenChange,
 }: {
   /** Selected language id; "" means unset. */
   value: string;
@@ -32,8 +34,19 @@ export function LanguagePicker({
   autoLabel?: string;
   onClear?: () => void;
   triggerClassName?: string;
+  /** Controlled popover state, for callers that open the picker from elsewhere
+   *  (a command-palette action). Omit for the built-in uncontrolled behavior. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  // The internal state tracks every transition even while controlled, so a
+  // caller that stops passing `open` resumes from the state actually on screen.
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = openProp ?? internalOpen;
+  function setOpen(next: boolean) {
+    setInternalOpen(next);
+    onOpenChange?.(next);
+  }
   const [query, setQuery] = useState("");
 
   const customIds = customLanguages.map((c) => c.id).filter(Boolean);

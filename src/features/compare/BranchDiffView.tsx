@@ -1,10 +1,12 @@
 import { useDeferredValue, useState } from "react";
+import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import { FileRowActions } from "@/features/history/FileRowActions";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useBranchDiffFiles, useBranchFileDiff } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
@@ -99,7 +101,12 @@ export function BranchDiffView({
   return (
     <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
       <header className="flex items-center gap-2 border-b px-4 py-3 text-xs">
-        <span className="font-medium">
+        {/* Branch names are unbreakable tokens — without the clamp a long pair
+            sets the whole view's minimum width. */}
+        <span
+          className="min-w-0 truncate font-medium"
+          onMouseEnter={clipTitleFromText}
+        >
           <span className="font-mono">{compare}</span> vs{" "}
           <span className="font-mono">{base}</span>
         </span>
@@ -116,15 +123,11 @@ export function BranchDiffView({
         />
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <aside
-          className={cn(
-            "flex w-72 shrink-0 flex-col border-r",
-            PLACEHOLDER_FADE,
-            staleDim,
-          )}
+      <DetailRailRow>
+        <DetailRail
+          className={cn(PLACEHOLDER_FADE, staleDim)}
           role="listbox"
-          aria-label="Changed files"
+          ariaLabel="Changed files"
         >
           {/* overflow-hidden contains the list's natural height (vendored Root is
               `relative`-only) so a long list can't leak a window scrollbar. */}
@@ -162,7 +165,7 @@ export function BranchDiffView({
               ))}
             </FileRowActions>
           </ScrollArea>
-        </aside>
+        </DetailRail>
         <main
           aria-busy={Boolean(diffDim)}
           className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}
@@ -178,7 +181,7 @@ export function BranchDiffView({
             <DiffPlaceholder message="Select a file to see its changes" />
           )}
         </main>
-      </div>
+      </DetailRailRow>
     </div>
   );
 }

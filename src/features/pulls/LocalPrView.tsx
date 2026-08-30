@@ -625,9 +625,13 @@ export function LocalPrView({
     return (
       <div className="flex h-full flex-col">
         <header className="space-y-2 border-b px-4 py-3">
-          <div className="flex items-start gap-2">
-            <h2 className="text-sm font-medium">{pr.title}</h2>
-            <span className="flex-1" />
+          {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap,
+              so the badge would stay put and the title collapse instead. Growing
+              also replaces the spacer that used to right-align it. */}
+          <div className="flex flex-wrap items-start gap-2">
+            <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
+              {pr.title}
+            </h2>
             <Badge variant="secondary" className="capitalize">
               {pr.status}
             </Badge>
@@ -661,9 +665,13 @@ export function LocalPrView({
   return (
     <div className="flex h-full flex-col">
       <header className="space-y-2 border-b px-4 py-3">
-        <div className="flex items-start gap-2">
-          <h2 className="text-sm font-medium">{pr.title}</h2>
-          <span className="flex-1" />
+        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
+            the actions would stay put and the title collapse instead. Growing also
+            replaces the spacer that used to right-align them. */}
+        <div className="flex flex-wrap items-start gap-2">
+          <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
+            {pr.title}
+          </h2>
           {pr.status === "open" && (
             <Button
               variant="outline"
@@ -767,7 +775,7 @@ export function LocalPrView({
             ))}
           </div>
         )}
-        <div className="flex gap-1 pt-1">
+        <div className="flex flex-wrap gap-1 pt-1">
           {availableSections.map((s) => (
             <Button
               key={s}
@@ -1064,7 +1072,7 @@ export function LocalPrView({
 
       {pr.status === "open" && renderMergeStatus()}
 
-      <div className="flex items-center gap-2 border-t p-3">
+      <div className="flex flex-wrap items-center gap-2 border-t p-3">
         {pr.status === "open" && (
           <>
             {forgeFeatureReady(ghStatus.data, "mrCreate") && (

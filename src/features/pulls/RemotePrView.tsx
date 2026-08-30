@@ -2219,14 +2219,16 @@ export function RemotePrView({
     return (
       <div className="flex h-full flex-col">
         <header className="space-y-2 border-b px-4 py-3">
-          <div className="flex items-start gap-2">
-            <h2 className="text-sm font-medium">
+          {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap,
+              so the badge would stay put and the title collapse instead. Growing
+              also replaces the spacer that used to right-align it. */}
+          <div className="flex flex-wrap items-start gap-2">
+            <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
               {pr.title}{" "}
               <span className="font-normal text-muted-foreground">
                 #{pr.number}
               </span>
             </h2>
-            <span className="flex-1" />
             <Badge variant="secondary" className="capitalize">
               {pr.state.toLowerCase()}
             </Badge>
@@ -2436,14 +2438,16 @@ export function RemotePrView({
   return (
     <div className="flex h-full flex-col">
       <header className="@container/pr-header space-y-2 border-b px-4 py-3">
-        <div className="flex items-start gap-2">
-          <h2 className="text-sm font-medium">
+        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
+            the actions would stay put and the title collapse instead. Growing also
+            replaces the spacer that used to right-align them. */}
+        <div className="flex flex-wrap items-start gap-2">
+          <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
             {pr.title}{" "}
             <span className="font-normal text-muted-foreground">
               #{pr.number}
             </span>
           </h2>
-          <span className="flex-1" />
           {isOpen &&
             canWrite &&
             (repoStatus.data?.branch?.name === pr.headRefName ? (
@@ -2611,7 +2615,7 @@ export function RemotePrView({
           provider={providerKey}
           crossRepository={!!pr.crossRepository}
         />
-        <div className="flex gap-1 pt-1">
+        <div className="flex flex-wrap gap-1 pt-1">
           {availableSections.map((s) => (
             <Button
               key={s}
@@ -3161,7 +3165,7 @@ export function RemotePrView({
           Convert-to-draft pair — shown when any is available, each control gated
           individually. */}
       {isOpen && (canChangeState || canMerge || canWrite) && (
-        <div className="flex items-center gap-2 border-t p-3">
+        <div className="flex flex-wrap items-center gap-2 border-t p-3">
           {/* One Ready / Convert-to-draft pair for all three providers: GitLab
               (`glab mr update`) and Bitbucket (PUT `draft`) via `canToggleDraft`;
               GitHub folds in via `canWrite` and routes the same `setDraft` mutation

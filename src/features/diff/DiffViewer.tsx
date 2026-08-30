@@ -49,6 +49,10 @@ import type { SelectedFile } from "@/lib/stores/ui";
 import { useUiStore } from "@/lib/stores/ui";
 import { useEffectiveSyntax } from "@/lib/syntax/queries";
 import { toastError } from "@/lib/toast";
+import {
+  SPLIT_MIN_CONTAINER_PX,
+  useContainerWidth,
+} from "@/lib/use-container-width";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
@@ -70,6 +74,7 @@ import {
   useFileContent,
   useShikiRouting,
 } from "./DiffSurface";
+import { fileExt } from "./diff-lang";
 import { ImagePanes } from "./ImageDiff";
 
 /** Working-tree diff for the file selected in the changes panel. */
@@ -164,7 +169,14 @@ function WorkingTreeDiff({
   const settings = useSettings();
   const saveSettings = useSaveSettings();
   const isDark = useIsDark();
-  const viewMode = settings.data?.diffViewMode ?? "unified";
+  // Split needs a legible column count per side; under it this pane renders
+  // unified without ever writing the preference back (`null` = not yet
+  // measured, which stays on the preference so the first paint doesn't flash).
+  const [paneRef, paneWidth] = useContainerWidth<HTMLDivElement>();
+  const narrowPane = paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX;
+  const viewMode = narrowPane
+    ? "unified"
+    : (settings.data?.diffViewMode ?? "unified");
   const [discard, setDiscard] = useState<{
     label: string;
     run: () => void;
@@ -184,6 +196,9 @@ function WorkingTreeDiff({
     forText: string;
   } | null>(null);
   const clearSelection = useCallback(() => setSelectionState(null), []);
+  // Owned here so the palette action can open the picker; the trigger itself is
+  // always visible in this toolbar, so this is the action's only reason to exist.
+  const [langOpen, setLangOpen] = useState(false);
   // `parsed`, `hunkMode`, and `busy` are computed above the `!hunkMode` early
   // return because the hotkey registrations below run unconditionally and read
   // them.
@@ -234,6 +249,16 @@ function WorkingTreeDiff({
     "clear-line-selection",
     clearSelection,
     hunkMode && selection !== null && !busy && discard === null,
+  );
+  // Only this toolbar's own arm registers: outside hunk mode the fallback
+  // DiffSurface below renders the picker and registers for itself, and a child's
+  // effect runs first — so an ungated registration here would win the dispatch
+  // (newest handler) and open a toolbar that isn't on screen. The selection arm
+  // replaces the picker with its stage/discard buttons, hence `selection`.
+  useHotkeyAction(
+    "change-diff-language",
+    () => setLangOpen(true),
+    hunkMode && selection === null && Boolean(fileExt(file.path)),
   );
   // Any Discard confirm's `run` captured line numbers (or a hunk) at open
   // time — close it the moment the diff text moves on from the text it was
@@ -335,7 +360,7 @@ function WorkingTreeDiff({
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div ref={paneRef} className="@container/staging-pane flex h-full flex-col">
       {/* The selection actions take over this row rather than opening one of
           their own: a row that mounts below the toolbar pushes the whole diff
           down on mouseup, moving the lines the user just dragged across. */}
@@ -438,8 +463,21 @@ function WorkingTreeDiff({
             </>
           ) : (
             <>
-              <DiffLanguagePicker filePath={file.path} />
-              <DiffModeToggle />
+              {/* Same treatment as the read-only surface's toolbar: the picker
+                  is this row's only variable-width control (its label follows
+                  the language name), so it goes under @md to give the row a
+                  fixed floor — but stays laid out while its popup is open,
+                  since Base UI anchors to the trigger and a display:none
+                  trigger positions the popup at 0,0. `empty:hidden` keeps the
+                  row's gap off an extensionless file. */}
+              <span className="hidden @md/staging-pane:flex empty:hidden has-[[data-popup-open]]:flex">
+                <DiffLanguagePicker
+                  filePath={file.path}
+                  open={langOpen}
+                  onOpenChange={setLangOpen}
+                />
+              </span>
+              <DiffModeToggle splitDisabled={narrowPane} />
             </>
           )}
         </span>

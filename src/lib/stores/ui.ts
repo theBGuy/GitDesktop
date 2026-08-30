@@ -148,6 +148,7 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   // chip's promised session persistence on any repo round-trip.
   compareBranch: null,
   localPrCreate: null,
+  commitDialogOpen: false,
   selectedPr: null,
   pendingPrSection: null,
   pendingReviewId: null,
@@ -282,6 +283,11 @@ interface UiState {
    *  a panel-hosted instance would conceal with the tab that launched it mid-close,
    *  deferring its close and unmount until that tab is next shown. */
   localPrCreate: { defaultHead?: string; defaultBase?: string } | null;
+  /** Whether the pop-out commit dialog is open. In the store (not panel state)
+   *  because the dialog is hoisted at RepositoryView level and opens from the
+   *  palette as well as the commit box — including while the sidebar is
+   *  collapsed, where the inline box is Activity-hidden. Not persisted. */
+  commitDialogOpen: boolean;
   /** Selected workflow run (databaseId) on the Actions tab. */
   selectedRunId: number | null;
   /** Selected finding on the Findings tab. */
@@ -401,6 +407,9 @@ interface UiState {
     defaultBase?: string;
   }) => void;
   closeLocalPrCreate: () => void;
+  /** Open / close the hoisted pop-out commit dialog. */
+  openCommitDialog: () => void;
+  closeCommitDialog: () => void;
   selectRun: (id: number | null) => void;
   selectFinding: (finding: SelectedFinding | null) => void;
   setFindingsLimits: (limits: FindingsLimits) => void;
@@ -509,6 +518,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     pendingIssueDraft: null,
     pendingCreate: null,
     localPrCreate: null,
+    commitDialogOpen: false,
     selectedRunId: null,
     selectedFinding: null,
     findingsLimits: DEFAULT_FINDINGS_LIMITS,
@@ -623,6 +633,8 @@ export const useUiStore = create<UiState>()((set, get) => {
     clearPendingCreate: () => set({ pendingCreate: null }),
     openLocalPrCreate: (seeds) => set({ localPrCreate: seeds ?? {} }),
     closeLocalPrCreate: () => set({ localPrCreate: null }),
+    openCommitDialog: () => set({ commitDialogOpen: true }),
+    closeCommitDialog: () => set({ commitDialogOpen: false }),
     selectRun: (id) => set({ selectedRunId: id }),
     selectFinding: (finding) => set({ selectedFinding: finding }),
     setFindingsLimits: (limits) => set({ findingsLimits: limits }),

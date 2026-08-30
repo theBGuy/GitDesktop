@@ -2,6 +2,7 @@ import { CopyIcon, DotsThreeVerticalIcon } from "@phosphor-icons/react";
 import { useDeferredValue, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
+import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -401,13 +402,10 @@ export function CommitDetailView({
         )}
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <aside
-          className={cn(
-            "flex w-72 shrink-0 flex-col border-r",
-            PLACEHOLDER_FADE,
-            staleDim,
-          )}
+      <DetailRailRow>
+        <DetailRail
+          ariaLabel="Changed files"
+          className={cn(PLACEHOLDER_FADE, staleDim)}
         >
           <p className="border-b px-3 py-1.5 text-xs text-muted-foreground">
             {files.data.length} changed file{files.data.length === 1 ? "" : "s"}
@@ -449,7 +447,7 @@ export function CommitDetailView({
               ))}
             </FileRowActions>
           </ScrollArea>
-        </aside>
+        </DetailRail>
         <main
           aria-busy={Boolean(diffDim)}
           className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}
@@ -468,7 +466,7 @@ export function CommitDetailView({
             <DiffPlaceholder message="Select a file to see its changes" />
           )}
         </main>
-      </div>
+      </DetailRailRow>
 
       {/* Mounted for every commit, rendering only where comments are supported:
           arrowing through history must not tear down its per-commit drafts. */}

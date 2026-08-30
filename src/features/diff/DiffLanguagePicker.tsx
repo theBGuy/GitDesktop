@@ -10,7 +10,18 @@ import { LanguagePicker } from "./LanguagePicker";
  * and lets the user set a personal override for the extension — saved
  * immediately, so every diff of that extension re-highlights at once.
  */
-export function DiffLanguagePicker({ filePath }: { filePath: string }) {
+export function DiffLanguagePicker({
+  filePath,
+  open,
+  onOpenChange,
+}: {
+  filePath: string;
+  /** Controlled popover state, forwarded straight through: the diff toolbar owns
+   *  it so the `change-diff-language` palette action can open a trigger its
+   *  container query has hidden. Omit for uncontrolled behavior. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
   const settings = useSettings();
   const saveSettings = useSaveSettings();
   const repoPath = useUiStore((s) => s.repoPath);
@@ -45,6 +56,8 @@ export function DiffLanguagePicker({ filePath }: { filePath: string }) {
       autoLabel="Auto-detect"
       onClear={clearLang}
       triggerClassName="text-muted-foreground"
+      open={open}
+      onOpenChange={onOpenChange}
     />
   );
 }

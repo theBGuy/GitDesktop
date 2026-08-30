@@ -217,8 +217,10 @@ export function ExploreScreen() {
         </p>
       )}
 
+      {/* The tab strip scrolls inside itself so its two tabs can't widen the
+          body on a narrow window. */}
       {!searching && !isBitbucket && (
-        <div className="border-b px-3 py-2">
+        <div className="overflow-x-auto border-b px-3 py-2">
           <Tabs
             value={effectiveZeroMode}
             onValueChange={(v) => setZeroMode(v as ZeroMode)}

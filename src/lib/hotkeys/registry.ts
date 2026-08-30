@@ -206,6 +206,22 @@ export const ACTIONS = [
     category: "Navigation",
     defaultBinding: null,
   },
+  {
+    id: "toggle-sidebar",
+    label: "Collapse or expand the sidebar",
+    category: "Navigation",
+    // mod+b is Show branches, so this takes the shifted form of VS Code's
+    // sidebar chord rather than the plain one.
+    defaultBinding: "mod+shift+b",
+  },
+  {
+    id: "toggle-diff-file-list",
+    label: "Collapse or expand the diff file list",
+    category: "Navigation",
+    // Palette-only by default: it applies on the diff detail surfaces alone, so
+    // it ships without spending a chord. Users can bind a key.
+    defaultBinding: null,
+  },
 
   // Repository
   {
@@ -576,6 +592,14 @@ export const ACTIONS = [
     defaultBinding: "mod+enter",
   },
   {
+    id: "open-commit-dialog",
+    label: "Open commit dialog",
+    category: "Changes",
+    // Palette-only: the dialog is the commit path that exists at every width and
+    // collapse state, so it must be reachable without the inline commit box.
+    defaultBinding: null,
+  },
+  {
     id: "generate-commit-message",
     // The id is persisted in user rebindings, so it keeps its commit-box origin;
     // the chord now drives whatever Generate surface is on screen.
@@ -635,6 +659,14 @@ export const ACTIONS = [
     id: "unstage-selected-files",
     label: "Unstage selected files",
     category: "Changes",
+    defaultBinding: null,
+  },
+  {
+    id: "change-diff-language",
+    label: "Change diff language…",
+    category: "Changes",
+    // Palette-only: it opens the diff language picker, which the diff toolbar
+    // hides at narrow pane widths.
     defaultBinding: null,
   },
 

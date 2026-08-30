@@ -20,6 +20,9 @@ function ScrollArea({
         {children}
       </ScrollAreaPrimitive.Viewport>
       <ScrollBar />
+      {/* Base UI's viewport is `overflow: scroll` with native bars suppressed, so
+          without this one horizontal overflow scrolls with no visible affordance. */}
+      <ScrollBar orientation="horizontal" />
       <ScrollAreaPrimitive.Corner />
     </ScrollAreaPrimitive.Root>
   );

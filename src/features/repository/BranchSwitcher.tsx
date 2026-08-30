@@ -1945,7 +1945,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           <Popover.Trigger
             disabled={busy || amending}
             render={
-              <Button variant="ghost" size="sm" className="min-w-0 shrink">
+              <Button
+                variant="ghost"
+                size="sm"
+                // overflow-hidden clips the box the shrink cascade squeezes;
+                // without it the icons (shrink-0) spill out both sides into the
+                // separator and the repository menu on a narrow header.
+                className="min-w-0 shrink overflow-hidden"
+              >
                 <GitBranchIcon data-icon="inline-start" />
                 <span
                   className="min-w-0 truncate"

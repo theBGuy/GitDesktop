@@ -26,10 +26,10 @@ export interface GenerateAction {
  * listener. `run` undefined means the surface has no generator at all — Hide-AI
  * removed it, or a shared dialog's host passes none — and the chord falls
  * through untouched instead. Nothing generates behind a dialog in that arm
- * either, because the only global handler is the commit box's: Hide-AI leaves
- * it registered but DISABLED, and the listener runs the newest ENABLED handler
- * or none; and off the Changes tab the commit box is unmounted, so it isn't
- * registered at all.
+ * either, because the global handlers are the two commit surfaces' (the box and
+ * the hoisted commit dialog, both via useCommitSubmit): Hide-AI leaves them
+ * registered but DISABLED, and the listener runs the newest ENABLED handler or
+ * none; the box unregisters off the Changes tab and the dialog while closed.
  *
  * Auto-repeat is dropped without swallowing, matching that global listener —
  * holding the chord must not re-fire before the generating flag lands.

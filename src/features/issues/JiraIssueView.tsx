@@ -1625,15 +1625,21 @@ export function JiraIssueView({
   }
 
   return (
-    <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
+    <div
+      className="@container/jira-detail flex h-full flex-col"
+      aria-busy={Boolean(staleDim)}
+    >
       <header className="space-y-2 border-b px-4 py-3">
-        <div className="flex items-start gap-2">
+        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
+            the actions would stay put and the title collapse instead. Growing also
+            replaces the spacer that used to right-align them. */}
+        <div className="flex flex-wrap items-start gap-2">
           {/* The key is the PROP (always the issue you selected); the summary is
               fetched, so it fades rather than disappearing — hiding it would
               collapse the header's height mid-transition. */}
           <h2
             className={cn(
-              "min-w-0 text-sm font-medium",
+              "min-w-0 flex-auto text-sm font-medium break-words",
               PLACEHOLDER_FADE,
               staleDim,
             )}
@@ -1643,7 +1649,6 @@ export function JiraIssueView({
             </span>{" "}
             {issue.summary}
           </h2>
-          <span className="flex-1" />
           {/* Absent while a placeholder is served: the verb comes from the
               LOADED issue's status, so a click during that window would fire the
               wrong transition against the issue you actually selected. */}
@@ -1720,8 +1725,13 @@ export function JiraIssueView({
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
+      {/* Below ~672px of pane the 256px rail leaves under ~57ch of body, so it
+          stacks under the thread instead (see JiraIssueSidebar). */}
+      <div className="flex min-h-0 flex-1 @max-2xl/jira-detail:flex-col">
+        {/* `min-h-0` only bites once stacked: the auto minimum size applies to the
+            flex MAIN axis, so in the column the body would otherwise floor at its
+            thread's full height and push a scrollbar onto the document. */}
+        <div className="flex min-w-0 flex-1 flex-col @max-2xl/jira-detail:min-h-0">
           {/* overflow-hidden contains the content's natural height (vendored
               Root is `relative`-only) so a long issue can't leak a window
               scrollbar. */}

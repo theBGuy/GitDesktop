@@ -67,6 +67,32 @@ delegating to `DropdownMenuPortal`, so regenerating it into a direct
 `Menu.Portal` call would break it silently. `drawer.tsx` is vaul and has no
 container prop, so its popups are not panel-scoped.
 
+## Narrow-window width deltas
+
+A second, unrelated pair of sanctioned deltas keeps popups and scroll
+regions usable when the window is narrow. They share no code with the
+panel-portal contract above, so they are lost and restored separately.
+
+- **`scroll-area.tsx`** — `ScrollArea` renders a horizontal `ScrollBar`
+  alongside the vertical one. Base UI's viewport is `overflow: scroll` with
+  the native scrollbars suppressed, so without it horizontal overflow is
+  scrollable but shows no affordance anywhere in the app.
+- **`popover.tsx`** — `PopoverContent`'s class list caps the popup at
+  `max-w-(--available-width)`, the viewport-space variable Base UI's
+  positioner publishes. Uncapped, a popup wider than the space beside its
+  trigger hangs off-screen: the positioner is `position: fixed` and floating
+  UI's shift pins the near edge, leaving the overflow unreachable.
+
+Grep each file after regenerating it:
+
+```sh
+grep -n 'orientation="horizontal"' src/components/ui/scroll-area.tsx
+grep -n 'available-width' src/components/ui/popover.tsx
+```
+
+No match means that file's width delta is gone. `popover.tsx` carries the
+panel-portal delta too, so check both of its markers.
+
 ## Check before re-applying
 
 If one of these has to be re-created, confirm it is still needed. Verify

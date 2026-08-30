@@ -757,16 +757,18 @@ export function RemoteIssueView({
   );
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="@container/issue-detail flex h-full flex-col">
       <header className="space-y-2 border-b px-4 py-3">
-        <div className="flex items-start gap-2">
-          <h2 className="text-sm font-medium">
+        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
+            the actions would stay put and the title collapse instead. Growing also
+            replaces the spacer that used to right-align them. */}
+        <div className="flex flex-wrap items-start gap-2">
+          <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
             {issue.title}{" "}
             <span className="font-normal text-muted-foreground">
               #{issue.number}
             </span>
           </h2>
-          <span className="flex-1" />
           {/* Both seed an AI run from the rendered issue, so they're absent while
               that issue isn't the one you selected. */}
           {!detailsStale && (
@@ -985,8 +987,13 @@ export function RemoteIssueView({
           )}
         </div>
       </header>
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
+      {/* Below ~672px of pane the 256px rail leaves under ~57ch of body, so it
+          stacks under the thread instead (see IssueRail). */}
+      <div className="flex min-h-0 flex-1 @max-2xl/issue-detail:flex-col">
+        {/* `min-h-0` only bites once stacked: the auto minimum size applies to the
+            flex MAIN axis, so in the column the body would otherwise floor at its
+            thread's full height and push a scrollbar onto the document. */}
+        <div className="flex min-w-0 flex-1 flex-col @max-2xl/issue-detail:min-h-0">
           {/* overflow-hidden contains the thread's natural height (vendored Root is
               `relative`-only) so a long issue can't leak a window scrollbar. */}
           <ScrollArea className="min-h-0 flex-1 overflow-hidden">

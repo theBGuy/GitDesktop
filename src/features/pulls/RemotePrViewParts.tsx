@@ -1,5 +1,6 @@
 import { ClockIcon } from "@phosphor-icons/react";
 import { type ComponentProps, useMemo, useState } from "react";
+import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -270,8 +271,8 @@ export function PrFilesPane({
   ));
 
   return (
-    <div className="flex min-h-0 flex-1">
-      <aside className="flex w-72 shrink-0 flex-col border-r">
+    <DetailRailRow>
+      <DetailRail ariaLabel="Changed files">
         {/* overflow-hidden contains the list's natural height (vendored Root is
             `relative`-only) so a long file list can't leak a window scrollbar. */}
         <ScrollArea className="min-h-0 flex-1 overflow-hidden">
@@ -287,7 +288,7 @@ export function PrFilesPane({
             <div onKeyDown={onFilesKeyDown}>{fileRows}</div>
           )}
         </ScrollArea>
-      </aside>
+      </DetailRail>
       <main className="min-w-0 flex-1">
         {effectivePath ? (
           <DiffContent
@@ -302,7 +303,7 @@ export function PrFilesPane({
           <DiffPlaceholder message="Select a file to see its changes" />
         )}
       </main>
-    </div>
+    </DetailRailRow>
   );
 }
 

@@ -65,6 +65,11 @@ export const capabilities: Capability[] = [
     group: "Diffs & staging",
     label: "Commit with co-authors suggested from history; amend, undo, revert",
   },
+  {
+    group: "Diffs & staging",
+    label:
+      "Pop the commit box out into a dialog — a roomier editor with your staged files alongside",
+  },
   { group: "Diffs & staging", label: "Recoverable, recycle-bin discards" },
 
   // — Branches & history —
@@ -426,6 +431,11 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label: "Remembers window size & position",
+  },
+  {
+    group: "Repository & workspace",
+    label:
+      "Narrow windows & split-screen layouts — down to 640px, with a collapsible sidebar and diff file list",
   },
   {
     group: "Repository & workspace",
