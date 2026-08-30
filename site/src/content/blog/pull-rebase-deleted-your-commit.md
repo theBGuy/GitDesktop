@@ -133,12 +133,14 @@ $ git status -sb
 If you'd already committed new work on top of the pulled branch
 before noticing, reset would take it down with the pull's result; in
 that case `git cherry-pick 5a818d0` brings the lost commit onto the
-current state instead.
+current state instead. A branch repaired that way already sits on top
+of `origin/search`, so there is nothing left to integrate: skip the
+reset below and just `git push`.
 
 Ahead 1, behind 1 is the divergence the pull was supposed to resolve,
 now out in the open: you have a commit missing from the remote, the
-remote has one you haven't integrated. It still needs resolving; that
-happens in *Integrating it properly*, below. First, the reason.
+remote has one you haven't integrated. If you took the reset path, that
+gets resolved in *Integrating it properly*, below. First, the reason.
 
 ## Why the rebase threw it away
 
@@ -253,10 +255,10 @@ Your change is back on the branch: aeae0fd, a new hash because the
 parent changed, same message and content, sitting on top of your
 teammate's work, published with an ordinary fast-forward push. Both
 commits survive. This is what the pull would have done had it drawn the
-boundary from the graph instead of the diary. (A bare `git rebase` with
-no upstream argument defaults to the same fork-point rule as pull, so
-name the upstream when it matters.) If you stashed at the start,
-`git stash pop` brings that work back; the incident is over.
+boundary from the graph instead of the diary. If you stashed at the
+start, `git stash pop` brings that work back; the incident is over.
+(A bare `git rebase` with no upstream argument defaults to the same
+fork-point rule as pull, so name the upstream when it matters.)
 
 A `(forced update)` line in any fetch or pull output is the only
 warning you get. When you see it, stop pulling by reflex. Read what moved
