@@ -863,10 +863,18 @@ review via its subscription login. The full list is under
   heading hierarchy, and syntax-highlighted code in ~190 languages (light
   and dark).
 - **Mention & reference autocomplete**: on GitHub and GitLab repos, type
-  `@` in a comment box, reply, edit, diff line comment, or release notes to
-  pick a person and `#` to pick from the recently updated open issues and pull
-  requests, with arrow keys and Enter to accept. GitLab adds `!` for merge
-  requests; each forge offers only the references it links.
+  `@` in a comment box, reply, edit, diff line comment, release notes, or a
+  local PR or issue's description and comments to pick a person and `#` to
+  pick from the recently updated open issues and pull requests, with arrow
+  keys and Enter to accept. GitLab adds `!` for merge requests; each forge
+  offers only the references it links.
+- **References are links**: `#123` and `@user` in a rendered description,
+  comment, review thread, AI review, or release note open what they name. On
+  GitHub, `#123` opens that issue or pull request in the app, whichever it
+  turns out to be; on GitLab, `#123` opens the issue and `!123` the merge
+  request. `@user` opens the profile in your browser. Bitbucket bodies leave
+  references plain, matching Bitbucket itself, and a reference inside a code
+  span or fence stays plain text.
 - **Collapsible comment box**: fold the comment box down to a one-line strip to
   read more of the thread, on every conversation surface — pull requests and
   issues (local, on the forge, and Jira), discussions, and commits. Approve,

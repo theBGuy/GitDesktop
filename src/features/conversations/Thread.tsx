@@ -307,7 +307,7 @@ export function Thread({
             (renderBody ? (
               renderBody(thread.body)
             ) : (
-              <Markdown>{thread.body}</Markdown>
+              <Markdown refs={mentions?.refs}>{thread.body}</Markdown>
             ))}
         </>
       )}

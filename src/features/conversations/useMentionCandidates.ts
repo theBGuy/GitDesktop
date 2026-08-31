@@ -1,4 +1,7 @@
 import { useCallback, useState } from "react";
+// Type-only, so it is erased at compile time: markdown-refs.ts imports TRIGGERS
+// from here, and only an erased import keeps that cycle off the runtime graph.
+import type { MarkdownRefs } from "@/components/ui/markdown-refs";
 import { useForgeGhHost } from "@/lib/git/host";
 import { useAssignableUsers, useIssueList, usePrList } from "@/lib/git/queries";
 import type {
@@ -31,6 +34,10 @@ export interface MentionSource {
   triggers: readonly MentionTrigger[];
   /** GitHub host for login-derived avatars; `null` off GitHub. */
   ghHost: string | null;
+  /** The same forge context, shaped for the markdown renderer so a body can
+   *  linkify the references this source helps write. Undefined whenever the
+   *  source is inert (forge status unresolved, or no hosted remote). */
+  refs?: MarkdownRefs;
   /** First time a trigger token opens — flips the lazy queries on. Idempotent. */
   onActive: () => void;
   /** Pure filter over cached data; called during render. `isError` reports that a
@@ -49,7 +56,7 @@ export interface MentionSource {
  * `@nickname` written through its API — its mentions need `@{accountId}`, which
  * `forge_assignable_users` has no Bitbucket arm to supply, so it offers none.
  */
-const TRIGGERS: Record<ForgeProvider, readonly MentionTrigger[]> = {
+export const TRIGGERS: Record<ForgeProvider, readonly MentionTrigger[]> = {
   github: ["@", "#"],
   gitlab: ["@", "#", "!"],
   bitbucket: [],
@@ -248,5 +255,11 @@ export function useMentionCandidates({
     };
   };
 
-  return { triggers, ghHost, onActive, query };
+  return {
+    triggers,
+    ghHost,
+    refs: provider ? { provider, repoPath, lens } : undefined,
+    onActive,
+    query,
+  };
 }

@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { Textarea } from "@/components/ui/textarea";
 import { copyText } from "@/lib/clipboard";
+import { useForgeStatus } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
@@ -51,6 +52,10 @@ export function ReviewHistory({
   prKind: "remote" | "local";
   prRef: string;
 }) {
+  // Stored review text cites `#N` the same way a live run does, so it linkifies
+  // against this repo's forge.
+  const provider = useForgeStatus(repoPath).data?.provider;
+  const refs = provider ? { provider, repoPath, lens } : undefined;
   const history = useReviewHistory(repoPath, lens, prKind, prRef);
   const partials = useReviewPartials(repoPath, lens, prKind, prRef);
   const del = useDeleteReview(repoPath, lens, prKind, prRef);
@@ -276,7 +281,7 @@ export function ReviewHistory({
                             and this disclosure sits in the panel's fixed header, above the
                             Close/Merge controls. */}
                         <div className="max-h-64 overflow-y-auto">
-                          <Markdown>{reviewText(r)}</Markdown>
+                          <Markdown refs={refs}>{reviewText(r)}</Markdown>
                           {r.thoughts?.trim() && (
                             <ThoughtsDisclosure thoughts={r.thoughts} />
                           )}

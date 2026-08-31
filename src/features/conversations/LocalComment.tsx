@@ -12,6 +12,7 @@ import {
 import { Markdown } from "@/components/ui/markdown";
 import { copyText } from "@/lib/clipboard";
 import { CommentEditor } from "./CommentEditor";
+import type { MentionSource } from "./useMentionCandidates";
 
 /**
  * A comment on a local (offline) PR or issue. Local comments aren't tied to
@@ -25,6 +26,7 @@ export function LocalComment({
   onDelete,
   onHide,
   onUnhide,
+  mentions,
 }: {
   comment: {
     body: string;
@@ -41,6 +43,9 @@ export function LocalComment({
   onHide: () => void;
   /** Un-collapses the comment. */
   onUnhide: () => void;
+  /** The surface's forge context: drives `@`/`#`/`!` autocomplete while editing
+   *  and linkifies the same references in the rendered body. */
+  mentions?: MentionSource;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -123,6 +128,7 @@ export function LocalComment({
           }}
           onCancel={() => setEditing(false)}
           textareaClassName="max-h-48 min-h-16 resize-y"
+          mentions={mentions}
         />
       ) : hidden && !expanded ? (
         <button
@@ -143,7 +149,7 @@ export function LocalComment({
               Hide comment
             </button>
           )}
-          <Markdown>{comment.body}</Markdown>
+          <Markdown refs={mentions?.refs}>{comment.body}</Markdown>
         </>
       )}
     </div>

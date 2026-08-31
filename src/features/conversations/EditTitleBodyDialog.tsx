@@ -87,8 +87,8 @@ interface EditTitleBodyDialogProps {
    *  byte-identically. */
   belowBody?: ReactNode;
   /** Opt in to `@`/`#`/`!` autocomplete in the description field, matching the
-   *  composer below the thread. The local views omit it (nothing autolinks a
-   *  local body). */
+   *  composer below the thread. The renderer autolinks references on local bodies
+   *  too, so the local views pass it as the remote ones do. */
   mentions?: MentionSource;
 }
 

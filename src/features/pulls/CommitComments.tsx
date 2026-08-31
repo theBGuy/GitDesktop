@@ -4,6 +4,7 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
+import type { MarkdownRefs } from "@/components/ui/markdown-refs";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import { Thread } from "@/features/conversations/Thread";
@@ -149,9 +150,20 @@ export function useCommitLineAnchors(
   comments: CommitCommentOut[] | undefined,
   sections: DiffSections | undefined,
   path: string | null,
+  refs?: MarkdownRefs,
 ): DiffLineAnchor[] {
+  // Held by field, not by object: `useMentionCandidates` rebuilds `refs` every
+  // render, and DiffSurface keys its widgets on anchor identity — an object dep
+  // would re-identify every anchor on every pass.
+  const refProvider = refs?.provider;
+  const refRepoPath = refs?.repoPath;
+  const refLens = refs?.lens;
   return useMemo<DiffLineAnchor[]>(() => {
     if (!path) return [];
+    const bodyRefs: MarkdownRefs | undefined =
+      refProvider && refRepoPath && refLens
+        ? { provider: refProvider, repoPath: refRepoPath, lens: refLens }
+        : undefined;
     const byLine = new Map<number, CommitCommentOut[]>();
     for (const c of comments ?? []) {
       if (c.path !== path) continue;
@@ -176,13 +188,13 @@ export function useCommitLineAnchors(
                 )}
                 <p className="text-[11px] font-medium">{c.author}</p>
               </div>
-              <Markdown>{c.body}</Markdown>
+              <Markdown refs={bodyRefs}>{c.body}</Markdown>
             </div>
           ))}
         </div>
       ),
     }));
-  }, [comments, sections, path]);
+  }, [comments, sections, path, refProvider, refRepoPath, refLens]);
 }
 
 /** Map a flat commit comment onto the {@link Thread} prop shape — commit

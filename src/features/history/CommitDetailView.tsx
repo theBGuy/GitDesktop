@@ -13,6 +13,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import type { MarkdownRefs } from "@/components/ui/markdown-refs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
@@ -135,10 +136,16 @@ export function CommitDetailView({
   // the diff drives off `deferredPath` (not effectivePath) — so use deferredPath
   // throughout, letting anchors/widget follow the file the diff actually shows
   // while rapid arrow-keying settles.
+  // Inline comment bodies linkify against the same origin-lens repo they were
+  // read from; the resolved provider only, never `providerKey`'s GitHub default.
+  const commentRefs: MarkdownRefs | undefined = provider
+    ? { provider, repoPath, lens: "origin" }
+    : undefined;
   const lineAnchors = useCommitLineAnchors(
     comments.data,
     providerKey === "github" ? remoteSections : undefined,
     commentsEnabled ? deferredPath : null,
+    commentRefs,
   );
   // Both commit queries keep serving the PREVIOUS commit while the selected one
   // loads, so everything derived from them is that commit's until it lands.

@@ -506,7 +506,12 @@ export const capabilities: Capability[] = [
   {
     group: "Keyboard & Markdown",
     label:
-      "@mention & #reference autocomplete — GitHub & GitLab comments, replies, release notes",
+      "@mention & #reference autocomplete — GitHub & GitLab comments, replies, release notes, local PRs & issues",
+  },
+  {
+    group: "Keyboard & Markdown",
+    label:
+      "Reference autolinks — #123 and @user open the pull request, issue, or profile they name",
   },
 
   // — AI · generate & review —

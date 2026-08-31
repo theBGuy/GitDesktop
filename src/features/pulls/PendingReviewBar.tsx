@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/ui/markdown";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
+import { useForgeStatus } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import {
   type ReviewDraft,
@@ -45,6 +46,10 @@ export function DraftCommentCard({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const updateDraft = useUpdateReviewDraft(repoPath, lens, number);
   const removeDraft = useRemoveReviewDraft(repoPath, lens, number);
+  // A draft body carries the same references the posted comment will, so the
+  // preview linkifies them against the PR's repo.
+  const provider = useForgeStatus(repoPath).data?.provider;
+  const refs = provider ? { provider, repoPath, lens } : undefined;
 
   const next = body.trim();
   const canSave = next.length > 0 && next !== draft.body.trim();
@@ -103,7 +108,7 @@ export function DraftCommentCard({
           textareaClassName="max-h-48 min-h-16 resize-y"
         />
       ) : (
-        <Markdown>{draft.body}</Markdown>
+        <Markdown refs={refs}>{draft.body}</Markdown>
       )}
       <ConfirmDialog
         open={confirmDelete}

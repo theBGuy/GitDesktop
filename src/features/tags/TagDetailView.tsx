@@ -353,7 +353,7 @@ export function TagDetailView({
         <ScrollArea className="min-h-0 flex-1 overflow-hidden">
           <div className={cn("space-y-4 p-4", PLACEHOLDER_FADE, staleDim)}>
             {rel.body.trim() ? (
-              <Markdown>{rel.body}</Markdown>
+              <Markdown refs={mentions.refs}>{rel.body}</Markdown>
             ) : (
               <p className="text-xs text-muted-foreground italic">
                 No release notes.

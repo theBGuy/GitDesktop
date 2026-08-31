@@ -1062,7 +1062,7 @@ export function RemoteIssueView({
                   </DropdownMenu>
                 </p>
                 {hasVisibleBody(issue.body) ? (
-                  <Markdown>{issue.body}</Markdown>
+                  <Markdown refs={mentions.refs}>{issue.body}</Markdown>
                 ) : (
                   <p className="text-xs text-muted-foreground italic">
                     No description provided.

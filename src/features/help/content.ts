@@ -918,17 +918,26 @@ tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and b
 you write Markdown — issues, discussions, and release notes. On **GitHub** and
 **GitLab** repos, typing **@** suggests people and **#** suggests the recently updated
 **open** issues and pull requests (on GitLab, **#** covers issues and **!** covers
-merge requests). That works
-in the comment box at the bottom of a pull request, issue, discussion, or commit, and
-in replies, edits, line comments on a diff, and release notes; arrow keys move through
-the list, Enter or Tab accepts, and Esc dismisses it. The comment box itself folds to a
-one-line strip when you want more of the thread on screen: the caret at the left of its
-button row collapses it, and clicking the strip (or starting a quote reply) opens it
-again with the cursor in the editor. The caret keeps that slot in both states, so
-collapsing leaves the pointer on the control that opens the box back up. Folded, the
+merge requests). That works in the comment box at the bottom of a pull request, issue,
+discussion, or commit, in replies, edits, line comments on a diff, and release notes,
+and in a local pull request's or issue's description and comment box; arrow keys move
+through the list, Enter or Tab accepts, and Esc dismisses it. The comment box itself
+folds to a one-line strip when you want more of the thread on screen: the caret at the
+left of its button row collapses it, and clicking the strip (or starting a quote reply)
+opens it again with the cursor in the editor. The caret keeps that slot in both states,
+so collapsing leaves the pointer on the control that opens the box back up. Folded, the
 surface's own actions stay on the strip and a saved draft shows its first line there;
 the choice is remembered across every conversation surface and across restarts, and the
 command palette's **Collapse or expand the comment box** toggles it too.
+
+Those references are links once a body is rendered. On **GitHub** and **GitLab**, a
+**#123** in a description, comment, review thread,{{ai}} AI review,{{/ai}} or release note opens that
+pull request or issue right here in the app — GitHub numbers issues and pull requests in
+one sequence, so GitDesktop works out which of the two you meant and takes you to the
+matching tab; on GitLab, **#123** is an issue and **!123** a merge request. **@user**
+opens that person's profile in your browser. **Bitbucket** bodies leave references plain,
+matching Bitbucket itself, and a reference inside backticks or a fenced code block stays
+plain text everywhere.
 
 ## Conflicts with the base branch
 
@@ -1300,6 +1309,8 @@ all** — describe it in Markdown, comment, label, approve, close or reopen (pos
 drafted comment alongside), and merge locally. Local PRs are private to you and never
 written into the repo. When you're ready, **promote** a local PR to a real pull request
 on GitHub or Bitbucket, or a merge request on GitLab, in one click, history preserved.
+On a GitHub or GitLab repo the description and comment box complete **@** mentions and
+**#** references like the hosted ones, and render them as links you can click through.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA
@@ -1571,7 +1582,9 @@ credential** with one button instead of re-entering it.
 A **local issue** is a private, offline to-do tracked in the app — create, edit, label,
 and close or reopen it with no remote, your drafted comment posted alongside. When it's
 ready to share, **promote** it to a GitHub or GitLab issue — or, when the repo has a
-**linked Jira project**, to a Jira issue — in one click.
+**linked Jira project**, to a Jira issue — in one click. On a GitHub or GitLab repo its
+description and comments complete **@** mentions and **#** references, and render them as
+links, the same way the hosted issues do.
 {{ai}}
 ## Hand off to an agent
 

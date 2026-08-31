@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import DOMPurify from "dompurify";
 // Static `lib/common` (~37 languages) so the common fences highlight instantly
@@ -7,8 +8,19 @@ import hljs from "highlight.js/lib/common";
 import { Marked } from "marked";
 import { useMemo, useSyncExternalStore } from "react";
 import { diffLang } from "@/features/diff/diff-lang";
+import { forgeRepoUrl } from "@/lib/git/api";
+import { issueDetailsOptions } from "@/lib/git/queries";
+import type { RemoteLens } from "@/lib/git/types";
+import { lensKey } from "@/lib/repo-lens/queries";
+import { useUiStore } from "@/lib/stores/ui";
+import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { hljsUpgradeStore, upgradeToFullHljs } from "./markdown-hljs";
+import {
+  forgeRefExtension,
+  type MarkdownRefs,
+  setActiveMarkdownRefs,
+} from "./markdown-refs";
 import "./markdown-highlight.css";
 
 /**
@@ -59,6 +71,10 @@ md.use({
     },
   },
 });
+// Forge references (`#N` / `!N` / `@user`) are GitHub-style post-processing, not
+// GFM, so they only linkify through this extension — and only while a body's
+// active context names a provider (see markdown-refs.ts).
+md.use({ extensions: [forgeRefExtension] });
 
 /**
  * Renders GitHub-flavored Markdown (PR descriptions, comments, AI output).
@@ -73,10 +89,19 @@ md.use({
 export function Markdown({
   children,
   className,
+  refs,
 }: {
   children: string;
   className?: string;
+  /** Forge context that linkifies `#N` / `!N` / `@user` and routes a click on
+   *  one in-app. Omitted (or before forge status resolves) the body renders
+   *  exactly as it did without the extension. */
+  refs?: MarkdownRefs;
 }) {
+  const queryClient = useQueryClient();
+  const selectPr = useUiStore((s) => s.selectPr);
+  const selectIssue = useUiStore((s) => s.selectIssue);
+  const setRepoTab = useUiStore((s) => s.setRepoTab);
   // Subscribe to the highlight.js upgrade: when a fence's exotic language pulls
   // in the full build, this snapshot changes, re-parsing so the previously-plain
   // fence highlights. (Module state read during render is invisible to the React
@@ -89,16 +114,116 @@ export function Markdown({
   // hljsVersion is a deliberate rebuild trigger: marked reads the now-upgraded
   // hljs during parse via module state, not a value passed in, so bumping it is
   // what forces the re-parse that highlights the previously-plain fence.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: hljsVersion is an intentional rebuild trigger, not read directly
+  // The ref deps are the three primitives rather than `refs` itself, so a caller
+  // rebuilding the object each render can't re-parse every body.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: hljsVersion is an intentional rebuild trigger, and `refs` is deliberately tracked by its primitives
   const html = useMemo(() => {
-    const raw = md.parse(children, { async: false }) as string;
-    return DOMPurify.sanitize(raw);
-  }, [children, hljsVersion]);
+    setActiveMarkdownRefs(refs ?? null);
+    try {
+      const raw = md.parse(children, { async: false }) as string;
+      return DOMPurify.sanitize(raw);
+    } finally {
+      setActiveMarkdownRefs(null);
+    }
+  }, [children, hljsVersion, refs?.provider, refs?.repoPath, refs?.lens]);
 
-  // Intercept link clicks (event delegation) so they open externally rather
-  // than navigating the embedded webview.
+  /** Navigate to whatever a rendered reference anchor points at. */
+  async function openRef(anchor: HTMLAnchorElement) {
+    if (!refs) return;
+    const { repoPath, lens } = refs;
+    const kind = anchor.dataset.ref;
+    if (kind === "user") {
+      const user = anchor.dataset.refUser;
+      if (!user) return;
+      try {
+        // Origin off the repo's server-truth web URL, so GitHub Enterprise and
+        // self-managed GitLab hosts resolve without a host table.
+        const origin = new URL(await forgeRepoUrl(repoPath)).origin;
+        await openUrl(`${origin}/${user}`);
+      } catch (e) {
+        toastError(e);
+      }
+      return;
+    }
+    const number = Number(anchor.dataset.refNum);
+    if (!Number.isInteger(number)) return;
+    const openPr = () => {
+      selectPr({ kind: "remote", id: String(number) });
+      setRepoTab("pulls");
+    };
+    const openIssue = () => {
+      selectIssue({ kind: "remote", id: String(number) });
+      setRepoTab("issues");
+    };
+    // GitLab's two kinds skip the lens check below: the origin/upstream lens is
+    // GitHub-fork-only, so a mismatch can't arise here.
+    if (kind === "mr") {
+      openPr();
+      return;
+    }
+    if (kind === "issue") {
+      openIssue();
+      return;
+    }
+    // selectPr/selectIssue hand over a bare number that the destination view
+    // resolves under the repo's ACTIVE lens, so a body rendered under the other
+    // one (a local view, or any surface pinned to origin) can only reach the
+    // right item by leaving the app. A cold cache reads as "origin", matching
+    // useRepoLens' own fallback.
+    const activeLens =
+      queryClient.getQueryData<RemoteLens>(lensKey(repoPath)) ?? "origin";
+    if (activeLens !== lens) {
+      try {
+        const details = await queryClient.fetchQuery(
+          issueDetailsOptions(repoPath, number, lens),
+        );
+        await openUrl(details.url);
+      } catch (e) {
+        toastError(e);
+      }
+      return;
+    }
+    // GitHub's `#N` addresses one number space, so the kind resolves here: a
+    // cached list that already holds the number answers for free (its issue
+    // lists exclude PRs), and otherwise the issues endpoint answers for PR
+    // numbers too — a `/pull/` URL is what tells the two apart.
+    const cachedHas = (list: "pr-list" | "issue-list") =>
+      queryClient
+        .getQueriesData<{ number: number }[]>({
+          queryKey: ["repo", repoPath, list, lens],
+        })
+        .some(([, rows]) => rows?.some((row) => row.number === number));
+    if (cachedHas("pr-list")) {
+      openPr();
+      return;
+    }
+    if (cachedHas("issue-list")) {
+      openIssue();
+      return;
+    }
+    try {
+      const issue = await queryClient.fetchQuery(
+        issueDetailsOptions(repoPath, number, lens),
+      );
+      if (issue.url.includes("/pull/")) openPr();
+      else openIssue();
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  // Event delegation over the rendered body, most specific target first: a forge
+  // reference navigates in-app, and any other external link opens in the system
+  // browser rather than navigating the embedded webview.
   function onClick(e: React.MouseEvent) {
-    const href = (e.target as HTMLElement).closest("a")?.getAttribute("href");
+    const anchor = (e.target as HTMLElement).closest("a");
+    if (!anchor) return;
+    if (anchor.dataset.ref) {
+      e.preventDefault();
+      void openRef(anchor);
+      return;
+    }
+    const href = anchor.getAttribute("href");
     if (href && /^(https?:|mailto:)/.test(href)) {
       e.preventDefault();
       openUrl(href);

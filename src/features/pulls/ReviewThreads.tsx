@@ -718,7 +718,9 @@ export function ReviewThreadCard({
                   <div className="space-y-3">
                     {splitSuggestionSegments(body).map((seg, i) =>
                       seg.kind === "md" ? (
-                        <Markdown key={i}>{seg.text}</Markdown>
+                        <Markdown key={i} refs={mentions?.refs}>
+                          {seg.text}
+                        </Markdown>
                       ) : (
                         <SuggestionBlock
                           key={i}

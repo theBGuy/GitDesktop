@@ -45,6 +45,7 @@ import {
 } from "@/lib/ai/providers";
 import type { AiProviderId, ReviewMode } from "@/lib/ai/types";
 import { copyText } from "@/lib/clipboard";
+import { useForgeStatus } from "@/lib/git/queries";
 import { quickTransition } from "@/lib/motion";
 import {
   useExternalReviews,
@@ -207,6 +208,17 @@ export function PrReviewPanel({
   const notes = useReviewerNotes(context.repoPath, prKind, prRef);
   const hasNotes = Boolean(notes.data?.reviewNotes?.trim());
   const [ignoreNotes, setIgnoreNotes] = useState(false);
+
+  // Review output cites `#N` constantly, so linkify it against the PR's own repo.
+  // `context.provider` is the AI provider — the FORGE one comes from forge status.
+  const forgeProvider = useForgeStatus(context.repoPath).data?.provider;
+  const refs = forgeProvider
+    ? {
+        provider: forgeProvider,
+        repoPath: context.repoPath,
+        lens: context.lens,
+      }
+    : undefined;
 
   const globalReviewAi = settings.data?.reviewAi;
   // Optional dedicated config for security audits (Settings → AI). When set and
@@ -761,11 +773,11 @@ export function PrReviewPanel({
                 </span>
               </p>
               {/* Keep any partial output that streamed before it failed. */}
-              {text.trim() && <Markdown>{text}</Markdown>}
+              {text.trim() && <Markdown refs={refs}>{text}</Markdown>}
             </div>
           ) : text.trim() ? (
             <>
-              <Markdown>{text}</Markdown>
+              <Markdown refs={refs}>{text}</Markdown>
               {thoughts.trim() && <ThoughtsDisclosure thoughts={thoughts} />}
             </>
           ) : generating ? (
@@ -784,7 +796,7 @@ export function PrReviewPanel({
                   — partial output kept. Run it again for a full review.
                 </span>
               </p>
-              <Markdown>{reviewText(keptPartial)}</Markdown>
+              <Markdown refs={refs}>{reviewText(keptPartial)}</Markdown>
               {/* After a restart this record is the only copy of the output, so it needs
                   its own copy path — the live run's Copy above is gone with the run. */}
               <Button

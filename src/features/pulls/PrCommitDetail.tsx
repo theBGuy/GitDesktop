@@ -111,6 +111,7 @@ export function PrCommitDetail({
     comments.data,
     sections,
     effectivePath,
+    { provider, repoPath, lens },
   );
 
   const selected = files.find((f) => f.path === effectivePath);

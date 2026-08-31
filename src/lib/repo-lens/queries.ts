@@ -15,7 +15,7 @@ import { loadRepoLens, saveRepoLens } from "./store";
 // refetches an active query whatever its staleTime — which would re-read disk
 // and overwrite a session-only lens applied by a navigation, repainting the
 // other lens's pull request under the selected number.
-const lensKey = (repo: string) => ["repo-lens", repo] as const;
+export const lensKey = (repo: string) => ["repo-lens", repo] as const;
 
 /** The raw persisted lens for a repo, unfiltered by the gate. Prefer
  *  {@link useRepoLens} in surfaces — this exists so the setter and the switcher

@@ -42,6 +42,7 @@ import {
 } from "@/features/conversations/EditTitleBodyDialog";
 import { LocalComment } from "@/features/conversations/LocalComment";
 import { useLocalConversation } from "@/features/conversations/useLocalConversation";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
@@ -206,6 +207,9 @@ export function LocalPrView({
   const [promoteOpen, setPromoteOpen] = useState(false);
   const ghStatus = useForgeStatus(repoPath);
   const provider = ghStatus.data?.provider;
+  // A local PR's body and comments autolink the forge's references like any other
+  // body, and its editors complete them. Local PRs have no lens, so "origin".
+  const mentions = useMentionCandidates({ repoPath, lens: "origin", provider });
   // Promote copy names the detected forge. The label spans all three providers;
   // the noun stays two-way because only GitLab calls it a merge request.
   const promoteLabel = providerLabel(provider);
@@ -853,7 +857,7 @@ export function LocalPrView({
               <div className="group flex items-start justify-between gap-2 border-b pb-3">
                 <div className="min-w-0 flex-1">
                   {pr.body.trim() ? (
-                    <Markdown>{pr.body}</Markdown>
+                    <Markdown refs={mentions.refs}>{pr.body}</Markdown>
                   ) : (
                     <p className="text-xs text-muted-foreground">
                       No description.
@@ -944,6 +948,7 @@ export function LocalPrView({
                         onDelete={() => setDeletingCommentId(c.id)}
                         onHide={() => setCommentHidden(c.id, true)}
                         onUnhide={() => setCommentHidden(c.id, false)}
+                        mentions={mentions}
                       />
                     ),
                   });
@@ -1008,6 +1013,7 @@ export function LocalPrView({
             submitLabel="Comment"
             ariaLabel="Leave a note"
             placeholder="Leave a note…"
+            mentions={mentions}
             actions={
               pr.status === "open" && (
                 <Button
@@ -1237,6 +1243,7 @@ export function LocalPrView({
         description="Updates the title and description of this local pull request."
         contentClassName={undefined}
         bodyTextareaClassName="max-h-72"
+        mentions={mentions}
         onGenerate={aiEnabled ? runGenerate : undefined}
         generating={prGen.generating}
         generateDisabled={ahead.length === 0}

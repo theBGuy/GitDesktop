@@ -753,7 +753,7 @@ export function DiscussionView({
               </DropdownMenu>
             </p>
             {hasVisibleBody(d.body) ? (
-              <Markdown>{d.body}</Markdown>
+              <Markdown refs={mentions.refs}>{d.body}</Markdown>
             ) : (
               <p className="text-xs text-muted-foreground italic">
                 No description provided.

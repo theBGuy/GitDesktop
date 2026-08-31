@@ -43,6 +43,7 @@ import {
 } from "@/features/conversations/EditTitleBodyDialog";
 import { LocalComment } from "@/features/conversations/LocalComment";
 import { useLocalConversation } from "@/features/conversations/useLocalConversation";
+import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { copyText } from "@/lib/clipboard";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
@@ -73,6 +74,11 @@ export function LocalIssueView({
   const selectIssue = useUiStore((s) => s.selectIssue);
   const selectedIssue = useUiStore((s) => s.selectedIssue);
   const ghStatus = useForgeStatus(repoPath);
+  const provider = ghStatus.data?.provider;
+  // A local issue's body and comments autolink the forge's references like any
+  // other body, and its editors complete them. Local issues have no lens, so
+  // the candidate lists come off "origin".
+  const mentions = useMentionCandidates({ repoPath, lens: "origin", provider });
   // Two independent publish gates: the forge's static issue-create capability
   // and a live per-user Jira permission probe. The Publish affordance shows when
   // EITHER is available; the dialog itself parameterizes / offers a choice.
@@ -303,7 +309,7 @@ export function LocalIssueView({
           <div className="group flex items-start justify-between gap-2 border-b pb-3">
             <div className="min-w-0 flex-1">
               {issue.body.trim() ? (
-                <Markdown>{issue.body}</Markdown>
+                <Markdown refs={mentions.refs}>{issue.body}</Markdown>
               ) : (
                 <p className="text-xs text-muted-foreground">No description.</p>
               )}
@@ -345,6 +351,7 @@ export function LocalIssueView({
               onDelete={() => setDeletingCommentId(c.id)}
               onHide={() => setCommentHidden(c.id, true)}
               onUnhide={() => setCommentHidden(c.id, false)}
+              mentions={mentions}
             />
           ))}
           {issue.comments.length === 0 && (
@@ -362,6 +369,7 @@ export function LocalIssueView({
         onSubmit={addComment}
         onClear={() => setComment("")}
         submitLabel="Comment"
+        mentions={mentions}
       />
 
       <div className="flex flex-wrap items-center gap-2 border-t p-3">
@@ -516,6 +524,7 @@ export function LocalIssueView({
         description="Updates the title and description of this local issue."
         contentClassName={undefined}
         bodyTextareaClassName="max-h-72"
+        mentions={mentions}
       />
 
       <DeleteCommentDialog
