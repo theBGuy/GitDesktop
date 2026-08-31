@@ -142,6 +142,11 @@ export function isWorktreePromoting(path: string): boolean {
  *  spelling, so the store's refusals and the callers' can't drift apart. */
 export const WORKTREE_PROMOTING_MESSAGE = "This worktree is being promoted.";
 
+/** Both starters' refusal of a duplicate attempt. "Already" is the store's own
+ *  word for a second attempt on the same target, and belongs only here — a
+ *  caller that never asked for the removal states the state instead. */
+const WORKTREE_REMOVING_MESSAGE = "This worktree is already being removed.";
+
 // `_set` unused: every write goes through the module-level helpers below, so a
 // runner that outlives its dialog reaches state the same way the starters do.
 export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
@@ -152,7 +157,7 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
       // Matched on the directory, not the string: today's callers all spell it
       // the ui store's way, but the admission rule shouldn't depend on that.
       if (isRemovalInFlight(get().byRepo, repoPath, path))
-        return "This worktree is already being removed.";
+        return WORKTREE_REMOVING_MESSAGE;
       if (promotingWorktrees.has(normPath(path)))
         return WORKTREE_PROMOTING_MESSAGE;
       markRemoval(repoPath, path, name);
@@ -164,7 +169,7 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
       // `mainPath` is git's spelling; the entry this would collide with was
       // written under the ui store's. Match on the directory, not the string.
       if (isRemovalInFlight(get().byRepo, mainPath, worktreePath))
-        return "This worktree is already being removed.";
+        return WORKTREE_REMOVING_MESSAGE;
       if (promotingWorktrees.has(normPath(worktreePath)))
         return WORKTREE_PROMOTING_MESSAGE;
       if (promotingMains.has(normPath(mainPath)))

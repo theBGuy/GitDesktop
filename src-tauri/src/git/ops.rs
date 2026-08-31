@@ -97,6 +97,9 @@ async fn absolute_git_dir(repo: &str) -> Option<std::path::PathBuf> {
 /// for a worktree under `worktree.useRelativePaths` / `--relative-paths`
 /// (`gitdir: ../<main>/.git/worktrees/<name>`); measured, git 2.51.1. Joining on the
 /// repo path resolves those and leaves an absolute pointer untouched.
+///
+/// `git::worktree::worktree_last_activity_ms` duplicates this resolution rule, so a
+/// change here has to land there too until both are hoisted into one shared helper.
 fn marker_dir(repo: &str) -> Option<std::path::PathBuf> {
     let repo_root = Path::new(repo);
     let dot_git = repo_root.join(".git");

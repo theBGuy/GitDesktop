@@ -139,8 +139,8 @@ plus markers for never-published and upstream-deleted branches), its +/−
 divergence vs. the default branch (labeled with the default's name), and a
 PR badge.
 
-- **Clean up branches** ⭐: one reviewed list that archives or deletes every
-  stale branch — merged into the default branch (directly, or, where the
+- **Clean up branches** ⭐: one reviewed list that archives or deletes your
+  stale branches — merged into the default branch (directly, or, where the
   forge connection supplies them, by a recent pull request, so squash and
   rebase merges count) or with no commits in a chosen window. Pull-request
   matches go by branch name, so they only badge a row with the PR that took

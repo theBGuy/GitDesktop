@@ -82,6 +82,35 @@ export function prCheckStateFrom(
   return "checked";
 }
 
+/**
+ * How far the worktree read behind the `isInWorktree` exclusion got. That
+ * predicate answers false for every branch until the read lands, so its state is
+ * what the dialog holds on: `"pending"` — no answer yet, and a list painted from
+ * it could offer a branch the settled answer excludes; `"failed"` — the read
+ * failed, a coverage gap the dialog names; `"checked"` — the exclusion is real.
+ */
+export type WorktreeCheckState = "pending" | "failed" | "checked";
+
+/** Derives that state from the worktree query. Absent data covers both a read in
+ *  flight and one that never started — the same thing to a caller that has no
+ *  answer to act on. */
+export function worktreeCheckStateFrom(q: {
+  isError: boolean;
+  data: unknown;
+}): WorktreeCheckState {
+  if (q.isError) return "failed";
+  if (q.data === undefined) return "pending";
+  return "checked";
+}
+
+/** Why a stale branch can still be off the list, per mode — the empty state
+ *  names it rather than claiming nothing is stale, which the branches sitting on
+ *  disk would contradict. */
+const EMPTY_EXCLUDED_REASON: Record<Mode, string> = {
+  archive: "already archived or checked out in another worktree",
+  delete: "protected by branch rules or checked out in another worktree",
+};
+
 /** The empty state's merged clause, per PR-check outcome. It names pull requests
  *  only where they were actually read: a failed read gets its own caveat below,
  *  and a check that never ran says nothing about them either way. The `pending`
@@ -171,8 +200,9 @@ function RowBadge({
  * local branches that are stale — **merged into the default branch** or **idle
  * past the selected age window** — and lets the user Archive (reversible hide via
  * the `gitdesktopArchived` flag) or Delete (`git branch -D`) the selected set in
- * one pass. The current branch, the default branch, and `gd/session/*` branches
- * are never candidates; Delete additionally excludes rule-protected branches.
+ * one pass. The current branch, the default branch, `gd/session/*` branches, and
+ * branches checked out in another worktree are never candidates; Archive also
+ * skips already-archived branches, and Delete skips rule-protected ones.
  *
  * Merged detection has two sources: branch divergence (`ahead === 0`, no extra
  * backend) and the switcher's PR map, which catches the squash and rebase merges
@@ -188,6 +218,7 @@ export function CleanupBranchesDialog({
   currentBranch,
   isProtected,
   isInWorktree,
+  worktreeCheckState,
   prMergedByBranch,
   prCheckState,
   prCheckPaused,
@@ -203,6 +234,12 @@ export function CleanupBranchesDialog({
   /** True when a branch is checked out in another worktree — git can't delete it,
    *  and archiving would hide a branch that's in use, so both modes drop it. */
   isInWorktree: (name: string) => boolean;
+  /** Whether {@link isInWorktree} has an answer yet. An advisory read that would
+   *  have refused an action must be held on, never acted around: while this is
+   *  `"pending"` the predicate is a stand-in that excludes nothing, so the list
+   *  neither paints nor pre-selects. (`useEffectiveBranchRulesSettling` carries
+   *  the same contract for the branch rules behind `isProtected`.) */
+  worktreeCheckState: WorktreeCheckState;
   /** Branch name → the label of the merged pull request it maps to ("#123").
    *  Name-keyed and limited to the PRs the app has fetched, so it labels rows,
    *  never selects them. */
@@ -302,6 +339,11 @@ export function CleanupBranchesDialog({
     });
   }, [stale, mode, isProtected, isInWorktree]);
 
+  // Until the worktree read lands, `isInWorktree` excludes nothing, so every
+  // candidate below is provisional — the list stays behind the skeleton and the
+  // selection stays unseeded rather than offering a row the answer would remove.
+  const checkingWorktrees = worktreeCheckState === "pending";
+
   // Re-check every candidate whenever the set itself changes — opening, switching
   // mode, adjusting the window, or divergence resolving to reveal merged branches.
   const candidateNames = useMemo(
@@ -327,9 +369,12 @@ export function CleanupBranchesDialog({
   const autoSelectKey = [...autoSelectNames].sort().join("\n");
   useEffect(() => {
     if (running) return; // don't clobber a batch mid-flight
+    // Nothing may be pre-selected off a stand-in exclusion: the seed re-runs
+    // once the worktree read lands and the excluded rows are really gone.
+    if (checkingWorktrees) return;
     setSelected(new Set(autoSelectKey ? autoSelectKey.split("\n") : []));
     setActiveName(null);
-  }, [autoSelectKey, running]);
+  }, [autoSelectKey, running, checkingWorktrees]);
 
   // First load: a merged signal still in flight and nothing has surfaced yet.
   // Age-based candidates already show instantly (branch data is cached), so this
@@ -341,9 +386,18 @@ export function CleanupBranchesDialog({
   // shows: the check line stays sr-only on the empty first paint (the skeleton
   // is the visual signal there) and on a parked re-check of an answered list,
   // whose visible staleness caveat is a surface this change doesn't own.
+  const stillChecking = checkingMerged || checkingWorktrees;
   const showCheckLine =
-    checkingMerged && (prCheckPaused || candidates.length > 0);
+    stillChecking && (prCheckPaused || candidates.length > 0);
   const showPrFailedLine = prCheckState === "failed" && candidates.length > 0;
+  // Unlike the pull-request caveat, this one shows on an empty list too: a
+  // failed read leaves the exclusion vacuous, which the empty state's own copy
+  // would otherwise assert as real.
+  const worktreeCheckFailed = worktreeCheckState === "failed";
+  // A provisional list is no list: the skeleton covers the whole worktree wait,
+  // not just the empty first paint the merged check gates.
+  const showSkeleton =
+    checkingWorktrees || (checkingMerged && candidates.length === 0);
 
   const selectedCount = candidateNames.filter((n) => selected.has(n)).length;
   const allChecked =
@@ -442,6 +496,14 @@ export function CleanupBranchesDialog({
   const primaryLabel = running
     ? `${gerund}… ${progress?.done ?? 0}/${progress?.total ?? 0}`
     : `${verb} ${pluralBranches(selectedCount)}`;
+  // The mode's own exclusions can empty the list while stale branches remain, so
+  // both empty states name the exclusion instead of reporting none. One string
+  // for the prose and the live region — a reader and a listener get the same
+  // sentence.
+  const allStaleExcluded = candidates.length === 0 && stale.length > 0;
+  const emptyStatus = allStaleExcluded
+    ? `${pluralBranches(stale.length)} ${stale.length === 1 ? "is" : "are"} stale but excluded from ${verb}: ${EMPTY_EXCLUDED_REASON[mode]}.`
+    : "No stale branches.";
 
   return (
     <>
@@ -529,8 +591,10 @@ export function CleanupBranchesDialog({
           </div>
 
           {/* Select-all header — a tri-state indicator (the vendored Checkbox
-              has no indeterminate visual, and components/ui/ is off-limits). */}
-          {candidates.length > 0 && (
+              has no indeterminate visual, and components/ui/ is off-limits).
+              Withheld while the list is provisional — it would count rows the
+              worktree read may still remove. */}
+          {candidates.length > 0 && !checkingWorktrees && (
             <button
               type="button"
               disabled={running}
@@ -572,22 +636,25 @@ export function CleanupBranchesDialog({
               role="status"
               className={cn(
                 "flex flex-col gap-0.5",
-                !showCheckLine && !showPrFailedLine && "sr-only",
+                !showCheckLine &&
+                  !showPrFailedLine &&
+                  !worktreeCheckFailed &&
+                  "sr-only",
               )}
             >
               {/* A parked pull-request read is still waiting, so it keeps the
                   waiting line; the resting line reports the count and claims
                   nothing about the check, which is what a `role="status"`
                   region can honestly repeat on every mode and window change. */}
-              {checkingMerged || prCheckPaused ? (
+              {stillChecking || prCheckPaused ? (
                 <MergedCheckLine
                   paused={prCheckPaused}
-                  srOnly={!checkingMerged}
+                  srOnly={!stillChecking}
                 />
               ) : (
                 <p className="sr-only">
                   {candidates.length === 0
-                    ? "No stale branches."
+                    ? emptyStatus
                     : `${pluralBranches(candidates.length)} to review.`}
                 </p>
               )}
@@ -605,19 +672,33 @@ export function CleanupBranchesDialog({
                   one may be missing.
                 </p>
               ) : null}
+              {worktreeCheckFailed ? (
+                <p className="px-1 py-1 text-[11px] text-muted-foreground">
+                  Worktree checkouts couldn't be read, so a branch checked out
+                  in another worktree may be listed.
+                </p>
+              ) : null}
             </div>
 
             {/* List / skeleton / empty */}
-            {checkingMerged && candidates.length === 0 ? (
+            {showSkeleton ? (
               <CheckingMergedPlaceholder paused={prCheckPaused} />
             ) : candidates.length === 0 ? (
               <p className="py-6 text-center text-xs text-muted-foreground">
-                No stale branches — nothing is merged into{" "}
-                <span className="font-mono">
-                  {defaultBranch ?? "the default branch"}
-                </span>
-                {EMPTY_MERGED_CLAUSE[prCheckState]}
-                {windowDays} days. Try a shorter window.
+                {allStaleExcluded ? (
+                  emptyStatus
+                ) : (
+                  <>
+                    No stale branches — nothing is merged into{" "}
+                    <span className="font-mono">
+                      {defaultBranch ?? "the default branch"}
+                    </span>
+                    {EMPTY_MERGED_CLAUSE[prCheckState]}
+                    {windowDays} days. Try a shorter window.
+                  </>
+                )}
+                {/* Carried by BOTH arms: an excluded-only list is just as
+                    incomplete when the pull-request read failed. */}
                 {prCheckState === "failed"
                   ? " Pull requests couldn't be checked, so a branch merged through one may be missing here."
                   : null}
@@ -681,7 +762,7 @@ export function CleanupBranchesDialog({
             <Button
               type="button"
               variant={mode === "delete" ? "destructive" : "default"}
-              disabled={selectedCount === 0 || running}
+              disabled={selectedCount === 0 || running || checkingWorktrees}
               onClick={onPrimary}
             >
               {primaryLabel}

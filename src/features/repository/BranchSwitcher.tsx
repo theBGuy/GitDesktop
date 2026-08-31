@@ -108,6 +108,7 @@ import {
 import {
   CleanupBranchesDialog,
   prCheckStateFrom,
+  worktreeCheckStateFrom,
 } from "./CleanupBranchesDialog";
 import { CreateBranchDialog } from "./CreateBranchDialog";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
@@ -483,8 +484,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Branches checked out in *another* worktree → that worktree's path. Git
   // forbids the same branch in two worktrees, so these can't be checked out
   // here; the row offers to open the worktree instead. The active repo's own
-  // branch is excluded (it's the one you're on). Fetched only while open.
-  const userWorktrees = useUserWorktrees(repoPath, open);
+  // branch is excluded (it's the one you're on). Fetched while the menu OR the
+  // cleanup dialog is open: that dialog's archive and delete exclusions read
+  // this map, and the cleanup hotkey closes the menu on its way to it.
+  const userWorktrees = useUserWorktrees(repoPath, open || cleanupOpen);
   const activeNorm = normPath(repoPath);
   const worktreeByBranch = useMemo(() => {
     const map = new Map<string, string>();
@@ -494,9 +497,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     return map;
   }, [userWorktrees.data, activeNorm]);
-  // Cross-worktree navigation (fetched only while open): the main workspace, the
-  // other worktrees you can jump to, and whether you're currently in a linked
-  // (non-main) worktree — where a branch checkout lands here, not in main.
+  // Cross-worktree navigation (same fetch as the map above): the main
+  // workspace, the other worktrees you can jump to, and whether you're
+  // currently in a linked (non-main) worktree — where a branch checkout lands
+  // here, not in main.
   const worktreeList = userWorktrees.data ?? [];
   const currentWorktree = worktreeList.find(
     (w) => normPath(w.path) === activeNorm,
@@ -821,8 +825,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       // branch not already occupied by another worktree (that checkout fails too).
       if (deleteTarget === currentName) {
         // Fetch occupancy FRESH: the cached `worktreeByBranch` is gated on the
-        // popover being open, but a delete can fire from the `delete-branch`
-        // hotkey that never opened it — leaving the map empty and the guard moot.
+        // popover or the cleanup dialog being open, and the `delete-branch`
+        // hotkey opens neither — leaving the map empty and the guard moot.
         let occupied: Set<string>;
         try {
           const wts = await listUserWorktrees(repoPath);
@@ -2417,6 +2421,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         currentBranch={currentName}
         isProtected={(name) => isDeletionBlocked(rulesConfig, name)}
         isInWorktree={(name) => worktreeByBranch.has(name)}
+        // The map is empty until the read lands and stays empty if it fails, so
+        // the dialog is told which, and holds its list rather than acting on an
+        // exclusion that isn't answering yet.
+        worktreeCheckState={worktreeCheckStateFrom(userWorktrees)}
         prMergedByBranch={mergedPrByBranch}
         // Only the closed list carries merged PRs, and `canGh` is what says the
         // query runs at all — so the dialog is told which of the four it got,

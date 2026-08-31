@@ -1278,9 +1278,14 @@ prunable gitdir file points to non-existent location
     /// The last-activity probe over both worktree shapes: the main checkout,
     /// whose `.git` is a directory, and a linked one, whose `.git` is a pointer
     /// file. Then the index-over-HEAD priority, which every order-blind
-    /// assertion above would also pass for a HEAD-first probe, and the fallback
-    /// chain — index gone leaves HEAD, both gone reports nothing rather than
-    /// erroring.
+    /// assertion above would also pass for a HEAD-first probe, the relative form
+    /// of that pointer, and the fallback chain — index gone leaves HEAD, both
+    /// gone reports nothing rather than erroring.
+    ///
+    /// The pointer is rewritten in place and never restored, so every assertion
+    /// after that stage resolves through the RELATIVE form rather than git's
+    /// absolute one. Deliberate: it keeps both arms exercised, and the admin
+    /// paths the deletions use come from the repo path, not the pointer.
     #[tokio::test]
     async fn last_activity_reads_both_worktree_shapes_and_falls_back() {
         let (base, repo_s) = setup_repo("last-activity").await;
@@ -1335,6 +1340,24 @@ prunable gitdir file points to non-existent location
             worktree_last_activity_ms(&wt_s),
             Some(index_ms),
             "the index is the signal, not HEAD"
+        );
+
+        // git records an ABSOLUTE pointer unless `worktree.useRelativePaths` is on,
+        // so only a hand-built one exercises the relative arm at the filesystem level.
+        let repo_dir = std::path::Path::new(&repo_s)
+            .file_name()
+            .expect("the temp repo has a directory name")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: ../{repo_dir}/.git/worktrees/age-wt\n"),
+        )
+        .expect("rewrite the pointer in its relative form");
+        assert_eq!(
+            worktree_last_activity_ms(&wt_s),
+            Some(index_ms),
+            "a relative gitdir pointer resolves against the worktree"
         );
 
         std::fs::remove_file(&index).expect("drop the linked index");
