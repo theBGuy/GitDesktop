@@ -34,9 +34,9 @@ function bbSlugWarning(value: string): string | null {
   return "Only letters, numbers, and . _ - are allowed, starting with a letter or number.";
 }
 
-/** Whether any `/`-separated segment leads with a dash. gh reads a leading dash
- *  as a flag, and the backend's own guard only tests the whole string, so an
- *  owner-qualified `acme/-x` reaches gh unrefused unless it's caught per segment. */
+/** Whether any `/`-separated segment leads with a dash. A whole-string leading
+ *  dash is the argv flag hazard the backend refuses; an inner one isn't, but takes
+ *  the same refusal on both publish paths — one rule, raised inline, not late. */
 function hasDashLedSegment(value: string): boolean {
   return value
     .trim()
@@ -44,32 +44,53 @@ function hasDashLedSegment(value: string): boolean {
     .some((segment) => segment.trim().startsWith("-"));
 }
 
-/** With the owner picker active a typed `owner/name` still wins over the select,
- *  which is how an org the listing can't reach (the 100-org cap, a token without
- *  `read:org`) stays publishable — so the slash only earns a note. The refusals
- *  are tested first, so a warning beside a disabled Publish always explains it. */
-function ghNameWarning(value: string): string | null {
+/** A slashed name that isn't exactly `owner/name` with both parts filled. */
+function malformedOwnerName(value: string): boolean {
+  if (!value.includes("/")) return false;
+  const parts = value.trim().split("/");
+  return parts.length !== 2 || parts.some((part) => part.trim() === "");
+}
+
+/** Why a GitHub name is refused, or null. Every publish path shares these, so
+ *  the message a blocked Publish needs is available whether or not the owner
+ *  picker rendered. */
+function ghNameRefusal(value: string): string | null {
   if (hasDashLedSegment(value)) {
     return "A repository name can't start with a dash.";
   }
+  if (malformedOwnerName(value)) {
+    return "Type owner/name.";
+  }
+  return null;
+}
+
+/** Names GitHub refuses: blank, or anything `ghNameRefusal` names. Blank blocks
+ *  silently, matching the `required` validator's no-inline-text style. Sharing
+ *  the refusal set with the hint keeps blocked-implies-explained structural. */
+function ghNameBlocked(value: string): boolean {
+  return value.trim() === "" || ghNameRefusal(value) !== null;
+}
+
+/** The picker arm's hints: the refusals, plus a note that a typed `owner/name`
+ *  wins over the select — that's how an org the listing can't reach (the 100-org
+ *  cap, a token without `read:org`) stays publishable. */
+function ghNameWarning(value: string): string | null {
+  const refusal = ghNameRefusal(value);
+  if (refusal) return refusal;
   if (value.includes("/")) {
     return "Publishing under the owner typed here, not the Owner select.";
   }
   return null;
 }
 
-/** Names the owner-picker arm refuses: blank, or any segment leading with a dash.
- *  Blank blocks silently, matching the `required` validator's no-inline-text style. */
-function ghNameBlocked(value: string): boolean {
-  return value.trim() === "" || hasDashLedSegment(value);
-}
-
-/** Provider-specific inline hints on Name; GitLab's namespace needs none. */
+/** Provider-specific inline hints on Name; GitLab's namespace needs none. The
+ *  GitHub entry is the refusals alone — the dialog swaps in `ghNameWarning`
+ *  where a picker exists for the advisory to point at. */
 const NAME_WARNINGS: Record<
   "github" | "gitlab" | "bitbucket",
   ((value: string) => string | null) | undefined
 > = {
-  github: ghNameWarning,
+  github: ghNameRefusal,
   gitlab: undefined,
   bitbucket: bbSlugWarning,
 };
@@ -218,15 +239,16 @@ export function PublishDialog({
   const bbBlocked =
     isBitbucket &&
     (bbSlugWarning(nameVal) !== null || nameVal.trim() === "" || !workspaceVal);
-  // A typed owner wins, so an unseeded picker only blocks a name that would
-  // consume it; the name's `warning` explains a refused name inline.
+  // Refused names are refused on every GitHub path; only the picker adds the
+  // unseeded-owner gate, and a typed owner exempts a name from it.
   const ghBlocked =
-    ghPickerActive &&
-    (ghNameBlocked(nameVal) || (!ownerVal && !nameVal.includes("/")));
-  // GitHub's hints presume the picker — without a listing at all, typed
-  // `owner/name` is the only way to reach an org, so the hints go with it.
-  const nameWarning =
-    isGitHub && !ghPickerActive ? undefined : NAME_WARNINGS[provider];
+    isGitHub &&
+    (ghNameBlocked(nameVal) ||
+      (ghPickerActive && !ownerVal && !nameVal.includes("/")));
+  // The refusals ride every arm so a refused name is explained wherever it
+  // blocks (blank and the unseeded-owner gate stay deliberately silent); the
+  // advisory names the Owner select, so it rides only the arm that renders one.
+  const nameWarning = ghPickerActive ? ghNameWarning : NAME_WARNINGS[provider];
 
   const seedOnOpen = useEffectEvent(() =>
     form.reset({
@@ -252,16 +274,23 @@ export function PublishDialog({
     if (open && isBitbucket) seedWorkspace(defaultWorkspace);
   }, [open, isBitbucket, defaultWorkspace]);
 
-  // Owners load after the dialog opens; same seed-once-empty rule as workspaces.
+  // Owners load after the dialog opens, so seed the picker once they arrive, and
+  // re-seed whenever the held owner isn't in the list the data now describes — a
+  // gh account switch refetches into a list the old viewer is absent from, and
+  // composing under it would create the repo on the wrong account. Validity is
+  // derived from the current list rather than cleared by each writer, so an org
+  // that simply drops out is covered by the same arm.
   const defaultOwner = owners.data?.viewer ?? "";
-  const seedOwner = useEffectEvent((login: string) => {
-    if (!form.state.values.owner && login) {
-      form.setFieldValue("owner", login);
+  const seedOwner = useEffectEvent((viewer: string, logins: string[]) => {
+    if (!viewer) return;
+    const held = form.state.values.owner;
+    if (!held || !logins.includes(held)) {
+      form.setFieldValue("owner", viewer);
     }
   });
   useEffect(() => {
-    if (open && isGitHub) seedOwner(defaultOwner);
-  }, [open, isGitHub, defaultOwner]);
+    if (open && isGitHub) seedOwner(defaultOwner, ownerLogins);
+  }, [open, isGitHub, defaultOwner, ownerLogins]);
 
   // Shared by the Generate button and the generate chord below.
   function runGenerate() {

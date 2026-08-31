@@ -431,7 +431,9 @@ export const CHECKS = [
       // Defaults the workflow once `dispatchable` arrives; the caller's
       // preselect rides a consume-once ref, the fallback keeps `!workflow`.
       "src/features/actions/RunWorkflowDialog.tsx",
-      // Seeds the Bitbucket workspace once workspaces load; empty-field only.
+      // Workspace seed is empty-field only; the owner seed also re-seeds when
+      // the held owner is no longer in the fetched list (account switch), so
+      // it never fights a pick that's still valid.
       "src/features/repository/PublishDialog.tsx",
       // Seeds the URL field once the current remote URL query resolves.
       "src/features/repository/RemoteUrlDialog.tsx",
