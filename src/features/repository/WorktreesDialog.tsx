@@ -15,6 +15,7 @@ import {
 import { useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { RelativeTime } from "@/components/relative-time";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -62,7 +63,9 @@ import {
   isWorktreePromoting,
   useIsRemovingWorktree,
   useWorktreeRemovals,
+  WORKTREE_PROMOTING_MESSAGE,
 } from "@/lib/stores/worktree-removal";
+import { validEpochMs } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
@@ -156,9 +159,9 @@ function WorktreeList({
 
   async function handleOpen(w: UserWorktree) {
     if (normPath(w.path) === activeNorm) return; // already here
-    // Its folder is on its way out. Not just the removal entry: a promote gaps
-    // it on both ends — the claim lands before markRemoval, and the tail runs
-    // on past the delete with nothing left in `removingPaths`.
+    // Its folder is on its way out. Not just the removal entry: a promote's
+    // claim opens before markRemoval and releases only after the entry has
+    // settled, so the entry alone misses both ends.
     if (refuseWhileLeaving(w.path, removingPaths.has(w.path))) return;
     await openWorktree(w.path);
     onClose();
@@ -319,7 +322,15 @@ function WorktreeRow({
   onDelete: () => void;
   onPromote: () => void;
 }) {
-  const { path, branch, isMain, isDetached, isLocked, lockReason } = worktree;
+  const {
+    path,
+    branch,
+    isMain,
+    isDetached,
+    isLocked,
+    lockReason,
+    lastActivityMs,
+  } = worktree;
 
   const itemLabel = (label: string, otherReason?: string) =>
     worktreeItemLabel(label, isRemoving, otherReason);
@@ -382,6 +393,12 @@ function WorktreeRow({
             {path}
           </span>
         </span>
+        {lastActivityMs != null && validEpochMs(lastActivityMs) && (
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            Active{" "}
+            <RelativeTime date={new Date(lastActivityMs).toISOString()} />
+          </span>
+        )}
       </button>
 
       <DropdownMenu>
@@ -540,7 +557,7 @@ export function refuseWhileLeaving(path: string, removing: boolean): boolean {
     return true;
   }
   if (isWorktreePromoting(path)) {
-    toast.info("This worktree is being promoted.");
+    toast.info(WORKTREE_PROMOTING_MESSAGE);
     return true;
   }
   return false;

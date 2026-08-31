@@ -201,7 +201,7 @@ export function CleanupBranchesDialog({
   /** True when a branch is blocked from deletion by an effective branch rule. */
   isProtected: (name: string) => boolean;
   /** True when a branch is checked out in another worktree — git can't delete it,
-   *  so it's dropped from the delete candidates (it can still be archived). */
+   *  and archiving would hide a branch that's in use, so both modes drop it. */
   isInWorktree: (name: string) => boolean;
   /** Branch name → the label of the merged pull request it maps to ("#123").
    *  Name-keyed and limited to the PRs the app has fetched, so it labels rows,
@@ -282,13 +282,16 @@ export function CleanupBranchesDialog({
     windowDays,
   ]);
 
-  // Mode-specific candidates. Archive hides — already-archived branches are a
-  // no-op, so drop them. Delete is permanent — drop rule-protected branches
+  // Mode-specific candidates. Archive hides — drop already-archived branches
+  // (a no-op) and ones checked out in another worktree (in use; the row menu
+  // refuses those too). Delete is permanent — drop rule-protected branches
   // (they'd fail anyway), but keep archived ones (a final sweep may want them).
   const candidates = useMemo(() => {
     const list =
       mode === "archive"
-        ? stale.filter((c) => !c.branch.archived)
+        ? stale.filter(
+            (c) => !c.branch.archived && !isInWorktree(c.branch.name),
+          )
         : stale.filter(
             (c) => !isProtected(c.branch.name) && !isInWorktree(c.branch.name),
           );

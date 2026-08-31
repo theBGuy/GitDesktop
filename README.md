@@ -174,10 +174,12 @@ PR badge.
   its own name.
 - **Worktree manager**: create, switch between, rename, lock, promote a
   worktree's branch into your main checkout, and remove linked worktrees, so
-  you can work on several branches in parallel folders without stashing.
-  One-click jumps to the main workspace sit right in the branch switcher,
-  where each worktree row also carries a context menu with the management
-  actions it supports, and a branch's own menu can remove its worktree.
+  you can work on several branches in parallel folders without stashing. Each
+  row shows when that worktree was last active, so the ones you've finished
+  with are easy to spot. One-click jumps to the main workspace sit right in
+  the branch switcher, where each worktree row also carries a context menu
+  with the management actions it supports, and a branch's own menu can remove
+  its worktree.
 - **Compare**: a tab with a three-dot diff, commits ahead/behind,
   merge/rebase, and jump-to-PR. Each ahead/behind commit shows its tag chips
   and carries a context menu — checkout, cherry-pick, create a branch or tag,

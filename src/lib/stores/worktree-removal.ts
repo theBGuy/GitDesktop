@@ -16,6 +16,9 @@ export interface WorktreeRemoval {
   name: string;
   /** Epoch ms the removal started. */
   startedAt: number;
+  /** Which step of a promote this entry is on. Set only by the promote path — a
+   *  plain delete leaves it undefined, and the removal ends with its own step. */
+  promotePhase?: "removing" | "stashing" | "checking-out";
 }
 
 /** The open delete dialog's hooks for the removal it launched. */
@@ -135,6 +138,10 @@ export function isWorktreePromoting(path: string): boolean {
   return promotingWorktrees.has(normPath(path));
 }
 
+/** The refusal every surface shows for a worktree a promote has claimed — one
+ *  spelling, so the store's refusals and the callers' can't drift apart. */
+export const WORKTREE_PROMOTING_MESSAGE = "This worktree is being promoted.";
+
 // `_set` unused: every write goes through the module-level helpers below, so a
 // runner that outlives its dialog reaches state the same way the starters do.
 export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
@@ -147,7 +154,7 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
       if (isRemovalInFlight(get().byRepo, repoPath, path))
         return "This worktree is already being removed.";
       if (promotingWorktrees.has(normPath(path)))
-        return "This worktree is being promoted.";
+        return WORKTREE_PROMOTING_MESSAGE;
       markRemoval(repoPath, path, name);
       void run(repoPath, path, force);
       return null;
@@ -159,7 +166,7 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
       if (isRemovalInFlight(get().byRepo, mainPath, worktreePath))
         return "This worktree is already being removed.";
       if (promotingWorktrees.has(normPath(worktreePath)))
-        return "This worktree is being promoted.";
+        return WORKTREE_PROMOTING_MESSAGE;
       if (promotingMains.has(normPath(mainPath)))
         return "Another worktree is already being promoted to your main workspace.";
       promotingMains.add(normPath(mainPath));
@@ -173,16 +180,43 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
   }),
 );
 
-function markRemoval(repoPath: string, path: string, name: string) {
+function markRemoval(
+  repoPath: string,
+  path: string,
+  name: string,
+  promotePhase?: WorktreeRemoval["promotePhase"],
+) {
   useWorktreeRemovalStore.setState((s) => ({
     byRepo: {
       ...s.byRepo,
       [repoPath]: {
         ...s.byRepo[repoPath],
-        [path]: { path, name, startedAt: Date.now() },
+        [path]: { path, name, startedAt: Date.now(), promotePhase },
       },
     },
   }));
+}
+
+/** Moves an existing entry on to the next promote step; a missing entry is a
+ *  defensive no-op. */
+function advancePromotePhase(
+  repoKey: string,
+  path: string,
+  phase: WorktreeRemoval["promotePhase"],
+) {
+  useWorktreeRemovalStore.setState((s) => {
+    const entry = s.byRepo[repoKey]?.[path];
+    if (!entry) return s;
+    return {
+      byRepo: {
+        ...s.byRepo,
+        [repoKey]: {
+          ...s.byRepo[repoKey],
+          [path]: { ...entry, promotePhase: phase },
+        },
+      },
+    };
+  });
 }
 
 function clearRemoval(repoPath: string, path: string) {
@@ -269,8 +303,8 @@ async function removeWorktreeFreeingBranch(repoPath: string, path: string) {
  * Runs one promote to completion: free the branch (remove its worktree, keep the
  * branch) then check it out in the main workspace. Store-owned so the composite
  * survives its dialog, which closes as soon as the store accepts the promote;
- * its removal step shows in the main workspace's own removal line and manager
- * row like any other.
+ * the main workspace's own removal line carries it step by step, and its removal
+ * step shows in the manager's row like any other.
  *
  * The generic removal toast and the listener stack stay out of this path: they
  * are the delete dialog's contract, and promote ends on its own composite toast.
@@ -305,22 +339,35 @@ async function runPromote(
     useUiStore.getState().openRepo(info);
     await new Promise((resolve) => setTimeout(resolve, 80));
     // Main is the active repo now, so the removal is visible where the user is.
-    markRemoval(activeKey, worktreePath, branch);
+    markRemoval(activeKey, worktreePath, branch, "removing");
     markedKey = activeKey;
     // Free the branch: remove the worktree but KEEP the branch (null) — we
     // check it out in main next. force=false: the clean-tree guard already ran.
     await removeWorktreeFreeingBranch(mainPath, worktreePath);
     removed = true;
     await pruneWorktrees(mainPath).catch(() => undefined);
-    settleRemoval(activeKey, worktreePath);
-    markedKey = null;
+    // The removed row has to leave the manager's list now, while the entry
+    // stays on to report the tail: these are `settleRemoval`'s invalidations
+    // without its clear.
+    void queryClient.invalidateQueries({ queryKey: worktreeKey(activeKey) });
+    void queryClient.invalidateQueries({
+      queryKey: repoKeys.branches(activeKey),
+    });
+    advancePromotePhase(
+      activeKey,
+      worktreePath,
+      willStash ? "stashing" : "checking-out",
+    );
     // The branch's working tree is free now; stash main's own WIP (if any) so
     // the checkout can't be blocked, then land main on the promoted branch.
     if (willStash) {
       await gitStashAll(mainPath);
       stashed = true;
+      advancePromotePhase(activeKey, worktreePath, "checking-out");
     }
     await gitCheckoutBranch(mainPath, branch);
+    settleRemoval(activeKey, worktreePath);
+    markedKey = null;
     await queryClient.invalidateQueries({ queryKey: repoKeys.all(activeKey) });
     toast.success(
       willStash

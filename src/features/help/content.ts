@@ -519,9 +519,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   and labeled with the default branch's name.
 - **Create** a branch ({{kbd:new-branch}}), **rename** ({{kbd:rename-branch}}), **delete**
   ({{kbd:delete-branch}}), or **archive** it — archiving hides a branch without deleting
-  it, collapsing it into an "Archived" section. The branch you're on and the default
-  branch can't be archived; **Unarchive** has no such limit — it works even on the
-  branch you're checked out on. When creating, the **Base it on** picker is a
+  it, collapsing it into an "Archived" section. The branch you're on, the default
+  branch, and a branch checked out in another worktree can't be archived;
+  **Unarchive** has no such limit — it works even on the branch you're checked out on. When creating, the **Base it on** picker is a
   searchable list grouped into **Local** and **Remote** branches, so you can start
   from *any* branch — not just the one you're on. Basing on a remote branch (e.g. \`origin/epic/…\`)
   starts from the remote tip and leaves the new branch with **no upstream**, so its first
@@ -652,7 +652,9 @@ settings*.)
 
 **Worktrees…** (in the ⋮ menu, or the command palette) manages linked worktrees — extra
 folders that each check out a different branch of the same repository, so you can build,
-test, or review several branches at once without stashing or switching.
+test, or review several branches at once without stashing or switching. Each row
+shows when git last did work in that worktree (hover the time for the exact date),
+so the ones you've finished with stand out.
 
 - **Add** a worktree on a new branch (from any base) or an existing one; it's checked out
   into its own folder, defaulting to a sibling of the repository.
@@ -677,8 +679,9 @@ test, or review several branches at once without stashing or switching.
   stash*), and promoting is blocked while the main workspace has a merge, rebase,
   cherry-pick or revert in progress, or unresolved conflicts. Works even on the worktree
   you're currently in. The dialog closes right away and the promote finishes on its own;
-  its removal step shows the same line at the top of the repository view and the same
-  **Removing…** row as a delete.
+  a status line at the top of the repository view names each step (removing the worktree,
+  stashing your changes, checking out the branch) until the branch lands in your main
+  workspace.
 - **Repair links** (footer) re-connects worktrees if you moved or renamed the repository
   folder in your file manager, which otherwise breaks the path each worktree records.
 

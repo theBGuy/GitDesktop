@@ -43,6 +43,9 @@ export interface UserWorktree {
   isLocked: boolean;
   /** Lock reason, when one was given (else ""). */
   lockReason: string;
+  /** Epoch ms of the worktree's last git activity, probed from its index file's
+   *  mtime with HEAD as the fallback. null when neither is readable. */
+  lastActivityMs: number | null;
 }
 
 /** Lists the repo's *user* worktrees for the worktree manager — every checkout

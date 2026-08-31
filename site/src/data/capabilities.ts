@@ -381,7 +381,8 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Repository & workspace",
-    label: "Worktree manager — create, switch, rename, lock, promote & remove",
+    label:
+      "Worktree manager — create, switch, rename, lock, promote & remove, with a last-active time per worktree",
     highlight: true,
   },
   {

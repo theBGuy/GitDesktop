@@ -47,6 +47,9 @@ pub struct UserWorktree {
     pub is_locked: bool,
     /// The lock reason, when one was given (else "").
     pub lock_reason: String,
+    /// Epoch ms of the worktree's last git activity, probed from its index
+    /// file's mtime with HEAD as the fallback. `None` when neither is readable.
+    pub last_activity_ms: Option<i64>,
 }
 
 /// Normalizes a worktree path for cross-source comparison: git prints forward
@@ -187,6 +190,7 @@ pub async fn git_worktree_list_user(
             is_detached: w.detached,
             is_locked: w.locked.is_some(),
             lock_reason: w.locked.unwrap_or_default(),
+            last_activity_ms: worktree_last_activity_ms(&w.path),
             path: w.path,
             branch: w.branch,
             head: w.head,
@@ -721,6 +725,53 @@ fn is_session_worktree(
     false
 }
 
+/// The target of a linked worktree's `.git` pointer file (`gitdir: <path>`).
+/// The recorded path may be relative to the worktree, so callers resolve it.
+fn parse_gitdir_pointer(content: &str) -> Option<&str> {
+    content
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+}
+
+/// A file's mtime as epoch ms, or `None` when it is unreadable.
+fn file_mtime_ms(path: &std::path::Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let ms = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    i64::try_from(ms).ok()
+}
+
+/// When git last did work in this worktree, as epoch ms. The index file's mtime
+/// is the signal: it moves on checkout, stage, commit, and status alike, whereas
+/// the admin directory's own mtime and `logs/HEAD` are rewritten wholesale by a
+/// `gc` pass, which makes every dormant worktree look freshly used (measured on
+/// 8 real worktrees, 2026-08-30). HEAD's mtime is the fallback. `None` on
+/// anything unreadable — one worktree with odd admin files must never fail the
+/// whole list.
+fn worktree_last_activity_ms(worktree_path: &str) -> Option<i64> {
+    let root = std::path::Path::new(worktree_path);
+    let dotgit = root.join(".git");
+    // `git::ops::marker_dir` resolves the same `.git`-dir-or-pointer question for
+    // op markers, so a change to either resolution rule has to land in both until
+    // they are hoisted into one shared helper.
+    let admin = match std::fs::metadata(&dotgit) {
+        Ok(meta) if meta.is_dir() => dotgit,
+        // A linked worktree's `.git` is a pointer to `<repo>/.git/worktrees/<id>`,
+        // recorded relative under `worktree.useRelativePaths` — joining on the
+        // tree resolves that and leaves an absolute pointer untouched.
+        Ok(_) => {
+            let pointer = std::fs::read_to_string(&dotgit).ok()?;
+            root.join(parse_gitdir_pointer(&pointer)?)
+        }
+        Err(_) => return None,
+    };
+    file_mtime_ms(&admin.join("index")).or_else(|| file_mtime_ms(&admin.join("HEAD")))
+}
+
 /// Parses `git worktree list --porcelain` into one `WorktreeInfo` per stanza.
 /// Stanzas are blank-line separated; each carries a `worktree <path>` line and
 /// (unless detached) a `branch refs/heads/<name>` line.
@@ -873,6 +924,26 @@ prunable gitdir file points to non-existent location
             ..Default::default()
         };
         assert!(!is_session_worktree(&user, &registry, app_root));
+    }
+
+    #[test]
+    fn parse_gitdir_pointer_reads_absolute_relative_and_padded_forms() {
+        assert_eq!(
+            parse_gitdir_pointer("gitdir: C:/repos/app/.git/worktrees/wt\n"),
+            Some("C:/repos/app/.git/worktrees/wt")
+        );
+        assert_eq!(
+            parse_gitdir_pointer("gitdir: ../repo/.git/worktrees/wt"),
+            Some("../repo/.git/worktrees/wt")
+        );
+        // No space after the colon, and a trailing blank line.
+        assert_eq!(
+            parse_gitdir_pointer("gitdir:/srv/repo/.git/worktrees/wt\n\n"),
+            Some("/srv/repo/.git/worktrees/wt")
+        );
+        assert_eq!(parse_gitdir_pointer("gitdir:\n"), None);
+        assert_eq!(parse_gitdir_pointer("not a pointer file\n"), None);
+        assert_eq!(parse_gitdir_pointer(""), None);
     }
 
     #[test]
@@ -1201,6 +1272,82 @@ prunable gitdir file points to non-existent location
         assert!(
             !registry(&repo_s).await.contains("/gone-wt"),
             "the stale admin entry is gone"
+        );
+    }
+
+    /// The last-activity probe over both worktree shapes: the main checkout,
+    /// whose `.git` is a directory, and a linked one, whose `.git` is a pointer
+    /// file. Then the index-over-HEAD priority, which every order-blind
+    /// assertion above would also pass for a HEAD-first probe, and the fallback
+    /// chain — index gone leaves HEAD, both gone reports nothing rather than
+    /// erroring.
+    #[tokio::test]
+    async fn last_activity_reads_both_worktree_shapes_and_falls_back() {
+        let (base, repo_s) = setup_repo("last-activity").await;
+        let wt = base.path().join("age-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-age", &wt_s, "HEAD"]).await;
+
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        for path in [&repo_s, &wt_s] {
+            let ms = worktree_last_activity_ms(path)
+                .unwrap_or_else(|| panic!("a live worktree has a readable mtime: {path}"));
+            assert!(
+                (ms - now).abs() < 5 * 60 * 1000,
+                "{path}: {ms} is not within 5 minutes of {now}"
+            );
+        }
+
+        let admin = std::path::Path::new(&repo_s)
+            .join(".git")
+            .join("worktrees")
+            .join("age-wt");
+        let index = admin.join("index");
+        let head = admin.join("HEAD");
+
+        // Backdate the index an hour with its bytes untouched, so the two stamps
+        // are ordered and far apart: the probe must report the OLDER one, which
+        // neither a HEAD-first nor a newest-of-the-two resolution can. Setting the
+        // time rather than sleeping keeps this off the filesystem's timestamp
+        // granularity.
+        let handle = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&index)
+            .expect("open the linked index");
+        handle
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .expect("backdate the linked index");
+        drop(handle);
+
+        let index_ms = file_mtime_ms(&index).expect("the backdated index has an mtime");
+        let head_ms = file_mtime_ms(&head).expect("HEAD has an mtime");
+        assert!(
+            index_ms < head_ms,
+            "the fixture must separate the stamps: index {index_ms}, HEAD {head_ms}"
+        );
+        assert_eq!(
+            worktree_last_activity_ms(&wt_s),
+            Some(index_ms),
+            "the index is the signal, not HEAD"
+        );
+
+        std::fs::remove_file(&index).expect("drop the linked index");
+        assert_eq!(
+            worktree_last_activity_ms(&wt_s),
+            Some(head_ms),
+            "HEAD carries the fallback when the index is unreadable"
+        );
+        std::fs::remove_file(&head).expect("drop the linked HEAD");
+        assert_eq!(
+            worktree_last_activity_ms(&wt_s),
+            None,
+            "an unreadable probe reports nothing instead of failing"
         );
     }
 
