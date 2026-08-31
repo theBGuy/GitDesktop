@@ -62,11 +62,11 @@ import type {
   GeneratedNotes,
   GhAccounts,
   GhBranchProtection,
+  GhPublishOwners,
   GhRepoList,
   GhScopes,
   GhSecret,
   GhVariable,
-  GithubPublishOwners,
   GitInfo,
   GitLabHook,
   GitLabHookDelivery,
@@ -2971,7 +2971,7 @@ export const forgeGlMemberProjects = (repoPath: string) =>
 
 /** Owners the viewer can publish under — the GitHub publish owner picker (account-scoped). */
 export const forgeGhPublishOwners = () =>
-  invoke<GithubPublishOwners>("forge_gh_publish_owners");
+  invoke<GhPublishOwners>("forge_gh_publish_owners");
 
 // ── Bitbucket settings surface — Bitbucket repos only; the GitHub / GitLab dialogs
 //    keep their own provider-shaped sections.

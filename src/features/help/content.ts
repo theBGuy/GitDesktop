@@ -721,12 +721,15 @@ right on the **Push** and **Pull** buttons.
 
 A repo with no remote gets **Publish repository…** in the sync bar, and in the panel that
 stands in for the forge tabs until a remote exists. On **GitHub** the dialog opens with an
-**Owner** select above the name: your own account first, then every organization you belong
-to. Whichever you pick is where the repository is created — GitDesktop then adds it as
+**Owner** select above the name: your own account first, then your organizations (up to
+100). Whichever you pick is where the repository is created — GitDesktop then adds it as
 \`origin\` and pushes the current branch. Organizations that don't let you create
-repositories stay in the list, disabled, with **Can't create repositories** on the row. If
-the organization list can't be loaded, the name field takes an \`owner/name\` instead so you
-can still publish.
+repositories stay in the list, disabled, with **Can't create repositories** on the row.
+
+Typing \`owner/name\` in the **Name** field publishes under that owner rather than the
+select — how you reach an organization the list doesn't show. The select itself only
+disappears when the owner list has never loaded; once it has, a later refresh failure
+leaves the cached list in place.
 
 **GitLab** publishes into your own namespace, and **Bitbucket** asks for a **workspace**
 (see *Bitbucket repositories*).

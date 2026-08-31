@@ -1,4 +1,4 @@
-import { type ComponentProps, type ReactNode, useId } from "react";
+import { type ComponentProps, type ReactNode, useEffect, useId } from "react";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -192,7 +192,8 @@ export function SelectControl({
   sizeToContent = false,
 }: {
   label?: ReactNode;
-  /** value → display label; option order follows the object's key order. */
+  /** value → display label; rendered in the object's key order unless `order`
+   *  overrides it. */
   items: Record<string, string>;
   /** The selected key; "" (or a key absent from `items`) shows no selection. */
   value: string;
@@ -225,6 +226,27 @@ export function SelectControl({
         items[optionValue] ?? optionValue,
       ])
     : Object.entries(items);
+  // A mismatched `order` is never repaired here: a key it omits is dropped, a key
+  // only it holds renders its raw value as the label, and nothing is reordered —
+  // silently fixing a caller's bug would hide a wrong list from the user. Today's
+  // callers derive `order` and `items` from one source, so this guards future ones.
+  // In an effect, not the render body (StrictMode double-invokes render); the
+  // literal `import.meta.env.DEV` leads the `&&` so Vite drops the whole block.
+  useEffect(() => {
+    if (import.meta.env.DEV && order) {
+      const missing = Object.keys(items).filter((k) => !order.includes(k));
+      const extra = order.filter((k) => !(k in items));
+      const duplicate = order.filter((k, i) => order.indexOf(k) !== i);
+      if (missing.length || extra.length || duplicate.length) {
+        console.warn("SelectControl: `order` does not match `items`", {
+          label,
+          missing,
+          extra,
+          duplicate,
+        });
+      }
+    }
+  }, [items, order, label]);
   return (
     <div className="space-y-2">
       {label && <Label htmlFor={id}>{label}</Label>}

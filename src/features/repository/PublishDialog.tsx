@@ -34,17 +34,34 @@ function bbSlugWarning(value: string): string | null {
   return "Only letters, numbers, and . _ - are allowed, starting with a letter or number.";
 }
 
-/** With the owner picker active the name is just the repository name: a slash
- *  means the old typed owner/name form, and a leading dash reads as a gh flag —
- *  a composed `owner/-x` slips past the backend's own leading-dash refusal. */
+/** Whether any `/`-separated segment leads with a dash. gh reads a leading dash
+ *  as a flag, and the backend's own guard only tests the whole string, so an
+ *  owner-qualified `acme/-x` reaches gh unrefused unless it's caught per segment. */
+function hasDashLedSegment(value: string): boolean {
+  return value
+    .trim()
+    .split("/")
+    .some((segment) => segment.trim().startsWith("-"));
+}
+
+/** With the owner picker active a typed `owner/name` still wins over the select,
+ *  which is how an org the listing can't reach (the 100-org cap, a token without
+ *  `read:org`) stays publishable — so the slash only earns a note. The refusals
+ *  are tested first, so a warning beside a disabled Publish always explains it. */
 function ghNameWarning(value: string): string | null {
-  if (value.includes("/")) {
-    return "Choose the owner above instead of typing owner/name.";
-  }
-  if (value.trim().startsWith("-")) {
+  if (hasDashLedSegment(value)) {
     return "A repository name can't start with a dash.";
   }
+  if (value.includes("/")) {
+    return "Publishing under the owner typed here, not the Owner select.";
+  }
   return null;
+}
+
+/** Names the owner-picker arm refuses: blank, or any segment leading with a dash.
+ *  Blank blocks silently, matching the `required` validator's no-inline-text style. */
+function ghNameBlocked(value: string): boolean {
+  return value.trim() === "" || hasDashLedSegment(value);
 }
 
 /** Provider-specific inline hints on Name; GitLab's namespace needs none. */
@@ -123,9 +140,10 @@ export function PublishDialog({
   const workspaceItems = Object.fromEntries(workspaceSlugs.map((s) => [s, s]));
 
   // GitHub creates the repo under an owner — your account or an org. Only fetched
-  // when the GitHub dialog is open. The typed `owner/name` fallback engages only
-  // when the listing NEVER loaded: react-query keeps `data` across a failed
-  // background refetch, and stale owners beat yanking the picker mid-edit.
+  // when the GitHub dialog is open. The picker is hidden only when the listing
+  // NEVER loaded: react-query keeps `data` across a failed background refetch,
+  // and stale owners beat yanking the picker mid-edit. A typed `owner/name`
+  // targets that owner either way.
   const owners = useGhPublishOwners(open && isGitHub);
   const ghPickerActive = isGitHub && !(owners.isError && !owners.data);
   const ownerLogins = owners.data
@@ -139,7 +157,9 @@ export function PublishDialog({
   const ownerAnnotations = Object.fromEntries(
     blockedOrgs.map((o) => [
       o.login,
-      <span className="shrink-0 text-[11px] text-muted-foreground">
+      // Not muted: the row's own `data-disabled:opacity-50` already halves it,
+      // and the reason a row is disabled has to stay readable.
+      <span className="shrink-0 text-[11px] text-foreground">
         Can't create repositories
       </span>,
     ]),
@@ -158,9 +178,13 @@ export function PublishDialog({
     onSubmit: async ({ value }) => {
       const name = value.name.trim();
       // The publish backend takes `owner/repo` in `name`; compose it only for an
-      // org — the viewer's own login publishes under the bare name.
+      // org — the viewer's own login publishes under the bare name, and a name
+      // that already carries an owner targets that owner as typed.
       const target =
-        ghPickerActive && value.owner && value.owner !== owners.data?.viewer
+        ghPickerActive &&
+        !name.includes("/") &&
+        value.owner &&
+        value.owner !== owners.data?.viewer
           ? `${value.owner}/${name}`
           : name;
       try {
@@ -194,10 +218,11 @@ export function PublishDialog({
   const bbBlocked =
     isBitbucket &&
     (bbSlugWarning(nameVal) !== null || nameVal.trim() === "" || !workspaceVal);
-  // With the picker active the owner comes from it, so a name carrying its own
-  // owner or a leading dash can't be composed; the name's `warning` says which.
+  // A typed owner wins, so an unseeded picker only blocks a name that would
+  // consume it; the name's `warning` explains a refused name inline.
   const ghBlocked =
-    ghPickerActive && (ghNameWarning(nameVal) !== null || !ownerVal);
+    ghPickerActive &&
+    (ghNameBlocked(nameVal) || (!ownerVal && !nameVal.includes("/")));
   // GitHub's hints presume the picker — without a listing at all, typed
   // `owner/name` is the only way to reach an org, so the hints go with it.
   const nameWarning =
@@ -263,7 +288,11 @@ export function PublishDialog({
   });
 
   const githubScope = ghPickerActive ? (
-    <>It's created under the selected owner.</>
+    <>
+      It's created under the selected owner; typing{" "}
+      <span className="font-mono">owner/name</span> publishes under that owner
+      instead.
+    </>
   ) : (
     <>
       Use <span className="font-mono">owner/name</span> to publish under an
@@ -326,6 +355,7 @@ export function PublishDialog({
                     disabled={owners.isPending || !owners.data}
                     disabledItems={disabledOwners}
                     annotations={ownerAnnotations}
+                    sizeToContent
                   />
                 )}
               </form.AppField>
