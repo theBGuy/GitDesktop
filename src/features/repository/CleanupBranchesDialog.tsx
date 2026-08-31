@@ -86,21 +86,35 @@ export function prCheckStateFrom(
  * How far the worktree read behind the `isInWorktree` exclusion got. That
  * predicate answers false for every branch until the read lands, so its state is
  * what the dialog holds on: `"pending"` — no answer yet, and a list painted from
- * it could offer a branch the settled answer excludes; `"failed"` — the read
- * failed, a coverage gap the dialog names; `"checked"` — the exclusion is real.
+ * it could offer a branch the settled answer excludes; `"failed"` — no answer is
+ * coming, a coverage gap the dialog names; `"checked"` — the exclusion is real.
  */
 export type WorktreeCheckState = "pending" | "failed" | "checked";
 
 /** Derives that state from the worktree query. Absent data covers both a read in
  *  flight and one that never started — the same thing to a caller that has no
- *  answer to act on. */
+ *  answer to act on.
+ *
+ *  A PARKED read (react-query's offline mode) counts as failed rather than
+ *  pending: nothing will resolve it on its own, so the list must paint with the
+ *  caveat instead of waiting out the session. `useUserWorktrees` sets
+ *  `networkMode: "always"` for its local git read, which should keep that arm
+ *  unreachable — it is the net for a caller that doesn't.
+ *
+ *  Placeholder data is a stand-in for another key's rows, never an answer about
+ *  this repo, so it reads as pending. That query sets no placeholder today; this
+ *  is the same net. */
 export function worktreeCheckStateFrom(q: {
   isError: boolean;
+  fetchStatus: "fetching" | "paused" | "idle";
+  isPlaceholderData: boolean;
   data: unknown;
 }): WorktreeCheckState {
   if (q.isError) return "failed";
-  if (q.data === undefined) return "pending";
-  return "checked";
+  // Data in hand answers the exclusion even while a refetch is parked behind it.
+  if (q.data !== undefined && !q.isPlaceholderData) return "checked";
+  if (q.fetchStatus === "paused") return "failed";
+  return "pending";
 }
 
 /** Why a stale branch can still be off the list, per mode — the empty state
@@ -125,16 +139,25 @@ const EMPTY_MERGED_CLAUSE: Record<PrCheckState, string> = {
   unavailable: " and nothing is idle for ",
 };
 
-/** The one-line status above the candidate list while merged detection runs.
- *  A parked check has no progress to report, so it names what it's waiting on
- *  rather than implying the read is underway — and only the pull-request half
- *  can park, since divergence reads local objects with no connection at all.
- *  `srOnly` announces it without drawing it, for the states that show no
- *  status line today. */
-function MergedCheckLine({
+/** What the candidate list is waiting on, per outstanding read. The two settle
+ *  independently, so the line names the one actually running rather than
+ *  whichever came first. */
+const CHECKING_COPY: Record<"merged" | "worktrees", string> = {
+  merged: "Checking which branches are merged…",
+  worktrees: "Checking which branches are checked out in another worktree…",
+};
+
+/** The one-line status above the candidate list while a check it depends on
+ *  runs. A parked check has no progress to report, so it names what it's waiting
+ *  on rather than implying the read is underway — and only the pull-request half
+ *  can park, since both git reads work on local objects. `srOnly` announces it
+ *  without drawing it, for the states that show no status line today. */
+function CheckingLine({
+  what,
   paused,
   srOnly,
 }: {
+  what: "merged" | "worktrees";
   paused: boolean;
   srOnly?: boolean;
 }) {
@@ -146,7 +169,7 @@ function MergedCheckLine({
     >
       {paused
         ? "Waiting for a connection to check which branches were merged through a pull request…"
-        : "Checking which branches are merged…"}
+        : CHECKING_COPY[what]}
     </p>
   );
 }
@@ -647,7 +670,8 @@ export function CleanupBranchesDialog({
                   nothing about the check, which is what a `role="status"`
                   region can honestly repeat on every mode and window change. */}
               {stillChecking || prCheckPaused ? (
-                <MergedCheckLine
+                <CheckingLine
+                  what={checkingMerged ? "merged" : "worktrees"}
                   paused={prCheckPaused}
                   srOnly={!stillChecking}
                 />

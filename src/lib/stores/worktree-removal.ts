@@ -239,13 +239,20 @@ function clearRemoval(repoPath: string, path: string) {
   });
 }
 
-/** Drops the entry and refreshes what a settled removal changed: the manager's
- *  list, plus branches (a removed worktree frees its branch for checkout
- *  elsewhere) — the same set the worktree mutations invalidate. */
-function settleRemoval(repoPath: string, path: string) {
-  clearRemoval(repoPath, path);
+/** Refreshes what a completed removal changed: the manager's list, plus branches
+ *  (a removed worktree frees its branch for checkout elsewhere) — the same set
+ *  the worktree mutations invalidate. Separate from {@link settleRemoval}
+ *  because the promote path refreshes at its removal step while its entry stays
+ *  on screen for the rest of the composite. */
+function invalidateAfterRemoval(repoPath: string) {
   void queryClient.invalidateQueries({ queryKey: worktreeKey(repoPath) });
   void queryClient.invalidateQueries({ queryKey: repoKeys.branches(repoPath) });
+}
+
+/** Drops the entry and refreshes what the removal changed. */
+function settleRemoval(repoPath: string, path: string) {
+  clearRemoval(repoPath, path);
+  invalidateAfterRemoval(repoPath);
 }
 
 /**
@@ -351,13 +358,9 @@ async function runPromote(
     await removeWorktreeFreeingBranch(mainPath, worktreePath);
     removed = true;
     await pruneWorktrees(mainPath).catch(() => undefined);
-    // The removed row has to leave the manager's list now, while the entry
-    // stays on to report the tail: these are `settleRemoval`'s invalidations
-    // without its clear.
-    void queryClient.invalidateQueries({ queryKey: worktreeKey(activeKey) });
-    void queryClient.invalidateQueries({
-      queryKey: repoKeys.branches(activeKey),
-    });
+    // The removed row leaves the manager's list now; the entry stays on, so the
+    // line can go on reporting the tail.
+    invalidateAfterRemoval(activeKey);
     advancePromotePhase(
       activeKey,
       worktreePath,
@@ -384,13 +387,20 @@ async function runPromote(
     if (markedKey) settleRemoval(markedKey, worktreePath);
     if (removed) {
       // The worktree is already gone and the branch is free but not checked
-      // out — surface the recovery path (with git's error as the detail).
-      toast.error(
-        `Removed the worktree, but couldn't check out ${branch} in your main workspace — switch to it there manually.${
-          stashed ? " Your changes are stashed — use Pop latest stash." : ""
-        }`,
-        { description: e instanceof Error ? e.message : String(e) },
-      );
+      // out — surface the recovery path (with git's error as the detail). Which
+      // path depends on the step: a promote that wanted a stash and never got
+      // one stopped there, and the changes it left in place are exactly what
+      // would block "check it out yourself".
+      const stashedClause = stashed
+        ? " Your changes are stashed — use Pop latest stash."
+        : "";
+      const message =
+        willStash && !stashed
+          ? `Removed the worktree, but couldn't stash your main workspace changes — commit or stash them, then check out ${branch} manually.`
+          : `Removed the worktree, but couldn't check out ${branch} in your main workspace — switch to it there manually.${stashedClause}`;
+      toast.error(message, {
+        description: e instanceof Error ? e.message : String(e),
+      });
     } else {
       toastError(e);
     }

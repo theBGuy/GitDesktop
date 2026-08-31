@@ -280,12 +280,17 @@ export const worktreeKey = (repo: string) =>
   ["repo", repo, "user-worktrees"] as const;
 
 /** The repo's user-facing worktrees (session worktrees filtered out by the
- *  backend). `enabled` gates the fetch so it only runs while the manager is open. */
+ *  backend). `enabled` gates the fetch to the surface asking for it — the
+ *  manager, the branch switcher and its cleanup dialog, the branch pickers. */
 export function useUserWorktrees(repo: string, enabled = true) {
   return useQuery({
     queryKey: worktreeKey(repo),
     queryFn: () => listUserWorktrees(repo),
     enabled: enabled && Boolean(repo),
+    // A local `git worktree list` read. react-query's default "online" mode
+    // parks the fetch whenever the OS reports no connection, and a parked query
+    // is neither loading nor errored — a consumer waiting on it waits forever.
+    networkMode: "always",
   });
 }
 
