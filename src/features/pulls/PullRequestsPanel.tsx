@@ -18,6 +18,7 @@ import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
 import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
+import { clipTitleFromText } from "@/lib/clip-title";
 import type { PrStateFilter } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import {
@@ -285,31 +286,38 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           selectedPr?.kind === "local" && selectedPr.id === pr.id
         }
         onSelectLocal={(pr) => selectPr({ kind: "local", id: pr.id })}
-        renderLocalRow={(pr) => (
-          <>
-            <p className="flex items-center gap-1.5 text-xs font-medium">
-              <GitPullRequestIcon className="size-3 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 truncate" title={pr.title}>
-                {pr.title}
-              </span>
-              {pr.status !== "open" && (
-                <Badge variant="secondary" className="capitalize">
-                  {pr.status}
-                </Badge>
-              )}
-            </p>
-            <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
-              {parseableDate(pr.createdAt) && (
-                <>
-                  <RelativeTime date={pr.createdAt} />
-                  {" · "}
-                </>
-              )}
-              {pr.head} → {pr.base}
-              {pr.archived ? " · archived" : ""}
-            </p>
-          </>
-        )}
+        renderLocalRow={(pr) => {
+          const created = parseableDate(pr.createdAt);
+          return (
+            <>
+              <p className="flex items-center gap-1.5 text-xs font-medium">
+                <GitPullRequestIcon className="size-3 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 truncate" title={pr.title}>
+                  {pr.title}
+                </span>
+                {pr.status !== "open" && (
+                  <Badge variant="secondary" className="capitalize">
+                    {pr.status}
+                  </Badge>
+                )}
+              </p>
+              <p
+                className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground"
+                onMouseEnter={clipTitleFromText}
+              >
+                {created && <RelativeTime date={pr.createdAt} />}
+                {pr.archived && (created ? " · archived" : "archived")}
+                {!created && !pr.archived && "—"}
+              </p>
+              <p
+                className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground"
+                onMouseEnter={clipTitleFromText}
+              >
+                {pr.head} → {pr.base}
+              </p>
+            </>
+          );
+        }}
         localRowContextMenu={(pr, row) => (
           <LocalPrContextMenu repoPath={repoPath} pr={pr}>
             {row}
@@ -399,11 +407,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
                 </span>
               )}
             </p>
-            <p className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground">
+            <p
+              className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground"
+              onMouseEnter={clipTitleFromText}
+            >
               #{pr.number}
-              {/* Ahead of the branch names so the row's truncation can't eat it.
-                  Text carries the meaning; the label is self-contained so the
-                  glyph reads on its own. */}
+              {/* Indicators lead this line: truncation eats the tail first, so
+                  the age and author drop before the glyphs. Text carries the
+                  meaning; the label is self-contained so the glyph reads alone. */}
               {mergeMap?.get(pr.number) === "conflicting" && (
                 <>
                   {" · "}
@@ -432,19 +443,24 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
                   </span>
                 </>
               )}
-              {" · "}
-              {pr.author ? `${displayLogin(pr.author.login)} · ` : ""}
+              {pr.author ? ` · ${displayLogin(pr.author.login)}` : ""}
               {parseableDate(pr.createdAt) && (
                 <>
-                  <RelativeTime date={pr.createdAt} />
                   {" · "}
+                  <RelativeTime date={pr.createdAt} />
                 </>
               )}
+            </p>
+            <p
+              className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground"
+              onMouseEnter={clipTitleFromText}
+            >
               {pr.headRefName} → {pr.baseRefName}
             </p>
           </>
         )}
         remoteSkeletonRows={2}
+        skeletonLines={3}
         localNoun="pull requests"
         remoteNoun={remoteNoun}
       >

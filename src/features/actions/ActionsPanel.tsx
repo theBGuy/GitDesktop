@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { type MouseEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { ListRowSkeleton } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,8 +21,8 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Skeleton } from "@/components/ui/skeleton";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { suppressContextMenu } from "@/lib/context-menu";
 import {
   forgeFeatureReady,
@@ -245,21 +246,21 @@ export function ActionsPanel({
           is `relative`-only) so a long list can't leak a window scrollbar. */}
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
         {forge.isPending ? (
-          <div className="space-y-2 p-3">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
-          </div>
+          <>
+            <ListRowSkeleton lines={3} />
+            <ListRowSkeleton lines={3} />
+          </>
         ) : !ghReady ? (
           <ForgeNotReady
             repoPath={repoPath}
             feature={isPipelines ? "pipelines" : "workflow runs"}
           />
         ) : runs.isPending ? (
-          <div className="space-y-2 p-3">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
-          </div>
+          <>
+            <ListRowSkeleton lines={3} />
+            <ListRowSkeleton lines={3} />
+            <ListRowSkeleton lines={3} />
+          </>
         ) : runs.isError ? (
           <p className="px-3 py-4 text-xs text-muted-foreground">
             Couldn't load {runNoun} runs. Refresh to try again.
@@ -349,8 +350,11 @@ export function ActionsPanel({
                         {run.displayTitle}
                       </span>
                     </p>
-                    <p className="mt-0.5 truncate pl-5 text-[11px] text-muted-foreground">
-                      {run.workflowName} · {run.headBranch} ·{" "}
+                    <p
+                      className="mt-0.5 truncate pl-5 text-[11px] text-muted-foreground"
+                      onMouseEnter={clipTitleFromText}
+                    >
+                      {run.workflowName} ·{" "}
                       {statusLabel(run.status, run.conclusion)}
                       {parseableDate(run.updatedAt) && (
                         <>
@@ -358,6 +362,14 @@ export function ActionsPanel({
                           <RelativeTime date={run.updatedAt} />
                         </>
                       )}
+                    </p>
+                    <p
+                      className="mt-0.5 truncate pl-5 text-[11px] text-muted-foreground"
+                      onMouseEnter={clipTitleFromText}
+                    >
+                      {/* Tag/commit-triggered runs have no branch — the dash
+                          keeps the row's three-line height. */}
+                      {run.headBranch || "—"}
                     </p>
                   </button>
                 );

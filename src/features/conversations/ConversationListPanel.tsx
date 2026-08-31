@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
+import { ListRowSkeleton } from "@/components/list-row-skeleton";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -15,7 +16,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Skeleton } from "@/components/ui/skeleton";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import { cn } from "@/lib/utils";
 import { LoadMoreRow } from "./LoadMoreRow";
@@ -145,6 +145,9 @@ export function ConversationListPanel<L, R, J = never>(props: {
   renderRemoteRow: (item: R) => ReactNode;
   /** Skeleton rows while the GitHub list loads (PR=2, issue=3). */
   remoteSkeletonRows: number;
+  /** Lines per skeleton row: match the panel's real row layout (three-line
+   *  PR rows vs two-line issue rows); `remoteSkeletonRows` sets the count. */
+  skeletonLines?: 2 | 3;
   /** The remote list fetch failed — render `remoteErrorSlot` in place of the
    *  empty state so a failed load doesn't read as "no items". Omit (the default)
    *  and the remote section behaves exactly as before. */
@@ -228,6 +231,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
     onRemoteHover,
     renderRemoteRow,
     remoteSkeletonRows,
+    skeletonLines = 2,
     remoteError,
     remoteErrorSlot,
     localNoun,
@@ -370,19 +374,15 @@ export function ConversationListPanel<L, R, J = never>(props: {
           />
           {!remoteCollapsed &&
             (ghPending ? (
-              <div className="space-y-2 p-3">
-                <Skeleton className="h-9 w-full" />
-              </div>
+              <ListRowSkeleton lines={skeletonLines} />
             ) : !ghReady ? (
               (remoteNotReadySlot ?? (
                 <ForgeNotReady repoPath={repoPath} feature={feature} />
               ))
             ) : listPending ? (
-              <div className="space-y-2 p-3">
-                {Array.from({ length: remoteSkeletonRows }, (_, i) => (
-                  <Skeleton key={i} className="h-9 w-full" />
-                ))}
-              </div>
+              Array.from({ length: remoteSkeletonRows }, (_, i) => (
+                <ListRowSkeleton key={i} lines={skeletonLines} />
+              ))
             ) : remoteError ? (
               (remoteErrorSlot ?? (
                 <p className="px-3 py-4 text-xs text-muted-foreground">
@@ -419,11 +419,11 @@ export function ConversationListPanel<L, R, J = never>(props: {
                 )}
               </div>
               {jira.pending ? (
-                <div className="space-y-2 p-3">
-                  {Array.from({ length: jira.skeletonRows }, (_, i) => (
-                    <Skeleton key={i} className="h-9 w-full" />
-                  ))}
-                </div>
+                // Jira rows are three-line (status chips · title · key/updated),
+                // unlike this panel's own two-line issue rows.
+                Array.from({ length: jira.skeletonRows }, (_, i) => (
+                  <ListRowSkeleton key={i} lines={3} />
+                ))
               ) : jira.isError ? (
                 (jira.errorSlot ?? (
                   <p className="px-3 py-4 text-xs text-muted-foreground">
