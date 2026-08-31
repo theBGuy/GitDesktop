@@ -1412,10 +1412,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
     // Best-effort by design: a null `defaultName` (still loading, or unresolvable)
     // drops the default-branch guard rather than disabling Archive everywhere.
+    // The worktree guard is HELD rather than dropped while its read is in
+    // flight — the map is empty until it lands, which would offer Archive on a
+    // branch the answer excludes. A FAILED read falls through to best-effort:
+    // no answer is coming, and holding the item forever helps no one.
     const archiveBlockedReason = (() => {
       if (branch.archived) return null;
       if (branch.isCurrent) return "current branch";
       if (branch.name === defaultName) return "default branch";
+      if (userWorktrees.data === undefined && !userWorktrees.isError)
+        return "checking worktrees…";
       if (inWorktree) return "checked out in another worktree";
       return null;
     })();

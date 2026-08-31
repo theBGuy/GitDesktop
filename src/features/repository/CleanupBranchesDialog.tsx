@@ -174,10 +174,11 @@ function CheckingLine({
   );
 }
 
-/** Empty first paint while merged detection runs. An animated skeleton over a
- *  parked check would be a false activity signal, so a parked check paints
- *  nothing here — the status region above already names what it's waiting on. */
-function CheckingMergedPlaceholder({ paused }: { paused: boolean }) {
+/** First paint while a check the list depends on runs. An animated skeleton over
+ *  a parked pull-request read would be a false activity signal, so a parked read
+ *  paints nothing here — the status region above already names what it's waiting
+ *  on. */
+function CheckingPlaceholder({ paused }: { paused: boolean }) {
   if (paused) return null;
   return (
     <div className="space-y-1 py-2" aria-busy>
@@ -706,7 +707,7 @@ export function CleanupBranchesDialog({
 
             {/* List / skeleton / empty */}
             {showSkeleton ? (
-              <CheckingMergedPlaceholder paused={prCheckPaused} />
+              <CheckingPlaceholder paused={prCheckPaused} />
             ) : candidates.length === 0 ? (
               <p className="py-6 text-center text-xs text-muted-foreground">
                 {allStaleExcluded ? (
