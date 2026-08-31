@@ -1,8 +1,7 @@
 import { useCallback, useState } from "react";
-// Type-only, so it is erased at compile time: markdown-refs.ts imports TRIGGERS
-// from here, and only an erased import keeps that cycle off the runtime graph.
 import type { MarkdownRefs } from "@/components/ui/markdown-refs";
 import { useForgeGhHost } from "@/lib/git/host";
+import { type MentionTrigger, TRIGGERS } from "@/lib/git/mention-triggers";
 import { useAssignableUsers, useIssueList, usePrList } from "@/lib/git/queries";
 import type {
   ForgeProvider,
@@ -12,8 +11,7 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 
-/** A character that opens the suggestion popover when typed at a word boundary. */
-export type MentionTrigger = "@" | "#" | "!";
+export type { MentionTrigger };
 
 export interface MentionCandidate {
   /** Stable React key, unique per row. */
@@ -48,19 +46,6 @@ export interface MentionSource {
     query: string,
   ) => { items: MentionCandidate[]; loading: boolean; isError: boolean };
 }
-
-/**
- * Which triggers each forge autolinks in a comment body. GitHub resolves `#N` from a
- * single number space covering issues AND PRs; GitLab numbers them separately (`#`
- * issues, `!` merge requests). Bitbucket autolinks neither a bare `#N` nor a plain
- * `@nickname` written through its API — its mentions need `@{accountId}`, which
- * `forge_assignable_users` has no Bitbucket arm to supply, so it offers none.
- */
-export const TRIGGERS: Record<ForgeProvider, readonly MentionTrigger[]> = {
-  github: ["@", "#"],
-  gitlab: ["@", "#", "!"],
-  bitbucket: [],
-};
 
 /** No provider resolved yet: the source is inert (no triggers, no queries). */
 const NO_TRIGGERS: readonly MentionTrigger[] = [];

@@ -1,8 +1,5 @@
 import type { RendererExtension, TokenizerExtension, Tokens } from "marked";
-import {
-  type MentionTrigger,
-  TRIGGERS,
-} from "@/features/conversations/useMentionCandidates";
+import { type MentionTrigger, TRIGGERS } from "@/lib/git/mention-triggers";
 import type { ForgeProvider, RemoteLens } from "@/lib/git/types";
 
 /** What a rendered markdown body needs to linkify forge references: whose
@@ -30,14 +27,36 @@ const REF_KIND: Record<
   bitbucket: {},
 };
 
-/** No forge numbers an item 0, so `#0` is prose. */
-const NUMBER_RE = /^([#!])([1-9]\d{0,9})(?!\w)/;
-/** GitHub's handle grammar: alphanumerics with single internal hyphens, 39 chars
- *  at most. Deliberately conservative for GitLab, whose logins may hold dots. A
- *  following `.`/`/` that CONTINUES into a word is part of a longer name or path
- *  (`@jane.doe`, `@group/sub`), so the whole thing stays plain rather than
- *  linking a prefix — sentence-ending punctuation still closes a mention. */
-const USER_RE = /^@([a-zA-Z0-9](?:-?[a-zA-Z0-9]){0,38})(?![\w-])(?![./]\w)/;
+/** The grammars of the VALUES this renderer emits into `data-ref-num` /
+ *  `data-ref-user`. Both the tokenizer's match and the click dispatch's
+ *  re-validation are built from these fragments so the two can never drift.
+ *  No forge numbers an item 0, so `#0` is prose; handles follow GitHub's rule
+ *  (alphanumerics with single internal hyphens, 39 chars at most), which is
+ *  deliberately conservative for GitLab, whose logins may hold dots. */
+const NUMBER_SRC = String.raw`[1-9]\d{0,9}`;
+const USER_SRC = String.raw`[a-zA-Z0-9](?:-?[a-zA-Z0-9]){0,38}`;
+
+const NUMBER_RE = new RegExp(String.raw`^([#!])(${NUMBER_SRC})(?!\w)`);
+/** A following `.`/`/` that CONTINUES into a word belongs to a longer name or
+ *  path (`@jane.doe`, `@group/sub`), so the whole thing stays plain rather than
+ *  linking a prefix; sentence-ending punctuation still closes a mention. */
+const USER_RE = new RegExp(String.raw`^@(${USER_SRC})(?![\w-])(?![./]\w)`);
+const NUMBER_VALUE_RE = new RegExp(String.raw`^${NUMBER_SRC}$`);
+const USER_VALUE_RE = new RegExp(String.raw`^${USER_SRC}$`);
+
+/** Whether an anchor's `data-ref-num` is one this renderer could have emitted.
+ *  Raw HTML authored in a body survives sanitization with its `data-*` intact,
+ *  so the dispatch re-checks before it navigates or builds a forge URL. */
+export function isValidRefNum(value: string | undefined): value is string {
+  return value !== undefined && NUMBER_VALUE_RE.test(value);
+}
+
+/** The `data-ref-user` twin of {@link isValidRefNum} — rejects paths and any
+ *  other crafted value that could steer the profile URL. */
+export function isValidRefUser(value: string | undefined): value is string {
+  return value !== undefined && USER_VALUE_RE.test(value);
+}
+
 /** A reference only opens at a boundary: a word char keeps `word#123` plain, `/`
  *  keeps a URL fragment plain, and `&` keeps entities like `&#39;` unlinkified.
  *  Emphasis inherits the asymmetry — `**bold**#278` links where `_italic_#278`
@@ -60,18 +79,36 @@ export function setActiveMarkdownRefs(refs: MarkdownRefs | null): void {
 const NO_TRIGGERS: readonly string[] = [];
 const NO_KINDS: Partial<Record<MentionTrigger, MarkdownRefKind>> = {};
 
-/** The active forge's two tables, or null when nothing can match — no context,
- *  or a forge that autolinks nothing (Bitbucket), which must not pay for a scan. */
-function activeTables(): {
+/** A forge's two tables, or null when nothing can match — a forge that autolinks
+ *  nothing (Bitbucket) must not pay for a scan. */
+function tablesFor(provider: ForgeProvider): {
   triggers: readonly string[];
   kinds: Partial<Record<MentionTrigger, MarkdownRefKind>>;
 } | null {
-  if (!activeRefs) return null;
-  const { provider } = activeRefs;
   const triggers =
     (TRIGGERS[provider] as readonly string[] | undefined) ?? NO_TRIGGERS;
   if (triggers.length === 0) return null;
   return { triggers, kinds: REF_KIND[provider] ?? NO_KINDS };
+}
+
+/** {@link tablesFor} for the body currently being parsed. */
+function activeTables() {
+  return activeRefs ? tablesFor(activeRefs.provider) : null;
+}
+
+/** Whether `kind` is one this renderer could have emitted for `provider` — the
+ *  dispatch's guard against a `data-ref` naming a kind this forge never
+ *  produces (GitLab's `mr` on GitHub, anything at all on Bitbucket). Derived
+ *  from the same two tables the tokenizer reads, so the pair can't drift. */
+export function isEmittableRefKind(
+  provider: ForgeProvider,
+  kind: string | undefined,
+): kind is MarkdownRefKind {
+  const tables = tablesFor(provider);
+  if (!tables || kind === undefined) return false;
+  return tables.triggers.some(
+    (ch) => tables.kinds[ch as MentionTrigger] === kind,
+  );
 }
 
 /** What `ch` addresses on the active forge — undefined with no context, or when
@@ -110,10 +147,12 @@ export const forgeRefExtension: TokenizerExtension & RendererExtension = {
     return undefined;
   },
   tokenizer(src, tokens) {
-    // A link label's tokens are lexed with `inLink` set (marked's own guard for
-    // its autolinker): an anchor nested there is split by the HTML parser, which
-    // strands the outer link's href.
-    if (this.lexer.state.inLink) return undefined;
+    // marked's two raw-HTML states, both fatal to a nested anchor: inside a link
+    // label the HTML parser splits the anchor and strands the outer href, and
+    // inside a `<pre|code|kbd|script>` run the reference is quoted text that
+    // must stay text.
+    if (this.lexer.state.inLink || this.lexer.state.inRawBlock)
+      return undefined;
     const kind = activeKind(src[0]);
     if (!kind) return undefined;
     // The tokenizer gets no lookbehind and `start` cannot see the character

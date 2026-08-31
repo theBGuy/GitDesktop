@@ -1310,7 +1310,8 @@ drafted comment alongside), and merge locally. Local PRs are private to you and 
 written into the repo. When you're ready, **promote** a local PR to a real pull request
 on GitHub or Bitbucket, or a merge request on GitLab, in one click, history preserved.
 On a GitHub or GitLab repo the description and comment box complete **@** mentions and
-**#** references like the hosted ones, and render them as links you can click through.
+**#** references (**!** merge requests too on GitLab) like the hosted ones, and render
+them as links you can click through.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA
@@ -1583,8 +1584,8 @@ A **local issue** is a private, offline to-do tracked in the app — create, edi
 and close or reopen it with no remote, your drafted comment posted alongside. When it's
 ready to share, **promote** it to a GitHub or GitLab issue — or, when the repo has a
 **linked Jira project**, to a Jira issue — in one click. On a GitHub or GitLab repo its
-description and comments complete **@** mentions and **#** references, and render them as
-links, the same way the hosted issues do.
+description and comments complete **@** mentions and **#** references (**!** merge
+requests too on GitLab), and render them as links, the same way the hosted issues do.
 {{ai}}
 ## Hand off to an agent
 

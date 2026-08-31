@@ -6,7 +6,7 @@ import DOMPurify from "dompurify";
 // build (see markdown-hljs.ts), which registers into this same core singleton.
 import hljs from "highlight.js/lib/common";
 import { Marked } from "marked";
-import { useMemo, useSyncExternalStore } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { diffLang } from "@/features/diff/diff-lang";
 import { forgeRepoUrl } from "@/lib/git/api";
 import { issueDetailsOptions } from "@/lib/git/queries";
@@ -18,6 +18,9 @@ import { cn } from "@/lib/utils";
 import { hljsUpgradeStore, upgradeToFullHljs } from "./markdown-hljs";
 import {
   forgeRefExtension,
+  isEmittableRefKind,
+  isValidRefNum,
+  isValidRefUser,
   type MarkdownRefs,
   setActiveMarkdownRefs,
 } from "./markdown-refs";
@@ -99,9 +102,11 @@ export function Markdown({
   refs?: MarkdownRefs;
 }) {
   const queryClient = useQueryClient();
-  const selectPr = useUiStore((s) => s.selectPr);
-  const selectIssue = useUiStore((s) => s.selectIssue);
-  const setRepoTab = useUiStore((s) => s.setRepoTab);
+  // Cold list caches are the norm on local surfaces, so the resolve fetch can be
+  // the only gap between click and navigation. The fetch is cache-first, so the
+  // cursor plus aria-busy is the whole affordance: a spinner or a toast would be
+  // louder than this warrants.
+  const [resolving, setResolving] = useState(false);
   // Subscribe to the highlight.js upgrade: when a fence's exotic language pulls
   // in the full build, this snapshot changes, re-parsing so the previously-plain
   // fence highlights. (Module state read during render is invisible to the React
@@ -130,23 +135,36 @@ export function Markdown({
   /** Navigate to whatever a rendered reference anchor points at. */
   async function openRef(anchor: HTMLAnchorElement) {
     if (!refs) return;
-    const { repoPath, lens } = refs;
+    const { provider, repoPath, lens } = refs;
     const kind = anchor.dataset.ref;
+    // Body-authored raw HTML reaches here with its `data-*` intact (DOMPurify
+    // keeps them by design), so every value is re-checked against the grammar
+    // the renderer emits before it can steer a URL or a selection — the kind
+    // against THIS forge's row, since one forge's kinds aren't another's.
+    if (!isEmittableRefKind(provider, kind)) return;
     if (kind === "user") {
       const user = anchor.dataset.refUser;
-      if (!user) return;
+      if (!isValidRefUser(user)) return;
+      setResolving(true);
       try {
-        // Origin off the repo's server-truth web URL, so GitHub Enterprise and
-        // self-managed GitLab hosts resolve without a host table.
+        // Origin off the repo's server-truth web URL, so GitHub Enterprise and a
+        // self-managed GitLab at a host root need no host table. An instance
+        // served under a path prefix loses that prefix here.
         const origin = new URL(await forgeRepoUrl(repoPath)).origin;
-        await openUrl(`${origin}/${user}`);
+        await openUrl(`${origin}/${encodeURIComponent(user)}`);
       } catch (e) {
         toastError(e);
+      } finally {
+        setResolving(false);
       }
       return;
     }
-    const number = Number(anchor.dataset.refNum);
-    if (!Number.isInteger(number)) return;
+    const refNum = anchor.dataset.refNum;
+    if (!isValidRefNum(refNum)) return;
+    const number = Number(refNum);
+    // Fire-time reads of stable store actions: subscribing would put three
+    // listeners on every rendered body, most of which never carry a reference.
+    const { selectPr, selectIssue, setRepoTab } = useUiStore.getState();
     const openPr = () => {
       selectPr({ kind: "remote", id: String(number) });
       setRepoTab("pulls");
@@ -173,6 +191,7 @@ export function Markdown({
     const activeLens =
       queryClient.getQueryData<RemoteLens>(lensKey(repoPath)) ?? "origin";
     if (activeLens !== lens) {
+      setResolving(true);
       try {
         const details = await queryClient.fetchQuery(
           issueDetailsOptions(repoPath, number, lens),
@@ -180,6 +199,8 @@ export function Markdown({
         await openUrl(details.url);
       } catch (e) {
         toastError(e);
+      } finally {
+        setResolving(false);
       }
       return;
     }
@@ -201,6 +222,7 @@ export function Markdown({
       openIssue();
       return;
     }
+    setResolving(true);
     try {
       const issue = await queryClient.fetchQuery(
         issueDetailsOptions(repoPath, number, lens),
@@ -209,6 +231,8 @@ export function Markdown({
       else openIssue();
     } catch (e) {
       toastError(e);
+    } finally {
+      setResolving(false);
     }
   }
 
@@ -233,6 +257,9 @@ export function Markdown({
   return (
     <div
       onClick={onClick}
+      // The cursor can't reach a keyboard or screen-reader user; aria-busy is
+      // the same signal for them.
+      aria-busy={resolving}
       className={cn(
         "markdown-body text-xs/relaxed break-words",
         // Margins collapse at the edges so previews/comments have no leading or
@@ -249,6 +276,10 @@ export function Markdown({
         // Nested lists hug their parent item rather than opening a full gap.
         "[&_li_ul]:my-1 [&_li_ol]:my-1",
         "[&_a]:cursor-pointer [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2 [&_a:hover]:text-foreground",
+        // AFTER the anchor block, not before: tw-merge keeps the later of two
+        // `[&_a]:cursor-*` classes, so listing this first leaves the anchor on
+        // cursor-pointer and the busy state invisible where the pointer actually is.
+        resolving && "cursor-progress [&_a]:cursor-progress",
         "[&_code]:rounded-none [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em]",
         "[&_pre]:my-2.5 [&_pre]:overflow-x-auto [&_pre]:border [&_pre]:border-border [&_pre]:bg-muted [&_pre]:p-3 [&_pre]:text-[0.85em] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-[1em]",
         "[&_blockquote]:my-2.5 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",
