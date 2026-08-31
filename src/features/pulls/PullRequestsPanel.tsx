@@ -307,7 +307,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               >
                 {created && <RelativeTime date={pr.createdAt} />}
                 {pr.archived && (created ? " · archived" : "archived")}
-                {!created && !pr.archived && "—"}
+                {!created && !pr.archived && <span aria-hidden="true">—</span>}
               </p>
               <p
                 className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground"
@@ -460,7 +460,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           </>
         )}
         remoteSkeletonRows={2}
-        skeletonLines={3}
+        skeletonRowLines={3}
         localNoun="pull requests"
         remoteNoun={remoteNoun}
       >

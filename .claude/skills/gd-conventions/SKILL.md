@@ -163,10 +163,13 @@ separators.
 - A lazy panel's `Suspense` fallback is `LazyPanelFallback`
   (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
   region has no aria-busy and announces nothing to assistive tech.
-- Loading placeholders for a bordered row list are `ListRowSkeleton`
-  (`src/components/list-row-skeleton.tsx`) with `lines` matching the real row's
-  line count — flush `border-b px-3 py-2` rows, never a padded stack of
-  fixed-height bars, so a cold load doesn't shift the list as rows arrive.
+- Loading placeholders for a bordered row list are `ListRowSkeletons`
+  (`src/components/list-row-skeleton.tsx`), with `lines` matching the real row's
+  line count and `name` naming the content ("Loading pull requests…") — flush
+  `border-b px-3 py-2` rows, never a padded stack of fixed-height bars, so a
+  cold load doesn't shift the list as rows arrive. It carries the group's
+  `aria-busy` + sr-only status; `ListRowSkeleton` is the single row it wraps,
+  not a call-site component.
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.

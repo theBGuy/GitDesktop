@@ -3,7 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { type MouseEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { ListRowSkeleton } from "@/components/list-row-skeleton";
+import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -246,21 +246,22 @@ export function ActionsPanel({
           is `relative`-only) so a long list can't leak a window scrollbar. */}
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
         {forge.isPending ? (
-          <>
-            <ListRowSkeleton lines={3} />
-            <ListRowSkeleton lines={3} />
-          </>
+          <ListRowSkeletons
+            rows={2}
+            lines={3}
+            name={isPipelines ? "pipelines" : "workflow runs"}
+          />
         ) : !ghReady ? (
           <ForgeNotReady
             repoPath={repoPath}
             feature={isPipelines ? "pipelines" : "workflow runs"}
           />
         ) : runs.isPending ? (
-          <>
-            <ListRowSkeleton lines={3} />
-            <ListRowSkeleton lines={3} />
-            <ListRowSkeleton lines={3} />
-          </>
+          <ListRowSkeletons
+            rows={3}
+            lines={3}
+            name={isPipelines ? "pipelines" : "workflow runs"}
+          />
         ) : runs.isError ? (
           <p className="px-3 py-4 text-xs text-muted-foreground">
             Couldn't load {runNoun} runs. Refresh to try again.
@@ -369,7 +370,7 @@ export function ActionsPanel({
                     >
                       {/* Tag/commit-triggered runs have no branch — the dash
                           keeps the row's three-line height. */}
-                      {run.headBranch || "—"}
+                      {run.headBranch || <span aria-hidden="true">—</span>}
                     </p>
                   </button>
                 );
