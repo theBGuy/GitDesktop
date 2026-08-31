@@ -406,8 +406,7 @@ export function CleanupBranchesDialog({
   const pausedMergedCheck = checkingMerged && prCheckPaused;
   // Which of the status region's lines are DRAWN — it announces more than it
   // shows: the check line stays sr-only on the empty first paint (the skeleton
-  // is the visual signal there) and on a parked re-check of an answered list,
-  // whose visible staleness caveat is a surface this change doesn't own.
+  // is the visual signal there).
   const stillChecking = checkingMerged || checkingWorktrees;
   const showCheckLine =
     stillChecking && (pausedMergedCheck || candidates.length > 0);
@@ -664,10 +663,11 @@ export function CleanupBranchesDialog({
                   "sr-only",
               )}
             >
-              {/* A parked pull-request read is still waiting, so it keeps the
-                  waiting line; the resting line reports the count and claims
-                  nothing about the check, which is what a `role="status"`
-                  region can honestly repeat on every mode and window change. */}
+              {/* A parked FIRST pull-request fetch is still waiting, so it keeps
+                  the waiting line; a parked refetch over settled data falls
+                  through to the resting line, which reports the count and claims
+                  nothing about the check — what a `role="status"` region can
+                  honestly repeat on every mode and window change. */}
               {stillChecking ? (
                 <CheckingLine
                   what={checkingMerged ? "merged" : "worktrees"}
@@ -704,7 +704,11 @@ export function CleanupBranchesDialog({
 
             {/* List / skeleton / empty */}
             {showSkeleton ? (
-              <CheckingPlaceholder paused={pausedMergedCheck} />
+              // A running local worktree read is real activity, so it earns the
+              // skeleton even while the pull-request fetch sits parked.
+              <CheckingPlaceholder
+                paused={pausedMergedCheck && !checkingWorktrees}
+              />
             ) : candidates.length === 0 ? (
               <p className="py-6 text-center text-xs text-muted-foreground">
                 {allStaleExcluded ? (
