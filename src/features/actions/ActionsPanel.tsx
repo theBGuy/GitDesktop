@@ -88,6 +88,7 @@ export function ActionsPanel({
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
   const runNoun = isPipelines ? "pipeline" : "workflow";
+  const ciFeature = isPipelines ? "pipelines" : "workflow runs";
   const runHint =
     writeReason ??
     (ghReady
@@ -246,22 +247,11 @@ export function ActionsPanel({
           is `relative`-only) so a long list can't leak a window scrollbar. */}
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
         {forge.isPending ? (
-          <ListRowSkeletons
-            rows={2}
-            lines={3}
-            name={isPipelines ? "pipelines" : "workflow runs"}
-          />
+          <ListRowSkeletons rows={2} lines={3} name={ciFeature} />
         ) : !ghReady ? (
-          <ForgeNotReady
-            repoPath={repoPath}
-            feature={isPipelines ? "pipelines" : "workflow runs"}
-          />
+          <ForgeNotReady repoPath={repoPath} feature={ciFeature} />
         ) : runs.isPending ? (
-          <ListRowSkeletons
-            rows={3}
-            lines={3}
-            name={isPipelines ? "pipelines" : "workflow runs"}
-          />
+          <ListRowSkeletons rows={3} lines={3} name={ciFeature} />
         ) : runs.isError ? (
           <p className="px-3 py-4 text-xs text-muted-foreground">
             Couldn't load {runNoun} runs. Refresh to try again.

@@ -11,7 +11,7 @@ const BAR_WIDTHS = ["w-3/5", "w-2/5", "w-1/2"];
  * workflow-run / Jira rows). Callers render `ListRowSkeletons` instead — it
  * wraps this one with the busy announcement a loading region owes readers.
  */
-export function ListRowSkeleton({ lines }: { lines: 2 | 3 }) {
+function ListRowSkeleton({ lines }: { lines: 2 | 3 }) {
   return (
     <div className="border-b px-3 py-2">
       {/* Index key: a fixed static list that never reorders. */}
