@@ -80,6 +80,8 @@ import {
 import { SquashDialog } from "./RewriteDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
 
+const FILTER_PLACEHOLDER = "Filter loaded commits, or search all history";
+
 export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const log = useLog(repoPath);
   // Batch-resolve commit-author avatars for the log's authors (GitHub-only,
@@ -350,11 +352,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     return (
       <>
         <div className="border-b p-2">
-          {/* The real filter mounts disabled so the header doesn't shift the
-              rows when the log lands. */}
+          {/* A disabled copy of the header below, so the rows don't shift when
+              the log lands. */}
           <Input
             disabled
-            placeholder="Filter loaded commits, or search all history"
+            placeholder={FILTER_PLACEHOLDER}
             className="h-7"
             autoComplete="off"
           />
@@ -749,7 +751,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
             // Clearing the box returns to filtering the loaded pages.
             if (!e.target.value.trim()) setSearchMode(false);
           }}
-          placeholder="Filter loaded commits, or search all history"
+          placeholder={FILTER_PLACEHOLDER}
           className="h-7"
           autoComplete="off"
         />

@@ -8,7 +8,8 @@ import { cn } from "@/lib/utils";
  * `indent` (the default) lines after the first sit where icon-led rows put
  * their meta lines (≈ their `pl-4`/`pl-5`); avatar-column lists, whose lines
  * share one left edge, pass `indent={false}`. `lines` must match the real
- * row's line count (2 = issue rows, 3 = PR / workflow-run / Jira rows).
+ * row's line count (2 = issue / commit / tag / finding rows, 3 = PR /
+ * workflow-run / Jira / discussion rows).
  * Callers render `ListRowSkeletons` instead — it wraps this one with the busy
  * announcement a loading region owes readers.
  */
@@ -42,16 +43,19 @@ export function ListRowSkeletons({
   indent?: boolean;
 }) {
   return (
-    <div aria-busy>
-      {/* aria-busy alone has no text; role="status" gives the busy region words
-          for readers that announce it. */}
+    <>
+      {/* Outside the aria-busy subtree: busy suppresses descendant live-region
+          announcements until it flips false, and this container unmounts
+          instead of flipping. */}
       <span role="status" className="sr-only">
         Loading {name}…
       </span>
-      {/* Index key: a fixed static list that never reorders. */}
-      {Array.from({ length: rows }, (_, i) => (
-        <ListRowSkeleton key={i} lines={lines} indent={indent} />
-      ))}
-    </div>
+      <div aria-busy>
+        {/* Index key: a fixed static list that never reorders. */}
+        {Array.from({ length: rows }, (_, i) => (
+          <ListRowSkeleton key={i} lines={lines} indent={indent} />
+        ))}
+      </div>
+    </>
   );
 }

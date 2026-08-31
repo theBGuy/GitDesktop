@@ -108,6 +108,12 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     rowKey: (t) => String(t.number),
   });
 
+  // The forge-status and discussions-meta probes both precede any list data, so
+  // both render the same single-row placeholder.
+  const probeSkeleton = (
+    <ListRowSkeletons rows={1} lines={3} indent={false} name="discussions" />
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-1 border-b p-2">
@@ -184,12 +190,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
         <div onKeyDown={onListKeyDown}>
           {gh.isPending ? (
-            <ListRowSkeletons
-              rows={1}
-              lines={3}
-              indent={false}
-              name="discussions"
-            />
+            probeSkeleton
           ) : !ghReady ? (
             <ForgeNotReady repoPath={repoPath} feature="discussions" />
           ) : !forgeSupports(gh.data, "discussions") ? (
@@ -197,12 +198,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
               Discussions aren't available on this repository's host.
             </p>
           ) : meta.isPending ? (
-            <ListRowSkeletons
-              rows={1}
-              lines={3}
-              indent={false}
-              name="discussions"
-            />
+            probeSkeleton
           ) : meta.isError ? (
             <p className="px-3 py-6 text-center text-xs text-muted-foreground">
               Couldn't load discussions for this repository.
