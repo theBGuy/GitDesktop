@@ -220,7 +220,8 @@ export function Markdown({
     // GitHub's `#N` addresses one number space, so the kind resolves here: a
     // cached list that already holds the number answers for free (its issue
     // lists exclude PRs), and otherwise the issues endpoint answers for PR
-    // numbers too — a `/pull/` URL is what tells the two apart.
+    // numbers too — the URL's resource segment (…/pull/N vs …/issues/N) tells
+    // the two apart; a substring test would misfire on a repo named `pull`.
     const cachedHas = (list: "pr-list" | "issue-list") =>
       queryClient
         .getQueriesData<{ number: number }[]>({
@@ -240,7 +241,7 @@ export function Markdown({
       const issue = await queryClient.fetchQuery(
         issueDetailsOptions(repoPath, number, lens),
       );
-      if (issue.url.includes("/pull/")) openPr();
+      if (new URL(issue.url).pathname.split("/").at(-2) === "pull") openPr();
       else openIssue();
     } catch (e) {
       toastError(e);
