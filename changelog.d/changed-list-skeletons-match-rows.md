@@ -1,0 +1,1 @@
+- Loading placeholders in the discussions, history, tags, compare, and findings lists now match the rows they load into, keeping those lists steady on first open.

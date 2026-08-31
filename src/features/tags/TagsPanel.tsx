@@ -1,6 +1,7 @@
 import { CaretDownIcon, PlusIcon, TagIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,7 +21,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
   forgeFeatureReady,
@@ -194,10 +194,7 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
           `relative`-only) so a long list can't leak a window scrollbar. */}
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
         {tagList.isPending ? (
-          <div className="space-y-2 p-3">
-            <Skeleton className="h-9 w-full" />
-            <Skeleton className="h-9 w-full" />
-          </div>
+          <ListRowSkeletons rows={2} lines={2} name="tags" />
         ) : visible.length === 0 ? (
           <p className="px-3 py-4 text-xs text-muted-foreground">
             {rows.length > 0

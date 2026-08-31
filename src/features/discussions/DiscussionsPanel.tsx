@@ -1,6 +1,7 @@
 import { CaretDownIcon, PlusIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +14,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Skeleton } from "@/components/ui/skeleton";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { LabelChip } from "@/features/conversations/Thread";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
@@ -184,9 +184,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
         <div onKeyDown={onListKeyDown}>
           {gh.isPending ? (
-            <div className="space-y-2 p-3">
-              <Skeleton className="h-9 w-full" />
-            </div>
+            <ListRowSkeletons rows={1} lines={3} name="discussions" />
           ) : !ghReady ? (
             <ForgeNotReady repoPath={repoPath} feature="discussions" />
           ) : !forgeSupports(gh.data, "discussions") ? (
@@ -194,9 +192,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
               Discussions aren't available on this repository's host.
             </p>
           ) : meta.isPending ? (
-            <div className="space-y-2 p-3">
-              <Skeleton className="h-9 w-full" />
-            </div>
+            <ListRowSkeletons rows={1} lines={3} name="discussions" />
           ) : meta.isError ? (
             <p className="px-3 py-6 text-center text-xs text-muted-foreground">
               Couldn't load discussions for this repository.
@@ -206,11 +202,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
               Discussions aren't enabled for this repository.
             </p>
           ) : list.isPending ? (
-            <div className="space-y-2 p-3">
-              <Skeleton className="h-9 w-full" />
-              <Skeleton className="h-9 w-full" />
-              <Skeleton className="h-9 w-full" />
-            </div>
+            <ListRowSkeletons rows={3} lines={3} name="discussions" />
           ) : visible.length === 0 ? (
             <p className="px-3 py-4 text-xs text-muted-foreground">
               {discussions.length > 0

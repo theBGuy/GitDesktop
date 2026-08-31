@@ -10,6 +10,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { type MouseEvent, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -445,10 +446,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
           </button>
 
           {comparison.isPending ? (
-            <div className="space-y-2 p-3">
-              <Skeleton className="h-8 w-full" />
-              <Skeleton className="h-8 w-full" />
-            </div>
+            <ListRowSkeletons rows={2} lines={2} name="commits" />
           ) : (
             /* overflow-hidden contains the list's natural height (vendored Root
                is `relative`-only) so a long list can't leak a window scrollbar. */

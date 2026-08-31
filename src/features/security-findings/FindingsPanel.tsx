@@ -14,6 +14,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,7 +26,6 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Skeleton } from "@/components/ui/skeleton";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import {
@@ -402,12 +402,7 @@ function PathLabel({ path, line }: { path: string; line: number | null }) {
 }
 
 function RowSkeletons() {
-  return (
-    <div className="space-y-2 p-3">
-      <Skeleton className="h-10 w-full" />
-      <Skeleton className="h-10 w-full" />
-    </div>
-  );
+  return <ListRowSkeletons rows={2} lines={2} name="findings" />;
 }
 
 /** A full-width, in-flow explanation of why a category has no usable data, with
