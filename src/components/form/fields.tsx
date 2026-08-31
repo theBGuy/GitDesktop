@@ -198,7 +198,8 @@ export function SelectControl({
   value: string;
   onValueChange: (value: string) => void;
   disabled?: boolean;
-  /** Option keys rendered as disabled rows (skipped by keyboard nav). */
+  /** Option keys rendered as disabled rows — unselectable and skipped by
+   *  typeahead, though arrow-key highlight still visits them (aria-disabled). */
   disabledItems?: ReadonlySet<string>;
   /** Explicit option order. `items` is an object, so integer-like keys sort
    *  ahead of the rest whatever order it was built in — any caller whose values

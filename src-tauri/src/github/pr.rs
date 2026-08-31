@@ -499,7 +499,8 @@ fn parse_publish_owners(body: &str) -> AppResult<GithubPublishOwners> {
 
 /// The viewer's publishable owners, for the publish dialog's owner picker.
 /// Account-scoped, so it runs with no repo dir; `first: 100` is a deliberate
-/// fail-open cap — the typed `owner/name` form still reaches an org past it.
+/// unpaginated cap — an org past it is reachable by typed `owner/name` only
+/// while the dialog is in its listing-never-loaded fallback.
 pub async fn gh_publish_owners() -> AppResult<GithubPublishOwners> {
     let query = "query { viewer { login organizations(first: 100) { nodes { login viewerCanCreateRepositories } } } }";
     let out = run_gh(
