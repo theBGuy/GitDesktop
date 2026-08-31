@@ -712,10 +712,28 @@ export function ChangesPanel({
 
   if (status.isPending) {
     return (
-      <div className="flex-1 space-y-2 p-3">
-        <Skeleton className="h-4 w-24" />
-        <Skeleton className="h-8 w-full" />
-        <Skeleton className="h-8 w-full" />
+      // Anchored to the empty state's geometry (Empty gap-4 p-6; EmptyMedia
+      // size-8 mb-2; header gap-2): a clean tree resolves onto these bars in
+      // place, and the file list crossfades in as categorically different
+      // content — neither reads as a jump. The animation delay keeps a fast
+      // status resolve from flashing a placeholder at all.
+      <div
+        aria-busy
+        className="flex flex-1 flex-col items-center justify-center gap-4 p-6 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:delay-150 motion-safe:duration-200 motion-safe:fill-mode-backwards"
+      >
+        {/* aria-busy alone has no text; role="status" gives the busy region
+            words for readers that announce it. */}
+        <span role="status" className="sr-only">
+          Loading changes…
+        </span>
+        {/* pb-48 stands in for the empty state's action stack (4-5 h-8
+            buttons + gaps), so this centered column puts the disc where the
+            resolved icon lands — without it the icon resolves ~90px higher. */}
+        <div className="flex flex-col items-center gap-2 pb-48">
+          <Skeleton className="mb-2 size-8" />
+          <Skeleton className="h-5 w-32" />
+          <Skeleton className="h-5 w-36" />
+        </div>
       </div>
     );
   }

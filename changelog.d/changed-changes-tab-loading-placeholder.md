@@ -1,0 +1,1 @@
+- The Changes tab settles without jumping: its loading placeholder sits where the clean-tree message lands and only appears when loading takes a moment.
