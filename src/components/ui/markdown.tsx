@@ -132,19 +132,34 @@ export function Markdown({
     }
   }, [children, hljsVersion, refs?.provider, refs?.repoPath, refs?.lens]);
 
-  /** Navigate to whatever a rendered reference anchor points at. */
-  async function openRef(anchor: HTMLAnchorElement) {
-    if (!refs) return;
-    const { provider, repoPath, lens } = refs;
+  /**
+   * The reference this anchor addresses, or null when it isn't one this body can
+   * act on. Body-authored raw HTML reaches the DOM with its `data-*` intact
+   * (DOMPurify keeps them by design), so the kind is checked against THIS forge's
+   * row and every value against the grammar the renderer emits. Synchronous
+   * because the click handler decides whether to claim the event on its answer.
+   */
+  function refTarget(anchor: HTMLAnchorElement) {
+    if (!refs) return null;
     const kind = anchor.dataset.ref;
-    // Body-authored raw HTML reaches here with its `data-*` intact (DOMPurify
-    // keeps them by design), so every value is re-checked against the grammar
-    // the renderer emits before it can steer a URL or a selection — the kind
-    // against THIS forge's row, since one forge's kinds aren't another's.
-    if (!isEmittableRefKind(provider, kind)) return;
+    if (!isEmittableRefKind(refs.provider, kind)) return null;
     if (kind === "user") {
       const user = anchor.dataset.refUser;
-      if (!isValidRefUser(user)) return;
+      return isValidRefUser(user) ? ({ kind, user } as const) : null;
+    }
+    const refNum = anchor.dataset.refNum;
+    return isValidRefNum(refNum)
+      ? ({ kind, number: Number(refNum) } as const)
+      : null;
+  }
+
+  /** Navigate to whatever a validated reference target points at. */
+  async function openRef(target: NonNullable<ReturnType<typeof refTarget>>) {
+    if (!refs) return;
+    const { repoPath, lens } = refs;
+    const { kind } = target;
+    if (kind === "user") {
+      const { user } = target;
       setResolving(true);
       try {
         // Origin off the repo's server-truth web URL, so GitHub Enterprise and a
@@ -159,9 +174,7 @@ export function Markdown({
       }
       return;
     }
-    const refNum = anchor.dataset.refNum;
-    if (!isValidRefNum(refNum)) return;
-    const number = Number(refNum);
+    const { number } = target;
     // Fire-time reads of stable store actions: subscribing would put three
     // listeners on every rendered body, most of which never carry a reference.
     const { selectPr, selectIssue, setRepoTab } = useUiStore.getState();
@@ -237,14 +250,18 @@ export function Markdown({
   }
 
   // Event delegation over the rendered body, most specific target first: a forge
-  // reference navigates in-app, and any other external link opens in the system
-  // browser rather than navigating the embedded webview.
+  // reference navigates in-app, then any external link opens in the system browser
+  // rather than navigating the embedded webview, and the fall-through past both is
+  // the seam a future image branch slots into. The in-app branch claims the event
+  // only for a target that fully validates, so a `data-ref` this renderer didn't
+  // emit keeps whatever behavior its href already gives it.
   function onClick(e: React.MouseEvent) {
     const anchor = (e.target as HTMLElement).closest("a");
     if (!anchor) return;
-    if (anchor.dataset.ref) {
+    const target = refTarget(anchor);
+    if (target) {
       e.preventDefault();
-      void openRef(anchor);
+      void openRef(target);
       return;
     }
     const href = anchor.getAttribute("href");

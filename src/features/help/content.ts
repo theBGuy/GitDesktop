@@ -934,7 +934,9 @@ Those references are links once a body is rendered. On **GitHub** and **GitLab**
 **#123** in a description, comment, review thread,{{ai}} AI review,{{/ai}} or release note opens that
 pull request or issue right here in the app — GitHub numbers issues and pull requests in
 one sequence, so GitDesktop works out which of the two you meant and takes you to the
-matching tab; on GitLab, **#123** is an issue and **!123** a merge request. **@user**
+matching tab (a body you're viewing under a fork's other remote opens the item on the
+forge instead, so the number always lands where it belongs); on GitLab, **#123** is an
+issue and **!123** a merge request. **@user**
 opens that person's profile in your browser. **Bitbucket** bodies leave references plain,
 matching Bitbucket itself, and a reference inside backticks or a fenced code block stays
 plain text everywhere.
