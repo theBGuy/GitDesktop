@@ -348,9 +348,21 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
   if (log.isPending) {
     return (
-      <div className="flex-1">
-        <ListRowSkeletons rows={3} lines={2} name="commits" />
-      </div>
+      <>
+        <div className="border-b p-2">
+          {/* The real filter mounts disabled so the header doesn't shift the
+              rows when the log lands. */}
+          <Input
+            disabled
+            placeholder="Filter loaded commits, or search all history"
+            className="h-7"
+            autoComplete="off"
+          />
+        </div>
+        <div className="flex-1">
+          <ListRowSkeletons rows={3} lines={2} indent={false} name="commits" />
+        </div>
+      </>
     );
   }
 

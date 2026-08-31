@@ -184,7 +184,12 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
       <ScrollArea className="min-h-0 flex-1 overflow-hidden">
         <div onKeyDown={onListKeyDown}>
           {gh.isPending ? (
-            <ListRowSkeletons rows={1} lines={3} name="discussions" />
+            <ListRowSkeletons
+              rows={1}
+              lines={3}
+              indent={false}
+              name="discussions"
+            />
           ) : !ghReady ? (
             <ForgeNotReady repoPath={repoPath} feature="discussions" />
           ) : !forgeSupports(gh.data, "discussions") ? (
@@ -192,7 +197,12 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
               Discussions aren't available on this repository's host.
             </p>
           ) : meta.isPending ? (
-            <ListRowSkeletons rows={1} lines={3} name="discussions" />
+            <ListRowSkeletons
+              rows={1}
+              lines={3}
+              indent={false}
+              name="discussions"
+            />
           ) : meta.isError ? (
             <p className="px-3 py-6 text-center text-xs text-muted-foreground">
               Couldn't load discussions for this repository.
@@ -202,7 +212,12 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
               Discussions aren't enabled for this repository.
             </p>
           ) : list.isPending ? (
-            <ListRowSkeletons rows={3} lines={3} name="discussions" />
+            <ListRowSkeletons
+              rows={3}
+              lines={3}
+              indent={false}
+              name="discussions"
+            />
           ) : visible.length === 0 ? (
             <p className="px-3 py-4 text-xs text-muted-foreground">
               {discussions.length > 0

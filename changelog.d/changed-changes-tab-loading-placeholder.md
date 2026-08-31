@@ -1,1 +1,2 @@
-- The Changes tab settles without jumping: its loading placeholder sits where the clean-tree message lands and only appears when loading takes a moment.
+- The **Changes** tab holds its place while it loads: the placeholder sits
+  where the clean-tree summary lands, and a quick load skips it entirely.

@@ -712,23 +712,24 @@ export function ChangesPanel({
 
   if (status.isPending) {
     return (
-      // Anchored to the empty state's geometry (Empty gap-4 p-6; EmptyMedia
-      // size-8 mb-2; header gap-2): a clean tree resolves onto these bars in
-      // place, and the file list crossfades in as categorically different
-      // content — neither reads as a jump. The animation delay keeps a fast
-      // status resolve from flashing a placeholder at all.
+      // Geometry copied from the empty state (Empty gap-4 p-6; EmptyMedia
+      // size-8 mb-2; header gap-2) so a clean tree resolves its icon/title
+      // onto these bars. The 150ms animation delay keeps a fast status
+      // resolve from ever painting a placeholder.
+      // A delayed paint isn't motion, so the 0-duration animation runs
+      // unconditionally; the fade is the motion-safe layer on top.
       <div
         aria-busy
-        className="flex flex-1 flex-col items-center justify-center gap-4 p-6 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:delay-150 motion-safe:duration-200 motion-safe:fill-mode-backwards"
+        className="flex flex-1 flex-col items-center justify-center gap-4 p-6 animate-in fade-in-0 delay-150 duration-0 fill-mode-backwards motion-safe:duration-200"
       >
         {/* aria-busy alone has no text; role="status" gives the busy region
             words for readers that announce it. */}
         <span role="status" className="sr-only">
           Loading changes…
         </span>
-        {/* pb-48 stands in for the empty state's action stack (4-5 h-8
-            buttons + gaps), so this centered column puts the disc where the
-            resolved icon lands — without it the icon resolves ~90px higher. */}
+        {/* pb-48 reserves the empty state's action stack (2-5 h-7 buttons +
+            gaps), calibrated to the fullest 5-button case — shorter stacks
+            resolve the header a few px higher. */}
         <div className="flex flex-col items-center gap-2 pb-48">
           <Skeleton className="mb-2 size-8" />
           <Skeleton className="h-5 w-32" />
