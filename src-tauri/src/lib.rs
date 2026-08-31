@@ -477,6 +477,7 @@ pub fn run() {
             forge::forge_repo_visibility,
             forge::forge_publish_targets,
             forge::forge_publish_repo,
+            forge::forge_gh_publish_owners,
             forge::forge_bb_workspaces,
             forge::forge_bb_repo_settings,
             forge::forge_bb_repo_settings_update,

@@ -115,6 +115,10 @@ separators.
   an item-level handler is dead once the row span self-bounds (the
   `select-item-clip-title` guard fails on both); the closed field takes
   `onMouseEnter={clipTitleFromText}` on its `SelectValue`.
+- A `SelectControl`/`SelectField` `items` Record silently reorders integer-like
+  keys to the front (JS object semantics) — any picker whose option values are
+  user-supplied identifiers that can be all-digits (logins, slugs) must pass
+  the `order` prop with the sequence it means (exactly the keys of `items`).
 - Per-file `+added -deleted` counts render through `DiffStat`
   (`src/components/diff-stat.tsx`) — plain numbers in, optional `isBinary`
   (a muted `bin`) and `format` (Insights abbreviates via `fmt`); never

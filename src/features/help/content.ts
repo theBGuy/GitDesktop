@@ -717,6 +717,20 @@ right on the **Push** and **Pull** buttons.
 - **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
   see **Publish branch** instead.
 
+## Publish a local repo
+
+A repo with no remote gets **Publish repository…** in the sync bar, and in the panel that
+stands in for the forge tabs until a remote exists. On **GitHub** the dialog opens with an
+**Owner** select above the name: your own account first, then every organization you belong
+to. Whichever you pick is where the repository is created — GitDesktop then adds it as
+\`origin\` and pushes the current branch. Organizations that don't let you create
+repositories stay in the list, disabled, with **Can't create repositories** on the row. If
+the organization list can't be loaded, the name field takes an \`owner/name\` instead so you
+can still publish.
+
+**GitLab** publishes into your own namespace, and **Bitbucket** asks for a **workspace**
+(see *Bitbucket repositories*).
+
 ## Stash and reapply
 
 When a **Pull** would overwrite uncommitted changes, git refuses it — and GitDesktop offers

@@ -1170,6 +1170,12 @@ export interface GitLabMrMergeState {
   pipelineUrl: string;
 }
 
+/** Owners the viewer can publish a new GitHub repository under. */
+export interface GithubPublishOwners {
+  viewer: string;
+  orgs: { login: string; canCreate: boolean }[];
+}
+
 // ── Bitbucket settings surface ─────────────────────────────────────────────
 //
 // Bitbucket's repo-management model is its own shape (like GitLab's), not a mapping

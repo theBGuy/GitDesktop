@@ -5838,6 +5838,18 @@ export function useGlMemberProjects(repo: string, enabled: boolean) {
   });
 }
 
+/** The viewer's publishable GitHub owners — the publish owner picker.
+ *  Account-scoped, so NOT repo-keyed; cached broadly like workspaces. */
+export function useGhPublishOwners(enabled: boolean) {
+  return useQuery({
+    queryKey: ["gh", "publish-owners"] as const,
+    queryFn: () => api.forgeGhPublishOwners(),
+    enabled,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
 // ── Bitbucket settings surface ─────────────────────────────────────────────
 // Mirrors the useGl* hooks: repo-keyed reads (staleTime + retry:false) and mutations
 // that invalidate their read onSettled. The workspaces list is account-scoped, not

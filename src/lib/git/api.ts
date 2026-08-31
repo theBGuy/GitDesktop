@@ -66,6 +66,7 @@ import type {
   GhScopes,
   GhSecret,
   GhVariable,
+  GithubPublishOwners,
   GitInfo,
   GitLabHook,
   GitLabHookDelivery,
@@ -2967,6 +2968,10 @@ export const forgeGlProtectedBranchDelete = (repoPath: string, name: string) =>
  *  dialog's suggestions (host-correct for self-managed GitLab). */
 export const forgeGlMemberProjects = (repoPath: string) =>
   invoke<string[]>("forge_gl_member_projects", { repoPath });
+
+/** Owners the viewer can publish under — the GitHub publish owner picker (account-scoped). */
+export const forgeGhPublishOwners = () =>
+  invoke<GithubPublishOwners>("forge_gh_publish_owners");
 
 // ── Bitbucket settings surface — Bitbucket repos only; the GitHub / GitLab dialogs
 //    keep their own provider-shaped sections.

@@ -417,6 +417,100 @@ pub async fn gh_publish_repo(
     gh_repo_url(repo_path).await
 }
 
+/// Owners the viewer can publish a new repository under: their own account plus
+/// every org membership. GraphQL's `viewerCanCreateRepositories` folds the org
+/// member-policy AND the viewer's role server-side (probed 2026-08-31: false on
+/// a member-role org whose policy forbids member creation, true elsewhere).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubPublishOwners {
+    pub viewer: String,
+    pub orgs: Vec<GithubPublishOrg>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubPublishOrg {
+    pub login: String,
+    pub can_create: bool,
+}
+
+#[derive(Deserialize)]
+struct RawOwnersBody {
+    data: Option<RawOwnersData>,
+}
+
+#[derive(Deserialize)]
+struct RawOwnersData {
+    viewer: Option<RawOwnersViewer>,
+}
+
+#[derive(Deserialize)]
+struct RawOwnersViewer {
+    #[serde(default)]
+    login: String,
+    organizations: Option<RawOwnerOrgs>,
+}
+
+#[derive(Deserialize)]
+struct RawOwnerOrgs {
+    /// GraphQL connection nodes are nullable both as a list and per entry, so
+    /// each layer stays optional rather than defaulting a shape we didn't get.
+    nodes: Option<Vec<Option<RawOwnerOrg>>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawOwnerOrg {
+    #[serde(default)]
+    login: String,
+    #[serde(default)]
+    viewer_can_create_repositories: bool,
+}
+
+/// Response body → the publish owner list. Pure so it tests without a network.
+/// A missing viewer login is an error (there is nothing to publish under);
+/// null or login-less org entries are skipped rather than failing the list.
+fn parse_publish_owners(body: &str) -> AppResult<GithubPublishOwners> {
+    let parsed: RawOwnersBody = serde_json::from_str(body)
+        .map_err(|e| AppError::Gh(format!("could not parse the owner query: {e}")))?;
+    let viewer = parsed
+        .data
+        .and_then(|d| d.viewer)
+        .filter(|v| !v.login.trim().is_empty())
+        .ok_or_else(|| AppError::Gh("could not determine your GitHub account".into()))?;
+    let orgs = viewer
+        .organizations
+        .and_then(|o| o.nodes)
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter(|o| !o.login.trim().is_empty())
+        .map(|o| GithubPublishOrg {
+            login: o.login,
+            can_create: o.viewer_can_create_repositories,
+        })
+        .collect();
+    Ok(GithubPublishOwners {
+        viewer: viewer.login,
+        orgs,
+    })
+}
+
+/// The viewer's publishable owners, for the publish dialog's owner picker.
+/// Account-scoped, so it runs with no repo dir; `first: 100` is a deliberate
+/// fail-open cap — the typed `owner/name` form still reaches an org past it.
+pub async fn gh_publish_owners() -> AppResult<GithubPublishOwners> {
+    let query = "query { viewer { login organizations(first: 100) { nodes { login viewerCanCreateRepositories } } } }";
+    let out = run_gh(
+        None,
+        &["api", "graphql", "-f", &format!("query={query}")],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    parse_publish_owners(&out.stdout_lossy())
+}
+
 /// The repository's web URL (works for github.com and GitHub Enterprise).
 /// Append paths like `/issues/new` for specific pages.
 pub async fn gh_repo_url(repo_path: String) -> AppResult<String> {
@@ -5791,7 +5885,8 @@ mod tests {
         external_items_from_thread_nodes,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message, host_from_url,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
-        parse_auth_accounts, parse_pr_url_repo, pr_edit_args, pr_poll_query, pull_stack_ref,
+        parse_auth_accounts, parse_pr_url_repo, parse_publish_owners, pr_edit_args, pr_poll_query,
+        pull_stack_ref,
         real_check_time,
         real_time_or_empty, reconstruct_pr_diff, reject_upstream_create_metadata,
         rest_comment_to_out, rest_commit_to_out, rest_pull_to_pr_info, rest_review_to_out,
@@ -8007,5 +8102,59 @@ github.acme.com
             ] },
         })];
         assert!(external_items_from_thread_nodes(&nodes).is_empty());
+    }
+
+    /// Fixtures rather than a live gh: the false arm needs an org whose member
+    /// policy forbids repository creation, which no test account can conjure.
+    #[test]
+    fn parses_publish_owners_with_orgs() {
+        let body = r#"{"data":{"viewer":{"login":"theBGuy","organizations":{"nodes":[
+            {"login":"acme","viewerCanCreateRepositories":true},
+            {"login":"locked-co","viewerCanCreateRepositories":false}
+        ]}}}}"#;
+        let owners = parse_publish_owners(body).expect("parsed");
+        assert_eq!(owners.viewer, "theBGuy");
+        assert_eq!(owners.orgs.len(), 2);
+        assert_eq!(owners.orgs[0].login, "acme");
+        assert!(owners.orgs[0].can_create);
+        assert_eq!(owners.orgs[1].login, "locked-co");
+        assert!(!owners.orgs[1].can_create);
+    }
+
+    #[test]
+    fn parses_publish_owners_with_no_orgs() {
+        let body = r#"{"data":{"viewer":{"login":"solo","organizations":{"nodes":[]}}}}"#;
+        assert!(parse_publish_owners(body).expect("parsed").orgs.is_empty());
+        // A viewer without the connection at all is the same empty list.
+        let bare = r#"{"data":{"viewer":{"login":"solo"}}}"#;
+        let owners = parse_publish_owners(bare).expect("parsed");
+        assert_eq!(owners.viewer, "solo");
+        assert!(owners.orgs.is_empty());
+    }
+
+    #[test]
+    fn skips_null_org_nodes_in_publish_owners() {
+        let body = r#"{"data":{"viewer":{"login":"theBGuy","organizations":{"nodes":[
+            null, {"login":"acme","viewerCanCreateRepositories":true}
+        ]}}}}"#;
+        let owners = parse_publish_owners(body).expect("parsed");
+        assert_eq!(owners.orgs.len(), 1);
+        assert_eq!(owners.orgs[0].login, "acme");
+    }
+
+    #[test]
+    fn refuses_publish_owners_without_a_viewer_login() {
+        assert!(matches!(
+            parse_publish_owners("not json at all"),
+            Err(AppError::Gh(_))
+        ));
+        assert!(matches!(
+            parse_publish_owners(r#"{"data":{"viewer":null}}"#),
+            Err(AppError::Gh(_))
+        ));
+        assert!(matches!(
+            parse_publish_owners(r#"{"data":{"viewer":{"login":""}}}"#),
+            Err(AppError::Gh(_))
+        ));
     }
 }

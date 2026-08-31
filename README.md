@@ -81,6 +81,9 @@ expand them when you want the detail.
 Clone, add local, create (with README / .gitignore / license scaffolding),
 publish to GitHub, GitLab, or Bitbucket, and fork.
 
+- **Pick the owner when you publish**: publishing a local repo to GitHub
+  starts with an **Owner** select (your account or any organization you
+  belong to); Bitbucket picks a **workspace** the same way.
 - **Repo switcher**: every repo grouped by owner, with a Recent section and a
   filter. Each row carries identity badges (the forge's logo, a cloud for an
   unrecognized remote, a folder for local-only, and a lock / buildings /

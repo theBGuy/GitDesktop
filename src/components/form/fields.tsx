@@ -186,6 +186,8 @@ export function SelectControl({
   value,
   onValueChange,
   disabled,
+  disabledItems,
+  order,
   annotations,
   sizeToContent = false,
 }: {
@@ -196,6 +198,13 @@ export function SelectControl({
   value: string;
   onValueChange: (value: string) => void;
   disabled?: boolean;
+  /** Option keys rendered as disabled rows (skipped by keyboard nav). */
+  disabledItems?: ReadonlySet<string>;
+  /** Explicit option order. `items` is an object, so integer-like keys sort
+   *  ahead of the rest whatever order it was built in — any caller whose values
+   *  can be all-digits (logins, slugs) passes the order it means. Must hold
+   *  exactly the keys of `items`, no extras or duplicates. */
+  order?: readonly string[];
   /** Optional per-option trailing content (e.g. status chips), keyed by value.
    *  Rendered after a truncating label; keys with no entry render label-only.
    *  Never surfaces in the closed trigger — that reads the `items` map. */
@@ -209,6 +218,12 @@ export function SelectControl({
   // Opt-in rich rows: wrap the label so it can truncate and leave room for a
   // trailing annotation. Plain callers keep the exact prior markup.
   const rich = sizeToContent || annotations !== undefined;
+  const entries: [string, string][] = order
+    ? order.map((optionValue) => [
+        optionValue,
+        items[optionValue] ?? optionValue,
+      ])
+    : Object.entries(items);
   return (
     <div className="space-y-2">
       {label && <Label htmlFor={id}>{label}</Label>}
@@ -233,14 +248,22 @@ export function SelectControl({
               }
             : {})}
         >
-          {Object.entries(items).map(([optionValue, display]) =>
+          {entries.map(([optionValue, display]) =>
             rich ? (
-              <SelectItem key={optionValue} value={optionValue}>
+              <SelectItem
+                key={optionValue}
+                value={optionValue}
+                disabled={disabledItems?.has(optionValue)}
+              >
                 <span className="min-w-0 flex-1 truncate">{display}</span>
                 {annotations?.[optionValue]}
               </SelectItem>
             ) : (
-              <SelectItem key={optionValue} value={optionValue}>
+              <SelectItem
+                key={optionValue}
+                value={optionValue}
+                disabled={disabledItems?.has(optionValue)}
+              >
                 {display}
               </SelectItem>
             ),
@@ -257,6 +280,8 @@ export function SelectField({
   label,
   items,
   disabled,
+  disabledItems,
+  order,
   annotations,
   sizeToContent = false,
 }: Omit<ComponentProps<typeof SelectControl>, "value" | "onValueChange">) {
@@ -268,6 +293,8 @@ export function SelectField({
       value={field.state.value}
       onValueChange={(v) => field.handleChange(v)}
       disabled={disabled}
+      disabledItems={disabledItems}
+      order={order}
       annotations={annotations}
       sizeToContent={sizeToContent}
     />

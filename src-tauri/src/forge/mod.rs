@@ -3727,6 +3727,13 @@ pub async fn forge_repo_delete(
     Ok(())
 }
 
+/// Owners the viewer can publish under — the GitHub publish owner picker.
+/// Account-scoped (no repo_path).
+#[tauri::command]
+pub async fn forge_gh_publish_owners() -> AppResult<crate::github::pr::GithubPublishOwners> {
+    crate::github::pr::gh_publish_owners().await
+}
+
 // ── Bitbucket settings sub-surfaces ──
 
 /// The viewer's Bitbucket workspaces — the publish target picker. Account-scoped

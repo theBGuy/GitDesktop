@@ -371,7 +371,8 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Repository & workspace",
-    label: "Publish a local repo to GitHub, GitLab or Bitbucket",
+    label:
+      "Publish a local repo to GitHub, GitLab or Bitbucket — choose the GitHub owner or Bitbucket workspace",
   },
   {
     group: "Repository & workspace",
