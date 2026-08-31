@@ -150,23 +150,16 @@ const CHECKING_COPY: Record<"merged" | "worktrees", string> = {
 /** The one-line status above the candidate list while a check it depends on
  *  runs. A parked check has no progress to report, so it names what it's waiting
  *  on rather than implying the read is underway — and only the pull-request half
- *  can park, since both git reads work on local objects. `srOnly` announces it
- *  without drawing it, for the states that show no status line today. */
+ *  can park, since both git reads work on local objects. */
 function CheckingLine({
   what,
   paused,
-  srOnly,
 }: {
   what: "merged" | "worktrees";
   paused: boolean;
-  srOnly?: boolean;
 }) {
   return (
-    <p
-      className={
-        srOnly ? "sr-only" : "px-1 py-1 text-[11px] text-muted-foreground"
-      }
-    >
+    <p className="px-1 py-1 text-[11px] text-muted-foreground">
       {paused
         ? "Waiting for a connection to check which branches were merged through a pull request…"
         : CHECKING_COPY[what]}
@@ -406,13 +399,18 @@ export function CleanupBranchesDialog({
   const checkingMerged =
     (Boolean(defaultBranch) && divergence.isLoading) ||
     prCheckState === "pending";
+  // Parked matters only while the merged check is still outstanding: a parked
+  // FIRST fetch keeps `checkingMerged` true (prCheckState "pending"), while a
+  // parked background refetch over settled data has nothing to wait for — and
+  // its connection copy would answer for the local reads still running.
+  const pausedMergedCheck = checkingMerged && prCheckPaused;
   // Which of the status region's lines are DRAWN — it announces more than it
   // shows: the check line stays sr-only on the empty first paint (the skeleton
   // is the visual signal there) and on a parked re-check of an answered list,
   // whose visible staleness caveat is a surface this change doesn't own.
   const stillChecking = checkingMerged || checkingWorktrees;
   const showCheckLine =
-    stillChecking && (prCheckPaused || candidates.length > 0);
+    stillChecking && (pausedMergedCheck || candidates.length > 0);
   const showPrFailedLine = prCheckState === "failed" && candidates.length > 0;
   // Unlike the pull-request caveat, this one shows on an empty list too: a
   // failed read leaves the exclusion vacuous, which the empty state's own copy
@@ -670,11 +668,10 @@ export function CleanupBranchesDialog({
                   waiting line; the resting line reports the count and claims
                   nothing about the check, which is what a `role="status"`
                   region can honestly repeat on every mode and window change. */}
-              {stillChecking || prCheckPaused ? (
+              {stillChecking ? (
                 <CheckingLine
                   what={checkingMerged ? "merged" : "worktrees"}
-                  paused={prCheckPaused}
-                  srOnly={!stillChecking}
+                  paused={pausedMergedCheck}
                 />
               ) : (
                 <p className="sr-only">
@@ -707,7 +704,7 @@ export function CleanupBranchesDialog({
 
             {/* List / skeleton / empty */}
             {showSkeleton ? (
-              <CheckingPlaceholder paused={prCheckPaused} />
+              <CheckingPlaceholder paused={pausedMergedCheck} />
             ) : candidates.length === 0 ? (
               <p className="py-6 text-center text-xs text-muted-foreground">
                 {allStaleExcluded ? (
