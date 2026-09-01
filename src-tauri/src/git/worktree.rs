@@ -538,8 +538,11 @@ pub(crate) async fn remove_worktree(
 /// the read fails — callers treat both as "don't touch it".
 ///
 /// Fully qualified: bare `rev-parse <name>` resolves a same-named TAG first, which
-/// would compare a tag's tip against a branch delete.
+/// would compare a tag's tip against a branch delete. The name is IPC-supplied and
+/// validated here, so an invalid name skips the whole delete rather than reaching
+/// this template or the `branch -D` argv downstream.
 async fn branch_tip(repo_path: &str, branch: &str) -> Option<String> {
+    crate::git::branches::validate_ref_name(branch).ok()?;
     let out = run_git_raw(
         Some(repo_path),
         &[

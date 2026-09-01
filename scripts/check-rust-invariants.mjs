@@ -129,6 +129,12 @@ const REFSPEC_ALLOWLIST = [
     rationale: "#[cfg(test)] fixture — the branch name is a test literal",
   },
   {
+    file: "git/worktree.rs",
+    fn: "branch_tip",
+    rationale:
+      "read-only rev-parse tip probe gating the removal's best-effort branch delete (never a refspec); validates with validate_ref_name at fn entry",
+  },
+  {
     file: "github/pr.rs",
     fn: "gh_delete_remote_head_branch",
     rationale:
