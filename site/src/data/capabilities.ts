@@ -511,12 +511,17 @@ export const capabilities: Capability[] = [
   {
     group: "Keyboard & Markdown",
     label:
-      "Reference autolinks — #123, @user, and GitLab's !123 open the issue, pull request, or profile they name, and preview its state, title & author on hover",
+      "Reference autolinks — #123, @user, and GitLab's !123 open the issue, pull request, or profile they name",
   },
   {
     group: "Keyboard & Markdown",
     label:
-      "Fullscreen image viewer — screenshots in any rendered body and both sides of an image diff, with fit/100% zoom and arrow-key stepping",
+      "Reference preview cards — hover or Tab to a #123, !123, or @user and read its state, title & author in place",
+  },
+  {
+    group: "Keyboard & Markdown",
+    label:
+      "Fullscreen image viewer — screenshots in any rendered body and both sides of an image diff, with fit/100% zoom and arrow-key stepping in fit view",
   },
 
   // — AI · generate & review —

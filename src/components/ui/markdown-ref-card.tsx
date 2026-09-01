@@ -2,6 +2,7 @@ import {
   CheckCircleIcon,
   CircleDashedIcon,
   GitMergeIcon,
+  GitPullRequestIcon,
   type Icon,
 } from "@phosphor-icons/react";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
@@ -16,13 +17,12 @@ import {
 } from "@/components/ui/hover-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useForgeGhHost } from "@/lib/git/host";
-import { issueDetailsOptions, prDetailsOptions } from "@/lib/git/queries";
-import type {
-  ForgeUserRef,
-  IssueDetails,
-  PrDetails,
-  RemoteLens,
-} from "@/lib/git/types";
+import {
+  issueDetailsOptions,
+  prDetailsOptions,
+  useAssignableUsers,
+} from "@/lib/git/queries";
+import type { IssueDetails, PrDetails, RemoteLens } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
@@ -77,6 +77,9 @@ export function isPullRefUrl(url: string): boolean {
 /** The calm card's whole payload. `createdAt` is present only where the resolved
  *  shape carries one — pull request details have no creation timestamp. */
 interface RefItem {
+  /** Which shape answered. A GitHub `#N` can be either, and the two read CLOSED
+   *  differently, so the pill needs the answer the resolve already had. */
+  flavor: "issue" | "pr";
   state: string;
   title: string;
   author: string;
@@ -85,6 +88,7 @@ interface RefItem {
 
 function issueItem(issue: IssueDetails): RefItem {
   return {
+    flavor: "issue",
     state: issue.state,
     title: issue.title,
     author: issue.author,
@@ -96,6 +100,7 @@ function issueItem(issue: IssueDetails): RefItem {
  *  its own state even where `isDraft` lingers. */
 function prItem(pr: PrDetails): RefItem {
   return {
+    flavor: "pr",
     state: pr.isDraft && pr.state === "OPEN" ? "DRAFT" : pr.state,
     title: pr.title,
     author: pr.author,
@@ -104,8 +109,10 @@ function prItem(pr: PrDetails): RefItem {
 
 /**
  * Resolve a number reference under the body's own lens, matching what a click on
- * it would open. Every fetch is cache-first, so a warm list or a second hover
- * costs nothing.
+ * it would open. Reads are cache-first within each query's staleTime, and a warm
+ * list settles the kind without the classifying read — but a cold GitHub `#N`
+ * still costs two reads, so the caller's open delay is what keeps a pointer
+ * crossing a body of references from resolving every one of them.
  */
 async function resolveRefItem(
   queryClient: QueryClient,
@@ -155,20 +162,30 @@ async function resolveRefItem(
   }
 }
 
-/** Glyph and tone per state, following the related-issue `StateIcon` pairing.
- *  The word beside the glyph is what actually carries the state — color never
- *  does — so an unrecognized state (wire drift) falls through to the neutral
- *  dot without losing meaning. */
-const STATE_PILL: Record<
-  string,
-  { Icon: Icon; className: string } | undefined
-> = {
+interface StatePill {
+  Icon: Icon;
+  className: string;
+}
+
+/** Glyph and tone per state, shared by both shapes. The word beside the glyph is
+ *  what actually carries the state — color never does — so an unrecognized state
+ *  (wire drift) falls through to the neutral dot without losing meaning. */
+const STATE_PILL: Record<string, StatePill | undefined> = {
   OPEN: { Icon: CircleDashedIcon, className: "text-success" },
-  CLOSED: { Icon: CheckCircleIcon, className: "text-merged" },
   MERGED: { Icon: GitMergeIcon, className: "text-merged" },
   DRAFT: { Icon: CircleDashedIcon, className: "text-muted-foreground" },
 };
-const NEUTRAL_PILL = {
+
+/** CLOSED is the one state the app's two conventions part on: a closed issue is
+ *  resolved (the related-issue `StateIcon`), a closed pull request is abandoned
+ *  (`prPresentation` in IssueDevelopment), and a card that borrowed one for the
+ *  other would name the right state beside the wrong glyph. */
+const CLOSED_PILL: Record<RefItem["flavor"], StatePill> = {
+  issue: { Icon: CheckCircleIcon, className: "text-merged" },
+  pr: { Icon: GitPullRequestIcon, className: "text-destructive" },
+};
+
+const NEUTRAL_PILL: StatePill = {
   Icon: CircleDashedIcon,
   className: "text-muted-foreground",
 };
@@ -195,14 +212,14 @@ function RefUserCard({
   lens: RemoteLens;
   login: string;
 }) {
-  const queryClient = useQueryClient();
   const ghHost = useForgeGhHost(repoPath);
-  // A one-shot cache read: the popup mounts fresh per open, so a later fill can
-  // never leave a stale URL behind. GitLab populates `avatarUrl`; GitHub leaves
-  // it empty and `ForgeUserAvatar` derives the login's `.png` from `ghHost`.
-  const avatarUrl = queryClient
-    .getQueryData<ForgeUserRef[]>(["repo", repoPath, "assignable-users", lens])
-    ?.find((u) => u.id === login)?.avatarUrl;
+  // Whatever the pickers have already fetched, read through the same hook they
+  // use so the card repaints if the list lands under it — disabled, because a
+  // preview must never be what pulls the repo's whole user list. GitLab
+  // populates `avatarUrl`; GitHub leaves it empty and `ForgeUserAvatar` derives
+  // the login's `.png` from `ghHost`.
+  const { data: users } = useAssignableUsers(repoPath, false, lens);
+  const avatarUrl = users?.find((u) => u.id === login)?.avatarUrl;
   return (
     <div className="flex items-center gap-2">
       <ForgeUserAvatar
@@ -242,7 +259,10 @@ function RefCardBody({
   if (item === null) {
     return <p className="text-muted-foreground">{`Couldn't load ${label}`}</p>;
   }
-  const pill = STATE_PILL[item.state] ?? NEUTRAL_PILL;
+  const pill =
+    (item.state === "CLOSED"
+      ? CLOSED_PILL[item.flavor]
+      : STATE_PILL[item.state]) ?? NEUTRAL_PILL;
   const { createdAt } = item;
   return (
     <div className="flex flex-col gap-1.5">
@@ -304,8 +324,9 @@ export function MarkdownRefCard({
   // forms alike) while a store-registered trigger in the same build measured
   // correctly. So the card rides the trigger path instead: an inert invisible
   // span pinned to the active anchor's rect registers as the reference exactly
-  // the way a real trigger does. Read once per anchor — the card closes before
-  // anything can move it.
+  // the way a real trigger does. Read once per anchor: the caller closes the
+  // card on the first scroll or resize, so the rect it opened at is the only one
+  // it is ever shown at.
   const rect = useMemo(() => anchor?.getBoundingClientRect() ?? null, [anchor]);
   // Keyed by WHICH reference it answers, so a card switching targets reads as
   // resolving rather than painting the previous reference's content under the
@@ -355,7 +376,10 @@ export function MarkdownRefCard({
       }}
     >
       {/* Kept mounted through the close fade — an unmounting active trigger
-          force-closes the card mid-animation. */}
+          force-closes the card mid-animation. A transformed ancestor (a
+          `DialogContent`'s `-translate-x-1/2`) would become this fixed span's
+          containing block and displace the card by that offset — a refs-passing
+          body hosted inside one has to re-anchor or portal the span. */}
       <HoverCardTrigger
         render={
           <span
@@ -382,8 +406,12 @@ export function MarkdownRefCard({
         // link, and a popup edge that close can capture it.
         sideOffset={8}
         className="w-72"
-        // The skeleton is the sighted busy signal; this is its twin for anyone
-        // reading the card through the anchor's `aria-describedby`.
+        // The card opens empty and fills in, but `aria-describedby` resolves
+        // once, at focus — so the popup is a polite live region and the resolved
+        // state, title and author announce themselves as they land. `aria-busy`
+        // is the skeleton's twin for the same reader, and holds the announcement
+        // until the swap is done.
+        role="status"
         aria-busy={
           shown !== null && shown.kind !== "user" && item === undefined
         }

@@ -170,7 +170,10 @@ export function ImagePanes({
     <div className="flex items-start justify-center gap-8 p-6">
       {panes.map((pane, i) => (
         <ImageSide
-          key={pane.key}
+          // Keyed by the pair as well as the slot: a side that kept its element
+          // across a file switch would caption the new image with the previous
+          // one's dimensions until the new one decodes.
+          key={`${id}|${pane.key}`}
           label={pane.label}
           onMeasure={(size) => patch({ [pane.key]: size })}
           onOpen={() => patch({ viewing: i })}

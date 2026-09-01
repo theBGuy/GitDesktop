@@ -92,7 +92,9 @@ export function ImageLightbox({
   onOpenChange: (open: boolean) => void;
 }) {
   // Zoom, measured size, and load failure are all keyed by the shown image, so
-  // moving to another one resets them during render instead of via an effect.
+  // moving to another one suppresses them during render instead of via an
+  // effect — and stepping back to it restores what it had, which is what makes
+  // arrowing through a set and returning feel like the same viewer.
   const [zoomedKey, setZoomedKey] = useState<string | null>(null);
   const [measured, setMeasured] = useState<{
     key: string;

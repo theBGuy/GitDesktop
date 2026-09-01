@@ -272,6 +272,36 @@ export function Markdown({
     return () => cancelTimer(cardTimer);
   }, [html]);
 
+  // The card is pinned to the rect its anchor had when it opened, so anything
+  // that moves the reference strands it: the hover routes end at the pointer
+  // leaving, but a focused one would sit at stale coordinates while its
+  // reference scrolls away. Capture-phase, since a pane's scroll doesn't bubble.
+  // The listeners go on a frame late: tabbing to an off-screen reference scrolls
+  // it into view first, and that scroll lands after the focus that opened the
+  // card (scroll steps run before animation-frame callbacks).
+  useEffect(() => {
+    if (cardTarget === null) return;
+    let subscribed = false;
+    const close = () => {
+      cancelTimer(cardTimer);
+      // The claim describes the card that just closed; a lingering true would
+      // block the blur path from closing the NEXT card (pointerover re-arms it).
+      cardHovered.current = false;
+      setCardTarget(null);
+    };
+    const raf = requestAnimationFrame(() => {
+      subscribed = true;
+      window.addEventListener("scroll", close, true);
+      window.addEventListener("resize", close);
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      if (!subscribed) return;
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [cardTarget]);
+
   // The open card describes its anchor. Set on the node rather than rendered:
   // the anchor is injected HTML, same as the image affordances below. The
   // cleanup covers both a close and a swap to another anchor.
@@ -297,6 +327,14 @@ export function Markdown({
       offs.push(() => img.removeEventListener("load", onLoad));
       markLightboxImage(img);
     }
+    // Expanding a `<details>` qualifies the images inside it, which nothing else
+    // re-evaluates — a click would open one the keyboard could never reach.
+    // `toggle` doesn't bubble, so the root only sees it in capture.
+    const onToggle = () => {
+      for (const img of root.querySelectorAll("img")) markLightboxImage(img);
+    };
+    root.addEventListener("toggle", onToggle, true);
+    offs.push(() => root.removeEventListener("toggle", onToggle, true));
     return () => {
       for (const off of offs) off();
     };
@@ -329,6 +367,7 @@ export function Markdown({
     cancelTimer(cardTimer);
     cardTimer.current = setTimeout(() => {
       cardTimer.current = null;
+      cardHovered.current = false;
       setCardTarget(null);
     }, CARD_CLOSE_DELAY);
   }
@@ -363,9 +402,15 @@ export function Markdown({
     // has to race, and losing that race reopens from the anchor and cycles.
     if ((e.relatedTarget as Element | null)?.closest?.(CARD_POPUP_SELECTOR))
       return;
-    cardHovered.current = false;
     cancelTimer(cardTimer);
-    if (cardTarget) scheduleCardClose();
+    // Only the anchor the card belongs to may close it. A card opened by
+    // keyboard on another reference is neither this pointer's to close nor its
+    // to have claimed — closing it here would leave it with no way back, the
+    // keyboard route reopening only on a fresh focus.
+    if (cardTarget && anchor === cardAnchor) {
+      cardHovered.current = false;
+      scheduleCardClose();
+    }
   }
 
   function onFocusCapture(e: React.FocusEvent) {
@@ -607,6 +652,7 @@ export function Markdown({
           onOpenChange={(open) => {
             if (open) return;
             cancelTimer(cardTimer);
+            cardHovered.current = false;
             setCardTarget(null);
           }}
           onPointerEnter={() => {

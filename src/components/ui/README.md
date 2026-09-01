@@ -95,29 +95,28 @@ panel-portal delta too, so check both of its markers.
 
 ## Anchor forwarding
 
-A third set, again sharing no code with the two above. Base UI positions a
-popup against its `*Trigger` by default; a caller that renders no trigger has
-to hand the positioner an element itself, through the `anchor` prop these
-wrappers otherwise swallow.
+A third delta, again sharing no code with the two above. Base UI positions a
+popup against its `*Trigger`; a caller whose trigger is not the element the
+popup should line up with hands the positioner an element itself, through the
+`anchor` prop the wrapper otherwise swallows.
 
-- **`combobox.tsx`**, **`hover-card.tsx`** — the `*Content` component's `Pick`
-  from its `Positioner.Props` includes `anchor`, and it forwards the prop to
-  the `Positioner`. Without it the chip-anchored combobox and the markdown
-  reference card — one card per rendered body, positioned at whichever
-  injected `<a>` the pointer is on — have no way to place their popup.
-  `hover-card.tsx` forwards `positionMethod` from the same `Pick` as well: that
-  card portals into the surrounding panel and anchors to an element in another
-  subtree, so it asks for viewport coordinates rather than resolving an
-  offsetParent it does not share.
+- **`combobox.tsx`** — `ComboboxContent`'s `Pick` from its `Positioner.Props`
+  includes `anchor`, forwards it to the `Positioner`, and stamps the popup's
+  `data-chips={!!anchor}`. A chips-shaped combobox types into a small input
+  inside the chip row, so its list belongs against the whole field, not that
+  input; the `data-chips` flag is what then drops the popup's `--anchor-width`
+  plus `--spacing(7)` floor so it can match that field exactly. No call site
+  passes `anchor` today, so the app demonstrates neither half — weigh that
+  under *Check before re-applying* below.
 
-Grep each file after regenerating it:
+Grep the file after regenerating it:
 
 ```sh
-grep -n '"anchor"' src/components/ui/combobox.tsx src/components/ui/hover-card.tsx
+grep -n '"anchor"' src/components/ui/combobox.tsx
 ```
 
-No match means that file's anchor delta is gone. Both files carry the
-panel-portal delta too, so check both of their markers.
+No match means the anchor delta is gone. That file carries the panel-portal
+delta too, so check both of its markers.
 
 ## Check before re-applying
 
