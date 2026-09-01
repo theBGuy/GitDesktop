@@ -53,9 +53,8 @@ const ZOOM_TOGGLE = {
 
 const ARROW_STEP: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1 };
 
-/** How far one arrow press pans the zoomed image, in px. Roughly a line of the
- *  footer's height — small enough to aim with, large enough to cross a
- *  screenshot without holding the key down. */
+/** How far one arrow press pans the zoomed image, in px — small enough to aim
+ *  with, large enough to cross a screenshot without holding the key down. */
 const PAN_STEP = 80;
 
 /** Each arrow's pan direction at 100%, in `PAN_STEP` units. */

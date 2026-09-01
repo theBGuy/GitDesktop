@@ -405,7 +405,7 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 - **Image diffs** render side by side. Click a side, or Tab to it and press Enter, to
   open it fullscreen: the image over a dimmed backdrop, its label and pixel dimensions
   along the bottom, and a **Fit** / **100%** toggle. In **Fit** view ← and → move
-  between the old and new sides; at **100%** they scroll the zoomed image instead, and
+  between the old and new sides; at **100%** the arrow keys pan the zoomed image, and
   Esc closes either way. The **SVG** preview above a text diff and the image diffs
   inside the stashes dialog open the same viewer.
 - Very large diffs are capped (with a **Show full diff** escape hatch) so a huge file
@@ -954,7 +954,7 @@ comment, or discussion (or Tab to it and press Enter) and it fills the window ov
 dimmed backdrop, with its name and pixel dimensions along the bottom, a **Fit** /
 **100%** toggle, and **Open in browser** for an image the body loaded from the web.
 In **Fit** view ← and → step through the other images in the same body; at **100%**
-they scroll the zoomed image instead, and Esc closes the viewer. A linked image still
+the arrow keys pan the zoomed image, and Esc closes the viewer. A linked image still
 follows its link, and badges and icons stay put.
 
 ## Conflicts with the base branch

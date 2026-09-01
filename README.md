@@ -882,9 +882,9 @@ review via its subscription login. The full list is under
   comment, or discussion (or either side of an image diff) to fill the window
   over a dimmed backdrop, with its label and pixel dimensions, a
   **Fit** / **100%** toggle, and **Open in browser** for one loaded from the
-  web. In **Fit** view the arrow keys walk the rest of the set (the other
-  images in that body, or the diff's old and new sides); at **100%** they
-  scroll the zoomed image instead, and Esc closes either way. Every image the
+  web. In **Fit** view ← and → walk the rest of the set (the other images in
+  that body, or the diff's old and new sides); at **100%** the arrow keys pan
+  the zoomed image instead, and Esc closes either way. Every image the
   viewer opens takes the keyboard too: Tab to it and press Enter. A linked image
   still follows its link, and badges and icons stay put.
 - **Collapsible comment box**: fold the comment box down to a one-line strip to

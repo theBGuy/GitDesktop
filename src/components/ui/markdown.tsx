@@ -263,9 +263,11 @@ export function Markdown({
   // The focus route's pending open, held so a blur or a re-parse can cancel it
   // rather than measuring an anchor that is gone or no longer where it was.
   const cardFrame = useRef<number | null>(null);
-  // The pointer's claim on the card — resting on a reference, or inside the
-  // popup. Read by the blur path, which must not close a card the mouse owns.
-  const cardHovered = useRef(false);
+  // WHICH reference the pointer claims: the anchor it rests on, or the open
+  // card's own anchor while it rests inside the popup. Null is no claim. The
+  // blur path must not close a card the mouse owns, and only the anchor's
+  // identity can tell that apart from a claim on some unrelated reference.
+  const cardPointerAnchor = useRef<HTMLAnchorElement | null>(null);
   const cardId = useId();
   const bodyRef = useRef<HTMLDivElement>(null);
   // Null is closed. The viewer copies src strings rather than nodes, so this
@@ -288,7 +290,7 @@ export function Markdown({
   useEffect(() => {
     cancelTimer(cardTimer);
     cancelFrame(cardFrame);
-    cardHovered.current = false;
+    cardPointerAnchor.current = null;
     setCardTarget(null);
     setLightbox(null);
     return () => {
@@ -310,9 +312,9 @@ export function Markdown({
     let subscribed = false;
     const close = () => {
       cancelTimer(cardTimer);
-      // The claim describes the card that just closed; a lingering true would
+      // The claim describes the card that just closed; a lingering one would
       // block the blur path from closing the NEXT card (pointerover re-arms it).
-      cardHovered.current = false;
+      cardPointerAnchor.current = null;
       setCardTarget(null);
     };
     const raf = requestAnimationFrame(() => {
@@ -377,7 +379,7 @@ export function Markdown({
     if (index < 0) return;
     cancelTimer(cardTimer);
     cancelFrame(cardFrame);
-    cardHovered.current = false;
+    cardPointerAnchor.current = null;
     setCardTarget(null);
     setLightbox({ images: imgs.map(toLightboxImage), index });
   }
@@ -395,7 +397,7 @@ export function Markdown({
     cancelTimer(cardTimer);
     cardTimer.current = setTimeout(() => {
       cardTimer.current = null;
-      cardHovered.current = false;
+      cardPointerAnchor.current = null;
       setCardTarget(null);
     }, CARD_CLOSE_DELAY);
   }
@@ -404,7 +406,7 @@ export function Markdown({
     const anchor = (e.target as HTMLElement).closest("a");
     const target = anchor && refTarget(anchor);
     if (!anchor || !target) return;
-    cardHovered.current = true;
+    cardPointerAnchor.current = anchor;
     // Cancels the close armed on the way out — of the anchor itself, or of the
     // popup the pointer is coming back from.
     cancelTimer(cardTimer);
@@ -433,7 +435,7 @@ export function Markdown({
     // The pointer has left a reference for something that isn't the popup, so it
     // holds no claim on any card — including one it never opened, a sweep across
     // a reference too brief to beat the open delay.
-    cardHovered.current = false;
+    cardPointerAnchor.current = null;
     cancelTimer(cardTimer);
     // Only the anchor the card belongs to may close it. A card opened by
     // keyboard on another reference is not this pointer's to close — doing so
@@ -465,13 +467,19 @@ export function Markdown({
   function onBlurCapture(e: React.FocusEvent) {
     const anchor = (e.target as HTMLElement).closest("a");
     if (!anchor || !refTarget(anchor)) return;
-    // The keyboard's claim on the card ends here — card content is
-    // non-interactive, so focus cannot have moved into it. The pointer may still
-    // hold a claim of its own, on a reference or inside the popup, and a mouse
-    // user's card must not close because focus went somewhere unrelated.
-    if (cardHovered.current) return;
-    cancelTimer(cardTimer);
+    // A pending focus-open belongs to the anchor being blurred, so it dies here
+    // whatever the pointer is doing — otherwise it would open a card for a
+    // reference the keyboard has already left.
     cancelFrame(cardFrame);
+    // The keyboard's claim on the card ends here — card content is
+    // non-interactive, so focus cannot have moved into it. What survives is a
+    // pointer claim on THIS card: the pointer resting on the card's own anchor,
+    // or inside the popup (which claims that same anchor). A claim on some other
+    // reference is not a reason to keep this card, which is how a keyboard card
+    // on B closes while the mouse sits on A.
+    const claim = cardPointerAnchor.current;
+    if (claim !== null && claim === cardAnchor) return;
+    cancelTimer(cardTimer);
     setCardTarget(null);
   }
 
@@ -696,15 +704,17 @@ export function Markdown({
               onOpenChange={(open) => {
                 if (open) return;
                 cancelTimer(cardTimer);
-                cardHovered.current = false;
+                cardPointerAnchor.current = null;
                 setCardTarget(null);
               }}
               onPointerEnter={() => {
-                cardHovered.current = true;
+                // Inside the popup the pointer claims the card, so it claims the
+                // anchor the card belongs to — the blur path compares identities.
+                cardPointerAnchor.current = cardAnchor;
                 cancelTimer(cardTimer);
               }}
               onPointerLeave={() => {
-                cardHovered.current = false;
+                cardPointerAnchor.current = null;
                 scheduleCardClose();
               }}
             />,
