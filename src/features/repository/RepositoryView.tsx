@@ -677,10 +677,10 @@ export function RepositoryView() {
     if (refocusToggleRef.current === null) return;
     const matched = refocusToggleRef.current === sidebarCollapsed;
     refocusToggleRef.current = null;
+    if (!matched) return;
     // One frame, inside the commit that rendered the new mode's toggle: a Base
     // UI menu returns focus to its (now unmounted) trigger as it closes and
     // would otherwise win.
-    if (!matched) return;
     handoffRef.current = true;
     requestAnimationFrame(() => {
       handoffRef.current = false;
