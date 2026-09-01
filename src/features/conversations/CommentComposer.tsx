@@ -95,11 +95,12 @@ export function CommentComposer({
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const editorWrapRef = useRef<HTMLDivElement>(null);
   const peekRef = useRef<HTMLButtonElement>(null);
-  // The scroll region measured at expand time, when the reader was sitting at
-  // its bottom — null otherwise. The ELEMENT is held rather than re-walked on
-  // the commit: un-hiding the editor changes which containers overflow, so a
-  // second walk can answer with a different element than the one the pin
-  // decision was made against.
+  // The scroll region measured before the box grows (an expand, or the rollback
+  // of a refused collapse), when the reader was sitting at its bottom; null
+  // otherwise. The ELEMENT is held rather than re-walked on the commit:
+  // un-hiding the editor changes which containers overflow, so a second walk can
+  // answer with a different element than the one the pin decision was made
+  // against.
   const repinRef = useRef<HTMLElement | null>(null);
   // What the expanded/collapsed render owes the user once it commits. The
   // un-hide rides a react-query cache notify, whose batching can land after any

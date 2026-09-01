@@ -476,6 +476,10 @@ export function RepositoryView() {
   // rather than from a frame scheduled in the handler, because the preference
   // lives in react-query, whose notify-batched re-render can land after one.
   const refocusToggleRef = useRef<boolean | null>(null);
+  // A hand-off frame is scheduled but hasn't landed. Focus sits on <body> for
+  // that whole window (longer still if the window is backgrounded, where rAF is
+  // suspended), so a rejection arriving inside it must read as "focus is ours".
+  const handoffRef = useRef(false);
 
   // OS notifications for PR/check and workflow-run events while this repo is open.
   usePrNotifications(repoPath ?? "");
@@ -501,11 +505,15 @@ export function RepositoryView() {
   function setSidebarCollapsed(next: boolean): boolean {
     const current = settings.data;
     if (!current || current.sidebarCollapsed === next) return false;
-    // Focus sitting in the sidebar is about to be hidden (the panels) or
-    // unmounted (this mode's toggle, the rail), so it can't be re-homed until
-    // the new mode has rendered its own toggle — arm the hand-off for that
-    // commit rather than focusing a node this flip is about to take away.
-    if (sidebarRef.current?.contains(document.activeElement)) {
+    // Focus sitting in the sidebar (or in flight to it, mid hand-off) is about
+    // to be hidden (the panels) or unmounted (this mode's toggle, the rail), so
+    // it can't be re-homed until the new mode has rendered its own toggle — arm
+    // the hand-off for that commit rather than focusing a node this flip is
+    // about to take away.
+    if (
+      handoffRef.current ||
+      sidebarRef.current?.contains(document.activeElement)
+    ) {
       refocusToggleRef.current = next;
     }
     const updated = { ...current, sidebarCollapsed: next };
@@ -523,7 +531,10 @@ export function RepositoryView() {
           settingsKeys.settings,
         );
         if (latest?.sidebarCollapsed !== next) return;
-        if (sidebarRef.current?.contains(document.activeElement)) {
+        if (
+          handoffRef.current ||
+          sidebarRef.current?.contains(document.activeElement)
+        ) {
           refocusToggleRef.current = !next;
         }
         queryClient.setQueryData(settingsKeys.settings, current);
@@ -669,7 +680,12 @@ export function RepositoryView() {
     // One frame, inside the commit that rendered the new mode's toggle: a Base
     // UI menu returns focus to its (now unmounted) trigger as it closes and
     // would otherwise win.
-    if (matched) requestAnimationFrame(() => sidebarToggleRef.current?.focus());
+    if (!matched) return;
+    handoffRef.current = true;
+    requestAnimationFrame(() => {
+      handoffRef.current = false;
+      sidebarToggleRef.current?.focus();
+    });
   }, [sidebarCollapsed]);
 
   // Reset to the bare title only when the repo view unmounts (repo closed).
