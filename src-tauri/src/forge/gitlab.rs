@@ -5413,9 +5413,14 @@ pub async fn publish_repo(
     }
     let spec = crate::git::remote::publish_refspec(&branch);
     push_args.extend(["push", "-u", "origin", &spec]);
-    crate::git::runner::run_git_mutating(
+    // The NETWORK domain: a transfer runs for minutes on a large branch, and the
+    // working-tree lock must stay free for staging and commits meanwhile. Empty
+    // `cred` because `push_args` already carries the `-c` entries — that also keeps
+    // the ambient-auth retry (gated on a non-empty slice) off.
+    crate::git::remote::run_git_mutating_with_creds(
         state,
         repo_path,
+        &[],
         &push_args,
         crate::git::runner::NETWORK_TIMEOUT,
     )
@@ -5553,9 +5558,12 @@ pub async fn create_mr(
     }
     let spec = crate::git::remote::publish_refspec(head);
     push_args.extend(["push", "-u", "origin", &spec]);
-    crate::git::runner::run_git_mutating(
+    // NETWORK domain (see `publish_repo`'s push): the `-c` entries ride `push_args`,
+    // so the empty `cred` slice changes neither the command nor the ambient retry.
+    crate::git::remote::run_git_mutating_with_creds(
         state,
         repo_path,
+        &[],
         &push_args,
         crate::git::runner::NETWORK_TIMEOUT,
     )

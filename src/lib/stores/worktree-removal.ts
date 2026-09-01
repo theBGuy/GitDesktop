@@ -305,14 +305,29 @@ function settleRemoval(repoPath: string, path: string) {
  *  has settled. The removal itself has already succeeded here, so nothing in
  *  this step can turn it back into a failure — a refused archive reports itself
  *  and points at the branch menu, which can still do it. */
+/** The one recovery message for an archive that didn't happen, spelled once so
+ *  the two ways it can be refused can't drift apart. */
+function toastArchiveRefused(branch: string, e: unknown) {
+  toast.error(
+    `Removed the worktree, but couldn't archive ${branch} — you can archive it from the branch menu.`,
+    { description: errorMessage(e) },
+  );
+}
+
 async function archiveAfterRemoval(repoPath: string, branch: string) {
   // Re-resolved at completion time rather than trusted from the dialog: the
   // intent can be minutes old, and archiving the default branch would hide it
-  // from every branch surface. An unreadable default stays best-effort, the
-  // same posture the branch menu's own archive guard takes.
-  const isDefault = await gitDefaultBranch(repoPath)
-    .then((name) => name === branch)
-    .catch(() => false);
+  // from every branch surface. This write fails CLOSED — an unreadable default
+  // skips the archive and says so, because nobody is watching a deferred write
+  // that lands minutes later. The branch menu's guard stays best-effort on the
+  // same lookup: it answers a user who is right there to see the result.
+  let isDefault: boolean;
+  try {
+    isDefault = (await gitDefaultBranch(repoPath)) === branch;
+  } catch (e) {
+    toastArchiveRefused(branch, e);
+    return;
+  }
   if (isDefault) {
     toast.success("Worktree removed");
     toast.info(`Left ${branch} unarchived — it's the default branch.`);
@@ -327,10 +342,7 @@ async function archiveAfterRemoval(repoPath: string, branch: string) {
     });
     toast.success(`Worktree removed and ${branch} archived`);
   } catch (e) {
-    toast.error(
-      `Removed the worktree, but couldn't archive ${branch} — you can archive it from the branch menu.`,
-      { description: errorMessage(e) },
-    );
+    toastArchiveRefused(branch, e);
   }
 }
 

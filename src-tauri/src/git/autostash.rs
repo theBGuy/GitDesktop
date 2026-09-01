@@ -206,17 +206,15 @@ pub(crate) async fn git_pull_autostash_core(
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
-    let stashed = autostash_push(&repo_path).await?;
     // The transfer serializes with the network domain (the auto-fetch runs there),
-    // released the moment the pull returns. A refusal to wait is settled exactly like
-    // a failed git invocation, so the stash still comes back.
+    // and the hold is taken BEFORE the stash so it spans stash → pull → settle: a
+    // refusal to wait must precede the first tree mutation, or the user's work is
+    // stashed and popped back purely to report that something else was running.
     let network = state.network_lock(&repo_path).await;
-    let op = match acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a pull").await {
-        Ok(_net) => {
-            run_git_with_creds_once(&repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await
-        }
-        Err(busy) => Err(busy),
-    };
+    let _net_guard = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a pull").await?;
+
+    let stashed = autostash_push(&repo_path).await?;
+    let op = run_git_with_creds_once(&repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await;
     settle(&repo_path, paused, stashed, true, op).await
 }
 

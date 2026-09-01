@@ -110,8 +110,9 @@ pub(crate) fn try_acquire_repo_lock(
 pub(crate) fn holder_label(subcommand: &str) -> &'static str {
     match subcommand {
         "commit" => "a commit",
-        "add" => "a staging operation",
-        "apply" => "a patch apply",
+        // `apply` reaches this runner only as diff.rs's hunk stage/unstage/discard,
+        // which the user knows as staging — never as a standalone patch tool.
+        "add" | "apply" => "a staging operation",
         "restore" => "a file restore",
         // The one `submodule` argv reaching this runner is `submodule update`
         // (git::submodule's other paths hold the lock themselves and label it).
