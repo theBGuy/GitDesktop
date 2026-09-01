@@ -81,9 +81,9 @@ export function DetailRail({
   // pending: each branch renders a different button node, so without the move
   // focus drops to <body>. Armed on a committed flip, and on a rejected write's
   // rollback only while the rail holds focus AND the row is still wide (a narrow
-  // rollback can't produce the transition the arm waits for). Every expanded
-  // transition consumes the arm, so it can't linger to fire on a later width
-  // crossing, pulling focus into a rail the user never touched.
+  // rollback can't produce the transition the arm waits for). Every `expanded`
+  // or `narrow` commit consumes the arm, so it can't linger to fire on a later
+  // width crossing, pulling focus into a rail the user never touched.
   const refocus = useRef<boolean | null>(null);
 
   const narrow = rowWidth !== null && rowWidth < RAIL_MIN_CONTAINER_PX;
@@ -147,12 +147,16 @@ export function DetailRail({
 
   // Rides the commit that actually renders the new branch — a frame scheduled
   // from the handler could still beat react-query's notify-batched re-render.
+  // `narrow` is a trigger, not a read: a ResizeObserver width update can batch
+  // with the flip, leaving `expanded` still, and an arm left unconsumed there
+  // would fire on the next widening instead.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `narrow` is the trigger — a width crossing must consume a pending arm even when `expanded` holds still.
   useLayoutEffect(() => {
     if (refocus.current === null) return;
     const matched = refocus.current === expanded;
     refocus.current = null;
     if (matched) toggleRef.current?.focus();
-  }, [expanded]);
+  }, [expanded, narrow]);
 
   if (!expanded) {
     return (
@@ -193,9 +197,7 @@ export function DetailRail({
       <div className="flex h-7 shrink-0 items-center justify-end gap-2 border-b px-0.5">
         {/* `pl-2.5` on top of the row's `px-0.5` puts the header's text column on
             the same 12px inset as the `px-3` rows below it. */}
-        {header !== undefined && (
-          <div className="mr-auto min-w-0 pl-2.5">{header}</div>
-        )}
+        {header ? <div className="mr-auto min-w-0 pl-2.5">{header}</div> : null}
         <Button
           ref={toggleRef}
           type="button"

@@ -111,6 +111,7 @@ export function CommentComposer({
   const { collapsed, setCollapsed, toggle } = useComposerCollapsed(
     () => expand("focus"),
     collapse,
+    rollback,
   );
 
   /** Reveal the box, and record what the expanded render owes: focus, or the
@@ -136,6 +137,16 @@ export function CommentComposer({
     // unmounts with the expanded row; the palette closes), so focus would fall to
     // <body> without re-homing it on the peek strip.
     pendingPeekRef.current = setCollapsed(true);
+  }
+
+  /** A refused write is restoring the box to `restoredCollapsed`: arm whatever
+   *  that commit's effect owes, since it unmounts (peek button) or hides
+   *  (editor) the control focus is on. Gated on focus still being in the
+   *  composer — a user who moved on must not be yanked back. */
+  function rollback(restoredCollapsed: boolean) {
+    if (!rootRef.current?.contains(document.activeElement)) return;
+    if (restoredCollapsed) pendingPeekRef.current = true;
+    else pendingRef.current = "focus";
   }
 
   // No dependency list: the handle closes over `collapsed` and over locals the

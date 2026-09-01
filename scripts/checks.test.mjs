@@ -351,10 +351,34 @@ test("async-settings-rollback flags an optimistic patch whose onError refetches"
   assert.deepEqual(settingsRollback(block), [3]);
 });
 
+test("async-settings-rollback pairs across functions, not just adjacent code", () => {
+  // The property `onlyWhen` exists for: the gating patch and the mutation it
+  // guards can live in different functions of the same hook file, far outside
+  // any proximity window. Padding is deliberately >PAIR_GAP (160).
+  const source = [
+    "export function useSomethingCollapsed() {",
+    "  function apply(next) {",
+    "    queryClient.setQueryData(settingsKeys.settings, updated);",
+    "  }",
+    "  const pad1 = someHelper(alpha, beta, gamma, delta, epsilon, zeta, eta);",
+    "  const pad2 = someHelper(alpha, beta, gamma, delta, epsilon, zeta, eta);",
+    "  const pad3 = someHelper(alpha, beta, gamma, delta, epsilon, zeta, eta);",
+    "  const pad4 = someHelper(alpha, beta, gamma, delta, epsilon, zeta, eta);",
+    "  function persist(updated) {",
+    "    saveSettings.mutate(updated, {",
+    "      onError: () =>",
+    "        queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),",
+    "    });",
+    "  }",
+    "}",
+  ].join("\n");
+  assert.deepEqual(settingsRollback(source), [11]);
+});
+
 test("async-settings-rollback needs BOTH halves, in the same file", () => {
-  // A settings invalidate from an onError with nothing optimistic to roll back
-  // is the shape three live files have (DangerZone, RepoList,
-  // useRepoVisibilityProbe) — the gate is what keeps them clean.
+  // No live file trips the onError half today — every settings invalidate under
+  // src/ is success-path. The gate is forward-looking: a file that refetches
+  // settings from an onError with nothing optimistic to roll back stays clean.
   const noPatch = [
     "remove.mutate(path, {",
     "  onError: () =>",

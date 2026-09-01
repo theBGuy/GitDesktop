@@ -146,9 +146,13 @@ const anyOf = (scans) => (v) => [...new Set(scans.flatMap((scan) => scan(v)))];
 
 /** Scanner: `scan`'s hits, but only in files whose whole-file view also matches
  *  `gate` — a file-scoped AND for a class where each half is legitimate alone,
- *  so only their co-presence is the defect. `gate` must not carry `g`: `test`
- *  is stateful with it and would alternate between files. */
-const onlyWhen = (gate, scan) => (v) => (gate.test(v.text) ? scan(v) : []);
+ *  so only their co-presence is the defect. The `lastIndex` reset is what makes
+ *  a `g`-flagged `gate` safe: `test` is stateful with one, so it would otherwise
+ *  resume mid-file and alternate between hit and miss down the file list. */
+const onlyWhen = (gate, scan) => (v) => {
+  gate.lastIndex = 0;
+  return gate.test(v.text) ? scan(v) : [];
+};
 
 /** Scanner: the union of several `nearPair`s — one check, one allowlist, every
  *  Tailwind spelling of the same idiom. */
@@ -319,13 +323,19 @@ const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
 // restoring by REFETCH rather than by writing the snapshot back, which lands the
 // restore a commit or more later — too late for a focus hand-off armed on the
 // flip, so focus drops to <body> on a refused write.
-// Co-presence is the whole check: three files invalidate the settings key from
-// an onError with nothing optimistic to roll back (DangerZone, RepoList,
-// useRepoVisibilityProbe), and settings/queries.ts patches optimistically while
-// its own invalidates are all onSuccess — neither half alone is the class.
-// File-scoped rather than a proximity pair: the patch and the mutation it guards
-// can sit in different functions of the same hook file. The reported line is the
-// invalidate's `onError`, which is the site to rewrite.
+// Co-presence is the class, and the gate is FORWARD-looking: nothing trips the
+// onError half today — every settings invalidate under src/ is success-path, and
+// settings/queries.ts's lone `onError` sits 467 normalized chars from the next
+// one, well past PAIR_GAP (measured while sizing this check). What the gate buys
+// is that a file which legitimately refetches settings from an `onError` with
+// nothing optimistic to roll back (DangerZone, RepoList, useRepoVisibilityProbe
+// are each one edit from that shape) can never read as a violation.
+// The cost of file-scoping, accepted: one file that patches the settings cache
+// for its own feature AND refetches settings from an unrelated mutation's
+// onError pairs them anyway — a loud false positive, allowlist as remedy. It
+// buys the reverse, which matters more: the patch and the mutation it guards may
+// sit in different functions of the same hook file, and a proximity pair would
+// miss that. The reported line is the `onError`, which is the site to rewrite.
 const OPTIMISTIC_SETTINGS_PATCH_RE =
   /setQueryData\s*\(\s*settingsKeys\.settings\b/;
 const ONERROR_SETTINGS_REFETCH_RE = new RegExp(

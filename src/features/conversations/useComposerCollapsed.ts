@@ -17,10 +17,14 @@ import {
  * @param onExpand run when the box is expanded
  * @param onCollapse run when it collapses. Both directions re-home focus, but to
  *   different controls, so the hook delegates rather than picking one.
+ * @param onRollback run with the collapsed value a refused write is restoring —
+ *   the same re-homing decision for a transition the user never asked for, whose
+ *   commit would otherwise unmount the focused control and strand focus.
  */
 export function useComposerCollapsed(
   onExpand: () => void,
   onCollapse: () => void,
+  onRollback: (restoredCollapsed: boolean) => void,
 ) {
   const settings = useSettings();
   const saveSettings = useSaveSettings();
@@ -36,7 +40,8 @@ export function useComposerCollapsed(
     const updated = { ...current, commentComposerCollapsed: next };
     // Patch the cache before persisting: an expand focuses the editor one frame
     // later, which the settings round-trip would not have landed in time for. A
-    // failed write restores the previous value synchronously, in one commit.
+    // refused write restores the previous value synchronously, so the caller's
+    // re-homing has that one commit to ride.
     queryClient.setQueryData(settingsKeys.settings, updated);
     saveSettings.mutate(updated, {
       onError: () => {
@@ -47,6 +52,8 @@ export function useComposerCollapsed(
           settingsKeys.settings,
         );
         if (latest?.commentComposerCollapsed !== next) return;
+        // Armed before the restore, so the commit it rides is the very next one.
+        onRollback(current.commentComposerCollapsed);
         queryClient.setQueryData(settingsKeys.settings, current);
       },
     });

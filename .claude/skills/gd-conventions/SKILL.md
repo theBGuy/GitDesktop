@@ -176,9 +176,10 @@ separators.
   not a call-site component.
 - A file rail's header content (a count, a filter summary) rides `DetailRail`'s
   `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
-  caret strip — never a first-child band inside `children`: a second bordered
-  band breaks the collapse toggle's no-shift invariant (both branches pin the
-  caret in the same h-7 box, so the caret must not move as the rail toggles).
+  caret strip — never a first-child band inside `children`: the strip is already
+  a bordered row, so a band under it stacks a second border and spends vertical
+  space the list wants. Keep that content to one short line; the strip's h-7 is
+  what pins the caret at the same height in both branches, so it must not grow.
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.
