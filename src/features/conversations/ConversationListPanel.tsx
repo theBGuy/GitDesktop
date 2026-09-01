@@ -427,11 +427,13 @@ export function ConversationListPanel<L, R, J = never>(props: {
               </div>
               {jira.pending ? (
                 // Jira rows are three-line (status chips · title · key/updated),
-                // unlike this panel's own two-line issue rows.
+                // unlike this panel's own two-line issue rows — and chip-led
+                // with all three lines flush, so no meta indent.
                 <ListRowSkeletons
                   rows={jira.skeletonRows}
                   lines={3}
                   name="Jira issues"
+                  indent={false}
                 />
               ) : jira.isError ? (
                 (jira.errorSlot ?? (

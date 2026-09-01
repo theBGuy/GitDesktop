@@ -732,10 +732,11 @@ export function ChangesPanel({
           className="flex flex-1 flex-col items-center justify-center gap-4 p-6 animate-in fade-in-0 delay-150 duration-0 fill-mode-backwards motion-safe:duration-200"
         >
           {/* pb-28 reserves the action stack the swap actually paints: the
-              compare + forge queries are gated on status resolving, so the
-              PR / View-on-GitHub buttons cannot be present yet (3 h-7 buttons
-              + gaps). They pop in as those queries land — that later shift is
-              the empty state's own, independent of this placeholder. */}
+              compare query stays disabled until status resolves and the forge
+              probe hasn't answered yet, so the PR / View-on-GitHub buttons
+              cannot be present (3 h-7 buttons + gaps). They pop in as those
+              queries land — that later shift is the empty state's own,
+              independent of this placeholder. */}
           <div className="flex flex-col items-center gap-2 pb-28">
             <Skeleton className="mb-2 size-8" />
             <Skeleton className="h-5 w-32" />

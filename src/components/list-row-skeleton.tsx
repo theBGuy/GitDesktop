@@ -6,8 +6,8 @@ import { cn } from "@/lib/utils";
  * rhythm as the real rows, so real rows replace skeletons without shifting the
  * list. Bars run full width — the real lines truncate across the row. With
  * `indent` (the default) lines after the first sit where icon-led rows put
- * their meta lines (≈ their `pl-4`/`pl-5`); avatar-column lists, whose lines
- * share one left edge, pass `indent={false}`. `lines` must match the real
+ * their meta lines (≈ their `pl-4`/`pl-5`); lists whose lines share one left
+ * edge (avatar-column or chip-led) pass `indent={false}`. `lines` must match the real
  * row's line count (2 = issue / commit / tag / finding rows, 3 = PR /
  * workflow-run / Jira / discussion rows).
  * Callers render `ListRowSkeletons` instead — it wraps this one with the busy
