@@ -1417,11 +1417,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // branch the answer excludes. A FAILED read falls through to best-effort:
     // no answer is coming, and holding the item forever helps no one.
     // A branch whose worktree is being removed is the one exception, and it
-    // comes from the removal store rather than the worktree read: that read can
-    // be starved while a removal runs, leaving the guard stuck on "checking".
-    // Promote entries are excluded by `promotePhase`: a promote removes the
-    // worktree to CHECK THAT BRANCH OUT here, so archiving it mid-flight would
-    // land the user on an archived current branch.
+    // reads the removal store, not the worktree list: git goes on listing a
+    // worktree until its removal finishes, and this query is gated on the menu
+    // or the cleanup dialog being open, so `inWorktree` refuses on an answer
+    // that is either still true or already stale. Promote entries are excluded
+    // by `promotePhase`: a promote removes the worktree to CHECK THAT BRANCH
+    // OUT here, so archiving it mid-flight would hide the branch you land on.
     const archiveBlockedReason = (() => {
       if (branch.archived) return null;
       if (branch.isCurrent) return "current branch";
@@ -2435,11 +2436,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         currentBranch={currentName}
         isProtected={(name) => isDeletionBlocked(rulesConfig, name)}
         isInWorktree={(name) => worktreeByBranch.has(name)}
-        // From the removal store, not the worktree read: that read can be
-        // starved while a removal runs, so the exclusion above would hold a
-        // branch whose worktree is on its way out. A promote's removal
-        // (`promotePhase`) doesn't count — it frees the branch to check it out
-        // here, and archiving it would hide the branch you're about to land on.
+        // From the removal store, not the worktree read: `isInWorktree` still
+        // matches a worktree git lists until its removal finishes, and that
+        // read is gated on this menu or the dialog being open, so it can lag —
+        // either way the exclusion holds a branch already on its way out. A
+        // promote's removal (`promotePhase`) doesn't count: it frees the branch
+        // to check it out here, and archiving would hide what you land on.
         isWorktreeRemoving={(name) =>
           removals.some((r) => r.branch === name && !r.promotePhase)
         }

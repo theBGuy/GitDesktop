@@ -130,7 +130,7 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/worktree.rs",
-    fn: "branch_tip",
+    fn: "validated_branch_tip",
     rationale:
       "read-only rev-parse tip probe gating the removal's best-effort branch delete (never a refspec); validates with validate_ref_name at fn entry",
   },

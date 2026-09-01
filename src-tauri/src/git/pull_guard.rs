@@ -496,9 +496,10 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 ///
 /// The caller must already hold the repo's working-tree lock, so every step here
 /// uses the lock-free runners — `run_git_mutating*` would re-acquire it and
-/// deadlock. The fetch below takes the NETWORK lock for its own duration (that
-/// nesting direction only), which is what keeps it from racing the background
-/// auto-fetch at the ref level.
+/// deadlock. The NETWORK lock is taken around the fetch and held through the plan's
+/// reads (that nesting direction only), so the whole verdict rests on ONE snapshot
+/// of the tracking refs: the background auto-fetch shares that domain and would
+/// otherwise be free to move them between the fetch and the revs read off it.
 pub(crate) async fn probe(
     state: &AppState,
     repo: &str,
@@ -510,24 +511,33 @@ pub(crate) async fn probe(
     if current_branch(repo).await.as_deref() != Some(target.branch.as_str()) {
         return Ok(None);
     }
-    if target.remote != "." {
-        let network = state.network_lock(repo).await;
-        let _net_guard =
-            acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a fetch").await?;
-        let out = run_git_with_creds_once(
-            repo,
-            cred,
-            &["fetch", "--prune", &target.remote],
-            NETWORK_TIMEOUT,
-        )
-        .await?;
-        if out.code != 0 {
-            return Err(AppError::Git {
-                code: out.code,
-                stderr: out.full_failure_text(),
-            });
+    // ONE network hold spanning the fetch AND every read below it: the verdict is
+    // only sound on the refs this fetch produced, and the background auto-fetch runs
+    // in this same domain — released in between, it can move
+    // `refs/remotes/<remote>/<branch>` under the four reads and the plan then mixes
+    // two snapshots. `None` for a local upstream, which reads no remote-tracking ref.
+    let _net_guard = match target.remote.as_str() {
+        "." => None,
+        remote => {
+            let network = state.network_lock(repo).await;
+            let guard =
+                acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a fetch").await?;
+            let out = run_git_with_creds_once(
+                repo,
+                cred,
+                &["fetch", "--prune", remote],
+                NETWORK_TIMEOUT,
+            )
+            .await?;
+            if out.code != 0 {
+                return Err(AppError::Git {
+                    code: out.code,
+                    stderr: out.full_failure_text(),
+                });
+            }
+            Some(guard)
         }
-    }
+    };
 
     // The local side of every rev below is HEAD, not the branch NAME: rev-parse
     // resolves `refs/tags/<n>` ahead of `refs/heads/<n>`, so a tag sharing the

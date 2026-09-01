@@ -255,10 +255,11 @@ export function CleanupBranchesDialog({
    *  unless {@link isWorktreeRemoving} takes it back. */
   isInWorktree: (name: string) => boolean;
   /** True when the worktree holding this branch is already being removed, read
-   *  from the removal store rather than the worktree list (which can be starved
-   *  while a removal runs). Archive takes it back — the branch is on its way out
-   *  of use — while Delete keeps excluding it: git refuses `branch -D` on a
-   *  checked-out branch, and the removal can still fail. */
+   *  from the removal store rather than the worktree list, which goes on listing
+   *  that worktree until the removal finishes. Archive takes it back — the
+   *  branch is on its way out of use — while Delete keeps excluding it: git
+   *  refuses `branch -D` on a checked-out branch, and the removal can still
+   *  fail. */
   isWorktreeRemoving: (name: string) => boolean;
   /** Whether {@link isInWorktree} has an answer yet. An advisory read that would
    *  have refused an action must be held on, never acted around: while this is

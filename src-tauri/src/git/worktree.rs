@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
     acquire_repo_lock_unbounded, run_git, run_git_raw, run_git_worktree_admin,
-    try_acquire_repo_lock, DEFAULT_HOLDER, DEFAULT_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    try_acquire_repo_lock, DEFAULT_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -482,7 +482,7 @@ pub(crate) async fn remove_worktree(
     // server) anyway. An unreadable tip counts as absent, so the delete is skipped.
     let branch = branch.as_deref().filter(|b| !b.is_empty());
     let expected_tip = match branch {
-        Some(b) => branch_tip(repo_path, b).await,
+        Some(b) => validated_branch_tip(repo_path, b).await,
         None => None,
     };
 
@@ -541,7 +541,7 @@ pub(crate) async fn remove_worktree(
 /// would compare a tag's tip against a branch delete. The name is IPC-supplied and
 /// validated here, so an invalid name skips the whole delete rather than reaching
 /// this template or the `branch -D` argv downstream.
-async fn branch_tip(repo_path: &str, branch: &str) -> Option<String> {
+async fn validated_branch_tip(repo_path: &str, branch: &str) -> Option<String> {
     crate::git::branches::validate_ref_name(branch).ok()?;
     let out = run_git_raw(
         Some(repo_path),
@@ -565,7 +565,7 @@ async fn branch_tip(repo_path: &str, branch: &str) -> Option<String> {
 /// A moved or unreadable tip skips silently; the delete stays best-effort, since a
 /// refusal must never turn a completed removal into a reported failure.
 async fn delete_branch_if_unmoved(repo_path: &str, branch: &str, expected_tip: &str) {
-    if branch_tip(repo_path, branch).await.as_deref() != Some(expected_tip) {
+    if validated_branch_tip(repo_path, branch).await.as_deref() != Some(expected_tip) {
         return;
     }
     let _ = run_git(Some(repo_path), &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
@@ -605,7 +605,7 @@ pub(crate) async fn worktree_commit_all(
     // The WORKTREE's own working-tree domain, and unbounded: a session turn is
     // background work that has to queue rather than fail the turn.
     let domain = state.working_tree_lock(worktree_path).await;
-    let _guard = acquire_repo_lock_unbounded(&domain, DEFAULT_HOLDER).await;
+    let _guard = acquire_repo_lock_unbounded(&domain, "an agent session commit").await;
 
     let status = run_git(
         Some(worktree_path),
@@ -659,7 +659,7 @@ pub async fn git_worktree_squash(
     // into the squash. Lock-free runners only while held (see `run_git_mutating`).
     // Unbounded for the same reason as `worktree_commit_all`.
     let domain = state.working_tree_lock(&worktree_path).await;
-    let _guard = acquire_repo_lock_unbounded(&domain, DEFAULT_HOLDER).await;
+    let _guard = acquire_repo_lock_unbounded(&domain, "a session squash").await;
 
     let head = run_git(
         Some(&worktree_path),
@@ -1601,7 +1601,7 @@ prunable gitdir file points to non-existent location
         let repo_dir = base.path().join("repo");
         run(&repo_s, &["branch", "unmoved"]).await;
         run(&repo_s, &["branch", "moved"]).await;
-        let tip = branch_tip(&repo_s, "moved")
+        let tip = validated_branch_tip(&repo_s, "moved")
             .await
             .expect("a fresh branch has a tip");
 
@@ -1621,7 +1621,7 @@ prunable gitdir file points to non-existent location
             "a branch that moved since the snapshot must survive"
         );
 
-        let unmoved_tip = branch_tip(&repo_s, "unmoved").await.unwrap();
+        let unmoved_tip = validated_branch_tip(&repo_s, "unmoved").await.unwrap();
         delete_branch_if_unmoved(&repo_s, "unmoved", &unmoved_tip).await;
         assert!(
             run(&repo_s, &["branch", "--list", "unmoved"])
@@ -1643,7 +1643,7 @@ prunable gitdir file points to non-existent location
         let wt = base.path().join("live-wt");
         let wt_s = wt.to_string_lossy().into_owned();
         run(&repo_s, &["worktree", "add", "-b", "feat-live", &wt_s, "HEAD"]).await;
-        let tip = branch_tip(&repo_s, "feat-live").await.unwrap();
+        let tip = validated_branch_tip(&repo_s, "feat-live").await.unwrap();
 
         delete_branch_if_unmoved(&repo_s, "feat-live", &tip).await;
         assert!(

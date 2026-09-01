@@ -110,6 +110,9 @@ pub(crate) fn try_acquire_repo_lock(
 pub(crate) fn holder_label(subcommand: &str) -> &'static str {
     match subcommand {
         "commit" => "a commit",
+        "add" => "a staging operation",
+        "apply" => "a patch apply",
+        "restore" => "a file restore",
         // The one `submodule` argv reaching this runner is `submodule update`
         // (git::submodule's other paths hold the lock themselves and label it).
         "submodule" => "a submodule update",

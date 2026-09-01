@@ -50,6 +50,9 @@ export function DeleteWorktreeDialog({
 }) {
   const startRemoval = useWorktreeRemovalStore((s) => s.startRemoval);
   const removing = useIsRemovingWorktree(repoPath, worktree?.path);
+  // Both reset per target only because every mount site keys this dialog by the
+  // target's path (WorktreesDialog, BranchSwitcher); an unkeyed third mount
+  // would carry one worktree's force escalation and archive intent to the next.
   // A locked worktree always needs --force; a dirty one reveals it on first try.
   const [forceNeeded, setForceNeeded] = useState(worktree?.isLocked ?? false);
   const [archiveAfter, setArchiveAfter] = useState(false);
