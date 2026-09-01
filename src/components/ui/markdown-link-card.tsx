@@ -116,7 +116,7 @@ export function MarkdownLinkCard({ href }: { href: string }) {
 
   const host = displayHost(href);
   const image = preview?.imageData;
-  // Belt and braces over the backend's own content-type gate — see DATA_IMAGE.
+  // Belt and braces over the backend's byte-sniff and dimension gate — see DATA_IMAGE.
   const showImage =
     image !== null &&
     image !== undefined &&

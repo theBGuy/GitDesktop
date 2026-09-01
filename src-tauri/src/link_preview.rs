@@ -11,6 +11,11 @@
 //! webview into the user's LAN. Delivering bytes means the webview issues no
 //! third-party request at all, which also closes that redirect gap and the `Referer`
 //! leak, and leaves no DNS-rebinding window for images.
+//!
+//! Those bytes are hardened in their own right before they ship: the format is sniffed
+//! from the magic bytes rather than trusted from the response header, its dimensions are
+//! read out of the header alone (nothing is decoded here), and a declared raster past the
+//! caps is dropped — a small file can otherwise ask the webview's decoder for gigabytes.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::OnceLock;
@@ -52,8 +57,9 @@ const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 /// the webview: [`MAX_IMAGE_BYTES`] bounds the compressed copy and says nothing about the
 /// decoded one, and a few KB of PNG can declare a raster that kills the renderer.
 const MAX_IMAGE_DIMENSION: u32 = 8192;
-/// The area ceiling, which bites where the per-axis one does not: comfortably above any
-/// real og image (those run ~2 MP) and far below decompression-bomb territory.
+/// The area ceiling, which bites where the per-axis one does not. Deliberate headroom at
+/// ~20x any real og image: the largest raster it admits peaks near 160 MB of RGBA while
+/// the webview decodes it, and that hover's cache entry expires on a 5-minute `gcTime`.
 const MAX_IMAGE_PIXELS: u64 = 40_000_000;
 
 /// How far [`tag_end`] scans for a tag's `>`, and how many `<meta` occurrences are
@@ -73,8 +79,9 @@ const MAX_IMAGE_URL_CHARS: usize = 2048;
 /// The Open Graph summary a hover card renders. Every field is optional: a page with
 /// no metadata is a valid answer, not an error.
 ///
-/// `image_data` is a complete `data:<content-type>;base64,<payload>` URI, not a URL —
-/// see the module doc for why the bytes travel instead of a link.
+/// `image_data` is a complete `data:<sniffed media type>;base64,<payload>` URI, not a URL
+/// — the type is read from the bytes, never from the response header. See the module doc
+/// for why the bytes travel instead of a link.
 #[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkPreview {
@@ -368,27 +375,22 @@ fn is_html(headers: &header::HeaderMap) -> bool {
 }
 
 /// Whether a response is worth reading as an image at all — the cheap early filter that
-/// spares the [`MAX_IMAGE_BYTES`] body read for everything else. The type that ships is
-/// NOT this one: [`checked_image_type`] sniffs it from the bytes. Pure, so both halves of
-/// the split are testable without a response.
+/// spares the [`MAX_IMAGE_BYTES`] body read for everything else. Its whole job is that
+/// yes-or-no: the type that ships is sniffed from the bytes by [`checked_image_type`],
+/// and this returns no value the URI could be built from, so the attacker-chosen header
+/// cannot reach the frontend by any route rather than merely by intent.
 ///
-/// The header is attacker-chosen — the page names the `og:image` host — so the match is
-/// against a closed set rather than an `image/<token>` grammar: an exact compare refuses
-/// the decorated spellings (`image/png,x`, `image/png#`) on its own, and those matter
-/// because a data URI's media type ends at its first comma or `#`, which would strip the
-/// `;base64` flag off the URI the frontend receives. SVG is deliberately absent: it is an
-/// active document (script, external references), and og images are raster in practice.
-fn image_media_type(content_type: &str) -> Option<String> {
-    let media_type = content_type.split(';').next()?.trim().to_ascii_lowercase();
-    let carried = match media_type.as_str() {
+/// A closed set rather than an `image/<token>` grammar: an exact compare refuses the
+/// decorated spellings (`image/png,x`, `image/png#`) on its own, and those matter because
+/// a data URI's media type ends at its first comma or `#`. SVG is deliberately absent: it
+/// is an active document (script, external references), and og images are raster.
+fn header_claims_carried_image(content_type: &str) -> bool {
+    let media_type = content_type.split_once(';').map_or(content_type, |(t, _)| t);
+    matches!(
+        media_type.trim().to_ascii_lowercase().as_str(),
         // `image/jpg` is not a registered type, but misconfigured hosts serve it.
-        "image/jpeg" | "image/jpg" => "image/jpeg",
-        "image/png" => "image/png",
-        "image/gif" => "image/gif",
-        "image/webp" => "image/webp",
-        _ => return None,
-    };
-    Some(carried.to_string())
+        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -448,7 +450,9 @@ fn sniff_png(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
 /// of expanding the image bounds to contain the FIRST frame's rect. Both descriptor
 /// fields are `u16`, so a 1x1 screen can front a 131070-per-axis allocation, and desktop
 /// Blink sets no decoded-size ceiling of its own. Later frames are clipped to those
-/// bounds, so gating the union of screen and first frame is the whole exposure.
+/// bounds, so gating the union of screen and first frame is the whole exposure. That is
+/// the WINDOWS webview (WebView2); macOS ships WKWebView and Linux webkit2gtk, for which
+/// the union is a conservative upper bound — no decoder can allocate past it.
 ///
 /// Terminates on any input: every block consumes at least the byte that introduces it,
 /// and a zero-length sub-block is the terminator consuming its own length byte, so `i`
@@ -641,13 +645,15 @@ async fn load_image_data_uri(url: Url) -> Option<String> {
     if !(200..300).contains(&resp.status().as_u16()) {
         return None;
     }
-    // Header first, purely to avoid reading 2 MiB of a non-image; the type that ships is
-    // the one sniffed from the bytes below, since this header is attacker-chosen.
-    image_media_type(
+    // Header first, purely to avoid reading 2 MiB of a non-image; it names nothing that
+    // ships, since the type on the URI is sniffed from the bytes below.
+    if !header_claims_carried_image(
         resp.headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())?,
-    )?;
+    ) {
+        return None;
+    }
     let (bytes, over_cap) = read_body_capped(resp, MAX_IMAGE_BYTES).await.ok()?;
     encode_checked_image(&bytes, over_cap)
 }
@@ -1644,19 +1650,20 @@ mod tests {
     }
 
     /// The accept side is a closed set of five spellings — the four carried formats plus
-    /// the `image/jpg` misspelling, which normalizes rather than being carried verbatim.
+    /// the `image/jpg` misspelling. Parameters, casing, and surrounding space are
+    /// normalized away before the compare; nothing else is.
     #[test]
-    fn image_media_type_accepts_raster_images_only() {
-        for (raw, expected) in [
-            ("image/png", "image/png"),
-            ("IMAGE/PNG", "image/png"),
-            ("image/jpeg; charset=binary", "image/jpeg"),
-            ("  image/webp  ", "image/webp"),
-            ("image/gif", "image/gif"),
-            ("image/jpg", "image/jpeg"),
-            ("IMAGE/JPG; charset=binary", "image/jpeg"),
+    fn the_header_filter_admits_raster_images_only() {
+        for raw in [
+            "image/png",
+            "IMAGE/PNG",
+            "image/jpeg; charset=binary",
+            "  image/webp  ",
+            "image/gif",
+            "image/jpg",
+            "IMAGE/JPG; charset=binary",
         ] {
-            assert_eq!(image_media_type(raw).as_deref(), Some(expected), "{raw}");
+            assert!(header_claims_carried_image(raw), "{raw} is worth reading");
         }
         for raw in [
             "text/html",
@@ -1678,16 +1685,20 @@ mod tests {
             "image/",
             "/png",
         ] {
-            assert_eq!(image_media_type(raw), None, "{raw} must not be carried");
+            assert!(
+                !header_claims_carried_image(raw),
+                "{raw} must not be carried"
+            );
         }
     }
 
-    /// The header comes from the attacker-chosen image host. A comma ends the media type
-    /// when a data URI is parsed and a `#` starts its fragment, so either one both
-    /// dodges the exact-match SVG refusal and strips the `;base64` flag off the URI the
-    /// frontend receives — the whole reason the subtype is token-validated.
+    /// A decorated spelling is not the type it decorates, so the closed-set compare
+    /// refuses each of these the same way it refuses `text/html`. They are pinned
+    /// separately because they are the shapes that would matter most if one ever did get
+    /// through: a comma ends a data URI's media type and a `#` starts its fragment, so
+    /// either would strip the `;base64` flag off the URI the frontend receives.
     #[test]
-    fn image_media_type_rejects_decorated_subtypes() {
+    fn the_header_filter_refuses_decorated_subtypes() {
         for raw in [
             "image/svg+xml,x",
             "image/svg+xml,",
@@ -1700,9 +1711,8 @@ mod tests {
             "image/png\"",
             "image/png\\x",
         ] {
-            assert_eq!(
-                image_media_type(raw),
-                None,
+            assert!(
+                !header_claims_carried_image(raw),
                 "{raw} must not reach a data URI"
             );
         }
@@ -2178,15 +2188,16 @@ mod tests {
     }
 
     /// The transport header decides only whether the body is read at all; the type the
-    /// data URI carries comes from the bytes. [`encode_checked_image`] is the whole
-    /// post-read path `load_image_data_uri` runs, and it takes no content type — so the
-    /// header cannot reach the URI without that signature changing, which no edit does by
-    /// accident. Only the pre-read header filter needs a live response and stays untested.
+    /// data URI carries comes from the bytes. [`header_claims_carried_image`] yields no
+    /// type to route anywhere, and [`encode_checked_image`] — the whole post-read path
+    /// `load_image_data_uri` runs — takes no content type, so between them there is no
+    /// header-derived value for an edit to reach for.
     #[test]
     fn the_sniffed_type_wins_over_the_transport_header() {
         let gif = gif_fixture(b"GIF89a", 8, 8);
-        // The header a hostile host would send, and what the bytes actually are.
-        assert_eq!(image_media_type("image/png").as_deref(), Some("image/png"));
+        // The header a hostile host would send passes the filter as a bare yes, while the
+        // bytes are something else entirely.
+        assert!(header_claims_carried_image("image/png"));
         assert_eq!(sniff_image(&gif), Some(("image/gif", 8, 8)));
         assert!(encode_checked_image(&gif, false)
             .expect("a tiny GIF clears the caps")
