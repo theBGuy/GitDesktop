@@ -46,6 +46,7 @@ const modKey = scanner("hand-rolled-mod-key");
 const inlineClipTitle = scanner("inline-clip-title");
 const selectItemClipTitle = scanner("select-item-clip-title");
 const setQueryData = scanner("setQueryData-noop");
+const settingsRollback = scanner("async-settings-rollback");
 const bareMutate = scanner("bare-mutate-in-converted-trees");
 const menuSuppression = scanner("context-menu-suppression");
 const loneActivity = scanner("lone-activity-boundary");
@@ -325,6 +326,69 @@ test("setQueryData-noop does not reach across a `;` statement boundary", () => {
     "logger.debug(label, undefined);",
   ].join("\n");
   assert.deepEqual(setQueryData(source), []);
+});
+
+test("async-settings-rollback flags an optimistic patch whose onError refetches", () => {
+  // The pre-fix shape, in both its bodies: the arrow the two settings hooks
+  // used, and the block detail-rail used to clear its focus arm in.
+  const arrow = [
+    "queryClient.setQueryData(settingsKeys.settings, updated);",
+    "saveSettings.mutate(updated, {",
+    "  onError: () =>",
+    "    queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),",
+    "});",
+  ].join("\n");
+  assert.deepEqual(settingsRollback(arrow), [3]);
+  const block = [
+    "queryClient.setQueryData(settingsKeys.settings, updated);",
+    "saveSettings.mutate(updated, {",
+    "  onError: () => {",
+    "    refocus.current = null;",
+    "    queryClient.invalidateQueries({ queryKey: settingsKeys.settings });",
+    "  },",
+    "});",
+  ].join("\n");
+  assert.deepEqual(settingsRollback(block), [3]);
+});
+
+test("async-settings-rollback needs BOTH halves, in the same file", () => {
+  // A settings invalidate from an onError with nothing optimistic to roll back
+  // is the shape three live files have (DangerZone, RepoList,
+  // useRepoVisibilityProbe) — the gate is what keeps them clean.
+  const noPatch = [
+    "remove.mutate(path, {",
+    "  onError: () =>",
+    "    queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),",
+    "});",
+  ].join("\n");
+  assert.deepEqual(settingsRollback(noPatch), []);
+  // The happy-path reconcile every settings mutation carries is onSuccess, so
+  // the patch alone never pairs with it.
+  const onSuccess = [
+    "queryClient.setQueryData(settingsKeys.settings, updated);",
+    "return useMutation({",
+    "  mutationFn: saveSettingsMerged,",
+    "  onSuccess: () =>",
+    "    queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),",
+    "});",
+  ].join("\n");
+  assert.deepEqual(settingsRollback(onSuccess), []);
+});
+
+test("async-settings-rollback leaves the guarded synchronous restore alone", () => {
+  // The useApplyTheme shape this check exists to hold: latest-write guard, then
+  // the snapshot written straight back.
+  const fixed = [
+    "queryClient.setQueryData(settingsKeys.settings, updated);",
+    "saveSettings.mutate(updated, {",
+    "  onError: () => {",
+    "    const latest = queryClient.getQueryData(settingsKeys.settings);",
+    "    if (latest?.theme !== next) return;",
+    "    queryClient.setQueryData(settingsKeys.settings, current);",
+    "  },",
+    "});",
+  ].join("\n");
+  assert.deepEqual(settingsRollback(fixed), []);
 });
 
 test("bare-mutate-in-converted-trees flags every way a call reaches its callbacks", () => {

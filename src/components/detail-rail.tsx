@@ -5,6 +5,7 @@ import {
   createContext,
   type ReactNode,
   useContext,
+  useEffectEvent,
   useLayoutEffect,
   useRef,
   useState,
@@ -12,6 +13,7 @@ import {
 import { usePanelActive } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import type { AppSettings } from "@/lib/settings/api";
 import {
   settingsKeys,
   useSaveSettings,
@@ -55,11 +57,15 @@ export function DetailRailRow({ children }: { children: ReactNode }) {
 export function DetailRail({
   ariaLabel,
   className,
+  header,
   role,
   children,
 }: {
   ariaLabel: string;
   className?: string;
+  /** Rendered start-aligned in the expanded caret strip (e.g. a file count),
+   *  which owns the row's height — it must not grow past one short line. */
+  header?: ReactNode;
   role?: AriaRole;
   children: ReactNode;
 }) {
@@ -73,10 +79,11 @@ export function DetailRail({
   const toggleRef = useRef<HTMLButtonElement>(null);
   // The expanded-ness a focus-carrying toggle asked for, or null when nothing is
   // pending: each branch renders a different button node, so without the move
-  // focus drops to <body>. Single-shot — armed only on a committed flip, cleared
-  // the moment it fires, and cleared again if the write is refused. An arm that
-  // outlived its own flip would fire on the next width crossing instead, pulling
-  // focus into a rail the user never touched.
+  // focus drops to <body>. Armed on a committed flip, and on a rejected write's
+  // rollback only while the rail holds focus AND the row is still wide (a narrow
+  // rollback can't produce the transition the arm waits for). Every expanded
+  // transition consumes the arm, so it can't linger to fire on a later width
+  // crossing, pulling focus into a rail the user never touched.
   const refocus = useRef<boolean | null>(null);
 
   const narrow = rowWidth !== null && rowWidth < RAIL_MIN_CONTAINER_PX;
@@ -87,6 +94,29 @@ export function DetailRail({
   const expanded = narrow
     ? transientExpand
     : !settings.data?.diffFileListCollapsed;
+
+  // Rejected-write rollback as an effect event so `narrow` is read at rejection
+  // time, not capture time: a rollback landing while the row is narrow can't
+  // transition `expanded` (the strip is width-forced), so arming there would
+  // leave a live arm for a later width crossing to fire as a focus steal.
+  const rollbackCollapsePref = useEffectEvent(
+    (previous: AppSettings, attempted: AppSettings) => {
+      // Only roll back if this call's change is still the latest: otherwise a
+      // late-failing earlier write would stomp a newer successful one.
+      const latest = queryClient.getQueryData<AppSettings>(
+        settingsKeys.settings,
+      );
+      if (latest?.diffFileListCollapsed !== attempted.diffFileListCollapsed)
+        return;
+      // Re-armed for the rollback's own commit, only while the rail still holds
+      // focus — a user who has moved on must not have it stolen back.
+      refocus.current =
+        !narrow && railRef.current?.contains(document.activeElement)
+          ? !previous.diffFileListCollapsed
+          : null;
+      queryClient.setQueryData(settingsKeys.settings, previous);
+    },
+  );
 
   const toggle = () => {
     const held = Boolean(railRef.current?.contains(document.activeElement));
@@ -108,10 +138,7 @@ export function DetailRail({
     // so a second press reads the new value instead of re-issuing the old flip.
     queryClient.setQueryData(settingsKeys.settings, updated);
     saveSettings.mutate(updated, {
-      onError: () => {
-        refocus.current = null;
-        queryClient.invalidateQueries({ queryKey: settingsKeys.settings });
-      },
+      onError: () => rollbackCollapsePref(current, updated),
     });
   };
   // Only the visible tab's rail answers the action: <Activity> keeps hidden
@@ -121,9 +148,10 @@ export function DetailRail({
   // Rides the commit that actually renders the new branch — a frame scheduled
   // from the handler could still beat react-query's notify-batched re-render.
   useLayoutEffect(() => {
-    if (refocus.current !== expanded) return;
+    if (refocus.current === null) return;
+    const matched = refocus.current === expanded;
     refocus.current = null;
-    toggleRef.current?.focus();
+    if (matched) toggleRef.current?.focus();
   }, [expanded]);
 
   if (!expanded) {
@@ -162,7 +190,12 @@ export function DetailRail({
       aria-label={role ? LANDMARK_LABEL : ariaLabel}
       className={cn("flex w-72 shrink-0 flex-col border-r", className)}
     >
-      <div className="flex h-7 shrink-0 items-center justify-end border-b px-0.5">
+      <div className="flex h-7 shrink-0 items-center justify-end gap-2 border-b px-0.5">
+        {/* `pl-2.5` on top of the row's `px-0.5` puts the header's text column on
+            the same 12px inset as the `px-3` rows below it. */}
+        {header !== undefined && (
+          <div className="mr-auto min-w-0 pl-2.5">{header}</div>
+        )}
         <Button
           ref={toggleRef}
           type="button"

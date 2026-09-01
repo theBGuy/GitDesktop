@@ -174,6 +174,11 @@ separators.
   cold load doesn't shift the list as rows arrive. It carries the group's
   `aria-busy` + sr-only status; `ListRowSkeleton` is the single row it wraps,
   not a call-site component.
+- A file rail's header content (a count, a filter summary) rides `DetailRail`'s
+  `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
+  caret strip — never a first-child band inside `children`: a second bordered
+  band breaks the collapse toggle's no-shift invariant (both branches pin the
+  caret in the same h-7 box, so the caret must not move as the rail toggles).
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.

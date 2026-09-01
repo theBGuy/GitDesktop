@@ -90,6 +90,7 @@ import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useLensGate, useSetRepoLens } from "@/lib/repo-lens/queries";
 import { useScripts } from "@/lib/scripts/queries";
+import type { AppSettings } from "@/lib/settings/api";
 import {
   settingsKeys,
   useAiEnabled,
@@ -510,11 +511,23 @@ export function RepositoryView() {
     const updated = { ...current, sidebarCollapsed: next };
     // Patch the cache before persisting: the flip has to land this render, or a
     // fast double-press reads the stale value and re-issues it — one flip, not
-    // two. A failed write refetches the stored truth back over the patch.
+    // two. A failed write restores the previous value synchronously, so the
+    // hand-off can ride the rollback's own commit.
     queryClient.setQueryData(settingsKeys.settings, updated);
     saveSettings.mutate(updated, {
-      onError: () =>
-        queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+      onError: () => {
+        // Only roll back if this call's change is still the latest: otherwise a
+        // late-failing earlier write would stomp a newer successful one (two
+        // fast presses where the first write rejects after the second lands).
+        const latest = queryClient.getQueryData<AppSettings>(
+          settingsKeys.settings,
+        );
+        if (latest?.sidebarCollapsed !== next) return;
+        if (sidebarRef.current?.contains(document.activeElement)) {
+          refocusToggleRef.current = !next;
+        }
+        queryClient.setQueryData(settingsKeys.settings, current);
+      },
     });
     return true;
   }
@@ -650,12 +663,13 @@ export function RepositoryView() {
       .catch(() => undefined);
   }, [repoName, alias, headLabel]);
   useLayoutEffect(() => {
-    if (refocusToggleRef.current !== sidebarCollapsed) return;
+    if (refocusToggleRef.current === null) return;
+    const matched = refocusToggleRef.current === sidebarCollapsed;
     refocusToggleRef.current = null;
     // One frame, inside the commit that rendered the new mode's toggle: a Base
     // UI menu returns focus to its (now unmounted) trigger as it closes and
     // would otherwise win.
-    requestAnimationFrame(() => sidebarToggleRef.current?.focus());
+    if (matched) requestAnimationFrame(() => sidebarToggleRef.current?.focus());
   }, [sidebarCollapsed]);
 
   // Reset to the bare title only when the repo view unmounts (repo closed).

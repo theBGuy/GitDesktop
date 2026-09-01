@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import type { AppSettings } from "@/lib/settings/api";
 import {
   settingsKeys,
   useSaveSettings,
@@ -35,11 +36,19 @@ export function useComposerCollapsed(
     const updated = { ...current, commentComposerCollapsed: next };
     // Patch the cache before persisting: an expand focuses the editor one frame
     // later, which the settings round-trip would not have landed in time for. A
-    // failed write refetches the stored truth back over the patch.
+    // failed write restores the previous value synchronously, in one commit.
     queryClient.setQueryData(settingsKeys.settings, updated);
     saveSettings.mutate(updated, {
-      onError: () =>
-        queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+      onError: () => {
+        // Only roll back if this call's change is still the latest: otherwise a
+        // late-failing earlier write would stomp a newer successful one (two
+        // fast toggles where the first write rejects after the second lands).
+        const latest = queryClient.getQueryData<AppSettings>(
+          settingsKeys.settings,
+        );
+        if (latest?.commentComposerCollapsed !== next) return;
+        queryClient.setQueryData(settingsKeys.settings, current);
+      },
     });
     return true;
   }

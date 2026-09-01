@@ -212,10 +212,14 @@ export function PrCommitDetail({
         <DiffPlaceholder message="Could not load this commit's changes" />
       ) : (
         <DetailRailRow>
-          <DetailRail ariaLabel="Changed files">
-            <p className="border-b px-3 py-1.5 text-xs text-muted-foreground">
-              {files.length} changed file{files.length === 1 ? "" : "s"}
-            </p>
+          <DetailRail
+            ariaLabel="Changed files"
+            header={
+              <p className="truncate text-xs text-muted-foreground">
+                {files.length} changed file{files.length === 1 ? "" : "s"}
+              </p>
+            }
+          >
             {/* overflow-hidden contains the list's natural height (vendored Root
                 is `relative`-only) so a long file list can't leak a window scrollbar. */}
             <ScrollArea className="min-h-0 flex-1 overflow-hidden">

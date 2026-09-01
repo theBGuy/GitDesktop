@@ -413,10 +413,13 @@ export function CommitDetailView({
         <DetailRail
           ariaLabel="Changed files"
           className={cn(PLACEHOLDER_FADE, staleDim)}
+          header={
+            <p className="truncate text-xs text-muted-foreground">
+              {files.data.length} changed file
+              {files.data.length === 1 ? "" : "s"}
+            </p>
+          }
         >
-          <p className="border-b px-3 py-1.5 text-xs text-muted-foreground">
-            {files.data.length} changed file{files.data.length === 1 ? "" : "s"}
-          </p>
           {/* overflow-hidden contains the list's natural height (vendored Root is
               `relative`-only) so a long file list can't leak a window scrollbar. */}
           <ScrollArea className="min-h-0 flex-1 overflow-hidden">
