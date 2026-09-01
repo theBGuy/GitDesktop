@@ -1542,13 +1542,25 @@ mod tests {
         }
     }
 
-    /// The image fetch's first act is to `guard_hop` its target, and that is the whole
-    /// private-network refusal — nothing reaches the network before it. IP literals need
-    /// no DNS, which is what makes these arms testable offline.
+    /// Three layers, because the outer two can each pass for the wrong reason. The
+    /// `guard_hop` arm is the precise "why". The shared loop must then fail with a
+    /// REFUSAL (`InvalidArgument`) and not a transport error (`Command`) — that is what
+    /// distinguishes "the guard rejected it" from "the request was attempted and
+    /// failed", and it is the arm that catches a guard moved after the send. The public
+    /// entry's `None` pins the chain the command actually calls, but a bypass would
+    /// still yield `None` once the doomed request errored, so the elapsed bound below is
+    /// what gives that arm teeth.
+    ///
+    /// Every arm resolves offline: a blocked literal never reaches DNS, `localhost` is
+    /// name-blocked before the lookup, `file://` fails the scheme check, and an
+    /// unparseable candidate is dropped before any of it.
     #[tokio::test]
     async fn a_private_network_image_url_is_refused_before_any_request() {
+        let started = std::time::Instant::now();
         for candidate in [
-            "http://192.168.1.1/setup.cgi?reboot=1",
+            // Inert paths on purpose: if a regression ever lets one of these through,
+            // the suite must not be the thing that acts on the developer's own LAN.
+            "http://192.168.1.1/cover.png",
             "http://127.0.0.1:8080/x.png",
             "http://169.254.169.254/latest/meta-data",
             "http://[::1]/x.png",
@@ -1561,13 +1573,33 @@ mod tests {
                 guard_hop(&target).await.is_err(),
                 "{candidate} must be refused before any request"
             );
+            match fetch_following_redirects(target).await {
+                Err(AppError::InvalidArgument(_)) => {}
+                Err(other) => panic!("{candidate} failed in transit, not at the guard: {other}"),
+                Ok(_) => panic!("{candidate} must never be requested"),
+            }
+            assert!(
+                fetch_image_data(candidate).await.is_none(),
+                "{candidate} must not be fetched"
+            );
         }
         // A public literal clears the guard, again without touching DNS.
         assert!(guard_hop(&url("https://93.184.216.34/cover.png"))
             .await
             .is_ok());
-        // An unparseable candidate never reaches the guard: the fetch drops it first.
+        // An unparseable candidate is dropped before the guard is ever consulted.
         assert!(Url::parse("not a url").is_err());
+        assert!(fetch_image_data("not a url").await.is_none());
+
+        // Refusals are decided in memory, so the whole loop is sub-millisecond work. A
+        // path that reached the network would spend seconds here failing to connect
+        // (6.64s measured with the guard removed), which is the only way the `None`
+        // assertions above can be caught passing for the wrong reason.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "refusals took {:?} — something attempted a connection",
+            started.elapsed()
+        );
     }
 
     /// The examined-tag bound is what makes the scan linear regardless of body shape;

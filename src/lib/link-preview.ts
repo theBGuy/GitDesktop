@@ -25,22 +25,26 @@ export function fetchLinkPreview(url: string): Promise<LinkPreview> {
 }
 
 /**
- * A page's preview, cached for the session: a SETTLED one is never re-read, and
- * the half-hour `gcTime` keeps a body's links warm across view switches. That
- * cache now holds image BYTES rather than a URL, so `gcTime` bounds real memory
- * — an entry is a page's card, not a pointer to one.
+ * An entry carries the og image's BYTES, not a URL, so `gcTime` is this cache's
+ * memory bound rather than a convenience knob, and is deliberately short: five
+ * minutes covers re-hovering a link while reading around it, and caps retention
+ * at minutes of hovering rather than half an hour of it. `staleTime` stays
+ * infinite — while an entry is cached it is settled, and a re-hover repaints
+ * with no request at all.
  *
  * A FAILED one needs the two mount options as much as `retry`: the card
  * remounts on every hover, and `staleTime` doesn't cover an error, so without
  * them each re-hover re-invokes the command and can pay the full timeout again
  * for an answer the backend already gave (a private host it refuses by design).
+ * That memory expires with the entry: a refusal is re-earned once per `gcTime`,
+ * which is the price of bounding what the cache holds.
  */
 export const linkPreviewOptions = (url: string) =>
   queryOptions({
     queryKey: ["link-preview", url] as const,
     queryFn: () => fetchLinkPreview(url),
     staleTime: Number.POSITIVE_INFINITY,
-    gcTime: 30 * 60_000,
+    gcTime: 5 * 60_000,
     retry: false,
     retryOnMount: false,
     refetchOnWindowFocus: false,
