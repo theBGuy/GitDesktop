@@ -218,8 +218,9 @@ function RowBadge({
  * past the selected age window** — and lets the user Archive (reversible hide via
  * the `gitdesktopArchived` flag) or Delete (`git branch -D`) the selected set in
  * one pass. The current branch, the default branch, `gd/session/*` branches, and
- * branches checked out in another worktree are never candidates; Archive also
- * skips already-archived branches, and Delete skips rule-protected ones.
+ * branches checked out in another worktree are never candidates — except that
+ * Archive takes back a branch whose worktree is already being removed; Archive
+ * also skips already-archived branches, and Delete skips rule-protected ones.
  *
  * Merged detection has two sources: branch divergence (`ahead === 0`, no extra
  * backend) and the switcher's PR map, which catches the squash and rebase merges
@@ -235,6 +236,7 @@ export function CleanupBranchesDialog({
   currentBranch,
   isProtected,
   isInWorktree,
+  isWorktreeRemoving,
   worktreeCheckState,
   prMergedByBranch,
   prCheckState,
@@ -249,8 +251,15 @@ export function CleanupBranchesDialog({
   /** True when a branch is blocked from deletion by an effective branch rule. */
   isProtected: (name: string) => boolean;
   /** True when a branch is checked out in another worktree — git can't delete it,
-   *  and archiving would hide a branch that's in use, so both modes drop it. */
+   *  and archiving would hide a branch that's in use, so both modes drop it
+   *  unless {@link isWorktreeRemoving} takes it back. */
   isInWorktree: (name: string) => boolean;
+  /** True when the worktree holding this branch is already being removed, read
+   *  from the removal store rather than the worktree list (which can be starved
+   *  while a removal runs). Archive takes it back — the branch is on its way out
+   *  of use — while Delete keeps excluding it: git refuses `branch -D` on a
+   *  checked-out branch, and the removal can still fail. */
+  isWorktreeRemoving: (name: string) => boolean;
   /** Whether {@link isInWorktree} has an answer yet. An advisory read that would
    *  have refused an action must be held on, never acted around: while this is
    *  `"pending"` the predicate is a stand-in that excludes nothing, so the list
@@ -338,13 +347,17 @@ export function CleanupBranchesDialog({
 
   // Mode-specific candidates. Archive hides — drop already-archived branches
   // (a no-op) and ones checked out in another worktree (in use; the row menu
-  // refuses those too). Delete is permanent — drop rule-protected branches
-  // (they'd fail anyway), but keep archived ones (a final sweep may want them).
+  // refuses those too), except where that worktree is already being removed.
+  // Delete is permanent — drop rule-protected branches (they'd fail anyway),
+  // but keep archived ones (a final sweep may want them).
   const candidates = useMemo(() => {
     const list =
       mode === "archive"
         ? stale.filter(
-            (c) => !c.branch.archived && !isInWorktree(c.branch.name),
+            (c) =>
+              !c.branch.archived &&
+              (!isInWorktree(c.branch.name) ||
+                isWorktreeRemoving(c.branch.name)),
           )
         : stale.filter(
             (c) => !isProtected(c.branch.name) && !isInWorktree(c.branch.name),
@@ -354,7 +367,7 @@ export function CleanupBranchesDialog({
       if (a.merged !== b.merged) return a.merged ? -1 : 1;
       return b.ageDays - a.ageDays;
     });
-  }, [stale, mode, isProtected, isInWorktree]);
+  }, [stale, mode, isProtected, isInWorktree, isWorktreeRemoving]);
 
   // Until the worktree read lands, `isInWorktree` excludes nothing, so every
   // candidate below is provisional — the list stays behind the skeleton and the

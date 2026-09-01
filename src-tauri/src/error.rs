@@ -21,6 +21,10 @@ pub enum AppError {
     /// would push every `AppResult` in the crate past clippy's `result_large_err`.
     #[error("{}", .0.message)]
     PullRebaseWouldDrop(Box<crate::git::pull_guard::WouldDrop>),
+    /// A bounded wait for one of a repo's locks expired. `holder` names what was
+    /// running in the user's terms ("a worktree removal"), never the lock itself.
+    #[error("{}", busy_message(holder))]
+    Busy { holder: String },
     #[error("not a git repository: {0}")]
     NotARepo(String),
     #[error("git executable not found")]
@@ -62,6 +66,22 @@ fn git_message(code: i32, stderr: &str) -> String {
     }
 }
 
+/// One complete sentence, because the frontend takes line 1 verbatim as the toast
+/// title (`firstMeaningfulLine`, `src/lib/error-summary.ts`). An empty holder falls
+/// back to the generic phrasing rather than emitting a headless sentence.
+fn busy_message(holder: &str) -> String {
+    let mut chars = holder.chars();
+    let Some(first) = chars.next() else {
+        return "Another Git operation is still running — try again when it finishes."
+            .to_string();
+    };
+    format!(
+        "{}{} is still running — try again when it finishes.",
+        first.to_uppercase(),
+        chars.as_str()
+    )
+}
+
 /// The frontend renders a conflict from `op`/`report`, so this is what the
 /// non-presenting readers get: `Display` feeds `to_string()` embeds (the oplog
 /// entry, the compound funnels' wrapped messages). A report can only be empty if
@@ -85,6 +105,7 @@ impl Serialize for AppError {
             // Stable serialized kind — the frontend branches on it to open the
             // keep-or-drop decision instead of presenting an error.
             AppError::PullRebaseWouldDrop(_) => "pullRebaseWouldDrop",
+            AppError::Busy { .. } => "busy",
             AppError::NotARepo(_) => "notARepo",
             AppError::GitNotFound => "gitNotFound",
             AppError::GhNotFound => "ghNotFound",
@@ -110,6 +131,9 @@ impl Serialize for AppError {
             AppError::Git { code, stderr } => {
                 map.serialize_entry("code", code)?;
                 map.serialize_entry("stderr", stderr)?;
+            }
+            AppError::Busy { holder } => {
+                map.serialize_entry("holder", holder)?;
             }
             AppError::Conflict { op, paths, report } => {
                 map.serialize_entry("op", op)?;
@@ -218,6 +242,19 @@ mod tests {
             ))
             .unwrap(),
             r#"{"kind":"pullRebaseWouldDrop","message":"Pulling with rebase would drop 2 commits that origin/main no longer contains.","branch":"main","upstream":"origin/main","branchTip":"1111111111111111111111111111111111111111","newTip":"3333333333333333333333333333333333333333","mergeBase":"4444444444444444444444444444444444444444","forkPoint":"1111111111111111111111111111111111111111","commits":[{"sha":"1111111111111111111111111111111111111111","subject":"V the victim","author":"Ada","authorDate":"2026-08-28T23:37:38-04:00"},{"sha":"2222222222222222222222222222222222222222","subject":"also doomed","author":"Bob","authorDate":"2026-08-27T10:00:00+00:00"}]}"#
+        );
+    }
+
+    /// The frontend renders line 1 of `message` as the toast title, so the whole
+    /// sentence is the contract — not just the `holder` key beside it.
+    #[test]
+    fn busy_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::Busy {
+            holder: "a worktree removal".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"busy","message":"A worktree removal is still running — try again when it finishes.","holder":"a worktree removal"}"#
         );
     }
 

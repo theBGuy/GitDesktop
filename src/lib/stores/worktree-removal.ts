@@ -1,10 +1,17 @@
 import { toast } from "sonner";
 import { create } from "zustand";
-import { gitCheckoutBranch, gitStashAll, validateRepo } from "@/lib/git/api";
+import {
+  gitCheckoutBranch,
+  gitDefaultBranch,
+  gitSetBranchArchived,
+  gitStashAll,
+  validateRepo,
+} from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import { repoKeys, worktreeKey } from "@/lib/git/queries";
 import { pruneWorktrees, removeWorktree } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
+import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useUiStore } from "./ui";
 
@@ -14,6 +21,14 @@ export interface WorktreeRemoval {
   path: string;
   /** What to call it on screen — its branch, or the folder name when detached. */
   name: string;
+  /** The branch checked out in the worktree being removed, null when detached.
+   *  Distinct from {@link WorktreeRemoval.name}, whose folder-name fallback can
+   *  collide with an unrelated branch — match on this one. */
+  branch: string | null;
+  /** Archive {@link WorktreeRemoval.branch} once the removal succeeds. Held in
+   *  memory only: quitting mid-removal drops the intent while the backend
+   *  removal still completes, which is accepted over persisting it. */
+  archiveWhenDone: boolean;
   /** Epoch ms the removal started. */
   startedAt: number;
   /** Which step of a promote this entry is on. Set only by the promote path — a
@@ -46,7 +61,12 @@ interface WorktreeRemovalState {
   startRemoval: (args: {
     repoPath: string;
     path: string;
+    /** Display name; see {@link WorktreeRemoval.name}. */
     name: string;
+    /** The removed worktree's branch; see {@link WorktreeRemoval.branch}. */
+    branch: string | null;
+    /** Archive `branch` when the removal succeeds. */
+    archiveWhenDone: boolean;
     force: boolean;
   }) => string | null;
   /** Starts a promote — remove the worktree to free its branch, then check that
@@ -153,15 +173,22 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
   (_set, get) => ({
     byRepo: {},
 
-    startRemoval: ({ repoPath, path, name, force }) => {
+    startRemoval: ({
+      repoPath,
+      path,
+      name,
+      branch,
+      archiveWhenDone,
+      force,
+    }) => {
       // Matched on the directory, not the string: today's callers all spell it
       // the ui store's way, but the admission rule shouldn't depend on that.
       if (isRemovalInFlight(get().byRepo, repoPath, path))
         return WORKTREE_REMOVING_MESSAGE;
       if (promotingWorktrees.has(normPath(path)))
         return WORKTREE_PROMOTING_MESSAGE;
-      markRemoval(repoPath, path, name);
-      void run(repoPath, path, force);
+      markRemoval({ repoPath, path, name, branch, archiveWhenDone });
+      void run({ repoPath, path, force, branch, archiveWhenDone });
       return null;
     },
 
@@ -185,18 +212,37 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
   }),
 );
 
-function markRemoval(
-  repoPath: string,
-  path: string,
-  name: string,
-  promotePhase?: WorktreeRemoval["promotePhase"],
-) {
+/** Named arguments rather than positional: `name` and `branch` are both plain
+ *  strings that usually hold the same value, and a swap at a call site would
+ *  only surface on a detached worktree. */
+function markRemoval({
+  repoPath,
+  path,
+  name,
+  branch,
+  archiveWhenDone,
+  promotePhase,
+}: {
+  repoPath: string;
+  path: string;
+  name: string;
+  branch: string | null;
+  archiveWhenDone: boolean;
+  promotePhase?: WorktreeRemoval["promotePhase"];
+}) {
   useWorktreeRemovalStore.setState((s) => ({
     byRepo: {
       ...s.byRepo,
       [repoPath]: {
         ...s.byRepo[repoPath],
-        [path]: { path, name, startedAt: Date.now(), promotePhase },
+        [path]: {
+          path,
+          name,
+          branch,
+          archiveWhenDone,
+          startedAt: Date.now(),
+          promotePhase,
+        },
       },
     },
   }));
@@ -255,12 +301,57 @@ function settleRemoval(repoPath: string, path: string) {
   invalidateAfterRemoval(repoPath);
 }
 
+/** Honours the delete dialog's "archive when done" checkbox, once the removal
+ *  has settled. The removal itself has already succeeded here, so nothing in
+ *  this step can turn it back into a failure — a refused archive reports itself
+ *  and points at the branch menu, which can still do it. */
+async function archiveAfterRemoval(repoPath: string, branch: string) {
+  // Re-resolved at completion time rather than trusted from the dialog: the
+  // intent can be minutes old, and archiving the default branch would hide it
+  // from every branch surface. An unreadable default stays best-effort, the
+  // same posture the branch menu's own archive guard takes.
+  const isDefault = await gitDefaultBranch(repoPath)
+    .then((name) => name === branch)
+    .catch(() => false);
+  if (isDefault) {
+    toast.success("Worktree removed");
+    toast.info(`Left ${branch} unarchived — it's the default branch.`);
+    return;
+  }
+  try {
+    await gitSetBranchArchived(repoPath, branch, true);
+    // `settleRemoval` invalidated before the flag landed; branch surfaces read
+    // the archived state, so they need the pass that sees it.
+    void queryClient.invalidateQueries({
+      queryKey: repoKeys.branches(repoPath),
+    });
+    toast.success(`Worktree removed and ${branch} archived`);
+  } catch (e) {
+    toast.error(
+      `Removed the worktree, but couldn't archive ${branch} — you can archive it from the branch menu.`,
+      { description: errorMessage(e) },
+    );
+  }
+}
+
 /**
  * Runs one removal to completion. There is deliberately no cancel: the backend
  * removal is uninterruptible past its first steps, and killing it midway strands
  * a half-removed worktree with a live admin entry.
  */
-async function run(repoPath: string, path: string, force: boolean) {
+async function run({
+  repoPath,
+  path,
+  force,
+  branch,
+  archiveWhenDone,
+}: {
+  repoPath: string;
+  path: string;
+  force: boolean;
+  branch: string | null;
+  archiveWhenDone: boolean;
+}) {
   let failure: { error: unknown } | null = null;
   try {
     // branch=null: removing a worktree leaves its branch intact (deleting a
@@ -277,13 +368,23 @@ async function run(repoPath: string, path: string, force: boolean) {
   settleRemoval(repoPath, path);
 
   const listener = listeners.get(listenerKey(repoPath, path))?.at(-1);
-  if (!failure) {
+  if (failure) {
+    // A failed removal leaves the worktree — and so the branch's checkout —
+    // in place, so the archive intent is not acted on.
+    if (listener) listener.onError(failure.error, force);
+    else toastError(failure.error);
+    return;
+  }
+  if (!archiveWhenDone || !branch) {
     toast.success("Worktree removed");
     listener?.onSuccess();
     return;
   }
-  if (listener) listener.onError(failure.error, force);
-  else toastError(failure.error);
+  // Close the dialog before the archive rather than after: the entry has
+  // already settled, so one left open would re-offer Remove on a worktree that
+  // is gone. The archive reports its own outcome by toast either way.
+  listener?.onSuccess();
+  await archiveAfterRemoval(repoPath, branch);
 }
 
 /** Remove a worktree while keeping its branch, retrying once if the folder is
@@ -351,7 +452,16 @@ async function runPromote(
     useUiStore.getState().openRepo(info);
     await new Promise((resolve) => setTimeout(resolve, 80));
     // Main is the active repo now, so the removal is visible where the user is.
-    markRemoval(activeKey, worktreePath, branch, "removing");
+    // A promote is checking this branch out, not putting it away, so it never
+    // archives; the branch doubles as the display name (a promote has one).
+    markRemoval({
+      repoPath: activeKey,
+      path: worktreePath,
+      name: branch,
+      branch,
+      archiveWhenDone: false,
+      promotePhase: "removing",
+    });
     markedKey = activeKey;
     // Free the branch: remove the worktree but KEEP the branch (null) — we
     // check it out in main next. force=false: the clean-tree guard already ran.

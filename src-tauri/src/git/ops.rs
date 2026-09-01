@@ -7,8 +7,9 @@ use crate::error::{AppError, AppResult};
 use crate::git::diff::parse_numstat_z;
 use crate::git::history::validate_hash;
 use crate::git::runner::{
-    run_git, run_git_mutating, run_git_mutating_raw, run_git_raw, run_git_raw_input,
-    DEFAULT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    acquire_repo_lock, run_git, run_git_mutating, run_git_mutating_raw, run_git_raw,
+    run_git_raw_input, run_git_worktree_admin, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{FileDiff, RepoOpState, RewriteStep, StashEntry, TagInfo};
 use crate::state::AppState;
@@ -454,8 +455,8 @@ fn remove_lines(content: &str, drop: &std::collections::HashSet<u32>) -> String 
 /// the dirty check alone would let a reset strand those markers and leave the
 /// repo claiming an operation whose commits have moved out from under it.
 ///
-/// Both `--hard` guards and the reset itself run under ONE `repo_lock` hold, so
-/// no other caller in THIS PROCESS can dirty the tree or start a merge between the
+/// Both `--hard` guards and the reset itself run under ONE working-tree-lock hold,
+/// so no other caller in THIS PROCESS can dirty the tree or start a merge between the
 /// checks and a rewrite that has no stash and no reflog to recover from. The hold
 /// is why the reset runs on the lock-free `run_git`: `run_git_mutating` re-acquires
 /// the same non-reentrant mutex and deadlocks, so this trades away its one-shot
@@ -508,8 +509,8 @@ pub(crate) async fn git_reset_core(
     }
     // One hold across both guards and the rewrite — see this function's doc for
     // why the runner inside it must be the lock-free one.
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a reset").await?;
     ensure_clean_tree(&repo_path).await?;
     if op_state(&repo_path).await?.mid_op() {
         return Err(AppError::InvalidArgument(
@@ -697,8 +698,8 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
     // `target` to the `target_tip` captured up here, so a commit another caller lands
     // in between would be destroyed by a reset to a tip that predates it. Lock-free
     // runners only while held (see `run_git_mutating`).
-    let lock = state.repo_lock(repo_path).await;
-    let guard = lock.lock().await;
+    let domain = state.working_tree_lock(repo_path).await;
+    let guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a cherry-pick").await?;
 
     // Ahead of the tree check because it can't stand in for this one: a pick paused
     // with its conflicts staged has a CLEAN tree, so the only refusal left would be
@@ -804,7 +805,7 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
         let mut failure: Option<(String, AppError)> = None;
         'picks: for hash in hashes {
             // Raw plus an explicit code check, never a mutating runner: this loop
-            // runs inside the compound's own `repo_lock` hold. A conflicted pick
+            // runs inside the compound's own working-tree hold. A conflicted pick
             // splits its report — `could not apply` on stderr, the `CONFLICT (…`
             // file list on stdout — so the rollback verdict below needs both.
             let out = match run_git_raw(Some(repo_path), &["cherry-pick", hash], pick_timeout).await
@@ -1046,8 +1047,8 @@ pub(crate) async fn git_stash_all_core(state: &AppState, repo_path: String) -> A
     // between the check and the push. That means the lock-free `run_git` for the
     // push itself — `run_git_mutating` re-acquires this non-reentrant lock and
     // deadlocks — trading away its one-shot index.lock retry (as autostash does).
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a stash operation").await?;
     refuse_mid_op(&repo_path).await?;
 
     run_git(
@@ -1155,10 +1156,10 @@ pub(crate) async fn git_stash_paths_core(
     // the stash's index-commit (`^2`), so any OTHER staged file rides along and can
     // resurrect on `pop --index`. To capture only the selection, hold the per-repo
     // lock across the whole compound sequence and use the lock-free `run_git` for
-    // every step while holding it — `repo_lock` is a non-reentrant
+    // every step while holding it — the working-tree domain is a non-reentrant
     // `tokio::sync::Mutex`, so `run_git_mutating` would re-acquire it and deadlock.
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a stash operation").await?;
 
     // Refuse mid-operation, before any mutation: an unmerged index blocks both a
     // native `git stash push` and the slow path's `write-tree` snapshot, and a
@@ -1619,11 +1620,11 @@ pub(crate) async fn replace_file_lines(
     // Hold the repo's mutating lock across the WHOLE dirty-check → read → verify →
     // write → stage sequence, not just the final `git add`: otherwise two concurrent
     // Apply calls on different ranges of one file interleave and the second silently
-    // overwrites the first's write. `repo_lock` is a `tokio::sync::Mutex` (safe to
-    // hold across `.await`) but non-reentrant — use the lock-free `run_git` below,
-    // never `run_git_mutating`, which would deadlock.
-    let lock = state.repo_lock(repo_path).await;
-    let _guard = lock.lock().await;
+    // overwrites the first's write. The working-tree domain is a `tokio::sync::Mutex`
+    // (safe to hold across `.await`) but non-reentrant — use the lock-free `run_git`
+    // below, never `run_git_mutating`, which would deadlock.
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a file edit").await?;
 
     let repo_root = std::path::Path::new(repo_path);
     let target = repo_root.join(rel);
@@ -2447,7 +2448,7 @@ pub(crate) async fn unmerged_paths(repo_path: &str) -> Vec<String> {
 /// `report` must be [`GitOutput::full_failure_text`]: the conflict families split
 /// ONE report across both streams, so either half alone is silent data loss.
 /// Lock-free (the probe uses `run_git_raw`), so compounds may call it while
-/// holding `repo_lock`.
+/// holding any domain's lock.
 pub(crate) async fn classify_failure(
     repo_path: &str,
     op: &str,
@@ -2499,14 +2500,15 @@ fn worktree_root_dir(repo_path: &str) -> AppResult<std::path::PathBuf> {
 /// `git worktree prune`, both in the MAIN repo, both best-effort (a resolve
 /// worktree is detached and holds no branch, so nothing else needs cleanup).
 async fn remove_resolve_worktree(state: &AppState, repo_path: &str, worktree_path: &str) {
-    let _ = run_git_mutating(
+    let _ = run_git_worktree_admin(
         state,
         repo_path,
         &["worktree", "remove", "--force", worktree_path],
         WORKTREE_OP_TIMEOUT,
     )
     .await;
-    let _ = run_git_mutating(state, repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    let _ =
+        run_git_worktree_admin(state, repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
 }
 
 /// Parses `git worktree list --porcelain` into the checked-out branch name of
@@ -2828,7 +2830,7 @@ pub(crate) async fn merge_local_pr(
         crate::oplog::finish(repo_path, &op_id, Some(e.to_string())).await;
         return Err(AppError::Io(e));
     }
-    let add = run_git_mutating(
+    let add = run_git_worktree_admin(
         state,
         repo_path,
         &["worktree", "add", "--detach", &worktree_path, &base_tip],
@@ -3518,7 +3520,7 @@ pub(crate) async fn merge_remote_pr(
     ));
     let worktree_path = worktree_path.to_string_lossy().into_owned();
     std::fs::create_dir_all(root).map_err(AppError::Io)?;
-    run_git_mutating(
+    run_git_worktree_admin(
         state,
         repo_path,
         &["worktree", "add", "--detach", &worktree_path, &head_tip],
@@ -3997,8 +3999,8 @@ pub(crate) async fn rewrite_commits_with_timeouts(
     // destroyed, and between `reset --hard base` and the picks the branch sits rewound
     // where a concurrent read sees a truncated history. Lock-free runners only while
     // held (see `run_git_mutating`).
-    let lock = state.repo_lock(repo_path).await;
-    let guard = lock.lock().await;
+    let domain = state.working_tree_lock(repo_path).await;
+    let guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a history rewrite").await?;
 
     // reset --hard would destroy uncommitted work — refuse instead.
     let status = run_git(
@@ -4086,7 +4088,7 @@ pub(crate) async fn rewrite_commits_with_timeouts(
         let rewound = failure.is_none();
         if failure.is_none() {
             // Raw plus `check_code`, never a mutating runner: this loop runs inside
-            // the compound's own `repo_lock` hold. Failures land on either stream —
+            // the compound's own working-tree hold. Failures land on either stream —
             // a conflicted pick splits `could not apply` (stderr) from its `CONFLICT (…`
             // file list (stdout), and `commit` reports a squash that left nothing to
             // commit on stdout alone — so a stderr-only error would carry half a
@@ -4574,6 +4576,8 @@ pub async fn git_list_tags(repo_path: String) -> AppResult<Vec<TagInfo>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only: the interleave control queues on the lock WITHOUT a wait bound.
+    use crate::git::runner::acquire_repo_lock_unbounded;
 
     fn dropping(content: &str, lines: &[u32]) -> String {
         remove_lines(content, &lines.iter().copied().collect())
@@ -5327,18 +5331,22 @@ mod tests {
             let state = state.clone();
             let repo = repo.clone();
             tokio::spawn(async move {
-                let lock = state.repo_lock(&repo).await;
+                let domain = state.working_tree_lock(&repo).await;
                 // Bounded wait: if the compound somehow finished first we still
                 // commit, and the assertions below stay meaningful either way.
                 for _ in 0..500 {
-                    if lock.try_lock().is_err() {
+                    if domain.lock().try_lock().is_err() {
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 }
-                run_git_mutating(
-                    &state,
-                    &repo,
+                // The same queue an ordinary mutating caller joins, minus the wait
+                // bound: this test pins the compound's ATOMICITY, so a compound that
+                // outran `LOCK_WAIT_TIMEOUT` on a loaded runner must not turn it into
+                // a Busy failure. Lock-free runner, since the hold is ours.
+                let _guard = acquire_repo_lock_unbounded(&domain, "a commit").await;
+                run_git(
+                    Some(&repo),
                     &["commit", "--allow-empty", "-m", "concurrent"],
                     DEFAULT_TIMEOUT,
                 )

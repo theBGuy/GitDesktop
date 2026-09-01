@@ -2,8 +2,8 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
-    run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
-    WORKTREE_OP_TIMEOUT,
+    acquire_repo_lock, run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
 use crate::state::AppState;
@@ -1078,9 +1078,9 @@ pub(crate) async fn update_branch_from(
         ));
     }
 
-    // Mutating refs — serialize against other writes to this repo.
-    let lock = state.repo_lock(repo_path).await;
-    let _guard = lock.lock().await;
+    // Mutating refs — serialize against other writes to this repo's working tree.
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a branch update").await?;
 
     let current = run_git(
         Some(repo_path),

@@ -1,7 +1,7 @@
 import { getTransport } from "@/lib/transport";
 
 /** The kinds whose wire shape is kind + message alone (Rust `AppError`
- *  serializes a payload only for the three members below). */
+ *  serializes a payload only for the four members below). */
 type PlainErrorKind =
   | "notARepo"
   | "gitNotFound"
@@ -38,6 +38,10 @@ export type AppError =
    *  exclusively through `isPullWouldDrop`, which narrows to `PullWouldDrop`
    *  (lib/git/api.ts) — declaring it twice would let the two shapes drift. */
   | { kind: "pullRebaseWouldDrop"; message: string }
+  /** A bounded wait for one of a repo's locks expired. `holder` names what was
+   *  running in the user's terms ("a worktree removal"), never the lock itself;
+   *  `message` is already the complete sentence a toast shows. */
+  | { kind: "busy"; message: string; holder: string }
   | { kind: PlainErrorKind; message: string };
 
 export function isAppError(e: unknown): e is AppError {

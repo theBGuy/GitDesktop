@@ -45,8 +45,46 @@ impl CancelEntry {
     }
 }
 
+/// The label of whatever currently holds a domain's lock, readable WITHOUT holding
+/// it — a waiter that times out reads this to name the operation it lost to. A
+/// blocking mutex because every critical section is one `Option` read or write.
+pub(crate) type HolderSlot = Arc<SyncMutex<Option<&'static str>>>;
+
+/// One lock domain for one repo path: the mutex plus its holder label. Cloning
+/// hands out the same two `Arc`s, so every caller shares one domain.
+#[derive(Clone, Default)]
+pub struct LockDomain {
+    lock: Arc<Mutex<()>>,
+    holder: HolderSlot,
+}
+
+impl LockDomain {
+    pub(crate) fn lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.lock)
+    }
+
+    pub(crate) fn holder_slot(&self) -> HolderSlot {
+        Arc::clone(&self.holder)
+    }
+
+    /// What holds this domain right now, or `None` when it is free (or held by an
+    /// unlabeled acquisition).
+    pub(crate) fn holder_label(&self) -> Option<&'static str> {
+        *self.holder.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// The three independent lock domains of one repo path. They are separate mutexes
+/// precisely so a multi-minute worktree removal can't stall staging or a commit.
+#[derive(Clone, Default)]
+struct RepoDomains {
+    working_tree: LockDomain,
+    worktree_admin: LockDomain,
+    network: LockDomain,
+}
+
 pub struct AppState {
-    repo_locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+    repo_domains: Mutex<HashMap<PathBuf, RepoDomains>>,
     pub git_info: OnceCell<GitInfo>,
     /// In-flight agent-CLI reviews and sessions keyed by a frontend-supplied id, so a
     /// separate cancel command can signal the streaming run to stop. A blocking mutex:
@@ -63,7 +101,7 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            repo_locks: Mutex::new(HashMap::new()),
+            repo_domains: Mutex::new(HashMap::new()),
             git_info: OnceCell::new(),
             agent_cancels: Arc::new(SyncMutex::new(HashMap::new())),
             close_to_tray: AtomicBool::new(true),
@@ -72,13 +110,39 @@ impl Default for AppState {
 }
 
 impl AppState {
-    /// Per-repo lock serializing mutating git operations so concurrent
-    /// invocations don't fight over .git/index.lock.
-    pub async fn repo_lock(&self, repo_path: &str) -> Arc<Mutex<()>> {
-        let mut map = self.repo_locks.lock().await;
-        map.entry(PathBuf::from(repo_path))
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+    /// The three domains for `repo_path`, created on first use.
+    async fn domains(&self, repo_path: &str) -> RepoDomains {
+        let mut map = self.repo_domains.lock().await;
+        map.entry(PathBuf::from(repo_path)).or_default().clone()
+    }
+
+    /// The **working-tree** domain: index, HEAD and ref mutations of the checkout
+    /// at `repo_path` — the lock that keeps concurrent git invocations from
+    /// fighting over `.git/index.lock`.
+    ///
+    /// Lock ordering across domains, which keeps the wait graph acyclic: a task may
+    /// take NETWORK while holding WORKING-TREE (a pull is a transfer plus a merge)
+    /// and never the reverse; the ADMIN domain nests with neither, and no task takes
+    /// two locks of one domain.
+    pub(crate) async fn working_tree_lock(&self, repo_path: &str) -> LockDomain {
+        self.domains(repo_path).await.working_tree
+    }
+
+    /// The **worktree-admin** domain: every `git worktree
+    /// add/remove/prune/move/lock/unlock/repair` on the main repo path. Separate
+    /// from the working tree because a removal holds it for minutes while staging
+    /// and committing must keep working. Never nested with another domain (see
+    /// [`working_tree_lock`](Self::working_tree_lock) for the ordering rule).
+    pub(crate) async fn worktree_admin_lock(&self, repo_path: &str) -> LockDomain {
+        self.domains(repo_path).await.worktree_admin
+    }
+
+    /// The **network** domain: fetch, push, set-head and pull transfers, serialized
+    /// so a user pull's fetch can't race the background auto-fetch at the ref level.
+    /// May be taken while holding the working-tree lock, never the reverse (see
+    /// [`working_tree_lock`](Self::working_tree_lock)).
+    pub(crate) async fn network_lock(&self, repo_path: &str) -> LockDomain {
+        self.domains(repo_path).await.network
     }
 
     /// Register (or adopt) the cancellation handle for a run id and return it. The

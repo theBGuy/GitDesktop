@@ -1416,10 +1416,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // flight — the map is empty until it lands, which would offer Archive on a
     // branch the answer excludes. A FAILED read falls through to best-effort:
     // no answer is coming, and holding the item forever helps no one.
+    // A branch whose worktree is being removed is the one exception, and it
+    // comes from the removal store rather than the worktree read: that read can
+    // be starved while a removal runs, leaving the guard stuck on "checking".
+    // Promote entries are excluded by `promotePhase`: a promote removes the
+    // worktree to CHECK THAT BRANCH OUT here, so archiving it mid-flight would
+    // land the user on an archived current branch.
     const archiveBlockedReason = (() => {
       if (branch.archived) return null;
       if (branch.isCurrent) return "current branch";
       if (branch.name === defaultName) return "default branch";
+      if (removals.some((r) => r.branch === branch.name && !r.promotePhase))
+        return null;
       if (userWorktrees.data === undefined && !userWorktrees.isError)
         return "checking worktrees…";
       if (inWorktree) return "checked out in another worktree";
@@ -2427,6 +2435,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         currentBranch={currentName}
         isProtected={(name) => isDeletionBlocked(rulesConfig, name)}
         isInWorktree={(name) => worktreeByBranch.has(name)}
+        // From the removal store, not the worktree read: that read can be
+        // starved while a removal runs, so the exclusion above would hold a
+        // branch whose worktree is on its way out. A promote's removal
+        // (`promotePhase`) doesn't count — it frees the branch to check it out
+        // here, and archiving it would hide the branch you're about to land on.
+        isWorktreeRemoving={(name) =>
+          removals.some((r) => r.branch === name && !r.promotePhase)
+        }
         // The map is empty until the read lands and stays empty if it fails, so
         // the dialog is told which, and holds its list rather than acting on an
         // exclusion that isn't answering yet.

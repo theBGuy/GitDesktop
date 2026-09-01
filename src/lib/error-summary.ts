@@ -20,6 +20,7 @@ const KIND_LABELS: Record<AppError["kind"], string> = {
   git: "Git error",
   conflict: "Merge conflict",
   pullRebaseWouldDrop: "Pull blocked",
+  busy: "Operation in progress",
   notARepo: "Not a Git repository",
   gitNotFound: "Git not found",
   ghNotFound: "GitHub CLI not found",

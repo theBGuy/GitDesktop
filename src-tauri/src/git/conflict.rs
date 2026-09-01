@@ -12,7 +12,9 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::git::runner::{run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT};
+use crate::git::runner::{
+    acquire_repo_lock, run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+};
 use crate::state::AppState;
 
 /// Cap on a conflicted file's working-tree size for AI resolution. Past this the
@@ -225,8 +227,8 @@ pub(crate) async fn git_checkout_conflict_side_core(
     // stage or discard can rewrite the working-tree file, and the `add` would then
     // stage THAT content as the user's chosen side. Lock-free runners only while
     // held (see `run_git_mutating`).
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a conflict resolution").await?;
 
     // A side that removed the file (deleted it, or renamed it away) has no stage
     // entry, and `checkout --ours|--theirs` then exits 1 ("does not have our

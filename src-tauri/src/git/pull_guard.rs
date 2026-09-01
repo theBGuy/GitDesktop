@@ -15,7 +15,10 @@ use crate::error::{AppError, AppResult};
 use crate::git::autostash::{autostash_push, settle, AutostashOutcome};
 use crate::git::history::validate_hash;
 use crate::git::remote::run_git_with_creds_once;
-use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
+use crate::git::runner::{
+    acquire_repo_lock, run_git, run_git_raw, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+};
 use crate::state::AppState;
 
 /// One commit the fork-point verdict would rewrite away, as the decision UI names
@@ -491,9 +494,13 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 /// pull that bare git refuses outright ("no such ref was fetched"). Pruned, the
 /// upstream ref stops resolving and that refusal is what the user sees.
 ///
-/// The caller must already hold the repo lock, so every step here uses the
-/// lock-free runners — `run_git_mutating*` would re-acquire it and deadlock.
+/// The caller must already hold the repo's working-tree lock, so every step here
+/// uses the lock-free runners — `run_git_mutating*` would re-acquire it and
+/// deadlock. The fetch below takes the NETWORK lock for its own duration (that
+/// nesting direction only), which is what keeps it from racing the background
+/// auto-fetch at the ref level.
 pub(crate) async fn probe(
+    state: &AppState,
     repo: &str,
     target: &PullTarget,
     cred: &[String],
@@ -504,6 +511,9 @@ pub(crate) async fn probe(
         return Ok(None);
     }
     if target.remote != "." {
+        let network = state.network_lock(repo).await;
+        let _net_guard =
+            acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a fetch").await?;
         let out = run_git_with_creds_once(
             repo,
             cred,
@@ -570,14 +580,14 @@ pub(crate) async fn guarded_pull(state: &AppState, repo: &str) -> AppResult<bool
     // autostash compounds do.
     let cred = credentials(repo, &target).await?;
 
-    let lock = state.repo_lock(repo).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(repo).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
     // Re-read under the lock: `resolve` saw the tree before it, and another window
     // pausing a rebase in that gap would leave this one rebasing onto a conflict.
     if mid_op(repo).await {
         return Ok(false);
     }
-    let Some(plan) = probe(repo, &target, &cred).await? else {
+    let Some(plan) = probe(state, repo, &target, &cred).await? else {
         return Ok(false);
     };
     if !plan.dropped().is_empty() {
@@ -619,10 +629,10 @@ pub(crate) async fn guarded_pull_autostash(
     };
     let cred = credentials(repo, &target).await?;
 
-    let lock = state.repo_lock(repo).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(repo).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
     crate::git::ops::refuse_mid_op(repo).await?;
-    let Some(plan) = probe(repo, &target, &cred).await? else {
+    let Some(plan) = probe(state, repo, &target, &cred).await? else {
         return Ok(None);
     };
     if !plan.dropped().is_empty() {
@@ -855,8 +865,8 @@ pub(crate) async fn git_pull_rebase_decided_core(
         &expected_tip,
     )?;
 
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
     // Names what the user asked for: this arm stashes nothing, so `refuse_mid_op`'s
     // "Can't stash …" would describe an operation that isn't happening.
     crate::git::ops::refuse_mid_op_for(&repo_path, "pull").await?;
@@ -955,8 +965,8 @@ pub(crate) async fn git_pull_rebase_decided_autostash_core(
         &expected_tip,
     )?;
 
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
     ensure_on_expected_commit(&repo_path, &decided.branch, &expected_tip).await?;
 

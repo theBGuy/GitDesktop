@@ -9,7 +9,8 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
-    run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    acquire_repo_lock_unbounded, run_git, run_git_raw, run_git_worktree_admin,
+    try_acquire_repo_lock, DEFAULT_HOLDER, DEFAULT_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -114,7 +115,7 @@ pub async fn git_worktree_create(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("HEAD");
-    run_git_mutating(
+    run_git_worktree_admin(
         &state,
         &repo_path,
         &["worktree", "add", "-b", &branch, &path_str, base],
@@ -145,20 +146,35 @@ pub async fn git_worktree_list(repo_path: String) -> AppResult<Vec<WorktreeInfo>
     Ok(parse_worktree_list(&out.stdout_lossy()))
 }
 
+/// Prunes stale worktree admin entries ONLY IF the admin domain is free right now.
+/// Contended means an admin op (a removal) is in flight, and this prune is
+/// skippable: its result is discarded either way, a removal runs its own prune when
+/// it ends, and queueing would stall the list read behind a multi-minute hold.
+/// `true` when the prune ran.
+pub(crate) async fn prune_worktrees_if_free(state: &AppState, repo_path: &str) -> bool {
+    let domain = state.worktree_admin_lock(repo_path).await;
+    let Some(_guard) = try_acquire_repo_lock(&domain, "a worktree operation") else {
+        return false;
+    };
+    let _ = run_git(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    true
+}
+
 /// Lists the repo's **user** worktrees for the worktree manager — every checkout
 /// except the app-internal agent-session ones; the main worktree is always first
-/// and undeletable. Prunes first so stale admin entries (directory deleted
-/// out-of-band) self-heal — such an entry also holds a branch lock, and it's
-/// filtered from the list, so the manager could never clear it otherwise. Git never
-/// prunes a *locked* worktree, so one on a temporarily-disconnected drive is safe if
-/// the user locked it.
+/// and undeletable. Prunes first (when nothing else is doing admin work) so stale
+/// admin entries (directory deleted out-of-band) self-heal — such an entry also
+/// holds a branch lock, and it's filtered from the list, so the manager could never
+/// clear it otherwise. Git never prunes a *locked* worktree, so one on a
+/// temporarily-disconnected drive is safe if the user locked it. The list read
+/// itself is lock-free, so it still answers while a removal runs.
 #[tauri::command]
 pub async fn git_worktree_list_user(
     app: AppHandle,
     state: State<'_, AppState>,
     repo_path: String,
 ) -> AppResult<Vec<UserWorktree>> {
-    let _ = run_git_mutating(&state, &repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    prune_worktrees_if_free(&state, &repo_path).await;
     let out = run_git(
         Some(&repo_path),
         &["worktree", "list", "--porcelain"],
@@ -250,7 +266,7 @@ pub async fn git_worktree_add_user(
     } else {
         args.extend_from_slice(&[path, branch]);
     }
-    run_git_mutating(&state, &repo_path, &args, WORKTREE_OP_TIMEOUT).await?;
+    run_git_worktree_admin(&state, &repo_path, &args, WORKTREE_OP_TIMEOUT).await?;
     Ok(())
 }
 
@@ -285,7 +301,7 @@ pub async fn git_worktree_move(
             "{to} already exists — choose a new name"
         )));
     }
-    run_git_mutating(
+    run_git_worktree_admin(
         &state,
         &repo_path,
         &["worktree", "move", from, to],
@@ -326,7 +342,7 @@ pub async fn git_worktree_lock(
         args.push(r);
     }
     args.push(path);
-    run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    run_git_worktree_admin(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -348,7 +364,7 @@ pub async fn git_worktree_unlock(
             "path must not start with '-'".into(),
         ));
     }
-    run_git_mutating(
+    run_git_worktree_admin(
         &state,
         &repo_path,
         &["worktree", "unlock", path],
@@ -368,7 +384,7 @@ pub async fn git_worktree_repair(
     state: State<'_, AppState>,
     repo_path: String,
 ) -> AppResult<()> {
-    run_git_mutating(
+    run_git_worktree_admin(
         &state,
         &repo_path,
         &["worktree", "repair"],
@@ -451,13 +467,24 @@ pub(crate) async fn remove_worktree(
     }
     args.push(path);
 
-    // One hold across remove → prune → `branch -D`: the delete is decided from state
-    // observed before the removal, so a concurrent checkout or commit in between would
-    // be destroyed by a `-D` that no longer reflects the repo. The `remove_dir_all`
-    // fallback stays under it — releasing around it reopens that window. Lock-free
-    // runners only while held (see `run_git_mutating`).
-    let lock = state.repo_lock(repo_path).await;
-    let _guard = lock.lock().await;
+    // The WORKTREE-ADMIN domain only, and unbounded: this hold spans a whole
+    // checkout's deletion (minutes on a large tree), so taking the working-tree lock
+    // with it would stall staging and committing for the duration — the bug the
+    // delete dialog's "you can close this and keep working" promise depends on.
+    // Nothing may error out of the wait: the removal IS the long operation.
+    let domain = state.worktree_admin_lock(repo_path).await;
+    let _guard = acquire_repo_lock_unbounded(&domain, "a worktree removal").await;
+
+    // The branch delete is decided from the tip observed BEFORE the removal instead
+    // of from a working-tree hold: git itself refuses to delete a branch checked out
+    // in any worktree, and the equality check below covers the commit race the old
+    // whole-repo hold closed — a hold that never reached another process (the MCP
+    // server) anyway. An unreadable tip counts as absent, so the delete is skipped.
+    let branch = branch.as_deref().filter(|b| !b.is_empty());
+    let expected_tip = match branch {
+        Some(b) => branch_tip(repo_path, b).await,
+        None => None,
+    };
 
     // `git worktree remove` deletes the directory itself, but its recursive delete
     // mishandles Windows reparse points: a worktree with pnpm-installed deps
@@ -501,17 +528,51 @@ pub(crate) async fn remove_worktree(
     }
     // The branch can only be deleted once it's no longer checked out (i.e. after
     // the worktree is gone). Best-effort: a failure here shouldn't fail removal.
-    if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
-        let _ = run_git(Some(repo_path), &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
+    if let (Some(branch), Some(expected_tip)) = (branch, expected_tip.as_deref()) {
+        delete_branch_if_unmoved(repo_path, branch, expected_tip).await;
     }
     Ok(())
+}
+
+/// The commit `refs/heads/<branch>` points at. `None` when the branch is gone or
+/// the read fails — callers treat both as "don't touch it".
+///
+/// Fully qualified: bare `rev-parse <name>` resolves a same-named TAG first, which
+/// would compare a tag's tip against a branch delete.
+async fn branch_tip(repo_path: &str, branch: &str) -> Option<String> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    (out.code == 0)
+        .then(|| out.stdout_lossy().trim().to_string())
+        .filter(|tip| !tip.is_empty())
+}
+
+/// Deletes `branch` ONLY IF its tip is still `expected_tip` — a commit that landed
+/// on it since would otherwise be discarded by a `-D` decided before it existed.
+/// A moved or unreadable tip skips silently; the delete stays best-effort, since a
+/// refusal must never turn a completed removal into a reported failure.
+async fn delete_branch_if_unmoved(repo_path: &str, branch: &str, expected_tip: &str) {
+    if branch_tip(repo_path, branch).await.as_deref() != Some(expected_tip) {
+        return;
+    }
+    let _ = run_git(Some(repo_path), &["branch", "-D", branch], DEFAULT_TIMEOUT).await;
 }
 
 /// Prunes stale worktree admin entries (a worktree whose directory was deleted
 /// out from under git, e.g. by an app crash). Safe to run on startup.
 #[tauri::command]
 pub async fn git_worktree_prune(state: State<'_, AppState>, repo_path: String) -> AppResult<()> {
-    run_git_mutating(&state, &repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await?;
+    run_git_worktree_admin(&state, &repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -538,8 +599,10 @@ pub(crate) async fn worktree_commit_all(
     // concurrent write lands between the check and `add -A` (sweeping files this
     // commit never meant to carry), and the HEAD read can report someone else's commit
     // as this one's. Lock-free runners only while held (see `run_git_mutating`).
-    let lock = state.repo_lock(worktree_path).await;
-    let _guard = lock.lock().await;
+    // The WORKTREE's own working-tree domain, and unbounded: a session turn is
+    // background work that has to queue rather than fail the turn.
+    let domain = state.working_tree_lock(worktree_path).await;
+    let _guard = acquire_repo_lock_unbounded(&domain, DEFAULT_HOLDER).await;
 
     let status = run_git(
         Some(worktree_path),
@@ -591,8 +654,9 @@ pub async fn git_worktree_squash(
     // commit the branch sits rewound with every turn's changes staged, so a concurrent
     // commit or discard there either loses the session's work or folds foreign changes
     // into the squash. Lock-free runners only while held (see `run_git_mutating`).
-    let lock = state.repo_lock(&worktree_path).await;
-    let _guard = lock.lock().await;
+    // Unbounded for the same reason as `worktree_commit_all`.
+    let domain = state.working_tree_lock(&worktree_path).await;
+    let _guard = acquire_repo_lock_unbounded(&domain, DEFAULT_HOLDER).await;
 
     let head = run_git(
         Some(&worktree_path),
@@ -639,8 +703,9 @@ pub async fn git_worktree_resume(
     path: String,
     branch: String,
 ) -> AppResult<()> {
-    let _ = run_git_mutating(&state, &repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
-    run_git_mutating(
+    let _ =
+        run_git_worktree_admin(&state, &repo_path, &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    run_git_worktree_admin(
         &state,
         &repo_path,
         &["worktree", "add", &path, &branch],
@@ -808,6 +873,9 @@ fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The module itself no longer calls the working-tree runner — the interleave
+    // tests below drive it as an ordinary caller would.
+    use crate::git::runner::run_git_mutating;
 
     #[test]
     fn repo_hash_is_stable_and_case_insensitive() {
@@ -1392,18 +1460,22 @@ prunable gitdir file points to non-existent location
             let state = state.clone();
             let repo = repo_s.clone();
             tokio::spawn(async move {
-                let lock = state.repo_lock(&repo).await;
+                let domain = state.working_tree_lock(&repo).await;
                 // Bounded wait: if the turn somehow finished first we still commit,
                 // and the assertions below stay meaningful either way.
                 for _ in 0..500 {
-                    if lock.try_lock().is_err() {
+                    if domain.lock().try_lock().is_err() {
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 }
-                run_git_mutating(
-                    &state,
-                    &repo,
+                // The same queue an ordinary mutating caller joins, minus the wait
+                // bound: this test pins the turn's ATOMICITY, so a turn that outran
+                // `LOCK_WAIT_TIMEOUT` on a loaded runner must not turn it into a Busy
+                // failure. Lock-free runner, since the hold is ours.
+                let _guard = acquire_repo_lock_unbounded(&domain, "a commit").await;
+                run_git(
+                    Some(&repo),
                     &["commit", "--allow-empty", "-m", "concurrent"],
                     DEFAULT_TIMEOUT,
                 )
@@ -1428,5 +1500,155 @@ prunable gitdir file points to non-existent location
         // And the turn's own output rode along in the turn's commit, not a later one.
         let files = run(&repo_s, &["show", "--name-only", "--format=", &hash]).await;
         assert!(files.contains("agent.txt"), "turn's output missing: {files}");
+    }
+
+    /// The bug this split fixes: while a removal holds the worktree-admin lock, a
+    /// commit must run to completion rather than queue behind it. Deterministic —
+    /// the admin lock is held outright for the whole call, no timing bet.
+    #[tokio::test]
+    async fn staging_runs_while_a_worktree_removal_holds_the_admin_lock() {
+        let (_base, repo_s) = setup_repo("admin-vs-commit").await;
+        let state = AppState::default();
+        let _admin = acquire_repo_lock_unbounded(
+            &state.worktree_admin_lock(&repo_s).await,
+            "a worktree removal",
+        )
+        .await;
+
+        run_git_mutating(
+            &state,
+            &repo_s,
+            &["commit", "--allow-empty", "-m", "during removal"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .expect("a commit must not wait on the worktree-admin domain");
+        assert!(run(&repo_s, &["log", "--format=%s"])
+            .await
+            .contains("during removal"));
+    }
+
+    /// The inverse direction, and the one the owner hit from the other side: a
+    /// removal must not wait on whatever holds the working tree.
+    #[tokio::test]
+    async fn a_worktree_removal_runs_while_the_working_tree_lock_is_held() {
+        let (base, repo_s) = setup_repo("commit-vs-removal").await;
+        let wt = base.path().join("busy-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-busy", &wt_s, "HEAD"]).await;
+
+        let state = AppState::default();
+        let working_tree = state.working_tree_lock(&repo_s).await;
+        let _held = working_tree.lock().lock_owned().await;
+
+        remove_worktree(&state, &repo_s, &wt_s, Some("feat-busy".into()), false)
+            .await
+            .expect("a removal must not wait on the working-tree domain");
+        assert!(!wt.exists(), "the checkout is gone");
+        assert!(
+            run(&repo_s, &["branch", "--list", "feat-busy"])
+                .await
+                .trim()
+                .is_empty(),
+            "and its branch went with it"
+        );
+    }
+
+    /// The opportunistic prune SKIPS rather than queues while an admin op runs, so
+    /// the worktree list still answers during a removal. The stale entry surviving
+    /// the contended call is what proves it was skipped and not merely slow.
+    #[tokio::test]
+    async fn the_opportunistic_prune_is_skipped_while_admin_work_runs() {
+        let (base, repo_s) = setup_repo("prune-if-free").await;
+        let wt = base.path().join("stale-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-stale", &wt_s, "HEAD"]).await;
+        std::fs::remove_dir_all(&wt).expect("drop the checkout behind git's back");
+
+        let state = AppState::default();
+        let contended = {
+            let _admin = acquire_repo_lock_unbounded(
+                &state.worktree_admin_lock(&repo_s).await,
+                "a worktree removal",
+            )
+            .await;
+            prune_worktrees_if_free(&state, &repo_s).await
+        };
+        assert!(!contended, "a held admin lock skips the prune");
+        assert!(
+            registry(&repo_s).await.contains("/stale-wt"),
+            "the stale entry survives a skipped prune"
+        );
+
+        assert!(
+            prune_worktrees_if_free(&state, &repo_s).await,
+            "a free admin lock runs it"
+        );
+        assert!(
+            !registry(&repo_s).await.contains("/stale-wt"),
+            "and the stale entry is gone"
+        );
+    }
+
+    /// The branch delete is now gated on the tip, not on a whole-repo hold: an
+    /// unmoved branch goes, one that gained a commit since stays.
+    #[tokio::test]
+    async fn delete_branch_if_unmoved_spares_a_branch_that_moved() {
+        let (base, repo_s) = setup_repo("tip-gate").await;
+        let repo_dir = base.path().join("repo");
+        run(&repo_s, &["branch", "unmoved"]).await;
+        run(&repo_s, &["branch", "moved"]).await;
+        let tip = branch_tip(&repo_s, "moved")
+            .await
+            .expect("a fresh branch has a tip");
+
+        // The branch gains a commit after the tip was recorded.
+        run(&repo_s, &["switch", "-q", "moved"]).await;
+        std::fs::write(repo_dir.join("later.txt"), "later\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "landed after the snapshot"]).await;
+        run(&repo_s, &["switch", "-q", "-"]).await;
+
+        delete_branch_if_unmoved(&repo_s, "moved", &tip).await;
+        assert!(
+            !run(&repo_s, &["branch", "--list", "moved"])
+                .await
+                .trim()
+                .is_empty(),
+            "a branch that moved since the snapshot must survive"
+        );
+
+        let unmoved_tip = branch_tip(&repo_s, "unmoved").await.unwrap();
+        delete_branch_if_unmoved(&repo_s, "unmoved", &unmoved_tip).await;
+        assert!(
+            run(&repo_s, &["branch", "--list", "unmoved"])
+                .await
+                .trim()
+                .is_empty(),
+            "an unmoved branch is deleted"
+        );
+
+        // A branch that never existed is a no-op, not a panic.
+        delete_branch_if_unmoved(&repo_s, "never-existed", &unmoved_tip).await;
+    }
+
+    /// git's own refusal is the third guard: a branch still checked out in a
+    /// worktree survives even at its recorded tip.
+    #[tokio::test]
+    async fn delete_branch_if_unmoved_defers_to_gits_checkout_refusal() {
+        let (base, repo_s) = setup_repo("tip-gate-checked-out").await;
+        let wt = base.path().join("live-wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-b", "feat-live", &wt_s, "HEAD"]).await;
+        let tip = branch_tip(&repo_s, "feat-live").await.unwrap();
+
+        delete_branch_if_unmoved(&repo_s, "feat-live", &tip).await;
+        assert!(
+            !run(&repo_s, &["branch", "--list", "feat-live"])
+                .await
+                .trim()
+                .is_empty(),
+            "git refuses to delete a branch checked out in a worktree"
+        );
     }
 }

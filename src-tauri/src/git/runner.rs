@@ -6,7 +6,7 @@ use tokio::process::Command;
 use tokio::sync::OnceCell;
 
 use crate::error::{AppError, AppResult};
-use crate::state::AppState;
+use crate::state::{AppState, HolderSlot, LockDomain};
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
@@ -16,6 +16,133 @@ pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
 /// lands mid-materialize or mid-delete — leaving exactly the half-state the
 /// registered/prunable reconciliation in `git::worktree` then has to clean up.
 pub const WORKTREE_OP_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How long a caller waits for the working-tree or worktree-admin lock before
+/// reporting [`AppError::Busy`]. Short on purpose: the ops holding those domains
+/// are local index/ref work, so a wait this long already means the user should be
+/// told what they are queued behind rather than watching a spinner.
+pub(crate) const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The same bound for the network domain, where a legitimate holder is a transfer
+/// whose own budget is `NETWORK_TIMEOUT` — a wait of a minute is still ordinary.
+pub(crate) const NETWORK_LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The holder label for a hold whose operation has no better name.
+pub(crate) const DEFAULT_HOLDER: &str = "another Git operation";
+
+/// A held domain lock, which publishes its holder's label for as long as it lives
+/// so a waiter that times out can name what it lost to.
+#[derive(Debug)]
+pub(crate) struct RepoLockGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    holder: HolderSlot,
+}
+
+impl Drop for RepoLockGuard {
+    fn drop(&mut self) {
+        *self.holder.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+}
+
+/// Publish `label` as the domain's holder and wrap the guard, so the label is
+/// cleared on every release path.
+fn hold(
+    domain: &LockDomain,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+    label: &'static str,
+) -> RepoLockGuard {
+    let holder = domain.holder_slot();
+    *holder.lock().unwrap_or_else(|p| p.into_inner()) = Some(label);
+    RepoLockGuard {
+        _guard: guard,
+        holder,
+    }
+}
+
+/// Wait up to `bound` for `domain`, labelling the hold `label`. On expiry the
+/// CURRENT holder's label rides the error, so the user reads what they are waiting
+/// for instead of watching an unbounded hang.
+///
+/// `bound` is a parameter rather than a constant so tests can pass
+/// `Duration::ZERO`: `tokio::time::timeout` polls its inner future first, so a zero
+/// budget still succeeds against a FREE lock and fails immediately against a held
+/// one — free/held is decided by the lock, never by scheduling.
+pub(crate) async fn acquire_repo_lock(
+    domain: &LockDomain,
+    bound: Duration,
+    label: &'static str,
+) -> AppResult<RepoLockGuard> {
+    match tokio::time::timeout(bound, domain.lock().lock_owned()).await {
+        Ok(guard) => Ok(hold(domain, guard, label)),
+        Err(_) => Err(AppError::Busy {
+            holder: domain.holder_label().unwrap_or(DEFAULT_HOLDER).to_string(),
+        }),
+    }
+}
+
+/// Wait indefinitely for `domain`. For the holds a user never initiated (agent
+/// session turns) and the ones that ARE the long operation: erroring there would
+/// only move the failure, so they queue.
+pub(crate) async fn acquire_repo_lock_unbounded(
+    domain: &LockDomain,
+    label: &'static str,
+) -> RepoLockGuard {
+    let guard = domain.lock().lock_owned().await;
+    hold(domain, guard, label)
+}
+
+/// Take `domain` only if it is free right now. `None` means someone else holds it
+/// and the caller's work is skippable — never a queue.
+pub(crate) fn try_acquire_repo_lock(
+    domain: &LockDomain,
+    label: &'static str,
+) -> Option<RepoLockGuard> {
+    let guard = domain.lock().try_lock_owned().ok()?;
+    Some(hold(domain, guard, label))
+}
+
+/// How a git subcommand is named to the NEXT caller waiting on the same domain.
+/// The user's word for the operation, not git's — this text lands in a toast.
+///
+/// Compound holds pass their own label instead (`"a history rewrite"`,
+/// `"a submodule change"`), since the sequence is what the user did, not any one
+/// of its commands.
+pub(crate) fn holder_label(subcommand: &str) -> &'static str {
+    match subcommand {
+        "commit" => "a commit",
+        // The one `submodule` argv reaching this runner is `submodule update`
+        // (git::submodule's other paths hold the lock themselves and label it).
+        "submodule" => "a submodule update",
+        "checkout" | "switch" => "a checkout",
+        "stash" => "a stash operation",
+        "worktree" => "a worktree operation",
+        "branch" => "a branch update",
+        "merge" => "a merge",
+        "rebase" => "a rebase",
+        "cherry-pick" => "a cherry-pick",
+        "revert" => "a revert",
+        "reset" => "a reset",
+        "pull" => "a pull",
+        "push" => "a push",
+        "fetch" => "a fetch",
+        _ => DEFAULT_HOLDER,
+    }
+}
+
+/// The subcommand in an argv that may open with `-c key=value` config pairs
+/// (`op_continue`'s `core.editor`, the forge pushes' credential entries), which
+/// would otherwise label every one of those holds generically.
+pub(crate) fn subcommand_of<'a>(args: &[&'a str]) -> &'a str {
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if *arg == "-c" {
+            rest.next();
+        } else if !arg.starts_with('-') {
+            return arg;
+        }
+    }
+    ""
+}
 
 pub struct GitOutput {
     pub stdout: Vec<u8>,
@@ -401,16 +528,22 @@ pub(crate) async fn worktree_toplevel(repo_path: &str) -> AppResult<String> {
     Ok(toplevel)
 }
 
-/// Runs a mutating git command under the per-repo lock, retrying once on
-/// index.lock contention caused by external tools (editors, other clients).
+/// Runs a mutating git command under the repo's WORKING-TREE lock, retrying once
+/// on index.lock contention caused by external tools (editors, other clients). The
+/// wait is bounded by [`LOCK_WAIT_TIMEOUT`] and reports [`AppError::Busy`] naming
+/// the current holder, so a caller is never queued behind a long op with no word.
 ///
-/// Compound sequences take `repo_lock` themselves, so their guards, anchors and
-/// rollback see one unbroken view — and must NOT call this from inside that hold,
-/// which re-acquires the same non-reentrant mutex and deadlocks. Use the lock-free
-/// runners there (`run_git`, `run_git_raw`, the `_input` pair,
+/// A repo has three independent domains — working-tree, worktree-admin
+/// (`run_git_worktree_admin`), network (`remote::run_git_mutating_with_creds`) —
+/// and every one of them is non-reentrant. Compound sequences take their domain's
+/// lock themselves, so their guards, anchors and rollback see one unbroken view,
+/// and must NOT call a mutating runner of THAT domain from inside the hold: use the
+/// lock-free runners (`run_git`, `run_git_raw`, the `_input` pair,
 /// `remote::run_git_with_creds_once`), accepting the loss of the retry above.
-/// Either way the lock serializes callers in THIS process: a separate MCP-server
-/// process has its own and is not covered.
+/// Crossing domains is allowed in ONE direction: a working-tree hold may take the
+/// network lock (a pull is a transfer plus a merge), never the reverse, which is
+/// what keeps the wait graph acyclic. Either way the locks serialize callers in
+/// THIS process: a separate MCP-server process has its own and is not covered.
 pub async fn run_git_mutating(
     state: &AppState,
     repo_path: &str,
@@ -431,8 +564,13 @@ pub async fn run_git_mutating_raw(
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    let lock = state.repo_lock(repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(args)),
+    )
+    .await?;
     let out = run_git_raw(Some(repo_path), args, timeout).await?;
     if out.code != 0 && out.stderr.contains("index.lock") {
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -449,14 +587,160 @@ pub async fn run_git_mutating_input(
     input: Option<&str>,
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    let lock = state.repo_lock(repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(args)),
+    )
+    .await?;
     match run_git_input(Some(repo_path), args, input, timeout).await {
         Err(AppError::Git { ref stderr, .. }) if stderr.contains("index.lock") => {
             tokio::time::sleep(Duration::from_millis(300)).await;
             run_git_input(Some(repo_path), args, input, timeout).await
         }
         other => other,
+    }
+}
+
+/// Runs a `git worktree …` admin command under the repo's WORKTREE-ADMIN lock —
+/// the domain that keeps a multi-minute removal from stalling staging, commits and
+/// the worktree list. Same bounded wait and [`AppError::Busy`] contract as
+/// [`run_git_mutating`]; no index.lock retry, since these commands touch the admin
+/// registry rather than the index.
+pub(crate) async fn run_git_worktree_admin(
+    state: &AppState,
+    repo_path: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GitOutput> {
+    let domain = state.worktree_admin_lock(repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a worktree operation").await?;
+    run_git(Some(repo_path), args, timeout).await
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    /// A zero budget is the deterministic seam for both verdicts: it resolves for a
+    /// FREE lock (timeout polls its inner future first) and expires immediately for
+    /// a held one, so neither arm rests on scheduling.
+    #[tokio::test]
+    async fn a_bounded_acquire_names_the_current_holder() {
+        let state = AppState::default();
+        let domain = state.worktree_admin_lock("C:/repos/busy").await;
+
+        let held = acquire_repo_lock(&domain, Duration::ZERO, "a worktree removal")
+            .await
+            .expect("a free lock is taken at a zero budget");
+
+        let err = acquire_repo_lock(&domain, Duration::ZERO, "a commit")
+            .await
+            .expect_err("a held lock refuses rather than queueing");
+        let AppError::Busy { holder } = &err else {
+            panic!("expected Busy, got {err:?}");
+        };
+        assert_eq!(holder, "a worktree removal");
+        assert_eq!(
+            err.to_string(),
+            "A worktree removal is still running — try again when it finishes."
+        );
+
+        // Released ⇒ free again, and the stale label is gone with it.
+        drop(held);
+        assert_eq!(domain.holder_label(), None);
+        acquire_repo_lock(&domain, Duration::ZERO, "a commit")
+            .await
+            .expect("the released lock is taken immediately");
+    }
+
+    /// An unlabeled holder still has to produce a sentence, so the waiter never
+    /// reads a headless one.
+    #[tokio::test]
+    async fn an_unlabeled_holder_falls_back_to_the_generic_name() {
+        let state = AppState::default();
+        let domain = state.working_tree_lock("C:/repos/unlabeled").await;
+        let raw = domain.lock();
+        let _held = raw.lock().await;
+
+        let err = acquire_repo_lock(&domain, Duration::ZERO, "a commit")
+            .await
+            .expect_err("the raw hold still blocks");
+        assert!(
+            matches!(&err, AppError::Busy { holder } if holder == DEFAULT_HOLDER),
+            "{err:?}"
+        );
+    }
+
+    /// The domains are independent by construction: a removal holding ADMIN must
+    /// not delay a commit, which is the whole point of the split.
+    #[tokio::test]
+    async fn the_three_domains_do_not_block_each_other() {
+        let state = AppState::default();
+        let repo = "C:/repos/domains";
+        let _admin = acquire_repo_lock(
+            &state.worktree_admin_lock(repo).await,
+            Duration::ZERO,
+            "a worktree removal",
+        )
+        .await
+        .expect("admin is free");
+
+        for domain in [
+            state.working_tree_lock(repo).await,
+            state.network_lock(repo).await,
+        ] {
+            acquire_repo_lock(&domain, Duration::ZERO, "a commit")
+                .await
+                .expect("another domain is unaffected by the admin hold");
+        }
+    }
+
+    /// Every accessor call for one repo path hands back the SAME mutex, and a
+    /// different path a different one. The whole scheme rests on this: a registry
+    /// that minted a fresh domain per call would serialize nothing while every
+    /// acquire still succeeded, and one that ignored the path would serialize every
+    /// repo against every other.
+    #[tokio::test]
+    async fn one_repo_path_shares_one_working_tree_mutex() {
+        let state = AppState::default();
+        let repo = "C:/repos/same-mutex";
+        let _held = state.working_tree_lock(repo).await.lock().lock_owned().await;
+
+        assert!(
+            state
+                .working_tree_lock(repo)
+                .await
+                .lock()
+                .try_lock()
+                .is_err(),
+            "a second lookup of the same path must find the held mutex"
+        );
+        assert!(
+            state
+                .working_tree_lock("C:/repos/other")
+                .await
+                .lock()
+                .try_lock()
+                .is_ok(),
+            "another repo path must be an independent mutex"
+        );
+    }
+
+    /// The label a waiter reads comes from the argv, and a leading `-c` pair must
+    /// not hide the subcommand behind it.
+    #[test]
+    fn the_holder_label_reads_past_leading_config_pairs() {
+        assert_eq!(subcommand_of(&["commit", "-m", "x"]), "commit");
+        assert_eq!(
+            subcommand_of(&["-c", "core.editor=true", "rebase", "--continue"]),
+            "rebase"
+        );
+        assert_eq!(subcommand_of(&["-c", "a=b", "-c", "c=d", "push"]), "push");
+        assert_eq!(subcommand_of(&[]), "");
+        assert_eq!(holder_label("cherry-pick"), "a cherry-pick");
+        assert_eq!(holder_label("bisect"), DEFAULT_HOLDER);
     }
 }
 

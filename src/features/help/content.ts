@@ -520,13 +520,13 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 - **Create** a branch ({{kbd:new-branch}}), **rename** ({{kbd:rename-branch}}), **delete**
   ({{kbd:delete-branch}}), or **archive** it — archiving hides a branch without deleting
   it, collapsing it into an "Archived" section. The branch you're on, the default branch,
-  and a branch checked out in another worktree can't be archived; **Unarchive** has no such
-  limit — it works even on the branch you're checked out on. When creating, the
-  **Base it on** picker is a searchable list grouped into **Local** and **Remote** branches,
-  so you can start from *any* branch — not just the one you're on. Basing on a remote branch
-  (e.g. \`origin/epic/…\`) starts from the remote tip and leaves the new branch with
-  **no upstream**, so its first push publishes it under its own name — pairs with pushing a
-  branch without switching to it (below).
+  and a branch checked out in another worktree can't be archived (unless you're already
+  deleting that worktree); **Unarchive** has no such limit — it works even on the branch
+  you're checked out on. When creating, the **Base it on** picker is a searchable list
+  grouped into **Local** and **Remote** branches, so you can start from *any* branch — not
+  just the one you're on. Basing on a remote branch (e.g. \`origin/epic/…\`) starts from the
+  remote tip and leaves the new branch with **no upstream**, so its first push publishes it
+  under its own name — pairs with pushing a branch without switching to it (below).
 - **Clean up branches** — from the switcher's menu or the command palette — opens a bulk
   sweep of stale branches: those **merged** into the default branch — directly, or, where
   the repository's forge connection can supply them, through a recent pull request, so
@@ -538,7 +538,8 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   name, so it never pre-checks a row on its own — it badges one for you to confirm. Review
   the list, then **archive** them (reversible) or **delete** them together. The current
   branch, the default branch, and branches checked out in another worktree are never
-  included; deleting also skips protected branches.
+  included (archiving still offers one whose worktree you're already deleting); deleting
+  also skips protected branches.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that
@@ -665,14 +666,16 @@ so the ones you've finished with stand out.
 - **Lock** a worktree (with an optional reason) so it won't be pruned, renamed, or
   removed: renaming needs an unlock first, and deleting asks for a forced confirmation.
   Useful for one on a removable or network drive; **Unlock** to undo.
-- **Delete** a worktree to remove its folder; its branch is kept. A worktree with
-  uncommitted changes, or a locked one, asks before force-removing. Removing a worktree can
-  take a few minutes, and you can close the dialog and carry on: the removal keeps a line at
-  the top of the repository view until it finishes, its row here reads **Removing…**, and
-  the actions held while it runs say *removal in progress*. It runs to completion once
-  started, so there's nothing to cancel. The main worktree, and whichever one you're
-  currently in, can't be renamed or deleted — switch away first. A locked worktree can't be
-  renamed until you unlock it.
+- **Delete** a worktree to remove its folder; its branch is kept. The dialog offers to
+  **archive that branch after the worktree is removed**, so a branch you're finished with
+  drops into the "Archived" section on its own (offered whenever the worktree is on a
+  branch other than the default one). A worktree with uncommitted changes, or a locked
+  one, asks before force-removing. Removing a worktree can take a few minutes, and you can
+  close the dialog and carry on: the removal keeps a line at the top of the repository view
+  until it finishes, its row here reads **Removing…**, and the actions held while it runs
+  say *removal in progress*. It runs to completion once started, so there's nothing to
+  cancel. The main worktree, and whichever one you're currently in, can't be renamed or
+  deleted — switch away first. A locked worktree can't be renamed until you unlock it.
 - **Promote to main workspace** brings a worktree's branch into your main checkout: it
   removes the worktree (a branch can't be checked out in two at once) and checks that branch
   out in the main workspace. The worktree must be clean first; any uncommitted work in the

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -10,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { useDefaultBranch } from "@/lib/git/queries";
 import type { UserWorktree } from "@/lib/git/worktree";
 import {
   registerRemovalListener,
@@ -18,6 +20,7 @@ import {
 } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { cn } from "@/lib/utils";
 
 /** Last path segment, tolerating both separators — what to call a detached
  *  worktree that has no branch name. */
@@ -49,6 +52,24 @@ export function DeleteWorktreeDialog({
   const removing = useIsRemovingWorktree(repoPath, worktree?.path);
   // A locked worktree always needs --force; a dirty one reveals it on first try.
   const [forceNeeded, setForceNeeded] = useState(worktree?.isLocked ?? false);
+  const [archiveAfter, setArchiveAfter] = useState(false);
+  // The intent the running removal actually recorded, so a dialog re-opened
+  // over one shows what it will do rather than this mount's fresh `false`.
+  const inFlightArchive = useWorktreeRemovalStore((s) =>
+    Boolean(worktree && s.byRepo[repoPath]?.[worktree.path]?.archiveWhenDone),
+  );
+  // Same query the branch switcher resolves its default branch from, so the two
+  // can't disagree about which branch Archive is refused for. Unresolved (still
+  // loading, or unreadable) leaves the offer up — the store re-checks at
+  // completion time, and that guard is the one that has to hold.
+  const defaultBranch = useDefaultBranch(repoPath);
+  // The branch the archive offer applies to, or null when there is none to
+  // offer: a detached worktree has no branch to put away, and the default
+  // branch is never archivable.
+  const archivableBranch =
+    worktree?.branch && worktree.branch !== defaultBranch.data
+      ? worktree.branch
+      : null;
 
   // Behind a ref because the store invokes these from its own async stack, long
   // after the render that wrote them: what gets registered is a plain object
@@ -88,6 +109,8 @@ export function DeleteWorktreeDialog({
       repoPath,
       path: worktree.path,
       name: worktree.branch || folderName(worktree.path),
+      branch: worktree.branch || null,
+      archiveWhenDone: archiveAfter && Boolean(worktree.branch),
       force,
     });
     if (refused) toast.info(refused);
@@ -112,6 +135,26 @@ export function DeleteWorktreeDialog({
         <p className="truncate rounded bg-muted px-2 py-1.5 font-mono text-[11px] text-muted-foreground">
           {worktree?.path}
         </p>
+
+        {archivableBranch && (
+          <label
+            className={cn(
+              "flex items-start gap-2 text-xs text-muted-foreground",
+              removing ? "cursor-not-allowed opacity-70" : "cursor-pointer",
+            )}
+          >
+            <Checkbox
+              checked={removing ? inFlightArchive : archiveAfter}
+              disabled={removing}
+              onCheckedChange={(checked) => setArchiveAfter(checked === true)}
+            />
+            <span className="min-w-0">
+              Archive{" "}
+              <span className="font-mono break-all">{archivableBranch}</span>{" "}
+              after the worktree is removed
+            </span>
+          </label>
+        )}
 
         {worktree?.isLocked && (
           <p className="text-xs text-warning">

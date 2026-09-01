@@ -6,7 +6,8 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
-    run_git, run_git_mutating, run_git_raw, GitOutput, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
+    acquire_repo_lock, holder_label, run_git, run_git_mutating, run_git_raw, subcommand_of,
+    GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -60,8 +61,9 @@ fn is_auth_class_failure(stderr: &str) -> bool {
 }
 
 /// Run a git network op with one-shot credential `-c` entries prefixed, taking NO
-/// lock — so it is callable from inside a held `repo_lock` (the autostash
-/// compounds). Returns the raw output: a non-zero exit is not an error here.
+/// lock — so it is callable from inside a held working-tree lock (the autostash
+/// compounds, which take the network lock around it themselves). Returns the raw
+/// output: a non-zero exit is not an error here.
 ///
 /// When `cred` is non-empty and the injected run fails with an auth-class git error
 /// ([`is_auth_class_failure`]), retries EXACTLY ONCE with NO injected config (the
@@ -100,9 +102,15 @@ pub(crate) async fn run_git_with_creds_once(
     Ok(out)
 }
 
-/// [`run_git_with_creds_once`] under the per-repo lock, surfacing a non-zero exit
-/// as [`AppError::Git`] — the mutating-command contract every network caller
+/// [`run_git_with_creds_once`] under the repo's NETWORK lock, surfacing a non-zero
+/// exit as [`AppError::Git`] — the mutating-command contract every network caller
 /// (fetch/pull/push) is written against.
+///
+/// The network domain rather than the working tree: a transfer runs for up to
+/// `NETWORK_TIMEOUT` and must not stall staging or a commit for that long. A caller
+/// whose command also touches the working tree (`git_pull_core`) takes the
+/// working-tree lock around this call — that direction only (see
+/// `run_git_mutating`).
 pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
     repo_path: &str,
@@ -110,8 +118,13 @@ pub(crate) async fn run_git_mutating_with_creds(
     sub: &[&str],
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    let lock = state.repo_lock(repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.network_lock(repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        NETWORK_LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(sub)),
+    )
+    .await?;
 
     // index.lock contention from an external tool (editor, other client) is
     // transient — retry once. Expressed here rather than via `run_git_mutating`
@@ -481,6 +494,12 @@ pub(crate) async fn git_pull_core(
         return Ok(());
     }
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+    // Bare `git pull` is a transfer AND a merge in one command, so it needs both
+    // domains: the working tree here, the network inside `run_git_mutating_with_creds`
+    // — that order only (see `run_git_mutating`). The guarded rebase path above takes
+    // the working-tree lock itself and must stay outside this hold.
+    let wt = state.working_tree_lock(&repo_path).await;
+    let _wt_guard = acquire_repo_lock(&wt, LOCK_WAIT_TIMEOUT, "a pull").await?;
     let already_unmerged = crate::git::ops::unmerged_paths(&repo_path).await;
     if let Err(err) =
         run_git_mutating_with_creds(state, &repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await

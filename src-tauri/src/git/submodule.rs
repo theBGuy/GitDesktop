@@ -5,7 +5,8 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
-    run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    acquire_repo_lock, run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Submodule, SubmoduleRemoveOutcome};
 use crate::state::AppState;
@@ -235,10 +236,12 @@ pub(crate) async fn git_submodule_update_core(
     // nested submodules to their own remote tips (measured, git 2.51.1). Only the
     // targeted level should follow its branch, so bump it un-recursively and then
     // settle its children on what it now records — two commands, one lock. Both are
-    // network steps, so the lock is deliberately held for minutes: the pair has to
-    // see one unbroken view, and blocking other mutations meanwhile is the point.
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    // network steps, so the working-tree lock is deliberately held for minutes: the
+    // pair has to see one unbroken view, and blocking other mutations meanwhile is
+    // the point. Labelled because of that duration — a waiter that gives up has to be
+    // told it is queued behind a submodule update rather than left guessing.
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule update").await?;
     crate::git::ops::refuse_mid_op_for(&repo_path, "update submodules").await?;
 
     let mut args = vec!["submodule", "update", "--init", "--remote"];
@@ -321,11 +324,11 @@ pub(crate) async fn git_submodule_add_core(
 
     // Lock-once rather than `run_git_mutating`, so the `.gitmodules` guard cannot be
     // raced by another in-process mutation between check and run — the same shape the
-    // other three `.gitmodules` writers use. The costs are deliberate: the lock is held
-    // across the clone, and the lock-free runner gives up `run_git_mutating`'s one-shot
-    // index.lock retry.
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    // other three `.gitmodules` writers use. The costs are deliberate: the working-tree
+    // lock is held across the clone, and the lock-free runner gives up
+    // `run_git_mutating`'s one-shot index.lock retry.
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule change").await?;
     crate::git::ops::refuse_mid_op_for(&repo_path, "add a submodule").await?;
     refuse_unsettled_gitmodules(&repo_path).await?;
     run_git(Some(&repo_path), &args, NETWORK_TIMEOUT).await?;
@@ -358,11 +361,11 @@ pub(crate) async fn git_submodule_remove_core(
     validate_repo_relative(&path, "submodule path")?;
     let spec = crate::git::pathspec::literal(&path);
 
-    // deinit → rm → module-data delete is one sequence: hold the per-repo lock
+    // deinit → rm → module-data delete is one sequence: hold the working-tree lock
     // across it and use the lock-free runners inside — `run_git_mutating` would
     // re-acquire the same non-reentrant mutex and deadlock.
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule change").await?;
     crate::git::ops::refuse_mid_op_for(&repo_path, "remove the submodule").await?;
     refuse_unsettled_gitmodules(&repo_path).await?;
 
@@ -501,8 +504,8 @@ pub(crate) async fn git_submodule_set_url_core(
     validate_option_value(&url, "submodule URL")?;
 
     // set-url + stage is one sequence — lock once, lock-free runners inside.
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule change").await?;
     crate::git::ops::refuse_mid_op_for(&repo_path, "change the submodule URL").await?;
     refuse_unsettled_gitmodules(&repo_path).await?;
 
@@ -541,8 +544,9 @@ pub(crate) async fn git_submodule_set_branch_core(
         validate_option_value(branch, "submodule branch")?;
     }
 
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    // set-branch + stage, same one-sequence shape as `set_url`.
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a submodule change").await?;
     crate::git::ops::refuse_mid_op_for(&repo_path, "change the submodule branch").await?;
     refuse_unsettled_gitmodules(&repo_path).await?;
 

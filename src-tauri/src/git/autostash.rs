@@ -1,17 +1,23 @@
 //! App-level stash → op → reapply compounds for pull, merge, rebase and switch.
 //!
-//! Each command acquires `repo_lock` ONCE and uses only the lock-free runners
-//! while holding it — `run_git_mutating` re-acquires the same non-reentrant
-//! mutex and deadlocks (precedent: `git_stash_paths_core`). The inner steps
-//! therefore lose `run_git_mutating`'s one-shot index.lock retry, the same
-//! trade-off that compound accepts.
+//! Each command acquires the repo's WORKING-TREE lock ONCE and uses only the
+//! lock-free runners while holding it — `run_git_mutating` re-acquires the same
+//! non-reentrant mutex and deadlocks (precedent: `git_stash_paths_core`). The inner
+//! steps therefore lose `run_git_mutating`'s one-shot index.lock retry, the same
+//! trade-off that compound accepts. The pull compound's transfer additionally takes
+//! the NETWORK lock around its one network call, so it still serializes against the
+//! background auto-fetch; that nesting direction is the only one allowed (see
+//! `run_git_mutating`).
 
 use tauri::State;
 
 use crate::error::AppResult;
 use crate::git::branches::validate_ref_name;
 use crate::git::remote::run_git_with_creds_once;
-use crate::git::runner::{run_git, run_git_raw, GitOutput, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
+use crate::git::runner::{
+    acquire_repo_lock, run_git, run_git_raw, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+};
 use crate::state::AppState;
 
 /// How a stash → op → reapply compound ended. Every failure mode is reportable —
@@ -196,12 +202,21 @@ pub(crate) async fn git_pull_autostash_core(
     // A read that shells out to git itself — resolve it BEFORE taking the lock.
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
 
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
-    let op = run_git_with_creds_once(&repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await;
+    // The transfer serializes with the network domain (the auto-fetch runs there),
+    // released the moment the pull returns. A refusal to wait is settled exactly like
+    // a failed git invocation, so the stash still comes back.
+    let network = state.network_lock(&repo_path).await;
+    let op = match acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a pull").await {
+        Ok(_net) => {
+            run_git_with_creds_once(&repo_path, &cred, &["pull", flag], NETWORK_TIMEOUT).await
+        }
+        Err(busy) => Err(busy),
+    };
     settle(&repo_path, paused, stashed, true, op).await
 }
 
@@ -223,8 +238,8 @@ pub(crate) async fn git_merge_autostash_core(
 ) -> AppResult<AutostashOutcome> {
     validate_ref_name(&branch)?;
 
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
@@ -257,8 +272,8 @@ pub(crate) async fn git_rebase_autostash_core(
 ) -> AppResult<AutostashOutcome> {
     validate_ref_name(&branch)?;
 
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a rebase").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
@@ -295,8 +310,8 @@ pub(crate) async fn git_rebase_onto_autostash_core(
     validate_ref_name(&new_base)?;
     validate_ref_name(&old_base)?;
 
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a rebase").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
@@ -344,8 +359,8 @@ pub(crate) async fn git_switch_autostash_core(
     }
     let tracking = remote.map(|remote| format!("{remote}/{name}"));
 
-    let lock = state.repo_lock(&repo_path).await;
-    let _guard = lock.lock().await;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a checkout").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
     let stashed = autostash_push(&repo_path).await?;
