@@ -48,6 +48,14 @@ const MAX_BODY_BYTES: usize = 512 * 1024;
 /// truncated image is a corrupt one, and the encoded copy also has to cross IPC.
 const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 
+/// Ceilings on the raster an image DECLARES, read from its header before the bytes reach
+/// the webview: [`MAX_IMAGE_BYTES`] bounds the compressed copy and says nothing about the
+/// decoded one, and a few KB of PNG can declare a raster that kills the renderer.
+const MAX_IMAGE_DIMENSION: u32 = 8192;
+/// The area ceiling, which bites where the per-axis one does not: comfortably above any
+/// real og image (those run ~2 MP) and far below decompression-bomb territory.
+const MAX_IMAGE_PIXELS: u64 = 40_000_000;
+
 /// How far [`tag_end`] scans for a tag's `>`, and how many `<meta` occurrences are
 /// examined at all. Together they bound the harvest at ~4 MB of scanning whatever the
 /// body contains: the window alone is not enough, because a document ending in a single
@@ -359,36 +367,249 @@ fn is_html(headers: &header::HeaderMap) -> bool {
         })
 }
 
-/// RFC 7230 token characters, less `#`. `#` is a valid token character but a fragment
-/// delimiter in the data URI this feeds, so it would truncate the media type there the
-/// same way a comma does.
-fn is_media_token(part: &str) -> bool {
-    !part.is_empty()
-        && part
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"!$%&'*+-.^_`|~".contains(&b))
-}
-
-/// The media type to embed in an image data URI, or `None` when the response is not an
-/// image this preview will carry. Pure, so the gate is testable without a response.
+/// Whether a response is worth reading as an image at all — the cheap early filter that
+/// spares the [`MAX_IMAGE_BYTES`] body read for everything else. The type that ships is
+/// NOT this one: [`checked_image_type`] sniffs it from the bytes. Pure, so both halves of
+/// the split are testable without a response.
 ///
-/// The header is attacker-chosen — the page names the `og:image` host — so the value is
-/// validated as `image/<token>` rather than by substring: `image/svg+xml,x` is not equal
-/// to `image/svg+xml`, so it would slip past the refusal below, and a data URI's media
-/// type ends at its first comma, which would also strip the `;base64` flag. SVG is
-/// refused despite being an image type: it is an active document (script, external
-/// references), and og images are raster in practice.
+/// The header is attacker-chosen — the page names the `og:image` host — so the match is
+/// against a closed set rather than an `image/<token>` grammar: an exact compare refuses
+/// the decorated spellings (`image/png,x`, `image/png#`) on its own, and those matter
+/// because a data URI's media type ends at its first comma or `#`, which would strip the
+/// `;base64` flag off the URI the frontend receives. SVG is deliberately absent: it is an
+/// active document (script, external references), and og images are raster in practice.
 fn image_media_type(content_type: &str) -> Option<String> {
     let media_type = content_type.split(';').next()?.trim().to_ascii_lowercase();
-    let (top_level, subtype) = media_type.split_once('/')?;
-    if top_level != "image" || !is_media_token(subtype) {
+    let carried = match media_type.as_str() {
+        // `image/jpg` is not a registered type, but misconfigured hosts serve it.
+        "image/jpeg" | "image/jpg" => "image/jpeg",
+        "image/png" => "image/png",
+        "image/gif" => "image/gif",
+        "image/webp" => "image/webp",
+        _ => return None,
+    };
+    Some(carried.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Image header sniffing
+// ---------------------------------------------------------------------------
+
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+/// A fixed-width field at `at`, or `None` when the slice ends first. Every dimension read
+/// below goes through here, so a header cut short can only ever yield `None`.
+fn field<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
+    bytes.get(at..at.checked_add(N)?)?.try_into().ok()
+}
+
+/// A 24-bit little-endian field — WebP's extended-format canvas dimensions.
+fn le_u24(bytes: &[u8], at: usize) -> Option<u32> {
+    let triple: [u8; 3] = field(bytes, at)?;
+    Some(u32::from_le_bytes([triple[0], triple[1], triple[2], 0]))
+}
+
+/// The format fetched bytes actually are, and the raster their HEADER declares — header
+/// fields only, nothing is decoded. `None` when the bytes are not one of the four raster
+/// formats this preview carries, or when the header they need is truncated.
+///
+/// The magic bytes decide, not the response header: the format has to be known to bound
+/// the decode the webview will perform, and a hostile host names the header freely.
+fn sniff_image(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    if bytes.starts_with(PNG_SIGNATURE) {
+        return sniff_png(bytes);
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return sniff_gif(bytes);
+    }
+    if bytes.starts_with(&[0xff, 0xd8]) {
+        return sniff_jpeg(bytes);
+    }
+    if bytes.starts_with(b"RIFF") && field::<4>(bytes, 8)? == *b"WEBP" {
+        return sniff_webp(bytes);
+    }
+    None
+}
+
+/// IHDR carries the dimensions and the spec requires it to be the first chunk, so a PNG
+/// whose 12..16 is anything else is malformed rather than merely ordered oddly.
+fn sniff_png(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    if field::<4>(bytes, 12)? != *b"IHDR" {
         return None;
     }
-    // Sound only because the token check above rules out the decorated spellings.
-    if media_type == "image/svg+xml" {
+    let width = u32::from_be_bytes(field(bytes, 16)?);
+    let height = u32::from_be_bytes(field(bytes, 20)?);
+    Some(("image/png", width, height))
+}
+
+/// The size a GIF is decoded at is NOT its logical screen descriptor. Blink decodes GIFs
+/// through Skia's `SkWuffsCodec`, which enables only wuffs' ignore-too-much-pixel-data
+/// quirk, leaving the default behaviour — stated in wuffs' own `decode_quirks.wuffs` —
+/// of expanding the image bounds to contain the FIRST frame's rect. Both descriptor
+/// fields are `u16`, so a 1x1 screen can front a 131070-per-axis allocation, and desktop
+/// Blink sets no decoded-size ceiling of its own. Later frames are clipped to those
+/// bounds, so gating the union of screen and first frame is the whole exposure.
+///
+/// Terminates on any input: every block consumes at least the byte that introduces it,
+/// and a zero-length sub-block is the terminator consuming its own length byte, so `i`
+/// strictly increases and each read is bounds-checked.
+fn sniff_gif(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    let screen_width = u32::from(u16::from_le_bytes(field(bytes, 6)?));
+    let screen_height = u32::from(u16::from_le_bytes(field(bytes, 8)?));
+    let flags = *bytes.get(10)?;
+    // The header runs to 13. A global colour table, when the flag bit says one is there,
+    // sits between it and the first block, sized 3 * 2^(N+1) by the low three bits.
+    let mut i = 13usize;
+    if flags & 0x80 != 0 {
+        i += 3 * (1usize << ((flags & 0x07) + 1));
+    }
+    loop {
+        match *bytes.get(i)? {
+            // An extension: a label byte, then length-prefixed sub-blocks to a 0 length.
+            0x21 => {
+                i += 2;
+                loop {
+                    let sub_block = usize::from(*bytes.get(i)?);
+                    i += 1;
+                    if sub_block == 0 {
+                        break;
+                    }
+                    i += sub_block;
+                }
+            }
+            0x2c => {
+                let left = u32::from(u16::from_le_bytes(field(bytes, i + 1)?));
+                let top = u32::from(u16::from_le_bytes(field(bytes, i + 3)?));
+                let width = u32::from(u16::from_le_bytes(field(bytes, i + 5)?));
+                let height = u32::from(u16::from_le_bytes(field(bytes, i + 7)?));
+                // u16 + u16 cannot overflow u32, so the union needs no saturation.
+                return Some((
+                    "image/gif",
+                    screen_width.max(left + width),
+                    screen_height.max(top + height),
+                ));
+            }
+            // The trailer, or any byte that starts no block: fail closed rather than fall
+            // back to the screen size, the same answer a truncated header gets.
+            _ => return None,
+        }
+    }
+}
+
+/// SOF0..SOF15, less the three markers that share the range without being frame headers:
+/// DHT (0xC4), the JPEG extensions marker (0xC8), and DAC (0xCC).
+fn is_start_of_frame(marker: u8) -> bool {
+    (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc)
+}
+
+/// Walk the marker chain to the first frame header, where a JPEG states its size.
+/// Terminates on any input: every iteration consumes a fill byte and a marker before the
+/// segment length is added, so `i` strictly increases, and each read is bounds-checked.
+fn sniff_jpeg(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    let mut i = 2usize;
+    loop {
+        if *bytes.get(i)? != 0xff {
+            return None;
+        }
+        // Any number of 0xFF fill bytes may precede a marker.
+        while *bytes.get(i)? == 0xff {
+            i += 1;
+        }
+        let marker = *bytes.get(i)?;
+        i += 1;
+        // EOI, or entropy-coded scan data: no frame header can follow either.
+        if marker == 0xd9 || marker == 0xda {
+            return None;
+        }
+        // TEM and the restart markers stand alone, carrying no length or payload.
+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        // A segment's length counts its own two bytes, so anything under 2 is malformed.
+        let length = usize::from(u16::from_be_bytes(field(bytes, i)?));
+        if length < 2 {
+            return None;
+        }
+        if is_start_of_frame(marker) {
+            // Length, one precision byte, then height before width.
+            let height = u16::from_be_bytes(field(bytes, i + 3)?);
+            let width = u16::from_be_bytes(field(bytes, i + 5)?);
+            return Some(("image/jpeg", width.into(), height.into()));
+        }
+        // Counting its own two bytes makes the length the whole step from here.
+        i = i.checked_add(length)?;
+    }
+}
+
+/// The three bitstream headers a WebP file can open with, each stating the size its own
+/// way. The chunk header sits at 12 (fourcc plus size) and its payload at 20.
+fn sniff_webp(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    let fourcc: [u8; 4] = field(bytes, 12)?;
+    let payload = bytes.get(20..)?;
+    let (width, height) = match &fourcc {
+        b"VP8 " => {
+            // A 3-byte frame tag, the sync code, then two dimensions whose top 2 bits are
+            // a scaling hint rather than size.
+            if field::<3>(payload, 3)? != [0x9d, 0x01, 0x2a] {
+                return None;
+            }
+            let width = u16::from_le_bytes(field(payload, 6)?) & 0x3fff;
+            let height = u16::from_le_bytes(field(payload, 8)?) & 0x3fff;
+            (u32::from(width), u32::from(height))
+        }
+        b"VP8L" => {
+            if *payload.first()? != 0x2f {
+                return None;
+            }
+            // 14 bits each, stored one less than the real dimension.
+            let bits = u32::from_le_bytes(field(payload, 1)?);
+            ((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1)
+        }
+        // A flags byte and 3 reserved, then the canvas size as two 24-bit fields, also
+        // stored one less.
+        b"VP8X" => (le_u24(payload, 4)? + 1, le_u24(payload, 7)? + 1),
+        _ => return None,
+    };
+    Some(("image/webp", width, height))
+}
+
+/// Whether a declared raster is safe to hand the webview's decoder. Both caps bite: the
+/// per-axis one bounds a single enormous edge, the pixel one a raster merely large on
+/// both axes.
+fn dimensions_within_caps(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= MAX_IMAGE_DIMENSION
+        && height <= MAX_IMAGE_DIMENSION
+        && u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS
+}
+
+/// The media type to embed for fetched image bytes, or `None` when they are not a
+/// carriable image or declare a raster past the caps.
+///
+/// Deliberate non-goals: nothing is downscaled or re-encoded, so the original bytes ship
+/// or none do; and an animated format's frame COUNT is unbounded by design. Each frame's
+/// raster is bounded by the gated canvas, which is what bounds per-tick decode cost, and
+/// the webview's animated-image cache bounds decoded-frame memory.
+fn checked_image_type(bytes: &[u8]) -> Option<&'static str> {
+    let (media_type, width, height) = sniff_image(bytes)?;
+    dimensions_within_caps(width, height).then_some(media_type)
+}
+
+/// Everything between a capped read and the URI that ships: the cap and empty checks, the
+/// header sniff, and the encoding. `None` for an over-cap or empty body, bytes that are
+/// not a carried image, or a raster past the caps.
+///
+/// The transport content type is deliberately NOT a parameter. The whole point of sniffing
+/// is that the attacker-chosen header must not name the type the frontend receives, and
+/// keeping it out of this signature is what makes routing it here impossible rather than
+/// merely unintended.
+fn encode_checked_image(bytes: &[u8], over_cap: bool) -> Option<String> {
+    if over_cap || bytes.is_empty() {
         return None;
     }
-    Some(media_type)
+    let media_type = checked_image_type(bytes)?;
+    Some(image_data_uri(media_type, bytes))
 }
 
 /// Compose the `data:` URI the frontend renders as an `<img src>`.
@@ -401,7 +622,8 @@ fn image_data_uri(media_type: &str, bytes: &[u8]) -> String {
 /// Fetch an `og:image` through this module's client and return it as a complete `data:`
 /// URI, so the webview never contacts the third-party host. Every failure — unparseable
 /// URL, refused hop, transport failure, non-2xx, a missing or unreadable content type,
-/// wrong media type, oversized or empty body, or [`IMAGE_DEADLINE`] elapsing — yields
+/// wrong media type, oversized or empty body, bytes that are not one of the carried image
+/// formats, a raster past the dimension caps, or [`IMAGE_DEADLINE`] elapsing — yields
 /// `None`: a preview without an image is a valid preview, never an error.
 async fn fetch_image_data(candidate: &str) -> Option<String> {
     let url = Url::parse(candidate).ok()?;
@@ -419,16 +641,15 @@ async fn load_image_data_uri(url: Url) -> Option<String> {
     if !(200..300).contains(&resp.status().as_u16()) {
         return None;
     }
-    let media_type = image_media_type(
+    // Header first, purely to avoid reading 2 MiB of a non-image; the type that ships is
+    // the one sniffed from the bytes below, since this header is attacker-chosen.
+    image_media_type(
         resp.headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())?,
     )?;
     let (bytes, over_cap) = read_body_capped(resp, MAX_IMAGE_BYTES).await.ok()?;
-    if over_cap || bytes.is_empty() {
-        return None;
-    }
-    Some(image_data_uri(&media_type, &bytes))
+    encode_checked_image(&bytes, over_cap)
 }
 
 /// Fetch a page's Open Graph metadata for the link hover card.
@@ -1422,6 +1643,8 @@ mod tests {
         assert_eq!(text.chars().count(), MAX_BODY_BYTES);
     }
 
+    /// The accept side is a closed set of five spellings — the four carried formats plus
+    /// the `image/jpg` misspelling, which normalizes rather than being carried verbatim.
     #[test]
     fn image_media_type_accepts_raster_images_only() {
         for (raw, expected) in [
@@ -1430,6 +1653,8 @@ mod tests {
             ("image/jpeg; charset=binary", "image/jpeg"),
             ("  image/webp  ", "image/webp"),
             ("image/gif", "image/gif"),
+            ("image/jpg", "image/jpeg"),
+            ("IMAGE/JPG; charset=binary", "image/jpeg"),
         ] {
             assert_eq!(image_media_type(raw).as_deref(), Some(expected), "{raw}");
         }
@@ -1440,6 +1665,13 @@ mod tests {
             // SVG is an image type but an active document — refused deliberately.
             "image/svg+xml",
             "IMAGE/SVG+XML; charset=utf-8",
+            // Image types the sniffer cannot read a raster out of, so the filter refuses
+            // them here rather than letting the body read happen for nothing.
+            "image/bmp",
+            "image/tiff",
+            "image/avif",
+            "image/x-icon",
+            "image/heic",
             "",
             "notimage/png",
             "image",
@@ -1497,6 +1729,474 @@ mod tests {
         // Empty input still produces a well-formed (empty-payload) URI; the fetch path
         // rejects empty bodies before reaching here.
         assert_eq!(image_data_uri("image/gif", &[]), "data:image/gif;base64,");
+    }
+
+    /// The signature plus an IHDR chunk header — everything [`sniff_png`] reads, and
+    /// nothing a decoder could act on.
+    fn png_fixture(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = PNG_SIGNATURE.to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes
+    }
+
+    /// Signature, logical screen descriptor, then the packed flags byte (bit 7 = a global
+    /// colour table follows, low three bits its size), background index, aspect ratio.
+    fn gif_header(version: &[u8], width: u16, height: u16, flags: u8) -> Vec<u8> {
+        let mut bytes = version.to_vec();
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&[flags, 0, 0]);
+        bytes
+    }
+
+    /// An image descriptor — the rect Blink expands its decode bounds to contain.
+    fn gif_descriptor(left: u16, top: u16, width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![0x2c];
+        for value in [left, top, width, height] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.push(0); // packed fields: no local colour table
+        bytes
+    }
+
+    /// A GIF whose first frame exactly fills its logical screen — the ordinary case, and
+    /// the only one where the screen descriptor alone would have been the right answer.
+    fn gif_fixture(version: &[u8], width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = gif_header(version, width, height, 0x00);
+        bytes.extend_from_slice(&gif_descriptor(0, 0, width, height));
+        bytes
+    }
+
+    /// One JPEG marker segment: `0xFF`, the marker, then a length counting its own bytes.
+    fn jpeg_segment(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let mut segment = vec![0xff, marker];
+        let length = u16::try_from(payload.len() + 2).expect("fixture payloads are small");
+        segment.extend_from_slice(&length.to_be_bytes());
+        segment.extend_from_slice(payload);
+        segment
+    }
+
+    /// SOI, whatever `leading` bytes the walk has to step over, then a frame header.
+    fn jpeg_fixture(sof_marker: u8, leading: &[u8], width: u16, height: u16) -> Vec<u8> {
+        let mut frame = vec![8u8]; // sample precision
+        frame.extend_from_slice(&height.to_be_bytes());
+        frame.extend_from_slice(&width.to_be_bytes());
+        frame.extend_from_slice(&[1, 1, 0x11, 0]); // a single component
+        let mut bytes = vec![0xff, 0xd8];
+        bytes.extend_from_slice(leading);
+        bytes.extend_from_slice(&jpeg_segment(sof_marker, &frame));
+        bytes
+    }
+
+    /// A RIFF/WEBP container around one chunk, which is all the sniffer looks at.
+    fn webp_fixture(fourcc: &[u8], payload: &[u8]) -> Vec<u8> {
+        let chunk_size = u32::try_from(payload.len()).expect("fixture payloads are small");
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(chunk_size + 12).to_le_bytes());
+        bytes.extend_from_slice(b"WEBP");
+        bytes.extend_from_slice(fourcc);
+        bytes.extend_from_slice(&chunk_size.to_le_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn webp_lossy_fixture(width: u16, height: u16) -> Vec<u8> {
+        let mut payload = vec![0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a];
+        payload.extend_from_slice(&width.to_le_bytes());
+        payload.extend_from_slice(&height.to_le_bytes());
+        webp_fixture(b"VP8 ", &payload)
+    }
+
+    fn webp_lossless_fixture(width: u32, height: u32) -> Vec<u8> {
+        let mut payload = vec![0x2f];
+        payload.extend_from_slice(&((width - 1) | ((height - 1) << 14)).to_le_bytes());
+        webp_fixture(b"VP8L", &payload)
+    }
+
+    fn webp_extended_fixture(width: u32, height: u32) -> Vec<u8> {
+        let mut payload = vec![0x00, 0x00, 0x00, 0x00]; // flags plus 3 reserved bytes
+        payload.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+        payload.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+        webp_fixture(b"VP8X", &payload)
+    }
+
+    #[test]
+    fn sniff_image_reads_a_png_ihdr_header() {
+        assert_eq!(
+            sniff_image(&png_fixture(1200, 630)),
+            Some(("image/png", 1200, 630))
+        );
+        // The chunk type is checked, not assumed: IHDR must come first.
+        let mut wrong_chunk = png_fixture(1200, 630);
+        wrong_chunk[12..16].copy_from_slice(b"iCCP");
+        assert_eq!(sniff_image(&wrong_chunk), None);
+    }
+
+    /// Both GIF versions share the header the dimensions sit in, and only those two
+    /// spellings are a GIF at all.
+    #[test]
+    fn sniff_image_reads_both_gif_versions() {
+        assert_eq!(
+            sniff_image(&gif_fixture(b"GIF87a", 640, 480)),
+            Some(("image/gif", 640, 480))
+        );
+        assert_eq!(
+            sniff_image(&gif_fixture(b"GIF89a", 16, 16)),
+            Some(("image/gif", 16, 16))
+        );
+        assert_eq!(sniff_image(&gif_fixture(b"GIF88a", 16, 16)), None);
+    }
+
+    /// Blink does not decode into the logical screen size: Skia's `SkWuffsCodec` leaves
+    /// wuffs' default bounds-expansion behaviour on, so the decoder allocates for the
+    /// union of the screen and the first frame's rect. The union is what must come back.
+    #[test]
+    fn sniff_image_expands_a_gif_to_contain_its_first_frame() {
+        // A frame larger than its screen: neither the screen size nor the frame size
+        // alone is the answer.
+        let mut grown = gif_header(b"GIF89a", 1, 1, 0x00);
+        grown.extend_from_slice(&gif_descriptor(0, 0, 600, 400));
+        assert_eq!(sniff_image(&grown), Some(("image/gif", 600, 400)));
+
+        // The frame's POSITION extends the bounds too, not only its size.
+        let mut offset = gif_header(b"GIF89a", 10, 10, 0x00);
+        offset.extend_from_slice(&gif_descriptor(100, 50, 200, 100));
+        assert_eq!(sniff_image(&offset), Some(("image/gif", 300, 150)));
+
+        // A screen larger than the frame keeps the screen — a union, never a swap.
+        let mut roomy = gif_header(b"GIF89a", 800, 600, 0x00);
+        roomy.extend_from_slice(&gif_descriptor(0, 0, 10, 10));
+        assert_eq!(sniff_image(&roomy), Some(("image/gif", 800, 600)));
+    }
+
+    /// The bypass this closes: a GIF reading as 1x1 by its screen descriptor while its
+    /// first frame declares the raster the decoder actually allocates.
+    #[test]
+    fn a_gif_hiding_a_huge_frame_behind_a_tiny_screen_is_refused() {
+        let mut bomb = gif_header(b"GIF89a", 1, 1, 0x00);
+        bomb.extend_from_slice(&gif_descriptor(0, 0, 60000, 60000));
+        assert_eq!(sniff_image(&bomb), Some(("image/gif", 60000, 60000)));
+        assert_eq!(checked_image_type(&bomb), None);
+
+        // The same hiding place reached through the frame's position instead of its size.
+        let mut placed = gif_header(b"GIF89a", 1, 1, 0x00);
+        placed.extend_from_slice(&gif_descriptor(65000, 65000, 1000, 1000));
+        assert_eq!(sniff_image(&placed), Some(("image/gif", 66000, 66000)));
+        assert_eq!(checked_image_type(&placed), None);
+
+        // Every descriptor field is u16, so this is the largest raster the format can
+        // ask for — and the union arithmetic must not wrap on it.
+        let mut worst = gif_header(b"GIF89a", 1, 1, 0x00);
+        worst.extend_from_slice(&gif_descriptor(65535, 65535, 65535, 65535));
+        assert_eq!(sniff_image(&worst), Some(("image/gif", 131070, 131070)));
+        assert_eq!(checked_image_type(&worst), None);
+    }
+
+    /// Real GIFs put a colour table and extension blocks between the header and the first
+    /// descriptor, so reaching it means walking them rather than assuming offset 13.
+    #[test]
+    fn sniff_image_walks_a_gif_past_its_colour_table_and_extensions() {
+        // A global colour table, size code 1 — 3 * 2^2 = 12 bytes to step over.
+        let mut with_table = gif_header(b"GIF89a", 40, 30, 0x80 | 0x01);
+        with_table.extend_from_slice(&[0u8; 12]);
+        with_table.extend_from_slice(&gif_descriptor(0, 0, 40, 30));
+        assert_eq!(sniff_image(&with_table), Some(("image/gif", 40, 30)));
+
+        // The animated layout: a graphic control extension ahead of the frame, then a
+        // comment extension with two sub-blocks, which is what exercises the inner loop.
+        let mut animated = gif_header(b"GIF89a", 40, 30, 0x00);
+        animated.extend_from_slice(&[0x21, 0xf9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        animated.extend_from_slice(&[0x21, 0xfe, 0x03, b'a', b'b', b'c', 0x02, b'd', b'e', 0x00]);
+        animated.extend_from_slice(&gif_descriptor(0, 0, 40, 30));
+        assert_eq!(sniff_image(&animated), Some(("image/gif", 40, 30)));
+
+        // A maximal colour table and an extension together, with the frame still growing
+        // the bounds past the screen.
+        let mut both = gif_header(b"GIF89a", 1, 1, 0x80 | 0x07);
+        both.extend_from_slice(&[0u8; 768]);
+        both.extend_from_slice(&[0x21, 0xf9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        both.extend_from_slice(&gif_descriptor(0, 0, 500, 500));
+        assert_eq!(sniff_image(&both), Some(("image/gif", 500, 500)));
+    }
+
+    /// A GIF whose first block is the trailer, or anything the walk does not recognize,
+    /// never reaches a descriptor. Refused rather than gated on the screen size alone,
+    /// which is exactly the field a hostile file controls independently of the frame.
+    #[test]
+    fn sniff_image_refuses_a_gif_with_no_image_descriptor() {
+        let mut trailer = gif_header(b"GIF89a", 100, 100, 0x00);
+        trailer.push(0x3b);
+        assert_eq!(sniff_image(&trailer), None);
+
+        // A header with nothing after it, and a byte that starts no block at all.
+        assert_eq!(sniff_image(&gif_header(b"GIF89a", 100, 100, 0x00)), None);
+        let mut junk = gif_header(b"GIF89a", 100, 100, 0x00);
+        junk.push(0x5a);
+        assert_eq!(sniff_image(&junk), None);
+
+        // A colour table the file does not actually contain swallows the descriptor.
+        let mut lying = gif_header(b"GIF89a", 100, 100, 0x80 | 0x07);
+        lying.extend_from_slice(&gif_descriptor(0, 0, 100, 100));
+        assert_eq!(sniff_image(&lying), None);
+
+        // A body of nothing but empty extensions is walked to its end, not spun on: each
+        // block consumes at least the byte that introduces it.
+        let mut endless = gif_header(b"GIF89a", 100, 100, 0x00);
+        for _ in 0..100_000 {
+            endless.extend_from_slice(&[0x21, 0xfe, 0x00]);
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(sniff_image(&endless), None);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the block walk took {elapsed:?} — it does not terminate"
+        );
+    }
+
+    #[test]
+    fn sniff_image_reads_a_jpeg_frame_header_right_after_the_soi() {
+        assert_eq!(
+            sniff_image(&jpeg_fixture(0xc0, &[], 800, 400)),
+            Some(("image/jpeg", 800, 400))
+        );
+    }
+
+    /// A real JPEG opens with segments the walk must step over, and each states a length
+    /// rather than a terminator — reading the frame at a fixed offset would read noise.
+    #[test]
+    fn sniff_image_walks_past_leading_segments_to_the_frame_header() {
+        let mut leading = jpeg_segment(0xe0, b"JFIF\0\x01\x02\0\0\x01\0\x01\0\0");
+        leading.extend_from_slice(&jpeg_segment(0xe1, &[0u8; 64]));
+        leading.extend_from_slice(&jpeg_segment(0xdb, &[0u8; 65]));
+        // A restart marker stands alone — no length follows it.
+        leading.extend_from_slice(&[0xff, 0xd0]);
+        assert_eq!(
+            sniff_image(&jpeg_fixture(0xc0, &leading, 1024, 768)),
+            Some(("image/jpeg", 1024, 768))
+        );
+        // Fill bytes before a marker are legal and must not be read as the marker.
+        let mut padded = vec![0xffu8, 0xff, 0xff];
+        padded.extend_from_slice(&jpeg_segment(0xe0, b"JFIF\0"));
+        assert_eq!(
+            sniff_image(&jpeg_fixture(0xc0, &padded, 20, 30)),
+            Some(("image/jpeg", 20, 30))
+        );
+    }
+
+    /// Progressive JPEGs open SOF2, and every frame header in the SOF range states its
+    /// size identically — the range is what is matched, not SOF0 alone.
+    #[test]
+    fn sniff_image_accepts_a_progressive_jpeg_frame_header() {
+        assert_eq!(
+            sniff_image(&jpeg_fixture(0xc2, &[], 1920, 1080)),
+            Some(("image/jpeg", 1920, 1080))
+        );
+        // DHT, the JPEG extensions marker, and DAC sit inside the SOF byte range without
+        // being frame headers; reading one as a frame would take its payload for a size.
+        for marker in [0xc4u8, 0xc8, 0xcc] {
+            assert!(!is_start_of_frame(marker), "{marker:#x} is not a frame");
+        }
+    }
+
+    /// WebP states its size in whichever of three bitstreams the file opens with, each
+    /// encoding it differently — one reader would be right for at most one of them.
+    #[test]
+    fn sniff_image_reads_all_three_webp_bitstreams() {
+        assert_eq!(
+            sniff_image(&webp_lossy_fixture(1200, 630)),
+            Some(("image/webp", 1200, 630))
+        );
+        assert_eq!(
+            sniff_image(&webp_lossless_fixture(300, 200)),
+            Some(("image/webp", 300, 200))
+        );
+        assert_eq!(
+            sniff_image(&webp_extended_fixture(4000, 2000)),
+            Some(("image/webp", 4000, 2000))
+        );
+    }
+
+    #[test]
+    fn sniff_image_refuses_unknown_magic_bytes() {
+        for bytes in [
+            // Inert fixtures: headers only, nothing any decoder would act on.
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+            b"BM\x36\x00\x00\x00".to_vec(),
+            b"\x00\x00\x01\x00\x01\x00".to_vec(),
+            b"II*\x00".to_vec(),
+            b"%PDF-1.7".to_vec(),
+            Vec::new(),
+            vec![0u8; 64],
+        ] {
+            assert_eq!(sniff_image(&bytes), None, "{bytes:?} is not a carried image");
+        }
+        // A well-formed container whose first chunk is one this module cannot read is
+        // still a refusal, not a guess.
+        assert_eq!(sniff_image(&webp_fixture(b"ANIM", &[0u8; 16])), None);
+        assert_eq!(sniff_image(&webp_fixture(b"VP8L", &[0x00; 5])), None);
+    }
+
+    /// Every format's header can be cut mid-field by a hostile host or the byte cap. Each
+    /// reader must answer `None` rather than read past its slice, so every prefix short of
+    /// the bytes it needs is checked — which also pins how far each one reads.
+    #[test]
+    fn sniff_image_refuses_a_header_cut_short() {
+        let fixtures = [
+            (png_fixture(100, 100), 24),
+            // 13 header bytes, the image separator, and its four dimension fields — the
+            // descriptor's own trailing flags byte is never read.
+            (gif_fixture(b"GIF89a", 100, 100), 22),
+            (jpeg_fixture(0xc0, &[], 100, 100), 11),
+            (webp_lossy_fixture(100, 100), 30),
+            (webp_lossless_fixture(100, 100), 25),
+            (webp_extended_fixture(100, 100), 30),
+        ];
+        for (full, needed) in fixtures {
+            assert!(
+                sniff_image(&full[..needed]).is_some(),
+                "{needed} bytes is the whole header"
+            );
+            for cut in 0..needed {
+                assert_eq!(
+                    sniff_image(&full[..cut]),
+                    None,
+                    "a {cut}-byte prefix must not parse"
+                );
+            }
+        }
+    }
+
+    /// A segment length below 2 is malformed — it would claim a payload shorter than its
+    /// own length field. The guard is a validity check, not the walk's termination proof:
+    /// `i` is already past the marker when a length is read. The bound only detects a hang.
+    #[test]
+    fn sniff_image_refuses_a_jpeg_segment_length_below_two() {
+        let started = std::time::Instant::now();
+        for length in [0u16, 1] {
+            // On an APP0 the next iteration's marker check would refuse anyway, so this
+            // arm alone cannot tell whether the guard is present.
+            let mut app0 = vec![0xffu8, 0xd8, 0xff, 0xe0];
+            app0.extend_from_slice(&length.to_be_bytes());
+            app0.extend_from_slice(&[0u8; 4096]);
+            assert_eq!(sniff_image(&app0), None, "APP0 length {length} is refused");
+
+            // On a frame header it is verdict-relevant: the dimensions are read straight
+            // out of the segment, so without the guard these bytes return a size.
+            let mut frame = vec![0xffu8, 0xd8, 0xff, 0xc0];
+            frame.extend_from_slice(&length.to_be_bytes());
+            frame.extend_from_slice(&[0x08, 0x00, 0x64, 0x00, 0x64, 0x01, 0x01, 0x11, 0x00]);
+            assert_eq!(sniff_image(&frame), None, "SOF length {length} is refused");
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the marker walk took {elapsed:?} — it does not terminate"
+        );
+    }
+
+    /// A JPEG that reaches the scan data or the end of the image without a frame header
+    /// never declares a size, so there is nothing to gate and nothing to carry.
+    ///
+    /// Both fixtures carry a frame-shaped byte run past the marker that ends the chain,
+    /// so each arm has to do the refusing — bytes after an EOI, and entropy-coded scan
+    /// data, are both attacker-controlled and can spell anything.
+    #[test]
+    fn sniff_image_refuses_a_jpeg_with_no_frame_header() {
+        let mut ended = vec![0xffu8, 0xd8];
+        ended.extend_from_slice(&jpeg_segment(0xe0, b"JFIF\0"));
+        ended.extend_from_slice(&[0xff, 0xd9]); // EOI
+        // Length-shaped bytes, then a frame header the walk would reach if EOI did not
+        // stop it. (The SOI is stripped: what follows is the segment alone.)
+        ended.extend_from_slice(&[0x00, 0x02]);
+        ended.extend_from_slice(&jpeg_fixture(0xc0, &[], 3000, 3000)[2..]);
+        assert_eq!(sniff_image(&ended), None);
+
+        let mut scanned = vec![0xffu8, 0xd8];
+        scanned.extend_from_slice(&jpeg_segment(0xe0, b"JFIF\0"));
+        scanned.extend_from_slice(&jpeg_segment(0xda, &[0u8; 8])); // SOS
+        scanned.extend_from_slice(&jpeg_fixture(0xc0, &[], 4000, 4000)[2..]);
+        assert_eq!(sniff_image(&scanned), None);
+
+        // Running out of bytes mid-chain is the same answer, and a marker byte that never
+        // arrives is too.
+        assert_eq!(sniff_image(&[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x40]), None);
+        assert_eq!(sniff_image(&[0xff, 0xd8, 0x00, 0xe0]), None);
+    }
+
+    /// Zero and over-cap rasters are refused whatever format declares them. The 8000x8000
+    /// case is the one that proves the pixel cap is independently live: both of its axes
+    /// clear the per-axis cap, and only the area check refuses it.
+    #[test]
+    fn the_dimension_caps_refuse_zero_and_oversized_rasters() {
+        // An 8000-pixel axis clears the per-axis cap on its own, so nothing but the area
+        // check can refuse 8000x8000.
+        assert!(dimensions_within_caps(8000, 1));
+        assert!(dimensions_within_caps(1, 8000));
+        for (width, height) in [
+            (0, 100),
+            (100, 0),
+            (0, 0),
+            (MAX_IMAGE_DIMENSION + 1, 10),
+            (10, MAX_IMAGE_DIMENSION + 1),
+            (8000, 8000),
+        ] {
+            assert!(
+                !dimensions_within_caps(width, height),
+                "{width}x{height} must be refused"
+            );
+            assert_eq!(
+                checked_image_type(&png_fixture(width, height)),
+                None,
+                "{width}x{height} must not reach a data URI"
+            );
+        }
+    }
+
+    /// The stated ceilings are accepts: a cap biting one short of its value would drop
+    /// legitimate images with nothing to show for it.
+    #[test]
+    fn the_dimension_caps_accept_their_exact_boundaries() {
+        assert!(dimensions_within_caps(1, 1));
+        assert!(dimensions_within_caps(MAX_IMAGE_DIMENSION, 4000));
+        assert!(dimensions_within_caps(4000, MAX_IMAGE_DIMENSION));
+        assert_eq!(
+            checked_image_type(&png_fixture(MAX_IMAGE_DIMENSION, 4000)),
+            Some("image/png")
+        );
+        // Exactly at the area ceiling, with both axes inside the per-axis one.
+        assert_eq!(u64::from(8000u32) * 5000, MAX_IMAGE_PIXELS);
+        assert_eq!(
+            checked_image_type(&webp_extended_fixture(8000, 5000)),
+            Some("image/webp")
+        );
+        // One pixel past it is not.
+        assert!(!dimensions_within_caps(8000, 5001));
+    }
+
+    /// The transport header decides only whether the body is read at all; the type the
+    /// data URI carries comes from the bytes. [`encode_checked_image`] is the whole
+    /// post-read path `load_image_data_uri` runs, and it takes no content type — so the
+    /// header cannot reach the URI without that signature changing, which no edit does by
+    /// accident. Only the pre-read header filter needs a live response and stays untested.
+    #[test]
+    fn the_sniffed_type_wins_over_the_transport_header() {
+        let gif = gif_fixture(b"GIF89a", 8, 8);
+        // The header a hostile host would send, and what the bytes actually are.
+        assert_eq!(image_media_type("image/png").as_deref(), Some("image/png"));
+        assert_eq!(sniff_image(&gif), Some(("image/gif", 8, 8)));
+        assert!(encode_checked_image(&gif, false)
+            .expect("a tiny GIF clears the caps")
+            .starts_with("data:image/gif;base64,"));
+
+        // The same seam carries the read's verdict and both refusals it owns.
+        assert_eq!(encode_checked_image(&gif, true), None);
+        assert_eq!(encode_checked_image(&[], false), None);
+        assert_eq!(encode_checked_image(&png_fixture(9000, 9000), false), None);
+        assert_eq!(encode_checked_image(b"not an image at all", false), None);
     }
 
     #[test]
