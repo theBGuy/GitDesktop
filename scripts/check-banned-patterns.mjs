@@ -336,8 +336,13 @@ const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
 // buys the reverse, which matters more: the patch and the mutation it guards may
 // sit in different functions of the same hook file, and a proximity pair would
 // miss that. The reported line is the `onError`, which is the site to rewrite.
+// The optional type-argument group uses the same `<[^(]*?>` class as
+// SET_QUERY_DATA_RE above, for the same reason: a `<[^>]*>` group stops at the
+// INNER `>` of a nested generic (`setQueryData<Record<string, Foo>>`), and the
+// lazy run bounded by the call's own paren resolves it. Missing a typed spelling
+// here would turn this file's whole gate off, not just skip one line.
 const OPTIMISTIC_SETTINGS_PATCH_RE =
-  /setQueryData\s*\(\s*settingsKeys\.settings\b/;
+  /setQueryData\s*(?:<[^(]*?>)?\s*\(\s*settingsKeys\.settings\b/;
 const ONERROR_SETTINGS_REFETCH_RE = new RegExp(
   `\\bonError\\b[\\s\\S]{0,${PAIR_GAP}}?invalidateQueries\\s*\\(\\s*\\{\\s*` +
     `queryKey:\\s*settingsKeys\\.settings\\b`,

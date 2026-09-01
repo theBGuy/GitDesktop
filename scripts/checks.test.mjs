@@ -351,6 +351,26 @@ test("async-settings-rollback flags an optimistic patch whose onError refetches"
   assert.deepEqual(settingsRollback(block), [3]);
 });
 
+test("async-settings-rollback gates on a TYPED optimistic patch too", () => {
+  // The gate is all-or-nothing per file: a spelling it can't see turns the whole
+  // check off there. The repo already types the sibling read
+  // (`getQueryData<AppSettings>`), so the typed write is a plausible next edit —
+  // including the nested-generic form a `<[^>]*>` group would stop short of.
+  for (const call of [
+    "queryClient.setQueryData<AppSettings>(settingsKeys.settings, updated);",
+    "queryClient.setQueryData<Record<string, AppSettings>>(settingsKeys.settings, u);",
+  ]) {
+    const source = [
+      call,
+      "saveSettings.mutate(updated, {",
+      "  onError: () =>",
+      "    queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),",
+      "});",
+    ].join("\n");
+    assert.deepEqual(settingsRollback(source), [3], `should gate on ${call}`);
+  }
+});
+
 test("async-settings-rollback pairs across functions, not just adjacent code", () => {
   // The property `onlyWhen` exists for: the gating patch and the mutation it
   // guards can live in different functions of the same hook file, far outside
