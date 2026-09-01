@@ -44,16 +44,19 @@ interface Pane {
 
 function ImageSide({
   label,
+  size,
   src,
   onOpen,
   onMeasure,
 }: {
   label: string;
+  /** The parent's record of this side's measurement — the caption's only
+   *  source, so the two can't disagree about which file is on screen. */
+  size: Size | undefined;
   src: string;
   onOpen: () => void;
   onMeasure: (size: Size) => void;
 }) {
-  const [size, setSize] = useState<Size | null>(null);
   return (
     <figure className="min-w-0 max-w-[45%] space-y-1.5 text-center">
       <figcaption className="text-xs font-medium text-muted-foreground">
@@ -77,19 +80,17 @@ function ImageSide({
           <img
             alt={label}
             className="max-h-[60vh] max-w-full"
-            onLoad={(e) => {
-              const next = {
+            onLoad={(e) =>
+              onMeasure({
                 w: e.currentTarget.naturalWidth,
                 h: e.currentTarget.naturalHeight,
-              };
-              setSize(next);
-              onMeasure(next);
-            }}
+              })
+            }
             src={src}
           />
         </button>
       </div>
-      {size && (
+      {size !== undefined && (
         <p className="text-[11px] text-muted-foreground tabular-nums">
           {size.w} × {size.h}
         </p>
@@ -170,13 +171,13 @@ export function ImagePanes({
     <div className="flex items-start justify-center gap-8 p-6">
       {panes.map((pane, i) => (
         <ImageSide
-          // Keyed by the pair as well as the slot: a side that kept its element
-          // across a file switch would caption the new image with the previous
-          // one's dimensions until the new one decodes.
+          // Keyed by the pair as well as the slot: an `<img>` kept across a file
+          // switch paints the previous file until the new src decodes.
           key={`${id}|${pane.key}`}
           label={pane.label}
           onMeasure={(size) => patch({ [pane.key]: size })}
           onOpen={() => patch({ viewing: i })}
+          size={current?.[pane.key]}
           src={pane.src}
         />
       ))}

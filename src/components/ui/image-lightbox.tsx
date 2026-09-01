@@ -54,7 +54,7 @@ const ZOOM_TOGGLE = {
 const ARROW_STEP: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1 };
 
 /** Case-insensitive and un-flagged, so `.test` stays stateless for callers. */
-export const HTTP_SRC = /^https?:\/\//i;
+const HTTP_SRC = /^https?:\/\//i;
 
 // The field is dark in both themes, so its controls carry their own light-on-
 // dark palette rather than the theme-following defaults of the ghost variant.

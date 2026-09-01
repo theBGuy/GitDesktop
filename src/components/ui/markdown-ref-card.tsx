@@ -6,7 +6,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { isUserDismissal } from "@/components/panel-portal";
 import { RelativeTime } from "@/components/relative-time";
@@ -37,11 +37,19 @@ export type MarkdownRefTarget =
 /** What a reference IS, independent of the object carrying it — the dispatch
  *  mints a fresh target per pointer event, so resolved content is matched on
  *  this rather than identity, and a re-hover paints from cache without a
- *  skeleton in between. */
-function refKey(target: MarkdownRefTarget): string {
-  return target.kind === "user"
-    ? `user:${target.user}`
-    : `${target.kind}:${target.number}`;
+ *  skeleton in between. All three axes the resolve reads: the same number under
+ *  the other repo or lens is a different item, and a key blind to them would
+ *  paint the previous scope's title under the new scope's number. */
+function refKey(
+  repoPath: string,
+  lens: RemoteLens,
+  target: MarkdownRefTarget,
+): string {
+  const ref =
+    target.kind === "user"
+      ? `user:${target.user}`
+      : `${target.kind}:${target.number}`;
+  return `${repoPath}|${lens}|${ref}`;
 }
 
 /**
@@ -69,7 +77,9 @@ export function cachedRefKind(
 /** Whether a resolved item's web URL addresses a pull request. The issues
  *  endpoint answers for PR numbers too, and the URL's resource segment
  *  (…/pull/N vs …/issues/N) tells the two apart; a substring test would misfire
- *  on a repo named `pull`. */
+ *  on a repo named `pull`.
+ *  A malformed or empty URL throws here by design — both callers contain it: the
+ *  card's resolve `.catch` paints "Couldn't load", and `openRef`'s try toasts. */
 export function isPullRefUrl(url: string): boolean {
   return new URL(url).pathname.split("/").at(-2) === "pull";
 }
@@ -291,15 +301,15 @@ function RefCardBody({
  *
  * One instance serves a whole body: the caller owns which anchor is active (and
  * every open/close delay, since a card with no `PreviewCard.Trigger` gets none of
- * Base UI's hover machinery), and hands the element in as the positioner's
- * anchor. Resolving a number reference warms exactly the queries its destination
- * view reads, so the click after a hover lands on a primed cache.
+ * Base UI's hover machinery), and hands in the rect it measured at open.
+ * Resolving a number reference warms exactly the queries its destination view
+ * reads, so the click after a hover lands on a primed cache.
  */
 export function MarkdownRefCard({
   id,
   refs,
   target,
-  anchor,
+  rect,
   onOpenChange,
   onPointerEnter,
   onPointerLeave,
@@ -310,8 +320,8 @@ export function MarkdownRefCard({
   refs: MarkdownRefs;
   /** The reference to show, or null to close. */
   target: MarkdownRefTarget | null;
-  /** The anchor to position against. */
-  anchor: HTMLElement | null;
+  /** Viewport geometry of the active anchor, measured when the card opened. */
+  rect: DOMRect | null;
   /** Base UI's own dismissals (Escape, outside press) arrive here. */
   onOpenChange: (open: boolean) => void;
   onPointerEnter: () => void;
@@ -324,10 +334,9 @@ export function MarkdownRefCard({
   // forms alike) while a store-registered trigger in the same build measured
   // correctly. So the card rides the trigger path instead: an inert invisible
   // span pinned to the active anchor's rect registers as the reference exactly
-  // the way a real trigger does. Read once per anchor: the caller closes the
+  // the way a real trigger does. The caller measures at each open and closes the
   // card on the first scroll or resize, so the rect it opened at is the only one
   // it is ever shown at.
-  const rect = useMemo(() => anchor?.getBoundingClientRect() ?? null, [anchor]);
   // Keyed by WHICH reference it answers, so a card switching targets reads as
   // resolving rather than painting the previous reference's content under the
   // new one's number — and so re-hovering a resolved one paints straight from
@@ -340,11 +349,13 @@ export function MarkdownRefCard({
   // close animation doesn't play over an emptied card.
   const shown = useRetained(target);
   const item =
-    shown && resolved?.key === refKey(shown) ? resolved.item : undefined;
+    shown && resolved?.key === refKey(repoPath, lens, shown)
+      ? resolved.item
+      : undefined;
 
   useEffect(() => {
     if (!target || target.kind === "user") return;
-    const key = refKey(target);
+    const key = refKey(repoPath, lens, target);
     let cancelled = false;
     resolveRefItem(queryClient, repoPath, lens, target)
       .then((resolvedItem) => {
@@ -376,10 +387,7 @@ export function MarkdownRefCard({
       }}
     >
       {/* Kept mounted through the close fade — an unmounting active trigger
-          force-closes the card mid-animation. A transformed ancestor (a
-          `DialogContent`'s `-translate-x-1/2`) would become this fixed span's
-          containing block and displace the card by that offset — a refs-passing
-          body hosted inside one has to re-anchor or portal the span. */}
+          force-closes the card mid-animation. */}
       <HoverCardTrigger
         render={
           <span

@@ -14,6 +14,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   fileNameFromSrc,
   ImageLightbox,
@@ -127,11 +128,17 @@ const LIGHTBOX_MIN_PX = 48;
 
 /** Whether an embedded image is worth opening fullscreen. A linked image belongs
  *  to its link whatever the href — badges are near-universally wrapped in one —
- *  one inside a collapsed `<details>` isn't on screen to be opened or navigated
- *  past, and an image that hasn't loaded (or failed) reports 0 for both axes,
- *  which the floor rejects on its own. */
+ *  one in a `<summary>` belongs to the disclosure, whose toggle the viewer's own
+ *  `preventDefault` would swallow, one inside a collapsed `<details>` isn't on
+ *  screen to be opened or navigated past, and an image that hasn't loaded (or
+ *  failed) reports 0 for both axes, which the floor rejects on its own. */
 function isLightboxImage(img: HTMLImageElement): boolean {
-  if (img.closest("a") || img.closest("details:not([open])")) return false;
+  if (
+    img.closest("a") ||
+    img.closest("summary") ||
+    img.closest("details:not([open])")
+  )
+    return false;
   return (
     img.naturalWidth >= LIGHTBOX_MIN_PX && img.naturalHeight >= LIGHTBOX_MIN_PX
   );
@@ -235,12 +242,15 @@ export function Markdown({
   // `resolving`: hovering a reference must never flip the body's cursors — the
   // card's skeleton is the whole busy affordance for a hover.
   const [cardTarget, setCardTarget] = useState<MarkdownRefTarget | null>(null);
-  // The anchor is state rather than a ref because the positioner re-resolves only
-  // when the value it was handed changes: a switch straight from one reference to
-  // another (a Tab between two, which batches the close and the open into one
-  // commit) would otherwise leave the card sitting at the first anchor. It
-  // survives a close so the exit animation keeps its position.
+  // Which anchor the card belongs to: the pointer routes compare against it, and
+  // the `aria-describedby` effect writes to it. Never the card's geometry —
+  // reopening on the SAME element is a state no-op, so a rect derived from it
+  // would survive a scroll the reference has already moved under.
   const [cardAnchor, setCardAnchor] = useState<HTMLAnchorElement | null>(null);
+  // Measured at each open instead (a fresh DOMRect every time, so the positioner
+  // always re-resolves), and kept through the close so the exit animation plays
+  // where the card was.
+  const [cardRect, setCardRect] = useState<DOMRect | null>(null);
   const cardTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The pointer's claim on the card — resting on a reference, or inside the
   // popup. Read by the blur path, which must not close a card the mouse owns.
@@ -259,9 +269,9 @@ export function Markdown({
   // A re-parse replaces every injected anchor (a fence's lazy highlight.js
   // upgrade re-runs it), so an open card would track a detached node, and a
   // viewer opened from the old body no longer describes what's on screen.
-  // `cardAnchor` deliberately survives: only the positioner reads it, and
-  // clearing it here would drop the closing card to the origin mid-fade — the
-  // next `showCard` overwrites it before it can be read again.
+  // The anchor and its rect deliberately survive: both are read only while a
+  // target is set, and clearing the rect here would drop the closing card to the
+  // origin mid-fade — the next `showCard` overwrites both anyway.
   // `html` is the trigger, not a value this reads — same shape as the parse memo.
   // biome-ignore lint/correctness/useExhaustiveDependencies: html is the intentional reset trigger
   useEffect(() => {
@@ -358,6 +368,7 @@ export function Markdown({
   function showCard(anchor: HTMLAnchorElement, target: MarkdownRefTarget) {
     cancelTimer(cardTimer);
     setCardAnchor(anchor);
+    setCardRect(anchor.getBoundingClientRect());
     setCardTarget(target);
   }
 
@@ -402,15 +413,16 @@ export function Markdown({
     // has to race, and losing that race reopens from the anchor and cycles.
     if ((e.relatedTarget as Element | null)?.closest?.(CARD_POPUP_SELECTOR))
       return;
+    // The pointer has left a reference for something that isn't the popup, so it
+    // holds no claim on any card — including one it never opened, a sweep across
+    // a reference too brief to beat the open delay.
+    cardHovered.current = false;
     cancelTimer(cardTimer);
     // Only the anchor the card belongs to may close it. A card opened by
-    // keyboard on another reference is neither this pointer's to close nor its
-    // to have claimed — closing it here would leave it with no way back, the
-    // keyboard route reopening only on a fresh focus.
-    if (cardTarget && anchor === cardAnchor) {
-      cardHovered.current = false;
-      scheduleCardClose();
-    }
+    // keyboard on another reference is not this pointer's to close — doing so
+    // would leave it with no way back, the keyboard route reopening only on a
+    // fresh focus.
+    if (cardTarget && anchor === cardAnchor) scheduleCardClose();
   }
 
   function onFocusCapture(e: React.FocusEvent) {
@@ -643,28 +655,36 @@ export function Markdown({
         )}
         dangerouslySetInnerHTML={htmlProp}
       />
-      {refs ? (
-        <MarkdownRefCard
-          id={cardId}
-          refs={refs}
-          target={cardTarget}
-          anchor={cardAnchor}
-          onOpenChange={(open) => {
-            if (open) return;
-            cancelTimer(cardTimer);
-            cardHovered.current = false;
-            setCardTarget(null);
-          }}
-          onPointerEnter={() => {
-            cardHovered.current = true;
-            cancelTimer(cardTimer);
-          }}
-          onPointerLeave={() => {
-            cardHovered.current = false;
-            scheduleCardClose();
-          }}
-        />
-      ) : null}
+      {/* Portalled so the body div above stays its parent's ONLY in-flow child:
+          the card's trigger span is always mounted, and a `space-y-*` parent
+          (Tailwind compiles it to `> :not(:last-child)`) would otherwise hang a
+          phantom margin off the body. Context crosses a portal, so the popup's
+          own `usePanelPortalContainer()` still scopes it to the panel. */}
+      {refs
+        ? createPortal(
+            <MarkdownRefCard
+              id={cardId}
+              refs={refs}
+              target={cardTarget}
+              rect={cardRect}
+              onOpenChange={(open) => {
+                if (open) return;
+                cancelTimer(cardTimer);
+                cardHovered.current = false;
+                setCardTarget(null);
+              }}
+              onPointerEnter={() => {
+                cardHovered.current = true;
+                cancelTimer(cardTimer);
+              }}
+              onPointerLeave={() => {
+                cardHovered.current = false;
+                scheduleCardClose();
+              }}
+            />,
+            document.body,
+          )
+        : null}
       <ImageLightbox
         images={shownLightbox?.images ?? NO_IMAGES}
         index={shownLightbox?.index ?? 0}

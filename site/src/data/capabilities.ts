@@ -516,7 +516,7 @@ export const capabilities: Capability[] = [
   {
     group: "Keyboard & Markdown",
     label:
-      "Reference preview cards — hover or Tab to a #123, !123, or @user and read its state, title & author in place",
+      "Reference preview cards — hover or Tab to a #123 or !123 for its state, title & author, or to an @user for their avatar & handle",
   },
   {
     group: "Keyboard & Markdown",
