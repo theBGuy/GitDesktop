@@ -129,6 +129,8 @@ pub(crate) fn holder_label(subcommand: &str) -> &'static str {
         "pull" => "a pull",
         "push" => "a push",
         "fetch" => "a fetch",
+        // `remote set-head --auto` — a real network call holding the network domain.
+        "remote" => "a remote change",
         _ => DEFAULT_HOLDER,
     }
 }

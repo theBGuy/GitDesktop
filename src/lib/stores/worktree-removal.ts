@@ -301,10 +301,6 @@ function settleRemoval(repoPath: string, path: string) {
   invalidateAfterRemoval(repoPath);
 }
 
-/** Honours the delete dialog's "archive when done" checkbox, once the removal
- *  has settled. The removal itself has already succeeded here, so nothing in
- *  this step can turn it back into a failure — a refused archive reports itself
- *  and points at the branch menu, which can still do it. */
 /** The one recovery message for an archive that didn't happen, spelled once so
  *  the two ways it can be refused can't drift apart. */
 function toastArchiveRefused(branch: string, e: unknown) {
@@ -314,6 +310,10 @@ function toastArchiveRefused(branch: string, e: unknown) {
   );
 }
 
+/** Honours the delete dialog's "archive when done" checkbox, once the removal
+ *  has settled. The removal itself has already succeeded here, so nothing in
+ *  this step can turn it back into a failure — a refused archive reports itself
+ *  and points at the branch menu, which can still do it. */
 async function archiveAfterRemoval(repoPath: string, branch: string) {
   // Re-resolved at completion time rather than trusted from the dialog: the
   // intent can be minutes old, and archiving the default branch would hide it
