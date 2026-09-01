@@ -1,0 +1,5 @@
+- **Images open fullscreen.** Click a screenshot in a rendered description, comment, or
+  discussion, or either side of an image diff, and it fills the window with its label and
+  pixel dimensions, a **Fit** / **100%** toggle, and **Open in browser** for an image
+  loaded from the web. ← and → step through the other images in the same body, Esc
+  closes, and every image the viewer opens is reachable by Tab and Enter.

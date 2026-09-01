@@ -93,6 +93,32 @@ grep -n 'available-width' src/components/ui/popover.tsx
 No match means that file's width delta is gone. `popover.tsx` carries the
 panel-portal delta too, so check both of its markers.
 
+## Anchor forwarding
+
+A third set, again sharing no code with the two above. Base UI positions a
+popup against its `*Trigger` by default; a caller that renders no trigger has
+to hand the positioner an element itself, through the `anchor` prop these
+wrappers otherwise swallow.
+
+- **`combobox.tsx`**, **`hover-card.tsx`** — the `*Content` component's `Pick`
+  from its `Positioner.Props` includes `anchor`, and it forwards the prop to
+  the `Positioner`. Without it the chip-anchored combobox and the markdown
+  reference card — one card per rendered body, positioned at whichever
+  injected `<a>` the pointer is on — have no way to place their popup.
+  `hover-card.tsx` forwards `positionMethod` from the same `Pick` as well: that
+  card portals into the surrounding panel and anchors to an element in another
+  subtree, so it asks for viewport coordinates rather than resolving an
+  offsetParent it does not share.
+
+Grep each file after regenerating it:
+
+```sh
+grep -n '"anchor"' src/components/ui/combobox.tsx src/components/ui/hover-card.tsx
+```
+
+No match means that file's anchor delta is gone. Both files carry the
+panel-portal delta too, so check both of their markers.
+
 ## Check before re-applying
 
 If one of these has to be re-created, confirm it is still needed. Verify

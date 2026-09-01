@@ -1103,7 +1103,11 @@ export function useRepoLabels(
 // Shared definitions so the hook and the prefetch path stay in sync. A short
 // stale window makes a hover-prefetched PR open with no extra round-trip; the
 // window-focus refetch still keeps an open PR current.
-const prDetailsOptions = (repo: string, number: number, lens: RemoteLens) =>
+export const prDetailsOptions = (
+  repo: string,
+  number: number,
+  lens: RemoteLens,
+) =>
   queryOptions({
     queryKey: ["repo", repo, "pr", lens, number] as const,
     queryFn: () => api.forgePrView(repo, number, lens),

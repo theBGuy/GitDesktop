@@ -1,4 +1,8 @@
 import { useState } from "react";
+import {
+  ImageLightbox,
+  type LightboxImage,
+} from "@/components/ui/image-lightbox";
 import { useFileAtRev } from "@/lib/git/queries";
 
 const IMAGE_MIME: Record<string, string> = {
@@ -25,16 +29,31 @@ export interface ImageRevs {
   new: string | null;
 }
 
+interface Size {
+  w: number;
+  h: number;
+}
+
+type PaneKey = "old" | "new";
+
+interface Pane {
+  key: PaneKey;
+  label: string;
+  src: string;
+}
+
 function ImageSide({
   label,
-  base64,
-  mime,
+  src,
+  onOpen,
+  onMeasure,
 }: {
   label: string;
-  base64: string;
-  mime: string;
+  src: string;
+  onOpen: () => void;
+  onMeasure: (size: Size) => void;
 }) {
-  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  const [size, setSize] = useState<Size | null>(null);
   return (
     <figure className="min-w-0 max-w-[45%] space-y-1.5 text-center">
       <figcaption className="text-xs font-medium text-muted-foreground">
@@ -49,17 +68,26 @@ function ImageSide({
           backgroundSize: "16px 16px",
         }}
       >
-        <img
-          alt={label}
-          src={`data:${mime};base64,${base64}`}
-          className="max-h-[60vh] max-w-full"
-          onLoad={(e) =>
-            setSize({
-              w: e.currentTarget.naturalWidth,
-              h: e.currentTarget.naturalHeight,
-            })
-          }
-        />
+        <button
+          aria-label={`View ${label} image fullscreen`}
+          className="block cursor-zoom-in outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
+          onClick={onOpen}
+          type="button"
+        >
+          <img
+            alt={label}
+            className="max-h-[60vh] max-w-full"
+            onLoad={(e) => {
+              const next = {
+                w: e.currentTarget.naturalWidth,
+                h: e.currentTarget.naturalHeight,
+              };
+              setSize(next);
+              onMeasure(next);
+            }}
+            src={src}
+          />
+        </button>
       </div>
       {size && (
         <p className="text-[11px] text-muted-foreground tabular-nums">
@@ -68,6 +96,14 @@ function ImageSide({
       )}
     </figure>
   );
+}
+
+/** Measured sides and the open viewer, scoped to the pair they belong to. */
+interface PanesState {
+  id: string;
+  old?: Size;
+  new?: Size;
+  viewing?: number;
 }
 
 /**
@@ -86,6 +122,9 @@ export function ImagePanes({
   const mime = imageMime(filePath) ?? "application/octet-stream";
   const oldFile = useFileAtRev(repoPath, revs.old, filePath, true);
   const newFile = useFileAtRev(repoPath, revs.new, filePath, true);
+  // Keyed by the pair being shown, so a switch to another file drops the
+  // previous one's measurements and viewer index during render.
+  const [state, setState] = useState<PanesState>({ id: "" });
 
   const pending = oldFile.isPending || newFile.isPending;
   const oldB64 = oldFile.data ?? null;
@@ -94,27 +133,67 @@ export function ImagePanes({
   if (pending) {
     return null;
   }
+
+  const id = [filePath, revs.old, revs.new].join("|");
+  const current = state.id === id ? state : null;
+  const patch = (next: Partial<PanesState>) =>
+    setState((prev) =>
+      prev.id === id ? { ...prev, ...next } : { id, ...next },
+    );
+
+  const panes: Pane[] = [];
+  if (oldB64 !== null) {
+    panes.push({
+      key: "old",
+      label: newB64 === null ? "Deleted" : "Old",
+      src: `data:${mime};base64,${oldB64}`,
+    });
+  }
+  if (newB64 !== null) {
+    panes.push({
+      key: "new",
+      label: oldB64 === null ? "Added" : "New",
+      src: `data:${mime};base64,${newB64}`,
+    });
+  }
+
+  const images: LightboxImage[] = panes.map((pane) => ({
+    src: pane.src,
+    alt: pane.label,
+    label: pane.label,
+    naturalWidth: current?.[pane.key]?.w,
+    naturalHeight: current?.[pane.key]?.h,
+  }));
+  const viewing = current?.viewing ?? null;
+
   return (
     <div className="flex items-start justify-center gap-8 p-6">
-      {oldB64 !== null && (
+      {panes.map((pane, i) => (
         <ImageSide
-          label={newB64 === null ? "Deleted" : "Old"}
-          base64={oldB64}
-          mime={mime}
+          key={pane.key}
+          label={pane.label}
+          onMeasure={(size) => patch({ [pane.key]: size })}
+          onOpen={() => patch({ viewing: i })}
+          src={pane.src}
         />
-      )}
-      {newB64 !== null && (
-        <ImageSide
-          label={oldB64 === null ? "Added" : "New"}
-          base64={newB64}
-          mime={mime}
-        />
-      )}
-      {oldB64 === null && newB64 === null && (
+      ))}
+      {panes.length === 0 && (
         <p className="py-8 text-xs text-muted-foreground">
           Could not load this image.
         </p>
       )}
+      {/* Nested here rather than at a shared host: Base UI suppresses a parent
+          dialog's Escape only for a dialog inside its React tree, and these
+          panes render inside StashesDialog on one of their routes. */}
+      <ImageLightbox
+        images={images}
+        index={viewing ?? 0}
+        onIndexChange={(next) => patch({ viewing: next })}
+        onOpenChange={(open) => {
+          if (!open) patch({ viewing: undefined });
+        }}
+        open={viewing !== null}
+      />
     </div>
   );
 }

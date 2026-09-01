@@ -872,9 +872,19 @@ review via its subscription login. The full list is under
   comment, review thread, AI review, or release note open what they name. On
   GitHub, `#123` opens that issue or pull request in the app, whichever it
   turns out to be; on GitLab, `#123` opens the issue and `!123` the merge
-  request. `@user` opens the profile in your browser. Bitbucket bodies leave
+  request. `@user` opens the profile in your browser. Hover a reference, or
+  reach it with Tab, and a **preview card** shows what you'd be opening: the
+  state (Open, Merged, Closed, or Draft), title, and author of an issue or
+  pull request, or the avatar and handle of a person. Bitbucket bodies leave
   references plain, matching Bitbucket itself, and a reference inside a code
   span or fence stays plain text.
+- **Images open fullscreen**: click a screenshot in a rendered description,
+  comment, or discussion (or either side of an image diff) to fill the window
+  over a dimmed backdrop, with its label and pixel dimensions, a
+  **Fit** / **100%** toggle, and **Open in browser** for one loaded from the
+  web. Arrow keys walk the rest of the set (the other images in that body, or
+  the diff's old and new sides) and Esc closes. Every image the viewer opens
+  takes the keyboard too: Tab to it and press Enter.
 - **Collapsible comment box**: fold the comment box down to a one-line strip to
   read more of the thread, on every conversation surface — pull requests and
   issues (local, on the forge, and Jira), discussions, and commits. Approve,

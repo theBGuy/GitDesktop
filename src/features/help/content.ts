@@ -402,7 +402,11 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
   file is detected wrong (or turn highlighting off). A narrow pane drops the override's
   button from the toolbar; *Change diff language…* in the command palette (palette-only
   by default — bind a key in **Settings → Keyboard**) still opens the picker.
-- **Image diffs** render side by side.
+- **Image diffs** render side by side. Click a side, or Tab to it and press Enter, to
+  open it fullscreen: the image over a dimmed backdrop, its label and pixel dimensions
+  along the bottom, a **Fit** / **100%** toggle, ← and → between the old and new sides,
+  and Esc to close. The **SVG** preview above a text diff and the image diffs inside the
+  stashes dialog open the same viewer.
 - Very large diffs are capped (with a **Show full diff** escape hatch) so a huge file
   never freezes the view.
 - Files that look **generated or minified** (one enormous line — bundles, source maps,
@@ -936,10 +940,19 @@ pull request or issue right here in the app — GitHub numbers issues and pull r
 one sequence, so GitDesktop works out which of the two you meant and takes you to the
 matching tab (a body you're viewing under a fork's other remote opens the item on the
 forge instead, so the number always lands where it belongs); on GitLab, **#123** is an
-issue and **!123** a merge request. **@user**
-opens that person's profile in your browser. **Bitbucket** bodies leave references plain,
-matching Bitbucket itself, and a reference inside backticks or a fenced code block stays
-plain text everywhere.
+issue and **!123** a merge request. **@user** opens that person's profile in your
+browser. Hover a reference, or land on it with Tab, and a preview card names what you'd
+be opening: an issue, pull request, or merge request shows its state (Open, Merged,
+Closed, or Draft) beside its number, then its title and author, while **@user** shows
+that person's avatar and handle. Esc dismisses the card. **Bitbucket** bodies leave
+references plain, matching Bitbucket itself, and a reference inside backticks or a fenced
+code block stays plain text everywhere.
+
+Images in a rendered body open fullscreen too. Click a screenshot in a description,
+comment, or discussion (or Tab to it and press Enter) and it fills the window over a
+dimmed backdrop, with its name and pixel dimensions along the bottom, a **Fit** /
+**100%** toggle, and **Open in browser** for an image the body loaded from the web.
+← and → step through the other images in the same body, and Esc closes the viewer.
 
 ## Conflicts with the base branch
 
