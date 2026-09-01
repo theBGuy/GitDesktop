@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/hover-card";
 import { Input } from "@/components/ui/input";
 import type { DependencyPackage, RepoDependencies } from "@/lib/git/types";
+import { createCardLatch } from "@/lib/hover-card-latch";
 import {
   CARD_CLOSE_DELAY,
   CARD_OPEN_DELAY,
@@ -72,18 +73,6 @@ interface CardOwner {
   setOpen: (open: boolean) => void;
 }
 
-/** Which row's card is open, across the whole list. The keyboard route can open
- *  a card on a row the pointer never visits, so no pointer path reaches it and
- *  hovering another row would float a second card beside it. Imperative only;
- *  nothing renders from this. */
-let activeCard: CardOwner | null = null;
-
-/** Drops a row's claim, ignoring a row that no longer holds it — an evicted row
- *  must never clear the card that replaced it. */
-function releaseCard(owner: CardOwner) {
-  if (activeCard === owner) activeCard = null;
-}
-
 /** Everything that can open or hold a card, torn down together. The pointer
  *  claim has to go with it: removing a hovered node fires no `pointerleave`, so
  *  a card closed under the pointer would leave the claim set forever, and the
@@ -96,11 +85,10 @@ function resetCard(owner: CardOwner) {
   releaseCard(owner);
 }
 
-/** Hands the single open card to `owner`, tearing down whoever held it. */
-function claimCard(owner: CardOwner) {
-  if (activeCard !== null && activeCard !== owner) resetCard(activeCard);
-  activeCard = owner;
-}
+/** This family is the dependency list's rows — the keyboard route can open a card
+ *  on a row the pointer never visits, where no pointer path could close it. */
+const { claim: claimCard, release: releaseCard } =
+  createCardLatch<CardOwner>(resetCard);
 
 /** One dependency row: clickable name (opens its registry/repo) + a hovercard
  *  that lazily fetches the package's description. */

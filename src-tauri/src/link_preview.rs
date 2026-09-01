@@ -27,9 +27,15 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A hostile authoritative nameserver can stall `getaddrinfo` for the resolver's own
 /// timeout (~30s), once per hop, so the wait is bounded here; [`PREVIEW_DEADLINE`]
-/// then bounds the whole preview so hops cannot stack their budgets.
+/// then bounds the page half and [`IMAGE_DEADLINE`] the image step, so hops cannot
+/// stack their budgets past those two ceilings.
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_DEADLINE: Duration = Duration::from_secs(15);
+
+/// The image's own best-effort budget, outside [`PREVIEW_DEADLINE`]. Deliberately tight —
+/// below its own constituent timeouts ([`DNS_TIMEOUT`] alone can consume it): exceeding
+/// it costs the card its picture, never its text.
+const IMAGE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Redirects followed manually (see [`next_hop`]); the 4th is an error.
 const MAX_REDIRECTS: usize = 3;
@@ -223,12 +229,12 @@ fn validate_url(url: &Url) -> AppResult<FetchTarget> {
 }
 
 /// Clear one hop for fetching: [`validate_url`], then DNS when the host is a name. Used
-/// for the page's hops and for the `og:image` the frontend will load.
+/// for the page's hops and for the proxied `og:image` fetch.
 ///
-/// Accepted residual: whoever connects afterwards re-resolves the name — reqwest for a
-/// page hop, the webview for an image — so a DNS-rebinding TOCTOU between this check and
-/// that connection remains open. Tolerable for a hover preview in a desktop app, where
-/// the attacker already needs the user to hover a link they control.
+/// Accepted residual: reqwest re-resolves the name when it connects afterwards, so a
+/// DNS-rebinding TOCTOU between this check and that connection remains open. Tolerable
+/// for a hover preview in a desktop app, where the attacker already needs the user to
+/// hover a link they control.
 async fn guard_hop(url: &Url) -> AppResult<()> {
     let (host, port) = match validate_url(url)? {
         FetchTarget::Literal => return Ok(()),
@@ -385,14 +391,6 @@ fn image_media_type(content_type: &str) -> Option<String> {
     Some(media_type)
 }
 
-/// Pre-filter an `og:image` URL before any request: the cheap half of the image guard,
-/// rejecting a private-network target without spending a fetch on it.
-async fn vet_image_url(candidate: &str) -> Option<String> {
-    let url = Url::parse(candidate).ok()?;
-    guard_hop(&url).await.ok()?;
-    Some(candidate.to_string())
-}
-
 /// Compose the `data:` URI the frontend renders as an `<img src>`.
 fn image_data_uri(media_type: &str, bytes: &[u8]) -> String {
     use base64::Engine;
@@ -400,11 +398,23 @@ fn image_data_uri(media_type: &str, bytes: &[u8]) -> String {
     format!("data:{media_type};base64,{payload}")
 }
 
-/// Fetch a vetted `og:image` through this module's client and return it as a complete
-/// `data:` URI, so the webview never contacts the third-party host. Every failure —
-/// refused hop, non-2xx, wrong media type, oversized or empty body — yields `None`: a
-/// preview without an image is a valid preview, never an error.
-async fn fetch_image_data(url: Url) -> Option<String> {
+/// Fetch an `og:image` through this module's client and return it as a complete `data:`
+/// URI, so the webview never contacts the third-party host. Every failure — unparseable
+/// URL, refused hop, transport failure, non-2xx, a missing or unreadable content type,
+/// wrong media type, oversized or empty body, or [`IMAGE_DEADLINE`] elapsing — yields
+/// `None`: a preview without an image is a valid preview, never an error.
+async fn fetch_image_data(candidate: &str) -> Option<String> {
+    let url = Url::parse(candidate).ok()?;
+    // Its own budget, so a slow image host cannot spend the page's deadline. The first
+    // thing the loop does is `guard_hop` this URL, which is the whole private-network
+    // refusal — no separate pre-check earns its extra DNS lookup.
+    tokio::time::timeout(IMAGE_DEADLINE, load_image_data_uri(url))
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn load_image_data_uri(url: Url) -> Option<String> {
     let (_, resp) = fetch_following_redirects(url).await.ok()?;
     if !(200..300).contains(&resp.status().as_u16()) {
         return None;
@@ -424,14 +434,26 @@ async fn fetch_image_data(url: Url) -> Option<String> {
 /// Fetch a page's Open Graph metadata for the link hover card.
 ///
 /// A page with no metadata, or one that isn't HTML, is `Ok` with every field
-/// `None` — only refused URLs and transport failures are `Err`.
+/// `None` — only refused URLs, transport failures, non-2xx pages, and the page
+/// half's deadline are `Err`. The image step never is.
 #[tauri::command]
 pub async fn fetch_link_preview(url: String) -> AppResult<LinkPreview> {
-    // One deadline over the whole thing: each hop's timeouts are per-request, so four
-    // hops plus DNS plus the image check could otherwise stack into a minute.
-    tokio::time::timeout(PREVIEW_DEADLINE, fetch_preview(url))
+    // The deadline bounds the PAGE fetch, whose hops each carry their own per-request
+    // timeouts and would otherwise stack. The image is deliberately outside it: it has
+    // its own budget and can only ever be absent, so a slow image host cannot discard a
+    // preview whose text already arrived.
+    let parsed = tokio::time::timeout(PREVIEW_DEADLINE, fetch_page(url))
         .await
-        .map_err(|_| AppError::Command("link preview: timed out".into()))?
+        .map_err(|_| AppError::Command("link preview: timed out".into()))??;
+    let image_data = match &parsed.image_url {
+        Some(candidate) => fetch_image_data(candidate).await,
+        None => None,
+    };
+    Ok(LinkPreview {
+        title: parsed.title,
+        description: parsed.description,
+        image_data,
+    })
 }
 
 /// GET `start`, following redirects by hand so [`guard_hop`] clears every hop — the
@@ -468,7 +490,9 @@ async fn fetch_following_redirects(start: Url) -> AppResult<(Url, Response)> {
     }
 }
 
-async fn fetch_preview(url: String) -> AppResult<LinkPreview> {
+/// The page half: everything under [`PREVIEW_DEADLINE`], ending at the parsed metadata.
+/// The image it names is fetched separately so its cost is not charged to this budget.
+async fn fetch_page(url: String) -> AppResult<ParsedPreview> {
     let start = Url::parse(url.trim())
         .map_err(|_| AppError::InvalidArgument("link preview: not a valid URL".into()))?;
     let (final_url, resp) = fetch_following_redirects(start).await?;
@@ -477,26 +501,13 @@ async fn fetch_preview(url: String) -> AppResult<LinkPreview> {
         return Err(AppError::Command(format!("link preview: HTTP {status}")));
     }
     if !is_html(resp.headers()) {
-        return Ok(LinkPreview::default());
+        return Ok(ParsedPreview::default());
     }
     let (body, _) = read_body_capped(resp, MAX_BODY_BYTES).await?;
-    let parsed = preview_from_html(&String::from_utf8_lossy(&body), &final_url);
-    let mut preview = LinkPreview {
-        title: parsed.title,
-        description: parsed.description,
-        image_data: None,
-    };
-    // Vet the URL, then fetch it here rather than handing it to the webview. Both
-    // layers stay: the vet refuses a private target without spending a request, and the
-    // fetch is what survives a redirect the webview would have followed unchecked.
-    if let Some(candidate) = parsed.image_url {
-        if let Some(vetted) = vet_image_url(&candidate).await {
-            if let Ok(url) = Url::parse(&vetted) {
-                preview.image_data = fetch_image_data(url).await;
-            }
-        }
-    }
-    Ok(preview)
+    Ok(preview_from_html(
+        &String::from_utf8_lossy(&body),
+        &final_url,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1531,12 +1542,11 @@ mod tests {
         }
     }
 
-    /// The cheap half of the image guard: refusing a private target here costs no
-    /// request, while the enforcement that matters is the per-hop check inside the fetch
-    /// (a URL cleared here can still redirect). IP literals need no DNS, which is what
-    /// makes both arms testable offline.
+    /// The image fetch's first act is to `guard_hop` its target, and that is the whole
+    /// private-network refusal — nothing reaches the network before it. IP literals need
+    /// no DNS, which is what makes these arms testable offline.
     #[tokio::test]
-    async fn a_private_network_image_url_is_dropped_not_returned() {
+    async fn a_private_network_image_url_is_refused_before_any_request() {
         for candidate in [
             "http://192.168.1.1/setup.cgi?reboot=1",
             "http://127.0.0.1:8080/x.png",
@@ -1545,17 +1555,19 @@ mod tests {
             "http://[::ffff:10.0.0.1]/x.png",
             "http://localhost/x.png",
             "file:///etc/passwd",
-            "not a url",
         ] {
-            assert_eq!(
-                vet_image_url(candidate).await,
-                None,
-                "{candidate} must not reach the webview"
+            let target = Url::parse(candidate).expect("the candidate is a parseable URL");
+            assert!(
+                guard_hop(&target).await.is_err(),
+                "{candidate} must be refused before any request"
             );
         }
-        // A public literal passes through byte-for-byte.
-        let public = "https://93.184.216.34/cover.png";
-        assert_eq!(vet_image_url(public).await, Some(public.to_string()));
+        // A public literal clears the guard, again without touching DNS.
+        assert!(guard_hop(&url("https://93.184.216.34/cover.png"))
+            .await
+            .is_ok());
+        // An unparseable candidate never reaches the guard: the fetch drops it first.
+        assert!(Url::parse("not a url").is_err());
     }
 
     /// The examined-tag bound is what makes the scan linear regardless of body shape;

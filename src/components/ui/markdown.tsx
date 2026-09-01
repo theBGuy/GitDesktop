@@ -24,6 +24,7 @@ import { diffLang } from "@/features/diff/diff-lang";
 import { forgeRepoUrl } from "@/lib/git/api";
 import { issueDetailsOptions } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
+import { createCardLatch } from "@/lib/hover-card-latch";
 import {
   CARD_CLOSE_DELAY,
   CARD_OPEN_DELAY,
@@ -132,19 +133,6 @@ interface CardOwner {
   setTarget: (target: MarkdownRefTarget | null) => void;
 }
 
-/** Which body's card is open, across every rendered Markdown. Each body owns its
- *  own card state, so nothing else stops a conversation from floating two at
- *  once: a keyboard card in the description closes only on blur or dismissal,
- *  and hovering a link in a comment below fires none of its close routes.
- *  Written and read imperatively only — nothing renders from it. */
-let activeCard: CardOwner | null = null;
-
-/** Drops a body's claim, ignoring a body that no longer holds it — an unmounted
- *  body must never clear the card that replaced it. */
-function releaseCard(owner: CardOwner) {
-  if (activeCard === owner) activeCard = null;
-}
-
 /** Everything that can open or hold one body's card, torn down together. The
  *  pointer claim goes with it: a card closed from outside its own routes fires
  *  no `pointerout`, and a claim left set would block that body's next keyboard
@@ -157,11 +145,10 @@ function resetCard(owner: CardOwner) {
   releaseCard(owner);
 }
 
-/** Hands the single open card to `owner`, tearing down whoever held it. */
-function claimCard(owner: CardOwner) {
-  if (activeCard !== null && activeCard !== owner) resetCard(activeCard);
-  activeCard = owner;
-}
+/** This family is every rendered Markdown body, so the two cards it keeps apart
+ *  are typically a conversation's description and one of its comments. */
+const { claim: claimCard, release: releaseCard } =
+  createCardLatch<CardOwner>(resetCard);
 
 /** The external link this anchor addresses, or null when it isn't one. Read off
  *  the RAW href attribute, exactly as the click dispatch does, rather than the
