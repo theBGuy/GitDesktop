@@ -9,7 +9,12 @@ import { invoke } from "@/lib/tauri/invoke";
 export type LinkPreview = {
   title: string | null;
   description: string | null;
-  imageUrl: string | null;
+  /** The og image as a complete `data:image/<subtype>;base64,…` URI — bytes the
+   *  backend already fetched through its own per-hop-validated client, never a
+   *  URL for the webview to resolve. An `<img src>` follows redirects with no
+   *  host re-validation, so a public image host could 302 into the user's LAN
+   *  and reduce the backend's URL vetting to decoration. */
+  imageData: string | null;
 };
 
 /** Reads a page's Open Graph card. Rejects on a refused or unreachable URL —
@@ -21,7 +26,9 @@ export function fetchLinkPreview(url: string): Promise<LinkPreview> {
 
 /**
  * A page's preview, cached for the session: a SETTLED one is never re-read, and
- * the half-hour `gcTime` keeps a body's links warm across view switches.
+ * the half-hour `gcTime` keeps a body's links warm across view switches. That
+ * cache now holds image BYTES rather than a URL, so `gcTime` bounds real memory
+ * — an entry is a page's card, not a pointer to one.
  *
  * A FAILED one needs the two mount options as much as `retry`: the card
  * remounts on every hover, and `staleTime` doesn't cover an error, so without

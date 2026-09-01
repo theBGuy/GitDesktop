@@ -161,7 +161,7 @@ export const GeneralSection = withForm({
           </form.AppField>
           <p className="text-xs text-muted-foreground">
             Shows a page's title, description, and image when you hover or focus
-            a link in a rendered description, comment, or release note. The
+            a web link in a rendered description, comment, or release note. The
             link's destination always shows; turning this off skips contacting
             the linked site.
           </p>

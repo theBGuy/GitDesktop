@@ -12,6 +12,12 @@ const HTTP_SCHEME = /^https?:/i;
 const MAILTO_SCHEME = /^mailto:/i;
 const WWW_PREFIX = /^www\./;
 
+/** The only shape the og image may take: bytes the backend already fetched and
+ *  inlined. Matched exactly (no case fold) against the pinned wire format, so a
+ *  drifting shape can never put a fetchable URL — or a non-image payload — in
+ *  an `src` the webview would resolve. */
+const DATA_IMAGE = /^data:image\//;
+
 /** Bidi controls, stripped from every string a page or its author supplies.
  *  U+202E and its siblings reorder rendered text, so a URL can read as one host
  *  while addressing another — in the one surface built for judging that. CSS
@@ -55,18 +61,20 @@ function mailAddress(href: string): string {
   }
 }
 
-/** The footprint the settled card occupies at its largest: the og image box and
- *  its two text lines. The card must never GROW once open — Base UI re-runs
- *  collision avoidance as the popup resizes, and one opened near the viewport
- *  edge flips to the anchor's other side, out from under the pointer, which
- *  arms the close on the card the user is reading. Settling smaller only
- *  retracts the bottom edge, away from the anchor. */
+/** The card's settled maximum, reserved up front: the og image box over four
+ *  text lines — a `line-clamp-2` title above a `line-clamp-2` description — at
+ *  the popup's own `text-xs/relaxed` line box. The card may SHRINK on settle
+ *  (the bottom edge retracts, away from the anchor) but must never grow: Base
+ *  UI re-runs collision avoidance as the popup resizes, and one that flips to
+ *  the anchor's other side lands out from under the pointer and closes. */
 function LinkCardSkeleton() {
   return (
     <div className="flex flex-col gap-1.5">
       <Skeleton className="aspect-[1.91/1] w-full" />
-      <Skeleton className="h-3.5 w-full" />
-      <Skeleton className="h-3.5 w-4/5" />
+      <Skeleton className="h-[1.625em] w-full" />
+      <Skeleton className="h-[1.625em] w-4/5" />
+      <Skeleton className="h-[1.625em] w-full" />
+      <Skeleton className="h-[1.625em] w-3/5" />
     </div>
   );
 }
@@ -91,11 +99,11 @@ export function MarkdownLinkCard({ href }: { href: string }) {
   });
   // The setting gates the RENDER too, not just the fetch: a preview cached
   // before it was turned off outlives it (staleTime Infinity), and painting one
-  // would both show third-party content and re-request its image from the host
-  // the user just said not to contact.
+  // would show content pulled from a site the user has since said not to
+  // contact.
   const preview = previewsOn ? data : undefined;
-  // Which image URL failed, rather than a bare flag: the card carries no state
-  // to reset when a re-render swaps it to another link.
+  // Which image payload failed, rather than a bare flag: the card carries no
+  // state to reset when a re-render swaps it to another link.
   const [failedImage, setFailedImage] = useState<string | null>(null);
 
   if (!isHttp) {
@@ -107,13 +115,12 @@ export function MarkdownLinkCard({ href }: { href: string }) {
   }
 
   const host = displayHost(href);
-  const image = preview?.imageUrl;
-  // Belt and braces over the backend's own scheme check: the card must never
-  // resolve a `javascript:`/`data:` URL a drifting wire shape handed it.
+  const image = preview?.imageData;
+  // Belt and braces over the backend's own content-type gate — see DATA_IMAGE.
   const showImage =
     image !== null &&
     image !== undefined &&
-    HTTP_SCHEME.test(image) &&
+    DATA_IMAGE.test(image) &&
     image !== failedImage;
 
   return (
@@ -129,10 +136,9 @@ export function MarkdownLinkCard({ href }: { href: string }) {
         <img
           src={image}
           alt=""
-          // The app's own origin is nobody's business on a link the user has
-          // only hovered.
-          referrerPolicy="no-referrer"
           className="aspect-[1.91/1] w-full object-cover"
+          // A corrupt payload still fails to decode; hiding the block keeps a
+          // broken-image glyph out of a card the user only hovered.
           onError={() => setFailedImage(image)}
         />
       ) : null}

@@ -970,14 +970,14 @@ that person's avatar and handle. Esc dismisses the card. **Bitbucket** bodies le
 references plain, matching Bitbucket itself, and a reference inside backticks or a fenced
 code block stays plain text everywhere.
 
-Web and **mailto:** links get a card of their own. Pause the pointer on a link in any
-rendered body, or land on it with Tab, and the card names where it goes right away: the
-site's domain and the full URL. Esc dismisses it, the same as a reference card. For a
-web link GitDesktop then fills in the page's title, description, and image where the
-site publishes them, and a **mailto:** link shows the address it would write to. That
-lookup is **Fetch link previews** under **Settings → General**, on by default; turn it
-off and the cards show the destination alone. Pages on private or local network
-addresses are never fetched.
+Web and **mailto:** links get a card of their own. Pause the pointer on a link in
+any rendered body, or land on it with Tab, and the card names where it goes right
+away: a web link's domain and full URL, or the address a **mailto:** link would
+write to. Esc dismisses it, the same as a reference card. For a web link GitDesktop
+then fills in the page's title, description, and image where the site publishes
+them. That lookup is **Fetch link previews** under **Settings → General**, on by
+default; turn it off and the cards show the destination alone. Pages on private or
+local network addresses are never fetched.
 
 Images in a rendered body open fullscreen too. Click a screenshot in a description,
 comment, or discussion (or Tab to it and press Enter) and it fills the window over a

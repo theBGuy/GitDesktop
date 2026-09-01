@@ -211,15 +211,19 @@ const NEUTRAL_PILL: StatePill = {
   className: "text-muted-foreground",
 };
 
-/** Bars sized like the rows they stand in for, so the card doesn't resize under
- *  the pointer when the content lands. */
+/** The card's settled maximum, reserved up front: a state row, a `line-clamp-2`
+ *  title, and an author row — four lines at the popup's own `text-xs/relaxed`
+ *  line box. The card may SHRINK when the reference resolves (the bottom edge
+ *  retracts, away from the anchor) but must never grow: Base UI re-runs
+ *  collision avoidance as the popup resizes, and one that flips to the anchor's
+ *  other side lands out from under the pointer and closes itself. */
 function RefCardSkeleton() {
   return (
     <div className="flex flex-col gap-1.5">
-      <Skeleton className="h-3.5 w-20" />
-      <Skeleton className="h-3.5 w-full" />
-      <Skeleton className="h-3.5 w-4/5" />
-      <Skeleton className="h-3.5 w-24" />
+      <Skeleton className="h-[1.625em] w-20" />
+      <Skeleton className="h-[1.625em] w-full" />
+      <Skeleton className="h-[1.625em] w-4/5" />
+      <Skeleton className="h-[1.625em] w-24" />
     </div>
   );
 }

@@ -4,10 +4,13 @@
 //! against a private-network blocklist, a 3-hop redirect cap, and a 512 KiB body cap
 //! parsed by a bounded hand-rolled scan rather than a full HTML parser.
 //!
-//! The returned `og:image` clears that same blocklist before it crosses IPC: the
-//! webview loads it with `<img src>` outside this module's client, under a null CSP,
-//! so an unvetted image URL would hand a hostile page the LAN probe the rest of this
-//! module exists to prevent.
+//! The `og:image` is fetched HERE, through the same client and the same per-hop
+//! validation, and crosses IPC as a `data:` URI rather than a URL. Handing the webview
+//! a URL is not enough: `<img>` follows redirects with no validation of its own, so a
+//! page could point its `og:image` at a host that passes the blocklist and 302 the
+//! webview into the user's LAN. Delivering bytes means the webview issues no
+//! third-party request at all, which also closes that redirect gap and the `Referer`
+//! leak, and leaves no DNS-rebinding window for images.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::OnceLock;
@@ -35,6 +38,10 @@ const MAX_REDIRECTS: usize = 3;
 /// so this is generous, and the cap is what keeps a hostile page from exhausting memory.
 const MAX_BODY_BYTES: usize = 512 * 1024;
 
+/// Ceiling on a proxied `og:image`. Over it the image is dropped rather than cut: a
+/// truncated image is a corrupt one, and the encoded copy also has to cross IPC.
+const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+
 /// How far [`tag_end`] scans for a tag's `>`, and how many `<meta` occurrences are
 /// examined at all. Together they bound the harvest at ~4 MB of scanning whatever the
 /// body contains: the window alone is not enough, because a document ending in a single
@@ -51,12 +58,25 @@ const MAX_IMAGE_URL_CHARS: usize = 2048;
 
 /// The Open Graph summary a hover card renders. Every field is optional: a page with
 /// no metadata is a valid answer, not an error.
+///
+/// `image_data` is a complete `data:<content-type>;base64,<payload>` URI, not a URL —
+/// see the module doc for why the bytes travel instead of a link.
 #[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkPreview {
     pub title: Option<String>,
     pub description: Option<String>,
-    pub image_url: Option<String>,
+    pub image_data: Option<String>,
+}
+
+/// What the HTML scan produced. Separate from [`LinkPreview`] because its image is
+/// still a URL at this stage — the type the frontend receives can only ever hold the
+/// fetched bytes, so the two states cannot be confused.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ParsedPreview {
+    title: Option<String>,
+    description: Option<String>,
+    image_url: Option<String>,
 }
 
 /// The preview client, deliberately separate from [`crate::forge::http`]'s: it sends no
@@ -269,34 +289,56 @@ fn next_hop(
     Ok(Some(next))
 }
 
-/// Append `chunk` under [`MAX_BODY_BYTES`], returning `false` once the cap is reached
-/// and reading must stop. Split out from the async read so the cap itself is testable
-/// without a server.
-fn push_capped(buf: &mut Vec<u8>, chunk: &[u8]) -> bool {
-    let room = MAX_BODY_BYTES - buf.len();
-    if chunk.len() >= room {
-        buf.extend_from_slice(&chunk[..room]);
-        return false;
-    }
-    buf.extend_from_slice(chunk);
-    true
+/// Accumulates a response body under a byte cap. One byte past `cap` is read so a body
+/// sitting exactly ON the cap is distinguishable from one exceeding it — the page path
+/// parses a truncated body, but an oversized image has to be dropped. Split from the
+/// async read so tests drive the same accumulator the reader does.
+struct CappedBody {
+    buf: Vec<u8>,
+    cap: usize,
 }
 
-/// Read at most [`MAX_BODY_BYTES`] of the body, chunk by chunk — `.text()` on an
-/// attacker-chosen page would be unbounded. A cut mid-sequence is absorbed by the
-/// lossy decode.
-async fn read_body_capped(mut resp: Response) -> AppResult<String> {
-    let mut buf: Vec<u8> = Vec::new();
+impl CappedBody {
+    fn new(cap: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            cap,
+        }
+    }
+
+    /// `false` once enough has been read that no further chunk can change the outcome.
+    fn push(&mut self, chunk: &[u8]) -> bool {
+        let room = self.cap.saturating_add(1) - self.buf.len();
+        if chunk.len() >= room {
+            self.buf.extend_from_slice(&chunk[..room]);
+            return false;
+        }
+        self.buf.extend_from_slice(chunk);
+        true
+    }
+
+    /// The bytes trimmed to `cap`, plus whether the source ran past it.
+    fn finish(mut self) -> (Vec<u8>, bool) {
+        let over_cap = self.buf.len() > self.cap;
+        self.buf.truncate(self.cap);
+        (self.buf, over_cap)
+    }
+}
+
+/// Read at most `cap` bytes of the body, chunk by chunk — `.text()` on an
+/// attacker-chosen response would be unbounded.
+async fn read_body_capped(mut resp: Response, cap: usize) -> AppResult<(Vec<u8>, bool)> {
+    let mut body = CappedBody::new(cap);
     while let Some(chunk) = resp
         .chunk()
         .await
         .map_err(|e| AppError::Command(format!("link preview: could not read response: {e}")))?
     {
-        if !push_capped(&mut buf, &chunk) {
+        if !body.push(&chunk) {
             break;
         }
     }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    Ok(body.finish())
 }
 
 /// XHTML carries og tags as routinely as HTML does, so both types are parsed; an absent
@@ -311,19 +353,78 @@ fn is_html(headers: &header::HeaderMap) -> bool {
         })
 }
 
-/// Clear an `og:image` for the frontend, which loads it in the webview outside this
-/// module's client. A refusal drops the image rather than failing the preview — the
-/// card renders fine without one, and the page's own text is still trustworthy output.
+/// RFC 7230 token characters, less `#`. `#` is a valid token character but a fragment
+/// delimiter in the data URI this feeds, so it would truncate the media type there the
+/// same way a comma does.
+fn is_media_token(part: &str) -> bool {
+    !part.is_empty()
+        && part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!$%&'*+-.^_`|~".contains(&b))
+}
+
+/// The media type to embed in an image data URI, or `None` when the response is not an
+/// image this preview will carry. Pure, so the gate is testable without a response.
+///
+/// The header is attacker-chosen — the page names the `og:image` host — so the value is
+/// validated as `image/<token>` rather than by substring: `image/svg+xml,x` is not equal
+/// to `image/svg+xml`, so it would slip past the refusal below, and a data URI's media
+/// type ends at its first comma, which would also strip the `;base64` flag. SVG is
+/// refused despite being an image type: it is an active document (script, external
+/// references), and og images are raster in practice.
+fn image_media_type(content_type: &str) -> Option<String> {
+    let media_type = content_type.split(';').next()?.trim().to_ascii_lowercase();
+    let (top_level, subtype) = media_type.split_once('/')?;
+    if top_level != "image" || !is_media_token(subtype) {
+        return None;
+    }
+    // Sound only because the token check above rules out the decorated spellings.
+    if media_type == "image/svg+xml" {
+        return None;
+    }
+    Some(media_type)
+}
+
+/// Pre-filter an `og:image` URL before any request: the cheap half of the image guard,
+/// rejecting a private-network target without spending a fetch on it.
 async fn vet_image_url(candidate: &str) -> Option<String> {
     let url = Url::parse(candidate).ok()?;
     guard_hop(&url).await.ok()?;
     Some(candidate.to_string())
 }
 
+/// Compose the `data:` URI the frontend renders as an `<img src>`.
+fn image_data_uri(media_type: &str, bytes: &[u8]) -> String {
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("data:{media_type};base64,{payload}")
+}
+
+/// Fetch a vetted `og:image` through this module's client and return it as a complete
+/// `data:` URI, so the webview never contacts the third-party host. Every failure —
+/// refused hop, non-2xx, wrong media type, oversized or empty body — yields `None`: a
+/// preview without an image is a valid preview, never an error.
+async fn fetch_image_data(url: Url) -> Option<String> {
+    let (_, resp) = fetch_following_redirects(url).await.ok()?;
+    if !(200..300).contains(&resp.status().as_u16()) {
+        return None;
+    }
+    let media_type = image_media_type(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())?,
+    )?;
+    let (bytes, over_cap) = read_body_capped(resp, MAX_IMAGE_BYTES).await.ok()?;
+    if over_cap || bytes.is_empty() {
+        return None;
+    }
+    Some(image_data_uri(&media_type, &bytes))
+}
+
 /// Fetch a page's Open Graph metadata for the link hover card.
 ///
-/// A page with no metadata, or one that isn't HTML, is `Ok` with every field `None` —
-/// only refused URLs and transport failures are `Err`.
+/// A page with no metadata, or one that isn't HTML, is `Ok` with every field
+/// `None` — only refused URLs and transport failures are `Err`.
 #[tauri::command]
 pub async fn fetch_link_preview(url: String) -> AppResult<LinkPreview> {
     // One deadline over the whole thing: each hop's timeouts are per-request, so four
@@ -333,9 +434,16 @@ pub async fn fetch_link_preview(url: String) -> AppResult<LinkPreview> {
         .map_err(|_| AppError::Command("link preview: timed out".into()))?
 }
 
-async fn fetch_preview(url: String) -> AppResult<LinkPreview> {
-    let mut current = Url::parse(url.trim())
-        .map_err(|_| AppError::InvalidArgument("link preview: not a valid URL".into()))?;
+/// GET `start`, following redirects by hand so [`guard_hop`] clears every hop — the
+/// first one included — before it is requested. Returns the URL that finally served the
+/// response and the response itself, whatever its status; gating the status is the
+/// caller's half.
+///
+/// The page fetch and the image fetch both go through here, so the hop counting,
+/// `Location` resolution, and per-hop validation that [`next_hop`]'s tests cover apply
+/// to both paths — there is only one loop to get right.
+async fn fetch_following_redirects(start: Url) -> AppResult<(Url, Response)> {
+    let mut current = start;
     let mut hops = 0usize;
     loop {
         guard_hop(&current).await?;
@@ -350,24 +458,45 @@ async fn fetch_preview(url: String) -> AppResult<LinkPreview> {
             .get(header::LOCATION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        if let Some(next) = next_hop(&current, status, location.as_deref(), hops)? {
-            hops += 1;
-            current = next;
-            continue;
+        match next_hop(&current, status, location.as_deref(), hops)? {
+            Some(next) => {
+                hops += 1;
+                current = next;
+            }
+            None => return Ok((current, resp)),
         }
-        if !(200..300).contains(&status) {
-            return Err(AppError::Command(format!("link preview: HTTP {status}")));
-        }
-        if !is_html(resp.headers()) {
-            return Ok(LinkPreview::default());
-        }
-        let body = read_body_capped(resp).await?;
-        let mut preview = preview_from_html(&body, &current);
-        if let Some(candidate) = preview.image_url.take() {
-            preview.image_url = vet_image_url(&candidate).await;
-        }
-        return Ok(preview);
     }
+}
+
+async fn fetch_preview(url: String) -> AppResult<LinkPreview> {
+    let start = Url::parse(url.trim())
+        .map_err(|_| AppError::InvalidArgument("link preview: not a valid URL".into()))?;
+    let (final_url, resp) = fetch_following_redirects(start).await?;
+    let status = resp.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(AppError::Command(format!("link preview: HTTP {status}")));
+    }
+    if !is_html(resp.headers()) {
+        return Ok(LinkPreview::default());
+    }
+    let (body, _) = read_body_capped(resp, MAX_BODY_BYTES).await?;
+    let parsed = preview_from_html(&String::from_utf8_lossy(&body), &final_url);
+    let mut preview = LinkPreview {
+        title: parsed.title,
+        description: parsed.description,
+        image_data: None,
+    };
+    // Vet the URL, then fetch it here rather than handing it to the webview. Both
+    // layers stay: the vet refuses a private target without spending a request, and the
+    // fetch is what survives a redirect the webview would have followed unchecked.
+    if let Some(candidate) = parsed.image_url {
+        if let Some(vetted) = vet_image_url(&candidate).await {
+            if let Ok(url) = Url::parse(&vetted) {
+                preview.image_data = fetch_image_data(url).await;
+            }
+        }
+    }
+    Ok(preview)
 }
 
 // ---------------------------------------------------------------------------
@@ -665,11 +794,12 @@ fn resolve_image(base: &Url, raw: &str) -> Option<String> {
     (text.chars().count() <= MAX_IMAGE_URL_CHARS).then_some(text)
 }
 
-/// Build a preview from a page body and the URL that finally served it.
-fn preview_from_html(html: &str, final_url: &Url) -> LinkPreview {
+/// Build a parse result from a page body and the URL that finally served it. The image
+/// is still a URL here; [`fetch_image_data`] turns it into the bytes that ship.
+fn preview_from_html(html: &str, final_url: &Url) -> ParsedPreview {
     let h = harvest(html);
     let first = |sources: Vec<Option<String>>| sources.into_iter().flatten().next();
-    LinkPreview {
+    ParsedPreview {
         title: first(vec![h.og_title, h.tw_title, h.title_element])
             .and_then(|v| normalize(&v, MAX_TITLE_CHARS)),
         description: first(vec![h.og_description, h.tw_description, h.meta_description])
@@ -688,18 +818,19 @@ mod tests {
         Url::parse(s).expect("test URL parses")
     }
 
-    fn preview(html: &str) -> LinkPreview {
+    fn preview(html: &str) -> ParsedPreview {
         preview_from_html(html, &url("https://example.com/page"))
     }
 
-    /// The frontend reads `imageUrl` off this record; `rename_all` is a rename trap the
-    /// repo has been bitten by, so the wire shape is pinned rather than assumed.
+    /// The frontend reads `imageData` off this record — a data URI, not a URL, and no
+    /// `imageUrl` key at all. `rename_all` is a rename trap the repo has been bitten by,
+    /// so the wire shape is pinned rather than assumed.
     #[test]
     fn link_preview_serializes_to_the_pinned_wire_shape() {
         let value = serde_json::to_value(LinkPreview {
             title: Some("T".into()),
             description: Some("D".into()),
-            image_url: Some("https://example.com/i.png".into()),
+            image_data: Some("data:image/png;base64,AAAA".into()),
         })
         .unwrap();
         assert_eq!(
@@ -707,13 +838,15 @@ mod tests {
             json!({
                 "title": "T",
                 "description": "D",
-                "imageUrl": "https://example.com/i.png",
+                "imageData": "data:image/png;base64,AAAA",
             })
         );
         assert_eq!(
             serde_json::to_value(LinkPreview::default()).unwrap(),
-            json!({ "title": null, "description": null, "imageUrl": null })
+            json!({ "title": null, "description": null, "imageData": null })
         );
+        // The old key is gone, not merely renamed alongside.
+        assert!(value.get("imageUrl").is_none());
     }
 
     #[test]
@@ -1137,18 +1270,18 @@ mod tests {
     fn a_page_without_metadata_yields_all_none() {
         assert_eq!(
             preview("<html><body>Nothing here</body></html>"),
-            LinkPreview::default()
+            ParsedPreview::default()
         );
-        assert_eq!(preview(""), LinkPreview::default());
+        assert_eq!(preview(""), ParsedPreview::default());
         // A meta tag with no `content` contributes nothing.
         assert_eq!(
             preview(r#"<meta property="og:title">"#),
-            LinkPreview::default()
+            ParsedPreview::default()
         );
         // An empty `content` normalizes away rather than becoming an empty string.
         assert_eq!(
             preview(r#"<meta property="og:title" content="  ">"#),
-            LinkPreview::default()
+            ParsedPreview::default()
         );
     }
 
@@ -1202,37 +1335,67 @@ mod tests {
         assert!(!is_html(&headers_with(None)));
     }
 
-    /// Drive the cap the way the async reader does, over an explicit chunk sequence.
-    fn collect_capped(chunks: &[&[u8]]) -> Vec<u8> {
-        let mut buf = Vec::new();
+    /// Drive the accumulator the async reader uses, over an explicit chunk sequence.
+    fn collect_capped(chunks: &[&[u8]], cap: usize) -> (Vec<u8>, bool) {
+        let mut body = CappedBody::new(cap);
         for chunk in chunks {
-            if !push_capped(&mut buf, chunk) {
+            if !body.push(chunk) {
                 break;
             }
         }
-        buf
+        body.finish()
     }
 
     #[test]
     fn the_body_cap_stops_at_exactly_max_body_bytes() {
-        // Well under the cap: everything is kept.
-        let small = collect_capped(&[b"abc", b"def"]);
+        // Well under the cap: everything is kept, and nothing is reported over it.
+        let (small, over) = collect_capped(&[b"abc", b"def"], MAX_BODY_BYTES);
         assert_eq!(small, b"abcdef");
+        assert!(!over);
 
-        // A chunk landing exactly on the cap fills it and stops the read, so a chunk
-        // after it is never appended.
+        // A body landing exactly ON the cap is complete, not over it — the distinction
+        // the image path needs.
         let exact = vec![b'x'; MAX_BODY_BYTES];
-        let filled = collect_capped(&[&exact, b"never"]);
+        let (filled, over) = collect_capped(&[&exact], MAX_BODY_BYTES);
         assert_eq!(filled.len(), MAX_BODY_BYTES);
-        assert!(!filled.ends_with(b"never"));
+        assert!(!over, "a body exactly at the cap is not over it");
 
-        // An overflowing chunk is cut at the cap.
-        let over = vec![b'y'; MAX_BODY_BYTES + 4096];
-        assert_eq!(collect_capped(&[&over]).len(), MAX_BODY_BYTES);
+        // One byte past the cap is over it, and the bytes come back trimmed to the cap.
+        let one_over = vec![b'x'; MAX_BODY_BYTES + 1];
+        let (trimmed, over) = collect_capped(&[&one_over], MAX_BODY_BYTES);
+        assert_eq!(trimmed.len(), MAX_BODY_BYTES);
+        assert!(over, "one byte past the cap is over it");
+
+        // A chunk after the cap is reached is never appended.
+        let (filled, _) = collect_capped(&[&exact, b"never"], MAX_BODY_BYTES);
+        assert!(!filled.ends_with(b"never"));
 
         // The cap counts across chunks, not per chunk.
         let half = vec![b'z'; MAX_BODY_BYTES / 2];
-        assert_eq!(collect_capped(&[&half, &half, &half]).len(), MAX_BODY_BYTES);
+        let (all, over) = collect_capped(&[&half, &half, &half], MAX_BODY_BYTES);
+        assert_eq!(all.len(), MAX_BODY_BYTES);
+        assert!(over);
+    }
+
+    /// The image cap is the same accumulator at a different ceiling, and its boundary is
+    /// what decides drop-vs-keep rather than truncate-vs-keep.
+    #[test]
+    fn the_image_cap_separates_exactly_full_from_oversized() {
+        let exact = vec![0u8; MAX_IMAGE_BYTES];
+        let (bytes, over) = collect_capped(&[&exact], MAX_IMAGE_BYTES);
+        assert_eq!(bytes.len(), MAX_IMAGE_BYTES);
+        assert!(!over, "a 2 MiB image is at the cap, not over it");
+
+        let too_big = vec![0u8; MAX_IMAGE_BYTES + 1];
+        let (_, over) = collect_capped(&[&too_big], MAX_IMAGE_BYTES);
+        assert!(over, "2 MiB + 1 byte is over the cap and gets dropped");
+
+        // Split across chunks the verdict is the same.
+        let chunk = vec![0u8; MAX_IMAGE_BYTES / 2];
+        let (_, over) = collect_capped(&[&chunk, &chunk], MAX_IMAGE_BYTES);
+        assert!(!over);
+        let (_, over) = collect_capped(&[&chunk, &chunk, b"x"], MAX_IMAGE_BYTES);
+        assert!(over);
     }
 
     #[test]
@@ -1240,11 +1403,89 @@ mod tests {
         // Cap-1 ASCII bytes then a 2-byte char: the cut lands between its bytes.
         let mut body = vec![b'a'; MAX_BODY_BYTES - 1];
         body.extend_from_slice("é".as_bytes());
-        let truncated = collect_capped(&[&body]);
+        let (truncated, over) = collect_capped(&[&body], MAX_BODY_BYTES);
         assert_eq!(truncated.len(), MAX_BODY_BYTES);
+        assert!(over);
         let text = String::from_utf8_lossy(&truncated);
         assert!(text.ends_with('\u{fffd}'), "the split char became U+FFFD");
         assert_eq!(text.chars().count(), MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn image_media_type_accepts_raster_images_only() {
+        for (raw, expected) in [
+            ("image/png", "image/png"),
+            ("IMAGE/PNG", "image/png"),
+            ("image/jpeg; charset=binary", "image/jpeg"),
+            ("  image/webp  ", "image/webp"),
+            ("image/gif", "image/gif"),
+        ] {
+            assert_eq!(image_media_type(raw).as_deref(), Some(expected), "{raw}");
+        }
+        for raw in [
+            "text/html",
+            "application/json",
+            "application/octet-stream",
+            // SVG is an image type but an active document — refused deliberately.
+            "image/svg+xml",
+            "IMAGE/SVG+XML; charset=utf-8",
+            "",
+            "notimage/png",
+            "image",
+            "image/",
+            "/png",
+        ] {
+            assert_eq!(image_media_type(raw), None, "{raw} must not be carried");
+        }
+    }
+
+    /// The header comes from the attacker-chosen image host. A comma ends the media type
+    /// when a data URI is parsed and a `#` starts its fragment, so either one both
+    /// dodges the exact-match SVG refusal and strips the `;base64` flag off the URI the
+    /// frontend receives — the whole reason the subtype is token-validated.
+    #[test]
+    fn image_media_type_rejects_decorated_subtypes() {
+        for raw in [
+            "image/svg+xml,x",
+            "image/svg+xml,",
+            "image/png,x",
+            "image/svg+xml#x",
+            "image/png#",
+            "image/png x",
+            "image/pn g",
+            "image/svg/x",
+            "image/png\"",
+            "image/png\\x",
+        ] {
+            assert_eq!(
+                image_media_type(raw),
+                None,
+                "{raw} must not reach a data URI"
+            );
+        }
+    }
+
+    /// The frontend renders this string directly as an `<img src>`, so both halves of
+    /// the URI have to be exactly right.
+    #[test]
+    fn an_image_data_uri_carries_the_type_and_round_trips_the_bytes() {
+        use base64::Engine;
+
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let uri = image_data_uri("image/png", &bytes);
+        let payload = uri
+            .strip_prefix("data:image/png;base64,")
+            .expect("the prefix names the media type and the encoding");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .expect("the payload is valid base64"),
+            bytes,
+            "every byte survives the round trip"
+        );
+        // Empty input still produces a well-formed (empty-payload) URI; the fetch path
+        // rejects empty bodies before reaching here.
+        assert_eq!(image_data_uri("image/gif", &[]), "data:image/gif;base64,");
     }
 
     #[test]
@@ -1253,11 +1494,11 @@ mod tests {
         assert_eq!(preview(cut_mid_tag).title.as_deref(), Some("Good"));
 
         let unclosed_quote = r#"<meta property="og:title" content="never closed"#;
-        assert_eq!(preview(unclosed_quote), LinkPreview::default());
+        assert_eq!(preview(unclosed_quote), ParsedPreview::default());
 
         // A bare `<meta` at the very end is not a tag and must not panic.
-        assert_eq!(preview("<meta"), LinkPreview::default());
-        assert_eq!(preview("<title"), LinkPreview::default());
+        assert_eq!(preview("<meta"), ParsedPreview::default());
+        assert_eq!(preview("<title"), ParsedPreview::default());
         // A `<title>` with no `</title>` has no determinate text, so it yields nothing
         // rather than swallowing the rest of the document.
         assert_eq!(preview("<title>unterminated element").title, None);
@@ -1282,7 +1523,7 @@ mod tests {
             let started = std::time::Instant::now();
             let got = preview_from_html(&body, &base);
             let elapsed = started.elapsed();
-            assert_eq!(got, LinkPreview::default());
+            assert_eq!(got, ParsedPreview::default());
             assert!(
                 elapsed < Duration::from_secs(5),
                 "harvest took {elapsed:?} — the scan is not linear"
@@ -1290,9 +1531,10 @@ mod tests {
         }
     }
 
-    /// The image URL crosses IPC and is loaded by the webview under a null CSP, outside
-    /// this module's client — so it clears the blocklist here or it is not returned.
-    /// IP literals need no DNS, which is what makes both arms testable offline.
+    /// The cheap half of the image guard: refusing a private target here costs no
+    /// request, while the enforcement that matters is the per-hop check inside the fetch
+    /// (a URL cleared here can still redirect). IP literals need no DNS, which is what
+    /// makes both arms testable offline.
     #[tokio::test]
     async fn a_private_network_image_url_is_dropped_not_returned() {
         for candidate in [
@@ -1323,5 +1565,15 @@ mod tests {
         let filler = r#"<meta name="x" content="y">"#.repeat(MAX_META_TAGS - 1);
         let html = format!(r#"{filler}<meta property="og:title" content="Found">"#);
         assert_eq!(preview(&html).title.as_deref(), Some("Found"));
+    }
+
+    /// The mirror of the arm above, pinning the boundary from the far side: without it
+    /// nothing fails if the bound stops biting, since the pathological bodies stay
+    /// inside the hang bound on the tag window alone.
+    #[test]
+    fn metadata_past_the_examined_tag_bound_is_dropped() {
+        let filler = r#"<meta name="x" content="y">"#.repeat(MAX_META_TAGS);
+        let html = format!(r#"{filler}<meta property="og:title" content="Too late">"#);
+        assert_eq!(preview(&html).title, None);
     }
 }

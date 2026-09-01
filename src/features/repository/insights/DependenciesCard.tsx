@@ -11,6 +11,12 @@ import {
 } from "@/components/ui/hover-card";
 import { Input } from "@/components/ui/input";
 import type { DependencyPackage, RepoDependencies } from "@/lib/git/types";
+import {
+  CARD_CLOSE_DELAY,
+  CARD_OPEN_DELAY,
+  cancelFrame,
+  cancelTimer,
+} from "@/lib/hover-card-timing";
 import { toastError } from "@/lib/toast";
 import { fmt } from "./primitives";
 import { canFetchPackageInfo, usePackageInfo } from "./usePackageInfo";
@@ -49,11 +55,6 @@ function packageUrl(ecosystem: string, name: string): string | null {
   }
 }
 
-// The card is positioned by hand off an inert trigger, so none of Base UI's own
-// hover machinery applies and both delays are hand-rolled from its constants.
-const CARD_OPEN_DELAY = 600;
-const CARD_CLOSE_DELAY = 300;
-
 /** Viewport geometry the card's inert trigger span is pinned to. */
 interface AnchorRect {
   left: number;
@@ -62,36 +63,43 @@ interface AnchorRect {
   height: number;
 }
 
-function cancelTimer(
-  ref: React.RefObject<ReturnType<typeof setTimeout> | null>,
-) {
-  if (ref.current !== null) {
-    clearTimeout(ref.current);
-    ref.current = null;
-  }
+/** A row's handle on its own card — every field stable for the row's life, so
+ *  the object doubles as the row's identity in the latch below. */
+interface CardOwner {
+  timer: React.RefObject<ReturnType<typeof setTimeout> | null>;
+  frame: React.RefObject<number | null>;
+  pointerHeld: React.RefObject<boolean>;
+  setOpen: (open: boolean) => void;
 }
 
-function cancelFrame(ref: React.RefObject<number | null>) {
-  if (ref.current !== null) {
-    cancelAnimationFrame(ref.current);
-    ref.current = null;
-  }
+/** Which row's card is open, across the whole list. The keyboard route can open
+ *  a card on a row the pointer never visits, so no pointer path reaches it and
+ *  hovering another row would float a second card beside it. Imperative only;
+ *  nothing renders from this. */
+let activeCard: CardOwner | null = null;
+
+/** Drops a row's claim, ignoring a row that no longer holds it — an evicted row
+ *  must never clear the card that replaced it. */
+function releaseCard(owner: CardOwner) {
+  if (activeCard === owner) activeCard = null;
 }
 
 /** Everything that can open or hold a card, torn down together. The pointer
  *  claim has to go with it: removing a hovered node fires no `pointerleave`, so
  *  a card closed under the pointer would leave the claim set forever, and the
  *  row's next keyboard card would refuse to close on blur. */
-function resetCard(
-  timer: React.RefObject<ReturnType<typeof setTimeout> | null>,
-  frame: React.RefObject<number | null>,
-  pointerHeld: React.RefObject<boolean>,
-  setOpen: (open: boolean) => void,
-) {
-  cancelTimer(timer);
-  cancelFrame(frame);
-  pointerHeld.current = false;
-  setOpen(false);
+function resetCard(owner: CardOwner) {
+  cancelTimer(owner.timer);
+  cancelFrame(owner.frame);
+  owner.pointerHeld.current = false;
+  owner.setOpen(false);
+  releaseCard(owner);
+}
+
+/** Hands the single open card to `owner`, tearing down whoever held it. */
+function claimCard(owner: CardOwner) {
+  if (activeCard !== null && activeCard !== owner) resetCard(activeCard);
+  activeCard = owner;
 }
 
 /** One dependency row: clickable name (opens its registry/repo) + a hovercard
@@ -112,6 +120,14 @@ function DependencyRow({ p }: { p: DependencyPackage }) {
   // Whether the pointer rests on the row or inside the popup. Blur must not close
   // a card the mouse still holds — clicking the name blurs it on the way out.
   const pointerHeld = useRef(false);
+  // Built once: the latch compares rows by this object's identity, so it has to
+  // outlive every render.
+  const [card] = useState<CardOwner>(() => ({
+    timer,
+    frame,
+    pointerHeld,
+    setOpen,
+  }));
   const cardId = useId();
   const url = packageUrl(p.ecosystem, p.name);
   const info = usePackageInfo(p.ecosystem, p.name, open);
@@ -124,7 +140,7 @@ function DependencyRow({ p }: { p: DependencyPackage }) {
   useEffect(() => {
     if (!open) return;
     let subscribed = false;
-    const close = () => resetCard(timer, frame, pointerHeld, setOpen);
+    const close = () => resetCard(card);
     const raf = requestAnimationFrame(() => {
       subscribed = true;
       window.addEventListener("scroll", close, true);
@@ -136,24 +152,27 @@ function DependencyRow({ p }: { p: DependencyPackage }) {
       window.removeEventListener("scroll", close, true);
       window.removeEventListener("resize", close);
     };
-  }, [open]);
+  }, [open, card]);
 
-  // The virtualizer evicts rows mid-dwell.
+  // The virtualizer evicts rows mid-dwell, and an evicted row that still held
+  // the latch would tear down whichever card claims it next.
   useEffect(
     () => () => {
-      cancelTimer(timer);
-      cancelFrame(frame);
+      cancelTimer(card.timer);
+      cancelFrame(card.frame);
+      releaseCard(card);
     },
-    [],
+    [card],
   );
 
   function showAt(anchor: AnchorRect) {
+    claimCard(card);
     setRect(anchor);
     setOpen(true);
   }
 
   function dismiss() {
-    resetCard(timer, frame, pointerHeld, setOpen);
+    resetCard(card);
   }
 
   /** A 1px anchor at the pointer's x spanning the row's height, so the popup
@@ -231,8 +250,7 @@ function DependencyRow({ p }: { p: DependencyPackage }) {
     // A pointer claim outlives focus: resting on the row keeps the card, and the
     // pointer route owns closing that one.
     if (pointerHeld.current) return;
-    cancelTimer(timer);
-    setOpen(false);
+    dismiss();
   }
 
   /** Opening the registry page hands focus to another application, where no
@@ -295,8 +313,12 @@ function DependencyRow({ p }: { p: DependencyPackage }) {
               eventDetails.cancel();
               return;
             }
-            if (next) setOpen(true);
-            else dismiss();
+            if (!next) {
+              dismiss();
+              return;
+            }
+            claimCard(card);
+            setOpen(true);
           }}
         >
           {/* Kept mounted through the close fade — an unmounting trigger

@@ -462,6 +462,9 @@ export const CHECKS = [
       "src/features/repository/BranchSwitcher.tsx",
       // Registers the open dialog with the native-menu gate; add/remove pair.
       "src/lib/hotkeys/modal-gate.ts",
+      // Scroll/resize-close listeners for the open hovercard; add/remove pair,
+      // and re-subscribing after an Activity re-show is the wanted behavior.
+      "src/features/repository/insights/DependenciesCard.tsx",
     ],
     message:
       "an open-transition reset must ride useSeedOnOpen (src/lib/use-seed-on-open.ts) — a hidden <Activity> tab re-mounts its effects on show, so a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires and wipes the user's draft; a data-arrival or otherwise idempotent seed needs an allowlist entry with rationale",

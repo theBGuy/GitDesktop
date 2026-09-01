@@ -1,2 +1,2 @@
 - Dependency hovercards on the **Insights** page open at your cursor, and Tab
-  reaches them from the keyboard.
+  to a package's name opens its card from the keyboard.
