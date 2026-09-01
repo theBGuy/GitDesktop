@@ -121,6 +121,13 @@ function cancelTimer(
   }
 }
 
+function cancelFrame(ref: React.RefObject<number | null>) {
+  if (ref.current !== null) {
+    cancelAnimationFrame(ref.current);
+    ref.current = null;
+  }
+}
+
 /** Natural-size floor, both axes, for an image the viewer will open: it clears
  *  shields-style badges (~120×20) and emoji (~20×20) while any screenshot passes.
  *  One knob — widen or narrow it here. */
@@ -249,9 +256,13 @@ export function Markdown({
   const [cardAnchor, setCardAnchor] = useState<HTMLAnchorElement | null>(null);
   // Measured at each open instead (a fresh DOMRect every time, so the positioner
   // always re-resolves), and kept through the close so the exit animation plays
-  // where the card was.
+  // where the card was. The focus route measures a frame late — see the pending
+  // frame below — because Tab scrolls its target into view after firing focus.
   const [cardRect, setCardRect] = useState<DOMRect | null>(null);
   const cardTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The focus route's pending open, held so a blur or a re-parse can cancel it
+  // rather than measuring an anchor that is gone or no longer where it was.
+  const cardFrame = useRef<number | null>(null);
   // The pointer's claim on the card — resting on a reference, or inside the
   // popup. Read by the blur path, which must not close a card the mouse owns.
   const cardHovered = useRef(false);
@@ -269,26 +280,31 @@ export function Markdown({
   // A re-parse replaces every injected anchor (a fence's lazy highlight.js
   // upgrade re-runs it), so an open card would track a detached node, and a
   // viewer opened from the old body no longer describes what's on screen.
-  // The anchor and its rect deliberately survive: both are read only while a
-  // target is set, and clearing the rect here would drop the closing card to the
-  // origin mid-fade — the next `showCard` overwrites both anyway.
+  // The anchor and its rect deliberately survive: clearing the rect here would
+  // drop the closing card to the origin mid-fade, and the next `showCard`
+  // overwrites both anyway.
   // `html` is the trigger, not a value this reads — same shape as the parse memo.
   // biome-ignore lint/correctness/useExhaustiveDependencies: html is the intentional reset trigger
   useEffect(() => {
     cancelTimer(cardTimer);
+    cancelFrame(cardFrame);
     cardHovered.current = false;
     setCardTarget(null);
     setLightbox(null);
-    return () => cancelTimer(cardTimer);
+    return () => {
+      cancelTimer(cardTimer);
+      cancelFrame(cardFrame);
+    };
   }, [html]);
 
   // The card is pinned to the rect its anchor had when it opened, so anything
   // that moves the reference strands it: the hover routes end at the pointer
   // leaving, but a focused one would sit at stale coordinates while its
   // reference scrolls away. Capture-phase, since a pane's scroll doesn't bubble.
-  // The listeners go on a frame late: tabbing to an off-screen reference scrolls
-  // it into view first, and that scroll lands after the focus that opened the
-  // card (scroll steps run before animation-frame callbacks).
+  // The listeners go on a frame late even though the focus route already opens a
+  // frame late: Tab's scroll-into-view can land in that same frame, and closing
+  // on the very scroll the rect was measured after would shut the card on
+  // arrival.
   useEffect(() => {
     if (cardTarget === null) return;
     let subscribed = false;
@@ -360,6 +376,7 @@ export function Markdown({
     const index = imgs.indexOf(img);
     if (index < 0) return;
     cancelTimer(cardTimer);
+    cancelFrame(cardFrame);
     cardHovered.current = false;
     setCardTarget(null);
     setLightbox({ images: imgs.map(toLightboxImage), index });
@@ -434,7 +451,15 @@ export function Markdown({
     // too — and popping a card under the pointer there reads as a misfire,
     // worst on `@user`, where the browser takes over and the view never changes.
     if (!anchor.matches(":focus-visible")) return;
-    showCard(anchor, target);
+    // A frame late, so the rect is measured after the browser has scrolled this
+    // anchor into view — Tab fires focus first and scrolls during the update
+    // that follows, and scroll steps run before animation-frame callbacks.
+    // Harmless on an engine that scrolls first, and on an anchor already in view.
+    cancelFrame(cardFrame);
+    cardFrame.current = requestAnimationFrame(() => {
+      cardFrame.current = null;
+      showCard(anchor, target);
+    });
   }
 
   function onBlurCapture(e: React.FocusEvent) {
@@ -446,6 +471,7 @@ export function Markdown({
     // user's card must not close because focus went somewhere unrelated.
     if (cardHovered.current) return;
     cancelTimer(cardTimer);
+    cancelFrame(cardFrame);
     setCardTarget(null);
   }
 

@@ -9,7 +9,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { type KeyboardEvent, useState } from "react";
+import { type KeyboardEvent, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -52,6 +52,19 @@ const ZOOM_TOGGLE = {
 } satisfies Record<ZoomMode, { Glyph: Icon; text: string; label: string }>;
 
 const ARROW_STEP: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1 };
+
+/** How far one arrow press pans the zoomed image, in px. Roughly a line of the
+ *  footer's height — small enough to aim with, large enough to cross a
+ *  screenshot without holding the key down. */
+const PAN_STEP = 80;
+
+/** Each arrow's pan direction at 100%, in `PAN_STEP` units. */
+const ARROW_PAN: Record<string, { x: number; y: number } | undefined> = {
+  ArrowLeft: { x: -1, y: 0 },
+  ArrowRight: { x: 1, y: 0 },
+  ArrowUp: { x: 0, y: -1 },
+  ArrowDown: { x: 0, y: 1 },
+};
 
 /** Case-insensitive and un-flagged, so `.test` stays stateless for callers. */
 const HTTP_SRC = /^https?:\/\//i;
@@ -102,6 +115,9 @@ export function ImageLightbox({
     h: number;
   } | null>(null);
   const [failedKey, setFailedKey] = useState<string | null>(null);
+  // The scrolling field, so the arrows can pan it at 100% without depending on
+  // where focus happens to be.
+  const field = useRef<HTMLDivElement>(null);
 
   // Clearing the failure is what gives a reopen its retry: the <img> remounts
   // and fetches again, so a transient 401 or dropped connection isn't permanent.
@@ -138,9 +154,23 @@ export function ImageLightbox({
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    // Fit mode only: at 100% the arrows belong to the scroll field, and a
-    // mode-dependent rule beats one that changes meaning at the end-stops.
-    if (!hasNav || zoomed) return;
+    if (zoomed) {
+      // Panning is driven from here rather than left to the browser, which
+      // scrolls only when focus already sits inside the field — pressing the
+      // footer's 100% button leaves it on a button whose scrollable ancestor is
+      // the clipped popup, and the arrows would do nothing.
+      const pan = ARROW_PAN[e.key];
+      if (!pan) return;
+      e.preventDefault();
+      field.current?.scrollBy({
+        left: pan.x * PAN_STEP,
+        top: pan.y * PAN_STEP,
+      });
+      return;
+    }
+    // Fit view walks the set instead — a mode-dependent rule beats one that
+    // changes meaning at the end-stops.
+    if (!hasNav) return;
     const step = ARROW_STEP[e.key];
     if (step === undefined) return;
     const next = index + step;
@@ -159,7 +189,7 @@ export function ImageLightbox({
         showCloseButton={false}
       >
         <DialogTitle className="sr-only">{caption}</DialogTitle>
-        <div className="flex min-h-0 flex-1 overflow-auto">
+        <div className="flex min-h-0 flex-1 overflow-auto" ref={field}>
           {failed ? (
             <div className="m-auto flex flex-col items-center gap-3 px-6 py-10 text-center">
               <ImageBrokenIcon
