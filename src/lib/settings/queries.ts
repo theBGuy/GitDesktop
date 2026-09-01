@@ -66,6 +66,16 @@ export function useAiEnabled(): boolean {
   return !settings.data?.hideAi;
 }
 
+/** Whether a link preview may contact the linked site. Reads false until the
+ *  store answers — the opposite of {@link useAiEnabled}'s optimism, because
+ *  guessing wrong here would reach a third-party host the user opted out of;
+ *  the query resolves once per session and the card re-renders with the real
+ *  value. */
+export function useFetchLinkPreviews(): boolean {
+  const settings = useSettings();
+  return settings.data?.fetchLinkPreviews ?? false;
+}
+
 /**
  * Whether the commit/PR generation provider is actually usable: a saved API
  * key for key-based providers (Anthropic/OpenAI/OpenRouter), always true for

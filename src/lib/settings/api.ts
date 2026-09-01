@@ -257,6 +257,10 @@ export interface AppSettings {
   /** Default new pull requests to draft: the Create-PR dialog's "Create as draft" checkbox
    *  starts ticked. Off by default; still overridable per dialog. */
   createPrsAsDraft: boolean;
+  /** Let a link preview in rendered markdown contact the linked site for its
+   *  Open Graph title, description, and image. Off, the card still names the
+   *  link's destination — nothing leaves the machine. */
+  fetchLinkPreviews: boolean;
   /** First-run nudge toward the user guide; set once the user opens or dismisses it. */
   seenGuideNudge: boolean;
   /** Send anonymous usage events to PostHog. Default on (opt-out). */
@@ -350,6 +354,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoFetchInterval: "10",
   reviewDraftPrs: false,
   createPrsAsDraft: false,
+  fetchLinkPreviews: true,
   seenGuideNudge: false,
   analyticsEnabled: true,
   recordReplay: false,

@@ -15,6 +15,7 @@ mod hooks;
 mod instructions;
 mod jira_field_maps;
 mod jira_links;
+mod link_preview;
 mod local_issues;
 mod local_prs;
 mod mcp;
@@ -590,6 +591,7 @@ pub fn run() {
             dependabot::dependabot_get,
             dependabot::dependabot_set,
             dependabot::dependabot_delete,
+            link_preview::fetch_link_preview,
             github::insights::gh_community_insights,
             github::insights::gh_repo_traffic,
             github::insights::gh_repo_dependencies,

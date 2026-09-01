@@ -26,13 +26,24 @@ import type { IssueDetails, PrDetails, RemoteLens } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
+import { MarkdownLinkCard } from "./markdown-link-card";
 import type { MarkdownRefKind, MarkdownRefs } from "./markdown-refs";
 
-/** A reference that fully validated against the emitting renderer's grammar —
- *  what both the click dispatch and this card route on. */
+/** What an anchor in a rendered body opens a card for: a forge reference that
+ *  fully validated against the emitting renderer's grammar (what the click
+ *  dispatch routes on), or any link leaving the app — `mailto:` included, which
+ *  the card tells apart by scheme. */
 export type MarkdownRefTarget =
   | { kind: "user"; user: string }
-  | { kind: Exclude<MarkdownRefKind, "user">; number: number };
+  | { kind: Exclude<MarkdownRefKind, "user">; number: number }
+  | { kind: "external"; href: string };
+
+/** The forge-reference half of that union: what the click dispatch navigates
+ *  in-app and what the card's resolve runs for. An external link is neither. */
+export type MarkdownForgeTarget = Exclude<
+  MarkdownRefTarget,
+  { kind: "external" }
+>;
 
 /** What a reference IS, independent of the object carrying it — the dispatch
  *  mints a fresh target per pointer event, so resolved content is matched on
@@ -43,7 +54,7 @@ export type MarkdownRefTarget =
 function refKey(
   repoPath: string,
   lens: RemoteLens,
-  target: MarkdownRefTarget,
+  target: MarkdownForgeTarget,
 ): string {
   const ref =
     target.kind === "user"
@@ -247,18 +258,24 @@ function RefUserCard({
 }
 
 function RefCardBody({
-  repoPath,
-  lens,
+  refs,
   target,
   item,
 }: {
-  repoPath: string;
-  lens: RemoteLens;
+  /** Absent on bodies rendered with no forge context (the help screen, AI
+   *  output) — only external targets can arise there. */
+  refs: MarkdownRefs | undefined;
   target: MarkdownRefTarget | null;
   /** `undefined` while the reference is still resolving, `null` once it failed. */
   item: RefItem | null | undefined;
 }) {
   if (!target) return null;
+  if (target.kind === "external")
+    return <MarkdownLinkCard href={target.href} />;
+  // A forge reference only exists because the context that linkified it does,
+  // so this is unreachable rather than a state to render.
+  if (!refs) return null;
+  const { repoPath, lens } = refs;
   if (target.kind === "user") {
     return <RefUserCard repoPath={repoPath} lens={lens} login={target.user} />;
   }
@@ -317,7 +334,9 @@ export function MarkdownRefCard({
   /** The popup's element id, so the open card's anchor can point an
    *  `aria-describedby` at it. */
   id: string;
-  refs: MarkdownRefs;
+  /** Forge context for the reference kinds. Omitted on bodies that have none —
+   *  an external link needs no repo to describe itself. */
+  refs?: MarkdownRefs;
   /** The reference to show, or null to close. */
   target: MarkdownRefTarget | null;
   /** Viewport geometry of the active anchor, measured when the card opened. */
@@ -328,7 +347,10 @@ export function MarkdownRefCard({
   onPointerLeave: () => void;
 }) {
   const queryClient = useQueryClient();
-  const { repoPath, lens } = refs;
+  // Read as primitives rather than through `refs`, so a caller rebuilding that
+  // object each render can't re-run the resolve below.
+  const repoPath = refs?.repoPath;
+  const lens = refs?.lens;
   // The positioner's `anchor` prop never yields a measurable reference here —
   // probed live: the popup positioned against a 0×0 rect (element and virtual
   // forms alike) while a store-registered trigger in the same build measured
@@ -348,13 +370,18 @@ export function MarkdownRefCard({
   // The live target gates `open`; the retained one drives the content, so the
   // close animation doesn't play over an emptied card.
   const shown = useRetained(target);
+  // Null for anything the resolve never runs for — an external link, or a
+  // reference on a body with no forge context.
+  const shownKey =
+    shown && shown.kind !== "external" && repoPath && lens
+      ? refKey(repoPath, lens, shown)
+      : null;
   const item =
-    shown && resolved?.key === refKey(repoPath, lens, shown)
-      ? resolved.item
-      : undefined;
+    shownKey !== null && resolved?.key === shownKey ? resolved.item : undefined;
 
   useEffect(() => {
-    if (!target || target.kind === "user") return;
+    if (!repoPath || !lens) return;
+    if (!target || target.kind === "user" || target.kind === "external") return;
     const key = refKey(repoPath, lens, target);
     let cancelled = false;
     resolveRefItem(queryClient, repoPath, lens, target)
@@ -420,18 +447,20 @@ export function MarkdownRefCard({
         // is the skeleton's twin for the same reader, and holds the announcement
         // until the swap is done.
         role="status"
+        // External links are never busy: the site and URL are on screen the
+        // frame the card opens, and only the og section below them is still
+        // arriving. Holding the announcement for that would silence the part
+        // that always lands.
         aria-busy={
-          shown !== null && shown.kind !== "user" && item === undefined
+          shown !== null &&
+          shown.kind !== "user" &&
+          shown.kind !== "external" &&
+          item === undefined
         }
         onPointerEnter={onPointerEnter}
         onPointerLeave={onPointerLeave}
       >
-        <RefCardBody
-          repoPath={repoPath}
-          lens={lens}
-          target={shown}
-          item={item}
-        />
+        <RefCardBody refs={refs} target={shown} item={item} />
       </HoverCardContent>
     </HoverCard>
   );

@@ -151,6 +151,22 @@ export const GeneralSection = withForm({
           </p>
         </div>
         <div className="space-y-1.5">
+          <form.AppField name="fetchLinkPreviews">
+            {(field) => (
+              <field.CheckboxField
+                label="Fetch link previews"
+                className="flex cursor-pointer items-center gap-2 text-xs"
+              />
+            )}
+          </form.AppField>
+          <p className="text-xs text-muted-foreground">
+            Shows a page's title, description, and image when you hover or focus
+            a link in a rendered description, comment, or release note. The
+            link's destination always shows; turning this off skips contacting
+            the linked site.
+          </p>
+        </div>
+        <div className="space-y-1.5">
           <form.AppField name="analyticsEnabled">
             {(field) => (
               <field.CheckboxField

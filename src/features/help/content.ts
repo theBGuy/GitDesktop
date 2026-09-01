@@ -970,6 +970,15 @@ that person's avatar and handle. Esc dismisses the card. **Bitbucket** bodies le
 references plain, matching Bitbucket itself, and a reference inside backticks or a fenced
 code block stays plain text everywhere.
 
+Web and **mailto:** links get a card of their own. Pause the pointer on a link in any
+rendered body, or land on it with Tab, and the card names where it goes right away: the
+site's domain and the full URL. Esc dismisses it, the same as a reference card. For a
+web link GitDesktop then fills in the page's title, description, and image where the
+site publishes them, and a **mailto:** link shows the address it would write to. That
+lookup is **Fetch link previews** under **Settings → General**, on by default; turn it
+off and the cards show the destination alone. Pages on private or local network
+addresses are never fetched.
+
 Images in a rendered body open fullscreen too. Click a screenshot in a description,
 comment, or discussion (or Tab to it and press Enter) and it fills the window over a
 dimmed backdrop, with its name and pixel dimensions along the bottom, a **Fit** /
@@ -2497,7 +2506,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   puts your changes back once the switch lands), **create pull requests as drafts** by
   default (off by default — pre-checks the Create-PR dialog's draft box, still
   overridable per PR; pairs with *Review draft PRs when created* so a draft's automated
-  first review waits until it's marked ready), and privacy options.
+  first review waits until it's marked ready), **fetch link previews** (the title,
+  description, and image behind a link in a rendered body; off leaves the card showing
+  the destination alone), and privacy options.
 - **Appearance** — pick a theme: **System** (follows your OS's light/dark setting),
   **Light**, **Dark**, or **Slate** (a softer, blue-gray dark). Applies as you pick it,
   and *Cycle theme* in the command palette steps through them.

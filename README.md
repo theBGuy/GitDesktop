@@ -883,6 +883,13 @@ review via its subscription login. The full list is under
   pull request, or the avatar and handle of a person. Bitbucket bodies leave
   references plain, matching Bitbucket itself, and a reference inside a code
   span or fence stays plain text.
+- **Link previews**: hover a web or `mailto:` link in a rendered body, or reach
+  it with Tab, and a card names its destination right away: the domain and
+  the full URL. For a web link it then fills in the page's title, description,
+  and image where the site publishes them, and a `mailto:` link shows the
+  address. **Fetch link previews** (Settings → General) turns that lookup off
+  when you want the destination alone, and pages on private or local network
+  addresses are never fetched.
 - **Images open fullscreen**: click a screenshot in a rendered description,
   comment, or discussion (or either side of an image diff) to fill the window
   over a dimmed backdrop, with its label and pixel dimensions, a

@@ -523,6 +523,11 @@ export const capabilities: Capability[] = [
   {
     group: "Keyboard & Markdown",
     label:
+      "Link previews — hover or Tab to a link for its domain & full URL, plus the page's title, description & image",
+  },
+  {
+    group: "Keyboard & Markdown",
+    label:
       "Fullscreen image viewer — screenshots in any rendered body and both sides of an image diff, with fit/100% zoom and arrow-key stepping in fit view",
   },
 
