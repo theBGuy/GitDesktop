@@ -144,9 +144,10 @@ export function CreateJiraIssueDialog({
   // The generate chord drafts this issue while the dialog is open. It's mounted
   // on DialogContent, not the <form>: the X close button is a form SIBLING
   // inside the Popup, so a form-level handler would miss a chord pressed with
-  // focus on X. The swallow is unconditional so it can't reach the global
-  // generate-commit-message action behind the dialog; while generating it
-  // swallows but DOESN'T cancel.
+  // focus on X. It is swallowed here whenever it may fire (the hook mirrors the
+  // global listener's own guards), so the global generate-commit-message action
+  // can't run behind the dialog; while generating it swallows but DOESN'T
+  // cancel.
   const generateChord = useGenerateChord({
     enabled: aiEnabled && !generating && notes.trim() !== "",
     run: runGenerate,

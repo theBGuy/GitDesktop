@@ -8,6 +8,7 @@ import { useSettings } from "@/lib/settings/queries";
 import {
   eventToBinding,
   firesInEditable,
+  hasModifier,
   isEditableTarget,
   isTypeaheadTarget,
 } from "./binding";
@@ -144,12 +145,7 @@ export function useHotkeysListener() {
     if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
     // Typeahead surfaces only ever swallow modifier-less bindings: a mod/alt
     // chord is not something they can consume, so it keeps firing everywhere.
-    if (
-      !binding.includes("mod+") &&
-      !binding.includes("alt+") &&
-      isTypeaheadTarget(e.target)
-    )
-      return;
+    if (!hasModifier(binding) && isTypeaheadTarget(e.target)) return;
     const id = byBinding.get(binding);
     // Registered-vs-unregistered rule. A chord OWNED by an on-screen surface —
     // an action with at least one live handler, even a disabled one — must

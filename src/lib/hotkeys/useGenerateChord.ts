@@ -1,5 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useRef } from "react";
-import { eventToBinding, formatBinding } from "./binding";
+import {
+  eventToBinding,
+  firesInEditable,
+  formatBinding,
+  hasModifier,
+  isEditableTarget,
+  isTypeaheadTarget,
+} from "./binding";
 import { useEffectiveBindings } from "./hotkeys";
 
 /** What a surface does when the generate chord fires there. */
@@ -21,9 +28,19 @@ export interface GenerateAction {
  * cleared it, and the chord stays fully inert.
  *
  * Swallowing follows the generator, not its enabled state: while this surface
- * HAS a generator the chord is swallowed on every match, before `enabled` is
- * consulted, so a disabled Generate can't let the chord reach the global
- * listener. `run` undefined means the surface has no generator at all — Hide-AI
+ * HAS a generator the chord is swallowed before `enabled` is consulted, so a
+ * disabled Generate can't let the chord reach the global listener.
+ *
+ * Two rebinds are declined rather than swallowed, mirroring the guards the
+ * global listener applies to the same keystroke. In a text field: a binding
+ * carrying no real modifier (a bare or shift-only key), or one of the native
+ * editing combos `firesInEditable` excludes (mod+z, mod+c, …). In a menu,
+ * menubar, or select trigger: a binding carrying no real modifier. Nothing
+ * generates behind a dialog in either case, because the global listener
+ * declines exactly the same keystrokes — what this hook lets past is what that
+ * listener will not act on either.
+ *
+ * `run` undefined means the surface has no generator at all — Hide-AI
  * removed it, or a shared dialog's host passes none — and the chord falls
  * through untouched instead. Nothing generates behind a dialog in that arm
  * either, because the global handlers are the two commit surfaces' (the box and
@@ -51,6 +68,8 @@ export function useGenerateChord({
     onKeyDown: (e) => {
       if (binding === null || run === undefined || e.repeat) return;
       if (eventToBinding(e) !== binding) return;
+      if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
+      if (!hasModifier(binding) && isTypeaheadTarget(e.target)) return;
       e.preventDefault();
       if (enabled) run();
     },
@@ -94,8 +113,9 @@ export const GenerateActionContext = createContext<GenerateActionSink | null>(
  * Shell side of {@link GenerateActionContext}, for a container that owns the
  * chord but not the generator — a settings dialog whose sections come and go.
  * Provide `sink` on the context and call `runPublished` from the chord handler;
- * the swallow stays unconditional, so the chord can never leak out of the
- * shell, and a section without a generator makes it a no-op.
+ * the swallow follows {@link useGenerateChord}'s contract, so the chord can
+ * never leak out of the shell, and a section without a generator makes it a
+ * no-op.
  *
  * `activeKey` is what makes the published action safe to run. Under an
  * `AnimatePresence mode="wait"` crossfade the OUTGOING section stays mounted —

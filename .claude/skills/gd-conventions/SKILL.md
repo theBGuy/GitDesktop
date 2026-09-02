@@ -102,6 +102,14 @@ separators.
 **Mod-key display.** Shortcut hints render via `isMac` / `formatBinding` from
 `@/lib/hotkeys/binding` — never a literal ⌘ or "Ctrl+"; only labels branch.
 
+**Key-dispatch guards are shared, never re-derived:** `hasModifier`,
+`isTypeaheadTarget`, and `isEditableTarget` / `firesInEditable` all live in
+`src/lib/hotkeys/binding.ts`. Any path that compares `eventToBinding(e)` against
+a user binding and then `preventDefault`s applies the same editable + typeahead
+guard pair the global listener does — bindings are rebindable down to a single
+key, so an unguarded second dispatcher steals keystrokes from every text field.
+The `unguarded-binding-dispatcher` guard in `pnpm run checks` is the ratchet.
+
 **Patterns the user has ruled on:**
 - No hover-revealed per-row buttons — contextual actions are always-visible,
   or live in keyboard/context-menu/toolbar.
@@ -166,11 +174,12 @@ separators.
   highlights, no spinner where skeletons exist.
 - A caption over a GROUP of controls rides `LabeledGroup`
   (`src/components/form/labeled-group.tsx`), which ties the group to it via
-  `role="group"` + `aria-labelledby` — a bare `<Label>` with no `htmlFor` names
-  nothing for assistive tech; the `bare-group-label` guard in `pnpm run checks`
-  fails on a new attribute-less one. Existing idioms that already do their own
-  aria wiring stay as they are: the CreatePrDialog / CreateIssueDialog field-group
-  wrappers and McpServersSection's `role="group"` scope groups.
+  `role="group"` + `aria-labelledby` — a `<Label>` that associates with nothing
+  names nothing for assistive tech, however it is styled; the `bare-group-label`
+  guard in `pnpm run checks` fails on any `<Label>` carrying neither `htmlFor`
+  nor `id`. Existing idioms that already do their own aria wiring stay as they
+  are: the CreatePrDialog / CreateIssueDialog field-group wrappers and
+  McpServersSection's `role="group"` scope groups.
 - A lazy panel's `Suspense` fallback is `LazyPanelFallback`
   (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
   region has no aria-busy and announces nothing to assistive tech.

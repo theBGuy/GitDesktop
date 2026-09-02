@@ -256,9 +256,10 @@ export function CreateReleaseDialog({
 
   // The generate chord drives the AI item only — never the From-GitHub one, and
   // it never opens the dropdown. Mounted on DialogContent, not the <form>: the X
-  // close button is a form SIBLING inside the Popup. The swallow is
-  // unconditional so the chord can't reach the global generate-commit-message
-  // action behind the dialog; while generating it swallows but DOESN'T cancel.
+  // close button is a form SIBLING inside the Popup. It is swallowed here
+  // whenever it may fire (the hook mirrors the global listener's own guards),
+  // so the global generate-commit-message action can't run behind the dialog;
+  // while generating it swallows but DOESN'T cancel.
   const generateChord = useGenerateChord({
     enabled: aiEnabled && Boolean(tagTrimmed) && !busyGenerating,
     run: generateWithAi,

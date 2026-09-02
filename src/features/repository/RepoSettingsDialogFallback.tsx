@@ -24,9 +24,11 @@ export function RepoSettingsDialogFallback({
 }: {
   onOpenChange: (open: boolean) => void;
 }) {
-  // The chord must not reach the Changes-tab generator behind this frame. A
-  // defined `run` is what arms the hook's swallow at all; `enabled: false` is
-  // what keeps it from generating before the real dialog owns the chord.
+  // The Changes-tab generator must not run behind this frame. A defined `run`
+  // is what arms the hook's swallow at all, and the chord is then swallowed
+  // whenever it may fire (the hook mirrors the global listener's own guards);
+  // `enabled: false` is what keeps it from generating before the real dialog
+  // owns the chord.
   const generateChord = useGenerateChord({
     enabled: false,
     run: () => undefined,

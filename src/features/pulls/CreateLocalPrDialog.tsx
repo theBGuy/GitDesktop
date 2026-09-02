@@ -285,9 +285,10 @@ export function CreateLocalPrDialog({
           // The generate chord runs this dialog's own Generate while it's open.
           // This dialog is hoisted over the Changes tab, where the global
           // generate-commit-message action has a live handler — so while that
-          // Generate exists the chord is swallowed on every match, enabled or
-          // not. With Hide-AI on there's no Generate here at all and the chord
-          // falls through instead, which is still safe: the same flag leaves
+          // Generate exists the chord is swallowed whenever it may fire,
+          // enabled or not (the hook mirrors the global listener's own guards).
+          // With Hide-AI on there's no Generate here at all and the chord falls
+          // through instead, which is still safe: the same flag leaves
           // CommitBox's handler DISABLED and the listener only ever runs an
           // enabled one, and off the Changes tab CommitBox registers nothing.
           generateChord.onKeyDown(e);

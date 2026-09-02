@@ -188,12 +188,14 @@ function pushRejectionSummary(text: string): string | null {
  *  `! [rejected]` family above. Every pattern is line-anchored, since the same
  *  blob echoes URLs, paths, and commit subjects. ORDER IS PRECEDENCE: a
  *  repository-state refusal carries git's generic 403 line in the same blob, so
- *  it must be read before that line's own entry. Shapes measured verbatim
- *  against github.com on git 2.51.1.windows.1, 2026-09; the mirror line is a
- *  Gitea server's, from a user report. */
+ *  it must be read before that line's own entry. The read-only line must also
+ *  name a repository: that token is what keeps the summary's claim scoped to
+ *  the whole repository. Shapes measured verbatim against github.com on git
+ *  2.51.1.windows.1, 2026-09; the mirror line is a Gitea server's, from a user
+ *  report. */
 const REMOTE_ACCESS_SUMMARIES: readonly (readonly [RegExp, string])[] = [
   [
-    /^[ \t]*remote: .*\b[Rr]ead-only\b/m,
+    /^[ \t]*remote: (?=.*\b[Rr]epositor(?:y|ies)\b).*\b[Rr]ead-only\b/m,
     "The remote reports this repository as read-only (usually a mirror or an archived repository), so different credentials won't change the answer. If it mirrors another repository, push there instead.",
   ],
   [

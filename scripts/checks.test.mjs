@@ -54,6 +54,7 @@ const seedOnOpen = scanner("seed-effect-on-open");
 const diffStatPair = scanner("hand-rolled-diff-stat");
 const nullFallback = scanner("null-suspense-fallback");
 const bareGroupLabel = scanner("bare-group-label");
+const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -741,15 +742,29 @@ test("bare-group-label flags an attribute-less Label caption", () => {
   assert.deepEqual(bareGroupLabel(two), [1, 2]);
 });
 
+test("bare-group-label flags a styled caption — className is not association", () => {
+  // The most common spelling of the defect: a caption that looks deliberate
+  // because it carries styling, but still names nothing.
+  for (const source of [
+    '<Label className="text-xs">Rules</Label>',
+    '<Label className="text-xs text-muted-foreground">Pending invitations</Label>',
+    // Styled AND self-closing, in both spellings.
+    '<Label className="text-xs" />',
+    "<Label/>",
+    "<Label />",
+  ])
+    assert.deepEqual(bareGroupLabel(source), [1], `should flag ${source}`);
+});
+
 test("bare-group-label leaves every ASSOCIATED label alone", () => {
   for (const source of [
     // The single-control idiom.
     '<Label htmlFor="pages-cname">Custom domain</Label>',
     // The group idiom LabeledGroup emits — the id is what names the group.
     "<Label id={id}>{label}</Label>",
-    // A styled caption still carries an attribute.
-    '<Label className="text-xs">Only these branches</Label>',
-    // A wrapping label is a plain lowercase `<label>`, never this component.
+    // Association plus styling: the id still answers for the whole tag.
+    '<Label id={invitesLabelId} className="text-xs text-muted-foreground">',
+    // A lowercase `<label>` is the DOM element, not this component.
     '<label className="flex items-center gap-2"><Checkbox />Issues</label>',
     // The LabeledGroup call site itself.
     '<LabeledGroup label="Rules">{children}</LabeledGroup>',
@@ -770,16 +785,25 @@ test("bare-group-label allowlists whole files, and exempts vendored ui", () => {
     check.appliesTo("src/features/repo-settings/PagesSection.tsx"),
     true,
   );
-  // The deferred siblings are keyed per file: both of one file's captions are
-  // suppressed by its single entry, while an unlisted file still reports.
+  // Both kinds of entry are keyed per file: a deferred file's two captions are
+  // suppressed by its single entry, a WRAPPING label (implicit association, which
+  // neither htmlFor nor id can express) is suppressed by its own, and an unlisted
+  // file still reports.
   const files = [
     "src/features/pulls/LinkedIssuesField.tsx",
+    "src/features/repo-settings/GitLabVariablesSection.tsx",
     "src/features/repo-settings/PagesSection.tsx",
   ];
   const views = new Map([
     [
       "src/features/pulls/LinkedIssuesField.tsx",
       view("<Label>Linked issues</Label>\n<Label>Linked issues</Label>"),
+    ],
+    [
+      "src/features/repo-settings/GitLabVariablesSection.tsx",
+      view(
+        '<Label className="flex items-center gap-1.5 text-xs">\n<Checkbox checked={isProtected} />\nProtected\n</Label>',
+      ),
     ],
     [
       "src/features/repo-settings/PagesSection.tsx",
@@ -789,6 +813,61 @@ test("bare-group-label allowlists whole files, and exempts vendored ui", () => {
   const { violations } = runCheck(check, files, views);
   assert.deepEqual(violations, [
     "src/features/repo-settings/PagesSection.tsx:1",
+  ]);
+});
+
+test("unguarded-binding-dispatcher flags a swallowing dispatch with no guard", () => {
+  // The shape the class fix closed: a second listener matching the live event
+  // against a user binding and swallowing the key, with no editable guard.
+  const source = [
+    "function onKeyDown(e) {",
+    "  const binding = eventToBinding(e);",
+    "  if (binding && binding === effective) {",
+    "    e.preventDefault();",
+    "    run();",
+    "  }",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unguardedDispatcher(source), [2]);
+});
+
+test("unguarded-binding-dispatcher needs BOTH halves and clears on the guard", () => {
+  // Each token alone is ordinary: a binding read that swallows nothing, and a
+  // preventDefault with no binding comparison at all.
+  assert.deepEqual(
+    unguardedDispatcher("const hint = eventToBinding(e) ?? null;"),
+    [],
+  );
+  assert.deepEqual(unguardedDispatcher("e.preventDefault();"), []);
+  // The guard named ANYWHERE in the file clears it — the coarseness is the
+  // documented trade: presence, not proof it guards this path.
+  const guarded = [
+    "function onKeyDown(e) {",
+    "  if (isEditableTarget(e.target)) return;",
+    "  const binding = eventToBinding(e);",
+    "  if (binding === effective) e.preventDefault();",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unguardedDispatcher(guarded), []);
+});
+
+test("unguarded-binding-dispatcher allowlists the non-rebindable dispatchers", () => {
+  const check = CHECKS.find((c) => c.name === "unguarded-binding-dispatcher");
+  const files = [
+    "src/features/settings/KeyboardSection.tsx",
+    "src/features/pulls/SomeNewView.tsx",
+  ];
+  const dispatcher = [
+    "const binding = eventToBinding(e);",
+    "if (binding === effective) e.preventDefault();",
+  ].join("\n");
+  const views = new Map([
+    ["src/features/settings/KeyboardSection.tsx", view(dispatcher)],
+    ["src/features/pulls/SomeNewView.tsx", view(dispatcher)],
+  ]);
+  // The recorder is exempt by contract; a NEW file with the same shape is not.
+  assert.deepEqual(runCheck(check, files, views).violations, [
+    "src/features/pulls/SomeNewView.tsx:1",
   ]);
 });
 

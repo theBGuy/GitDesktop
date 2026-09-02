@@ -166,8 +166,9 @@ export function CreateBranchDialog({
     onName: (name) => createForm.setFieldValue("name", name),
   });
   // This dialog opens from the header over any tab, including Changes where the
-  // global generate-commit-message action is live — so the chord is swallowed
-  // here whether or not it can generate, and never reaches the commit box.
+  // global generate-commit-message action is live. The chord is swallowed here
+  // whenever it may fire, generate-capable or not (the hook mirrors the global
+  // listener's own guards), so nothing writes into the commit box behind it.
   const generateChord = useGenerateChord({
     enabled: generateAction.enabled,
     run: generateAction.run,

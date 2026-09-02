@@ -219,10 +219,11 @@ export function TaskDialog({
   }
   // The generate chord drives Generate — never Analyze, which documents an
   // existing script rather than writing one. Mounted on DialogContent so it also
-  // covers the X close button (a SIBLING of the fields inside the Popup); the
-  // swallow is unconditional, including the file-source case where there's no
-  // Generate at all, so it can't reach the global generate-commit-message action
-  // behind the dialog.
+  // covers the X close button (a SIBLING of the fields inside the Popup). It is
+  // swallowed here whenever it may fire (the hook mirrors the global listener's
+  // own guards), including the file-source case where there's no Generate at
+  // all, so the global generate-commit-message action can't run behind the
+  // dialog.
   const generateChord = useGenerateChord({
     enabled:
       sourceKind === "inline" &&

@@ -904,10 +904,10 @@ review via its subscription login. The full list is under
   issues (local, on the forge, and Jira), discussions, and commits. Approve,
   Review, and Close stay on the strip, a saved draft shows its first line there,
   and the choice is remembered until you expand it again.
-- **Keyboard-first**: rebindable shortcuts with GitHub-Desktop-compatible
-  defaults, a generated cheat sheet (`Ctrl`/`⌘`+`/`), a command palette
-  (`Ctrl`/`⌘`+`K`), a filterable shortcut list in Settings (by name, category,
-  or key), and arrow-key navigation everywhere.
+- **Keyboard-first**: rebindable shortcuts (single keys included) with
+  GitHub-Desktop-compatible defaults, a generated cheat sheet (`Ctrl`/`⌘`+`/`),
+  a command palette (`Ctrl`/`⌘`+`K`), a filterable shortcut list in Settings
+  (by name, category, or key), and arrow-key navigation everywhere.
 - **Themes**: System, Light, Dark, and a softer **Slate** (a cool, lifted
   blue-gray) that eases eye strain; switch in **Settings → Appearance** or
   cycle from the command palette.

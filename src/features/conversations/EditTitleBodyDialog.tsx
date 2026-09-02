@@ -146,8 +146,9 @@ export const EditTitleBodyDialog = withForm({
           // leak to the global commit / generate-commit-message actions behind the
           // dialog. Capturing on the Popup covers the X and every field, so the
           // preventDefault here is what actually contains each chord: mod+enter
-          // unconditionally, and the generate chord on every match for as long as
-          // the consumer HAS a Generate. A consumer that passes no `onGenerate`
+          // unconditionally, and the generate chord whenever it may fire for as
+          // long as the consumer HAS a Generate (the hook mirrors the global
+          // listener's own guards). A consumer that passes no `onGenerate`
           // (the issue views) lets it fall through untouched, which is safe:
           // the only global handler is CommitBox's, and it runs nothing unless
           // it is both mounted (Changes tab only) and enabled (never under

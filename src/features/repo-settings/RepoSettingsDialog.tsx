@@ -352,11 +352,12 @@ export function RepoSettingsDialog({
   // affordance — only the General sections have one, and they publish it here,
   // keyed by the section they mounted under so the crossfade's outgoing section
   // can't answer the chord (see `useGenerateActionSink`).
-  // The swallow below is unconditional whatever the active section: this dialog
+  // The chord is swallowed below whenever it may fire, whatever the active
+  // section (the hook mirrors the global listener's own guards): this dialog
   // opens over any tab, including Changes where the global
-  // generate-commit-message action is live, so a chord that leaked would write
-  // a commit message behind the dialog. `enabled: true` is that swallow; the
-  // published action's own gate decides whether anything actually runs.
+  // generate-commit-message action is live, so a chord that leaked would
+  // write a commit message behind the dialog. `enabled: true` is that
+  // swallow; the published action's own gate decides whether anything runs.
   const generate = useGenerateActionSink(activeSection);
   const generateChord = useGenerateChord({
     enabled: true,

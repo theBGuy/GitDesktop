@@ -489,7 +489,8 @@ export const capabilities: Capability[] = [
   // — Keyboard & Markdown —
   {
     group: "Keyboard & Markdown",
-    label: "Command palette + rebindable, filterable keys",
+    label:
+      "Command palette + rebindable, filterable keys — down to a single key",
     highlight: true,
   },
   { group: "Keyboard & Markdown", label: "Arrow-key navigation on every list" },

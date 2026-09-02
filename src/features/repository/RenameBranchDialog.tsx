@@ -154,8 +154,9 @@ export function RenameBranchDialog({
     onName: (name) => renameForm.setFieldValue("name", name),
   });
   // This dialog opens from any branch row over any tab, including Changes where
-  // the global generate-commit-message action is live — so the chord is
-  // swallowed here whether or not it can generate.
+  // the global generate-commit-message action is live. The chord is swallowed
+  // here whenever it may fire, generate-capable or not (the hook mirrors the
+  // global listener's own guards).
   const generateChord = useGenerateChord({
     enabled: generateAction.enabled,
     run: generateAction.run,

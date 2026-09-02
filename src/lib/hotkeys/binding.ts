@@ -178,12 +178,18 @@ const EDITING_COMBOS = new Set([
   "mod+shift+v",
 ]);
 
+/** Whether a binding carries a real modifier — plain keys and `shift+key` are
+ *  typing. Every dispatcher gates its editable and typeahead guards on this one
+ *  test, so the predicate can't drift between them. */
+export function hasModifier(binding: string): boolean {
+  return binding.includes("mod+") || binding.includes("alt+");
+}
+
 /**
- * Whether a binding is allowed to fire while focus sits in a text field:
- * it must carry a real modifier (plain keys and shift+key are typing) and
- * not collide with the native editing combos.
+ * Whether a binding is allowed to fire while focus sits in a text field: it
+ * must carry a real modifier and not collide with the native editing combos.
  */
 export function firesInEditable(binding: string): boolean {
-  if (!binding.includes("mod+") && !binding.includes("alt+")) return false;
+  if (!hasModifier(binding)) return false;
   return !EDITING_COMBOS.has(binding);
 }

@@ -154,6 +154,15 @@ const onlyWhen = (gate, scan) => (v) => {
   return gate.test(v.text) ? scan(v) : [];
 };
 
+/** Scanner: `scan`'s hits, but only in files whose whole-file view does NOT
+ *  match `absent` — the negative twin of `onlyWhen`, for a class whose remedy is
+ *  the PRESENCE of a shared helper somewhere in the file rather than the absence
+ *  of a bad shape. Same `lastIndex` reset, for the same reason. */
+const unlessPresent = (absent, scan) => (v) => {
+  absent.lastIndex = 0;
+  return absent.test(v.text) ? [] : scan(v);
+};
+
 /** Scanner: the union of several `nearPair`s — one check, one allowlist, every
  *  Tailwind spelling of the same idiom. */
 const anyPair = (pairs) => anyOf(pairs.map(([a, b]) => nearPair(a, b)));
@@ -317,15 +326,30 @@ const ACTIVITY_JSX_RE = /<Activity(?![\w$])/;
 // converted site had.
 const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
 
-// An ATTRIBUTE-LESS `<Label>` open tag. Every legitimately associated label in
-// this tree carries an attribute — `htmlFor` for a single control, `id` for a
-// group caption, `className` on a styled one — and a label that WRAPS its control
-// is spelled as a plain `<label>`, so the bare form is the class itself: it names
-// nothing for assistive tech. The optional whitespace covers the formatter's
-// never-produced-here `<Label >`; a tag broken across lines is not seen, since
-// this reads per line rather than the joined view (the formatter has no reason to
-// wrap a tag with no attributes to wrap).
-const BARE_LABEL_RE = /<Label\s*>/;
+// A `<Label>` open tag carrying no ASSOCIATION. Only two attributes associate a
+// label with what it names — `htmlFor` for a single control, `id` for a caption
+// an `aria-labelledby` points at — so the key is those, not attribute-vs-bare:
+// `className` styles a label without naming anything. `\/?` is what also catches
+// the self-closing forms. A `<Label>` that WRAPS its control is associated at
+// RUNTIME, which no static pattern can see, so those ride the allowlist.
+// Three documented edges, all zero-instance today. Two fail OPEN: an open tag
+// broken across lines is unseen (this reads per line, not the joined view), and
+// an attribute merely ENDING in `id` (`data-id=`) satisfies the `\b` and reads
+// as associated. One fails CLOSED: both `[^>]*` spans stop at the first `>`, so
+// an attribute VALUE containing `>` ahead of the `htmlFor` (a template-literal
+// title reordered before it) hides the association and reports a correct label.
+const UNASSOCIATED_LABEL_RE =
+  /<Label(?![^>]*\b(?:htmlFor|id)\s*=)(?:\s[^>]*)?\/?>/;
+
+// A key-dispatch path that compares a live event against a user binding and
+// swallows the key, in a file that never mentions the editable-target guard.
+// Deliberately COARSE — presence of a symbol anywhere in the file, not on the
+// right path — so it can report a file that guards one handler and not the one
+// added next to it. It is a ratchet, not a proof: its job is to make a NEW
+// dispatch path stop a reader at the allowlist rather than merge unnoticed.
+const EVENT_TO_BINDING_RE = /\beventToBinding\s*\(/;
+const PREVENT_DEFAULT_RE = /\.preventDefault\s*\(/;
+const EDITABLE_GUARD_RE = /\bisEditableTarget\s*\(/;
 
 // The two halves of an async settings rollback. The gate: an OPTIMISTIC patch of
 // the settings cache — the file flips the preference itself so the UI can commit
@@ -566,21 +590,53 @@ export const CHECKS = [
   {
     name: "bare-group-label",
     appliesTo: notVendoredUi,
-    scan: perLine(BARE_LABEL_RE),
-    // Keyed per FILE, not per site: these three carry captions of the same class
-    // whose conversion belongs to their own change, and a coarser key means an
-    // unrelated edit to one of them can't turn the entry stale mid-flight. The
-    // gate blocks NEW bare captions; it is not a to-do list for these.
+    scan: perLine(UNASSOCIATED_LABEL_RE),
+    // Keyed per FILE, not per site, for both kinds of entry below: a coarser key
+    // means an unrelated edit to one of these files can't turn the entry stale
+    // mid-flight. The gate blocks NEW unassociated captions; the deferred group
+    // is not a to-do list.
     allowlist: [
+      // Deferred captions — same class, converted in their own change.
       // Two "Linked issues" captions over the linked-issue chip rows.
       "src/features/pulls/LinkedIssuesField.tsx",
       // "Target" over the tag/commitish picker, "Release notes" over the editor.
       "src/features/tags/CreateReleaseDialog.tsx",
       // "Script" over the interpreter + path row.
       "src/features/scripts/TaskDialog.tsx",
+      // WRAPPING labels around a `<Checkbox>`, associated at RUNTIME: Base UI's
+      // Root renders a `<span role="checkbox">` and routes a caller `id` to its
+      // aria-hidden proxy input, so an `htmlFor` could not reach the interactive
+      // element — instead `useAriaLabelledBy` walks from that input to the
+      // wrapping `<label>` and points the span's `aria-labelledby` at it. Correct
+      // as written; a static pattern simply cannot see it.
+      // "Protected" / "Masked in job logs" on the variable form.
+      "src/features/repo-settings/GitLabVariablesSection.tsx",
+      // "Secured" on the variable form and its repository-variable twin.
+      "src/features/repo-settings/BitbucketVariablesSection.tsx",
     ],
     message:
-      'a `<Label>` with no attributes names nothing for assistive tech — it has no htmlFor to point at a control and wraps none, so the controls under it read as anonymous; caption a group with LabeledGroup (src/components/form/labeled-group.tsx), which pairs the label\'s id with role="group" + aria-labelledby, or give the label an htmlFor when it belongs to one control; a genuinely decorative caption needs an allowlist entry with rationale',
+      'a `<Label>` with no htmlFor and no id names nothing for assistive tech, however it is styled — whatever sits under it reads as anonymous; caption a GROUP with LabeledGroup (src/components/form/labeled-group.tsx), which pairs the label\'s id with role="group" + aria-labelledby, or point a single-control label at its control with htmlFor; a label that WRAPS its control is associated at runtime and a genuinely decorative one names nothing on purpose — either needs an allowlist entry with rationale',
+  },
+  {
+    name: "unguarded-binding-dispatcher",
+    appliesTo: notVendoredUi,
+    scan: unlessPresent(
+      EDITABLE_GUARD_RE,
+      onlyWhen(PREVENT_DEFAULT_RE, perLine(EVENT_TO_BINDING_RE)),
+    ),
+    // Neither entry dispatches a REBINDABLE binding, which is what the guards
+    // protect; both are keyed per file, like every other entry here.
+    allowlist: [
+      // The shortcut RECORDER: capturing and swallowing every key, guards
+      // included, is precisely its contract — a guard would make keys
+      // unbindable.
+      "src/features/settings/KeyboardSection.tsx",
+      // Its `eventToBinding` call tests a HARDCODED mod+enter submit chord, not
+      // a user binding, so there is no rebindable dispatch to guard.
+      "src/components/mention-autocomplete.tsx",
+    ],
+    message:
+      "a path that matches eventToBinding(e) against a user binding and preventDefaults it must apply the same guards as the global listener — isEditableTarget to keep typing out of it, plus the typeahead guard (src/lib/hotkeys/binding.ts) — or a single-key binding steals keystrokes from every text field; a file that dispatches no rebindable binding needs an allowlist entry with rationale",
   },
 ];
 

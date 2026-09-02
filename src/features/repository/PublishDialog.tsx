@@ -308,8 +308,9 @@ export function PublishDialog({
     });
   }
   // This dialog opens from the header over any tab, including Changes where the
-  // global generate-commit-message action is live — so the chord is swallowed
-  // here whether or not it can generate. Mounted on DialogContent, not the
+  // global generate-commit-message action is live. The chord is swallowed here
+  // whenever it may fire, generate-capable or not (the hook mirrors the global
+  // listener's own guards). Mounted on DialogContent, not the
   // <form>: the X close button is a form SIBLING inside the Popup.
   const generateChord = useGenerateChord({
     enabled: aiEnabled && !descGen.generating,

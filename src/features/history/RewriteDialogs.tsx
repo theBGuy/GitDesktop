@@ -131,8 +131,9 @@ export function SquashDialog({
   const runHead = steps.find((s) => s.hashes.length > 1)?.hashes.at(-1);
   // The generate chord writes the squashed message while this dialog is open.
   // Mounted on DialogContent so it also covers the X close button (a form
-  // SIBLING inside the Popup); the swallow is unconditional so it can't reach
-  // the global generate-commit-message action behind the dialog, and while
+  // SIBLING inside the Popup). It is swallowed here whenever it may fire (the
+  // hook mirrors the global listener's own guards), so the global
+  // generate-commit-message action can't run behind the dialog; while
   // generating it swallows but DOESN'T cancel.
   const generateChord = useGenerateChord({
     enabled: aiEnabled && !ai.generating && Boolean(runHead),

@@ -4,7 +4,11 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withForm } from "@/lib/form";
-import { eventToBinding, formatBinding } from "@/lib/hotkeys/binding";
+import {
+  eventToBinding,
+  formatBinding,
+  hasModifier,
+} from "@/lib/hotkeys/binding";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   ACTIONS,
@@ -15,8 +19,12 @@ import { matchesActionText, queryTokens } from "@/lib/hotkeys/search";
 import { cn } from "@/lib/utils";
 import { settingsFormOpts } from "./settings-form";
 
-/** Keys that activate whatever control has focus. */
-const ACTIVATION_KEYS = new Set(["enter", "space"]);
+/** Keys refused without a modifier because they activate whatever has focus,
+ *  on every surface. Space is deliberately NOT here — binding a single key to
+ *  stage or select is the primary ask — so it binds, and the note on assignment
+ *  carries its cost: a live bound action takes the keypress a focused button or
+ *  checkbox would have used, and page scroll with it. */
+const ACTIVATION_KEYS = new Set(["enter"]);
 
 /** Keys that scroll or move a selection on their own. A bare binding on one
  *  preventDefaults it on every surface where the action is live, so list
@@ -33,7 +41,8 @@ const NAV_KEYS = new Set([
 ]);
 
 /** The key a binding ends on — its final "+"-joined token, so the `shift+`
- *  forms land in the same bucket as the bare key. */
+ *  forms land in the same bucket as the bare key. A lone "+" yields "", which
+ *  is in neither refuse set and therefore binds. */
 function finalKey(binding: string): string {
   return binding.split("+").pop() ?? "";
 }
@@ -43,16 +52,26 @@ function finalKey(binding: string): string {
  *  key binds, because the dispatcher holds modifier-less bindings back wherever
  *  the keystroke is already typing or driving a menu. */
 function isBindableCombo(binding: string): boolean {
-  if (binding.includes("mod+") || binding.includes("alt+")) return true;
+  if (hasModifier(binding)) return true;
   const key = finalKey(binding);
   return !ACTIVATION_KEYS.has(key) && !NAV_KEYS.has(key);
+}
+
+/** What accepting a modifier-less binding costs. Space earns the longer line:
+ *  it is the one bindable key whose native job is activating the focused
+ *  control, so a live action takes that keypress instead. */
+function consequenceNote(binding: string): string {
+  const quiet = `${formatBinding(binding)} stays quiet while you're typing or in a menu or picker, and fires anywhere else`;
+  return finalKey(binding) === "space"
+    ? `${quiet} — including on a focused button, where it replaces the button's own Space press.`
+    : `${quiet}.`;
 }
 
 /** Why a refused key can't stand alone. The two sets collide with different
  *  things, so each names what the bare key would have taken over. */
 function refusalNote(binding: string): string {
   return ACTIVATION_KEYS.has(finalKey(binding))
-    ? `Enter and Space activate the focused control, so this shortcut needs ${formatBinding("mod")} or ${formatBinding("alt")} added.`
+    ? `Enter activates the focused control, so this shortcut needs ${formatBinding("mod")} or ${formatBinding("alt")} added.`
     : `That key scrolls and navigates on its own, so this shortcut needs ${formatBinding("mod")} or ${formatBinding("alt")} added.`;
 }
 
@@ -135,14 +154,8 @@ export const KeyboardSection = withForm({
       // The assignment always stands; a modifier-less binding only earns a note
       // about where it stays quiet, and never over the steal message. (Chords
       // are exempt: the quiet zones named by the note don't apply to them.)
-      if (
-        !setBinding(id, binding) &&
-        !binding.includes("mod+") &&
-        !binding.includes("alt+")
-      ) {
-        setNote(
-          `${formatBinding(binding)} stays quiet while you're typing or in a menu or picker, and fires anywhere else.`,
-        );
+      if (!setBinding(id, binding) && !hasModifier(binding)) {
+        setNote(consequenceNote(binding));
       }
       setRecordingId(null);
     });
