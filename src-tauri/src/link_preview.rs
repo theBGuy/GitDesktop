@@ -388,8 +388,16 @@ fn header_claims_carried_image(content_type: &str) -> bool {
     let media_type = content_type.split_once(';').map_or(content_type, |(t, _)| t);
     matches!(
         media_type.trim().to_ascii_lowercase().as_str(),
-        // `image/jpg` is not a registered type, but misconfigured hosts serve it.
-        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp"
+        // `image/jpg` and IIS's legacy `image/x-png` are unregistered spellings hosts
+        // serve anyway; `image/apng` is registered, and an APNG is a PNG to the sniffer.
+        // Each names a format the sniffer can bound, and each ships as its sniffed type.
+        "image/png"
+            | "image/x-png"
+            | "image/apng"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
     )
 }
 
@@ -401,13 +409,13 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 /// A fixed-width field at `at`, or `None` when the slice ends first. Every dimension read
 /// below goes through here, so a header cut short can only ever yield `None`.
-fn field<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
+fn header_field<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
     bytes.get(at..at.checked_add(N)?)?.try_into().ok()
 }
 
 /// A 24-bit little-endian field — WebP's extended-format canvas dimensions.
-fn le_u24(bytes: &[u8], at: usize) -> Option<u32> {
-    let triple: [u8; 3] = field(bytes, at)?;
+fn le_u24_at(bytes: &[u8], at: usize) -> Option<u32> {
+    let triple: [u8; 3] = header_field(bytes, at)?;
     Some(u32::from_le_bytes([triple[0], triple[1], triple[2], 0]))
 }
 
@@ -427,7 +435,7 @@ fn sniff_image(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
     if bytes.starts_with(&[0xff, 0xd8]) {
         return sniff_jpeg(bytes);
     }
-    if bytes.starts_with(b"RIFF") && field::<4>(bytes, 8)? == *b"WEBP" {
+    if bytes.starts_with(b"RIFF") && header_field::<4>(bytes, 8)? == *b"WEBP" {
         return sniff_webp(bytes);
     }
     None
@@ -436,11 +444,11 @@ fn sniff_image(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
 /// IHDR carries the dimensions and the spec requires it to be the first chunk, so a PNG
 /// whose 12..16 is anything else is malformed rather than merely ordered oddly.
 fn sniff_png(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
-    if field::<4>(bytes, 12)? != *b"IHDR" {
+    if header_field::<4>(bytes, 12)? != *b"IHDR" {
         return None;
     }
-    let width = u32::from_be_bytes(field(bytes, 16)?);
-    let height = u32::from_be_bytes(field(bytes, 20)?);
+    let width = u32::from_be_bytes(header_field(bytes, 16)?);
+    let height = u32::from_be_bytes(header_field(bytes, 20)?);
     Some(("image/png", width, height))
 }
 
@@ -458,8 +466,8 @@ fn sniff_png(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
 /// and a zero-length sub-block is the terminator consuming its own length byte, so `i`
 /// strictly increases and each read is bounds-checked.
 fn sniff_gif(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
-    let screen_width = u32::from(u16::from_le_bytes(field(bytes, 6)?));
-    let screen_height = u32::from(u16::from_le_bytes(field(bytes, 8)?));
+    let screen_width = u32::from(u16::from_le_bytes(header_field(bytes, 6)?));
+    let screen_height = u32::from(u16::from_le_bytes(header_field(bytes, 8)?));
     let flags = *bytes.get(10)?;
     // The header runs to 13. A global colour table, when the flag bit says one is there,
     // sits between it and the first block, sized 3 * 2^(N+1) by the low three bits.
@@ -482,10 +490,10 @@ fn sniff_gif(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
                 }
             }
             0x2c => {
-                let left = u32::from(u16::from_le_bytes(field(bytes, i + 1)?));
-                let top = u32::from(u16::from_le_bytes(field(bytes, i + 3)?));
-                let width = u32::from(u16::from_le_bytes(field(bytes, i + 5)?));
-                let height = u32::from(u16::from_le_bytes(field(bytes, i + 7)?));
+                let left = u32::from(u16::from_le_bytes(header_field(bytes, i + 1)?));
+                let top = u32::from(u16::from_le_bytes(header_field(bytes, i + 3)?));
+                let width = u32::from(u16::from_le_bytes(header_field(bytes, i + 5)?));
+                let height = u32::from(u16::from_le_bytes(header_field(bytes, i + 7)?));
                 // u16 + u16 cannot overflow u32, so the union needs no saturation.
                 return Some((
                     "image/gif",
@@ -507,6 +515,12 @@ fn is_start_of_frame(marker: u8) -> bool {
 }
 
 /// Walk the marker chain to the first frame header, where a JPEG states its size.
+///
+/// The invariant: the walk may never advance past bytes libjpeg would still scan for
+/// markers. It skips length-bearing segments by the same self-counting arithmetic, and
+/// ERREXITs on the markers it does not handle (DHP, EXP, JPGn, the reserved range), so a
+/// position past one of those gates nothing that ever decodes. Anything else refuses.
+///
 /// Terminates on any input: every iteration consumes a fill byte and a marker before the
 /// segment length is added, so `i` strictly increases, and each read is bounds-checked.
 fn sniff_jpeg(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
@@ -525,19 +539,39 @@ fn sniff_jpeg(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
         if marker == 0xd9 || marker == 0xda {
             return None;
         }
+        // Neither of these is length-bearing, so reading a length here would desync the
+        // walk from the decoder. `FF 00` is a stuffed pair libjpeg DISCARDS mid-scan
+        // (jdmarker.c's next_marker) and keeps scanning, so consuming two bytes after it
+        // as a length jumps clean over the frame header libjpeg still reads; a repeated
+        // SOI it refuses outright (JERR_SOI_DUPLICATE). Both refuse for the same reason.
+        if marker == 0x00 || marker == 0xd8 {
+            return None;
+        }
         // TEM and the restart markers stand alone, carrying no length or payload.
         if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
             continue;
         }
         // A segment's length counts its own two bytes, so anything under 2 is malformed.
-        let length = usize::from(u16::from_be_bytes(field(bytes, i)?));
+        let length = usize::from(u16::from_be_bytes(header_field(bytes, i)?));
         if length < 2 {
             return None;
         }
         if is_start_of_frame(marker) {
+            // T.81 fixes a frame header at 8 + 3 * Nf bytes, and libjpeg's get_sof errors
+            // on any other length. Slicing the whole segment forces it in-buffer, so a
+            // size can never be read out of a frame header the decoder would itself
+            // reject — a truncated or inconsistent one is not a size, it is a refusal.
+            if length < 8 {
+                return None;
+            }
+            let segment = bytes.get(i..i.checked_add(length)?)?;
+            let components = usize::from(segment[7]);
+            if components == 0 || length != 8 + 3 * components {
+                return None;
+            }
             // Length, one precision byte, then height before width.
-            let height = u16::from_be_bytes(field(bytes, i + 3)?);
-            let width = u16::from_be_bytes(field(bytes, i + 5)?);
+            let height = u16::from_be_bytes(header_field(bytes, i + 3)?);
+            let width = u16::from_be_bytes(header_field(bytes, i + 5)?);
             return Some(("image/jpeg", width.into(), height.into()));
         }
         // Counting its own two bytes makes the length the whole step from here.
@@ -547,18 +581,22 @@ fn sniff_jpeg(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
 
 /// The three bitstream headers a WebP file can open with, each stating the size its own
 /// way. The chunk header sits at 12 (fourcc plus size) and its payload at 20.
+///
+/// The chunk SIZE at 16..20 is deliberately unread: the fields read below sit at fixed
+/// payload offsets whatever it says, and libwebp's demuxer refuses a VP8X declaring less
+/// than its 10 payload bytes — so a disagreement here can only over-refuse.
 fn sniff_webp(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
-    let fourcc: [u8; 4] = field(bytes, 12)?;
+    let fourcc: [u8; 4] = header_field(bytes, 12)?;
     let payload = bytes.get(20..)?;
     let (width, height) = match &fourcc {
         b"VP8 " => {
             // A 3-byte frame tag, the sync code, then two dimensions whose top 2 bits are
             // a scaling hint rather than size.
-            if field::<3>(payload, 3)? != [0x9d, 0x01, 0x2a] {
+            if header_field::<3>(payload, 3)? != [0x9d, 0x01, 0x2a] {
                 return None;
             }
-            let width = u16::from_le_bytes(field(payload, 6)?) & 0x3fff;
-            let height = u16::from_le_bytes(field(payload, 8)?) & 0x3fff;
+            let width = u16::from_le_bytes(header_field(payload, 6)?) & 0x3fff;
+            let height = u16::from_le_bytes(header_field(payload, 8)?) & 0x3fff;
             (u32::from(width), u32::from(height))
         }
         b"VP8L" => {
@@ -566,12 +604,12 @@ fn sniff_webp(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
                 return None;
             }
             // 14 bits each, stored one less than the real dimension.
-            let bits = u32::from_le_bytes(field(payload, 1)?);
+            let bits = u32::from_le_bytes(header_field(payload, 1)?);
             ((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1)
         }
         // A flags byte and 3 reserved, then the canvas size as two 24-bit fields, also
         // stored one less.
-        b"VP8X" => (le_u24(payload, 4)? + 1, le_u24(payload, 7)? + 1),
+        b"VP8X" => (le_u24_at(payload, 4)? + 1, le_u24_at(payload, 7)? + 1),
         _ => return None,
     };
     Some(("image/webp", width, height))
@@ -1649,9 +1687,9 @@ mod tests {
         assert_eq!(text.chars().count(), MAX_BODY_BYTES);
     }
 
-    /// The accept side is a closed set of five spellings — the four carried formats plus
-    /// the `image/jpg` misspelling. Parameters, casing, and surrounding space are
-    /// normalized away before the compare; nothing else is.
+    /// The accept side is a closed set — the carried formats plus the extra spellings
+    /// hosts serve for them. Parameters, casing, and surrounding space are normalized
+    /// away before the compare; nothing else is.
     #[test]
     fn the_header_filter_admits_raster_images_only() {
         for raw in [
@@ -1662,6 +1700,10 @@ mod tests {
             "image/gif",
             "image/jpg",
             "IMAGE/JPG; charset=binary",
+            // Unregistered PNG spellings that reach the sniffer as ordinary PNG bytes.
+            "image/x-png",
+            "image/apng",
+            "IMAGE/X-PNG; charset=binary",
         ] {
             assert!(header_claims_carried_image(raw), "{raw} is worth reading");
         }
@@ -1789,15 +1831,43 @@ mod tests {
         segment
     }
 
+    /// A complete, self-consistent frame payload: precision, dimensions, and one
+    /// component, so `Lf` comes to 8 + 3 * 1 = 11 exactly as T.81 requires.
+    fn sof_payload(width: u16, height: u16) -> Vec<u8> {
+        let mut payload = vec![8u8]; // sample precision
+        payload.extend_from_slice(&height.to_be_bytes());
+        payload.extend_from_slice(&width.to_be_bytes());
+        payload.extend_from_slice(&[1, 1, 0x11, 0]); // a single component
+        payload
+    }
+
     /// SOI, whatever `leading` bytes the walk has to step over, then a frame header.
     fn jpeg_fixture(sof_marker: u8, leading: &[u8], width: u16, height: u16) -> Vec<u8> {
-        let mut frame = vec![8u8]; // sample precision
-        frame.extend_from_slice(&height.to_be_bytes());
-        frame.extend_from_slice(&width.to_be_bytes());
-        frame.extend_from_slice(&[1, 1, 0x11, 0]); // a single component
         let mut bytes = vec![0xff, 0xd8];
         bytes.extend_from_slice(leading);
-        bytes.extend_from_slice(&jpeg_segment(sof_marker, &frame));
+        bytes.extend_from_slice(&jpeg_segment(sof_marker, &sof_payload(width, height)));
+        bytes
+    }
+
+    /// The desync layout, hand-rolled because the byte placement IS the test: a non
+    /// length-bearing pair whose following two bytes read as a length only if the walk is
+    /// wrong, sized to jump it over the real frame header and land it exactly on a decoy
+    /// hidden inside an APP0 payload.
+    fn jpeg_desync_fixture(pair: u8) -> Vec<u8> {
+        let real = jpeg_segment(0xc0, &sof_payload(20000, 20000));
+        let decoy = jpeg_segment(0xc0, &sof_payload(100, 100));
+        let hiding_app0 = jpeg_segment(0xe0, &decoy);
+        // A desynced walk resumes just past the fake length, so the jump has to cover the
+        // length itself, the real frame header, and the APP0's own marker and length.
+        let app0_header = hiding_app0.len() - decoy.len();
+        let skip = u16::try_from(2 + real.len() + app0_header).expect("the fixture is small");
+
+        let mut bytes = vec![0xff, 0xd8]; // SOI
+        bytes.extend_from_slice(&[0xff, pair]);
+        bytes.extend_from_slice(&skip.to_be_bytes());
+        bytes.extend_from_slice(&real);
+        bytes.extend_from_slice(&hiding_app0);
+        bytes.extend_from_slice(&jpeg_segment(0xda, &[0u8; 6])); // SOS
         bytes
     }
 
@@ -2052,7 +2122,8 @@ mod tests {
 
     /// Every format's header can be cut mid-field by a hostile host or the byte cap. Each
     /// reader must answer `None` rather than read past its slice, so every prefix short of
-    /// the bytes it needs is checked — which also pins how far each one reads.
+    /// the bytes it needs is checked — which pins each reader's MINIMUM. Only the GIF row
+    /// also pins where a reader stops, its descriptor's trailing flags byte going unread.
     #[test]
     fn sniff_image_refuses_a_header_cut_short() {
         let fixtures = [
@@ -2060,7 +2131,9 @@ mod tests {
             // 13 header bytes, the image separator, and its four dimension fields — the
             // descriptor's own trailing flags byte is never read.
             (gif_fixture(b"GIF89a", 100, 100), 22),
-            (jpeg_fixture(0xc0, &[], 100, 100), 11),
+            // SOI, the marker, and the whole Lf=11 frame header — the completeness check
+            // slices the entire segment, so a partial one is never read.
+            (jpeg_fixture(0xc0, &[], 100, 100), 15),
             (webp_lossy_fixture(100, 100), 30),
             (webp_lossless_fixture(100, 100), 25),
             (webp_extended_fixture(100, 100), 30),
@@ -2081,21 +2154,23 @@ mod tests {
     }
 
     /// A segment length below 2 is malformed — it would claim a payload shorter than its
-    /// own length field. The guard is a validity check, not the walk's termination proof:
-    /// `i` is already past the marker when a length is read. The bound only detects a hang.
+    /// own length field. The `length < 2` guard is redundant: with it removed, another
+    /// gate still refuses each arm below, so what this pins is the VERDICT rather than any
+    /// one gate. The wall-clock bound only detects a hang.
     #[test]
     fn sniff_image_refuses_a_jpeg_segment_length_below_two() {
         let started = std::time::Instant::now();
         for length in [0u16, 1] {
-            // On an APP0 the next iteration's marker check would refuse anyway, so this
-            // arm alone cannot tell whether the guard is present.
+            // On an APP0, a marker check refuses: any length under 2 leaves `i` on one of
+            // the length field's own bytes — 0x00 for a length of 0, 0x01 for 1, never
+            // 0xFF — so no marker is read there.
             let mut app0 = vec![0xffu8, 0xd8, 0xff, 0xe0];
             app0.extend_from_slice(&length.to_be_bytes());
             app0.extend_from_slice(&[0u8; 4096]);
             assert_eq!(sniff_image(&app0), None, "APP0 length {length} is refused");
 
-            // On a frame header it is verdict-relevant: the dimensions are read straight
-            // out of the segment, so without the guard these bytes return a size.
+            // On a frame header the completeness check also refuses it — T.81's smallest
+            // `Lf` is 11, so anything under 8 is not a frame header at all.
             let mut frame = vec![0xffu8, 0xd8, 0xff, 0xc0];
             frame.extend_from_slice(&length.to_be_bytes());
             frame.extend_from_slice(&[0x08, 0x00, 0x64, 0x00, 0x64, 0x01, 0x01, 0x11, 0x00]);
@@ -2135,6 +2210,63 @@ mod tests {
         // arrives is too.
         assert_eq!(sniff_image(&[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x40]), None);
         assert_eq!(sniff_image(&[0xff, 0xd8, 0x00, 0xe0]), None);
+    }
+
+    /// The gate is only worth anything where it agrees with the decoder about which bytes
+    /// are a frame header. libjpeg's `next_marker` DISCARDS a stuffed `FF 00` and resumes
+    /// scanning, so reading the two bytes after one as a segment length jumps the walk
+    /// clean over the frame header libjpeg still finds. A repeated `FF D8` desyncs the
+    /// same way here (libjpeg refuses it outright as a duplicate SOI). Neither is
+    /// length-bearing, which is why both refuse.
+    #[test]
+    fn a_jpeg_that_desyncs_the_marker_walk_is_refused() {
+        for pair in [0x00u8, 0xd8] {
+            let bytes = jpeg_desync_fixture(pair);
+            assert_eq!(sniff_image(&bytes), None, "FF {pair:02X} must be refused");
+        }
+
+        // The decoy is complete and self-consistent on its own, so the refusals above are
+        // the marker arm rather than the completeness check firing by coincidence.
+        assert_eq!(
+            sniff_image(&jpeg_fixture(0xc0, &[], 100, 100)),
+            Some(("image/jpeg", 100, 100))
+        );
+
+        // And the raster the decoder actually allocates for is the one the fixture hides:
+        // reachable only with the walk in step, and far over the caps.
+        let honest = jpeg_fixture(0xc0, &[], 20000, 20000);
+        assert_eq!(sniff_image(&honest), Some(("image/jpeg", 20000, 20000)));
+        assert_eq!(checked_image_type(&honest), None);
+    }
+
+    /// T.81 fixes `Lf` at 8 + 3 * Nf, so a frame header that disagrees with its own
+    /// component count is one libjpeg's `get_sof` rejects — reading a size out of it would
+    /// cap a raster nothing decodes.
+    #[test]
+    fn sniff_image_refuses_an_inconsistent_frame_header() {
+        // Nf = 0, and Nf = 2 against a length that only fits one component.
+        for components in [0u8, 2] {
+            let mut payload = sof_payload(100, 100);
+            payload[5] = components;
+            let bytes = [vec![0xffu8, 0xd8], jpeg_segment(0xc0, &payload)].concat();
+            assert_eq!(sniff_image(&bytes), None, "Nf {components} must be refused");
+        }
+
+        // A length under the 8 bytes a frame header always has, and a segment whose
+        // declared length runs past the buffer.
+        let mut short = vec![0xffu8, 0xd8, 0xff, 0xc0, 0x00, 0x07];
+        short.extend_from_slice(&[0x08, 0x00, 0x64, 0x00, 0x64]);
+        assert_eq!(sniff_image(&short), None);
+        let mut overrun = vec![0xffu8, 0xd8, 0xff, 0xc0, 0x00, 0x20];
+        overrun.extend_from_slice(&sof_payload(100, 100));
+        assert_eq!(sniff_image(&overrun), None);
+
+        // Nf = 2 with the length that matches it (Lf = 14) is accepted.
+        let mut two = sof_payload(640, 480);
+        two[5] = 2;
+        two.extend_from_slice(&[2, 0x11, 0]);
+        let bytes = [vec![0xffu8, 0xd8], jpeg_segment(0xc0, &two)].concat();
+        assert_eq!(sniff_image(&bytes), Some(("image/jpeg", 640, 480)));
     }
 
     /// Zero and over-cap rasters are refused whatever format declares them. The 8000x8000
