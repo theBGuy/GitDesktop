@@ -67,12 +67,10 @@ export const useConflictResolve = create<ConflictResolveState>()(
 );
 
 // A resolve walk belongs to the repo AND tab it started on; this store is separate,
-// so the ui store's CROSS_REPO_RESET can't reach it — drop the walk on either axis
-// here. A surviving walk runs against a different tree: the old repo, or (tabs stay
-// mounted under `<Activity>`) a PR's hidden worktree, where a same-named path lets a
-// conflict takeover adopt the walk and stream AI edits unasked. Subscriptions fire
-// synchronously inside the ui setter, before the commit that flips tab visibility —
-// that ordering is what puts the clear ahead of any adoption.
+// so the ui store's CROSS_REPO_RESET can't reach it — drop the walk when either
+// changes. Tabs stay mounted under `<Activity>`, so a surviving walk could be adopted
+// by another tab's resolve surface against a different tree. Subscriptions fire
+// synchronously inside the ui setter, ahead of the commit that flips visibility.
 useUiStore.subscribe((s, prev) => {
   if (s.repoPath === prev.repoPath && s.repoTab === prev.repoTab) return;
   const { activePath, queue } = useConflictResolve.getState();

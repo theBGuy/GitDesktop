@@ -487,6 +487,10 @@ export function CommitDetailView({
         canComment={canCommentCommits}
         remoteLabel={remoteLabel}
         diffSections={providerKey === "github" ? remoteSections : undefined}
+        // Only GitHub resolves a comment's line through the fetched patch, so only
+        // GitHub has to wait for it; the others anchor by plain line and are always
+        // ready.
+        diffReady={providerKey !== "github" || remoteDiff.isSuccess}
         selectedPath={deferredPath}
         onSelectFile={selectFileFromComments}
         lens="origin"

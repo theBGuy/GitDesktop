@@ -224,9 +224,9 @@ function toThread(c: CommitCommentOut): PrThreadOut {
  * The comment surface for a single commit: whole-commit comments as a flat thread
  * list, line-anchored comments grouped by `path:line`, and a whole-commit composer.
  * Inline rendering in the diff pane needs BOTH the selected file and a resolved
- * new-side line: selected-file comments whose line can't be resolved lead the group
- * below under a couldn't-place label, and every other anchored comment follows under
- * its path — so none is ever silently dropped.
+ * new-side line: selected-file comments that miss lead the group below, marked
+ * couldn't-place once `diffReady` says the file's patch was actually walked, and
+ * every other anchored comment follows under its path — so none is silently dropped.
  *
  * It owns its pane sizing: a bottom pane capped at 45% of its flex-column parent,
  * so a caller drops it in as a sibling rather than wrapping it.
@@ -242,6 +242,7 @@ export function CommitComments({
   lens,
   stale = false,
   enabled = true,
+  diffReady = true,
 }: {
   repoPath: string;
   sha: string;
@@ -265,6 +266,11 @@ export function CommitComments({
    *  component STAYS MOUNTED so per-commit drafts survive a commit that doesn't
    *  (yet) support them; the read is disabled with it. */
   enabled?: boolean;
+  /** Whether `diffSections` reflects a settled read of THIS commit's patch. False
+   *  (loading, errored, or another commit's placeholder) makes every line look
+   *  unresolvable, so the couldn't-place marker is withheld rather than blaming the
+   *  comment for a missing patch. */
+  diffReady?: boolean;
 }) {
   const comments = useCommitComments(repoPath, enabled ? sha : null, lens);
   const createComment = useCreateCommitComment(repoPath, lens);
@@ -409,7 +415,7 @@ export function CommitComments({
               />
             ))}
 
-            {hiddenAnchored.length > 0 && (
+            {orderedHidden.length > 0 && (
               <div className="space-y-3">
                 {orderedHidden.map(({ comment: c, path, line, startLine }) => {
                   // A valid range labels `path:start–end`; a single line (or an
@@ -421,40 +427,57 @@ export function CommitComments({
                         ? `:${startLine}–${line}`
                         : `:${line}`;
                   const label = `${path}${lineLabel}`;
-                  // On the open file the line never resolved (resolved ones render
-                  // inline), so say so rather than offer a jump to the file already
-                  // shown.
+                  // The open file never offers a jump (it's already shown), and only
+                  // claims the comment is unplaceable once the patch has been walked:
+                  // an unread patch resolves no line either, and would blame the
+                  // comment for a diff that simply hasn't loaded.
                   const ownFile = path === selectedPath;
-                  return (
-                    <div key={c.id} className="space-y-1">
-                      {ownFile ? (
+                  const labelNode = (() => {
+                    switch (true) {
+                      case ownFile && diffReady:
                         // The annotation is the point of this label, so only the
                         // path truncates — it keeps its own clipped-text tooltip.
-                        <p className="flex items-baseline text-[11px] text-muted-foreground">
-                          <span
-                            className="min-w-0 truncate font-mono"
-                            onMouseEnter={clipTitleFromText}
+                        return (
+                          <p className="flex items-baseline text-[11px] text-muted-foreground">
+                            <span
+                              className="min-w-0 truncate font-mono"
+                              onMouseEnter={clipTitleFromText}
+                            >
+                              {path}
+                            </span>
+                            <span className="shrink-0 font-sans">
+                              {" · couldn't place in this diff"}
+                            </span>
+                          </p>
+                        );
+                      case ownFile:
+                        return (
+                          <p className="truncate font-mono text-[11px] text-muted-foreground">
+                            {label}
+                          </p>
+                        );
+                      case onSelectFile !== undefined:
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => onSelectFile(path)}
+                            className="block max-w-full cursor-pointer truncate text-left font-mono text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+                            title={`Open ${label} in the diff`}
                           >
-                            {path}
-                          </span>
-                          <span className="shrink-0 font-sans">
-                            {" · couldn't place in this diff"}
-                          </span>
-                        </p>
-                      ) : onSelectFile ? (
-                        <button
-                          type="button"
-                          onClick={() => onSelectFile(path)}
-                          className="block max-w-full cursor-pointer truncate text-left font-mono text-[11px] text-muted-foreground hover:text-foreground hover:underline"
-                          title={`Open ${label} in the diff`}
-                        >
-                          {label}
-                        </button>
-                      ) : (
-                        <p className="truncate font-mono text-[11px] text-muted-foreground">
-                          {label}
-                        </p>
-                      )}
+                            {label}
+                          </button>
+                        );
+                      default:
+                        return (
+                          <p className="truncate font-mono text-[11px] text-muted-foreground">
+                            {label}
+                          </p>
+                        );
+                    }
+                  })();
+                  return (
+                    <div key={c.id} className="space-y-1">
+                      {labelNode}
                       <Thread
                         thread={toThread(c)}
                         onSaveEdit={

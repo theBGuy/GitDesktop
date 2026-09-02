@@ -1012,14 +1012,15 @@ tree are untouched, the same way a local PR's merge works (see *Local PRs* below
 takes the view over with the conflicted files and the in-app conflict editor (see
 *Syncing & conflicts*).{{ai}} **Resolve with AI** is offered on the strip itself — it
 opens the resolution and starts walking the conflicts with AI straight away — and again
-inside, where it reads **Resolve all with AI** while more than one file is left. Both
-need AI turned on with a review model configured, and every proposal is yours to review
-before it lands.{{/ai}} Once every conflict is resolved, **Finish & push** commits the
-merge and pushes it to the pull request's **head branch**, so the pull request itself
-picks the resolution up. That push is **never forced**: if the head moved while you were
-working, it's refused and your resolution is kept rather than overwritten. **Discard**
-deletes the hidden worktree and touches nothing else. Leave a resolution unfinished and
-it's offered back the next time you open that pull request, as **Continue resolving**.
+inside, where it reads **Resolve all with AI** while more than one file is left
+(switching tabs ends the walk). Both need AI turned on with a review model configured,
+and every proposal is yours to review before it lands.{{/ai}} Once every conflict is
+resolved, **Finish & push** commits the merge and pushes it to the pull request's
+**head branch**, so the pull request itself picks the resolution up. That push is
+**never forced**: if the head moved while you were working, it's refused and your
+resolution is kept rather than overwritten. **Discard** deletes the hidden worktree and
+touches nothing else. Leave a resolution unfinished and it's offered back the next time
+you open that pull request, as **Continue resolving**.
 
 This flow stops at a pull request **from a fork**: finishing a resolution means pushing
 it to a head branch in the contributor's repository, which the conflict resolver doesn't

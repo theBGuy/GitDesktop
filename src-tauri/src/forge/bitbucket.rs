@@ -1077,7 +1077,9 @@ struct BbCommitStatus {
 /// SUCCESSFUL → SUCCESS, FAILED → FAILURE, STOPPED → CANCELLED (finished without a
 /// verdict), INPROGRESS and anything unknown → PENDING.
 fn map_bb_check_state(state: &str) -> String {
-    match state {
+    // Normalized like `reduce_bb_ci` reads the same field, so the two can't split
+    // on a padded or lowercased value.
+    match state.trim().to_ascii_uppercase().as_str() {
         "SUCCESSFUL" => "SUCCESS".to_string(),
         "FAILED" => "FAILURE".to_string(),
         "STOPPED" => "CANCELLED".to_string(),

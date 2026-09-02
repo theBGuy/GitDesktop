@@ -972,6 +972,11 @@ export function splitCommitMessage(raw: string): {
   return { title, body };
 }
 
+/** Tokens a model emits to mean "no labels" rather than omitting the line. Consulted
+ *  only after the repo lookup misses, so a repo label with one of these names still
+ *  wins — a sentinel must never be reported as an invented label. */
+const NO_LABEL_SENTINELS = new Set(["none", "n/a", "na", "-"]);
+
 /**
  * Splits a (possibly still streaming) PR/MR response into title, body, validated
  * label NAMES, and validated `closes` / `relates` issue numbers. Reuses
@@ -985,9 +990,10 @@ export function splitCommitMessage(raw: string): {
  *   of those tokens is deliberately sacrificed to that guarantee.
  * - Labels match case-insensitively against `availableLabels`, returned in the repo's
  *   canonical casing; anything not in the set is DROPPED and reported in
- *   `droppedLabels` (as the model emitted it) so a caller can surface the mismatch.
- *   Empty whenever there is no directive or no `availableLabels` — a run with the
- *   feature off drops nothing.
+ *   `droppedLabels` (as the model emitted it) so a caller can surface the mismatch —
+ *   except a {@link NO_LABEL_SENTINELS} token, which is skipped silently. Empty
+ *   whenever there is no directive or no `availableLabels` — a run with the feature
+ *   off drops nothing.
  * - `Closes:`/`Relates:` numbers are comma-split, `#`-stripped, digits-only, validated
  *   against `candidateIssueNumbers` and deduped; a number in both lands in `relates`.
  * - `Relates:` KEY-shaped tokens validate against `candidateJiraKeys` → `jiraMentions`
@@ -1070,7 +1076,7 @@ export function extractPrDraft(
       const match = canonical.get(key);
       seen.add(key);
       if (match) labels.push(match);
-      else droppedLabels.push(trimmed);
+      else if (!NO_LABEL_SENTINELS.has(key)) droppedLabels.push(trimmed);
     }
   }
 
