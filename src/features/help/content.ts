@@ -1194,7 +1194,8 @@ line, and the composer says so.
 Create a PR with **Create pull request** ({{kbd:create-pr}}) or from the Compare tab — as
 a **draft** if you like, and set its **labels** and **assignees** right in the dialog
 (GitHub and GitLab; Bitbucket PRs have neither, so it shows only its reviewers picker
-instead); the label picker says when labels couldn't be loaded. A **Linked issues** row (GitHub and GitLab, wherever the repo has an issue
+instead); the label picker says when labels couldn't be loaded.
+A **Linked issues** row (GitHub and GitLab, wherever the repo has an issue
 tracker) lets you reference real repo issues on create: chips are **auto-detected** from
 your branch name and commit subjects (a \`fix/123-…\` branch seeds \`#123\`, validated
 against your actual issues), and you can add more by hand with **Link issue**. Each chip

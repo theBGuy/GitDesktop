@@ -276,9 +276,10 @@ export function PrCommitDetail({
               canComment={canCommentCommits}
               remoteLabel={remoteLabel}
               diffSections={sections}
-              // `sections` is empty while the diff loads or errors, and belongs to
-              // the previously selected commit while placeholder — both make every
-              // line look unresolvable.
+              // While placeholder, `sections` belongs to the previously selected
+              // commit, so a position-derived line would resolve against the wrong
+              // patch. (This mounts only once the diff settled, so load/error
+              // windows never reach it.)
               diffReady={diff.isSuccess && !diff.isPlaceholderData}
               selectedPath={effectivePath}
               onSelectFile={setSelectedPath}
