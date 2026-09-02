@@ -10,6 +10,7 @@ import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialo
 import { Thread } from "@/features/conversations/Thread";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
+import { clipTitleFromText } from "@/lib/clip-title";
 import type { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
   useCommitComments,
@@ -222,10 +223,10 @@ function toThread(c: CommitCommentOut): PrThreadOut {
 /**
  * The comment surface for a single commit: whole-commit comments as a flat thread
  * list, line-anchored comments grouped by `path:line`, and a whole-commit composer.
- * The diff pane renders anchored comments inline via `lineAnchors`, but ONLY for
- * the selected file — so the labelled group here lists every anchored comment that
- * isn't visible inline (another file, or unresolvable to a new-side line), so none
- * is ever silently dropped.
+ * Inline rendering in the diff pane needs BOTH the selected file and a resolved
+ * new-side line: selected-file comments whose line can't be resolved lead the group
+ * below under a couldn't-place label, and every other anchored comment follows under
+ * its path — so none is ever silently dropped.
  *
  * It owns its pane sizing: a bottom pane capped at 45% of its flex-column parent,
  * so a caller drops it in as a sibling rather than wrapping it.
@@ -308,6 +309,14 @@ export function CommitComments({
       })
       .filter(({ path, line }) => !(path === selectedPath && line != null));
   }, [anchored, diffSections, selectedPath]);
+
+  // Selected-file entries lead the group: they're retained only when their line
+  // didn't resolve, and under a cross-file label they read as another file's
+  // comment.
+  const orderedHidden = [
+    ...hiddenAnchored.filter(({ path }) => path === selectedPath),
+    ...hiddenAnchored.filter(({ path }) => path !== selectedPath),
+  ];
 
   // Parents serve the previous commit's content as placeholder while arrowing
   // through history, so hold writes until the shown commit is the addressed one.
@@ -402,7 +411,7 @@ export function CommitComments({
 
             {hiddenAnchored.length > 0 && (
               <div className="space-y-3">
-                {hiddenAnchored.map(({ comment: c, path, line, startLine }) => {
+                {orderedHidden.map(({ comment: c, path, line, startLine }) => {
                   // A valid range labels `path:start–end`; a single line (or an
                   // unresolved line) keeps `path:line` / `path`.
                   const lineLabel =
@@ -412,9 +421,27 @@ export function CommitComments({
                         ? `:${startLine}–${line}`
                         : `:${line}`;
                   const label = `${path}${lineLabel}`;
+                  // On the open file the line never resolved (resolved ones render
+                  // inline), so say so rather than offer a jump to the file already
+                  // shown.
+                  const ownFile = path === selectedPath;
                   return (
                     <div key={c.id} className="space-y-1">
-                      {onSelectFile ? (
+                      {ownFile ? (
+                        // The annotation is the point of this label, so only the
+                        // path truncates — it keeps its own clipped-text tooltip.
+                        <p className="flex items-baseline text-[11px] text-muted-foreground">
+                          <span
+                            className="min-w-0 truncate font-mono"
+                            onMouseEnter={clipTitleFromText}
+                          >
+                            {path}
+                          </span>
+                          <span className="shrink-0 font-sans">
+                            {" · couldn't place in this diff"}
+                          </span>
+                        </p>
+                      ) : onSelectFile ? (
                         <button
                           type="button"
                           onClick={() => onSelectFile(path)}

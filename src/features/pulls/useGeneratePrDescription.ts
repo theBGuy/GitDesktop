@@ -50,6 +50,9 @@ interface PrDraft {
   title: string;
   body: string;
   labels: string[];
+  /** Label names the model proposed that the repo doesn't have. Only meaningful
+   *  on the RESOLVED draft — a mid-stream chunk can hold a half-typed name. */
+  droppedLabels: string[];
   closes: number[];
   relates: number[];
   jiraMentions: string[];
@@ -66,7 +69,11 @@ export function useGeneratePrDescription(repoPath: string) {
    *  settings, so a supplier can honor the user's AI-ignore patterns), budgets
    *  it into a PR prompt, and streams the parsed title/body/labels draft to
    *  `onUpdate`. `availableLabels` are the repo's existing label names the model
-   *  may propose from (validated in the parser — invented labels are dropped). */
+   *  may propose from (validated in the parser — invented labels are dropped).
+   *
+   *  Resolves with the draft parsed from the COMPLETE response, or null when the
+   *  run bailed, aborted, or errored — the only signal that tells a completed
+   *  draft from the partial parses `onUpdate` sees mid-stream. */
   const runFromDiff = useCallback(
     async (
       getDiff: (settings: AppSettings) => Promise<SuppliedDiff>,
@@ -88,8 +95,15 @@ export function useGeneratePrDescription(repoPath: string) {
       /** Which set of changes the "nothing to describe" toasts name; the
        *  change-request noun follows `provider` (GitLab: merge request). */
       emptyScope: "branch-diff" | "change-request" = "branch-diff",
-    ) => {
-      await run(
+    ): Promise<PrDraft | null> => {
+      const parse = (buffer: string) =>
+        extractPrDraft(
+          buffer,
+          availableLabels.map((l) => l.name),
+          (issueCandidates ?? []).map((c) => c.number),
+          (jiraCandidates ?? []).map((c) => c.key),
+        );
+      const final = await run(
         async (settings) => {
           const [diff, repoInstructions] = await Promise.all([
             getDiff(settings),
@@ -124,18 +138,9 @@ export function useGeneratePrDescription(repoPath: string) {
             provider,
           });
         },
-        {
-          onChunk: (buffer) =>
-            onUpdate(
-              extractPrDraft(
-                buffer,
-                availableLabels.map((l) => l.name),
-                (issueCandidates ?? []).map((c) => c.number),
-                (jiraCandidates ?? []).map((c) => c.key),
-              ),
-            ),
-        },
+        { onChunk: (buffer) => onUpdate(parse(buffer)) },
       );
+      return final === null ? null : parse(final);
     },
     [repoPath, run],
   );

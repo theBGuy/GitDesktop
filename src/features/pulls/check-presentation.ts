@@ -2,6 +2,7 @@ import {
   CheckCircleIcon,
   CircleIcon,
   MinusCircleIcon,
+  ProhibitIcon,
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
@@ -31,16 +32,25 @@ export function checkPresentation(
       bucket: "passed",
     };
   }
-  if (
-    ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"].includes(
-      s,
-    )
-  ) {
+  if (["FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE"].includes(s)) {
     return {
       tone: "text-destructive",
       Icon: XCircleIcon,
       label: "failed",
       bucket: "failed",
+    };
+  }
+  if (s === "CANCELLED") {
+    // Finished without a result, not a failure — a run superseded by a
+    // concurrency group is routine, and every forge normalizes its cancel state
+    // to this word. The glyph matches the Actions tab's StatusIcon so the two
+    // surfaces agree; the required-checks join gates a cancelled required
+    // context explicitly rather than through this bucket.
+    return {
+      tone: "text-muted-foreground",
+      Icon: ProhibitIcon,
+      label: "cancelled",
+      bucket: "skipped",
     };
   }
   if (["SKIPPED", "NEUTRAL", "STALE"].includes(s)) {

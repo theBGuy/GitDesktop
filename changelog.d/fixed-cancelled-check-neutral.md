@@ -1,0 +1,1 @@
+- Cancelled check runs show as neutral in the PR checks panel with their own glyph and label, and required checks still hold the merge until they re-run green.

@@ -75,6 +75,16 @@ import {
   useLinkedIssueChips,
 } from "./useLinkedIssueChips";
 
+/** The hint for label names the model proposed that the repo doesn't have:
+ *  `Suggested label "x" isn't a repo label.`, plural `"a", "b" and "c"`. */
+function droppedLabelsHint(names: string[]): string {
+  const quoted = names.map((n) => `"${n}"`);
+  if (quoted.length === 1)
+    return `Suggested label ${quoted[0]} isn't a repo label.`;
+  const list = `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
+  return `Suggested labels ${list} aren't repo labels.`;
+}
+
 export function CreatePrDialog({
   repoPath,
   defaultBase,
@@ -165,6 +175,10 @@ export function CreatePrDialog({
   const [reviewers, setReviewers] = useState<ForgeUserRef[]>([]);
   const [labels, setLabels] = useState<Set<string>>(new Set());
   const [assignees, setAssignees] = useState<ForgeUserRef[]>([]);
+  // Label names a FINISHED generation proposed that the repo doesn't have — only
+  // ever set from the resolved draft, since a mid-stream chunk can hold a
+  // half-streamed name that would flash as a mismatch.
+  const [droppedLabels, setDroppedLabels] = useState<string[]>([]);
 
   // Linked issues: repo issues referenced on create (extraction-seeded, AI-proposed
   // or manual). They become `Closes #N`/`Relates to #N` body LINES, not create-
@@ -432,6 +446,7 @@ export function CreatePrDialog({
     aiDescriptionRef.current = false;
     setReviewers([]);
     setLabels(new Set());
+    setDroppedLabels([]);
     setAssignees([]);
     // Reset the linked-issue chips (and their dismissed/probed refs) — the create
     // dialog opens with no seeded body refs; extraction/AI seeding repopulates.
@@ -608,6 +623,7 @@ export function CreatePrDialog({
   // dialog-local generate chord.
   function runGenerate() {
     aiDescriptionRef.current = true;
+    setDroppedLabels([]);
     // Grounded issue candidates the model may link: current chips pinned first,
     // then the highest-scoring OPEN issues, capped at 8 (the hook records the set
     // it fed so `upsertAiIssues` can resolve an AI-proposed number's title/state).
@@ -615,6 +631,8 @@ export function CreatePrDialog({
     // Grounded Jira mention candidates (Bitbucket + linked project). Empty unless
     // the Jira cluster is active; mutually exclusive with `issueCandidates`.
     const jiraCandidates = canJiraMention ? buildJiraCandidates() : undefined;
+    // The returned promise resolves with the COMPLETE draft (null on bail/abort/
+    // error), which is what keeps the dropped-label hint off mid-stream partials.
     generate(
       base,
       head,
@@ -646,7 +664,9 @@ export function CreatePrDialog({
       issueCandidates,
       // Grounded Jira mention candidates — empty/undefined ⇒ no Jira variant.
       jiraCandidates,
-    );
+    ).then((final) => {
+      if (final) setDroppedLabels(final.droppedLabels);
+    });
   }
   // Context-sensitive reuse of the `generate-commit-message` binding while this
   // dialog is open. `run` is undefined with AI off — no Generate surface, so
@@ -882,74 +902,90 @@ export function CreatePrDialog({
             )}
 
             {canPickLabels && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Popover.Root>
-                  <Popover.Trigger
-                    render={
-                      <Button
-                        variant="outline"
-                        size="xs"
-                        aria-label="Add labels"
-                      />
-                    }
-                  >
-                    <TagIcon data-icon="inline-start" />
-                    Labels
-                  </Popover.Trigger>
-                  {/* Bare on purpose: this component's body renders above
-                      DialogContent's PanelPortalReset, so a
-                      usePanelPortalContainer() call here returns the panel
-                      container and the popup would land behind the dialog
-                      backdrop. (Pickers rendered as children inside the
-                      dialog read undefined.) */}
-                  <Popover.Portal>
-                    <Popover.Positioner
-                      align="start"
-                      sideOffset={4}
-                      className="isolate z-50"
+              <div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Popover.Root>
+                    <Popover.Trigger
+                      render={
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          aria-label="Add labels"
+                        />
+                      }
                     >
-                      <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-                        <p className="px-1 pb-1.5 text-xs font-medium">
-                          Labels
-                        </p>
-                        {(repoLabels.data ?? []).length === 0 && (
-                          <p className="px-1 py-1 text-xs text-muted-foreground">
-                            {repoLabels.isPending
-                              ? "Loading labels…"
-                              : "This repository has no labels."}
+                      <TagIcon data-icon="inline-start" />
+                      Labels
+                    </Popover.Trigger>
+                    {/* Bare on purpose: this component's body renders above
+                        DialogContent's PanelPortalReset, so a
+                        usePanelPortalContainer() call here returns the panel
+                        container and the popup would land behind the dialog
+                        backdrop. (Pickers rendered as children inside the
+                        dialog read undefined.) */}
+                    <Popover.Portal>
+                      <Popover.Positioner
+                        align="start"
+                        sideOffset={4}
+                        className="isolate z-50"
+                      >
+                        <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
+                          <p className="px-1 pb-1.5 text-xs font-medium">
+                            Labels
                           </p>
-                        )}
-                        {(repoLabels.data ?? []).map((label) => (
-                          <label
-                            key={label.name}
-                            className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
-                          >
-                            <Checkbox
-                              checked={labels.has(label.name)}
-                              onCheckedChange={(v) =>
-                                toggleLabel(label.name, v === true)
-                              }
-                            />
-                            <span
-                              aria-hidden
-                              className="size-2 shrink-0 rounded-full"
-                              style={{ backgroundColor: `#${label.color}` }}
-                            />
-                            <span
-                              className="flex-1 truncate"
-                              title={label.name}
+                          {(repoLabels.data ?? []).length === 0 && (
+                            <p className="px-1 py-1 text-xs text-muted-foreground">
+                              {repoLabels.isPending
+                                ? "Loading labels…"
+                                : repoLabels.isError
+                                  ? "Couldn't load labels."
+                                  : "This repository has no labels."}
+                            </p>
+                          )}
+                          {(repoLabels.data ?? []).map((label) => (
+                            <label
+                              key={label.name}
+                              className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
                             >
-                              {label.name}
-                            </span>
-                          </label>
-                        ))}
-                      </Popover.Popup>
-                    </Popover.Positioner>
-                  </Popover.Portal>
-                </Popover.Root>
-                {selectedChips.map((label) => (
-                  <LabelChip key={label.name} label={label} />
-                ))}
+                              <Checkbox
+                                checked={labels.has(label.name)}
+                                onCheckedChange={(v) =>
+                                  toggleLabel(label.name, v === true)
+                                }
+                              />
+                              <span
+                                aria-hidden
+                                className="size-2 shrink-0 rounded-full"
+                                style={{ backgroundColor: `#${label.color}` }}
+                              />
+                              <span
+                                className="flex-1 truncate"
+                                title={label.name}
+                              >
+                                {label.name}
+                              </span>
+                            </label>
+                          ))}
+                        </Popover.Popup>
+                      </Popover.Positioner>
+                    </Popover.Portal>
+                  </Popover.Root>
+                  {selectedChips.map((label) => (
+                    <LabelChip key={label.name} label={label} />
+                  ))}
+                </div>
+                {/* Mounted unconditionally: assistive tech announces a
+                    role="status" only when the region was already in the DOM
+                    before its text arrived. `empty:mt-0` keeps the silent
+                    state from reserving space under the row. */}
+                <p
+                  role="status"
+                  className="mt-1.5 text-xs text-muted-foreground empty:mt-0"
+                >
+                  {droppedLabels.length > 0
+                    ? droppedLabelsHint(droppedLabels)
+                    : ""}
+                </p>
               </div>
             )}
 

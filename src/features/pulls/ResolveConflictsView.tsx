@@ -65,9 +65,9 @@ export function ResolveConflictsView({
   // Same AI-resolution store the Changes tab drives: `activePath` decides whether
   // the selected file shows the AI streaming view or the manual editor, and
   // `startAll` kicks off a "resolve all" walk. It selects files via the main UI store,
-  // which is a real cross-surface bleed here — those paths live in a HIDDEN worktree.
-  // Stopping the walk on unmount is the honest minimum; scoping the store per surface
-  // is deliberately deferred.
+  // so its paths bleed across surfaces — and here they live in a HIDDEN worktree. The
+  // store drops any armed walk on a repo or tab switch, so this surface can't adopt
+  // one started in another repo or tab; finer per-tree scoping remains deferred.
   const startAll = useConflictResolve((s) => s.startAll);
   const activePath = useConflictResolve((s) => s.activePath);
   const stopResolveWalk = useConflictResolve((s) => s.stop);

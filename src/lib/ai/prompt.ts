@@ -23,6 +23,13 @@ Output ONLY the commit message itself: the first line is the subject (imperative
 Never reference issue or PR numbers, tickets, or links (e.g. "Closes #123") — you can't see the issue tracker, so any such reference is fabricated.
 Do not wrap the message in markdown fences. Do not add commentary before or after the message.`;
 
+/** Reference-syntax rule for every prompt whose output can be posted to a forge:
+ *  a bare `#N` there is a live cross-reference that notifies the thread it names,
+ *  so enumeration must not use it. Only the `(1)` form is offered — a leading
+ *  `1)` renders as an ordered list in the app's own markdown. */
+const REFERENCE_RULE =
+  "Write #N (or !N) only when deliberately referencing a real issue or pull request in this repository — on the forge it becomes a live cross-reference and notifies that thread. For enumeration or internal labels write (1), (2), never #1. To mention a reference without linking it, wrap it in backticks.";
+
 // KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 export function buildCommitPrompt(input: CommitPromptInput): {
   system: string;
@@ -339,7 +346,7 @@ export function buildPrPrompt(input: PrPromptInput): {
       .map((l) => renderLabelLine(l.name.trim(), l.description))
       .join("\n");
     systemParts.push(
-      `## Labels\n${labelLines}\nLabels are optional metadata: for most changes the right outcome is one label or none — never force one. Suggest a label ONLY when the change as a whole is what that label is for, judged by its stated purpose above (or by an unambiguous name when it has no description). Some labels belong to automation or maintainer workflows rather than to authors: dependency-bot ecosystem labels (a language or tooling name described like "Pull requests that update … code", which bots apply to dependency bumps), changelog or release controls, and triage states. Never suggest those for ordinary code changes — only when the change is precisely that case (for example, a PR that does nothing but bump dependencies).\nAfter the description, if any label qualifies, add a final line exactly like \`Labels: name1, name2\` listing ONLY label names from the list above, copied verbatim. Omit the line entirely when none qualify — never invent a label.`,
+      `## Labels\n${labelLines}\nLabels are optional metadata: for most changes the right outcome is one label or none — never force one. Suggest a label ONLY when the change as a whole is what that label is for, judged by its stated purpose above (or by an unambiguous name when it has no description). Some labels belong to automation or maintainer workflows rather than to authors: dependency-bot ecosystem labels (a language or tooling name described like "Pull requests that update … code", which bots apply to dependency bumps), changelog or release controls, and triage states. Never suggest those for ordinary code changes — only when the change is precisely that case (for example, a PR that does nothing but bump dependencies).\nAfter the description, if any label qualifies, add a final line exactly like \`Labels: name1, name2\` listing ONLY label names from the list above, copied verbatim. When the change clearly matches a label's stated purpose — a bug-fix PR where a "bug" label exists — propose that label rather than abstaining. Omit the line entirely when none qualify — never invent a label.`,
     );
   }
 
@@ -394,6 +401,7 @@ Write the review in GitHub-flavored Markdown:
 - Cover real issues across correctness (bugs, logic errors, unhandled edge cases or errors), security smells, performance traps, clarity and naming, and missing or weak tests. Breadth is welcome — but only where each finding is genuinely useful.
 - Signal over volume — but nothing confident held back: include a finding only if you are confident it is real; if you are unsure, leave it out. Report every finding you are confident is real in THIS review — a confident finding held back costs the author an entire extra review round later. That includes nits: raise every nit you are confident about now, one line each, so no later round has to — a nit not worth one line now is not worth a review round later; drop it for good rather than saving it. Nits stay terse and ordered last so they never crowd out the real issues. What you keep out is speculation, never confident findings. Don't flag formatting a linter/formatter handles; when a finding is one instance of a repeated pattern (an idiom, a convention breach, a stale doc surface), report it as ONE finding naming every affected file and line visible in the diff — never leave sibling instances unmentioned for a later round, and if the diff is truncated and you cannot pull or open the omitted parts, say the list covers only what is shown; and don't flag missing tests for changes that introduce no new behavior (renames, reformatting, or pure reorganization). Before flagging ANY finding, check the author's description AND the "Author's notes for reviewers" section for an explicit deliberate-decision note covering it; if one is present, acknowledge the recorded decision in one line instead of re-flagging it as new — once your own previous review has acknowledged it, a nit needs no further mention, but anything you would grade blocker or should-fix keeps a one-clause note that it remains a recorded decision — and still flag it in full if the note's claimed guard or justification is contradicted by code you can see. Before flagging a possible null/undefined or missing-value issue, check the typed contract: a field the types declare non-optional, or that every code path visibly always sets, is not a finding. If a finding claims a specific value flows into a specific parameter or limit (e.g. "X arrives as \`goal\`, then gets sliced to 6,000 chars"), you must trace that value INTO that parameter at a real call site shown in the diff or in code you have read — a same-named local variable or a mention in a doc comment is NOT a trace; if you cannot show the call-site mapping, omit the finding.
 - Be specific and grounded strictly in the diff — do not invent code, files, or behavior you cannot see. If the change looks solid, say so plainly in a line or two and stop.
+- ${REFERENCE_RULE}
 
 No filler: don't summarize what you reviewed, don't pad, don't add compliments — just the assessment and the findings. Do not wrap the whole review in a code fence. Do not restate the entire diff.`;
 
@@ -445,7 +453,8 @@ Output GitHub-flavored Markdown, one block per finding, ordered by severity then
 - A concrete remediation (describe it; do not write the fix unless it is trivial).
 If there are no genuine security issues in these changes, say so in one line.
 
-Before finalizing, re-check every finding against the Guiding rules, the Non-Issues, the always-out-of-scope list, the establish-what-you-are-reviewing step, the judge-against-the-reviewed-code rules, and the reporting thresholds, and drop any that don't clear them — but before you drop one as safe, name the specific guard that makes it safe; if you cannot name it, keep it. Do not pad: no summary of what you reviewed, no compliments, no filler — just findings or a single "no issues" line. Silence is better than noise. Do not invent code, files, or behavior you cannot see. Do not wrap the whole review in a code fence.`;
+Before finalizing, re-check every finding against the Guiding rules, the Non-Issues, the always-out-of-scope list, the establish-what-you-are-reviewing step, the judge-against-the-reviewed-code rules, and the reporting thresholds, and drop any that don't clear them — but before you drop one as safe, name the specific guard that makes it safe; if you cannot name it, keep it. Do not pad: no summary of what you reviewed, no compliments, no filler — just findings or a single "no issues" line. Silence is better than noise. Do not invent code, files, or behavior you cannot see. Do not wrap the whole review in a code fence.
+${REFERENCE_RULE}`;
 
 /** Appended to the review system prompt ONLY when prior-review context is fed,
  *  so a first-ever review's system prompt is unchanged. Frames the previous
@@ -886,7 +895,8 @@ Diagnose the failure and explain how to fix it, in GitHub-flavored Markdown:
 - If the logs are truncated or don't contain enough to be sure, say what's missing and give your best hypothesis instead of guessing confidently.
 - End with a \`## Agent prompt\` section whose body is a single fenced code block containing a self-contained instruction that a coding agent (e.g. Claude Code or Codex) running in this repository could follow to implement the fix. Write it as a direct task addressed to the agent, name the specific files to change, and include the essential context so it can act without seeing these logs. If you can't be confident in a fix, still give a prompt that tells the agent what to investigate.
 
-Be concise and high-signal. Ground every claim in the logs — do not invent errors, files, or commands you cannot see. Do not wrap the whole answer in a single code fence.`;
+Be concise and high-signal. Ground every claim in the logs — do not invent errors, files, or commands you cannot see. Do not wrap the whole answer in a single code fence.
+${REFERENCE_RULE}`;
 
 export interface DebugPromptInput {
   workflowName: string;
@@ -974,7 +984,10 @@ export function splitCommitMessage(raw: string): {
  *   unconditional even with no candidates fed; a prose final line starting with one
  *   of those tokens is deliberately sacrificed to that guarantee.
  * - Labels match case-insensitively against `availableLabels`, returned in the repo's
- *   canonical casing; anything not in the set is DROPPED.
+ *   canonical casing; anything not in the set is DROPPED and reported in
+ *   `droppedLabels` (as the model emitted it) so a caller can surface the mismatch.
+ *   Empty whenever there is no directive or no `availableLabels` — a run with the
+ *   feature off drops nothing.
  * - `Closes:`/`Relates:` numbers are comma-split, `#`-stripped, digits-only, validated
  *   against `candidateIssueNumbers` and deduped; a number in both lands in `relates`.
  * - `Relates:` KEY-shaped tokens validate against `candidateJiraKeys` → `jiraMentions`
@@ -990,6 +1003,7 @@ export function extractPrDraft(
   title: string;
   body: string;
   labels: string[];
+  droppedLabels: string[];
   closes: number[];
   relates: number[];
   jiraMentions: string[];
@@ -1038,8 +1052,10 @@ export function extractPrDraft(
       ? lines.slice(0, bodyEnd).join("\n").trimEnd()
       : fullBody;
 
-  // Validate the label names against the repo's set (canonical casing).
+  // Validate the label names against the repo's set (canonical casing). A name the
+  // set doesn't hold is kept as the model emitted it so the caller can say so.
   const labels: string[] = [];
+  const droppedLabels: string[] = [];
   if (availableLabels.length > 0 && captured.labels) {
     const canonical = new Map<string, string>();
     for (const name of availableLabels) {
@@ -1048,13 +1064,13 @@ export function extractPrDraft(
     }
     const seen = new Set<string>();
     for (const part of captured.labels.split(",")) {
-      const key = part.trim().toLowerCase();
-      if (!key) continue;
+      const trimmed = part.trim();
+      const key = trimmed.toLowerCase();
+      if (!key || seen.has(key)) continue;
       const match = canonical.get(key);
-      if (match && !seen.has(key)) {
-        seen.add(key);
-        labels.push(match);
-      }
+      seen.add(key);
+      if (match) labels.push(match);
+      else droppedLabels.push(trimmed);
     }
   }
 
@@ -1102,7 +1118,7 @@ export function extractPrDraft(
     }
   }
 
-  return { title, body, labels, closes, relates, jiraMentions };
+  return { title, body, labels, droppedLabels, closes, relates, jiraMentions };
 }
 
 /** The branch name from a branch-name response, tolerant of a leaked preamble line.
@@ -1224,7 +1240,8 @@ Title: <one concise line summarizing the issue, no trailing period, no quotes>
 
 <the issue body in GitHub-flavored markdown — organized with the sections appropriate to the notes (e.g. context/summary, steps to reproduce, expected vs. actual, proposed change), using headings and lists where they help>
 
-Expand and clarify the user's notes, but do NOT invent specifics (version numbers, exact error text, file names, stack traces) that the notes don't imply — leave a placeholder or omit instead. Do not wrap the output in code fences.`;
+Expand and clarify the user's notes, but do NOT invent specifics (version numbers, exact error text, file names, stack traces) that the notes don't imply — leave a placeholder or omit instead. Do not wrap the output in code fences.
+${REFERENCE_RULE}`;
 
 export function buildIssueDraftPrompt(input: {
   notes: string;
@@ -1327,7 +1344,8 @@ Give 2–4 concrete options per question whenever you can suggest them (the user
 Rules:
 - Stay at what/why. Do NOT write the full implementation, and do NOT invent specifics (exact code, version numbers, error text) the repo doesn't support.
 - Every path you cite must be a real file you opened — except a file you propose to CREATE, which you mark (create).
-- Prefer the project's own conventions and commands over generic ones.`;
+- Prefer the project's own conventions and commands over generic ones.
+- ${REFERENCE_RULE}`;
 
 /** Render one capped, deduped list as a single `Label: a, b, c …and N more` line,
  *  or null when empty. Never silently truncates — an explicit tail names the count
@@ -1493,6 +1511,7 @@ Rules:
 - Ground any repo claim in files you actually opened.
 - Keep your filesystem reads INSIDE this repository (the working directory and below). Explore the repo and the web — not the broader machine, the home directory, or system paths.
 - Keep the options genuinely distinct. Resist narrowing to one — breadth is the value here.
+- ${REFERENCE_RULE}
 - No filler, no compliments, no recap of these instructions.`;
 
 const DEEPRESEARCH_SYSTEM = `You are a research agent in DEEP RESEARCH mode for a software project. You have READ-ONLY tools — read files, grep, glob, and web search/fetch. You cannot and must not modify anything; your job is a rigorous, grounded, CITED investigation of ONE chosen direction.
@@ -1521,6 +1540,7 @@ Rules:
 - Ground repo-feasibility claims in files you actually opened.
 - Keep your filesystem reads INSIDE this repository (the working directory and below). Investigate the repo and the web — not the broader machine, the home directory, or system paths.
 - Cross-check before asserting; flag where sources disagree.
+- ${REFERENCE_RULE}
 - No filler, no compliments, no recap of these instructions.`;
 
 /**
@@ -1785,6 +1805,8 @@ When given only commit subjects:
 - Group them under short headings with concise past-tense bullets. Merge trivial/duplicate commits
   and drop noise (merge commits, "wip", formatting-only, version bumps). Do NOT invent changes.
 
+${REFERENCE_RULE}
+
 Keep it concise and scannable. If there are very few entries, a short flat list is fine.`;
 
 /** The commit-subjects-only variant of the release-notes system prompt: no host
@@ -1799,6 +1821,8 @@ You are given a list of commit subjects from this release.
 Group them under short headings (e.g. ## Features, ## Fixes, ## Maintenance) with concise
 past-tense bullets. Merge trivial/duplicate commits and drop noise (merge commits, "wip",
 formatting-only, version bumps). Do NOT invent changes.
+
+${REFERENCE_RULE}
 
 Keep it concise and scannable. If there are very few entries, a short flat list is fine.`;
 

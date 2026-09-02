@@ -1,0 +1,1 @@
+- AI-generated reviews, plans, release notes, and issue drafts enumerate findings as (1), (2) and reserve #N for deliberate references to real issues and pull requests.

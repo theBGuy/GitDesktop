@@ -1,0 +1,1 @@
+- A commit comment without a resolvable diff line now stays visibly attached to its own file, marked "couldn't place in this diff".

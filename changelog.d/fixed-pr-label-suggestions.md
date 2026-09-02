@@ -1,0 +1,1 @@
+- PR label suggestions are steadier: clear-cut fixes propose the matching label more reliably, a suggestion that isn't a repo label is called out beneath the Labels field, and the picker says when labels couldn't be loaded.
