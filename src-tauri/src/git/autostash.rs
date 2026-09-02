@@ -4,9 +4,11 @@
 //! lock-free runners while holding it — `run_git_mutating` re-acquires the same
 //! non-reentrant mutex and deadlocks (precedent: `git_stash_paths_core`). The inner
 //! steps therefore lose `run_git_mutating`'s one-shot index.lock retry, the same
-//! trade-off that compound accepts. The pull compound's transfer additionally takes
-//! the NETWORK lock around its one network call, so it still serializes against the
-//! background auto-fetch; that nesting direction is the only one allowed (see
+//! trade-off that compound accepts. The pull compound runs its transfer FIRST, under
+//! the network domain alone (`git::pull_guard`), and takes the working tree only for
+//! the local half — so staging stays available across a transfer. Its bare
+//! fall-through keeps the older shape, taking the NETWORK lock inside the
+//! working-tree hold; that nesting direction is the only one allowed (see
 //! `run_git_mutating`).
 
 use tauri::State;
@@ -191,13 +193,18 @@ pub(crate) async fn git_pull_autostash_core(
     // mode it RAN. A refused `--ff-only` leaves nothing unmerged, so its label
     // never surfaces.
     let paused = if mode == "rebase" { "rebase" } else { "merge" };
-    // Rebase mode runs the two-phase guard first — bare `git pull --rebase` can
-    // silently drop a pushed commit a force-push rewrote away (git::pull_guard).
-    // `None` means the guard stood down and this pull proceeds unchanged.
+    // Every mode splits into a network phase and a local one (git::pull_guard), so the
+    // transfer runs before anything is stashed and holds the network domain alone.
+    // Rebase mode additionally runs the fork-point guard there — bare
+    // `git pull --rebase` can silently drop a pushed commit a force-push rewrote away.
     if mode == "rebase" {
         if let Some(outcome) = crate::git::pull_guard::guarded_pull_autostash(state, &repo_path).await? {
             return Ok(outcome);
         }
+    } else if let Some(plain) =
+        crate::git::pull_guard::pin_plain_pull(state, &repo_path, mode != "merge").await?
+    {
+        return crate::git::pull_guard::merge_pinned_autostash(state, &repo_path, &plain).await;
     }
     // A read that shells out to git itself — resolve it BEFORE taking the lock.
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
@@ -206,10 +213,11 @@ pub(crate) async fn git_pull_autostash_core(
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
 
-    // The transfer serializes with the network domain (the auto-fetch runs there),
-    // and the hold is taken BEFORE the stash so it spans stash → pull → settle: a
-    // refusal to wait must precede the first tree mutation, or the user's work is
-    // stashed and popped back purely to report that something else was running.
+    // The fall-through's transfer serializes with the network domain (the auto-fetch
+    // runs there), and the hold is taken BEFORE the stash so it spans
+    // stash → pull → settle: a refusal to wait must precede the first tree mutation,
+    // or the user's work is stashed and popped back purely to report that something
+    // else was running.
     let network = state.network_lock(&repo_path).await;
     let _net_guard = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a pull").await?;
 
@@ -1697,19 +1705,17 @@ mod tests {
         }
     }
 
-    /// Pull's version of the same parity, on the split that hides the loss: the
-    /// fetch summary fills stderr while the merge verdict rides stdout, so an
-    /// error carrying stderr alone looks populated and still says nothing about
+    /// Pull's version of the same parity, on the split that hides the loss: a
+    /// conflicted merge reports on STDOUT and leaves stderr empty, so an error
+    /// shaped from stderr alone looks like a bare exit code and says nothing about
     /// the conflict. Both sides must carry the whole report, identically, and both
     /// must name the operation they paused.
     #[tokio::test]
     async fn a_conflicted_pull_with_nothing_stashed_carries_the_stdout_report() {
         let (dir, work, clone) = setup_clone("pull-parity-conflict").await;
-        // TWO clones, one per side: the fetch half of a pull reports
-        // `<old>..<new> main -> origin/main` on stderr and only when a ref
-        // actually moves, so running both pulls in ONE clone would compare a
-        // fetching pull against an already-up-to-date one. Cloned before the
-        // upstream push so each is behind by the same commit.
+        // TWO clones, one per side: the first pull leaves the tree mid-merge, so a
+        // second one in the SAME clone could only be measured against a refusal.
+        // Cloned before the upstream push so each is behind by the same commit.
         let url = format!(
             "file://{}",
             dir.path()

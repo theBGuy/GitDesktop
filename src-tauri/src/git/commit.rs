@@ -1,6 +1,7 @@
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::git::history::{parse_commit_log, LOG_FORMAT};
 use crate::git::runner::{
     run_git, run_git_mutating, run_git_mutating_raw, run_git_raw, DEFAULT_TIMEOUT,
 };
@@ -301,30 +302,75 @@ pub async fn git_recent_commits(repo_path: String, limit: u32) -> AppResult<Vec<
     let limit_arg = limit.to_string();
     let out = run_git(
         Some(&repo_path),
-        &[
-            "log",
-            "-n",
-            &limit_arg,
-            "--format=%H%x00%s%x00%an%x00%ae%x00%cI",
-        ],
+        &["log", "-n", &limit_arg, LOG_FORMAT],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let text = out.stdout_lossy();
-    let commits = text
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\0');
-            Some(CommitSummary {
-                hash: parts.next()?.to_string(),
-                subject: parts.next()?.to_string(),
-                author: parts.next()?.to_string(),
-                author_email: parts.next()?.to_string(),
-                date: parts.next()?.to_string(),
-                tags: Vec::new(),
-                is_merge: false,
-            })
-        })
-        .collect();
-    Ok(commits)
+    Ok(parse_commit_log(&out.stdout_lossy()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn run(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    /// The recent-commits list shares History's log format + parser, so its rows
+    /// carry the `%D` tag decorations and the `%P` merge flag.
+    #[tokio::test]
+    async fn recent_commits_carry_tags_and_merge_flags() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-recent-commits-")
+            .tempdir()
+            .expect("create temp dir");
+        let root = dir.path();
+        let repo = root.to_string_lossy().into_owned();
+        run(&repo, &["init", "-q"]).await;
+        run(&repo, &["config", "user.email", "t@t.local"]).await;
+        run(&repo, &["config", "user.name", "T"]).await;
+
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        // `git init` picks the default branch name from the host's config.
+        let base_branch = run(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        run(&repo, &["checkout", "-qb", "feature"]).await;
+        std::fs::write(root.join("feature.txt"), "feature\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "feature work"]).await;
+
+        run(&repo, &["checkout", "-q", &base_branch]).await;
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "base work"]).await;
+        run(&repo, &["tag", "v1.0"]).await;
+        // `--no-ff` so the fixture has a real two-parent commit to report on.
+        run(&repo, &["merge", "-q", "--no-ff", "--no-edit", "feature"]).await;
+
+        let commits = git_recent_commits(repo.clone(), 10)
+            .await
+            .expect("the log reads");
+
+        assert!(
+            commits[0].is_merge,
+            "the newest commit is the merge: {:?}",
+            commits[0]
+        );
+        assert!(commits[0].tags.is_empty(), "the merge carries no tag");
+        let tagged = commits
+            .iter()
+            .find(|c| c.subject == "base work")
+            .expect("the tagged commit is in range");
+        assert_eq!(tagged.tags, vec!["v1.0".to_string()]);
+        assert!(!tagged.is_merge, "an ordinary commit has one parent");
+    }
 }

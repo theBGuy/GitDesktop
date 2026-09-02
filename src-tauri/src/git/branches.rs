@@ -2,7 +2,8 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{
-    acquire_repo_lock, run_git, run_git_mutating, run_git_raw, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    acquire_repo_lock, acquire_repo_lock_unbounded, run_git, run_git_mutating, run_git_raw,
+    run_git_worktree_admin, try_acquire_repo_lock, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
     NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
@@ -1048,7 +1049,8 @@ pub(crate) async fn branch_reset_to_upstream(
 /// - already contains `base` → no-op, `"up-to-date"`.
 /// - strictly behind → fast-forward the ref, `"fast-forward"`.
 /// - diverged → merge `base` in a throwaway worktree so the main checkout is
-///   untouched, `"merge"`; a conflicting merge is aborted and the branch left as-is.
+///   untouched, `"merge"`; a conflicting merge is aborted and the branch left as-is,
+///   and a `branch` that moved while that worktree was materializing is refused.
 ///
 /// When `branch` IS the current branch there's nothing to avoid switching to, so it
 /// merges in place (conflicts surface in the changes list as usual — no abort).
@@ -1080,7 +1082,7 @@ pub(crate) async fn update_branch_from(
 
     // Mutating refs — serialize against other writes to this repo's working tree.
     let domain = state.working_tree_lock(repo_path).await;
-    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a branch update").await?;
+    let guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a branch update").await?;
 
     let current = run_git(
         Some(repo_path),
@@ -1148,46 +1150,182 @@ pub(crate) async fn update_branch_from(
     }
 
     // Diverged → merge in a throwaway worktree so the user's checkout is untouched.
+    // Both ends are pinned under THIS hold, because the worktree steps below run in
+    // the worktree-admin domain, which nests with no other: the working-tree lock is
+    // released across them, so either ref can move meanwhile.
+    let Some(branch_tip) = branch_tip_sha(repo_path, branch).await? else {
+        return Err(AppError::InvalidArgument(format!("unknown branch: {branch}")));
+    };
+    let base_out = run_git_raw(
+        Some(repo_path),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base}^{{commit}}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if base_out.code != 0 {
+        return Err(AppError::InvalidArgument(format!("unknown branch: {base}")));
+    }
+    let pins = UpdatePins {
+        branch_tip,
+        base_sha: base_out.stdout_lossy().trim().to_string(),
+    };
+    drop(guard);
+
     let tmp = std::env::temp_dir().join(format!("gd-update-{}", unique_suffix()));
     let tmp_str = tmp.to_string_lossy().to_string();
+    merge_diverged_in_worktree(state, repo_path, &tmp_str, branch, base, &pins).await
+}
 
-    run_git(
+/// The two refs an update is planned against, resolved under the first working-tree
+/// hold so nothing that moves afterwards can change what lands on the branch.
+struct UpdatePins {
+    branch_tip: String,
+    base_sha: String,
+}
+
+/// The sha `refs/heads/<branch>` points at, or `None` when there is no such branch.
+/// The FULL ref path is the point: under a bare `rev-parse <branch>` a tag sharing
+/// the name would shadow it, and the pin would then guard the wrong object.
+async fn branch_tip_sha(repo_path: &str, branch: &str) -> AppResult<Option<String>> {
+    let out = run_git_raw(
         Some(repo_path),
-        &["worktree", "add", "--quiet", &tmp_str, branch],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        return Ok(None);
+    }
+    Ok(Some(out.stdout_lossy().trim().to_string()))
+}
+
+/// The diverged arm, run with the working-tree lock RELEASED: `worktree
+/// add/remove/prune` belong to the worktree-admin domain, which nests with no other,
+/// and materializing a whole checkout takes minutes that staging must not queue
+/// behind.
+///
+/// The add is bounded, so a concurrent removal's prune yields an explained `Busy`
+/// instead of an interleaved write to `.git/worktrees/`. Every path out of the merge
+/// — refusal, conflict, success — reaches the teardown below.
+async fn merge_diverged_in_worktree(
+    state: &AppState,
+    repo_path: &str,
+    tmp: &str,
+    branch: &str,
+    base: &str,
+    pins: &UpdatePins,
+) -> AppResult<String> {
+    run_git_worktree_admin(
+        state,
+        repo_path,
+        &["worktree", "add", "--quiet", tmp, branch],
         WORKTREE_OP_TIMEOUT,
     )
     .await?;
 
-    // The merge keeps the default budget: it rewrites only the differing files, not
-    // the whole tree, and both arms below tear the temp worktree down regardless.
-    let merged = run_git(
-        Some(&tmp_str),
-        &["merge", "--no-edit", base],
-        DEFAULT_TIMEOUT,
-    )
-    .await;
+    let result = verify_pin_and_merge(state, repo_path, tmp, branch, base, pins).await;
 
-    let result = match merged {
-        Ok(_) => Ok("merge".to_string()),
-        Err(_) => {
-            // Undo the half-done merge so the branch ref is left as it was.
-            let _ = run_git_raw(Some(&tmp_str), &["merge", "--abort"], DEFAULT_TIMEOUT).await;
-            Err(AppError::InvalidArgument(format!(
-                "{branch} has changes that conflict with {base}. Switch to {branch} to merge and resolve them."
-            )))
+    // Try-then-detach is the only teardown shape with no bad arm: a bounded acquire
+    // that gave up on `Busy` would leak the throwaway worktree, and a synchronous
+    // unbounded one holds a finished update's command hostage for the minutes a
+    // node_modules-scale removal can hold the shared admin domain.
+    let domain = state.worktree_admin_lock(repo_path).await;
+    match try_acquire_repo_lock(&domain, "a worktree operation") {
+        Some(_admin) => remove_tmp_worktree(repo_path, tmp).await,
+        None => {
+            let (repo, tmp) = (repo_path.to_string(), tmp.to_string());
+            tauri::async_runtime::spawn(async move {
+                let _admin = acquire_repo_lock_unbounded(&domain, "a worktree operation").await;
+                remove_tmp_worktree(&repo, &tmp).await;
+            });
         }
-    };
+    }
 
-    // Always tear the throwaway worktree down, success or failure.
+    result
+}
+
+/// `worktree remove --force` then `prune`, both best-effort and both lock-free: every
+/// caller already holds the worktree-admin domain.
+async fn remove_tmp_worktree(repo_path: &str, tmp: &str) {
     let _ = run_git_raw(
         Some(repo_path),
-        &["worktree", "remove", "--force", &tmp_str],
+        &["worktree", "remove", "--force", tmp],
         WORKTREE_OP_TIMEOUT,
     )
     .await;
     let _ = run_git_raw(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+}
 
-    result
+/// Under a fresh working-tree hold: confirm both pinned refs still stand, then merge
+/// `base` by NAME inside the throwaway worktree at `tmp`. The merge writes the shared
+/// `refs/heads/<branch>`, which is why it belongs in this domain, and the name is what
+/// gives the merge commit its `Merge branch '<base>'` subject; the pins are what keep
+/// a ref that moved while the worktree materialized from silently changing the
+/// operation. The hold covers writers on THIS checkout only — another worktree of the
+/// same repo takes its own working-tree lock, and a session-worktree removal deletes
+/// refs under the admin hold, so a cross-checkout mover is outside what it promises.
+async fn verify_pin_and_merge(
+    state: &AppState,
+    repo_path: &str,
+    tmp: &str,
+    branch: &str,
+    base: &str,
+    pins: &UpdatePins,
+) -> AppResult<String> {
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a branch update").await?;
+
+    if branch_tip_sha(repo_path, branch).await?.as_deref() != Some(pins.branch_tip.as_str()) {
+        return Err(AppError::Command(format!(
+            "{branch} moved while this update was running — try again to see where it stands."
+        )));
+    }
+
+    // The base check runs in the TMP worktree's cwd — the $GIT_DIR the merge itself
+    // will resolve in. gitrevisions resolves $GIT_DIR-local names (HEAD, MERGE_HEAD, …)
+    // ahead of `refs/heads/`, and `validate_branch_name` admits a literal "HEAD", so a
+    // check in the main checkout could pass over a different object than the merge
+    // takes. Same cwd makes "whatever the merge resolves" provably the pinned commit.
+    let base_now = run_git_raw(
+        Some(tmp),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base}^{{commit}}"),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if base_now.code != 0 || base_now.stdout_lossy().trim() != pins.base_sha {
+        return Err(AppError::Command(format!(
+            "{base} moved while this update was running — try again to see where it stands."
+        )));
+    }
+
+    // The merge keeps the default budget: it rewrites only the differing files, not
+    // the whole tree. Lock-free runner — the hold is ours.
+    let merged = run_git(Some(tmp), &["merge", "--no-edit", base], DEFAULT_TIMEOUT).await;
+    match merged {
+        Ok(_) => Ok("merge".to_string()),
+        Err(_) => {
+            // Undo the half-done merge so the branch ref is left as it was.
+            let _ = run_git_raw(Some(tmp), &["merge", "--abort"], DEFAULT_TIMEOUT).await;
+            Err(AppError::InvalidArgument(format!(
+                "{branch} has changes that conflict with {base}. Switch to {branch} to merge and resolve them."
+            )))
+        }
+    }
 }
 
 /// Whether a commit is reachable from any remote-tracking ref (`refs/remotes/*`) —
@@ -1252,13 +1390,14 @@ mod tests {
     use super::{
         branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args,
         divergence_out_of_range, git_branch_merge_states, git_branches, git_create_branch_core,
-        git_default_branch, git_rename_branch_core, parse_cherry_counts, parse_upstream_track,
-        update_branch_from, validate_branch_name, validate_ref_name, BranchRewriteStatus,
-        MergePair,
+        git_default_branch, git_rename_branch_core, merge_diverged_in_worktree,
+        parse_cherry_counts, parse_upstream_track, update_branch_from, validate_branch_name,
+        validate_ref_name, BranchRewriteStatus, MergePair, UpdatePins,
     };
     use crate::error::AppError;
-    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::git::runner::{acquire_repo_lock, run_git, run_git_raw, DEFAULT_TIMEOUT};
     use crate::state::AppState;
+    use std::time::Duration;
 
     // Full decision table for the create-branch argv: checkout × start_point ×
     // no_track (8 cases). The no_track=false rows are a regression guard — their argv
@@ -2408,5 +2547,256 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A repo whose `feature` branch has diverged from the default branch — each side
+    /// adds a file the other doesn't have, so the merge itself succeeds. Returns the
+    /// temp guard, the repo directory, its path as a string, and the default branch.
+    async fn diverged_repo(tag: &str) -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+        let (guard, base_dir) = temp_base(tag);
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "seed.txt").await;
+        let main = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        run(&repo_s, &["switch", "-qc", "feature"]).await;
+        std::fs::write(repo.join("feature.txt"), "feature\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "feature work"]).await;
+
+        run(&repo_s, &["switch", "-q", &main]).await;
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "base work"]).await;
+
+        (guard, repo, repo_s, main)
+    }
+
+    /// The window the admin prologue opens: while the throwaway worktree materializes,
+    /// nothing holds the working-tree lock, so `branch` can move under the update. The
+    /// tip pinned before that window is what catches it — a mismatch refuses, leaves
+    /// the ref where it stands, and still tears the worktree down.
+    #[tokio::test]
+    async fn update_branch_from_refuses_a_branch_that_moved_under_it() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-stale-pin").await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        let base_sha = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+
+        let tmp = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("stale-pin-wt");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let state = AppState::default();
+        // A real commit that simply isn't feature's tip — the shape a branch someone
+        // moved mid-update leaves behind.
+        let err = merge_diverged_in_worktree(
+            &state,
+            &repo_s,
+            &tmp_s,
+            "feature",
+            &main,
+            &UpdatePins {
+                branch_tip: base_sha.clone(),
+                base_sha,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m) if m.contains("moved while this update was running")),
+            "{err:?}"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature"]).await.trim(),
+            feature_tip,
+            "a refused update leaves the branch exactly where it was"
+        );
+        let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
+        assert!(
+            !list.contains("stale-pin-wt"),
+            "the throwaway worktree is unregistered: {list}"
+        );
+        assert!(!tmp.exists(), "and its directory is gone");
+    }
+
+    /// The three cheap arms touch no worktree admin, so a removal holding that domain
+    /// must not delay them. A zero budget takes the FREE admin lock deterministically
+    /// and refuses a held one.
+    #[tokio::test]
+    async fn cheap_update_arms_run_while_the_worktree_admin_domain_is_held() {
+        let (_guard, _repo, repo_s, main) = diverged_repo("update-admin-free").await;
+        run(&repo_s, &["branch", "level", &main]).await;
+        run(&repo_s, &["branch", "behind", &format!("{main}~1")]).await;
+
+        let state = AppState::default();
+        let _admin = acquire_repo_lock(
+            &state.worktree_admin_lock(&repo_s).await,
+            Duration::ZERO,
+            "a worktree removal",
+        )
+        .await
+        .expect("the admin domain is free");
+
+        assert_eq!(
+            update_branch_from(&state, &repo_s, "level", &main)
+                .await
+                .expect("up-to-date needs no worktree"),
+            "up-to-date"
+        );
+        assert_eq!(
+            update_branch_from(&state, &repo_s, "behind", &main)
+                .await
+                .expect("a fast-forward needs no worktree"),
+            "fast-forward"
+        );
+        // Last, since it moves the default branch: `branch == current` merges in place.
+        assert_eq!(
+            update_branch_from(&state, &repo_s, &main, "feature")
+                .await
+                .expect("an in-place merge needs no worktree"),
+            "merge"
+        );
+    }
+
+    /// The base's half of the pin. Merging by NAME is what keeps git's own merge
+    /// subject, so the sha the name resolves to has to be checked — a base that gained
+    /// a commit while the worktree materialized is a different operation than the one
+    /// the user asked for, and is refused rather than quietly merged.
+    #[tokio::test]
+    async fn a_diverged_update_refuses_a_base_that_moved_under_it() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-moved-base").await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        let pinned_base = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+
+        // The base moves after the pin — exactly the window the admin prologue opens.
+        std::fs::write(repo.join("later.txt"), "later\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "base work later"]).await;
+        let moved_base = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+        assert_ne!(pinned_base, moved_base, "the fixture must move the base");
+
+        let tmp = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("moved-base-wt");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let err = merge_diverged_in_worktree(
+            &state,
+            &repo_s,
+            &tmp_s,
+            "feature",
+            &main,
+            &UpdatePins {
+                branch_tip: feature_tip.clone(),
+                base_sha: pinned_base,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.starts_with(&format!("{main} moved while this update was running"))),
+            "{err:?}"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature"]).await.trim(),
+            feature_tip,
+            "a refused update leaves the branch exactly where it was"
+        );
+        let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
+        assert!(
+            !list.contains("moved-base-wt"),
+            "the throwaway worktree is unregistered: {list}"
+        );
+        assert!(!tmp.exists(), "and its directory is gone");
+    }
+
+    /// The happy path: both pins hold, so the merge runs by NAME and the branch gets
+    /// git's own `Merge branch '<base>'` subject over the pinned commit.
+    #[tokio::test]
+    async fn a_diverged_update_merges_the_pinned_base_by_name() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-pinned-base").await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        let pinned_base = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+
+        let tmp = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("pinned-base-wt");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let outcome = merge_diverged_in_worktree(
+            &state,
+            &repo_s,
+            &tmp_s,
+            "feature",
+            &main,
+            &UpdatePins {
+                branch_tip: feature_tip,
+                base_sha: pinned_base.clone(),
+            },
+        )
+        .await
+        .expect("an unmoved base merges cleanly");
+        assert_eq!(outcome, "merge");
+
+        let merged_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        let parents = run(&repo_s, &["rev-list", "--parents", "-n", "1", &merged_tip]).await;
+        assert!(
+            parents.contains(pinned_base.as_str()),
+            "the pinned base is a parent of the merge: {parents}"
+        );
+        // Exit 0 specifically: `is_ancestor` answers 1 for "no", and 128 for a bad
+        // argument, so anything but 0 has to fail this.
+        let reachable = run_git_raw(
+            Some(&repo_s),
+            &["merge-base", "--is-ancestor", &pinned_base, &merged_tip],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reachable.code, 0,
+            "the pinned base is reachable from the merge: {}",
+            reachable.stderr
+        );
+        // Merging by name is the whole reason for the base pin: a sha argument would
+        // have written `Merge commit '<sha>'` here instead.
+        let subject = run(&repo_s, &["log", "-1", "--format=%s", &merged_tip]).await;
+        assert!(
+            subject.trim().starts_with(&format!("Merge branch '{main}'")),
+            "git's own merge subject survives: {subject}"
+        );
+        assert!(!tmp.exists(), "the throwaway worktree is torn down");
     }
 }

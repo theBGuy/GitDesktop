@@ -61,9 +61,10 @@ fn is_auth_class_failure(stderr: &str) -> bool {
 }
 
 /// Run a git network op with one-shot credential `-c` entries prefixed, taking NO
-/// lock — so it is callable from inside a held working-tree lock (the autostash
-/// compounds, which take the network lock around it themselves). Returns the raw
-/// output: a non-zero exit is not an error here.
+/// lock — so it is callable from inside a held domain: a pull's network phase
+/// (`git::pull_guard`) holds the network lock around it, and the autostash pull's
+/// bare fall-through holds the working tree and takes the network lock around it.
+/// Returns the raw output: a non-zero exit is not an error here.
 ///
 /// When `cred` is non-empty and the injected run fails with an auth-class git error
 /// ([`is_auth_class_failure`]), retries EXACTLY ONCE with NO injected config (the
@@ -107,10 +108,11 @@ pub(crate) async fn run_git_with_creds_once(
 /// (fetch/pull/push) is written against.
 ///
 /// The network domain rather than the working tree: a transfer runs for up to
-/// `NETWORK_TIMEOUT` and must not stall staging or a commit for that long. A caller
-/// whose command also touches the working tree (`git_pull_core`) takes the
-/// working-tree lock around this call — that direction only (see
-/// `run_git_mutating`).
+/// `NETWORK_TIMEOUT` and must not stall staging or a commit for that long. The pull
+/// cores' bare fall-through is the one caller whose command also touches the working
+/// tree: it holds the working-tree lock across this call, which is the only sanctioned
+/// nesting direction (see `run_git_mutating`). Every other caller here — fetch, push,
+/// set-head — holds nothing but the network domain this takes.
 pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
     repo_path: &str,
@@ -485,19 +487,26 @@ pub(crate) async fn git_pull_core(
     // would each pay for an unmerged probe that can only come back empty.
     // A refused `--ff-only` leaves nothing unmerged, so its label never surfaces.
     let op = if mode == "rebase" { "rebase" } else { "merge" };
-    // Rebase mode runs the two-phase guard first — bare `git pull --rebase`
-    // computes its own fork point and can silently drop a pushed commit a
-    // force-push rewrote away (git::pull_guard). `false` means the guard stood
-    // down (detached HEAD, no upstream, unrelated histories, a tree mid-op) and
-    // this pull runs byte-identically to before.
-    if mode == "rebase" && crate::git::pull_guard::guarded_pull(state, &repo_path).await? {
-        return Ok(());
+    // Every mode splits into a network phase and a local one (git::pull_guard), so the
+    // transfer holds the network domain alone and staging stays available across it.
+    // Rebase mode additionally runs the fork-point guard there — bare
+    // `git pull --rebase` computes its own fork point and can silently drop a pushed
+    // commit a force-push rewrote away.
+    if mode == "rebase" {
+        if crate::git::pull_guard::guarded_pull(state, &repo_path).await? {
+            return Ok(());
+        }
+    } else if let Some(plain) =
+        crate::git::pull_guard::pin_plain_pull(state, &repo_path, mode != "merge").await?
+    {
+        return crate::git::pull_guard::merge_pinned(state, &repo_path, &plain).await;
     }
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
-    // Bare `git pull` is a transfer AND a merge in one command, so it needs both
-    // domains: the working tree here, the network inside `run_git_mutating_with_creds`
-    // — that order only (see `run_git_mutating`). The guarded rebase path above takes
-    // the working-tree lock itself and must stay outside this hold.
+    // The fall-through, for every state the split phases stand down on (each listed at
+    // `pin_plain_pull` / `guarded_pull`): bare `git pull` is a transfer AND a merge in
+    // one command, so it needs both domains — the working tree here, the network inside
+    // `run_git_mutating_with_creds` — that order only (see `run_git_mutating`). The
+    // split phases above take their own locks and must stay outside this hold.
     let wt = state.working_tree_lock(&repo_path).await;
     let _wt_guard = acquire_repo_lock(&wt, LOCK_WAIT_TIMEOUT, "a pull").await?;
     let already_unmerged = crate::git::ops::unmerged_paths(&repo_path).await;
@@ -1764,6 +1773,52 @@ mod tests {
                 "{key}: the autostash entry is not left behind"
             );
         }
+    }
+
+    /// A merge-mode pull runs its own `git merge` rather than `git pull`, so it has
+    /// to spell pull's own merge subject — the line the user reads in their history,
+    /// and the one place git's URL rendering (a stripped trailing `.git`, anonymized
+    /// credentials) and its `into <branch>` rule show through. Compared against a
+    /// real bare pull in a twin clone, so no wording is asserted from memory.
+    #[tokio::test]
+    async fn a_merge_mode_pull_writes_bare_pulls_merge_subject() {
+        let (_guard, base, _origin_s, url) = seeded_origin("merge-subject").await;
+        let base_s = base.to_string_lossy().into_owned();
+        let work = base.join("work");
+        let work_s = work.to_string_lossy().into_owned();
+
+        let mut clones = Vec::new();
+        for name in ["guarded", "bare"] {
+            run(&base_s, &["-c", "core.autocrlf=false", "clone", "-q", &url, name]).await;
+            let c = base.join(name).to_string_lossy().into_owned();
+            run(&c, &["config", "core.autocrlf", "false"]).await;
+            run(&c, &["config", "user.email", "t@t.local"]).await;
+            run(&c, &["config", "user.name", "T"]).await;
+            // A local commit on a file upstream never touches: the branch has to have
+            // DIVERGED, since a fast-forward writes no merge commit to compare.
+            std::fs::write(base.join(name).join("mine.txt"), "mine\n").unwrap();
+            run(&c, &["add", "-A"]).await;
+            run(&c, &["commit", "-qm", "my local work"]).await;
+            clones.push(c);
+        }
+
+        std::fs::write(work.join("a.txt"), "upstream\n").unwrap();
+        run(&work_s, &["commit", "-qam", "upstream moves on"]).await;
+        run(&work_s, &["push", "-q"]).await;
+
+        let state = AppState::default();
+        git_pull_core(&state, clones[0].clone(), "merge".into())
+            .await
+            .expect("a non-overlapping divergence merges cleanly");
+        run(&clones[1], &["pull", "--no-rebase", "-q"]).await;
+
+        let ours = subjects(&clones[0]).await.first().cloned().unwrap();
+        let theirs = subjects(&clones[1]).await.first().cloned().unwrap();
+        assert_eq!(ours, theirs, "the merge subject must be pull's own");
+        assert!(
+            ours.starts_with("Merge branch 'main' of "),
+            "and it names the upstream branch it merged: {ours}"
+        );
     }
 
     // --- Pure arg-building for a named-branch push. ---

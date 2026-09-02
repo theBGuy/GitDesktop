@@ -793,16 +793,6 @@ fn is_session_worktree(
     false
 }
 
-/// The target of a linked worktree's `.git` pointer file (`gitdir: <path>`).
-/// The recorded path may be relative to the worktree, so callers resolve it.
-fn parse_gitdir_pointer(content: &str) -> Option<&str> {
-    content
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("gitdir:"))
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-}
-
 /// A file's mtime as epoch ms, or `None` when it is unreadable.
 fn file_mtime_ms(path: &std::path::Path) -> Option<i64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
@@ -820,23 +810,8 @@ fn file_mtime_ms(path: &std::path::Path) -> Option<i64> {
 /// 8 real worktrees, 2026-08-30). HEAD's mtime is the fallback. `None` on
 /// anything unreadable — one worktree with odd admin files must never fail the
 /// whole list.
-fn worktree_last_activity_ms(worktree_path: &str) -> Option<i64> {
-    let root = std::path::Path::new(worktree_path);
-    let dotgit = root.join(".git");
-    // `git::ops::marker_dir` resolves the same `.git`-dir-or-pointer question for
-    // op markers, so a change to either resolution rule has to land in both until
-    // they are hoisted into one shared helper.
-    let admin = match std::fs::metadata(&dotgit) {
-        Ok(meta) if meta.is_dir() => dotgit,
-        // A linked worktree's `.git` is a pointer to `<repo>/.git/worktrees/<id>`,
-        // recorded relative under `worktree.useRelativePaths` — joining on the
-        // tree resolves that and leaves an absolute pointer untouched.
-        Ok(_) => {
-            let pointer = std::fs::read_to_string(&dotgit).ok()?;
-            root.join(parse_gitdir_pointer(&pointer)?)
-        }
-        Err(_) => return None,
-    };
+pub(crate) fn worktree_last_activity_ms(worktree_path: &str) -> Option<i64> {
+    let admin = crate::git::ops::resolve_git_admin_dir(std::path::Path::new(worktree_path))?;
     file_mtime_ms(&admin.join("index")).or_else(|| file_mtime_ms(&admin.join("HEAD")))
 }
 
@@ -878,6 +853,7 @@ mod tests {
     use super::*;
     // The module itself no longer calls the working-tree runner — the interleave
     // tests below drive it as an ordinary caller would.
+    use crate::git::ops::parse_gitdir_pointer;
     use crate::git::runner::run_git_mutating;
 
     #[test]

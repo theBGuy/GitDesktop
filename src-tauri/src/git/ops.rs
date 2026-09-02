@@ -87,49 +87,57 @@ async fn absolute_git_dir(repo: &str) -> Option<std::path::PathBuf> {
     (!dir.is_empty()).then(|| std::path::PathBuf::from(dir))
 }
 
-/// The dir holding `repo`'s op markers, resolved without spawning git — for the
-/// paths that pay this on EVERY commit or while holding a lock and must not grow a
-/// `rev-parse` child for it. `None` for anything unreadable, which callers must read
-/// as "no markers", never as an error.
+/// The target of a linked worktree's or submodule's `.git` pointer file
+/// (`gitdir: <path>`). The recorded path may be relative to the tree holding that
+/// file, so callers resolve it. Line-scanned rather than whole-content-trimmed, which
+/// keeps a pointer carrying stray leading lines readable.
+pub(crate) fn parse_gitdir_pointer(content: &str) -> Option<&str> {
+    content
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+}
+
+/// The admin dir behind a tree's `.git`, resolved without spawning git — for the
+/// paths that pay this on EVERY commit, or while holding a lock, and must not grow a
+/// `rev-parse` child for it. `None` for anything unreadable, which callers read as an
+/// absence ("no markers", "no activity"), never as an error.
 ///
 /// A linked worktree or submodule replaces `.git` with a one-line `gitdir:` pointer
-/// to the dir holding ITS markers, and that path may be relative to the tree holding
+/// to the dir holding ITS state, and that path may be relative to the tree holding
 /// the `.git` file — always for a submodule (`gitdir: ../.git/modules/<name>`), and
 /// for a worktree under `worktree.useRelativePaths` / `--relative-paths`
 /// (`gitdir: ../<main>/.git/worktrees/<name>`); measured, git 2.51.1. Joining on the
-/// repo path resolves those and leaves an absolute pointer untouched.
-///
-/// `git::worktree::worktree_last_activity_ms` duplicates this resolution rule, so a
-/// change here has to land there too until both are hoisted into one shared helper.
-fn marker_dir(repo: &str) -> Option<std::path::PathBuf> {
-    let repo_root = Path::new(repo);
-    let dot_git = repo_root.join(".git");
+/// tree root resolves those and leaves an absolute pointer untouched.
+pub(crate) fn resolve_git_admin_dir(tree_root: &Path) -> Option<std::path::PathBuf> {
+    let dot_git = tree_root.join(".git");
     match std::fs::metadata(&dot_git) {
         Ok(meta) if meta.is_dir() => Some(dot_git),
-        Ok(_) => std::fs::read_to_string(&dot_git)
-            .ok()?
-            .trim()
-            .strip_prefix("gitdir:")
-            .map(|dir| repo_root.join(dir.trim())),
+        Ok(_) => {
+            let pointer = std::fs::read_to_string(&dot_git).ok()?;
+            Some(tree_root.join(parse_gitdir_pointer(&pointer)?))
+        }
         Err(_) => None,
     }
 }
 
 /// Whether `CHERRY_PICK_HEAD` is present, resolved without spawning git (see
-/// [`marker_dir`]).
+/// [`resolve_git_admin_dir`]).
 ///
 /// Narrower than [`op_state`] on purpose: it answers only "is a single-commit pick
 /// stopped here", the state `cherry-pick <hash>` leaves and `git commit` clears. The
 /// sequencer-only pick (`cherry-pick -n`, no marker) is deliberately outside it.
 pub(crate) fn cherry_pick_marker_present(repo: &str) -> bool {
-    marker_dir(repo).is_some_and(|dir| dir.join("CHERRY_PICK_HEAD").exists())
+    resolve_git_admin_dir(Path::new(repo))
+        .is_some_and(|dir| dir.join("CHERRY_PICK_HEAD").exists())
 }
 
 /// Whether a rebase is stopped here, resolved without spawning git (see
-/// [`marker_dir`]) — the same `rebase-merge`/`rebase-apply` pair [`op_state`] reads,
-/// for the callers that need the verdict while holding a lock.
+/// [`resolve_git_admin_dir`]) — the same `rebase-merge`/`rebase-apply` pair
+/// [`op_state`] reads, for the callers that need the verdict while holding a lock.
 pub(crate) fn rebase_marker_present(repo: &str) -> bool {
-    marker_dir(repo).is_some_and(|dir| {
+    resolve_git_admin_dir(Path::new(repo)).is_some_and(|dir| {
         dir.join("rebase-merge").exists() || dir.join("rebase-apply").exists()
     })
 }
@@ -6235,6 +6243,43 @@ mod tests {
         assert!(
             cherry_pick_marker_present(&repo),
             "a relative pointer resolves against the tree holding the .git file"
+        );
+    }
+
+    /// The tolerance both spawn-free `.git` resolutions share: the line-scanning form,
+    /// which reads a pointer past stray leading lines. Its failure direction is the
+    /// safe one for both callers — an unresolvable pointer means "no markers" / "no
+    /// activity", never an error.
+    #[test]
+    fn a_junk_prefixed_gitdir_pointer_resolves_for_both_entry_points() {
+        let tmp = tempfile::Builder::new()
+            .prefix("gd-junk-gitdir-")
+            .tempdir()
+            .expect("create temp dir");
+        let tree = tmp.path().join("tree");
+        let admin = tmp.path().join("real/.git/worktrees/wt");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(
+            tree.join(".git"),
+            "# stray leading line\ngitdir: ../real/.git/worktrees/wt\n",
+        )
+        .unwrap();
+        let tree_s = tree.to_string_lossy().into_owned();
+
+        assert!(
+            resolve_git_admin_dir(&tree).is_some(),
+            "the pointer is found past the junk line"
+        );
+        std::fs::write(admin.join("CHERRY_PICK_HEAD"), "deadbeef\n").unwrap();
+        assert!(
+            cherry_pick_marker_present(&tree_s),
+            "the op-marker probe reads through it"
+        );
+        std::fs::write(admin.join("index"), b"idx").unwrap();
+        assert!(
+            crate::git::worktree::worktree_last_activity_ms(&tree_s).is_some(),
+            "and so does the worktree activity probe"
         );
     }
 

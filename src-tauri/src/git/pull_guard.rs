@@ -8,6 +8,14 @@
 //! verdict into that argv: it has no `--no-fork-point` and never consults
 //! `rebase.forkPoint` (measured, git 2.51.1), so deciding at all means running the
 //! phases ourselves — probe here, then rebase onto pinned SHAs on the user's answer.
+//!
+//! Splitting the phases is also what keeps the TRANSFER off the working tree: EVERY
+//! mode routes its fetch through here (the plain modes via [`pin_plain_pull`]), under
+//! the NETWORK domain alone, and only then takes the working tree for the local half.
+//! So staging and committing stay available across a transfer, and the local half
+//! runs on the SHAs that one fetch pinned. (The rebase arms' submodule parity step is
+//! the exception: it runs a network-scale `submodule update` inside the working-tree
+//! hold, so `submodule.recurse` users still see a long hold after their rebase.)
 
 use tauri::State;
 
@@ -16,8 +24,8 @@ use crate::git::autostash::{autostash_push, settle, AutostashOutcome};
 use crate::git::history::validate_hash;
 use crate::git::remote::run_git_with_creds_once;
 use crate::git::runner::{
-    acquire_repo_lock, run_git, run_git_raw, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
-    NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    acquire_repo_lock, run_git, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -66,6 +74,31 @@ pub(crate) struct PullTarget {
     upstream: String,
     /// The upstream's remote, or `"."` for a local-branch upstream (nothing to fetch).
     remote: String,
+}
+
+/// What one pull's network phase produced, pinned under the hold that produced it.
+/// The local half is spelled in these values alone: the refs they were read from
+/// move under the background auto-fetch, and `FETCH_HEAD` is shared by every
+/// worktree of the repo, so re-reading either at merge time would act on a
+/// different snapshot than the one the plan was made from.
+pub(crate) struct PinnedFetch {
+    /// The upstream tip this fetch produced.
+    new_tip: String,
+    /// The `FETCH_HEAD` record naming `new_tip`, kept verbatim so `git fmt-merge-msg`
+    /// can spell the merge subject exactly as bare pull's does.
+    merge_source: String,
+}
+
+/// A plain (non-rebase) pull past its network phase: the target it runs against, the
+/// SHAs one fetch pinned, and the mode both halves were decided under. `None` from
+/// [`pin_plain_pull`] means the caller must fall through to bare `git pull` instead.
+pub(crate) struct PlainPull {
+    target: PullTarget,
+    pinned: PinnedFetch,
+    /// Fast-forward-only, the app's default mode; `false` is merge mode. Carried here
+    /// rather than re-passed so the stand-down verdict and the argv can't disagree
+    /// about which mode was checked.
+    ff_only: bool,
 }
 
 /// The fork-point verdict for one pull, with every SHA it rests on pinned. The
@@ -128,14 +161,15 @@ fn rebase_argv<'a>(autostash: Option<&'a str>, new_tip: &'a str, base: &'a str) 
     argv
 }
 
-/// The autostash flag a PLAIN (non-compound) rebase pull carries, mirroring what
-/// bare `git pull --rebase` would have done — all four arms measured on git
-/// 2.51.1:
+/// The autostash flag a PLAIN (non-compound) pull carries, mirroring what bare
+/// `git pull` would have done — all four arms measured on git 2.51.1:
 ///
-/// - `pull.autoStash=true` ⇒ `--autostash`; a bare rebase would IGNORE that key.
+/// - `pull.autoStash=true` ⇒ `--autostash`; a bare rebase or merge IGNORES that key.
 /// - `pull.autoStash=false` ⇒ `--no-autostash`, refusing as pull would.
-/// - unset ⇒ NO flag, which is what lets `rebase.autoStash` govern (pull's own
-///   fallback; ignoring it there was a bug git fixed in 2.36).
+/// - unset ⇒ NO flag, which is what lets the command's OWN key govern —
+///   `rebase.autoStash` for the rebase arms, `merge.autoStash` for the merge ones,
+///   each read natively (pull's own fallback; ignoring it there was a bug git fixed
+///   in 2.36).
 ///
 /// An unreadable or non-boolean value reads as unset: the flagless form leaves
 /// git's own resolution in charge rather than forcing a verdict.
@@ -494,23 +528,22 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 /// pull that bare git refuses outright ("no such ref was fetched"). Pruned, the
 /// upstream ref stops resolving and that refusal is what the user sees.
 ///
-/// The caller must already hold the repo's working-tree lock, so every step here
-/// uses the lock-free runners — `run_git_mutating*` would re-acquire it and
-/// deadlock. The NETWORK lock is taken around the fetch and held through the plan's
-/// reads (that nesting direction only), so the whole verdict rests on ONE snapshot
-/// of the tracking refs: the background auto-fetch shares that domain and would
-/// otherwise be free to move them between the fetch and the revs read off it.
+/// This phase holds the NETWORK domain and nothing else, so a transfer running for
+/// its whole budget never stalls staging or a commit; the caller takes the working
+/// tree afterwards, for the local half alone. Every step uses the lock-free runners,
+/// since `run_git_mutating*` would re-acquire a domain held here and deadlock.
+///
+/// The network hold spans the fetch AND the plan's reads, so the whole verdict rests
+/// on ONE snapshot of the tracking refs: the background auto-fetch shares that domain
+/// and would otherwise be free to move them between the fetch and the revs read off
+/// it. `branch_tip` is what the caller's [`ensure_pin_current`] re-checks before any
+/// of these SHAs are acted on.
 pub(crate) async fn probe(
     state: &AppState,
     repo: &str,
     target: &PullTarget,
     cred: &[String],
 ) -> AppResult<Option<PullPlan>> {
-    // Taking the lock is what makes `target` current; a switch between `resolve`
-    // and here would rebase `base..HEAD` for the wrong branch.
-    if current_branch(repo).await.as_deref() != Some(target.branch.as_str()) {
-        return Ok(None);
-    }
     // ONE network hold spanning the fetch AND every read below it: the verdict is
     // only sound on the refs this fetch produced, and the background auto-fetch runs
     // in this same domain — released in between, it can move
@@ -520,8 +553,7 @@ pub(crate) async fn probe(
         "." => None,
         remote => {
             let network = state.network_lock(repo).await;
-            let guard =
-                acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a fetch").await?;
+            let guard = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a pull").await?;
             let out = run_git_with_creds_once(
                 repo,
                 cred,
@@ -541,8 +573,8 @@ pub(crate) async fn probe(
 
     // The local side of every rev below is HEAD, not the branch NAME: rev-parse
     // resolves `refs/tags/<n>` ahead of `refs/heads/<n>`, so a tag sharing the
-    // branch's name would silently answer for it. The check above is what makes
-    // HEAD exactly this branch.
+    // branch's name would silently answer for it. `ensure_pin_current` is what makes
+    // HEAD provably this branch, at this tip, before any of these SHAs is acted on.
     let (Some(branch_tip), Some(new_tip)) = (
         rev_parse(repo, "HEAD").await,
         rev_parse(repo, &target.upstream_ref).await,
@@ -579,6 +611,332 @@ pub(crate) async fn probe(
     }))
 }
 
+/// The network phase of a PLAIN (merge / fast-forward) pull: one fetch under the
+/// network domain alone, with everything the local half needs pinned off it.
+///
+/// `None` stands the split phases down and the caller runs bare `git pull` — for a
+/// target `resolve` won't answer for (detached HEAD, no upstream, a tree mid-op,
+/// whose own git wording is what the user knows), for a local-branch upstream
+/// (nothing to transfer), for config the local half cannot honor
+/// ([`plain_pull_config_stands_down`]), and when the fetch leaves no usable snapshot.
+pub(crate) async fn pin_plain_pull(
+    state: &AppState,
+    repo: &str,
+    ff_only: bool,
+) -> AppResult<Option<PlainPull>> {
+    let Some(target) = resolve(repo).await? else {
+        return Ok(None);
+    };
+    if target.remote == "."
+        || plain_pull_config_stands_down(repo, &target.remote, !ff_only).await
+    {
+        return Ok(None);
+    }
+    // Shells out to git and the forge CLI — resolved before any lock, as the
+    // autostash compounds do.
+    let cred = credentials(repo, &target).await?;
+    let Some(pinned) = fetch_and_pin(state, repo, &target, &cred).await? else {
+        return Ok(None);
+    };
+    Ok(Some(PlainPull {
+        target,
+        pinned,
+        ff_only,
+    }))
+}
+
+/// Whether config makes the split phases behave differently from bare `git pull`, in
+/// which case the caller hands the pull back to bare `git pull` rather than quietly
+/// changing what it does. `merge_mode` gates the keys only a merge can trip.
+async fn plain_pull_config_stands_down(repo: &str, remote: &str, merge_mode: bool) -> bool {
+    // `submodule.recurse`: bare pull updates submodule worktrees for these modes, and
+    // the guard's measured parity step covers rebase only.
+    if submodule_recurse(repo).await {
+        return true;
+    }
+    // Pull-only keys `git merge` never reads, so honoring them is impossible here.
+    // `--ff-only` mode passes its own flag on both sides, which overrides `pull.ff`
+    // either way; `merge.ff` needs no arm, since bare pull reads it identically.
+    if merge_mode {
+        for key in ["pull.ff", "pull.twohead"] {
+            if config_is_set(repo, key).await {
+                return true;
+            }
+        }
+    }
+    // These only bite because our fetch PRUNES: pruning is what lets them delete local
+    // tags, and bare pull (with `fetch.prune` unset) never pruned at all.
+    for key in [
+        "fetch.pruneTags".to_string(),
+        format!("remote.{remote}.pruneTags"),
+    ] {
+        if config_is_true(repo, &key).await {
+            return true;
+        }
+    }
+    // A refspec writing into `refs/heads/*` needs the `--update-head-ok` bare pull
+    // passes its own fetch; ours would hard-refuse ("Refusing to fetch into branch").
+    fetch_maps_into_heads(repo, remote).await
+}
+
+/// Whether `key` is set at ALL, in any scope — the test for the tri-state and
+/// free-form keys where the value is irrelevant and a `--bool` read would collapse
+/// `only` into false. `--get` exits 1 when the key is unset. An unrunnable probe
+/// reads as set, so doubt stands the split phases down rather than acting.
+async fn config_is_set(repo: &str, key: &str) -> bool {
+    run_git_raw(Some(repo), &["config", "--get", key], DEFAULT_TIMEOUT)
+        .await
+        .is_ok_and(|out| out.code == 0)
+}
+
+/// Whether `key` reads true through git's own boolean resolution, so every spelling
+/// of true stays git's verdict. An unrunnable probe reads as true, standing the
+/// split phases down rather than acting on an unknown.
+async fn config_is_true(repo: &str, key: &str) -> bool {
+    let Ok(out) = run_git_raw(
+        Some(repo),
+        &["config", "--bool", "--get", key],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    else {
+        return true;
+    };
+    out.code == 0 && out.stdout_lossy().trim() == "true"
+}
+
+/// Whether any of the remote's fetch refspecs writes into `refs/heads/*` — the
+/// mirror-style clone whose fetch would collide with the checked-out branch. A
+/// leading `+` is the force marker, and the destination is the half after `:`; a
+/// refspec with no `:` (an exclusion, a fetch-only ref) writes nowhere local.
+async fn fetch_maps_into_heads(repo: &str, remote: &str) -> bool {
+    let Ok(out) = run_git_raw(
+        Some(repo),
+        &["config", "--get-all", &format!("remote.{remote}.fetch")],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    else {
+        return true;
+    };
+    out.stdout_lossy().lines().any(|spec| {
+        spec.trim()
+            .trim_start_matches('+')
+            .split_once(':')
+            .is_some_and(|(_, dst)| dst.starts_with("refs/heads/"))
+    })
+}
+
+/// The guard's own fetch, with the local half's inputs read under the SAME network
+/// hold — the one-snapshot invariant [`probe`] documents, for the modes that need no
+/// fork-point verdict. `None` when that snapshot is incomplete: an upstream branch
+/// deleted on the forge stops resolving once the fetch prunes it, and the caller's
+/// bare `git pull` then answers in git's own words ("no such ref was fetched").
+async fn fetch_and_pin(
+    state: &AppState,
+    repo: &str,
+    target: &PullTarget,
+    cred: &[String],
+) -> AppResult<Option<PinnedFetch>> {
+    let network = state.network_lock(repo).await;
+    let _net_guard = acquire_repo_lock(&network, NETWORK_LOCK_WAIT_TIMEOUT, "a pull").await?;
+    let out = run_git_with_creds_once(
+        repo,
+        cred,
+        &["fetch", "--prune", target.remote.as_str()],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
+    let Some(new_tip) = rev_parse(repo, &target.upstream_ref).await else {
+        return Ok(None);
+    };
+    let Some(merge_source) = fetch_head_record(repo, &new_tip).await else {
+        return Ok(None);
+    };
+    Ok(Some(PinnedFetch {
+        new_tip,
+        merge_source,
+    }))
+}
+
+/// The `FETCH_HEAD` record this fetch wrote for `new_tip` — the for-merge line (an
+/// EMPTY second field; every other ref the refspec brought carries `not-for-merge`),
+/// which is what `git fmt-merge-msg` turns into pull's own merge subject.
+///
+/// `None` unless there is EXACTLY ONE for-merge record and it names `new_tip`: a
+/// branch with several `branch.<b>.merge` entries gets an OCTOPUS merge from bare
+/// pull, which one pinned record cannot reproduce.
+///
+/// Read here rather than at merge time because `FETCH_HEAD` is shared by every
+/// worktree of the repo and the next fetch anywhere rewrites it. `--git-path` answers
+/// relative to the child's cwd, so the path is resolved against `repo` rather than
+/// this process's own working directory.
+async fn fetch_head_record(repo: &str, new_tip: &str) -> Option<String> {
+    let out = run_git_raw(
+        Some(repo),
+        &["rev-parse", "--git-path", "FETCH_HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    if out.code != 0 {
+        return None;
+    }
+    let stdout = out.stdout_lossy();
+    let rel = std::path::Path::new(stdout.trim_end_matches(['\r', '\n']));
+    let path = if rel.is_absolute() {
+        rel.to_path_buf()
+    } else {
+        std::path::Path::new(repo).join(rel)
+    };
+    let text = std::fs::read_to_string(path).ok()?;
+    let for_merge: Vec<&str> = text
+        .lines()
+        .filter(|line| line.split('\t').nth(1) == Some(""))
+        .collect();
+    match for_merge.as_slice() {
+        [record] if record.split('\t').next() == Some(new_tip) => Some((*record).to_string()),
+        _ => None,
+    }
+}
+
+/// Refuse unless HEAD is still the branch the network phase ran against — the branch
+/// every pinned SHA was read for. The TIP is deliberately not checked here: nothing
+/// the plain local half does depends on it (there is no fork-point verdict), merging
+/// the pinned tip onto a HEAD the user just advanced is what a fresh pull would do,
+/// and refusing that would defeat the concurrency this split exists to allow.
+///
+/// Deliberately NOT [`PULL_DECISION_STALE`]: that marker keys the frontend's
+/// stale-decision flow, which has an answer to re-ask.
+async fn ensure_branch_current(repo: &str, branch: &str) -> AppResult<()> {
+    if current_branch(repo).await.as_deref() != Some(branch) {
+        return Err(AppError::Command(
+            "The checked-out branch changed while this pull was fetching — pull again to see where it stands."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// [`ensure_branch_current`] plus the tip, for the rebase arms: their fork-point
+/// verdict and the base it replays from are only sound on the HEAD the probe measured
+/// them against. A refusal rather than a fall-through to bare `git pull --rebase`,
+/// which would hand the fork-point verdict back to git and reopen the vaporize this
+/// module exists to prevent.
+async fn ensure_pin_current(repo: &str, branch: &str, branch_tip: &str) -> AppResult<()> {
+    let head_branch = current_branch(repo).await;
+    let head = rev_parse(repo, "HEAD").await.unwrap_or_default();
+    if head_branch.as_deref() != Some(branch) || !head.eq_ignore_ascii_case(branch_tip) {
+        return Err(AppError::Command(
+            "The branch or its tip moved while this pull was fetching — pull again to see where it stands."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// `git merge` argv for the local half of a plain pull, on the pinned tip and never
+/// a ref name. Fast-forward-only mode carries no message, since it can only advance
+/// HEAD. Merge mode has to spell bare pull's own subject, and letting
+/// `git fmt-merge-msg` shape the record the fetch wrote is what makes it
+/// byte-identical — re-deriving git's URL rendering (trailing `.git` stripped,
+/// credentials anonymized) and its `into <branch>` rule here would drift.
+///
+/// `autostash` is the flag to carry, or `None` for none at all — the same translation
+/// [`rebase_argv`] takes, since `git merge` reads `pull.autoStash` no more than
+/// `git rebase` does.
+async fn plain_merge_argv(
+    repo: &str,
+    plain: &PlainPull,
+    autostash: Option<&str>,
+) -> AppResult<Vec<String>> {
+    let mut argv = vec!["merge".to_string()];
+    argv.extend(autostash.map(str::to_string));
+    if plain.ff_only {
+        argv.push("--ff-only".to_string());
+        argv.push(plain.pinned.new_tip.clone());
+        return Ok(argv);
+    }
+    let out = run_git_raw_input(
+        Some(repo),
+        &["fmt-merge-msg"],
+        Some(&format!("{}\n", plain.pinned.merge_source)),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
+    argv.extend(["--no-edit".to_string(), "-m".to_string()]);
+    argv.push(out.stdout_lossy().trim_end().to_string());
+    argv.push(plain.pinned.new_tip.clone());
+    Ok(argv)
+}
+
+/// Run the pinned merge under the hold the caller already owns.
+///
+/// `WORKTREE_OP_TIMEOUT`, not the default: the incoming delta after a long-offline
+/// pull is checkout-scale work, and a kill mid-checkout leaves a torn tree and a
+/// stranded `index.lock` rather than a slow pull.
+async fn run_pinned_merge(repo: &str, argv: &[String]) -> AppResult<crate::git::runner::GitOutput> {
+    run_git_raw(
+        Some(repo),
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+        WORKTREE_OP_TIMEOUT,
+    )
+    .await
+}
+
+/// The local half of a plain pull for the non-autostash core: the first point at
+/// which a pull touches the working tree at all.
+pub(crate) async fn merge_pinned(state: &AppState, repo: &str, plain: &PlainPull) -> AppResult<()> {
+    let domain = state.working_tree_lock(repo).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
+    ensure_branch_current(repo, &plain.target.branch).await?;
+    let argv = plain_merge_argv(repo, plain, plain_autostash_flag(repo).await).await?;
+    let already_unmerged = crate::git::ops::unmerged_paths(repo).await;
+    let out = run_pinned_merge(repo, &argv).await?;
+    if out.code != 0 {
+        return Err(crate::git::ops::classify_failure(
+            repo,
+            "merge",
+            &already_unmerged,
+            out.code,
+            out.full_failure_text(),
+        )
+        .await);
+    }
+    Ok(())
+}
+
+/// [`merge_pinned`] with the uncommitted changes stashed across the merge. The
+/// currency check runs BEFORE the stash, so a refused pull leaves the dirty tree
+/// exactly as it found it and there is nothing to settle.
+pub(crate) async fn merge_pinned_autostash(
+    state: &AppState,
+    repo: &str,
+    plain: &PlainPull,
+) -> AppResult<AutostashOutcome> {
+    let domain = state.working_tree_lock(repo).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
+    crate::git::ops::refuse_mid_op(repo).await?;
+    ensure_branch_current(repo, &plain.target.branch).await?;
+    let argv = plain_merge_argv(repo, plain, COMPOUND_AUTOSTASH).await?;
+
+    let stashed = autostash_push(repo).await?;
+    let op = run_pinned_merge(repo, &argv).await;
+    settle(repo, "merge", stashed, true, op).await
+}
+
 /// The guarded rebase-mode pull for the plain (non-autostash) core. `false` means
 /// the guard stood down and the caller must run bare `git pull --rebase` exactly
 /// as before.
@@ -586,9 +944,18 @@ pub(crate) async fn guarded_pull(state: &AppState, repo: &str) -> AppResult<bool
     let Some(target) = resolve(repo).await? else {
         return Ok(false);
     };
-    // Shells out to git and the forge CLI — resolved before the lock, as the
+    // Shells out to git and the forge CLI — resolved before any lock, as the
     // autostash compounds do.
     let cred = credentials(repo, &target).await?;
+    // Phase A holds the network domain alone, and its refusal touches nothing the
+    // user owns — so both the transfer and the would-drop answer come before the
+    // working tree is taken at all.
+    let Some(plan) = probe(state, repo, &target, &cred).await? else {
+        return Ok(false);
+    };
+    if !plan.dropped().is_empty() {
+        return Err(plan.into_error());
+    }
 
     let domain = state.working_tree_lock(repo).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
@@ -597,12 +964,7 @@ pub(crate) async fn guarded_pull(state: &AppState, repo: &str) -> AppResult<bool
     if mid_op(repo).await {
         return Ok(false);
     }
-    let Some(plan) = probe(state, repo, &target, &cred).await? else {
-        return Ok(false);
-    };
-    if !plan.dropped().is_empty() {
-        return Err(plan.into_error());
-    }
+    ensure_pin_current(repo, &target.branch, &plan.branch_tip).await?;
     let autostash = plain_autostash_flag(repo).await;
     let already_unmerged = crate::git::ops::unmerged_paths(repo).await;
     let out = run_git_raw(
@@ -638,16 +1000,19 @@ pub(crate) async fn guarded_pull_autostash(
         return Ok(None);
     };
     let cred = credentials(repo, &target).await?;
-
-    let domain = state.working_tree_lock(repo).await;
-    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
-    crate::git::ops::refuse_mid_op(repo).await?;
     let Some(plan) = probe(state, repo, &target, &cred).await? else {
         return Ok(None);
     };
     if !plan.dropped().is_empty() {
         return Err(plan.into_error());
     }
+
+    let domain = state.working_tree_lock(repo).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a pull").await?;
+    crate::git::ops::refuse_mid_op(repo).await?;
+    // Both gates run BEFORE the stash, so a refused pull leaves the dirty tree
+    // exactly as it found it.
+    ensure_pin_current(repo, &target.branch, &plan.branch_tip).await?;
     let stashed = autostash_push(repo).await?;
     let op = run_git_raw(
         Some(repo),
@@ -1925,6 +2290,447 @@ mod tests {
             "dirty\n"
         );
         assert!(git(&clone, &["stash", "list"]).await.trim().is_empty());
+    }
+
+    // ---- plain pull: network phase, then the local half ----------------------
+
+    /// A bare origin, a teammate's `work` clone, and the clone under test — strictly
+    /// BEHIND origin by one commit, which is what a plain pull fast-forwards onto.
+    /// Returns the fixture guard, the clone, the work clone, and origin's tip.
+    ///
+    /// `b.txt` is three lines and the upstream commit rewrites only its FIRST: a local
+    /// edit to the third line then blocks a plain fast-forward while still popping
+    /// cleanly, which is what makes the autostash arms measurable.
+    async fn behind_fixture(marker: &str) -> (tempfile::TempDir, String, String, String) {
+        let dir = temp(marker);
+        let root = dir.path().to_string_lossy().into_owned();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        let url = format!(
+            "file://{}",
+            dir.path()
+                .join("origin.git")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+
+        git(&root, &["init", "-q", "-b", "main", "work"]).await;
+        let work_dir = dir.path().join("work");
+        let work = work_dir.to_string_lossy().into_owned();
+        configure(&work).await;
+        std::fs::write(work_dir.join("a.txt"), "base\n").unwrap();
+        std::fs::write(work_dir.join("b.txt"), "one\ntwo\nthree\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "base"]).await;
+        git(&work, &["remote", "add", "origin", &url]).await;
+        git(&work, &["push", "-q", "-u", "origin", "main"]).await;
+
+        git(
+            &root,
+            &["-c", "core.autocrlf=false", "clone", "-q", &url, "clone"],
+        )
+        .await;
+        let clone = dir.path().join("clone").to_string_lossy().into_owned();
+        configure(&clone).await;
+
+        // Upstream moves on, and the clone has not seen it yet.
+        std::fs::write(work_dir.join("a.txt"), "upstream\n").unwrap();
+        std::fs::write(work_dir.join("b.txt"), "ONE\ntwo\nthree\n").unwrap();
+        git(&work, &["commit", "-qam", "upstream moves on"]).await;
+        git(&work, &["push", "-q"]).await;
+        let tip = rev(&work, "HEAD").await;
+        (dir, clone, work, tip)
+    }
+
+    /// The transfer holds the NETWORK domain alone, so the user can stage or commit
+    /// straight through it. A working-tree hold that OUTLIVES the phase is the proof:
+    /// a phase that took the working tree would have reported `Busy` instead.
+    #[tokio::test]
+    async fn the_network_phase_runs_with_the_working_tree_held() {
+        let (_dir, clone, _work, tip) = behind_fixture("net-only").await;
+
+        let state = AppState::default();
+        let wt = state.working_tree_lock(&clone).await;
+        let _held = acquire_repo_lock(&wt, std::time::Duration::ZERO, "a commit")
+            .await
+            .expect("the working tree is free for the test to take");
+
+        let plain = pin_plain_pull(&state, &clone, true)
+            .await
+            .expect("the network phase completes with the working tree held")
+            .expect("the fixture tracks a real remote branch");
+        assert_eq!(plain.pinned.new_tip, tip, "and it pinned the fetched tip");
+    }
+
+    /// The local half acts on the SHA the fetch pinned, never on a ref re-read at
+    /// merge time: a later fetch moves both the tracking ref and FETCH_HEAD, and
+    /// neither is allowed to change what lands.
+    #[tokio::test]
+    async fn the_local_half_merges_the_pinned_tip_not_a_later_one() {
+        let (dir, clone, work, pinned_tip) = behind_fixture("pinned-tip").await;
+
+        let state = AppState::default();
+        let plain = pin_plain_pull(&state, &clone, true)
+            .await
+            .unwrap()
+            .expect("the fixture tracks a real remote branch");
+        assert_eq!(plain.pinned.new_tip, pinned_tip);
+
+        std::fs::write(dir.path().join("work").join("b.txt"), "later\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "upstream moves again"]).await;
+        git(&work, &["push", "-q"]).await;
+        git(&clone, &["fetch", "-q", "--prune", "origin"]).await;
+        let later = rev(&clone, "refs/remotes/origin/main").await;
+        assert_ne!(later, pinned_tip, "the second fetch must move the ref");
+        assert_eq!(rev(&clone, "FETCH_HEAD").await, later, "and FETCH_HEAD too");
+
+        merge_pinned(&state, &clone, &plain)
+            .await
+            .expect("the pinned tip is a fast-forward");
+        assert_eq!(
+            rev(&clone, "HEAD").await,
+            pinned_tip,
+            "the pull landed the tip its own fetch produced"
+        );
+    }
+
+    /// The merge SUBJECT is pinned by the same snapshot as the tip. A second fetch
+    /// rewrites `FETCH_HEAD` with a record for a different branch, and the merge must
+    /// still name the one this pull actually fetched — a subject read at merge time
+    /// would name the other branch and read as a merge that never happened.
+    #[tokio::test]
+    async fn the_merge_subject_names_this_pulls_own_fetch_not_a_later_one() {
+        let (dir, clone, work, pinned_tip) = behind_fixture("pinned-subject").await;
+        let clone_dir = dir.path().join("clone");
+        // A local commit on another file, so merge mode really merges: a fast-forward
+        // writes no subject to compare.
+        std::fs::write(clone_dir.join("mine.txt"), "mine\n").unwrap();
+        git(&clone, &["add", "-A"]).await;
+        git(&clone, &["commit", "-qm", "my local work"]).await;
+
+        let state = AppState::default();
+        let plain = pin_plain_pull(&state, &clone, false)
+            .await
+            .unwrap()
+            .expect("the fixture tracks a real remote branch");
+
+        // A second branch published and fetched by name — an explicitly requested ref
+        // is FOR-MERGE, so it takes over the whole FETCH_HEAD verdict.
+        git(&work, &["switch", "-q", "-c", "other"]).await;
+        std::fs::write(dir.path().join("work").join("o.txt"), "o\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "other branch"]).await;
+        git(&work, &["push", "-q", "-u", "origin", "other"]).await;
+        git(&clone, &["fetch", "-q", "origin", "other"]).await;
+
+        merge_pinned(&state, &clone, &plain)
+            .await
+            .expect("a non-overlapping divergence merges cleanly");
+        let subject = log_subjects(&clone).await.first().cloned().unwrap();
+        assert!(
+            subject.starts_with("Merge branch 'main' of "),
+            "the subject must name the branch this pull fetched: {subject}"
+        );
+        assert!(
+            !subject.contains("'other'"),
+            "and never the record a later fetch left behind: {subject}"
+        );
+        assert_eq!(
+            rev(&clone, "HEAD^2").await,
+            pinned_tip,
+            "the merged parent is the pinned tip"
+        );
+    }
+
+    /// The plain half verifies branch IDENTITY only. A commit the user landed while
+    /// the transfer ran is exactly the concurrency this split exists to allow, so the
+    /// pull merges its pinned tip onto that new commit rather than refusing.
+    #[tokio::test]
+    async fn the_local_half_merges_onto_a_commit_made_during_the_fetch() {
+        let (dir, clone, _work, pinned_tip) = behind_fixture("commit-during-fetch").await;
+        let clone_dir = dir.path().join("clone");
+
+        let state = AppState::default();
+        let plain = pin_plain_pull(&state, &clone, false)
+            .await
+            .unwrap()
+            .expect("the fixture tracks a real remote branch");
+
+        std::fs::write(clone_dir.join("late.txt"), "late\n").unwrap();
+        git(&clone, &["add", "-A"]).await;
+        git(&clone, &["commit", "-qm", "late local commit"]).await;
+        let mine = rev(&clone, "HEAD").await;
+
+        merge_pinned(&state, &clone, &plain)
+            .await
+            .expect("a commit made during the transfer must not refuse the pull");
+        assert_eq!(rev(&clone, "HEAD^1").await, mine, "the user's commit is kept");
+        assert_eq!(rev(&clone, "HEAD^2").await, pinned_tip, "and the pinned tip merged");
+    }
+
+    /// Branch identity is the one thing the plain half cannot proceed without: the
+    /// pinned tip was fetched for a branch that is no longer checked out. The autostash
+    /// arm is where the refusal has a stash to get wrong, so it is the arm tested.
+    #[tokio::test]
+    async fn the_autostash_local_half_refuses_a_switched_branch_without_stashing() {
+        let (dir, clone, _work, _tip) = behind_fixture("switched-branch").await;
+        let clone_dir = dir.path().join("clone");
+
+        let state = AppState::default();
+        let plain = pin_plain_pull(&state, &clone, false)
+            .await
+            .unwrap()
+            .expect("the fixture tracks a real remote branch");
+
+        git(&clone, &["switch", "-q", "-c", "elsewhere"]).await;
+        std::fs::write(clone_dir.join("dirty.txt"), "dirty\n").unwrap();
+
+        let err = merge_pinned_autostash(&state, &clone, &plain)
+            .await
+            .expect_err("the pin was made for a branch that is no longer checked out");
+        assert!(
+            matches!(&err, AppError::Command(m) if m.contains("The checked-out branch changed")),
+            "{err:?}"
+        );
+        assert!(
+            !err.to_string().contains(PULL_DECISION_STALE),
+            "that marker keys a different frontend flow: {err}"
+        );
+        assert!(
+            git(&clone, &["stash", "list"]).await.trim().is_empty(),
+            "the refusal comes before the stash"
+        );
+        assert_eq!(
+            git(&clone, &["status", "--porcelain"]).await.trim(),
+            "?? dirty.txt",
+            "and the dirty tree is exactly as the user left it"
+        );
+    }
+
+    /// The REBASE arms keep the tip in their check: their fork-point verdict and the
+    /// base they replay from are only sound on the HEAD the probe measured. Driven at
+    /// the predicate, because a tip that moves mid-probe is not a schedulable event.
+    #[tokio::test]
+    async fn the_rebase_arms_refuse_a_branch_or_tip_that_moved_during_the_fetch() {
+        let (dir, clone, _work, _tip) = behind_fixture("rebase-pin").await;
+        let clone_dir = dir.path().join("clone");
+        let pinned_tip = rev(&clone, "HEAD").await;
+
+        ensure_pin_current(&clone, "main", &pinned_tip)
+            .await
+            .expect("an unmoved branch passes");
+
+        // The tip moves under the pin.
+        std::fs::write(clone_dir.join("late.txt"), "late\n").unwrap();
+        git(&clone, &["add", "-A"]).await;
+        git(&clone, &["commit", "-qm", "late local commit"]).await;
+        let err = ensure_pin_current(&clone, "main", &pinned_tip)
+            .await
+            .expect_err("a moved tip must be refused");
+        assert!(
+            matches!(&err, AppError::Command(m) if m.contains("The branch or its tip moved")),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains(PULL_DECISION_STALE), "{err}");
+
+        // And the tip alone is not identity: another branch at the SAME commit is a
+        // ref the pull was never resolved against.
+        let moved = rev(&clone, "HEAD").await;
+        git(&clone, &["switch", "-q", "-c", "elsewhere"]).await;
+        assert!(ensure_pin_current(&clone, "main", &moved).await.is_err());
+        assert!(ensure_branch_current(&clone, "main").await.is_err());
+        assert!(ensure_branch_current(&clone, "elsewhere").await.is_ok());
+    }
+
+    /// Config the plain half's `git merge` cannot honor has to hand the pull back to
+    /// bare `git pull`, or the pull silently stops doing what the user configured.
+    /// Every key is set locally, so the machine's own git config cannot decide this.
+    #[tokio::test]
+    async fn the_plain_arms_stand_down_on_config_git_merge_cannot_honor() {
+        let (_dir, clone, _work, _tip) = behind_fixture("stand-down").await;
+        // The boolean keys pinned false up front: an unset key would otherwise read
+        // through to a global one and decide the baseline.
+        for key in ["submodule.recurse", "fetch.pruneTags", "remote.origin.pruneTags"] {
+            git(&clone, &["config", key, "false"]).await;
+        }
+        assert!(
+            !plain_pull_config_stands_down(&clone, "origin", true).await,
+            "an ordinary clone runs the split phases"
+        );
+
+        for (key, value) in [
+            ("pull.ff", "only"),
+            ("pull.ff", "false"),
+            ("pull.twohead", "ours"),
+            ("fetch.pruneTags", "true"),
+            ("remote.origin.pruneTags", "yes"),
+            ("submodule.recurse", "true"),
+        ] {
+            git(&clone, &["config", key, value]).await;
+            assert!(
+                plain_pull_config_stands_down(&clone, "origin", true).await,
+                "{key}={value} must stand the split phases down"
+            );
+            git(&clone, &["config", "--unset", key]).await;
+        }
+
+        // `--ff-only` mode passes its own flag on both sides, so the pull-only merge
+        // keys are overridden there and cost nothing.
+        for key in ["pull.ff", "pull.twohead"] {
+            git(&clone, &["config", key, "only"]).await;
+            assert!(
+                !plain_pull_config_stands_down(&clone, "origin", false).await,
+                "{key} is overridden by an explicit --ff-only on both sides"
+            );
+            git(&clone, &["config", "--unset", key]).await;
+        }
+
+        // A mirror-style refspec needs the `--update-head-ok` bare pull's fetch carries.
+        git(
+            &clone,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/upstream/*",
+            ],
+        )
+        .await;
+        assert!(
+            plain_pull_config_stands_down(&clone, "origin", true).await,
+            "a refspec writing into refs/heads/* would hard-refuse"
+        );
+    }
+
+    /// A branch with several `branch.<b>.merge` entries gets an OCTOPUS merge from
+    /// bare pull, and one pinned FETCH_HEAD record cannot reproduce it — so the phase
+    /// stands down rather than merging whichever record it happened to pick.
+    #[tokio::test]
+    async fn a_multi_upstream_branch_stands_the_network_phase_down() {
+        let (dir, clone, work, _tip) = behind_fixture("octopus").await;
+
+        let state = AppState::default();
+        assert!(
+            pin_plain_pull(&state, &clone, true).await.unwrap().is_some(),
+            "one upstream is the ordinary case"
+        );
+
+        git(&work, &["switch", "-q", "-c", "topic"]).await;
+        std::fs::write(dir.path().join("work").join("t.txt"), "t\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "topic"]).await;
+        git(&work, &["push", "-q", "-u", "origin", "topic"]).await;
+        git(
+            &clone,
+            &["config", "--add", "branch.main.merge", "refs/heads/topic"],
+        )
+        .await;
+
+        assert!(
+            pin_plain_pull(&state, &clone, true).await.unwrap().is_none(),
+            "two upstreams is an octopus merge the pinned record cannot spell"
+        );
+    }
+
+    /// Bare `git pull` honors `pull.autoStash` where a bare `git merge` ignores it, so
+    /// the plain arms have to translate it — and to pass NOTHING when it is unset,
+    /// which is what leaves `merge.autoStash` (read natively by `git merge`) in charge.
+    /// Both keys drive the same fixture, and the unset control is what gives them
+    /// teeth: without a flag the fast-forward is refused outright.
+    #[tokio::test]
+    async fn a_plain_pull_honors_the_autostash_config() {
+        for key in ["pull.autoStash", "merge.autoStash", "none"] {
+            let (dir, clone, _work, tip) = behind_fixture(&format!("plain-autostash-{key}")).await;
+            let clone_dir = dir.path().join("clone");
+            if key != "none" {
+                git(&clone, &["config", key, "true"]).await;
+            }
+            // The upstream commit rewrote b.txt's first line; this edits its third, so
+            // a plain fast-forward refuses to overwrite it and only an autostash gets
+            // the pull through — then pops cleanly.
+            std::fs::write(clone_dir.join("b.txt"), "one\ntwo\nTHREE\n").unwrap();
+
+            let state = AppState::default();
+            let plain = pin_plain_pull(&state, &clone, true)
+                .await
+                .unwrap()
+                .expect("the fixture tracks a real remote branch");
+            let result = merge_pinned(&state, &clone, &plain).await;
+
+            if key == "none" {
+                let err = result.expect_err("with neither key set git must refuse");
+                assert!(
+                    err.to_string().to_lowercase().contains("would be overwritten"),
+                    "git's own refusal must reach the user: {err}"
+                );
+                assert_ne!(rev(&clone, "HEAD").await, tip, "and nothing moved");
+                continue;
+            }
+            result.unwrap_or_else(|e| panic!("{key}=true must let the pull through: {e}"));
+            assert_eq!(rev(&clone, "HEAD").await, tip, "{key}: the pull landed");
+            assert_eq!(
+                std::fs::read_to_string(clone_dir.join("b.txt")).unwrap(),
+                "ONE\ntwo\nTHREE\n",
+                "{key}: the upstream's line and the user's both survive"
+            );
+            assert!(
+                git(&clone, &["stash", "list"]).await.trim().is_empty(),
+                "{key}: the autostash entry is not left behind"
+            );
+        }
+    }
+
+    /// The flag's position in the argv, and the compound arms' opposite answer: they
+    /// stash for themselves, so git must not.
+    #[tokio::test]
+    async fn plain_merge_argv_carries_only_the_autostash_flag_it_is_given() {
+        let (_dir, clone, _work, tip) = behind_fixture("plain-argv").await;
+        let state = AppState::default();
+        let plain = pin_plain_pull(&state, &clone, true)
+            .await
+            .unwrap()
+            .expect("the fixture tracks a real remote branch");
+
+        assert_eq!(
+            plain_merge_argv(&clone, &plain, None).await.unwrap(),
+            vec!["merge".to_string(), "--ff-only".into(), tip.clone()]
+        );
+        assert_eq!(
+            plain_merge_argv(&clone, &plain, Some("--autostash"))
+                .await
+                .unwrap(),
+            vec![
+                "merge".to_string(),
+                "--autostash".into(),
+                "--ff-only".into(),
+                tip.clone()
+            ]
+        );
+        assert_eq!(
+            plain_merge_argv(&clone, &plain, COMPOUND_AUTOSTASH)
+                .await
+                .unwrap(),
+            vec![
+                "merge".to_string(),
+                "--no-autostash".into(),
+                "--ff-only".into(),
+                tip.clone()
+            ]
+        );
+
+        // Merge mode: the flag still leads, with the subject between it and the tip.
+        let merge_mode = PlainPull {
+            target: plain.target,
+            pinned: plain.pinned,
+            ff_only: false,
+        };
+        let argv = plain_merge_argv(&clone, &merge_mode, COMPOUND_AUTOSTASH)
+            .await
+            .unwrap();
+        assert_eq!(argv[..3], ["merge", "--no-autostash", "--no-edit"]);
+        assert_eq!(argv[3], "-m");
+        assert!(argv[4].starts_with("Merge branch 'main' of "), "{argv:?}");
+        assert_eq!(argv[5], tip);
     }
 
     // ---- submodule parity ---------------------------------------------------
