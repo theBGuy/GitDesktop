@@ -152,9 +152,9 @@ impl AppState {
         let toplevel = crate::git::runner::worktree_toplevel(repo_path).await;
         let identity = crate::git::repo::repo_identity(repo_path).await;
         // `repo_identity` answers with its input on failure, so equality with the
-        // input is the fallback-detection seam. It reads a caller that passed the
-        // common git dir ITSELF as unresolved, which costs a re-probe per call and
-        // never a wrong key.
+        // input is the fallback-detection seam. A caller passing the common git dir
+        // ITSELF can read as unresolved (when the spellings match exactly) — a
+        // re-probe per call at worst, never a wrong key.
         let resolved = toplevel.is_ok() && identity != repo_path;
         let keys = LockKeys {
             checkout: normalize_wt_path(toplevel.as_deref().unwrap_or(repo_path)),
@@ -224,9 +224,10 @@ impl AppState {
     /// May be taken while holding the working-tree lock, never the reverse (see
     /// [`working_tree_lock`](Self::working_tree_lock)).
     ///
-    /// Keyed by the SHARED identity: `refs/remotes/*` and FETCH_HEAD live in the
-    /// common git dir, so a worktree session's fetch and the main window's auto-fetch
-    /// are the very race this domain exists to prevent.
+    /// Keyed by the SHARED identity: `refs/remotes/*` lives in the common git dir
+    /// (FETCH_HEAD does not — it is per-worktree, measured via `--git-path`), so a
+    /// worktree session's fetch and the main window's auto-fetch race on the same
+    /// tracking refs — the very race this domain exists to prevent.
     pub(crate) async fn network_lock(&self, repo_path: &str) -> LockDomain {
         self.shared(repo_path).await.network
     }
@@ -423,7 +424,7 @@ mod lock_key_tests {
     /// The differentiated keying, in one test: a linked worktree has its OWN index
     /// and HEAD (so its own working-tree lock, which is what keeps a session's
     /// unbounded holds off the user's staging) but shares the `.git/worktrees`
-    /// registry, `refs/remotes/*` and FETCH_HEAD with the main checkout.
+    /// registry and `refs/remotes/*` with the main checkout.
     #[tokio::test]
     async fn a_linked_worktree_keeps_its_own_working_tree_domain_but_shares_the_repo() {
         let (_dir, repo) = setup_repo("worktree").await;
@@ -447,7 +448,7 @@ mod lock_key_tests {
         );
         assert!(
             same(&main.2, &wt.2),
-            "refs/remotes and FETCH_HEAD are shared, so fetches serialize"
+            "refs/remotes is shared, so fetches serialize"
         );
     }
 

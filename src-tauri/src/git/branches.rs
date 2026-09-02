@@ -1192,6 +1192,7 @@ struct UpdatePins {
 /// The FULL ref path is the point: under a bare `rev-parse <branch>` a tag sharing
 /// the name would shadow it, and the pin would then guard the wrong object.
 async fn branch_tip_sha(repo_path: &str, branch: &str) -> AppResult<Option<String>> {
+    validate_branch_name(branch)?;
     let out = run_git_raw(
         Some(repo_path),
         &[
@@ -1266,8 +1267,9 @@ async fn remove_tmp_worktree(repo_path: &str, tmp: &str) {
     let _ = run_git_raw(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
 }
 
-/// Under a fresh working-tree hold: confirm both pinned refs still stand, then merge
-/// `base` by NAME inside the throwaway worktree at `tmp`. The merge writes the shared
+/// Under a fresh working-tree hold: confirm the branch still stands where it was
+/// pinned and the base still descends from its pin, then merge `base` by NAME inside
+/// the throwaway worktree at `tmp`. The merge writes the shared
 /// `refs/heads/<branch>`, which is why it belongs in this domain, and the name is what
 /// gives the merge commit its `Merge branch '<base>'` subject; the pins are what keep
 /// a ref that moved while the worktree materialized from silently changing the
@@ -1291,11 +1293,15 @@ async fn verify_pin_and_merge(
         )));
     }
 
-    // The base check runs in the TMP worktree's cwd — the $GIT_DIR the merge itself
-    // will resolve in. gitrevisions resolves $GIT_DIR-local names (HEAD, MERGE_HEAD, …)
-    // ahead of `refs/heads/`, and `validate_branch_name` admits a literal "HEAD", so a
-    // check in the main checkout could pass over a different object than the merge
-    // takes. Same cwd makes "whatever the merge resolves" provably the pinned commit.
+    // The base check runs in the TMP worktree's cwd — the $GIT_DIR the merge resolves
+    // in. gitrevisions takes $GIT_DIR-local names (HEAD, MERGE_HEAD, …) ahead of
+    // `refs/heads/`, and `validate_branch_name` admits a literal "HEAD", so a check in
+    // the main checkout could pass over a different object than the merge takes.
+    //
+    // Descent, not equality, is the property: the app's own auto-fetch advances a
+    // remote-tracking base mid-window, and a base that only fast-forwarded is what a
+    // fresh update would merge anyway — only a rewound or rewritten one, an
+    // unresolvable name, or a failed probe invalidates the plan.
     let base_now = run_git_raw(
         Some(tmp),
         &[
@@ -1307,10 +1313,21 @@ async fn verify_pin_and_merge(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if base_now.code != 0 || base_now.stdout_lossy().trim() != pins.base_sha {
-        return Err(AppError::Command(format!(
-            "{base} moved while this update was running — try again to see where it stands."
-        )));
+    let base_now_sha = base_now.stdout_lossy().trim().to_string();
+    if base_now.code != 0 || base_now_sha != pins.base_sha {
+        let fast_forwarded = base_now.code == 0
+            && run_git_raw(
+                Some(tmp),
+                &["merge-base", "--is-ancestor", &pins.base_sha, &base_now_sha],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .is_ok_and(|out| out.code == 0);
+        if !fast_forwarded {
+            return Err(AppError::Command(format!(
+                "{base} moved while this update was running — try again to see where it stands."
+            )));
+        }
     }
 
     // The merge keeps the default budget: it rewrites only the differing files, not
@@ -2669,13 +2686,13 @@ mod tests {
         );
     }
 
-    /// The base's half of the pin. Merging by NAME is what keeps git's own merge
-    /// subject, so the sha the name resolves to has to be checked — a base that gained
-    /// a commit while the worktree materialized is a different operation than the one
-    /// the user asked for, and is refused rather than quietly merged.
+    /// The base's half of the pin, on its refusing side. Merging by NAME is what keeps
+    /// git's own merge subject, so the sha the name resolves to has to be checked — a
+    /// base whose pinned commit is no longer an ancestor is a different operation than
+    /// the one the user asked for, and is refused rather than quietly merged.
     #[tokio::test]
-    async fn a_diverged_update_refuses_a_base_that_moved_under_it() {
-        let (_guard, repo, repo_s, main) = diverged_repo("update-moved-base").await;
+    async fn a_diverged_update_refuses_a_base_rewritten_under_it() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-rewritten-base").await;
         let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
             .await
             .trim()
@@ -2685,15 +2702,14 @@ mod tests {
             .trim()
             .to_string();
 
-        // The base moves after the pin — exactly the window the admin prologue opens.
-        std::fs::write(repo.join("later.txt"), "later\n").unwrap();
-        run(&repo_s, &["add", "-A"]).await;
-        run(&repo_s, &["commit", "-qm", "base work later"]).await;
+        // `--amend` REPLACES the base tip rather than advancing it, so the pinned
+        // commit stops being an ancestor — the only move that invalidates the plan.
+        run(&repo_s, &["commit", "-q", "--amend", "-m", "base work, reworded"]).await;
         let moved_base = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
             .await
             .trim()
             .to_string();
-        assert_ne!(pinned_base, moved_base, "the fixture must move the base");
+        assert_ne!(pinned_base, moved_base, "the fixture must rewrite the base");
 
         let tmp = repo
             .parent()
@@ -2730,6 +2746,74 @@ mod tests {
             "the throwaway worktree is unregistered: {list}"
         );
         assert!(!tmp.exists(), "and its directory is gone");
+    }
+
+    /// The base's tolerant side. The app's own auto-fetch advances a remote-tracking
+    /// base while the throwaway worktree materializes, and a base that only
+    /// fast-forwarded is what a fresh update would merge — refusing it would make
+    /// "Update from origin/…" intermittently unusable on an active repo.
+    #[tokio::test]
+    async fn a_diverged_update_tolerates_a_base_that_fast_forwarded() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-ff-base").await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        let pinned_base = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+
+        // The base gains a commit after the pin — a fast-forward, the shape a fetch
+        // of a moving remote-tracking branch leaves behind.
+        std::fs::write(repo.join("later.txt"), "later\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "base work later"]).await;
+        let moved_base = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+        assert_ne!(pinned_base, moved_base, "the fixture must move the base");
+
+        let tmp = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("ff-base-wt");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let outcome = merge_diverged_in_worktree(
+            &state,
+            &repo_s,
+            &tmp_s,
+            "feature",
+            &main,
+            &UpdatePins {
+                branch_tip: feature_tip,
+                base_sha: pinned_base,
+            },
+        )
+        .await
+        .expect("a fast-forwarded base still merges");
+        assert_eq!(outcome, "merge");
+
+        // Point-of-execution semantics: the NEWER base commit is what landed.
+        let merged_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        let reachable = run_git_raw(
+            Some(&repo_s),
+            &["merge-base", "--is-ancestor", &moved_base, &merged_tip],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reachable.code, 0,
+            "the commit the base gained after the pin is in the merge: {}",
+            reachable.stderr
+        );
+        assert!(!tmp.exists(), "the throwaway worktree is torn down");
     }
 
     /// The happy path: both pins hold, so the merge runs by NAME and the branch gets

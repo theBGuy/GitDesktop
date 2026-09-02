@@ -692,10 +692,11 @@ pub fn pty_write(state: State<'_, PtyState>, id: String, data: String) -> AppRes
 /// Resizes the PTY when the terminal element resizes. Sync command (main thread),
 /// so the master is cloned OUT of the map and the guard dropped before the resize:
 /// that is an OS call, and holding the map lock across it stalls `pty_write`,
-/// `pty_close` and every reader/writer thread on a resize storm.
+/// `pty_close` and the reader threads on a resize storm (the writer thread owns
+/// its channel and never touches the map).
 ///
-/// A resize racing `pty_close` keeps the master alive through this clone for the
-/// length of the call — harmless: the result is discarded either way, and teardown
+/// A resize racing `pty_close` keeps the MASTER alive past the map entry's removal
+/// for the length of one OS call; the result is discarded either way, and teardown
 /// owns the handle's child and temp-script halves regardless.
 #[tauri::command]
 pub fn pty_resize(state: State<'_, PtyState>, id: String, cols: u16, rows: u16) -> AppResult<()> {

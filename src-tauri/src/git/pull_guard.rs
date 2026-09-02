@@ -77,9 +77,9 @@ pub(crate) struct PullTarget {
 }
 
 /// What one pull's network phase produced, pinned under the hold that produced it.
-/// The local half is spelled in these values alone: the refs they were read from
-/// move under the background auto-fetch, and `FETCH_HEAD` is shared by every
-/// worktree of the repo, so re-reading either at merge time would act on a
+/// The local half is spelled in these values alone: the background auto-fetch moves
+/// the tracking refs they were read from and rewrites this checkout's own
+/// `FETCH_HEAD` on its way past, so re-reading either at merge time would act on a
 /// different snapshot than the one the plan was made from.
 pub(crate) struct PinnedFetch {
     /// The upstream tip this fetch produced.
@@ -519,8 +519,9 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 
 /// Phase A: fetch, then compute the fork-point verdict. Touches nothing the user
 /// owns — no stash, no ref of theirs — so a would-drop refusal leaves the tree
-/// exactly as it found it. `None` re-stands-down (the branch changed under the
-/// lock, or the upstream ref doesn't resolve post-fetch).
+/// exactly as it found it. `None` stands the guard down: the branch was switched
+/// since `resolve` saw it, HEAD or the upstream ref fails to rev-parse, or there is
+/// no merge base or no fork point to decide anything from.
 ///
 /// The fetch PRUNES, which the stand-down below depends on: without it, an
 /// upstream branch deleted on the forge leaves its tracking ref behind, every
@@ -544,6 +545,13 @@ pub(crate) async fn probe(
     target: &PullTarget,
     cred: &[String],
 ) -> AppResult<Option<PullPlan>> {
+    // Best-effort currency, checked before anything is planned: a switch since
+    // `resolve` would compute `base..HEAD` for the wrong branch, and the would-drop
+    // refusal is raised before any working-tree check could catch it. The WT phase's
+    // `ensure_pin_current` stays the authority.
+    if current_branch(repo).await.as_deref() != Some(target.branch.as_str()) {
+        return Ok(None);
+    }
     // ONE network hold spanning the fetch AND every read below it: the verdict is
     // only sound on the refs this fetch produced, and the background auto-fetch runs
     // in this same domain — released in between, it can move
@@ -657,6 +665,10 @@ async fn plain_pull_config_stands_down(repo: &str, remote: &str, merge_mode: boo
     // Pull-only keys `git merge` never reads, so honoring them is impossible here.
     // `--ff-only` mode passes its own flag on both sides, which overrides `pull.ff`
     // either way; `merge.ff` needs no arm, since bare pull reads it identically.
+    // `pull.rebase` needs none either: measured on git 2.51.1, bare `git pull
+    // --ff-only` under `pull.rebase=true` refuses a diverged branch (exit 128) and
+    // fast-forwards a behind one — what `merge --ff-only` does — and merge mode's
+    // bare side passes `--no-rebase`, which overrides the key outright.
     if merge_mode {
         for key in ["pull.ff", "pull.twohead"] {
             if config_is_set(repo, key).await {
@@ -773,10 +785,12 @@ async fn fetch_and_pin(
 /// branch with several `branch.<b>.merge` entries gets an OCTOPUS merge from bare
 /// pull, which one pinned record cannot reproduce.
 ///
-/// Read here rather than at merge time because `FETCH_HEAD` is shared by every
-/// worktree of the repo and the next fetch anywhere rewrites it. `--git-path` answers
-/// relative to the child's cwd, so the path is resolved against `repo` rather than
-/// this process's own working directory.
+/// Read here rather than at merge time because `FETCH_HEAD` holds only the LAST
+/// fetch: it is per-worktree (measured, git 2.51.1 — a linked worktree's own
+/// `--git-path FETCH_HEAD` sits under `worktrees/<id>/`), and this checkout's
+/// background auto-fetch rewrites its copy. `--git-path` answers relative to the
+/// child's cwd, so the path is resolved against `repo` rather than this process's own
+/// working directory.
 async fn fetch_head_record(repo: &str, new_tip: &str) -> Option<String> {
     let out = run_git_raw(
         Some(repo),
@@ -2504,6 +2518,37 @@ mod tests {
             git(&clone, &["status", "--porcelain"]).await.trim(),
             "?? dirty.txt",
             "and the dirty tree is exactly as the user left it"
+        );
+    }
+
+    /// A branch switched between `resolve` and `probe` — credential resolution shells
+    /// out to the forge CLI, so the gap is real. Standing down there is what keeps a
+    /// would-drop dialog from naming the WRONG branch's commits: that refusal is
+    /// raised before any working-tree check runs.
+    #[tokio::test]
+    async fn probe_stands_down_when_the_branch_switched_since_resolve() {
+        let (_dir, clone, _work, _tip) = behind_fixture("probe-switched").await;
+        let state = AppState::default();
+        let target = resolve(&clone)
+            .await
+            .unwrap()
+            .expect("the fixture tracks a real remote branch");
+
+        assert!(
+            probe(&state, &clone, &target, &[])
+                .await
+                .unwrap()
+                .is_some(),
+            "the branch resolve saw is still checked out"
+        );
+
+        git(&clone, &["switch", "-q", "-c", "elsewhere"]).await;
+        assert!(
+            probe(&state, &clone, &target, &[])
+                .await
+                .unwrap()
+                .is_none(),
+            "a plan for a branch that is no longer HEAD must never be built"
         );
     }
 

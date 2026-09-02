@@ -58,6 +58,12 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/branches.rs",
+    fn: "branch_tip_sha",
+    rationale:
+      "read-only rev-parse tip probe (never a refspec); validates with validate_branch_name at fn entry",
+  },
+  {
+    file: "git/branches.rs",
     fn: "git_default_branch",
     rationale: "interpolates only the fixed literals main/master",
   },
