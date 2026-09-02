@@ -1102,6 +1102,8 @@ mod tests {
         // `resize` is an OS call on the main thread, so `pty_resize` clones the master
         // out and DROPS the map guard before making it — `pty_write` and `pty_close`
         // take that same lock and must stay reachable through a resize storm.
+        // Shape mirror over a test map, like the write test above (see
+        // `TestResizePtys`) — it pins the clone-then-drop shape, not `pty_resize`'s body.
         let ptys: TestResizePtys = Arc::default();
         let (entered_tx, entered) = channel();
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
@@ -1135,8 +1137,9 @@ mod tests {
 
     #[test]
     fn writing_under_the_map_lock_blocks_close_control() {
-        // Negative control for the test above: the pre-fix shape (write_all under the
-        // map lock) DOES block a `pty_close`-style acquire, so that assertion can fail.
+        // Negative control for `a_wedged_write_leaves_the_pty_map_lock_free`: the
+        // pre-fix shape (write_all under the map lock) DOES block a `pty_close`-style
+        // acquire, so that assertion can fail.
         let writers: Arc<Mutex<HashMap<String, WedgedWriter>>> = Arc::default();
         let (writer, wedge) = wedged_writer();
         writers.lock().unwrap().insert("t".to_string(), writer);

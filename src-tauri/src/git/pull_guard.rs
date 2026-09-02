@@ -521,7 +521,8 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 /// owns — no stash, no ref of theirs — so a would-drop refusal leaves the tree
 /// exactly as it found it. `None` stands the guard down: the branch was switched
 /// since `resolve` saw it, HEAD or the upstream ref fails to rev-parse, or there is
-/// no merge base or no fork point to decide anything from.
+/// no merge base or no fork point to decide anything from. A switch DURING the fetch
+/// is the one currency failure that errors instead — see the two-read paragraph below.
 ///
 /// The fetch PRUNES, which the stand-down below depends on: without it, an
 /// upstream branch deleted on the forge leaves its tracking ref behind, every
@@ -539,6 +540,14 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 /// and would otherwise be free to move them between the fetch and the revs read off
 /// it. `branch_tip` is what the caller's [`ensure_pin_current`] re-checks before any
 /// of these SHAs are acted on.
+///
+/// The branch is read for currency TWICE, because the working tree is deliberately
+/// not held across a transfer that may run for `NETWORK_TIMEOUT`. The read BEFORE the
+/// fetch stands down: nothing has happened yet, so bare `git pull` on the
+/// newly-current branch is the right answer. The read AFTER every rev the plan rests
+/// on REFUSES instead — a fall-through there would run bare `git pull --rebase` on a
+/// branch this guard never examined (the vaporize it exists to prevent), and the
+/// autostash core would have stashed the user's tree to do it.
 pub(crate) async fn probe(
     state: &AppState,
     repo: &str,
@@ -607,6 +616,11 @@ pub(crate) async fn probe(
     } else {
         dropped_commits(repo, &merge_base, &fork_point).await?
     };
+    // Currency again, after EVERY rev above: the transfer and these reads all ran with
+    // no working-tree hold, and a switch anywhere in that window leaves the SHAs
+    // describing one branch while the plan names another — the would-drop refusal is
+    // raised before any working-tree check, so it would name the wrong commits.
+    ensure_branch_current(repo, &target.branch).await?;
 
     Ok(Some(PullPlan {
         branch: target.branch.clone(),
@@ -656,39 +670,46 @@ pub(crate) async fn pin_plain_pull(
 /// Whether config makes the split phases behave differently from bare `git pull`, in
 /// which case the caller hands the pull back to bare `git pull` rather than quietly
 /// changing what it does. `merge_mode` gates the keys only a merge can trip.
+///
+/// Every read is independent and each is a `git` spawn, which is not cheap on
+/// Windows, so they go out together and one combined verdict decides — the whole
+/// check sits in front of the transfer on every plain pull.
 async fn plain_pull_config_stands_down(repo: &str, remote: &str, merge_mode: bool) -> bool {
-    // `submodule.recurse`: bare pull updates submodule worktrees for these modes, and
-    // the guard's measured parity step covers rebase only.
-    if submodule_recurse(repo).await {
-        return true;
+    let remote_prune_key = format!("remote.{remote}.pruneTags");
+    let (recurse, pull_only, fetch_prune_tags, remote_prune_tags, into_heads) = tokio::join!(
+        // `submodule.recurse`: bare pull updates submodule worktrees for these modes,
+        // and the guard's measured parity step covers rebase only.
+        submodule_recurse(repo),
+        pull_only_keys_set(repo, merge_mode),
+        // The `pruneTags` pair only bites because our fetch PRUNES: pruning is what
+        // lets them delete local tags, and bare pull (with `fetch.prune` unset) never
+        // pruned at all.
+        config_is_true(repo, "fetch.pruneTags"),
+        config_is_true(repo, &remote_prune_key),
+        // A refspec writing into `refs/heads/*` needs the `--update-head-ok` bare pull
+        // passes its own fetch; ours would hard-refuse ("Refusing to fetch into branch").
+        fetch_maps_into_heads(repo, remote),
+    );
+    recurse || pull_only || fetch_prune_tags || remote_prune_tags || into_heads
+}
+
+/// Whether either pull-only key `git merge` never reads is set, which makes honoring
+/// it impossible on the split path. `--ff-only` mode passes its own flag on both
+/// sides, which overrides `pull.ff` either way, so it probes nothing; `merge.ff` needs
+/// no arm, since bare pull reads it identically. `pull.rebase` needs none either:
+/// measured on git 2.51.1, bare `git pull --ff-only` under `pull.rebase=true` refuses
+/// a diverged branch (exit 128) and fast-forwards a behind one — what
+/// `merge --ff-only` does — and merge mode's bare side passes `--no-rebase`, which
+/// overrides the key outright.
+async fn pull_only_keys_set(repo: &str, merge_mode: bool) -> bool {
+    if !merge_mode {
+        return false;
     }
-    // Pull-only keys `git merge` never reads, so honoring them is impossible here.
-    // `--ff-only` mode passes its own flag on both sides, which overrides `pull.ff`
-    // either way; `merge.ff` needs no arm, since bare pull reads it identically.
-    // `pull.rebase` needs none either: measured on git 2.51.1, bare `git pull
-    // --ff-only` under `pull.rebase=true` refuses a diverged branch (exit 128) and
-    // fast-forwards a behind one — what `merge --ff-only` does — and merge mode's
-    // bare side passes `--no-rebase`, which overrides the key outright.
-    if merge_mode {
-        for key in ["pull.ff", "pull.twohead"] {
-            if config_is_set(repo, key).await {
-                return true;
-            }
-        }
-    }
-    // These only bite because our fetch PRUNES: pruning is what lets them delete local
-    // tags, and bare pull (with `fetch.prune` unset) never pruned at all.
-    for key in [
-        "fetch.pruneTags".to_string(),
-        format!("remote.{remote}.pruneTags"),
-    ] {
-        if config_is_true(repo, &key).await {
-            return true;
-        }
-    }
-    // A refspec writing into `refs/heads/*` needs the `--update-head-ok` bare pull
-    // passes its own fetch; ours would hard-refuse ("Refusing to fetch into branch").
-    fetch_maps_into_heads(repo, remote).await
+    let (ff, twohead) = tokio::join!(
+        config_is_set(repo, "pull.ff"),
+        config_is_set(repo, "pull.twohead"),
+    );
+    ff || twohead
 }
 
 /// Whether `key` is set at ALL, in any scope — the test for the tri-state and
@@ -825,6 +846,10 @@ async fn fetch_head_record(repo: &str, new_tip: &str) -> Option<String> {
 /// the plain local half does depends on it (there is no fork-point verdict), merging
 /// the pinned tip onto a HEAD the user just advanced is what a fresh pull would do,
 /// and refusing that would defeat the concurrency this split exists to allow.
+///
+/// [`probe`] closes with this too, for the same reason and with the tip likewise left
+/// to the working-tree phase's [`ensure_pin_current`]: a commit landing mid-fetch is
+/// ordinary, a branch SWITCH invalidates everything the plan names.
 ///
 /// Deliberately NOT [`PULL_DECISION_STALE`]: that marker keys the frontend's
 /// stale-decision flow, which has an answer to re-ask.
@@ -2549,6 +2574,72 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "a plan for a branch that is no longer HEAD must never be built"
+        );
+    }
+
+    /// The same switch landing DURING the fetch, which is the long window — the
+    /// transfer runs without the working tree held, for up to `NETWORK_TIMEOUT`. This
+    /// arm REFUSES where the pre-fetch one stands down: a stand-down here falls through
+    /// to bare `git pull --rebase` on a branch the guard never examined, and the
+    /// autostash core would stash the user's tree to run it.
+    ///
+    /// A `reference-transaction` hook does the switching: it fires inside the fetch, on
+    /// the tracking-ref update, so the flip lands after the pre-fetch read and before
+    /// the plan's own reads with no timing bet anywhere.
+    #[tokio::test]
+    async fn probe_refuses_when_the_branch_switched_during_the_fetch() {
+        let (dir, clone, work, _tip) = behind_fixture("probe-switched-mid-fetch").await;
+        let clone_dir = dir.path().join("clone");
+        git(&clone, &["branch", "elsewhere"]).await;
+        let hook = clone_dir
+            .join(".git")
+            .join("hooks")
+            .join("reference-transaction");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nif [ \"$1\" = \"committed\" ]; then\n  \
+             printf 'ref: refs/heads/elsewhere\\n' > \"${GIT_DIR:-.git}/HEAD\"\nfi\n",
+        )
+        .unwrap();
+        // git IGNORES a hook without the executable bit on POSIX, which would leave the
+        // branch unswitched and this test asserting nothing.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let state = AppState::default();
+        let target = resolve(&clone)
+            .await
+            .unwrap()
+            .expect("the fixture tracks a real remote branch");
+        // Upstream moves again, so this probe's fetch really updates a ref — the hook
+        // only fires on a committed transaction.
+        std::fs::write(dir.path().join("work").join("c.txt"), "c\n").unwrap();
+        git(&work, &["add", "-A"]).await;
+        git(&work, &["commit", "-qm", "upstream moves again"]).await;
+        git(&work, &["push", "-q"]).await;
+
+        // Mapped to a bool so the panic can name which Ok arm was taken: `true` built a
+        // plan for the wrong branch, `false` stood down where it had to refuse.
+        let err = probe(&state, &clone, &target, &[])
+            .await
+            .map(|plan| plan.is_some())
+            .expect_err("a plan whose revs outlived their branch must refuse, not stand down");
+        assert!(
+            matches!(&err, AppError::Command(m) if m.contains("The checked-out branch changed")),
+            "{err:?}"
+        );
+        assert_eq!(
+            current_branch(&clone).await.as_deref(),
+            Some("elsewhere"),
+            "the hook really did switch the branch mid-fetch"
+        );
+        assert_eq!(
+            rev(&clone, "refs/remotes/origin/main").await,
+            rev(&work, "HEAD").await,
+            "and the fetch really ran, so this is the POST-fetch arm"
         );
     }
 

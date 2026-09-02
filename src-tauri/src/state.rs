@@ -385,6 +385,17 @@ mod lock_key_tests {
         (dir, repo)
     }
 
+    /// An ABSOLUTE path guaranteed not to exist: a temp dir's child, minted and then
+    /// dropped along with the whole tree. A literal like `C:/repos/x` is a RELATIVE
+    /// path off Windows, which would leave resolvability up to the test cwd.
+    fn absent_path(marker: &str) -> String {
+        let dir = temp_dir(marker);
+        // Canonicalize while the dir still exists (see `fixture_path`).
+        let path = std::path::Path::new(&fixture_path(dir.path())).join("absent");
+        drop(dir);
+        path.to_string_lossy().into_owned()
+    }
+
     /// Domain identity is the mutex itself: two lookups share a domain exactly when
     /// they handed back the same `Arc`.
     fn same(a: &LockDomain, b: &LockDomain) -> bool {
@@ -471,10 +482,13 @@ mod lock_key_tests {
     /// one mutex, and two are still two.
     #[tokio::test]
     async fn a_non_repo_path_falls_back_to_its_own_spelling() {
+        let one = absent_path("absent");
+        let two = absent_path("absent-other");
+
         let state = AppState::default();
-        let fake = domains_of(&state, "C:/repos/gd-lockkey-absent").await;
-        let again = domains_of(&state, "C:/repos/gd-lockkey-absent").await;
-        let other = domains_of(&state, "C:/repos/gd-lockkey-absent-other").await;
+        let fake = domains_of(&state, &one).await;
+        let again = domains_of(&state, &one).await;
+        let other = domains_of(&state, &two).await;
 
         assert!(
             same(&fake.0, &again.0) && same(&fake.1, &again.1) && same(&fake.2, &again.2),

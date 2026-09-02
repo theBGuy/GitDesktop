@@ -1298,10 +1298,13 @@ async fn verify_pin_and_merge(
     // `refs/heads/`, and `validate_branch_name` admits a literal "HEAD", so a check in
     // the main checkout could pass over a different object than the merge takes.
     //
-    // Descent, not equality, is the property: the app's own auto-fetch advances a
-    // remote-tracking base mid-window, and a base that only fast-forwarded is what a
-    // fresh update would merge anyway — only a rewound or rewritten one, an
-    // unresolvable name, or a failed probe invalidates the plan.
+    // Three arms, so the refusal describes what happened. A base that only
+    // fast-forwarded is what a fresh update would merge — the app's own auto-fetch
+    // advances a remote-tracking base mid-window — so it proceeds. Exit 1 means the
+    // name did not resolve, and phase 1 already resolved it, so that base was deleted:
+    // its own wording, since a retry cannot find it either. A rewound or rewritten
+    // base, and any OTHER non-zero exit (128 — a vanished or corrupt tmp gitdir,
+    // measured git 2.51.1), take the retry wording, which suits a transient state.
     let base_now = run_git_raw(
         Some(tmp),
         &[
@@ -1313,8 +1316,15 @@ async fn verify_pin_and_merge(
         DEFAULT_TIMEOUT,
     )
     .await?;
+    if base_now.code == 1 {
+        return Err(AppError::Command(format!(
+            "{base} was deleted while this update was running — there is nothing to update from."
+        )));
+    }
     let base_now_sha = base_now.stdout_lossy().trim().to_string();
     if base_now.code != 0 || base_now_sha != pins.base_sha {
+        // The ancestor probe needs a resolved sha, so a failed re-resolve skips it
+        // and refuses.
         let fast_forwarded = base_now.code == 0
             && run_git_raw(
                 Some(tmp),
@@ -2743,6 +2753,64 @@ mod tests {
         let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
         assert!(
             !list.contains("moved-base-wt"),
+            "the throwaway worktree is unregistered: {list}"
+        );
+        assert!(!tmp.exists(), "and its directory is gone");
+    }
+
+    /// A base that stops resolving was deleted, not moved: phase 1 resolved the name,
+    /// so "try again to see where it stands" would point the user at a retry that
+    /// cannot succeed. Paired with the rewritten-base test, which keeps the "moved"
+    /// wording, so the two messages discriminate. Driven at the predicate, because a
+    /// base deleted mid-window is not a schedulable event.
+    #[tokio::test]
+    async fn a_diverged_update_reports_a_base_deleted_under_it() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-deleted-base").await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        let pinned_base = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+
+        // HEAD has to leave the base branch before git will delete it.
+        run(&repo_s, &["switch", "-qc", "spare"]).await;
+        run(&repo_s, &["branch", "-D", &main]).await;
+
+        let tmp = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("deleted-base-wt");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let err = merge_diverged_in_worktree(
+            &state,
+            &repo_s,
+            &tmp_s,
+            "feature",
+            &main,
+            &UpdatePins {
+                branch_tip: feature_tip.clone(),
+                base_sha: pinned_base,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.starts_with(&format!("{main} was deleted while this update was running"))),
+            "{err:?}"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature"]).await.trim(),
+            feature_tip,
+            "a refused update leaves the branch exactly where it was"
+        );
+        let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
+        assert!(
+            !list.contains("deleted-base-wt"),
             "the throwaway worktree is unregistered: {list}"
         );
         assert!(!tmp.exists(), "and its directory is gone");
