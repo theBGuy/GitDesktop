@@ -267,9 +267,9 @@ export function CommitComments({
    *  (yet) support them; the read is disabled with it. */
   enabled?: boolean;
   /** Whether `diffSections` reflects a settled read of THIS commit's patch. False
-   *  (loading, errored, or another commit's placeholder) makes every line look
-   *  unresolvable, so the couldn't-place marker is withheld rather than blaming the
-   *  comment for a missing patch. */
+   *  (loading, errored, or another commit's placeholder) makes a `position`-derived
+   *  line unresolvable, so the couldn't-place marker is withheld rather than blaming
+   *  the comment for a missing patch. */
   diffReady?: boolean;
 }) {
   const comments = useCommitComments(repoPath, enabled ? sha : null, lens);
@@ -305,17 +305,20 @@ export function CommitComments({
   // Anchored comments NOT visible inline: one renders inline only when it's on the
   // selected file AND resolves to a new-side line. Everything else surfaces below
   // under its `path:line` label, with the resolved line when we have one. Until
-  // `diffReady`, no line counts as resolved — the inline anchor a resolved line
-  // would rely on doesn't exist yet, so excluding the comment here would hide it.
+  // `diffReady`, no patch-derived line counts as resolved — its inline anchor doesn't
+  // exist yet, so excluding the comment here would hide it. A server-provided `line`
+  // never depends on the patch and stays resolved throughout.
   // Selected-file entries lead the group: they're retained only when their line
   // didn't resolve, and under a cross-file label they read as another file's comment.
   const orderedHidden = useMemo(() => {
     const retained = anchored
       .map((c) => {
         const path = c.path as string;
-        const line = diffReady
-          ? (c.line ?? lineFromPosition(diffSections?.get(path), c.position))
-          : null;
+        const line =
+          c.line ??
+          (diffReady
+            ? lineFromPosition(diffSections?.get(path), c.position)
+            : null);
         return { comment: c, path, line, startLine: c.startLine };
       })
       .filter(({ path, line }) => !(path === selectedPath && line != null));
