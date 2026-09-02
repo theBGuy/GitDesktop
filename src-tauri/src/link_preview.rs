@@ -520,8 +520,10 @@ fn is_start_of_frame(marker: u8) -> bool {
 /// The invariant: the walk may never advance past bytes libjpeg would still scan for
 /// markers. Every marker this walk length-skips is one libjpeg consumes by the same
 /// self-counting arithmetic, or rejects while validating its payload (DRI, DHT, DQT,
-/// DAC); the markers libjpeg fatally rejects are refused below; everything else refuses
-/// or returns.
+/// DAC); the markers libjpeg fatally rejects are refused below; the parameterless ones
+/// (TEM, RST) advance by the marker alone as libjpeg does; everything else refuses or
+/// returns.
+///
 /// Over-gating a SOF variant libjpeg cannot decode costs nothing.
 ///
 /// Terminates on any input: every iteration consumes a fill byte and a marker before the
