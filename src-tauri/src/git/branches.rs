@@ -1239,7 +1239,9 @@ async fn merge_diverged_in_worktree(
     // Try-then-detach is the only teardown shape with no bad arm: a bounded acquire
     // that gave up on `Busy` would leak the throwaway worktree, and a synchronous
     // unbounded one holds a finished update's command hostage for the minutes a
-    // node_modules-scale removal can hold the shared admin domain.
+    // node_modules-scale removal can hold the shared admin domain. A quit or crash
+    // while the detached task waits leaks the `gd-update-*` DIRECTORY — the registry
+    // entry self-heals through `worktree::prune_worktrees_if_free`, the directory does not.
     let domain = state.worktree_admin_lock(repo_path).await;
     match try_acquire_repo_lock(&domain, "a worktree operation") {
         Some(_admin) => remove_tmp_worktree(repo_path, tmp).await,
@@ -1342,17 +1344,29 @@ async fn verify_pin_and_merge(
 
     // The merge keeps the default budget: it rewrites only the differing files, not
     // the whole tree. Lock-free runner — the hold is ours.
-    let merged = run_git(Some(tmp), &["merge", "--no-edit", base], DEFAULT_TIMEOUT).await;
-    match merged {
-        Ok(_) => Ok("merge".to_string()),
-        Err(_) => {
-            // Undo the half-done merge so the branch ref is left as it was.
-            let _ = run_git_raw(Some(tmp), &["merge", "--abort"], DEFAULT_TIMEOUT).await;
-            Err(AppError::InvalidArgument(format!(
-                "{branch} has changes that conflict with {base}. Switch to {branch} to merge and resolve them."
-            )))
-        }
+    let merged = run_git_raw(Some(tmp), &["merge", "--no-edit", base], DEFAULT_TIMEOUT).await;
+    if merged.as_ref().is_ok_and(|out| out.code == 0) {
+        return Ok("merge".to_string());
     }
+
+    // The abort runs before the verdict, on every failure including a runner Err: a
+    // timeout that returned early would leave tmp mid-merge with the branch ref moved.
+    let _ = run_git_raw(Some(tmp), &["merge", "--abort"], DEFAULT_TIMEOUT).await;
+    // Exit 1 is the conflict (measured, git 2.51.1); a hook, a vanished tmp gitdir or
+    // unrelated histories exit 128, and the runner's Err is a timeout or spawn failure.
+    // Only the first has a remedy to name, so the rest carry git's own report instead.
+    Err(match merged {
+        Ok(out) if out.code == 1 => AppError::InvalidArgument(format!(
+            "{branch} has changes that conflict with {base}. Switch to {branch} to merge and resolve them."
+        )),
+        Ok(out) => AppError::Command(format!(
+            "merging {base} into {branch} failed — try again to see where it stands.\n{}",
+            out.full_failure_text()
+        )),
+        Err(e) => AppError::Command(format!(
+            "merging {base} into {branch} failed — try again to see where it stands.\n{e}"
+        )),
+    })
 }
 
 /// Whether a commit is reachable from any remote-tracking ref (`refs/remotes/*`) —
@@ -2694,6 +2708,68 @@ mod tests {
                 .expect("an in-place merge needs no worktree"),
             "merge"
         );
+    }
+
+    /// A merge that fails for a reason other than a conflict must not claim one: the
+    /// conflict wording names a remedy — switch and resolve — that a hook, a timeout
+    /// or unrelated histories give the user no way to act on. Unrelated histories are
+    /// the deterministic non-conflict shape (exit 128, measured git 2.51.1).
+    #[tokio::test]
+    async fn a_failed_merge_that_is_not_a_conflict_carries_gits_own_report() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-merge-failure").await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+
+        // An orphan branch shares no history with `feature`, so git refuses the merge
+        // outright rather than conflicting.
+        run(&repo_s, &["switch", "-q", "--orphan", "alien"]).await;
+        std::fs::write(repo.join("alien.txt"), "alien\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "alien root"]).await;
+        let alien_tip = run(&repo_s, &["rev-parse", "refs/heads/alien"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["switch", "-q", &main]).await;
+
+        let tmp = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("merge-failure-wt");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let err = merge_diverged_in_worktree(
+            &state,
+            &repo_s,
+            &tmp_s,
+            "feature",
+            "alien",
+            &UpdatePins {
+                branch_tip: feature_tip.clone(),
+                base_sha: alien_tip,
+            },
+        )
+        .await
+        .unwrap_err();
+        let AppError::Command(message) = &err else {
+            panic!("a non-conflict failure must not be the conflict refusal: {err:?}");
+        };
+        assert!(
+            message.starts_with("merging alien into feature failed"),
+            "{message}"
+        );
+        assert!(
+            message.contains("refusing to merge unrelated histories"),
+            "git's own report rides along: {message}"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature"]).await.trim(),
+            feature_tip,
+            "a failed merge leaves the branch exactly where it was"
+        );
+        assert!(!tmp.exists(), "the throwaway worktree is torn down");
     }
 
     /// The base's half of the pin, on its refusing side. Merging by NAME is what keeps

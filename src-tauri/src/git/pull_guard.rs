@@ -719,7 +719,7 @@ async fn pull_only_keys_set(repo: &str, merge_mode: bool) -> bool {
 async fn config_is_set(repo: &str, key: &str) -> bool {
     run_git_raw(Some(repo), &["config", "--get", key], DEFAULT_TIMEOUT)
         .await
-        .is_ok_and(|out| out.code == 0)
+        .map_or(true, |out| out.code == 0)
 }
 
 /// Whether `key` reads true through git's own boolean resolution, so every spelling
