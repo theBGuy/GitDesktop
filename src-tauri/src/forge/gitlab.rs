@@ -608,15 +608,19 @@ pub async fn prs_for_branch(repo_path: &str, head: &str) -> AppResult<Vec<PrInfo
 
 /// Map a GitLab GraphQL `PipelineStatusEnum` (the MR head pipeline's status) onto the
 /// neutral list-row CI signal. SKIPPED counts as passing (nothing to run, not a
-/// failure); everything unrecognized or in-flight → pending, never a false green.
-/// Null/absent pipeline → none. Case-insensitive.
+/// failure); CANCELED is neutral — a finished pipeline with no verdict, never a
+/// failure, matching what the checks panel renders for the same MR; CANCELING is still
+/// running, so its verdict is still forming → pending. Everything else unrecognized or
+/// in-flight → pending, never a false green. Null/absent pipeline → none.
+/// Case-insensitive.
 fn pipeline_status_to_ci(status: Option<&str>) -> String {
     match status.map(|s| s.trim().to_ascii_uppercase()) {
         None => "none".to_string(),
         Some(s) if s.is_empty() => "none".to_string(),
         Some(s) => match s.as_str() {
             "SUCCESS" | "SKIPPED" => "passing",
-            "FAILED" | "CANCELED" | "CANCELING" => "failing",
+            "FAILED" => "failing",
+            "CANCELED" => "neutral",
             _ => "pending",
         }
         .to_string(),
@@ -9654,8 +9658,10 @@ mod tests {
         assert_eq!(pipeline_status_to_ci(Some("SUCCESS")), "passing");
         assert_eq!(pipeline_status_to_ci(Some("SKIPPED")), "passing");
         assert_eq!(pipeline_status_to_ci(Some("FAILED")), "failing");
-        assert_eq!(pipeline_status_to_ci(Some("CANCELED")), "failing");
-        assert_eq!(pipeline_status_to_ci(Some("CANCELING")), "failing");
+        // A finished cancel has no verdict; one still cancelling is still running.
+        assert_eq!(pipeline_status_to_ci(Some("CANCELED")), "neutral");
+        assert_eq!(pipeline_status_to_ci(Some("canceled")), "neutral");
+        assert_eq!(pipeline_status_to_ci(Some("CANCELING")), "pending");
         assert_eq!(pipeline_status_to_ci(Some("RUNNING")), "pending");
         assert_eq!(pipeline_status_to_ci(Some("PENDING")), "pending");
         assert_eq!(pipeline_status_to_ci(Some("PREPARING")), "pending");

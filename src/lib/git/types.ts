@@ -1641,8 +1641,10 @@ export interface PrInfo {
   crossRepository?: boolean;
 }
 
-/** A PR's rolled-up CI signal for the list-row icon. "none" = no checks. */
-export type CiStatus = "passing" | "failing" | "pending" | "none";
+/** A PR's rolled-up CI signal for the list-row icon. "none" = no checks; "neutral" =
+ *  finished without a verdict (a cancelled pipeline). GitHub never sends "neutral":
+ *  its rollup enum has no cancelled value (see `rollup_state_to_ci`). */
+export type CiStatus = "passing" | "failing" | "pending" | "none" | "neutral";
 
 /** One PR's CI rollup keyed by number — the PR-list row-icon hydration payload.
  *  Provider-neutral (GitHub statusCheckRollup, GitLab headPipeline, Bitbucket a

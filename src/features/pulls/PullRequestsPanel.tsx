@@ -2,6 +2,7 @@ import {
   CheckCircleIcon,
   ClockIcon,
   GitPullRequestIcon,
+  ProhibitIcon,
   StackSimpleIcon,
   WarningIcon,
   XCircleIcon,
@@ -404,6 +405,18 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
                   aria-label="Checks pending"
                 >
                   <ClockIcon className="size-3" />
+                </span>
+              )}
+              {ciMap?.get(pr.number) === "neutral" && (
+                // Glyph + tone match `checkPresentation`'s CANCELLED so the row and
+                // the PR's checks panel read the same state.
+                <span
+                  className="ml-auto shrink-0 text-muted-foreground"
+                  role="img"
+                  title="Checks cancelled"
+                  aria-label="Checks cancelled"
+                >
+                  <ProhibitIcon className="size-3" />
                 </span>
               )}
             </p>

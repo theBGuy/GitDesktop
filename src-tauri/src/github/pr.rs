@@ -2322,7 +2322,8 @@ pub async fn gh_pr_list(
 
 /// One PR's rolled-up CI signal, keyed by number — the hydration payload for the
 /// PR-list row icons. `ci_status` is one of `"passing" | "failing" | "pending" |
-/// "none"`.
+/// "neutral" | "none"`, mirrored by `CiStatus` in the frontend's types.ts; every
+/// forge arm producing this struct emits only those five.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrCiStatus {
@@ -2346,6 +2347,12 @@ pub struct PrCiRefIn {
 /// list-row CI signal. `None` = the rollup was null (no checks configured) → `"none"`;
 /// an empty state string is treated the same. Unrecognized states bias to `"pending"`
 /// (conservative — never a false green). Case-insensitive.
+///
+/// No `"neutral"` arm on this forge, deliberately: the rollup enum has no cancelled
+/// value (GitHub folds a cancelled check into FAILURE server-side), so the row keeps
+/// GitHub's own verdict while the checks panel derives per-check
+/// (`check-presentation.ts`) — an accepted GitHub-only disagreement, since
+/// re-deriving the rollup here would cost a per-check fetch for every listed PR.
 fn rollup_state_to_ci(state: Option<&str>) -> String {
     match state.map(|s| s.trim().to_ascii_uppercase()) {
         None => "none".to_string(),

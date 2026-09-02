@@ -1073,8 +1073,9 @@ struct BbCommitStatus {
 }
 
 /// Map a Bitbucket commit-status state onto the vocabulary `RemotePrView`'s
-/// `checkPresentation` keys on (uppercased): SUCCESS → passed, FAILURE → failed,
-/// anything else → pending. Bitbucket sends SUCCESSFUL/FAILED/INPROGRESS/STOPPED.
+/// `checkPresentation` keys on. Bitbucket sends SUCCESSFUL/FAILED/INPROGRESS/STOPPED:
+/// SUCCESSFUL → SUCCESS, FAILED → FAILURE, STOPPED → CANCELLED (finished without a
+/// verdict), INPROGRESS and anything unknown → PENDING.
 fn map_bb_check_state(state: &str) -> String {
     match state {
         "SUCCESSFUL" => "SUCCESS".to_string(),
@@ -1087,20 +1088,24 @@ fn map_bb_check_state(state: &str) -> String {
 
 /// Reduce a commit's build-status states (Bitbucket `state`: SUCCESSFUL/FAILED/
 /// INPROGRESS/STOPPED, plus any unknown) to one neutral list-row CI signal.
-/// Precedence: any FAILED/STOPPED → failing; else any INPROGRESS or unrecognized
-/// state → pending (conservative — never a false green); else at least one
-/// SUCCESSFUL → passing; an empty status set → none (no checks reported).
+/// Precedence: any FAILED → failing; else any INPROGRESS or unrecognized state →
+/// pending, since a still-running sibling outranks a stopped one (the head's verdict
+/// is still forming) and an unknown value must never read as a false green; else any
+/// STOPPED → neutral, a set that finished without a verdict; else all SUCCESSFUL →
+/// passing; an empty status set → none (no checks reported).
 fn reduce_bb_ci(states: &[String]) -> String {
     if states.is_empty() {
         return "none".to_string();
     }
     let up: Vec<String> = states.iter().map(|s| s.trim().to_ascii_uppercase()).collect();
-    if up.iter().any(|s| s == "FAILED" || s == "STOPPED") {
+    if up.iter().any(|s| s == "FAILED") {
         return "failing".to_string();
     }
-    if up.iter().any(|s| s != "SUCCESSFUL") {
-        // INPROGRESS or any value we don't recognize → still-running / unknown.
+    if up.iter().any(|s| s != "SUCCESSFUL" && s != "STOPPED") {
         return "pending".to_string();
+    }
+    if up.iter().any(|s| s == "STOPPED") {
+        return "neutral".to_string();
     }
     "passing".to_string()
 }
@@ -5748,12 +5753,23 @@ mod tests {
             reduce_bb_ci(&["SUCCESSFUL".into(), "SUCCESSFUL".into()]),
             "passing"
         );
-        // Any FAILED/STOPPED dominates.
+        // Any FAILED dominates, a stopped sibling included.
         assert_eq!(
             reduce_bb_ci(&["SUCCESSFUL".into(), "FAILED".into()]),
             "failing"
         );
-        assert_eq!(reduce_bb_ci(&["STOPPED".into()]), "failing");
+        assert_eq!(reduce_bb_ci(&["STOPPED".into(), "FAILED".into()]), "failing");
+        // Stopped without a failure → neutral: finished, no verdict.
+        assert_eq!(reduce_bb_ci(&["STOPPED".into()]), "neutral");
+        assert_eq!(
+            reduce_bb_ci(&["SUCCESSFUL".into(), "STOPPED".into()]),
+            "neutral"
+        );
+        // Still running outranks a stopped sibling — the verdict is still forming.
+        assert_eq!(
+            reduce_bb_ci(&["STOPPED".into(), "INPROGRESS".into()]),
+            "pending"
+        );
         // In-progress (no failure) → pending, not passing.
         assert_eq!(
             reduce_bb_ci(&["SUCCESSFUL".into(), "INPROGRESS".into()]),
