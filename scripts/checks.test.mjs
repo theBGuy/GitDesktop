@@ -53,6 +53,7 @@ const loneActivity = scanner("lone-activity-boundary");
 const seedOnOpen = scanner("seed-effect-on-open");
 const diffStatPair = scanner("hand-rolled-diff-stat");
 const nullFallback = scanner("null-suspense-fallback");
+const bareGroupLabel = scanner("bare-group-label");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -700,9 +701,10 @@ test("hand-rolled-diff-stat exempts the component file and vendored ui only", ()
 });
 
 test("null-suspense-fallback flags the literal on one line or wrapped", () => {
-  assert.deepEqual(nullFallback("<Suspense fallback={null}>{kids}</Suspense>"), [
-    1,
-  ]);
+  assert.deepEqual(
+    nullFallback("<Suspense fallback={null}>{kids}</Suspense>"),
+    [1],
+  );
   // The formatter's shape: the prop on its own line, with inner spacing.
   const wrapped = [
     "<Suspense",
@@ -722,6 +724,72 @@ test("null-suspense-fallback leaves a real fallback and a forwarded prop alone",
     "<Suspense fallback={compact ? null : <Skeleton />}>{kids}</Suspense>",
   ])
     assert.deepEqual(nullFallback(source), [], `should ignore ${source}`);
+});
+
+test("bare-group-label flags an attribute-less Label caption", () => {
+  const caption = [
+    '<div className="space-y-2">',
+    "  <Label>Rules</Label>",
+    '  <RuleToggle label="Require a pull request" checked={d.requirePr} />',
+    "</div>",
+  ].join("\n");
+  assert.deepEqual(bareGroupLabel(caption), [2]);
+  assert.deepEqual(bareGroupLabel("<Label>{label}</Label>"), [1]);
+  // Two captions in one file are two findings, so a partial conversion can't
+  // read as clean once the first is fixed.
+  const two = ["<Label>Features</Label>", "<Label>Commits</Label>"].join("\n");
+  assert.deepEqual(bareGroupLabel(two), [1, 2]);
+});
+
+test("bare-group-label leaves every ASSOCIATED label alone", () => {
+  for (const source of [
+    // The single-control idiom.
+    '<Label htmlFor="pages-cname">Custom domain</Label>',
+    // The group idiom LabeledGroup emits — the id is what names the group.
+    "<Label id={id}>{label}</Label>",
+    // A styled caption still carries an attribute.
+    '<Label className="text-xs">Only these branches</Label>',
+    // A wrapping label is a plain lowercase `<label>`, never this component.
+    '<label className="flex items-center gap-2"><Checkbox />Issues</label>',
+    // The LabeledGroup call site itself.
+    '<LabeledGroup label="Rules">{children}</LabeledGroup>',
+  ])
+    assert.deepEqual(bareGroupLabel(source), [], `should ignore ${source}`);
+  // Comment stripping keeps the doc comment that NAMES the banned shape clean.
+  assert.deepEqual(
+    bareGroupLabel("// a bare `<Label>` names nothing for assistive tech"),
+    [],
+  );
+});
+
+test("bare-group-label allowlists whole files, and exempts vendored ui", () => {
+  const check = CHECKS.find((c) => c.name === "bare-group-label");
+  assert.equal(check.appliesTo("src/components/ui/label.tsx"), false);
+  assert.equal(check.appliesTo("src/components/form/labeled-group.tsx"), true);
+  assert.equal(
+    check.appliesTo("src/features/repo-settings/PagesSection.tsx"),
+    true,
+  );
+  // The deferred siblings are keyed per file: both of one file's captions are
+  // suppressed by its single entry, while an unlisted file still reports.
+  const files = [
+    "src/features/pulls/LinkedIssuesField.tsx",
+    "src/features/repo-settings/PagesSection.tsx",
+  ];
+  const views = new Map([
+    [
+      "src/features/pulls/LinkedIssuesField.tsx",
+      view("<Label>Linked issues</Label>\n<Label>Linked issues</Label>"),
+    ],
+    [
+      "src/features/repo-settings/PagesSection.tsx",
+      view("<Label>Source</Label>"),
+    ],
+  ]);
+  const { violations } = runCheck(check, files, views);
+  assert.deepEqual(violations, [
+    "src/features/repo-settings/PagesSection.tsx:1",
+  ]);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {
@@ -837,9 +905,11 @@ test("compare-endpoint check flags an interpolated basehead, either side", () =>
     "repos/{slug}/compare/main...{head}",
     "repos/{slug}/compare/{base}...{owner}:{branch}?per_page=1",
   ]) {
-    const src = ["fn build() -> String {", `    format!("${template}")`, "}"].join(
-      "\n",
-    );
+    const src = [
+      "fn build() -> String {",
+      `    format!("${template}")`,
+      "}",
+    ].join("\n");
     const hits = [];
     checkCompareEndpoints("fixture.rs", src, src.split("\n"), hits);
     assert.equal(hits.length, 1, `should flag ${template}`);
@@ -854,9 +924,11 @@ test("compare-endpoint check ignores a fully literal path and the slug alone", (
     "repos/{slug}/compare/main...dev",
     "repos/{slug}/pulls/{number}",
   ]) {
-    const src = ["fn build() -> String {", `    format!("${template}")`, "}"].join(
-      "\n",
-    );
+    const src = [
+      "fn build() -> String {",
+      `    format!("${template}")`,
+      "}",
+    ].join("\n");
     const hits = [];
     checkCompareEndpoints("fixture.rs", src, src.split("\n"), hits);
     assert.deepEqual(hits, [], `should ignore ${template}`);

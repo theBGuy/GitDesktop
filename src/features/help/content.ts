@@ -2484,11 +2484,13 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 {{ai}}- **Agent:** {{kbd:agent-toggle-terminal}} toggle the session terminal.
 {{/ai}}
 Every shortcut is **rebindable** in **Settings → Keyboard**: click a binding, press a new
-combination, and if it clashes with another action the app moves it for you. The list
-there is filterable by action name, category, or key — {{kbd:focus-filter}} jumps to the
-filter while the section is open. Many actions (creating issues/releases, repository
-settings, stash views{{ai}}, most agent commands{{/ai}}) are palette-only until you bind
-a key. Defaults match GitHub Desktop where there's an equivalent.`,
+combination, and if it clashes with another action the app moves it for you. A shortcut can
+be a single key: bare keys stay quiet while you're typing or in a menu or picker, and
+fire everywhere else. The list there is filterable by action name, category, or key —
+{{kbd:focus-filter}} jumps to the filter while the section is open. Many actions
+(creating issues/releases, repository settings, stash views{{ai}}, most agent
+commands{{/ai}}) are palette-only until you bind a key. Defaults match GitHub Desktop
+where there's an equivalent.`,
   },
   {
     id: "settings",

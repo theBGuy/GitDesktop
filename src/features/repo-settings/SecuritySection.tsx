@@ -2,6 +2,7 @@ import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -378,8 +379,7 @@ function MoreOnGitHub({ repoPath, open }: { repoPath: string; open: boolean }) {
   const url = settings.data?.htmlUrl;
   if (!url) return null;
   return (
-    <div className="space-y-2 border-t pt-3">
-      <Label>Only on GitHub</Label>
+    <LabeledGroup label="Only on GitHub" className="space-y-2 border-t pt-3">
       <p className="text-[11px] text-muted-foreground">
         GitHub exposes no API for these — manage them in your browser.
       </p>
@@ -397,7 +397,7 @@ function MoreOnGitHub({ repoPath, open }: { repoPath: string; open: boolean }) {
           </li>
         ))}
       </ul>
-    </div>
+    </LabeledGroup>
   );
 }
 

@@ -11,6 +11,7 @@ import {
 import { AnimatePresence, m, useReducedMotion } from "motion/react";
 import { type ComponentType, useState } from "react";
 import { toast } from "sonner";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { NavRail, type NavRailGroup } from "@/components/NavRail";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
@@ -932,8 +933,7 @@ function WebhookForm({
         </div>
       </div>
 
-      <div className="space-y-2">
-        <Label>Events</Label>
+      <LabeledGroup label="Events">
         <label className="flex cursor-pointer items-center gap-2 text-xs">
           <Switch checked={allEvents} onCheckedChange={setAllEvents} />
           Send me everything
@@ -954,7 +954,7 @@ function WebhookForm({
             ))}
           </div>
         )}
-      </div>
+      </LabeledGroup>
 
       <div className="flex items-center justify-between gap-4">
         <label className="flex cursor-pointer items-center gap-2 text-xs">

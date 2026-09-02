@@ -4,9 +4,9 @@ import {
   PlusIcon,
   XIcon,
 } from "@phosphor-icons/react";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import type { EntryRow } from "./shared";
 
 /** The env-var / header rows editor inside the dialog. Each row can hold a plain
@@ -29,13 +29,14 @@ export function EntryEditor({
   onRemove: (rowId: string) => void;
 }) {
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <Label>{label}</Label>
+    <LabeledGroup
+      label={label}
+      actions={
         <Button type="button" variant="ghost" size="sm" onClick={onAdd}>
           <PlusIcon data-icon="inline-start" /> Add
         </Button>
-      </div>
+      }
+    >
       {rows.length === 0 ? (
         <p className="text-xs text-muted-foreground">None.</p>
       ) : (
@@ -105,6 +106,6 @@ export function EntryEditor({
           ))}
         </div>
       )}
-    </div>
+    </LabeledGroup>
   );
 }

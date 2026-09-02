@@ -317,6 +317,16 @@ const ACTIVITY_JSX_RE = /<Activity(?![\w$])/;
 // converted site had.
 const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
 
+// An ATTRIBUTE-LESS `<Label>` open tag. Every legitimately associated label in
+// this tree carries an attribute — `htmlFor` for a single control, `id` for a
+// group caption, `className` on a styled one — and a label that WRAPS its control
+// is spelled as a plain `<label>`, so the bare form is the class itself: it names
+// nothing for assistive tech. The optional whitespace covers the formatter's
+// never-produced-here `<Label >`; a tag broken across lines is not seen, since
+// this reads per line rather than the joined view (the formatter has no reason to
+// wrap a tag with no attributes to wrap).
+const BARE_LABEL_RE = /<Label\s*>/;
+
 // The two halves of an async settings rollback. The gate: an OPTIMISTIC patch of
 // the settings cache — the file flips the preference itself so the UI can commit
 // before the store write resolves. The hit: that file's mutation `onError`
@@ -552,6 +562,25 @@ export const CHECKS = [
     allowlist: [],
     message:
       "`fallback={null}` blanks the region while the boundary is active, with no aria-busy and nothing announced to assistive tech — lazy panels use LazyPanelFallback (src/components/lazy-panel-fallback.tsx); any other fallback-taking host, or a boundary whose absence is genuinely invisible, needs an allowlist entry with rationale",
+  },
+  {
+    name: "bare-group-label",
+    appliesTo: notVendoredUi,
+    scan: perLine(BARE_LABEL_RE),
+    // Keyed per FILE, not per site: these three carry captions of the same class
+    // whose conversion belongs to their own change, and a coarser key means an
+    // unrelated edit to one of them can't turn the entry stale mid-flight. The
+    // gate blocks NEW bare captions; it is not a to-do list for these.
+    allowlist: [
+      // Two "Linked issues" captions over the linked-issue chip rows.
+      "src/features/pulls/LinkedIssuesField.tsx",
+      // "Target" over the tag/commitish picker, "Release notes" over the editor.
+      "src/features/tags/CreateReleaseDialog.tsx",
+      // "Script" over the interpreter + path row.
+      "src/features/scripts/TaskDialog.tsx",
+    ],
+    message:
+      'a `<Label>` with no attributes names nothing for assistive tech — it has no htmlFor to point at a control and wraps none, so the controls under it read as anonymous; caption a group with LabeledGroup (src/components/form/labeled-group.tsx), which pairs the label\'s id with role="group" + aria-labelledby, or give the label an htmlFor when it belongs to one control; a genuinely decorative caption needs an allowlist entry with rationale',
   },
 ];
 

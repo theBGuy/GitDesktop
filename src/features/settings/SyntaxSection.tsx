@@ -8,6 +8,7 @@ import { useSelector } from "@tanstack/react-store";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useState } from "react";
 import { toast } from "sonner";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -266,8 +267,7 @@ function CustomLanguageDialog({
 
             {/* Right: comments, strings, options */}
             <div className="flex flex-col gap-5">
-              <div className="space-y-2">
-                <Label>Comments</Label>
+              <LabeledGroup label="Comments">
                 <div className="grid grid-cols-3 gap-2">
                   <div className="space-y-1.5">
                     <Label
@@ -315,7 +315,7 @@ function CustomLanguageDialog({
                     />
                   </div>
                 </div>
-              </div>
+              </LabeledGroup>
 
               <div className="space-y-2">
                 <Label htmlFor="cl-strings">String delimiters</Label>

@@ -183,6 +183,39 @@ function pushRejectionSummary(text: string): string | null {
   return PUSH_REJECTION_SUMMARIES.find(([m]) => m.test(text))?.[1] ?? null;
 }
 
+/** Transport and sideband refusals — the remote answering the connection rather
+ *  than rejecting a ref, so they are deliberately separate from the per-ref
+ *  `! [rejected]` family above. Every pattern is line-anchored, since the same
+ *  blob echoes URLs, paths, and commit subjects. ORDER IS PRECEDENCE: a
+ *  repository-state refusal carries git's generic 403 line in the same blob, so
+ *  it must be read before that line's own entry. Shapes measured verbatim
+ *  against github.com on git 2.51.1.windows.1, 2026-09; the mirror line is a
+ *  Gitea server's, from a user report. */
+const REMOTE_ACCESS_SUMMARIES: readonly (readonly [RegExp, string])[] = [
+  [
+    /^[ \t]*remote: .*\b[Rr]ead-only\b/m,
+    "The remote reports this repository as read-only (usually a mirror or an archived repository), so different credentials won't change the answer. If it mirrors another repository, push there instead.",
+  ],
+  [
+    /^fatal: could not read Username for /m,
+    "No credentials are stored for this remote, and GitDesktop never lets Git prompt for them. Add them to your Git credential helper, then try again.",
+  ],
+  [
+    /^fatal: Authentication failed for /m,
+    "The remote rejected the credentials it was given. Update them in your Git credential helper, then try again.",
+  ],
+  [
+    /^fatal: unable to access '[^'\n]*': The requested URL returned error: 403/m,
+    "The remote recognizes the account but it lacks permission for this operation on this repository. Ask an owner for access, or check that the credentials in use belong to the account you expect.",
+  ],
+];
+
+/** The humanized line for a remote refusing access, or null when the text
+ *  carries none of the mapped shapes. */
+function remoteAccessSummary(text: string): string | null {
+  return REMOTE_ACCESS_SUMMARIES.find(([m]) => m.test(text))?.[1] ?? null;
+}
+
 /** Windows MAX_PATH refusals. git prints its reason as the TAIL of a diagnostic
  *  (`fatal: cannot create directory at '<path>': Filename too long`, measured on
  *  git 2.51.1.windows.1), so the marker is end-anchored like `: needs merge`
@@ -461,6 +494,7 @@ export function presentError(e: unknown): ErrorPresentation {
       (isConflict
         ? conflictSummary(combined)
         : (pushRejectionSummary(combined) ??
+          remoteAccessSummary(combined) ??
           (firstMeaningfulLine(message) || label)));
 
     const distinctStderr = stderr !== "" && !message.includes(stderr);

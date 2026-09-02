@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -215,8 +216,7 @@ export function McpServerDialog({
                 spellCheck={false}
               />
             </div>
-            <div className="space-y-2">
-              <Label>Transport</Label>
+            <LabeledGroup label="Transport">
               <div className="flex gap-1">
                 {(["stdio", "http"] as const).map((t) => (
                   <Button
@@ -232,7 +232,7 @@ export function McpServerDialog({
                   </Button>
                 ))}
               </div>
-            </div>
+            </LabeledGroup>
           </div>
 
           <div className="space-y-2">

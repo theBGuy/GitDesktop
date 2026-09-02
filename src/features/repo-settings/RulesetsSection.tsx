@@ -2,6 +2,7 @@ import { CaretLeftIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -641,9 +642,7 @@ function RulesetForm({
         )}
       </div>
 
-      <div className="space-y-2">
-        <Label>Rules</Label>
-
+      <LabeledGroup label="Rules">
         <RuleToggle
           label="Require a pull request before merging"
           checked={d.requirePr}
@@ -727,7 +726,7 @@ function RulesetForm({
           checked={d.requireSignatures}
           onChange={(v) => set("requireSignatures", v)}
         />
-      </div>
+      </LabeledGroup>
 
       <div className="flex items-center justify-end gap-2 pt-1">
         <Button variant="outline" onClick={onDone} disabled={pending}>

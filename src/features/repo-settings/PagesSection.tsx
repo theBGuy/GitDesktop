@@ -2,6 +2,7 @@ import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { toast } from "sonner";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -285,8 +286,7 @@ function PagesEnabled({
       </div>
 
       {!isWorkflow && (
-        <div className="space-y-1.5">
-          <Label>Source</Label>
+        <LabeledGroup label="Source" className="space-y-1.5">
           <div className="flex items-end gap-2">
             <Select value={branch} onValueChange={(v) => v && setBranch(v)}>
               <SelectTrigger className="w-44">
@@ -324,7 +324,7 @@ function PagesEnabled({
               Update
             </Button>
           </div>
-        </div>
+        </LabeledGroup>
       )}
 
       <div className="space-y-1.5">

@@ -2,6 +2,7 @@ import { ArrowSquareOutIcon, SparkleIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { toast } from "sonner";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -368,8 +369,7 @@ function GeneralForm({
         </div>
       </div>
 
-      <div className="space-y-2">
-        <Label>Features</Label>
+      <LabeledGroup label="Features">
         <div className="grid grid-cols-2 gap-2">
           <label className="flex cursor-pointer items-center gap-2 text-xs">
             <Checkbox
@@ -400,10 +400,9 @@ function GeneralForm({
             Discussions
           </label>
         </div>
-      </div>
+      </LabeledGroup>
 
-      <div className="space-y-2">
-        <Label>Pull request merges</Label>
+      <LabeledGroup label="Pull request merges">
         <div className="grid grid-cols-3 gap-2">
           <label className="flex cursor-pointer items-center gap-2 text-xs">
             <Checkbox
@@ -480,10 +479,9 @@ function GeneralForm({
           />
           Automatically delete head branches after merge
         </label>
-      </div>
+      </LabeledGroup>
 
-      <div className="space-y-2">
-        <Label>Commits</Label>
+      <LabeledGroup label="Commits">
         <label className="flex cursor-pointer items-center gap-2 text-xs">
           <Switch
             checked={form.webCommitSignoffRequired}
@@ -491,10 +489,9 @@ function GeneralForm({
           />
           Require contributors to sign off on web-based commits
         </label>
-      </div>
+      </LabeledGroup>
 
-      <div className="space-y-2">
-        <Label>Repository</Label>
+      <LabeledGroup label="Repository">
         <label className="flex cursor-pointer items-center gap-2 text-xs">
           <Switch
             checked={form.isTemplate}
@@ -512,11 +509,10 @@ function GeneralForm({
             Allow forking
           </label>
         )}
-      </div>
+      </LabeledGroup>
 
       {settings.htmlUrl && (
-        <div className="space-y-2">
-          <Label>Only on GitHub</Label>
+        <LabeledGroup label="Only on GitHub">
           <p className="text-xs text-muted-foreground">
             GitHub doesn't expose these to apps — manage them in your browser.
           </p>
@@ -534,7 +530,7 @@ function GeneralForm({
               </li>
             ))}
           </ul>
-        </div>
+        </LabeledGroup>
       )}
 
       <GhScopesNote />

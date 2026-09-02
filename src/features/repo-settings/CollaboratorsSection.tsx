@@ -1,5 +1,5 @@
 import { UserPlusIcon, XIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { toast } from "sonner";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { useRelativeNow } from "@/components/relative-time";
@@ -81,6 +81,7 @@ export function CollaboratorsSection({
   const [confirming, setConfirming] = useState<string | null>(null);
   const [activeCollab, setActiveCollab] = useState(-1);
   const [activeInvite, setActiveInvite] = useState(-1);
+  const invitesLabelId = useId();
   // `meta` is a plain string prop, so the shared clock has to be threaded in by
   // hand — `<RelativeTime>` can't render there.
   const now = useRelativeNow();
@@ -244,12 +245,12 @@ export function CollaboratorsSection({
 
       {inviteRows.length > 0 && (
         <div className="space-y-2">
-          <Label className="text-xs text-muted-foreground">
+          <Label id={invitesLabelId} className="text-xs text-muted-foreground">
             Pending invitations
           </Label>
           <div
             role="listbox"
-            aria-label="Pending invitations"
+            aria-labelledby={invitesLabelId}
             tabIndex={0}
             className="space-y-2 rounded-md outline-none focus-visible:ring-1 focus-visible:ring-ring"
             onKeyDown={listKeyboardNav({

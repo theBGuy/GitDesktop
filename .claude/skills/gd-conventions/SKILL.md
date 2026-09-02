@@ -164,6 +164,13 @@ separators.
   not a silent gap.
 - Never degrade a surface to dodge machinery: no plain `<pre>` where the app
   highlights, no spinner where skeletons exist.
+- A caption over a GROUP of controls rides `LabeledGroup`
+  (`src/components/form/labeled-group.tsx`), which ties the group to it via
+  `role="group"` + `aria-labelledby` — a bare `<Label>` with no `htmlFor` names
+  nothing for assistive tech; the `bare-group-label` guard in `pnpm run checks`
+  fails on a new attribute-less one. Existing idioms that already do their own
+  aria wiring stay as they are: the CreatePrDialog / CreateIssueDialog field-group
+  wrappers and McpServersSection's `role="group"` scope groups.
 - A lazy panel's `Suspense` fallback is `LazyPanelFallback`
   (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
   region has no aria-busy and announces nothing to assistive tech.

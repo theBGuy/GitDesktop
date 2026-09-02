@@ -153,6 +153,19 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
+/** Surfaces that consume plain keystrokes without being editable targets, where
+ *  a bare-key binding would double-act. `combobox` is the measured case: a
+ *  CLOSED Base UI select trigger runs value-mutating typeahead with no
+ *  preventDefault. The menu arms are our own invariant, since open Base UI
+ *  popups stop character keys but not named ones. `listbox` is excluded: the
+ *  app's lists navigate by arrows alone and are its primary keyboard surfaces. */
+export function isTypeaheadTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return (
+    target.closest('[role="menu"],[role="menubar"],[role="combobox"]') !== null
+  );
+}
+
 /** Native text-editing combos a hotkey must never shadow while typing. */
 const EDITING_COMBOS = new Set([
   "mod+a",
