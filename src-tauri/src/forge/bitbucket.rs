@@ -6310,6 +6310,9 @@ mod tests {
         assert_eq!(map_bb_check_state("FAILED"), "FAILURE");
         assert_eq!(map_bb_check_state("STOPPED"), "CANCELLED");
         assert_eq!(map_bb_check_state("INPROGRESS"), "PENDING");
+        // Padded/lowercased values normalize the same way `reduce_bb_ci` reads them.
+        assert_eq!(map_bb_check_state(" stopped "), "CANCELLED");
+        assert_eq!(map_bb_check_state("successful"), "SUCCESS");
     }
 
     #[test]

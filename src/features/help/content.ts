@@ -1218,7 +1218,9 @@ whatever you've already picked (never invented), and can **propose issue links**
 picked only from a grounded shortlist of your open issues (AI-picked chips carry a
 **sparkle**; a proposed *Closes* still lands as a safe *Relates to* you can toggle up) —
 or, on a Bitbucket repo with a linked Jira project, linked-Jira keys to mention, drawn
-from the same kind of grounded shortlist so it never invents a key.
+from the same kind of grounded shortlist so it never invents a key. A suggested name
+that isn't one of the repository's labels is called out beneath the **Labels** field,
+and the label picker says when labels couldn't be loaded.
 The same **Generate** button is on the **Edit** dialog too, so you can
 write or regenerate an existing PR's title and description at any time — including for pull
 requests from forks. The Create dialog also has an optional collapsed **Notes for
