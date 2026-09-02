@@ -509,7 +509,8 @@ fn sniff_gif(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
 }
 
 /// SOF0..SOF15, less the three markers that share the range without being frame headers:
-/// DHT (0xC4), the JPEG extensions marker (0xC8), and DAC (0xCC).
+/// DHT (0xC4), the JPEG extensions marker (0xC8), and DAC (0xCC). The walk refuses 0xC8
+/// with the fatal-marker classes before asking; its exclusion here is a second layer.
 fn is_start_of_frame(marker: u8) -> bool {
     (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc)
 }
@@ -517,9 +518,11 @@ fn is_start_of_frame(marker: u8) -> bool {
 /// Walk the marker chain to the first frame header, where a JPEG states its size.
 ///
 /// The invariant: the walk may never advance past bytes libjpeg would still scan for
-/// markers. It skips length-bearing segments by the same self-counting arithmetic, and
-/// ERREXITs on the markers it does not handle (DHP, EXP, JPGn, the reserved range), so a
-/// position past one of those gates nothing that ever decodes. Anything else refuses.
+/// markers. Every marker this walk length-skips is one libjpeg consumes by the same
+/// self-counting arithmetic, or rejects while validating its payload (DRI, DHT, DQT,
+/// DAC); the markers libjpeg fatally rejects are refused below; everything else refuses
+/// or returns.
+/// Over-gating a SOF variant libjpeg cannot decode costs nothing.
 ///
 /// Terminates on any input: every iteration consumes a fill byte and a marker before the
 /// segment length is added, so `i` strictly increases, and each read is bounds-checked.
@@ -539,17 +542,24 @@ fn sniff_jpeg(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
         if marker == 0xd9 || marker == 0xda {
             return None;
         }
-        // Neither of these is length-bearing, so reading a length here would desync the
-        // walk from the decoder. `FF 00` is a stuffed pair libjpeg DISCARDS mid-scan
-        // (jdmarker.c's next_marker) and keeps scanning, so consuming two bytes after it
-        // as a length jumps clean over the frame header libjpeg still reads; a repeated
-        // SOI it refuses outright (JERR_SOI_DUPLICATE). Both refuse for the same reason.
+        // `FF 00` is a stuffed pair libjpeg DISCARDS mid-scan (jdmarker.c's next_marker)
+        // and keeps scanning, so consuming the two bytes after it as a length jumps clean
+        // over the frame header libjpeg still reads; libjpeg refuses a repeated SOI
+        // outright (JERR_SOI_DUPLICATE). Neither byte is length-bearing, so both refuse
+        // here.
         if marker == 0x00 || marker == 0xd8 {
             return None;
         }
         // TEM and the restart markers stand alone, carrying no length or payload.
         if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
             continue;
+        }
+        // The fatally-rejected markers that are NOT frame headers: the reserved range,
+        // plus the unsupported JPG, DHP, EXP and JPGn classes. A file carrying one never
+        // decodes, so refusing keeps every length-skip below one libjpeg performs too.
+        // (The unsupported SOF variants gate instead — over-gating undecodable is free.)
+        if matches!(marker, 0x02..=0xbf | 0xc8 | 0xde | 0xdf | 0xf0..=0xfd) {
+            return None;
         }
         // A segment's length counts its own two bytes, so anything under 2 is malformed.
         let length = usize::from(u16::from_be_bytes(header_field(bytes, i)?));
@@ -569,9 +579,10 @@ fn sniff_jpeg(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
             if components == 0 || length != 8 + 3 * components {
                 return None;
             }
-            // Length, one precision byte, then height before width.
-            let height = u16::from_be_bytes(header_field(bytes, i + 3)?);
-            let width = u16::from_be_bytes(header_field(bytes, i + 5)?);
+            // Segment-relative, like `segment[7]` above: the length fills 0..2, then one
+            // precision byte, then height before width.
+            let height = u16::from_be_bytes(header_field(segment, 3)?);
+            let width = u16::from_be_bytes(header_field(segment, 5)?);
             return Some(("image/jpeg", width.into(), height.into()));
         }
         // Counting its own two bytes makes the length the whole step from here.
@@ -1700,7 +1711,8 @@ mod tests {
             "image/gif",
             "image/jpg",
             "IMAGE/JPG; charset=binary",
-            // Unregistered PNG spellings that reach the sniffer as ordinary PNG bytes.
+            // Extra PNG spellings — x-png unregistered, apng registered — that reach the
+            // sniffer as ordinary PNG bytes.
             "image/x-png",
             "image/apng",
             "IMAGE/X-PNG; charset=binary",
@@ -2065,6 +2077,13 @@ mod tests {
             sniff_image(&jpeg_fixture(0xc0, &padded, 20, 30)),
             Some(("image/jpeg", 20, 30))
         );
+        // DHT sits inside the SOF byte range and is skipped by length, not refused:
+        // libjpeg consumes a DHT by its declared length too (validating the payload as
+        // it goes — the class keeps the walk in step, whatever these filler bytes are).
+        assert_eq!(
+            sniff_image(&jpeg_fixture(0xc0, &jpeg_segment(0xc4, &[0u8; 20]), 320, 240)),
+            Some(("image/jpeg", 320, 240))
+        );
     }
 
     /// Progressive JPEGs open SOF2, and every frame header in the SOF range states its
@@ -2237,6 +2256,34 @@ mod tests {
         let honest = jpeg_fixture(0xc0, &[], 20000, 20000);
         assert_eq!(sniff_image(&honest), Some(("image/jpeg", 20000, 20000)));
         assert_eq!(checked_image_type(&honest), None);
+    }
+
+    /// A marker libjpeg treats as a fatal error is not something to skip past: the file
+    /// never decodes, so any frame header behind it gates a raster nothing allocates.
+    /// Each fixture puts one such marker — followed by `00 02`, a length only a walk
+    /// with the refusal deleted would read — ahead of a complete, valid SOF0: skipping
+    /// would land exactly on that header and report its size.
+    #[test]
+    fn sniff_image_refuses_markers_the_decoder_fatally_rejects() {
+        // The reserved range's ends, JPG, DHP, EXP, and the JPGn range's ends.
+        for marker in [0x02u8, 0xbf, 0xc8, 0xde, 0xdf, 0xf0, 0xfd] {
+            let leading = [0xff, marker, 0x00, 0x02];
+            assert_eq!(
+                sniff_image(&jpeg_fixture(0xc0, &leading, 640, 480)),
+                None,
+                "FF {marker:02X} must be refused, not skipped"
+            );
+        }
+        // The frame header behind them is well-formed and within the caps, so the
+        // refusals above are the marker arm and not some other gate.
+        assert_eq!(
+            sniff_image(&jpeg_fixture(0xc0, &[], 640, 480)),
+            Some(("image/jpeg", 640, 480))
+        );
+        assert_eq!(
+            checked_image_type(&jpeg_fixture(0xc0, &[], 640, 480)),
+            Some("image/jpeg")
+        );
     }
 
     /// T.81 fixes `Lf` at 8 + 3 * Nf, so a frame header that disagrees with its own
