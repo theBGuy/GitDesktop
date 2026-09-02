@@ -930,16 +930,15 @@ CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · �
 ⊖ J skipped**, each count with its own icon and word so status never rides on color
 alone. Skipped checks (plus neutral, stale, or cancelled ones) show as their own muted
 segment rather than masquerading as pending. It auto-expands whenever something has
-failed. Expanding lists
-the checks failures-first (arrow-navigable). A **GitHub Actions** check that's still
-**running** shows its **current step** right in the row and, when expanded, a **live step
-checklist** that updates as the run progresses; a finished Actions check **peeks its job
-log inline** instead — without leaving the PR — **copy** the log with the button in its
-top-right corner — with an **Open full run** link. An external check (Vercel and the
-like) links straight out to its details. **GitLab MRs** get the same rollup from the MR's
-pipeline jobs, with the same **inline log peek**; **Bitbucket PRs** get it from the PR's
-commit build statuses, but those **link out only** (name, state, and URL — Bitbucket
-exposes no fetchable job logs).
+failed. Expanding lists the checks failures-first (arrow-navigable). A **GitHub
+Actions** check that's still **running** shows its **current step** right in the row
+and, when expanded, a **live step checklist** that updates as the run progresses; a
+finished Actions check **peeks its job log inline** instead — without leaving the PR —
+**copy** the log with the button in its top-right corner — with an **Open full run**
+link. An external check (Vercel and the like) links straight out to its details.
+**GitLab MRs** get the same rollup from the MR's pipeline jobs, with the same **inline
+log peek**; **Bitbucket PRs** get it from the PR's commit build statuses, but those
+**link out only** (name, state, and URL — Bitbucket exposes no fetchable job logs).
 
 Comments, replies, edits, and descriptions use a Markdown editor with **Write / Preview**
 tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and bulleted
@@ -1069,9 +1068,9 @@ on both **GitHub** and **GitLab**.
 On **GitHub** the refusal is the base branch's rules going unmet, and the line names
 what is outstanding: **Merge is blocked — waiting on: build, fragment.** GitDesktop
 asks GitHub what that branch requires and matches it against the checks on this pull
-request, counting a context as outstanding when it has never reported, or when its
-most recent run failed, is still running, or has gone stale. Four are named, then
-*and N more*. Where the rules also require approving reviews, the count rides along:
+request, counting a context as outstanding when it has never reported, or when its most
+recent run failed, was cancelled, is still running, or has gone stale. Four are named,
+then *and N more*. Where the rules also require approving reviews, the count rides along:
 **The rules also require 2 approving reviews.** Wherever the specific requirements
 can't be named, the line falls back to **Merge is blocked by the base branch's
 protection rules.** When only the approval count is known it reads **…protection

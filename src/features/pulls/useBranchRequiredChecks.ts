@@ -93,9 +93,9 @@ export function unmetRequiredChecks(
   }
   return required.filter((context) => {
     const named = runs.get(context);
-    // Unmet = never reported, still running, failed, or gone stale — what a viewer
-    // is waiting on. A skipped or neutral run has reported a conclusion GitHub
-    // accepts, so naming it as something still to come would be wrong.
+    // Unmet = never reported, still running, failed, stale, or cancelled — what a
+    // viewer is waiting on. A skipped or neutral run has reported a conclusion GitHub
+    // accepts; cancelled shares their muted presentation but not that acceptance.
     if (!named) return true;
     // The newest DATED run decides, and an undated one is never overruled by it:
     // nothing orders that run against the others, so it has to clear on its own.

@@ -1,1 +1,1 @@
-- AI-generated reviews, plans, release notes, and issue drafts enumerate findings as (1), (2) and reserve #N for deliberate references to real issues and pull requests.
+- AI-generated text (reviews, security audits, debug explainers, plans, release notes, issue drafts, research) enumerates as (1), (2) and reserves #N for deliberate references to real issues and pull requests.

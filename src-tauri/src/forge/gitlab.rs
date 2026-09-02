@@ -609,10 +609,10 @@ pub async fn prs_for_branch(repo_path: &str, head: &str) -> AppResult<Vec<PrInfo
 /// Map a GitLab GraphQL `PipelineStatusEnum` (the MR head pipeline's status) onto the
 /// neutral list-row CI signal. SKIPPED counts as passing (nothing to run, not a
 /// failure); CANCELED is neutral — a finished pipeline with no verdict, never a
-/// failure, matching what the checks panel renders for the same MR; CANCELING is still
-/// running, so its verdict is still forming → pending. Everything else unrecognized or
-/// in-flight → pending, never a false green. Null/absent pipeline → none.
-/// Case-insensitive.
+/// failure (the checks panel derives per-job, so a job that failed before the cancel
+/// still reads failed there); CANCELING is still running, so its verdict is still
+/// forming → pending. Everything else unrecognized or in-flight → pending, never a
+/// false green. Null/absent pipeline → none. Case-insensitive.
 fn pipeline_status_to_ci(status: Option<&str>) -> String {
     match status.map(|s| s.trim().to_ascii_uppercase()) {
         None => "none".to_string(),

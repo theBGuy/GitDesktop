@@ -76,7 +76,8 @@ import {
 } from "./useLinkedIssueChips";
 
 /** The hint for label names the model proposed that the repo doesn't have:
- *  `Suggested label "x" isn't a repo label.`, plural `"a", "b" and "c"`. */
+ *  `Suggested label "x" isn't a repo label.`, plural `"a", "b" and "c"`.
+ *  Callers pass at least one name. */
 function droppedLabelsHint(names: string[]): string {
   const quoted = names.map((n) => `"${n}"`);
   if (quoted.length === 1)
