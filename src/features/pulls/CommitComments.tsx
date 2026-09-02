@@ -304,15 +304,18 @@ export function CommitComments({
 
   // Anchored comments NOT visible inline: one renders inline only when it's on the
   // selected file AND resolves to a new-side line. Everything else surfaces below
-  // under its `path:line` label, with the resolved line when we have one.
+  // under its `path:line` label, with the resolved line when we have one. Until
+  // `diffReady`, no line counts as resolved — the inline anchor a resolved line
+  // would rely on doesn't exist yet, so excluding the comment here would hide it.
   // Selected-file entries lead the group: they're retained only when their line
   // didn't resolve, and under a cross-file label they read as another file's comment.
   const orderedHidden = useMemo(() => {
     const retained = anchored
       .map((c) => {
         const path = c.path as string;
-        const line =
-          c.line ?? lineFromPosition(diffSections?.get(path), c.position);
+        const line = diffReady
+          ? (c.line ?? lineFromPosition(diffSections?.get(path), c.position))
+          : null;
         return { comment: c, path, line, startLine: c.startLine };
       })
       .filter(({ path, line }) => !(path === selectedPath && line != null));
@@ -320,7 +323,7 @@ export function CommitComments({
       ...retained.filter(({ path }) => path === selectedPath),
       ...retained.filter(({ path }) => path !== selectedPath),
     ];
-  }, [anchored, diffSections, selectedPath]);
+  }, [anchored, diffSections, selectedPath, diffReady]);
 
   // Parents serve the previous commit's content as placeholder while arrowing
   // through history, so hold writes until the shown commit is the addressed one.

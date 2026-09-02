@@ -1192,9 +1192,9 @@ a real range on **GitLab**; **GitHub** and **Bitbucket** commit comments anchor 
 line, and the composer says so.
 
 Create a PR with **Create pull request** ({{kbd:create-pr}}) or from the Compare tab — as
-a **draft** if you like, and set its **labels** and **assignees** right in the dialog
-(GitHub and GitLab; Bitbucket PRs have neither, so it shows only its reviewers picker
-instead). A **Linked issues** row (GitHub and GitLab, wherever the repo has an issue
+a **draft** if you like, and set its **labels** and **assignees** right in the dialog;
+the label picker says when labels couldn't be loaded (GitHub and GitLab; Bitbucket PRs
+have neither, so it shows only its reviewers picker instead). A **Linked issues** row (GitHub and GitLab, wherever the repo has an issue
 tracker) lets you reference real repo issues on create: chips are **auto-detected** from
 your branch name and commit subjects (a \`fix/123-…\` branch seeds \`#123\`, validated
 against your actual issues), and you can add more by hand with **Link issue**. Each chip
@@ -1219,8 +1219,7 @@ picked only from a grounded shortlist of your open issues (AI-picked chips carry
 **sparkle**; a proposed *Closes* still lands as a safe *Relates to* you can toggle up) —
 or, on a Bitbucket repo with a linked Jira project, linked-Jira keys to mention, drawn
 from the same kind of grounded shortlist so it never invents a key. A suggested name
-that isn't one of the repository's labels is called out beneath the **Labels** field,
-and the label picker says when labels couldn't be loaded.
+that isn't one of the repository's labels is called out beneath the **Labels** field.
 The same **Generate** button is on the **Edit** dialog too, so you can
 write or regenerate an existing PR's title and description at any time — including for pull
 requests from forks. The Create dialog also has an optional collapsed **Notes for
