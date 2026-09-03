@@ -16,8 +16,9 @@
 //! itself: the OS releases it when the owning process dies, so a probe that can
 //! acquire it is looking at a crash orphan.
 //!
-//! Every probe failure fails OPEN — no refusal, git's own error speaks, which is
-//! exactly today's behavior. An IO hiccup must never block a user's action.
+//! A probe that establishes nothing fails OPEN in BOTH directions — no refusal and no
+//! removal, leaving the caller exactly where it stood before markers existed. An IO
+//! hiccup must never block a user's action, nor authorize deleting a checkout.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,9 +68,10 @@ fn any_update_refusal() -> AppError {
     AppError::Command("A branch update is running — try again when it finishes.".to_string())
 }
 
-/// The refusal when a DEAD update's leftover still holds `branch` and this attempt
-/// could not clear it — the worktree-admin domain was busy, or the lock could not be
-/// probed. Never says an update is running: that would be a claim we just disproved.
+/// The refusal when a PROVABLY dead update's leftover still holds `branch` and this
+/// attempt could not clear it, which now means only one thing: the worktree-admin
+/// domain was busy. Raised solely off a `Released` probe, so it never says an update is
+/// running — that would be a claim the probe just disproved.
 pub(crate) fn interrupted_update_refusal(branch: &str) -> AppError {
     AppError::Command(format!(
         "An interrupted branch update is still holding {branch} — try again in a moment."
@@ -153,33 +155,39 @@ impl Drop for UpdateMarker {
     }
 }
 
-/// What a lock probe could establish. `Unknown` exists because the two consumers need
-/// opposite defaults: a refusal may only fire on `Live` (an unreadable lock must never
-/// block a user's action), while a REMOVAL may only fire on `Dead` (an antivirus
-/// scanner holding a live update's lock file open for a moment must never get that
-/// update's checkout force-removed mid-merge).
+/// What a lock probe could establish. Four states because the consumers need different
+/// defaults, and each state authorizes exactly one thing:
+/// - only `Live` may say an update is RUNNING — an unreadable lock must never block a
+///   user's action on a guess;
+/// - only `Released` may authorize an AGE-FREE removal, and its refusal when that
+///   removal cannot proceed says INTERRUPTED, which is what it just proved;
+/// - `Missing` and `Unknown` prove nothing, so they authorize neither and leave every
+///   caller at exactly the behavior it had before markers existed.
 #[derive(Debug, PartialEq, Eq)]
-enum LockProbe {
+pub(crate) enum LockProbe {
     /// Someone holds the lock — the update that minted it is still running.
     Live,
-    /// Provably nobody holds it: acquirable, or the file is gone (the pre-marker
-    /// orphan shape, which the background sweep still age-gates).
-    Dead,
-    /// The probe could not establish either — a transient IO failure.
+    /// The lock file exists and was acquirable: its owner is provably gone, since the
+    /// OS releases file locks on process death.
+    Released,
+    /// No lock file at all. NOT proof of death: a pre-marker binary mints no marker,
+    /// and a stale one can still be running an update (a not-yet-restarted MCP server
+    /// beside a rebuilt GUI). Only age can settle this shape.
+    Missing,
+    /// The probe established nothing — a transient IO failure.
     Unknown,
 }
 
-/// Probes the marker lock at `lock_path`. The OS releases an exclusive file lock when
-/// the holding process dies, so acquiring one is proof its owner is gone.
+/// Probes the marker lock at `lock_path`.
 fn probe_lock(lock_path: &Path) -> LockProbe {
     match std::fs::File::open(lock_path) {
         // The probe's own acquisition is released when `file` closes at end of scope.
         Ok(file) => match file.try_lock() {
-            Ok(()) => LockProbe::Dead,
+            Ok(()) => LockProbe::Released,
             Err(std::fs::TryLockError::WouldBlock) => LockProbe::Live,
             Err(std::fs::TryLockError::Error(_)) => LockProbe::Unknown,
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LockProbe::Dead,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LockProbe::Missing,
         Err(_) => LockProbe::Unknown,
     }
 }
@@ -201,10 +209,15 @@ pub(crate) fn is_update_worktree_path(path: &str) -> bool {
         .is_some_and(|name| name.starts_with(MARKER_PREFIX))
 }
 
-/// Whether the update owning the `gd-update-*` checkout at `path` is provably still
-/// running. Only `Live` answers `true`, so an unreadable lock never raises a refusal.
-pub(crate) fn update_worktree_is_live(path: &str) -> bool {
-    sidecar(Path::new(path), "lock").is_some_and(|lock| probe_lock(&lock) == LockProbe::Live)
+/// The lock state of the `gd-update-*` checkout at `path`. Every caller needs all four
+/// answers apart — `Live` refuses, `Released` claims, and `Missing`/`Unknown` prove
+/// nothing and behave exactly as if markers did not exist — so this replaces the
+/// is-live predicate a two-state probe could afford. An unusable path reads `Unknown`.
+pub(crate) fn update_worktree_probe(path: &str) -> LockProbe {
+    match sidecar(Path::new(path), "lock") {
+        Some(lock) => probe_lock(&lock),
+        None => LockProbe::Unknown,
+    }
 }
 
 /// One scan of a worktree root's markers.
@@ -241,7 +254,9 @@ pub(crate) fn refuse_in(root: &Path, branch: Option<&str>) -> RefuseOutcome {
         }
         match probe_lock(&entry.path()) {
             LockProbe::Live => {}
-            LockProbe::Dead => {
+            // `Missing` here means the file vanished between the listing and the open,
+            // which is a finished update either way — both are sweepable leftovers.
+            LockProbe::Released | LockProbe::Missing => {
                 outcome.saw_dead = true;
                 continue;
             }
@@ -337,11 +352,15 @@ pub(crate) async fn spawn_orphan_sweep(state: &AppState, repo_path: &str) {
 /// re-probe; `false` means it must not proceed (still live, unprobeable, or the admin
 /// domain was busy).
 ///
-/// No age gate, unlike the background sweep, and that is sound HERE specifically: the
-/// mint writes and locks the marker BEFORE `worktree add`, so a `gd-update-*` checkout
-/// appearing in porcelain proves the marker already existed. An acquirable lock is
-/// therefore direct proof its owner died, not a mint-order race — the window the age
-/// gate exists to cover cannot be open once the checkout is registered.
+/// No age gate, unlike the background sweep, and `Released` is what buys that: the mint
+/// writes and locks the marker BEFORE `worktree add`, so a registered checkout whose
+/// lock file EXISTS was minted by a marker-era process, and the OS having released that
+/// lock is direct proof the process died — never a mint-order race.
+///
+/// That proof covers only checkouts whose lock file exists. A `Missing` lock at a
+/// registered holder means a pre-marker binary minted it, and such a binary can still
+/// be running the update right now (a stale MCP-server exe beside a rebuilt GUI), so it
+/// is refused here and left to the age-gated background sweep.
 pub(crate) async fn claim_dead_update_worktree(
     state: &AppState,
     repo_path: &str,
@@ -358,7 +377,7 @@ pub(crate) async fn claim_dead_update_worktree(
     ) else {
         return false;
     };
-    if probe_lock(&lock) != LockProbe::Dead {
+    if probe_lock(&lock) != LockProbe::Released {
         return false;
     }
     let domain = state.worktree_admin_lock(repo_path).await;
@@ -367,11 +386,74 @@ pub(crate) async fn claim_dead_update_worktree(
     };
     // Re-probe under the hold: the first probe raced anything that could have started
     // an update on this stem in between.
-    if probe_lock(&lock) != LockProbe::Dead {
+    if probe_lock(&lock) != LockProbe::Released {
         return false;
     }
     remove_update_leftover(repo_path, root, stem).await;
     true
+}
+
+/// Clears the leftovers of DEAD updates of `branch` specifically, age-free, so the very
+/// next update of a branch a crash interrupted heals its own predecessor synchronously
+/// instead of racing a detached sweep for the worktree-admin domain.
+///
+/// Same proof as [`claim_dead_update_worktree`] and the same limit: only a lock file
+/// that EXISTS and is acquirable authorizes a removal, so a pre-marker build's
+/// markerless checkout is never claimed here. No porcelain read is needed — the lock
+/// file alone carries the proof.
+pub(crate) async fn claim_dead_updates_for_branch(state: &AppState, repo_path: &str, branch: &str) {
+    let Ok(root) = crate::git::ops::worktree_root_dir(repo_path) else {
+        return;
+    };
+    // Nothing to heal is the overwhelmingly common case; answer it without paying for
+    // the domain resolution or its lock.
+    if dead_stems_for_branch(&root, branch).is_empty() {
+        return;
+    }
+    let domain = state.worktree_admin_lock(repo_path).await;
+    let Some(_admin) = try_acquire_repo_lock(&domain, "a worktree operation") else {
+        return;
+    };
+    claim_dead_stems_for_branch_locked(repo_path, &root, branch).await;
+}
+
+/// The body of [`claim_dead_updates_for_branch`], over an explicit root so tests can
+/// drive it. The caller MUST hold the repo's worktree-admin domain.
+async fn claim_dead_stems_for_branch_locked(repo_path: &str, root: &Path, branch: &str) {
+    for stem in dead_stems_for_branch(root, branch) {
+        // Re-probe under the hold, as the single-holder claim does.
+        if probe_lock(&root.join(format!("{stem}.lock"))) != LockProbe::Released {
+            continue;
+        }
+        remove_update_leftover(repo_path, root, &stem).await;
+    }
+}
+
+/// The stems under `root` whose lock file exists, probes `Released`, and whose manifest
+/// names `branch`. Age-free by construction: an existing-but-released lock is the
+/// proof, so a markerless (`Missing`) stem is never a candidate here.
+fn dead_stems_for_branch(root: &Path, branch: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut stems = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(stem) = name.strip_suffix(".lock") else {
+            continue;
+        };
+        if !stem.starts_with(MARKER_PREFIX) {
+            continue;
+        }
+        if probe_lock(&entry.path()) != LockProbe::Released {
+            continue;
+        }
+        if read_manifest(&root.join(format!("{stem}.json"))).is_some_and(|m| m.branch == branch) {
+            stems.push(stem.to_string());
+        }
+    }
+    stems
 }
 
 /// Removes the `gd-update-*` leftovers a crashed or killed update left behind, so the
@@ -463,8 +545,14 @@ fn orphaned_update_stems(root: &Path, min_age: Duration) -> Vec<String> {
     let now = SystemTime::now();
     candidates
         .into_iter()
-        // Only a PROVEN-dead lock authorizes a removal — `Unknown` is spared.
-        .filter(|(stem, _)| probe_lock(&root.join(format!("{stem}.lock"))) == LockProbe::Dead)
+        // `Missing` is claimable HERE and nowhere else: the age gate is what stands in
+        // for the proof a lock file would have given. `Unknown` and `Live` are spared.
+        .filter(|(stem, _)| {
+            matches!(
+                probe_lock(&root.join(format!("{stem}.lock"))),
+                LockProbe::Released | LockProbe::Missing
+            )
+        })
         .filter(|(_, paths)| {
             // The NEWEST mtime of anything the stem owns: the most recent sign of life
             // is what has to be old, not the oldest.
@@ -772,15 +860,15 @@ mod tests {
         drop(marker);
         assert_eq!(
             probe_lock(&root.join("gd-update-held.lock")),
-            LockProbe::Dead,
-            "a missing lock is the pre-marker orphan shape"
+            LockProbe::Missing,
+            "no lock file at all is the pre-marker orphan shape, not proof of death"
         );
 
         std::fs::write(root.join("gd-update-freed.lock"), b"").unwrap();
         assert_eq!(
             probe_lock(&root.join("gd-update-freed.lock")),
-            LockProbe::Dead,
-            "an acquirable lock proves its owner is gone"
+            LockProbe::Released,
+            "an existing, acquirable lock proves its owner is gone"
         );
 
         // An open that fails as something OTHER than NotFound. There is no one
@@ -820,6 +908,11 @@ mod tests {
     /// Negative control for the guard MECHANISM: the root holds a live marker and no
     /// worktree at all, so nothing but the marker scan can produce this refusal —
     /// delete the scan and the same fixture answers `Ok`.
+    ///
+    /// This fixture IS the pre-add window: minted, `worktree add` not yet run, nothing
+    /// in porcelain. It is the only thing standing between a delete or a reset and an
+    /// update that dies on a missing ref, which is why those sites guard on the marker
+    /// before their porcelain read.
     #[test]
     fn the_refusal_comes_from_the_marker_not_from_git() {
         let (_guard, root) = temp_root("negative-control");
@@ -830,5 +923,106 @@ mod tests {
             "no checkout exists — git would have nothing to refuse"
         );
         assert!(refuse_in(&root, Some("feature")).refusal.is_some());
+        // The no-heal form the pre-add guards use reaches the same verdict through the
+        // same scan; only its healing differs.
+        assert_eq!(
+            refuse_in(&root, Some("feature"))
+                .refusal
+                .expect("the pre-add window refuses")
+                .to_string(),
+            branch_update_refusal("feature").to_string()
+        );
+        assert!(refuse_in(&root, Some("other")).refusal.is_none());
+    }
+
+    /// The targeted, age-free claim: only a lock that EXISTS and is acquirable, and
+    /// only for the branch asked about. The markerless case is the one that matters —
+    /// a pre-marker binary mints no lock and may still be running that update.
+    #[test]
+    fn the_branch_claim_takes_only_released_locks_for_that_branch() {
+        let (_guard, root) = temp_root("branch-claim");
+
+        std::fs::create_dir_all(root.join("gd-update-dead")).unwrap();
+        write_dead_marker(&root, "gd-update-dead", "feature");
+
+        // A live update of the same branch.
+        std::fs::create_dir_all(root.join("gd-update-busy")).unwrap();
+        let live = UpdateMarker::create_for(&root.join("gd-update-busy"), "feature")
+            .expect("the live marker mints");
+
+        // A dead update of a DIFFERENT branch.
+        write_dead_marker(&root, "gd-update-other", "release");
+
+        // A pre-marker build's checkout: no lock file at all.
+        std::fs::create_dir_all(root.join("gd-update-markerless")).unwrap();
+
+        assert_eq!(
+            dead_stems_for_branch(&root, "feature"),
+            vec!["gd-update-dead".to_string()],
+            "live, other-branch, and markerless stems are all spared"
+        );
+        assert!(
+            dead_stems_for_branch(&root, "nothing-here").is_empty(),
+            "a branch with no leftovers claims nothing"
+        );
+
+        // And the removal it authorizes takes only that stem, with no age gate — the
+        // headline crash-recovery case, where the next update heals its predecessor.
+        // The repo path is bogus on purpose: every git call fails and the filesystem
+        // fallback finishes the job, which is the arm that must not touch a neighbour.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(claim_dead_stems_for_branch_locked(
+                "C:/nonexistent-repo",
+                &root,
+                "feature",
+            ));
+        assert!(
+            !root.join("gd-update-dead").exists(),
+            "the leftover is gone"
+        );
+        assert!(
+            !root.join("gd-update-dead.lock").exists()
+                && !root.join("gd-update-dead.json").exists(),
+            "with its marker pair"
+        );
+        assert!(
+            root.join("gd-update-busy").exists()
+                && root.join("gd-update-other.lock").exists()
+                && root.join("gd-update-markerless").exists(),
+            "the live, other-branch, and markerless neighbours are untouched"
+        );
+        drop(live);
+    }
+
+    /// Regression pin: a REGISTERED `gd-update-*` checkout with no lock file must never
+    /// take the age-free claim. Its minter was a pre-marker binary, which can still be
+    /// running the update — only the age-gated sweep may ever touch it.
+    #[tokio::test]
+    async fn a_markerless_holder_is_never_claimed_age_free() {
+        let (_guard, root) = temp_root("markerless-claim");
+        let orphan = root.join("gd-update-premarker");
+        std::fs::create_dir_all(&orphan).unwrap();
+        assert_eq!(
+            update_worktree_probe(&orphan.to_string_lossy()),
+            LockProbe::Missing
+        );
+
+        let state = AppState::default();
+        assert!(
+            !claim_dead_update_worktree(&state, "C:/nonexistent-repo", &orphan.to_string_lossy())
+                .await,
+            "a markerless holder is refused before any git runs"
+        );
+        assert!(orphan.exists(), "and its checkout is left untouched");
+
+        // The age-gated sweep is the ONLY thing that may claim it.
+        assert_eq!(
+            orphaned_update_stems(&root, Duration::ZERO),
+            vec!["gd-update-premarker".to_string()],
+            "the background sweep still owns this shape"
+        );
     }
 }

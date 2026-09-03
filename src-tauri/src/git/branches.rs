@@ -316,29 +316,33 @@ async fn worktree_holding_branch(repo_path: &str, name: &str) -> Option<String> 
 }
 
 /// Arbitrates a `worktree_holding_branch` hit that turns out to be an UPDATE's hidden
-/// `gd-update-*` checkout: a running one is refused in the update's own words, and a
-/// dead one is cleared on the spot — no age gate, since the porcelain hit itself proves
-/// the mint completed. `true` means "cleared — re-probe"; `false` leaves the caller's
-/// own message to speak for a worktree the user owns.
+/// `gd-update-*` checkout. `true` means "cleared — re-probe"; `false` leaves the
+/// caller's own message to speak, which is also the answer whenever the marker proves
+/// nothing: an unreadable lock, or a checkout from a pre-marker build that may still be
+/// mid-update. Only a lock that EXISTS and is acquirable authorizes the age-free
+/// removal, and only a HELD one authorizes a refusal.
 async fn clear_update_holder(
     state: &AppState,
     repo_path: &str,
     branch: &str,
     holder: &str,
 ) -> AppResult<bool> {
-    use crate::git::update_marker as marker;
+    use crate::git::update_marker::{self as marker, LockProbe};
     if !marker::is_update_worktree_path(holder) {
         return Ok(false);
     }
-    if marker::update_worktree_is_live(holder) {
-        return Err(marker::branch_update_refusal(branch));
+    match marker::update_worktree_probe(holder) {
+        LockProbe::Live => Err(marker::branch_update_refusal(branch)),
+        LockProbe::Released => {
+            if marker::claim_dead_update_worktree(state, repo_path, holder).await {
+                return Ok(true);
+            }
+            // Provably dead but unclaimable (the admin domain was busy) — the hidden
+            // path is nothing the user can act on, so name the state instead.
+            Err(marker::interrupted_update_refusal(branch))
+        }
+        LockProbe::Missing | LockProbe::Unknown => Ok(false),
     }
-    if marker::claim_dead_update_worktree(state, repo_path, holder).await {
-        return Ok(true);
-    }
-    // Dead but unclaimable (admin busy, or the lock could not be probed) — the hidden
-    // path is nothing the user can act on, so name the state instead of that path.
-    Err(marker::interrupted_update_refusal(branch))
 }
 
 /// Force-deletes a local branch (the UI confirms first, GitHub Desktop style).
@@ -357,6 +361,10 @@ pub(crate) async fn git_delete_branch_core(
     name: String,
 ) -> AppResult<()> {
     validate_ref_name(&name)?;
+    // Two halves of one window: the marker covers an update that has minted but not yet
+    // registered its checkout (the `worktree add` is the long part), the porcelain arm
+    // below covers it once registered. Heal-free — the healing lives in the claim arm.
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(&repo_path, &name)?;
     // Pre-mutation guard: git's own refusal for a branch checked out in a worktree
     // is terse. Detect the holding worktree here — shared by every caller, not just
     // the switcher's UI guard — and surface an actionable message.
@@ -1055,6 +1063,10 @@ pub(crate) async fn branch_reset_to_upstream(
         )));
     }
 
+    // Two halves of one window, as in `git_delete_branch_core`: the marker covers an
+    // update that has minted but not yet registered its checkout, the porcelain arm
+    // below covers it once registered. Heal-free — healing lives in the claim arm.
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, branch)?;
     // Pre-mutation guards: git refuses both of these itself, but only after the
     // user has confirmed a destructive action, and its wording names neither
     // remedy. The linked-worktree probe excludes THIS checkout, so the current
@@ -1135,10 +1147,15 @@ pub(crate) async fn update_branch_from(
     }
     // One guard covers both self-collisions: a second update of the same branch, and
     // the fast-forward arm's `fetch . <base>:<branch>`, which git refuses outright
-    // against a branch held by the first update's checkout.
-    crate::git::update_marker::refuse_if_branch_updating(state, repo_path, branch).await?;
-    // Each update clears its predecessors' crash leftovers, so the orphan a killed
-    // run leaves behind never outlives the next one. Self-skips when admin is busy.
+    // against a branch held by the first update's checkout. Heal-free deliberately —
+    // this path's own `worktree add` takes the admin domain, and a detached sweep
+    // fired here would win it first and time that bounded acquire out.
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, branch)?;
+    // Healing, in two tiers. THIS branch's provably-dead leftovers go first and
+    // synchronously, so the first update after a crash clears its own predecessor
+    // before the add rather than racing it; everything else waits for the age gate and
+    // is skipped outright while the admin domain is busy.
+    crate::git::update_marker::claim_dead_updates_for_branch(state, repo_path, branch).await;
     crate::git::update_marker::sweep_orphaned_update_worktrees(state, repo_path).await;
 
     // Mutating refs — serialize against other writes to this repo's working tree.

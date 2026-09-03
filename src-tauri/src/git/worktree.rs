@@ -150,6 +150,8 @@ pub async fn git_worktree_list(repo_path: String) -> AppResult<Vec<WorktreeInfo>
 /// Contended means an admin op (a removal) is in flight, and this prune is
 /// skippable: its result is discarded either way, a removal runs its own prune when
 /// it ends, and queueing would stall the list read behind a multi-minute hold.
+/// Having pruned, it releases the hold and fires a DETACHED sweep for interrupted
+/// updates' orphaned checkouts, which prune itself cannot reach.
 /// `true` when the prune ran.
 pub(crate) async fn prune_worktrees_if_free(state: &AppState, repo_path: &str) -> bool {
     let domain = state.worktree_admin_lock(repo_path).await;

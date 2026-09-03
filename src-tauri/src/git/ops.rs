@@ -2696,6 +2696,12 @@ async fn finalize_base(
     // from the same porcelain stanzas in list order, so they line up per stanza.
     // Our resolve worktree is detached, so it never carries `base` as a branch and
     // is safely excluded.
+    // An update that has minted its marker but not yet registered its checkout is
+    // invisible to the porcelain read below, so the marker covers that half of the
+    // window and the arm below covers it once registered. Heal-free: this call's own
+    // continuation takes the admin domain to tear the resolve worktree down.
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, base)?;
+
     let listed = run_git(
         Some(repo_path),
         &["worktree", "list", "--porcelain"],
@@ -2705,34 +2711,57 @@ async fn finalize_base(
     let mut owning_worktree = worktree_holding(&listed.stdout_lossy(), base);
 
     // An update's hidden checkout is never a fast-forward target: advancing `base`
-    // under a running update moves the branch it pinned and kills it at its pin
-    // verify. Live refuses; a dead one is cleared on the spot and the scan retried
-    // once, and anything still holding `base` afterwards refuses as INTERRUPTED —
-    // claiming a running update would be a state this arm just disproved.
+    // under a running update moves the branch it pinned and kills it at its pin verify.
+    // Only a HELD lock refuses and only a RELEASED one authorizes the age-free removal;
+    // a marker that proves neither leaves this routing exactly as it was before markers
+    // existed, which the update's own pin verify already makes data-safe.
     if let Some(holder) = owning_worktree
         .as_deref()
         .filter(|w| crate::git::update_marker::is_update_worktree_path(w))
         .map(str::to_string)
     {
-        if crate::git::update_marker::update_worktree_is_live(&holder) {
-            return Err(crate::git::update_marker::branch_update_refusal(base));
-        }
-        if !crate::git::update_marker::claim_dead_update_worktree(state, repo_path, &holder).await
-        {
-            return Err(crate::git::update_marker::interrupted_update_refusal(base));
-        }
-        let relisted = run_git(
-            Some(repo_path),
-            &["worktree", "list", "--porcelain"],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-        owning_worktree = worktree_holding(&relisted.stdout_lossy(), base);
-        if owning_worktree
-            .as_deref()
-            .is_some_and(crate::git::update_marker::is_update_worktree_path)
-        {
-            return Err(crate::git::update_marker::interrupted_update_refusal(base));
+        match crate::git::update_marker::update_worktree_probe(&holder) {
+            crate::git::update_marker::LockProbe::Live => {
+                return Err(crate::git::update_marker::branch_update_refusal(base));
+            }
+            crate::git::update_marker::LockProbe::Released => {
+                if !crate::git::update_marker::claim_dead_update_worktree(
+                    state, repo_path, &holder,
+                )
+                .await
+                {
+                    return Err(crate::git::update_marker::interrupted_update_refusal(base));
+                }
+                let relisted = run_git(
+                    Some(repo_path),
+                    &["worktree", "list", "--porcelain"],
+                    DEFAULT_TIMEOUT,
+                )
+                .await?;
+                owning_worktree = worktree_holding(&relisted.stdout_lossy(), base);
+                // Another update may hold `base` by now. Same rule as above, so each
+                // message stays true: a held lock says running, a released one says
+                // interrupted, and an unprovable one routes as it always did.
+                if let Some(next) = owning_worktree
+                    .as_deref()
+                    .filter(|w| crate::git::update_marker::is_update_worktree_path(w))
+                {
+                    match crate::git::update_marker::update_worktree_probe(next) {
+                        crate::git::update_marker::LockProbe::Live => {
+                            return Err(crate::git::update_marker::branch_update_refusal(base));
+                        }
+                        crate::git::update_marker::LockProbe::Released => {
+                            return Err(crate::git::update_marker::interrupted_update_refusal(
+                                base,
+                            ));
+                        }
+                        crate::git::update_marker::LockProbe::Missing
+                        | crate::git::update_marker::LockProbe::Unknown => {}
+                    }
+                }
+            }
+            crate::git::update_marker::LockProbe::Missing
+            | crate::git::update_marker::LockProbe::Unknown => {}
         }
     }
 
