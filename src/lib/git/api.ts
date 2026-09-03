@@ -749,9 +749,9 @@ export const gitCommitFileDiff = (
 export const gitFetch = (repoPath: string) =>
   invoke<void>("git_fetch", { repoPath });
 
-/** Fetch a single named remote (`git fetch --prune --no-prune-tags <remote>`) — unlike
- *  {@link gitFetch}, which only touches the default remote. Used to sync a
- *  fork's `upstream`, which a bare fetch never reaches. */
+/** Fetch a single named remote (`git fetch --prune --no-prune-tags <remote>`),
+ *  unlike {@link gitFetch}, which only touches the default remote. Used to
+ *  sync a fork's `upstream`, which a bare fetch never reaches. */
 export const gitFetchRemote = (repoPath: string, remote: string) =>
   invoke<void>("git_fetch_remote", { repoPath, remote });
 

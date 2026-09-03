@@ -4704,8 +4704,8 @@ mod tests {
 
     /// Pins the runner's zero-budget contract, both halves: a timeout is reported,
     /// and git never runs (a `git init` under it leaves no repository behind). A
-    /// red here means the guard in `run_git_raw_input_bytes` is gone and every killed-git
-    /// test below is silently racing the child again.
+    /// red here means the guard in `run_git_raw_input_bytes` is gone and every
+    /// killed-git test below is silently racing the child again.
     #[tokio::test]
     async fn a_zero_budget_times_out_without_running_git() {
         let (dir, repo) = setup_repo("zero-budget").await;

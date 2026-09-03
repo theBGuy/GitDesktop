@@ -192,7 +192,10 @@ function pushRejectionSummary(text: string): string | null {
  *  name a repository: that token is what keeps the summary's claim scoped to
  *  the whole repository. Shapes measured verbatim against github.com on git
  *  2.51.1.windows.1, 2026-09; the mirror line is a Gitea server's, from a user
- *  report. */
+ *  report. Paired with the Rust canary
+ *  `remote_access_stderr_still_matches_the_frontend_markers` (git/remote.rs),
+ *  which pins measured stderr against Rust mirrors of these patterns — keep
+ *  the two lists in step, ORDER INCLUDED. */
 const REMOTE_ACCESS_SUMMARIES: readonly (readonly [RegExp, string])[] = [
   [
     /^[ \t]*remote: (?=.*\b[Rr]epositor(?:y|ies)\b).*\b[Rr]ead-only\b/m,

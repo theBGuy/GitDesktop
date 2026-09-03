@@ -766,7 +766,8 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Fetch the bound repository's default remote, pruning stale \
-                       remote-tracking branches and keeping local tags. \
+                       remote-tracking branches and retaining local tags unless the \
+                       remote explicitly fetches refs/tags/*. \
                        Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
