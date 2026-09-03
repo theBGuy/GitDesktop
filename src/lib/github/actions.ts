@@ -244,29 +244,31 @@ export function useWorkflowRunPages(
   active: boolean,
   branch?: string,
 ) {
+  // Normalize once: the key and the wire value must be the same string, or two
+  // spellings of one branch would each get their own cache entry.
+  const b = branch?.trim() || "";
   return useInfiniteQuery({
-    queryKey: ["repo", repo, "actions", "runs-paged", branch ?? ""] as const,
-    queryFn: ({ pageParam }) => forgeCiRunPage(repo, 40, pageParam, branch),
+    queryKey: ["repo", repo, "actions", "runs-paged", b] as const,
+    queryFn: ({ pageParam }) => forgeCiRunPage(repo, 40, pageParam, b),
     initialPageParam: 1,
     getNextPageParam: (last, pages) =>
       last.hasMore ? pages.length + 1 : undefined,
     enabled: enabled && active,
     staleTime: 10_000,
-    // Polls while ANY loaded run is active, deep-paged or not — the guide promises a
-    // list that keeps refreshing while a run is. The accepted cost: an interval
-    // refetch replays every loaded page serially, so a deep-paged session pays N
-    // sequential fetches per tick. That needs a running run AND a user who paged
-    // back through history, and the rows visibly update as it goes; react-query
-    // skips a tick whose predecessor is still in flight, so they can't stack.
-    refetchInterval: (query) =>
-      (query.state.data?.pages ?? []).some((p) =>
-        p.runs.some((r) => isRunActive(r.status)),
-      )
+    // Both auto-refresh paths replay EVERY loaded page serially, so their cost scales
+    // with how deep the user has paged — and the budget they spend is GitHub's shared
+    // 5,000 requests/hour, which every other gh surface in the app draws on too.
+    // Twenty loaded pages on a 5s tick would be thousands of requests an hour on its
+    // own, so both gate on a single loaded page: the poll fires only while page 1 is
+    // all there is and something in it is running. Paging deeper hands refreshing to
+    // the Refresh button, which updates everything loaded on demand.
+    refetchInterval: (query) => {
+      const pages = query.state.data?.pages ?? [];
+      return pages.length === 1 &&
+        pages[0].runs.some((r) => isRunActive(r.status))
         ? 5000
-        : false,
-    // Focus refetch replays every loaded page too, and unlike the poll it fires with
-    // nothing running. Keep it for the single-page common case (today's freshness on
-    // alt-tab return); once the user has paged in, Refresh is the explicit way back.
+        : false;
+    },
     refetchOnWindowFocus: (query) =>
       (query.state.data?.pages.length ?? 0) === 1,
   });

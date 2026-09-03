@@ -104,10 +104,7 @@ async fn gh_stored_login(host: &str) -> bool {
     }
     let Ok(gh) = gh_bin().await else { return false };
     let mut cmd = Command::new(&gh);
-    apply_gh_env(&mut cmd, None);
-    for var in AMBIENT_TOKEN_VARS {
-        cmd.env_remove(var);
-    }
+    apply_probe_env(&mut cmd);
     cmd.args(["auth", "token", "--hostname", host]);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -127,13 +124,20 @@ async fn gh_stored_login(host: &str) -> bool {
 /// The host spellings to offer gh for a remote URL, most specific first: the authority,
 /// then the bare host when they differ. gh's registry is port-SENSITIVE, so a
 /// `--hostname host:8443` login answers only to the authority while an unported one
-/// answers only to the bare host. Pure.
+/// answers only to the bare host. Both spellings pass [`crate::forge::is_safe_authority`]
+/// first: the parsers only split on `/`, `:` and the bracket span, so a crafted remote
+/// can carry `=`, `;`, `$`, or a space through them, and these strings reach `gh` argv
+/// and — on a successful probe — `GH_HOST`. Pure.
 fn gh_host_candidates(url: &str) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(authority) = crate::forge::remote_authority(url) {
+    if let Some(authority) =
+        crate::forge::remote_authority(url).filter(|a| crate::forge::is_safe_authority(a))
+    {
         out.push(authority);
     }
-    if let Some(host) = crate::forge::remote_host(url).filter(|h| !out.contains(h)) {
+    if let Some(host) = crate::forge::remote_host(url)
+        .filter(|h| !out.contains(h) && crate::forge::is_safe_authority(h))
+    {
         out.push(host);
     }
     out
@@ -155,6 +159,17 @@ async fn gh_host_for_repo(repo_path: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The stored-login probe's child environment: the standard gh environment with NO
+/// `GH_HOST` (the probe names its host by argument, and pinning one here would be
+/// circular) plus every ambient token variable removed. Split out from the spawn so the
+/// token-stripping this design rests on is assertable without a process.
+fn apply_probe_env<C: crate::agent::ChildEnv>(cmd: &mut C) {
+    apply_gh_env(cmd, None);
+    for var in AMBIENT_TOKEN_VARS {
+        cmd.unset_var(var);
+    }
 }
 
 /// The environment every gh child gets. `sanitize_child_env` runs first so these
@@ -353,6 +368,80 @@ mod tests {
     fn an_unparseable_remote_offers_nothing() {
         assert!(gh_host_candidates("/local/path").is_empty());
         assert!(gh_host_candidates("").is_empty());
+    }
+
+    /// The parsers split only on `/`, `:` and the bracket span, so config and shell
+    /// syntax rides through them intact. These strings would otherwise reach `gh` argv
+    /// as `--hostname <authority>` and, on a successful probe, `GH_HOST`.
+    #[test]
+    fn a_crafted_authority_offers_nothing() {
+        for url in [
+            "https://a b$c/o/r.git",
+            "https://host;rm -rf/o/r.git",
+            "https://a=b/o/r.git",
+            "https://h$(whoami)/o/r.git",
+        ] {
+            assert!(
+                gh_host_candidates(url).is_empty(),
+                "must offer nothing for {url:?}, got {:?}",
+                gh_host_candidates(url)
+            );
+        }
+        // The gate is a charset filter, not a URL rejection: ordinary hosts, ports, and
+        // IPv6 literals still come through.
+        assert_eq!(
+            gh_host_candidates("https://ghe.acme.com:8443/o/r.git"),
+            ["ghe.acme.com:8443", "ghe.acme.com"]
+        );
+        assert_eq!(
+            gh_host_candidates("https://[2001:db8::1]:8443/o/r.git"),
+            ["[2001:db8::1]:8443", "[2001:db8::1]"]
+        );
+    }
+
+    /// The probe's whole security property: gh must answer from its STORED config, never
+    /// from an ambient token, because `GH_ENTERPRISE_TOKEN` makes `gh auth token
+    /// --hostname <anything>` exit 0 for any enterprise spelling.
+    #[test]
+    fn the_stored_login_probe_strips_every_ambient_token() {
+        let mut env = RecordingEnv::default();
+        apply_probe_env(&mut env);
+        for var in AMBIENT_TOKEN_VARS {
+            assert!(
+                env.unset.iter().any(|k| k == var),
+                "{var} must be removed from the probe child: {env:?}"
+            );
+            assert_eq!(env.get(var), None, "{var} must not be re-set: {env:?}");
+        }
+        // The probe names its host by argument; pinning GH_HOST here would be circular,
+        // and UNSETTING it would break a deliberate GH_HOST setup.
+        assert_eq!(env.get("GH_HOST"), None, "{env:?}");
+        assert!(!env.unset.iter().any(|k| k == "GH_HOST"), "{env:?}");
+        // Still the standard gh child otherwise.
+        assert_eq!(env.get("GH_PAGER"), Some(""), "{env:?}");
+    }
+
+    /// Both verdicts round-trip and both expire: a sign-out must stop pinning within the
+    /// window, and a sign-in must start.
+    #[test]
+    fn stored_login_verdicts_are_served_within_the_ttl_and_expire_after_it() {
+        // The cache is process-wide and shared by every test in this binary, so each
+        // verdict gets its own host spelling.
+        let (yes, no) = ("ghe.stored.example", "ghe.absent.example");
+
+        assert_eq!(stored_login_cache_get(yes, STORED_LOGIN_TTL), None);
+
+        stored_login_cache_put(yes, true);
+        assert_eq!(stored_login_cache_get(yes, STORED_LOGIN_TTL), Some(true));
+        assert_eq!(stored_login_cache_get(yes, Duration::ZERO), None);
+
+        // `false` is a real verdict, not an absence — otherwise every unauthenticated
+        // host would re-spawn a probe per call.
+        stored_login_cache_put(no, false);
+        assert_eq!(stored_login_cache_get(no, STORED_LOGIN_TTL), Some(false));
+        assert_eq!(stored_login_cache_get(no, Duration::ZERO), None);
+
+        assert_eq!(STORED_LOGIN_TTL, Duration::from_secs(60));
     }
 
     #[test]

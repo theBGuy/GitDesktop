@@ -570,7 +570,12 @@ function RulesetForm({
   const repeatedChecks = hasRepeatedCheckContexts(original);
   const pins = pinnedCheckEntries(original);
   // Advisory: an unnamed app still shows its pin, as the raw id it was stored as.
-  const checkApps = useCheckRunApps(repoPath, pins.length > 0);
+  // Gated on the checks rule being ON as well: with it off the pin list isn't
+  // rendered, and the resolve costs two gh calls for names nothing displays.
+  const checkApps = useCheckRunApps(
+    repoPath,
+    d.requireChecks && pins.length > 0,
+  );
   const appNames = new Map(
     (checkApps.data ?? []).map((a) => [a.id, a.name || a.slug]),
   );

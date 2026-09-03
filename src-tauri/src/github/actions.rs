@@ -21,6 +21,15 @@ where
     Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
 }
 
+/// The numeric twin of [`de_null_string`]: an explicit `null` where a REST id is
+/// expected folds to 0 rather than failing the whole page's parse.
+fn de_null_u64<'de, D>(d: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(d)?.unwrap_or_default())
+}
+
 fn validate_ref(name: &str) -> AppResult<()> {
     if name.is_empty() || name.starts_with('-') {
         return Err(AppError::InvalidArgument(format!("invalid ref: {name}")));
@@ -188,15 +197,16 @@ struct RestRunPage {
 }
 
 /// One run as REST spells it — the snake_case twin of the `gh run list` JSON the
-/// [`WorkflowRun`] field names follow. Every field is null-tolerant: GitHub sends
-/// `null` for an undecided `conclusion` and for timestamps that haven't happened.
+/// [`WorkflowRun`] field names follow. Every field is null-tolerant, ids included:
+/// GitHub sends `null` for an undecided `conclusion` and for timestamps that haven't
+/// happened, and an explicit null anywhere must cost that one field, not the page.
 #[derive(Debug, Default, Deserialize)]
 struct RestRun {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_u64")]
     id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_u64")]
     run_number: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_u64")]
     workflow_id: u64,
     #[serde(default, deserialize_with = "de_null_string")]
     display_title: String,
@@ -261,16 +271,39 @@ fn gh_has_more(fetched: usize, limit: u32, page: u32, total_count: u64) -> bool 
     fetched == limit as usize && u64::from(page) * u64::from(limit) < total_count
 }
 
-/// How long a repo's workflow-name index stays trusted. Bounds the SECOND `gh` spawn
-/// every run-list fetch would otherwise pay — multiplied by the header badge's 8–30s
-/// poll and by one spawn per loaded page on the Actions panel's 5s poll. Staleness
-/// runs one way: a workflow added or renamed inside the window has its runs labeled
-/// with their own `name` until the entry expires, which for all but dynamic and
-/// `run-name:` workflows is the same string. Errors are never cached.
-const WORKFLOW_NAME_TTL: Duration = Duration::from_secs(300);
+/// How long a repo's workflow-name index stays trusted, per direction. Bounds the
+/// SECOND `gh` spawn every run-list fetch would otherwise pay — multiplied by the header
+/// badge's 8–30s poll and by one spawn per loaded page on the Actions panel's 5s poll.
+/// Staleness runs one way: a workflow added or renamed inside the window has its runs
+/// labeled with their own `name` until the entry expires, which for all but dynamic and
+/// `run-name:` workflows is the same string. A FAILED fetch is cached too, under the far
+/// shorter window: persistent failure (a rate limit is the case that matters, since it
+/// arrives exactly when spawning hurts) must not re-spawn per fetch, but recovery has to
+/// be quick.
+const WORKFLOW_NAME_TTL: NameTtl = NameTtl {
+    ok: Duration::from_secs(300),
+    error: Duration::from_secs(30),
+};
 
-/// Cache map keyed by `(repo_path, slug)`; value is `(fetch time, workflow_id → name)`.
-type WorkflowNameCache = Mutex<HashMap<(String, String), (Instant, HashMap<u64, String>)>>;
+/// The two windows [`WORKFLOW_NAME_CACHE`] serves, picked by whether the stored entry
+/// came from a failed fetch — one cache, both directions, like [`ProbeTtl`].
+#[derive(Debug, Clone, Copy)]
+struct NameTtl {
+    ok: Duration,
+    error: Duration,
+}
+
+/// A cached index and whether it came from a FAILED fetch. The flag picks the window and
+/// keeps an error's empty map distinguishable from a repo that genuinely has no
+/// workflows, which is a real answer and holds for the full `ok` window.
+struct CachedNames {
+    fetched_at: Instant,
+    names: HashMap<u64, String>,
+    errored: bool,
+}
+
+/// Cache map keyed by `(repo_path, slug)`.
+type WorkflowNameCache = Mutex<HashMap<(String, String), CachedNames>>;
 
 /// Per-`(repo, slug)` workflow-name index. `repo_path` is in the key for the same
 /// reason [`DISPATCH_PROBE_CACHE`] carries it: `gh_origin_slug` strips the authority,
@@ -282,30 +315,45 @@ fn workflow_name_cache() -> &'static WorkflowNameCache {
     WORKFLOW_NAME_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The cached index for `(repo_path, slug)`, only if an entry exists AND was fetched
-/// less than `ttl` ago. The lock is held just long enough to clone the map.
-fn workflow_names_get(
-    repo_path: &str,
-    slug: &str,
-    ttl: Duration,
-) -> Option<HashMap<u64, String>> {
+/// The cached index for `(repo_path, slug)`, only if an entry exists AND is still inside
+/// its own direction's window. The lock is held just long enough to clone the map.
+fn workflow_names_get(repo_path: &str, slug: &str, ttl: NameTtl) -> Option<HashMap<u64, String>> {
     let guard = workflow_name_cache().lock().unwrap();
-    let (fetched_at, names) = guard.get(&(repo_path.to_string(), slug.to_string()))?;
-    (fetched_at.elapsed() < ttl).then(|| names.clone())
+    let entry = guard.get(&(repo_path.to_string(), slug.to_string()))?;
+    let window = if entry.errored { ttl.error } else { ttl.ok };
+    (entry.fetched_at.elapsed() < window).then(|| entry.names.clone())
 }
 
-/// Record `names` as the current index for `(repo_path, slug)`, stamped now.
+/// Record a fetched `names` index for `(repo_path, slug)`, stamped now.
 fn workflow_names_put(repo_path: &str, slug: &str, names: HashMap<u64, String>) {
     workflow_name_cache().lock().unwrap().insert(
         (repo_path.to_string(), slug.to_string()),
-        (Instant::now(), names),
+        CachedNames {
+            fetched_at: Instant::now(),
+            names,
+            errored: false,
+        },
+    );
+}
+
+/// Record that the fetch for `(repo_path, slug)` FAILED: an empty index under the short
+/// window, so a persistent failure costs one spawn per window instead of one per fetch.
+fn workflow_names_put_failure(repo_path: &str, slug: &str) {
+    workflow_name_cache().lock().unwrap().insert(
+        (repo_path.to_string(), slug.to_string()),
+        CachedNames {
+            fetched_at: Instant::now(),
+            names: HashMap::new(),
+            errored: true,
+        },
     );
 }
 
 /// The `workflow_id` → name index backing every run row's `workflowName`, served from
 /// [`WORKFLOW_NAME_CACHE`] within [`WORKFLOW_NAME_TTL`] — a hit spawns no `gh` at all.
 /// Advisory: a failed fetch yields an EMPTY index (every row falls back to its own
-/// `name`) and is deliberately not cached, so the next call re-probes. Bounded by
+/// `name`), cached under [`WORKFLOW_NAME_TTL`]'s short error window so a persistent
+/// failure can't re-spawn per fetch while recovery stays quick. Bounded by
 /// [`fetch_workflows`]' 100-workflow limit: runs of workflows past it read as their own
 /// names. No single-flight, matching this file's other caches: concurrent misses
 /// compute the same value and the last write wins.
@@ -320,7 +368,10 @@ async fn workflow_name_index(repo_path: &str, slug: &str) -> HashMap<u64, String
             workflow_names_put(repo_path, slug, names.clone());
             names
         }
-        Err(_) => HashMap::new(),
+        Err(_) => {
+            workflow_names_put_failure(repo_path, slug);
+            HashMap::new()
+        }
     }
 }
 
@@ -1058,6 +1109,18 @@ mod tests {
                     "run_started_at": "2026-09-03T01:54:57Z"
                 },
                 {
+                    "id": null,
+                    "name": null,
+                    "run_number": null,
+                    "workflow_id": null,
+                    "display_title": "a row stripped to nulls",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "html_url": "https://github.com/theBGuy/GitDesktop/actions/runs/0",
+                    "created_at": "2026-09-03T01:00:00Z",
+                    "updated_at": "2026-09-03T01:00:10Z"
+                },
+                {
                     "id": 33705353404,
                     "name": "quality",
                     "head_branch": null,
@@ -1112,13 +1175,24 @@ mod tests {
             "195b9e99c92fe7814cd9b063cf0ddeda1f3d4d19"
         );
 
+        // An explicitly-nulled row: `#[serde(default)]` alone covers a MISSING key, not
+        // an explicit null, so without the null-tolerant ids this row would fail the
+        // whole page's parse and the panel would show nothing at all.
+        assert_eq!(runs.len(), 3, "a null-id row must not sink the page");
+        let nulled = &runs[1];
+        assert_eq!(nulled.id, 0);
+        assert_eq!(nulled.number, 0);
+        assert_eq!(nulled.workflow_database_id, 0);
+        assert_eq!(nulled.workflow_name, "");
+        assert_eq!(nulled.display_title, "a row stripped to nulls");
+
         // A still-running run: the three nullable fields fold to "" rather than
         // failing the parse or reaching the UI as null.
-        let second = &runs[1];
-        assert_eq!(second.conclusion, "");
-        assert_eq!(second.started_at, "");
-        assert_eq!(second.head_branch, "");
-        assert_eq!(second.status, "queued");
+        let third = &runs[2];
+        assert_eq!(third.conclusion, "");
+        assert_eq!(third.started_at, "");
+        assert_eq!(third.head_branch, "");
+        assert_eq!(third.status, "queued");
     }
 
     /// REST's per-run `name` is the RUN's name, so a dynamic or `run-name:` workflow
@@ -1220,6 +1294,12 @@ mod tests {
         );
     }
 
+    /// Both windows zero — every name entry reads as expired whatever its direction.
+    const EXPIRED_NAMES: NameTtl = NameTtl {
+        ok: Duration::ZERO,
+        error: Duration::ZERO,
+    };
+
     /// The name index is process-wide and shared by every test in this binary, so each
     /// test keys its entries under its own repo path and slug.
     #[test]
@@ -1229,12 +1309,11 @@ mod tests {
             .into_iter()
             .collect();
 
-        // An unfetched key — the shape an ERRED fetch also leaves behind, since only a
-        // successful list is ever stored — reads as absent, so the next call re-probes.
+        // A never-fetched key reads as absent, so the first call fetches.
         assert_eq!(
             workflow_names_get(repo, slug, WORKFLOW_NAME_TTL),
             None,
-            "an erred or never-run fetch must not pin an empty index"
+            "an unfetched key must not read as an empty index"
         );
 
         workflow_names_put(repo, slug, names.clone());
@@ -1242,8 +1321,9 @@ mod tests {
             workflow_names_get(repo, slug, WORKFLOW_NAME_TTL),
             Some(names.clone())
         );
-        // Zero window: every entry reads as expired without sleeping.
-        assert_eq!(workflow_names_get(repo, slug, Duration::ZERO), None);
+        // Both windows zero: every entry reads as expired whatever its direction, which
+        // is how this stands in for elapsed-past-TTL without sleeping.
+        assert_eq!(workflow_names_get(repo, slug, EXPIRED_NAMES), None);
 
         // An EMPTY index is a real answer (a repo with no workflows) and round-trips
         // as a hit, not as an absence.
@@ -1254,8 +1334,57 @@ mod tests {
             Some(HashMap::new())
         );
 
-        // The shipped window matches the frontend's `useWorkflows` staleTime.
-        assert_eq!(WORKFLOW_NAME_TTL, Duration::from_secs(300));
+        // The shipped windows: the success one matches the frontend's `useWorkflows`
+        // staleTime, and the error one is far shorter so recovery stays quick.
+        assert_eq!(WORKFLOW_NAME_TTL.ok, Duration::from_secs(300));
+        assert_eq!(WORKFLOW_NAME_TTL.error, Duration::from_secs(30));
+        assert!(WORKFLOW_NAME_TTL.error < WORKFLOW_NAME_TTL.ok);
+    }
+
+    /// A failed fetch caches an empty index so a rate-limited repo can't re-spawn `gh`
+    /// on every run-list fetch — but under the short window, and never mistaken for the
+    /// real (and equally empty) answer a workflow-less repo gives.
+    #[test]
+    fn a_failed_workflow_fetch_is_cached_briefly_and_separately() {
+        let (repo, slug) = ("C:/repos/wf-error", "o/wf-error");
+        workflow_names_put_failure(repo, slug);
+
+        // Inside the short window it serves, so the next fetch spawns nothing.
+        assert_eq!(
+            workflow_names_get(repo, slug, WORKFLOW_NAME_TTL),
+            Some(HashMap::new())
+        );
+
+        // Same age, same entry — only the errored flag decides the window. This one is
+        // past the error window and still inside the success one.
+        let past_the_error_window = NameTtl {
+            ok: Duration::from_secs(300),
+            error: Duration::ZERO,
+        };
+        assert_eq!(
+            workflow_names_get(repo, slug, past_the_error_window),
+            None,
+            "an error entry must expire on the SHORT window, not the long one"
+        );
+
+        // A workflow-less repo's genuinely empty index is a success and keeps the long
+        // window under the very same read.
+        let (ok_repo, ok_slug) = ("C:/repos/wf-error-ok", "o/wf-error-ok");
+        workflow_names_put(ok_repo, ok_slug, HashMap::new());
+        assert_eq!(
+            workflow_names_get(ok_repo, ok_slug, past_the_error_window),
+            Some(HashMap::new()),
+            "a real empty answer must not inherit the error window"
+        );
+
+        // A later success replaces the error entry in place.
+        let names: HashMap<u64, String> =
+            [(307_406_754u64, "changelog".to_string())].into_iter().collect();
+        workflow_names_put(repo, slug, names.clone());
+        assert_eq!(
+            workflow_names_get(repo, slug, past_the_error_window),
+            Some(names)
+        );
     }
 
     #[test]

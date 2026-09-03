@@ -275,7 +275,10 @@ export function ActionsPanel({
           <ForgeNotReady repoPath={repoPath} feature={ciFeature} />
         ) : runs.isPending ? (
           <ListRowSkeletons rows={3} lines={3} name={ciFeature} />
-        ) : runs.isError ? (
+        ) : runs.isError && allRuns.length === 0 ? (
+          // Only when there is nothing to show: a failed Load more also flips isError
+          // while every already-loaded page survives in the cache, and that failure
+          // belongs on the Load-more row rather than replacing the whole list.
           <p className="px-3 py-4 text-xs text-muted-foreground">
             Couldn't load {runNoun} runs. Refresh to try again.
           </p>
@@ -420,11 +423,17 @@ export function ActionsPanel({
             disabled={runs.isFetchingNextPage}
             onClick={() => runs.fetchNextPage()}
           >
-            {runs.isFetchingNextPage ? "Loading…" : "Load more"}
+            {runs.isFetchingNextPage
+              ? "Loading…"
+              : runs.isFetchNextPageError
+                ? "Couldn't load more — try again"
+                : "Load more"}
             {/* The count describes what was LOADED, which says nothing about a
-                filtered view — it returns when the filter clears. */}
+                filtered view — it returns when the filter clears. Suppressed on the
+                retry label too: the row says one thing at a time. */}
             {totalCount !== null &&
               !query &&
+              !runs.isFetchNextPageError &&
               ` · Showing ${allRuns.length.toLocaleString()} of ${totalCount.toLocaleString()}`}
           </Button>
         )}
