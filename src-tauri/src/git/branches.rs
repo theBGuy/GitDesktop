@@ -1176,9 +1176,23 @@ pub(crate) async fn update_branch_from(
     };
     drop(guard);
 
-    let tmp = std::env::temp_dir().join(format!("gd-update-{}", unique_suffix()));
+    // Minted under the app-data worktrees root, never the OS temp dir: that
+    // placement is what hides the checkout from the user-facing worktree listing
+    // and the surfaces built on it (`is_session_worktree`'s app-data arm).
+    let tmp = update_worktree_path(repo_path)?;
+    if let Some(root) = tmp.parent() {
+        std::fs::create_dir_all(root).map_err(AppError::Io)?;
+    }
     let tmp_str = tmp.to_string_lossy().to_string();
     merge_diverged_in_worktree(state, repo_path, &tmp_str, branch, base, &pins).await
+}
+
+/// Where an update's throwaway checkout goes: `<app-data>/worktrees/<repo-hash>/
+/// gd-update-<unique>`. Resolution only — creating the root is the caller's job,
+/// which keeps this callable from a test without writing under the real app data.
+fn update_worktree_path(repo_path: &str) -> AppResult<std::path::PathBuf> {
+    Ok(crate::git::ops::worktree_root_dir(repo_path)?
+        .join(format!("gd-update-{}", unique_suffix())))
 }
 
 /// The two refs an update is planned against, resolved under the first working-tree
@@ -1439,8 +1453,8 @@ mod tests {
         branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args,
         divergence_out_of_range, git_branch_merge_states, git_branches, git_create_branch_core,
         git_default_branch, git_rename_branch_core, merge_diverged_in_worktree,
-        parse_cherry_counts, parse_upstream_track, update_branch_from, validate_branch_name,
-        validate_ref_name, BranchRewriteStatus, MergePair, UpdatePins,
+        parse_cherry_counts, parse_upstream_track, update_branch_from, update_worktree_path,
+        validate_branch_name, validate_ref_name, BranchRewriteStatus, MergePair, UpdatePins,
     };
     use crate::error::AppError;
     use crate::git::runner::{acquire_repo_lock, run_git, run_git_raw, DEFAULT_TIMEOUT};
@@ -2560,6 +2574,27 @@ mod tests {
                 "base {bad_base:?}"
             );
         }
+    }
+
+    /// The throwaway checkout is minted under the app-data worktrees root, which is
+    /// what keeps it out of the worktree manager, with a unique `gd-update-` name.
+    /// Shape only — resolving a path creates nothing under the real app data.
+    #[test]
+    fn update_worktree_path_sits_under_the_app_data_root() {
+        let repo = "C:\\repos\\app";
+        let root = crate::git::ops::worktree_root_dir(repo).expect("app-data root resolves");
+        let first = update_worktree_path(repo).expect("update path resolves");
+        assert_eq!(first.parent(), Some(root.as_path()));
+        let name = first
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("the mint has a basename");
+        assert!(name.starts_with("gd-update-"), "{name}");
+        assert_ne!(
+            first,
+            update_worktree_path(repo).expect("update path resolves"),
+            "two mints in one process must not collide"
+        );
     }
 
     /// `update_branch_from` merges into `refs/heads/<branch>` and merges `<base>`,

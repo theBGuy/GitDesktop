@@ -2495,7 +2495,7 @@ fn repo_hash(repo_path: &str) -> String {
 /// `dirs::data_dir()` (as `local_prs.rs` / `oplog.rs` do) since the local-PR
 /// merge commands carry no `AppHandle`. Tauri's `app_data_dir()` is exactly
 /// `dirs::data_dir()/<identifier>`, so this points at the same directory.
-fn worktree_root_dir(repo_path: &str) -> AppResult<std::path::PathBuf> {
+pub(crate) fn worktree_root_dir(repo_path: &str) -> AppResult<std::path::PathBuf> {
     let data = dirs::data_dir()
         .ok_or_else(|| AppError::Command("could not resolve the app-data directory".to_string()))?;
     Ok(data

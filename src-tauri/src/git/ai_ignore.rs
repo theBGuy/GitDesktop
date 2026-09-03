@@ -35,7 +35,7 @@ use tokio::sync::OnceCell;
 
 use crate::error::{AppError, AppResult};
 use crate::git::diff::{parse_numstat_z_rows, DiffStatRow};
-use crate::git::runner::{run_git, run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT};
+use crate::git::runner::{run_git, run_git_raw, run_git_raw_input_bytes, DEFAULT_TIMEOUT};
 use crate::git::types::DiffStatEntry;
 
 /// The lines of an AI-ignore list the matcher acts on — trimmed, with blanks and
@@ -145,11 +145,16 @@ async fn neutral_repo() -> AppResult<PathBuf> {
 }
 
 /// `check-ignore` over `paths` with `lines` as the only rules in play, returning
-/// its raw `-z` stdout and the excludes-file path exactly as `core.excludesFile`
-/// received it — git echoes that spelling back as a verbose record's `<source>`
-/// (measured, git 2.51.1), so the caller can verify a record came from OUR list.
-/// `verbose` selects the four-token `<source> <linenum> <pattern> <path>` records
-/// instead of bare paths.
+/// its raw `-z` stdout BYTES and the excludes-file path exactly as
+/// `core.excludesFile` received it — git echoes that spelling back as a verbose
+/// record's `<source>` (measured, git 2.51.1), so the caller can verify a record
+/// came from OUR list. `verbose` selects the four-token
+/// `<source> <linenum> <pattern> <path>` records instead of bare paths.
+///
+/// Names are bytes in both directions, because git's matcher is: a name that is
+/// not valid UTF-8 has no `&str` spelling, and decoding one loses the very bytes
+/// the user's patterns were written against. Pattern LINES stay text — they come
+/// from settings the user typed.
 ///
 /// The one spawn path of the AI-ignore engine: every property below is part of
 /// the privacy boundary, so no caller re-derives one.
@@ -175,10 +180,10 @@ async fn neutral_repo() -> AppResult<PathBuf> {
 /// as a backstop.
 async fn run_check_ignore(
     repo_path: &str,
-    paths: &[String],
+    paths: &[Vec<u8>],
     lines: &[&str],
     verbose: bool,
-) -> AppResult<(String, String)> {
+) -> AppResult<(Vec<u8>, String)> {
     let icase = repo_ignorecase(repo_path).await;
     let neutral = neutral_repo().await?.to_string_lossy().into_owned();
 
@@ -204,8 +209,11 @@ async fn run_check_ignore(
     let excludes_arg = excludes_file.to_string_lossy().replace('\\', "/");
     let result = async {
         let config = format!("core.excludesFile={excludes_arg}");
-        let mut stdin = paths.join("\0");
-        stdin.push('\0');
+        let mut stdin: Vec<u8> = Vec::new();
+        for path in paths {
+            stdin.extend_from_slice(path);
+            stdin.push(0);
+        }
         let case = format!("core.ignorecase={icase}");
         let mut args: Vec<&str> = vec![
             "-c",
@@ -220,7 +228,8 @@ async fn run_check_ignore(
         if verbose {
             args.push("--verbose");
         }
-        let out = run_git_raw_input(Some(&neutral), &args, Some(&stdin), DEFAULT_TIMEOUT).await?;
+        let out =
+            run_git_raw_input_bytes(Some(&neutral), &args, Some(&stdin), DEFAULT_TIMEOUT).await?;
         // 0 = at least one path matched a rule, 1 = none did (not an error).
         if out.code > 1 {
             return Err(AppError::Git {
@@ -228,7 +237,7 @@ async fn run_check_ignore(
                 stderr: out.stderr,
             });
         }
-        Ok(out.stdout_lossy())
+        Ok(out.stdout)
     }
     .await;
 
@@ -251,11 +260,42 @@ async fn run_check_ignore(
 /// to `[]` without spawning git; so does "nothing matched" (check-ignore's exit
 /// code 1, which is not an error). The spawn itself, and the security properties
 /// around it, live in [`run_check_ignore`].
+///
+/// A `String` can only spell a name that decoded cleanly, so callers holding a
+/// name's real bytes want [`filter_ignored_bytes`], which this delegates to.
 pub async fn filter_ignored(
     repo_path: &str,
     paths: &[String],
     exclude: &[String],
 ) -> AppResult<Vec<String>> {
+    let bytes: Vec<Vec<u8>> = paths.iter().map(|p| p.as_bytes().to_vec()).collect();
+    let ignored = filter_ignored_bytes(repo_path, &bytes, exclude).await?;
+    // Inputs are `String`s and git echoes the input bytes back, so this decode is
+    // exact for every name this signature can carry.
+    Ok(ignored
+        .iter()
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect())
+}
+
+/// [`filter_ignored`] over names as the BYTES they really are.
+///
+/// gitignore matching is byte-domain, and a filename is not required to be valid
+/// UTF-8: decoding one to a `String` first replaces every unreadable byte with
+/// U+FFFD, so the engine is asked about a name the user never wrote and no
+/// pattern of theirs can match it. Callers that hold real bytes — anything
+/// reading names out of git with `-z` — should ask here, and only spell a name as
+/// text once its verdict is in.
+///
+/// Semantics, short-circuits and security properties are [`filter_ignored`]'s;
+/// the returned names are a subset of `paths`, byte-identical. A name must not
+/// carry an interior NUL — impossible in the `-z` streams callers read names
+/// from — since the NUL-framed wire would read it as two names.
+pub async fn filter_ignored_bytes(
+    repo_path: &str,
+    paths: &[Vec<u8>],
+    exclude: &[String],
+) -> AppResult<Vec<Vec<u8>>> {
     let (lines, has_positive) = actionable_lines(exclude);
     if paths.is_empty() || !has_positive {
         return Ok(Vec::new());
@@ -264,9 +304,9 @@ pub async fn filter_ignored(
     // `-z` output is NUL-TERMINATED, so the split yields a trailing empty
     // element; nothing else needs trimming (no CR, no quoting).
     Ok(stdout
-        .split('\0')
+        .split(|byte| *byte == 0)
         .filter(|p| !p.is_empty())
-        .map(String::from)
+        .map(<[u8]>::to_vec)
         .collect())
 }
 
@@ -322,7 +362,11 @@ pub async fn git_ai_ignore_verdicts(
         return Ok(Vec::new());
     }
     let kept: Vec<&str> = lines.iter().map(|(_, line)| *line).collect();
-    let (stdout, excludes) = run_check_ignore(&repo_path, &paths, &kept, true).await?;
+    // This surface is reached from JSON alone, so its paths ARE text; the decode
+    // below is the inverse of that, not a lossy step the engine imposes.
+    let names: Vec<Vec<u8>> = paths.into_iter().map(String::into_bytes).collect();
+    let (stdout, excludes) = run_check_ignore(&repo_path, &names, &kept, true).await?;
+    let stdout = String::from_utf8_lossy(&stdout);
 
     // Four NUL-separated tokens per record: source, line number, pattern, path.
     // The line number is 1-based into the excludes file just written — i.e. into
@@ -1041,6 +1085,71 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// A name that is not valid UTF-8 is matched on the bytes it really has and
+    /// comes back byte-identical. `check-ignore --no-index --stdin` matches names
+    /// that need not exist, so no filesystem is involved — the only way such a
+    /// name is expressible at all under Windows git.
+    #[tokio::test]
+    async fn byte_names_match_on_their_own_bytes() {
+        let (_dir, repo) = parity_repo().await;
+        // A lone 0xE9 is latin-1 `é` and invalid UTF-8, so this name has no
+        // `String` spelling: the byte API is the only one that can carry it.
+        let latin1 = b"caf\xE9.env".to_vec();
+
+        let hit = filter_ignored_bytes(&repo, std::slice::from_ref(&latin1), &["*.env".into()])
+            .await
+            .unwrap();
+        assert_eq!(hit, vec![latin1], "matched, and returned exactly as sent");
+
+        // A newline inside a name, and a name that is a PREFIX of another: what
+        // the NUL-joined stdin and NUL-split stdout have to keep apart.
+        let names = vec![
+            b"we\nird.env".to_vec(),
+            b"a.env".to_vec(),
+            b"a.envx".to_vec(),
+        ];
+        let hit = filter_ignored_bytes(&repo, &names, &["*.env".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(hit, vec![b"we\nird.env".to_vec(), b"a.env".to_vec()]);
+    }
+
+    /// The distinction the byte API exists for: latin-1 `café.env` and UTF-8
+    /// `café.env` are DIFFERENT names to git's matcher, so a literal pattern
+    /// naming one leaves the other visible.
+    ///
+    /// The String path cannot express it — the latin-1 name reaches it only as
+    /// `caf\u{FFFD}.env` — so the control below pins what that path really
+    /// decides: a verdict on the U+FFFD spelling, which is nobody's filename.
+    #[tokio::test]
+    async fn a_literal_pattern_tells_the_two_spellings_apart() {
+        let (_dir, repo) = parity_repo().await;
+        let latin1 = b"caf\xE9.env".to_vec();
+        let utf8 = "café.env".as_bytes().to_vec();
+        let both = vec![latin1.clone(), utf8.clone()];
+
+        let hit = filter_ignored_bytes(&repo, &both, &["café.env".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(hit, vec![utf8], "the UTF-8 spelling alone");
+
+        // The hole the byte arm closes: the String API answers about the lossy
+        // name it was given, a spelling that is nobody's filename.
+        let lossy = String::from_utf8_lossy(&latin1).into_owned();
+        assert_eq!(lossy, "caf\u{FFFD}.env");
+        let by_string = filter_ignored(&repo, std::slice::from_ref(&lossy), &["*.env".into()])
+            .await
+            .unwrap();
+        assert_eq!(by_string, vec![lossy.clone()]);
+        let by_bytes = filter_ignored_bytes(&repo, &[latin1], &[lossy])
+            .await
+            .unwrap();
+        assert!(
+            by_bytes.is_empty(),
+            "…and that spelling names no real file: {by_bytes:?}"
+        );
     }
 
     /// A fresh repo with an identity and pinned case sensitivity, for the

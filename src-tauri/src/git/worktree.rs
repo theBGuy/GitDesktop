@@ -964,7 +964,16 @@ prunable gitdir file points to non-existent location
         };
         assert!(is_session_worktree(&by_path, &HashSet::new(), app_root));
 
-        // 4) an ordinary user worktree is NOT excluded
+        // 4) an update's throwaway `gd-update-*` checkout, hidden by that same root
+        // (the branch it holds is one of the user's own, so only the path can hide it)
+        let by_update = RawWorktree {
+            path: "C:/Users/me/AppData/Local/app/worktrees/h/gd-update-1234-99".into(),
+            branch: "feature".into(),
+            ..Default::default()
+        };
+        assert!(is_session_worktree(&by_update, &HashSet::new(), app_root));
+
+        // 5) an ordinary user worktree is NOT excluded
         let user = RawWorktree {
             path: "C:/repos/app-feature".into(),
             branch: "feature".into(),

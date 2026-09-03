@@ -209,7 +209,7 @@ impl GitOutput {
 
 /// The resolved `git` binary, memoized for the process lifetime.
 ///
-/// `run_git_raw_input` is the base of the whole git call stack (status, diffs,
+/// `run_git_raw_input_bytes` is the base of the whole git call stack (status, diffs,
 /// history, staging — all firing continuously as the user works), and a packaged
 /// GUI app on macOS doesn't inherit the user's shell PATH. So we resolve `git`
 /// the way the About screen does (`crate::agent::resolve_named`: PATH + known
@@ -351,6 +351,18 @@ pub async fn run_git_raw_input(
     input: Option<&str>,
     timeout: Duration,
 ) -> AppResult<GitOutput> {
+    run_git_raw_input_bytes(repo_path, args, input.map(str::as_bytes), timeout).await
+}
+
+/// [`run_git_raw_input`] over a stdin that need not be text. Callers whose input
+/// carries PATH bytes want this: git's path handling is byte-domain, so a name
+/// that is not valid UTF-8 has no `&str` spelling that reaches git unchanged.
+pub async fn run_git_raw_input_bytes(
+    repo_path: Option<&str>,
+    args: &[&str],
+    input: Option<&[u8]>,
+    timeout: Duration,
+) -> AppResult<GitOutput> {
     // A zero budget refuses before spawning — no production caller passes one (they
     // all use a *_TIMEOUT constant), and it makes the tests' `Duration::ZERO` seam
     // deterministic: a nonzero expired budget loses the race to a fast child (Linux).
@@ -417,10 +429,10 @@ pub async fn run_git_raw_input(
         let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
         let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
         let write = async move {
-            let (Some(mut pipe), Some(text)) = (stdin_pipe, input) else {
+            let (Some(mut pipe), Some(bytes)) = (stdin_pipe, input) else {
                 return Ok(());
             };
-            let written = pipe.write_all(text.as_bytes()).await;
+            let written = pipe.write_all(bytes).await;
             // Close the pipe the moment the write ends (error path included) so
             // git sees EOF while the drains still poll — `--stdin` blocks forever
             // without it; the explicit drop pins that close point across refactors.

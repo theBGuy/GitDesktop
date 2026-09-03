@@ -2181,6 +2181,212 @@ hint: Updates were rejected because the tip of your current branch is behind
         );
     }
 
+    /// git asked for a username with prompting disabled and nothing in the
+    /// credential helper — measured against github.com on git 2.51.1.windows.1,
+    /// 2026-09.
+    const NO_CREDENTIALS_STDERR: &str = "\
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+";
+
+    /// Credentials github.com refused, same provenance. The sideband line names
+    /// the cause; the `fatal:` line is the one the frontend anchors on.
+    const REJECTED_CREDENTIALS_STDERR: &str = "\
+remote: Invalid username or token. Password authentication is not supported for Git operations.
+fatal: Authentication failed for 'https://github.com/octocat/Hello-World.git/'
+";
+
+    /// A push to a repository the authenticated account cannot write, same
+    /// provenance: the account is recognized, the permission is not there.
+    const FORBIDDEN_STDERR: &str = "\
+remote: Permission to octocat/Hello-World.git denied to theBGuy.
+fatal: unable to access 'https://github.com/octocat/Hello-World.git/': The requested URL returned error: 403
+";
+
+    /// A push dry-run against an archived GitHub repository, same provenance.
+    /// Only the `remote:` line is measured verbatim; the `fatal:` line under it is
+    /// git's standard curl-error shape, written out rather than captured — hence a
+    /// placeholder URL, so this blob makes no claim about a repository another
+    /// fixture presents differently.
+    const ARCHIVED_STDERR: &str = "\
+remote: This repository was archived so it is read-only.
+fatal: unable to access 'https://github.com/example/archived.git/': The requested URL returned error: 403
+";
+
+    /// A push to a Gitea pull-mirror over plain HTTP, from the user report the
+    /// read-only marker was written for (GitDesktop 0.10.0 on Linux, self-hosted
+    /// Gitea). The marker-bearing `remote:` line is verbatim; the report's paste
+    /// wraps the `fatal:` line after the colon, which git emits on one line, and
+    /// the `99xx` port is the reporter's own masking.
+    const GITEA_MIRROR_STDERR: &str = "\
+remote: mirror repository is read-only
+fatal: unable to access 'http://192.168.1.10:99xx/gituser1/GitDesktop/': The requested URL returned error: 403
+";
+
+    /// The chunks the frontend's `/m` regexes see as lines. JS `.` refuses every
+    /// LineTerminator and `^` re-anchors after each, while `str::lines` splits on
+    /// `\n` alone — and git's sideband re-emits `remote: ` after a BARE `\r` when
+    /// it overwrites a progress line, so `lines` would hand two sideband chunks to
+    /// one marker as a single matchable line.
+    fn js_lines(report: &str) -> impl Iterator<Item = &str> {
+        report.split(['\n', '\r', '\u{2028}', '\u{2029}'])
+    }
+
+    /// Whether `text` carries `word` at JS `\b` boundaries — `[A-Za-z0-9_]` on
+    /// either flank refuses the hit, which is what keeps `read-onlyish` and
+    /// `repositoryX` out. `-` is outside that set, so `read-only`'s own hyphen
+    /// never ends the word.
+    fn contains_word(text: &str, word: &str) -> bool {
+        fn is_word_char(c: char) -> bool {
+            c.is_ascii_alphanumeric() || c == '_'
+        }
+        text.match_indices(word).any(|(start, _)| {
+            text[..start].chars().next_back().is_none_or(|c| !is_word_char(c))
+                && text[start + word.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !is_word_char(c))
+        })
+    }
+
+    /// Entry one: a `remote:` line naming both a repository and a read-only state.
+    /// The JS lookahead makes the two order-independent within the line, and `.`
+    /// never crosses a line terminator, so both tokens must sit on the SAME line.
+    /// The case tolerance is `[Rr]` only, not a case-insensitive match.
+    fn marks_read_only_repository(report: &str) -> bool {
+        js_lines(report).any(|l| {
+            l.trim_start_matches([' ', '\t'])
+                .strip_prefix("remote: ")
+                .is_some_and(|rest| {
+                    ["repository", "Repository", "repositories", "Repositories"]
+                        .iter()
+                        .any(|w| contains_word(rest, w))
+                        && ["read-only", "Read-only"]
+                            .iter()
+                            .any(|w| contains_word(rest, w))
+                })
+        })
+    }
+
+    /// Entry two. Line-anchored with no indent tolerance, exactly like the regex.
+    fn marks_missing_credentials(report: &str) -> bool {
+        js_lines(report).any(|l| l.starts_with("fatal: could not read Username for "))
+    }
+
+    /// Entry three, anchored the same way.
+    fn marks_rejected_credentials(report: &str) -> bool {
+        js_lines(report).any(|l| l.starts_with("fatal: Authentication failed for "))
+    }
+
+    /// Entry four: git's curl-level 403. The regex's `[^'\n]*` cannot cross a
+    /// quote, so the URL runs to the FIRST `'` on the line and the tail has to
+    /// follow immediately. A bare `\r` inside the quotes ends the chunk here while
+    /// JS would keep reading — stricter than the frontend, the safe direction.
+    fn marks_forbidden_403(report: &str) -> bool {
+        js_lines(report).any(|l| {
+            l.strip_prefix("fatal: unable to access '")
+                .and_then(|r| r.split_once('\''))
+                .is_some_and(|(_url, tail)| {
+                    tail.starts_with(": The requested URL returned error: 403")
+                })
+        })
+    }
+
+    /// Rust mirrors of `REMOTE_ACCESS_SUMMARIES` (src/lib/error-summary.ts), in
+    /// the frontend's table order.
+    const REMOTE_ACCESS_MARKERS: [fn(&str) -> bool; 4] = [
+        marks_read_only_repository,
+        marks_missing_credentials,
+        marks_rejected_credentials,
+        marks_forbidden_403,
+    ];
+
+    /// Positions in [`REMOTE_ACCESS_MARKERS`], named for the verdict each entry
+    /// produces in the toast.
+    const READ_ONLY: usize = 0;
+    const NO_CREDENTIALS: usize = 1;
+    const REJECTED_CREDENTIALS: usize = 2;
+    const FORBIDDEN_403: usize = 3;
+
+    /// The entry `remoteAccessSummary` would pick: the FIRST match in table order,
+    /// mirroring its `.find()`. The index IS the verdict, so order is precedence.
+    fn first_remote_access_match(report: &str) -> Option<usize> {
+        REMOTE_ACCESS_MARKERS.iter().position(|m| m(report))
+    }
+
+    /// Canary for the frontend's remote-access markers: `remoteAccessSummary`
+    /// (src/lib/error-summary.ts) can only turn a transport or sideband refusal
+    /// into one human line while these measured stderr shapes still land on the
+    /// entry whose wording was written for them, so the blobs and Rust mirrors of
+    /// `REMOTE_ACCESS_SUMMARIES` are pinned together here. Keep the two lists in
+    /// step, ORDER INCLUDED — the table's order is precedence, not just layout.
+    /// GitLab and Bitbucket sideband wording is absent on purpose: the table grows
+    /// from captured stderr, never from guessed regexes.
+    #[test]
+    fn remote_access_stderr_still_matches_the_frontend_markers() {
+        for (stderr, entry, what) in [
+            (NO_CREDENTIALS_STDERR, NO_CREDENTIALS, "no stored credentials"),
+            (
+                REJECTED_CREDENTIALS_STDERR,
+                REJECTED_CREDENTIALS,
+                "rejected credentials",
+            ),
+            (FORBIDDEN_STDERR, FORBIDDEN_403, "a permission refusal"),
+            (ARCHIVED_STDERR, READ_ONLY, "an archived repository"),
+            (GITEA_MIRROR_STDERR, READ_ONLY, "a read-only mirror"),
+        ] {
+            assert_eq!(
+                first_remote_access_match(stderr),
+                Some(entry),
+                "{what} no longer reaches entry {entry} — the toast would explain \
+                 something else, or nothing. Actual stderr:\n{stderr}"
+            );
+        }
+
+        // Both read-only blobs also carry git's generic 403 line, so the read-only
+        // verdict above rests on the table's ORDER rather than on exclusivity.
+        for stderr in [ARCHIVED_STDERR, GITEA_MIRROR_STDERR] {
+            assert!(
+                REMOTE_ACCESS_MARKERS[FORBIDDEN_403](stderr),
+                "a read-only blob lost its 403 line — the fixture no longer exercises \
+                 the precedence entry one depends on. Actual stderr:\n{stderr}"
+            );
+        }
+
+        // The permission blob reaches entry four on its own merits: its `remote:`
+        // line reports no repository state, and no credential entry claims it.
+        for earlier in [READ_ONLY, NO_CREDENTIALS, REJECTED_CREDENTIALS] {
+            assert!(
+                !REMOTE_ACCESS_MARKERS[earlier](FORBIDDEN_STDERR),
+                "entry {earlier} claimed a plain permission refusal, which has its own \
+                 summary"
+            );
+        }
+
+        // Shapes the line anchor and word boundaries refuse. Looser matching here
+        // would let the canary pass stderr the frontend leaves raw, which is the one
+        // direction it must not be loose in.
+        for line in [
+            "Add read-only repository guard",          // a commit subject echoed back
+            "remote: repository is readonly",          // no hyphen
+            "remote: branch main is read-only",        // no repository token
+            "remote: this repository is read-onlyish", // past the word boundary
+            // Two sideband chunks a bare `\r` separates: neither carries both
+            // tokens, and JS `.` cannot span the `\r` to join them.
+            "remote: repository access\rremote: mirror is read-only\n",
+            // Entry two is anchored at the line start with no indent tolerance.
+            "  fatal: could not read Username for 'https://x'",
+            // Entry four's quoted run stops at the first `'`, so the tail has to
+            // follow that quote and not a later one.
+            "fatal: unable to access 'a': 'b': The requested URL returned error: 403",
+        ] {
+            assert_eq!(
+                first_remote_access_match(line),
+                None,
+                "`{line}` matched a remote-access marker the frontend would refuse"
+            );
+        }
+    }
+
     /// The wire values the TS `PushGuard` union (src/lib/git/api.ts) mirrors: the
     /// success toast keys on these exact strings, so a variant rename that skips
     /// the mirror would silently stop reporting a degraded force push.
