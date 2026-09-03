@@ -671,8 +671,9 @@ export function RemotePrView({
   // offer the PREVIOUS PR's. Retain the last FRESH value and the PR it belonged to;
   // a mismatch means nothing fresh has landed for this one yet, and neither action is
   // offered. Both retained values are primitives — an object would re-set every
-  // render. The stale arms feed null so a mount landing mid-switch seeds neither.
-  const retainedDraftFor = useRetained(
+  // render. The stale arms feed null so a mount landing mid-switch seeds neither,
+  // and the settled identity keys the checks rollup for the same reason.
+  const settledEntityKey = useRetained(
     details.isPlaceholderData ? null : entityKey,
     !details.isPlaceholderData,
   );
@@ -680,7 +681,7 @@ export function RemotePrView({
     details.isPlaceholderData ? null : (details.data?.isDraft ?? null),
     !details.isPlaceholderData,
   );
-  const shownIsDraft = retainedDraftFor === entityKey ? retainedIsDraft : null;
+  const shownIsDraft = settledEntityKey === entityKey ? retainedIsDraft : null;
   // Palette twins of the footer's draft controls — same `setDraft` mutation, same
   // frozen identity, and Ready also fires the ready-review automation. Registration
   // is effect-synced, so an `enabled` term alone still leaves the keypress a frame
@@ -2611,9 +2612,14 @@ export function RemotePrView({
           <p className="text-xs text-muted-foreground">{stackOfferNote}</p>
         ) : null}
         {/* Keyed per PR: the rollup latches its auto-open and remembers the
-            collapse you chose, and this view swaps PRs without remounting. */}
+            collapse you chose, and this view swaps PRs without remounting. The
+            SETTLED identity, not the live one — `pr` is the previous PR's
+            placeholder until fresh details land, and seeding off those would
+            auto-expand the new PR from the old one's checks. Nothing settled yet
+            gets a per-PR `pending-` key, so the settle still remounts and two
+            placeholder PRs never share one. */}
         <ChecksRollup
-          key={entityKey}
+          key={settledEntityKey ?? `pending-${entityKey}`}
           checks={pr.checks}
           repoPath={repoPath}
           provider={providerKey}

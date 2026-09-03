@@ -10,9 +10,12 @@ import { useUiStore } from "./ui";
  * active, what's next, and whose tree it is.
  *
  * Exactly one walk at a time: starting a new one replaces whatever was armed,
- * whatever its scope. ConflictResolveView therefore reads `queue`/`advance`/`stop`
- * ungated — it only ever mounts under a scope-matched parent, so the single walk it
- * finds is its own.
+ * whatever its scope. A SYNCHRONOUS read under a scope-matched parent may trust
+ * that walk to be its own — ConflictResolveView's `queue`/`advance`/`stop` reads
+ * rely on it. Anything resuming after an await must re-read the store and re-check
+ * `scopePath` + `activePath` before advancing or stopping: the parent's gate only
+ * unmounts on the next render, and a repo switch or another surface can replace
+ * the walk mid-await.
  *
  * Not a liveness signal: a walk outlives the surface that armed it (nothing disarms
  * one when a takeover's worktree is finished or discarded), so a non-null

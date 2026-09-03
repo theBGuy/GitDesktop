@@ -480,6 +480,15 @@ export function ChecksRollup({
     ]),
   );
   const attention = checks.filter((c) => attentionFlags.get(c)).length;
+  // React identity is content-first: a sorted-index key hands one row's open log to
+  // another check when `unmetRequiredContexts` re-ranks, and a `checks`-index key
+  // does the same when a refetch rebuilds the array. Run/job ids are unique where
+  // present; the name+index tail leaves only indistinguishable duplicates
+  // positional. `data-row` is recomputed per render, so nav identity stays
+  // positional even though the row itself moves with its check.
+  const orderKey = new Map(
+    checks.map((c, i) => [c, `${c.runId ?? "x"}:${c.jobId ?? c.name}:${i}`]),
+  );
 
   // Auto-expand on any failure, or on a required check that reads finished but
   // still holds the merge — either way the PR should show it without a click.
@@ -727,7 +736,7 @@ export function ChecksRollup({
               const live = running && !jobDone;
               return (
                 <CheckRow
-                  key={rowId(i)}
+                  key={orderKey.get(c)}
                   rowId={rowId(i)}
                   repoPath={repoPath}
                   check={c}

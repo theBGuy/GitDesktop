@@ -182,8 +182,8 @@ export function ConflictResolveView({
   }, [path]);
   // DiffViewer swaps this view out (keyed on path) the moment another file is
   // selected, so without this a streaming resolution keeps billing into an
-  // orphaned component; `<Activity>` hide runs it too. The flag marks a stream
-  // this teardown actually cut short — never a user cancel, never a finished one.
+  // orphaned component; `<Activity>` hide runs it too. The flag marks a run this
+  // teardown cut short — never a user cancel, never one that already settled.
   // Before the stream starts there is nothing to cancel: `run` clears it on entry.
   useEffect(
     () => () => {
@@ -206,12 +206,18 @@ export function ConflictResolveView({
   async function accept() {
     try {
       await resolve.mutateAsync({ path, content: proposed, stage: true });
+      // This continuation can outlive the walk that armed it (another surface armed
+      // its own walk, or the repo-switch clear fired) during the mutation, so both
+      // the wording and the advance come from a fresh read gated on it still
+      // being ours.
+      const walk = useConflictResolve.getState();
+      const owns = walk.scopePath === repoPath && walk.activePath === path;
       toast.success(
-        queue.length > 0
+        owns && walk.queue.length > 0
           ? `Resolved ${baseName(path)} — next conflict`
           : `Resolved ${baseName(path)}`,
       );
-      advance();
+      if (owns) walk.advance();
     } catch (e) {
       toastError(e);
     }
