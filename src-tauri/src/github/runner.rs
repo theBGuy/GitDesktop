@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::process::Command;
 use tokio::sync::OnceCell;
@@ -46,6 +48,130 @@ async fn gh_bin() -> AppResult<PathBuf> {
         .cloned()
 }
 
+/// Ambient token variables stripped from the stored-login probe's child. gh accepts any
+/// of these as an answer for a host it has no login for, which is exactly what the probe
+/// must not count.
+const AMBIENT_TOKEN_VARS: [&str; 4] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// TTL bounding how long a stored-login verdict stays trusted before we re-probe, so a
+/// sign-in or sign-out takes effect within a minute.
+const STORED_LOGIN_TTL: Duration = Duration::from_secs(60);
+
+/// Per-host-spelling cache of `(probe time, has a stored login)`. Bounded by the number
+/// of distinct spellings the open repos use (tiny); a stale entry is overwritten.
+type StoredLoginCache = Mutex<HashMap<String, (Instant, bool)>>;
+static STORED_LOGIN_CACHE: OnceLock<StoredLoginCache> = OnceLock::new();
+
+fn stored_login_cache() -> &'static StoredLoginCache {
+    STORED_LOGIN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn stored_login_cache_get(host: &str, ttl: Duration) -> Option<bool> {
+    let guard = stored_login_cache().lock().unwrap();
+    let (probed_at, stored) = guard.get(host)?;
+    (probed_at.elapsed() < ttl).then_some(*stored)
+}
+
+fn stored_login_cache_put(host: &str, stored: bool) {
+    stored_login_cache()
+        .lock()
+        .unwrap()
+        .insert(host.to_string(), (Instant::now(), stored));
+}
+
+/// Whether gh holds a login for `host` STORED in its own config or keyring — the gate on
+/// pinning `GH_HOST`. Memoized both directions for [`STORED_LOGIN_TTL`].
+///
+/// The four ambient token variables are stripped from the probe child: with
+/// `GH_ENTERPRISE_TOKEN` exported, `gh auth token --hostname <anything>` exits 0 for any
+/// enterprise spelling (measured, gh 2.94.0), so counting it would let a hostile `origin`
+/// aim the user's token at a host of its choosing. That is the first of two deliberate
+/// differences from [`crate::forge::github::gh_authenticated`], which counts env tokens
+/// because an env token is a legitimate answer for the credential-helper injection it
+/// gates. The second is the error arm: a failed spawn here pins nothing and caches
+/// nothing, leaving gh's own host chain in charge, where that helper fails optimistic.
+///
+/// SECURITY: `gh auth token`'s stdout IS the user's token. Only the exit code is read and
+/// the stream goes to null, so no code path can capture or log it.
+async fn gh_stored_login(host: &str) -> bool {
+    if let Some(hit) = stored_login_cache_get(host, STORED_LOGIN_TTL) {
+        return hit;
+    }
+    let Ok(gh) = gh_bin().await else { return false };
+    let mut cmd = Command::new(&gh);
+    apply_gh_env(&mut cmd, None);
+    for var in AMBIENT_TOKEN_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.args(["auth", "token", "--hostname", host]);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd.kill_on_drop(true);
+
+    let Ok(Ok(status)) = tokio::time::timeout(GH_TIMEOUT, cmd.status()).await else {
+        return false;
+    };
+    let stored = status.success();
+    stored_login_cache_put(host, stored);
+    stored
+}
+
+/// The host spellings to offer gh for a remote URL, most specific first: the authority,
+/// then the bare host when they differ. gh's registry is port-SENSITIVE, so a
+/// `--hostname host:8443` login answers only to the authority while an unported one
+/// answers only to the bare host. Pure.
+fn gh_host_candidates(url: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(authority) = crate::forge::remote_authority(url) {
+        out.push(authority);
+    }
+    if let Some(host) = crate::forge::remote_host(url).filter(|h| !out.contains(h)) {
+        out.push(host);
+    }
+    out
+}
+
+/// The host a repo's gh calls run against: the `origin` remote's spelling gh holds a
+/// STORED login for, authority before bare host. No stored login means no pin, so an SSH
+/// host alias, an `insteadOf` rewrite, or any host gh cannot serve keeps gh's own default
+/// chain rather than a dead call, and no ambient enterprise token is ever aimed at a host
+/// the user never signed into. Upstream-lens calls ride the origin host: cross-forge
+/// origin/upstream pairs exist, and mis-targeting them is the price of one chokepoint.
+async fn gh_host_for_repo(repo_path: &str) -> Option<String> {
+    let url = crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string())
+        .await
+        .ok()?;
+    for host in gh_host_candidates(&url) {
+        if gh_stored_login(&host).await {
+            return Some(host);
+        }
+    }
+    None
+}
+
+/// The environment every gh child gets. `sanitize_child_env` runs first so these
+/// explicit sets win over it, per that function's ordering contract.
+fn apply_gh_env<C: crate::agent::ChildEnv>(cmd: &mut C, gh_host: Option<&str>) {
+    crate::agent::sanitize_child_env(cmd);
+    // Keep gh fully non-interactive: no prompts, no pager, no update nags.
+    cmd.set_var("GH_PAGER", "");
+    cmd.set_var("GH_PROMPT_DISABLED", "1");
+    cmd.set_var("GH_NO_UPDATE_NOTIFIER", "1");
+    cmd.set_var("CLICOLOR", "0");
+    cmd.set_var("NO_COLOR", "1");
+    if let Some(host) = gh_host {
+        cmd.set_var("GH_HOST", host);
+    }
+}
+
 /// Runs the GitHub CLI and returns raw output regardless of exit code. Only a
 /// missing `gh` binary or a timeout is an error here.
 pub async fn run_gh_raw(
@@ -54,18 +180,16 @@ pub async fn run_gh_raw(
     timeout: Duration,
 ) -> AppResult<GhOutput> {
     let gh = gh_bin().await?;
+    let gh_host = match repo_path {
+        Some(repo) => gh_host_for_repo(repo).await,
+        None => None,
+    };
     let mut cmd = Command::new(&gh);
-    crate::agent::sanitize_child_env(&mut cmd);
+    apply_gh_env(&mut cmd, gh_host.as_deref());
     cmd.args(args);
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
     }
-    // Keep gh fully non-interactive: no prompts, no pager, no update nags.
-    cmd.env("GH_PAGER", "")
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GH_NO_UPDATE_NOTIFIER", "1")
-        .env("CLICOLOR", "0")
-        .env("NO_COLOR", "1");
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -123,17 +247,16 @@ pub async fn run_gh_input(
     use tokio::io::AsyncWriteExt;
 
     let gh = gh_bin().await?;
+    let gh_host = match repo_path {
+        Some(repo) => gh_host_for_repo(repo).await,
+        None => None,
+    };
     let mut cmd = Command::new(&gh);
-    crate::agent::sanitize_child_env(&mut cmd);
+    apply_gh_env(&mut cmd, gh_host.as_deref());
     cmd.args(args);
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
     }
-    cmd.env("GH_PAGER", "")
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GH_NO_UPDATE_NOTIFIER", "1")
-        .env("CLICOLOR", "0")
-        .env("NO_COLOR", "1");
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -179,4 +302,74 @@ pub async fn run_gh_input(
         }));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::ChildEnv;
+
+    /// Records what [`apply_gh_env`] did to a child's environment, so the pin is
+    /// assertable without spawning gh.
+    #[derive(Debug, Default)]
+    struct RecordingEnv {
+        set: Vec<(String, String)>,
+        unset: Vec<String>,
+    }
+
+    impl ChildEnv for RecordingEnv {
+        fn set_var(&mut self, key: &str, value: &str) {
+            self.set.push((key.to_string(), value.to_string()));
+        }
+        fn unset_var(&mut self, key: &str) {
+            self.unset.push(key.to_string());
+        }
+    }
+
+    impl RecordingEnv {
+        fn get(&self, key: &str) -> Option<&str> {
+            self.set.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        }
+    }
+
+    #[test]
+    fn an_unported_remote_offers_its_host_once() {
+        assert_eq!(gh_host_candidates("https://github.com/o/r.git"), ["github.com"]);
+        assert_eq!(gh_host_candidates("git@ghe.acme.com:o/r.git"), ["ghe.acme.com"]);
+        assert_eq!(gh_host_candidates("ssh://git@ghe.acme.com/o/r.git"), ["ghe.acme.com"]);
+    }
+
+    /// gh registers a ported instance under its full authority but an unported one under
+    /// the bare host, and only one of the two answers — so both are offered, in that order.
+    #[test]
+    fn a_ported_remote_offers_the_authority_before_the_bare_host() {
+        assert_eq!(
+            gh_host_candidates("https://ghe.acme.com:8443/o/r.git"),
+            ["ghe.acme.com:8443", "ghe.acme.com"],
+        );
+    }
+
+    #[test]
+    fn an_unparseable_remote_offers_nothing() {
+        assert!(gh_host_candidates("/local/path").is_empty());
+        assert!(gh_host_candidates("").is_empty());
+    }
+
+    #[test]
+    fn a_repo_scoped_child_is_pinned_to_its_host() {
+        let mut env = RecordingEnv::default();
+        apply_gh_env(&mut env, Some("ghe.acme.com:8443"));
+        assert_eq!(env.get("GH_HOST"), Some("ghe.acme.com:8443"), "{env:?}");
+        assert_eq!(env.get("GH_PAGER"), Some(""), "{env:?}");
+    }
+
+    #[test]
+    fn a_child_with_no_host_leaves_gh_host_alone() {
+        let mut env = RecordingEnv::default();
+        apply_gh_env(&mut env, None);
+        assert_eq!(env.get("GH_HOST"), None, "{env:?}");
+        assert!(!env.unset.iter().any(|k| k == "GH_HOST"), "{env:?}");
+        // The sanitize pass still ran, and it precedes our sets so ours win.
+        assert!(env.unset.iter().any(|k| k == "PWD"), "{env:?}");
+    }
 }

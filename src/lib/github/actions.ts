@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { invoke } from "@/lib/tauri/invoke";
 
 // ── Types (mirror the Rust structs in github/actions.rs) ─────────────────────
@@ -73,6 +78,13 @@ export interface Workflow {
   state: string;
 }
 
+export interface CiRunPage {
+  runs: WorkflowRun[];
+  /** Total matching runs when the provider reports one (GitHub; sometimes Bitbucket); null otherwise. */
+  totalCount: number | null;
+  hasMore: boolean;
+}
+
 // ── Status helpers ───────────────────────────────────────────────────────────
 
 const ACTIVE_STATUSES = new Set([
@@ -102,6 +114,21 @@ export const forgeCiRunList = (
   invoke<WorkflowRun[]>("forge_ci_run_list", {
     repoPath,
     limit,
+    branch: branch?.trim() || null,
+  });
+
+/** One page of runs (`page` is 1-based), plus the provider's total and whether more
+ *  remain — the paged read behind the Actions panel's Load more. */
+export const forgeCiRunPage = (
+  repoPath: string,
+  limit: number,
+  page: number,
+  branch?: string,
+) =>
+  invoke<CiRunPage>("forge_ci_run_page", {
+    repoPath,
+    limit,
+    page,
     branch: branch?.trim() || null,
   });
 
@@ -204,6 +231,44 @@ export function useWorkflowRuns(
       (query.state.data ?? []).some((r) => isRunActive(r.status))
         ? 5000
         : false,
+  });
+}
+
+/** The Actions panel's run list, paged so the repo's whole history is reachable.
+ *  `active` (the Actions tab being visible) gates the fetch so a hidden tab stops
+ *  fetching; the key stays inside the `["repo", repo, "actions"]` subtree the panel's
+ *  mutations invalidate. */
+export function useWorkflowRunPages(
+  repo: string,
+  enabled: boolean,
+  active: boolean,
+  branch?: string,
+) {
+  return useInfiniteQuery({
+    queryKey: ["repo", repo, "actions", "runs-paged", branch ?? ""] as const,
+    queryFn: ({ pageParam }) => forgeCiRunPage(repo, 40, pageParam, branch),
+    initialPageParam: 1,
+    getNextPageParam: (last, pages) =>
+      last.hasMore ? pages.length + 1 : undefined,
+    enabled: enabled && active,
+    staleTime: 10_000,
+    // Polls while ANY loaded run is active, deep-paged or not — the guide promises a
+    // list that keeps refreshing while a run is. The accepted cost: an interval
+    // refetch replays every loaded page serially, so a deep-paged session pays N
+    // sequential fetches per tick. That needs a running run AND a user who paged
+    // back through history, and the rows visibly update as it goes; react-query
+    // skips a tick whose predecessor is still in flight, so they can't stack.
+    refetchInterval: (query) =>
+      (query.state.data?.pages ?? []).some((p) =>
+        p.runs.some((r) => isRunActive(r.status)),
+      )
+        ? 5000
+        : false,
+    // Focus refetch replays every loaded page too, and unlike the poll it fires with
+    // nothing running. Keep it for the single-page common case (today's freshness on
+    // alt-tab return); once the user has paged in, Refresh is the explicit way back.
+    refetchOnWindowFocus: (query) =>
+      (query.state.data?.pages.length ?? 0) === 1,
   });
 }
 

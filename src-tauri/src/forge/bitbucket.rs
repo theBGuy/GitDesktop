@@ -40,7 +40,7 @@ use crate::forge::{
     FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
-use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
+use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::pr::{
     ApprovalState, CommitCommentOut, DraftCommentIn, PrAuthor, PrCiRefIn, PrCiStatus, PrCommitOut,
     PrDetails, PrFileOut, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef, PrThreadOut,
@@ -361,6 +361,10 @@ struct BbPage<T> {
     values: Vec<T>,
     #[serde(default)]
     next: Option<String>,
+    /// Total items matching the query, on the endpoints that document one (pipelines
+    /// does; several others omit it) — `None` everywhere it's absent.
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 // A derived `Default` would demand `T: Default`, which no item type needs to satisfy.
@@ -369,6 +373,7 @@ impl<T> Default for BbPage<T> {
         Self {
             values: Vec::new(),
             next: None,
+            size: None,
         }
     }
 }
@@ -1884,31 +1889,48 @@ fn from_bb_pipeline(p: BbPipeline, ws: &str, slug: &str) -> WorkflowRun {
     }
 }
 
-/// Recent pipelines for this repo, newest first; optionally scoped to one branch.
-/// Note the TRAILING SLASH on `pipelines/` (required). Single page at `pagelen =
-/// limit.clamp(1,100)`, matching GitLab's no-loop policy.
-pub async fn list_runs(
+/// One page of pipelines for this repo, newest first; optionally scoped to one
+/// branch. `page` is 1-based. Note the TRAILING SLASH on `pipelines/` (required).
+/// The envelope's own `next`/`size` answer both paging questions, so this asks for
+/// exactly one page and never follows the link itself.
+pub async fn run_page(
     repo_path: &str,
     limit: u32,
+    page: u32,
     branch: Option<String>,
-) -> AppResult<Vec<WorkflowRun>> {
+) -> AppResult<CiRunPage> {
     let creds = http::load_credentials().await?;
     let (ws, slug) = workspace_slug(repo_path).await?;
     let per_page = limit.clamp(1, 100);
+    let page_num = page.max(1);
     let mut path = format!(
-        "repositories/{}/{}/pipelines/?sort=-created_on&pagelen={per_page}",
+        "repositories/{}/{}/pipelines/?sort=-created_on&pagelen={per_page}&page={page_num}",
         encode_query_value(&ws),
         encode_query_value(&slug),
     );
     if let Some(b) = branch.as_deref().filter(|s| !s.is_empty()) {
         path.push_str(&format!("&target.branch={}", encode_query_value(b)));
     }
-    let page: BbPage<BbPipeline> = http::bb_get_json(&creds, &path, "pipelines").await?;
-    Ok(page
-        .values
-        .into_iter()
-        .map(|p| from_bb_pipeline(p, &ws, &slug))
-        .collect())
+    let fetched: BbPage<BbPipeline> = http::bb_get_json(&creds, &path, "pipelines").await?;
+    Ok(CiRunPage {
+        total_count: fetched.size,
+        has_more: fetched.next.is_some(),
+        runs: fetched
+            .values
+            .into_iter()
+            .map(|p| from_bb_pipeline(p, &ws, &slug))
+            .collect(),
+    })
+}
+
+/// Recent pipelines for this repo, newest first; optionally scoped to one branch —
+/// the first page of [`run_page`].
+pub async fn list_runs(
+    repo_path: &str,
+    limit: u32,
+    branch: Option<String>,
+) -> AppResult<Vec<WorkflowRun>> {
+    Ok(run_page(repo_path, limit, 1, branch).await?.runs)
 }
 
 /// A pipeline step (`{uuid, name?, state{name, result{name}}, …}`). No numeric id.
@@ -6257,6 +6279,7 @@ mod tests {
         let page_one = BbPage {
             values: vec!["alpha".to_string()],
             next: Some(next.to_string()),
+            size: None,
         };
         let mut out: Vec<String> = Vec::new();
         assert_eq!(

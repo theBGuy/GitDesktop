@@ -1496,6 +1496,15 @@ export interface RulesetFull {
   rules?: { type: string; parameters?: Record<string, unknown> }[];
 }
 
+/** A GitHub App that reports checks on the repo, for naming a required-check
+ *  entry's `integration_id` pin. An app that has never reported on the default
+ *  branch's head is absent, and its pin stays unresolved. */
+export interface CheckApp {
+  id: number;
+  name: string;
+  slug: string;
+}
+
 /** What a branch's active rules demand of a pull request, aggregated across every
  *  ruleset that applies. GitHub only. */
 export interface BranchRequiredRules {

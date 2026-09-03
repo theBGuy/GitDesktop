@@ -19,6 +19,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  useCheckRunApps,
   useCreateRuleset,
   useDeleteRuleset,
   useRuleset,
@@ -219,12 +220,23 @@ const storedCheckEntries = (
 };
 
 /** Whether the stored ruleset requires one check context through several entries.
- *  Those usually differ only by their app pin (`integration_id`), which this
- *  editor doesn't show — so they read as identical repeated lines. */
+ *  Those usually differ only by their app pin (`integration_id`), which the pin
+ *  lines beneath the hint name so the repeats read as distinct. */
 const hasRepeatedCheckContexts = (original: RulesetFull | undefined) => {
   const contexts = storedCheckEntries(original).map((c) => c.context);
   return new Set(contexts).size !== contexts.length;
 };
+
+/** The stored check entries that pin their context to one app, in stored order.
+ *  `integration_id` is unmodeled JSON off the wire, so the number check is a type
+ *  guard rather than a formality. */
+const pinnedCheckEntries = (original: RulesetFull | undefined) =>
+  storedCheckEntries(original).flatMap((entry) =>
+    typeof entry.integration_id === "number" &&
+    Number.isFinite(entry.integration_id)
+      ? [{ context: entry.context, integrationId: entry.integration_id }]
+      : [],
+  );
 
 function draftToBody(
   d: Draft,
@@ -555,6 +567,12 @@ function RulesetForm({
   );
   const [d, setD] = useState<Draft>(seed);
   const repeatedChecks = hasRepeatedCheckContexts(original);
+  const pins = pinnedCheckEntries(original);
+  // Advisory: an unnamed app still shows its pin, as the raw id it was stored as.
+  const checkApps = useCheckRunApps(repoPath, pins.length > 0);
+  const appNames = new Map(
+    (checkApps.data ?? []).map((a) => [a.id, a.name || a.slug]),
+  );
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setD((p) => ({ ...p, [key]: value }));
 
@@ -697,6 +715,20 @@ function RulesetForm({
                 This ruleset requires the same check more than once — keep every
                 line to keep them all.
               </p>
+            )}
+            {pins.length > 0 && (
+              <div className="space-y-0.5 text-[11px] text-muted-foreground">
+                <p>Checks pinned to an app:</p>
+                <ul className="space-y-0.5">
+                  {pins.map((pin, i) => (
+                    <li key={`${i}:${pin.integrationId}:${pin.context}`}>
+                      {pin.context} —{" "}
+                      {appNames.get(pin.integrationId) ||
+                        `app #${pin.integrationId}`}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
             <RuleToggle
               label="Require branches to be up to date before merging"

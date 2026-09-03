@@ -23,7 +23,7 @@ use crate::forge::{
     FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
-use crate::github::actions::{RunDetail, RunJob, WorkflowRun};
+use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
     ApprovalState, CommitCommentOut, DraftCommentIn, ExternalReviewItem, PrAuthor, PrCheckOut,
@@ -5904,15 +5904,23 @@ fn from_glab_job(j: GlabJob) -> RunJob {
     }
 }
 
-/// Recent pipelines for this repo, newest first; optionally scoped to one branch.
-pub async fn list_runs(
+/// One page of pipelines for this repo, newest first; optionally scoped to one
+/// branch. `page` is 1-based.
+///
+/// `total_count` stays `None`: GitLab reports totals in response HEADERS
+/// (`X-Total`), and `glab api` hands back only the body. `has_more` is therefore a
+/// full-page heuristic — worst case the user gets one more fetch that returns
+/// nothing and ends paging there.
+pub async fn run_page(
     repo_path: &str,
     limit: u32,
+    page: u32,
     branch: Option<String>,
-) -> AppResult<Vec<WorkflowRun>> {
+) -> AppResult<CiRunPage> {
     let enc = encode_project(&project_path(repo_path).await?);
     let per_page = limit.clamp(1, 100);
-    let mut endpoint = format!("projects/{enc}/pipelines?per_page={per_page}");
+    let page = page.max(1);
+    let mut endpoint = format!("projects/{enc}/pipelines?per_page={per_page}&page={page}");
     if let Some(b) = branch.as_deref().filter(|s| !s.is_empty()) {
         // Percent-encode: a branch with a query-significant char (`&`, `#`, `?`, `=`,
         // `%`) would otherwise corrupt the query and silently return the wrong
@@ -5922,7 +5930,22 @@ pub async fn list_runs(
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let pipelines: Vec<GlabPipeline> = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Glab(format!("could not parse GitLab pipelines: {e}")))?;
-    Ok(pipelines.into_iter().map(from_glab_pipeline).collect())
+    let has_more = pipelines.len() == per_page as usize;
+    Ok(CiRunPage {
+        runs: pipelines.into_iter().map(from_glab_pipeline).collect(),
+        total_count: None,
+        has_more,
+    })
+}
+
+/// Recent pipelines for this repo, newest first; optionally scoped to one branch —
+/// the first page of [`run_page`].
+pub async fn list_runs(
+    repo_path: &str,
+    limit: u32,
+    branch: Option<String>,
+) -> AppResult<Vec<WorkflowRun>> {
+    Ok(run_page(repo_path, limit, 1, branch).await?.runs)
 }
 
 /// One pipeline with its jobs, mapped onto `RunDetail` (jobs have empty `steps`).

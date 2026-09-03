@@ -2072,6 +2072,29 @@ pub async fn forge_ci_run_list(
     }
 }
 
+/// One PAGE of a repo's CI runs, behind the provider abstraction — the whole run
+/// history is reachable through it, unlike [`forge_ci_run_list`]'s newest-page-only
+/// read. `page` is 1-based; `limit` is clamped to 1..=100 by each provider arm.
+/// `total_count` is present only where the provider reports one (GitHub always,
+/// Bitbucket usually, GitLab never), so a consumer must treat `None` as unknown
+/// rather than zero.
+#[tauri::command]
+pub async fn forge_ci_run_page(
+    repo_path: String,
+    limit: u32,
+    page: u32,
+    branch: Option<String>,
+) -> AppResult<crate::github::actions::CiRunPage> {
+    let page = page.max(1);
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => gitlab::run_page(&repo_path, limit, page, branch).await,
+        Some((Provider::Bitbucket, _)) => {
+            bitbucket::run_page(&repo_path, limit, page, branch).await
+        }
+        _ => github::run_page(&repo_path, limit, page, branch).await,
+    }
+}
+
 /// Parse a CI run/job id out of its wire form; `kind` names it in the error
 /// ("run" / "job"). Every CI id PARAM rides the wire as a string — JS clients lose
 /// integer precision past 2^53 — while the provider arms that take a numeric id

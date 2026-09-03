@@ -29,6 +29,7 @@ import type {
   BranchRequiredRules,
   BranchRewriteStatus,
   BranchStats,
+  CheckApp,
   CodeFreqPoint,
   Collaborator,
   CommitAuthor,
@@ -3379,6 +3380,12 @@ export const ghRulesetsList = (repoPath: string) =>
 
 export const ghRulesetGet = (repoPath: string, id: number) =>
   invoke<RulesetFull>("gh_ruleset_get", { repoPath, id });
+
+/** The apps behind the repo's checks, read from the latest check runs on the
+ *  default branch's head — GitHub publishes no id→name lookup for an app. Only
+ *  apps that have reported there are named. GitHub only. */
+export const ghCheckRunApps = (repoPath: string) =>
+  invoke<CheckApp[]>("gh_check_run_apps", { repoPath });
 
 /** What a branch's active rules require — check contexts and any approving-review
  *  count. Empty for a readable branch under no rules; a branch this token can't read —

@@ -6480,6 +6480,8 @@ export function useDisablePages(repo: string) {
 const rulesetsKey = (repo: string) => ["repo", repo, "rulesets"] as const;
 const rulesetKey = (repo: string, id: number | null) =>
   ["repo", repo, "ruleset", id] as const;
+const checkRunAppsKey = (repo: string) =>
+  ["repo", repo, "check-run-apps"] as const;
 
 export function useRulesets(repo: string, enabled: boolean) {
   return useQuery({
@@ -6496,6 +6498,19 @@ export function useRuleset(repo: string, id: number | null) {
     queryKey: rulesetKey(repo, id),
     queryFn: () => api.ghRulesetGet(repo, id as number),
     enabled: id != null,
+    retry: false,
+  });
+}
+
+/** The apps behind the repo's checks, for naming a required-check pin. Advisory:
+ *  a failure leaves the pins showing their raw ids, so it never retries, and the
+ *  set changes about as often as the repo's CI does. */
+export function useCheckRunApps(repo: string, enabled: boolean) {
+  return useQuery({
+    queryKey: checkRunAppsKey(repo),
+    queryFn: () => api.ghCheckRunApps(repo),
+    staleTime: 10 * 60_000,
+    enabled,
     retry: false,
   });
 }

@@ -367,6 +367,15 @@ pub async fn list_runs(
     crate::github::actions::gh_run_list(repo_path.to_string(), limit, branch).await
 }
 
+pub async fn run_page(
+    repo_path: &str,
+    limit: u32,
+    page: u32,
+    branch: Option<String>,
+) -> AppResult<crate::github::actions::CiRunPage> {
+    crate::github::actions::gh_run_page(repo_path.to_string(), limit, page, branch).await
+}
+
 pub async fn view_run(
     repo_path: &str,
     run_id: u64,

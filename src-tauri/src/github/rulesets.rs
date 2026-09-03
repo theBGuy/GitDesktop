@@ -125,7 +125,10 @@ pub async fn gh_ruleset_delete(repo_path: String, id: u64) -> AppResult<()> {
 
 /// The `required_status_checks` contexts in a `/rules/branches/{branch}` response,
 /// in GitHub's own order and deduplicated — several rulesets may require the same
-/// context. Pure so the shape is pinned without a live `gh` call.
+/// context. Contexts are trimmed to match the editor's own normalizer
+/// (`storedCheckEntries`), so a ruleset authored elsewhere with a padded context
+/// still joins the check reporting under the bare name. Pure so the shape is pinned
+/// without a live `gh` call.
 fn required_check_contexts(rules: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for rule in rules.as_array().into_iter().flatten() {
@@ -139,6 +142,7 @@ fn required_check_contexts(rules: &Value) -> Vec<String> {
             let Some(context) = check.get("context").and_then(Value::as_str) else {
                 continue;
             };
+            let context = context.trim();
             if context.is_empty() || out.iter().any(|c| c == context) {
                 continue;
             }
@@ -259,6 +263,84 @@ pub async fn gh_ruleset_set_enforcement(
     gh_ruleset_update(repo_path, id, body).await
 }
 
+/// One GitHub App that reports checks on this repo, for naming a required-check
+/// entry's `integration_id` pin.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckApp {
+    pub id: u64,
+    pub name: String,
+    pub slug: String,
+}
+
+/// The distinct apps reporting the check runs in a `commits/{ref}/check-runs`
+/// response, in first-appearance order — one app reports every run of a matrix job.
+/// Every field is optional: this is third-party JSON, and a run naming no app id
+/// resolves no pin whatever else it carries.
+fn check_run_apps(payload: &Value) -> Vec<CheckApp> {
+    let mut out: Vec<CheckApp> = Vec::new();
+    let runs = payload.pointer("/check_runs").and_then(Value::as_array);
+    for run in runs.into_iter().flatten() {
+        let Some(app) = run.get("app") else { continue };
+        let Some(id) = app.get("id").and_then(Value::as_u64) else {
+            continue;
+        };
+        if out.iter().any(|a| a.id == id) {
+            continue;
+        }
+        let field = |key| app.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+        out.push(CheckApp {
+            id,
+            name: field("name"),
+            slug: field("slug"),
+        });
+    }
+    out
+}
+
+/// The apps behind this repo's checks, so the ruleset editor can name each
+/// required-check pin. GitHub publishes no id→name lookup for an app, and the
+/// latest check runs on the default branch's head are the repo-scoped source of
+/// those identities. One page of them, deliberately: the distinct apps on a head
+/// commit are a handful, and a pin to an app that never reported there stays
+/// unresolved and renders as its raw id.
+#[tauri::command]
+pub async fn gh_check_run_apps(repo_path: String) -> AppResult<Vec<CheckApp>> {
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let out = run_gh(
+        Some(&repo_path),
+        &["api", &format!("repos/{slug}")],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let repo: Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse the repository: {e}")))?;
+    let branch = repo
+        .get("default_branch")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::Gh("the repository names no default branch".into()))?;
+    // gh expands `{…}` in an endpoint as an owner/repo placeholder, which would
+    // retarget the request at another repo; `escape_branch_path` covers `#`/`%`.
+    if branch.contains('{') || branch.contains('}') {
+        return Err(AppError::Gh(format!(
+            "the default branch cannot be addressed as an endpoint: {branch}"
+        )));
+    }
+    let endpoint = format!(
+        "repos/{slug}/commits/{}/check-runs",
+        escape_branch_path(branch)
+    );
+    let out = run_gh(
+        Some(&repo_path),
+        &["api", "--method", "GET", &endpoint, "-f", "per_page=100"],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let payload: Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse the check runs: {e}")))?;
+    Ok(check_run_apps(&payload))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +351,13 @@ mod tests {
 
     fn approvals(raw: &str) -> Option<u32> {
         required_approving_reviews(&serde_json::from_str::<Value>(raw).expect("valid JSON"))
+    }
+
+    fn apps(raw: &str) -> Vec<(u64, String, String)> {
+        check_run_apps(&serde_json::from_str::<Value>(raw).expect("valid JSON"))
+            .into_iter()
+            .map(|a| (a.id, a.name, a.slug))
+            .collect()
     }
 
     #[test]
@@ -362,6 +451,13 @@ mod tests {
             {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}
         ]"#;
         assert_eq!(contexts(raw), vec!["build", "test"]);
+        // Padding is not identity: a ruleset authored outside this app's editor can
+        // carry " ci ", which names the same check as the bare "ci" beside it — and
+        // a unique padded context still has to come out matching its check's name.
+        let padded = r#"[
+            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":" ci "},{"context":"ci"},{"context":"  lint\t"}]}}
+        ]"#;
+        assert_eq!(contexts(padded), vec!["ci", "lint"]);
     }
 
     #[test]
@@ -392,9 +488,69 @@ mod tests {
             r#"{"message":"Not Found"}"#,
             r#"[{"type":"required_status_checks"}]"#,
             r#"[{"type":"required_status_checks","parameters":{"required_status_checks":{}}}]"#,
-            r#"[{"type":"required_status_checks","parameters":{"required_status_checks":[{},{"context":42},{"context":""}]}}]"#,
+            r#"[{"type":"required_status_checks","parameters":{"required_status_checks":[{},{"context":42},{"context":""},{"context":"  "}]}}]"#,
         ] {
             assert_eq!(contexts(raw), Vec::<String>::new(), "raw: {raw}");
+        }
+    }
+
+    #[test]
+    fn the_check_app_shape_serializes_camel_case() {
+        // The editor joins these against a stored entry's `integration_id`, so the
+        // id must travel as a JSON number rather than a string.
+        let json = serde_json::to_string(&CheckApp {
+            id: 15368,
+            name: "GitHub Actions".into(),
+            slug: "github-actions".into(),
+        })
+        .expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"id":15368,"name":"GitHub Actions","slug":"github-actions"}"#
+        );
+    }
+
+    #[test]
+    fn names_each_app_reporting_a_check_once() {
+        // Trimmed from `gh api repos/theBGuy/GitDesktop/commits/master/check-runs`:
+        // one app reports every leg of a matrix job, so it must be named once.
+        let raw = r#"{"total_count":8,"check_runs":[
+            {"name":"Cloudflare Pages","app":{"id":85455,"name":"Cloudflare Workers and Pages","slug":"cloudflare-workers-and-pages"}},
+            {"name":"rebuild","app":{"id":15368,"name":"GitHub Actions","slug":"github-actions"}},
+            {"name":"test (ubuntu-24.04)","app":{"id":15368,"name":"GitHub Actions","slug":"github-actions"}}
+        ]}"#;
+        assert_eq!(
+            apps(raw),
+            vec![
+                (
+                    85455,
+                    "Cloudflare Workers and Pages".to_string(),
+                    "cloudflare-workers-and-pages".to_string()
+                ),
+                (
+                    15368,
+                    "GitHub Actions".to_string(),
+                    "github-actions".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn tolerates_check_runs_the_endpoint_never_promised() {
+        // A run naming no app id resolves no pin and drops; one missing only its
+        // display fields still resolves by id, and renders as that id.
+        assert_eq!(
+            apps(r#"{"check_runs":[{"app":null},{},{"app":{"name":"no id"}},{"app":{"id":7}}]}"#),
+            vec![(7, String::new(), String::new())]
+        );
+        for raw in [
+            r#"{"message":"Not Found"}"#,
+            r#"{"check_runs":{}}"#,
+            r#"{"check_runs":[]}"#,
+            "[]",
+        ] {
+            assert!(apps(raw).is_empty(), "raw: {raw}");
         }
     }
 }
