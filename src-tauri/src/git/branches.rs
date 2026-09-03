@@ -1349,16 +1349,23 @@ async fn verify_pin_and_merge(
         return Ok("merge".to_string());
     }
 
-    // The abort runs before the verdict, on every failure including a runner Err: a
-    // timeout that returned early would leave tmp mid-merge with the branch ref moved.
+    // The conflict verdict comes from the INDEX, read before the abort clears it — the
+    // exit code cannot carry it: a `pre-merge-commit` hook that declines also exits 1
+    // with the auto-merge clean and nothing unmerged, and hooks resolve from the COMMON
+    // dir, so the main repo's hooks run in this worktree (measured, git 2.51.1).
+    let conflicted = !crate::git::ops::unmerged_paths(tmp).await.is_empty();
+    // Undo the half-done merge so the branch ref is left as it was. Every failure path
+    // reaches this, the runner's Err included — a timeout that returned early would
+    // leave tmp mid-merge.
     let _ = run_git_raw(Some(tmp), &["merge", "--abort"], DEFAULT_TIMEOUT).await;
-    // Exit 1 is the conflict (measured, git 2.51.1); a hook, a vanished tmp gitdir or
-    // unrelated histories exit 128, and the runner's Err is a timeout or spawn failure.
-    // Only the first has a remedy to name, so the rest carry git's own report instead.
-    Err(match merged {
-        Ok(out) if out.code == 1 => AppError::InvalidArgument(format!(
+
+    // Only a real conflict has a remedy to name; everything else carries git's report.
+    if conflicted {
+        return Err(AppError::InvalidArgument(format!(
             "{branch} has changes that conflict with {base}. Switch to {branch} to merge and resolve them."
-        )),
+        )));
+    }
+    Err(match merged {
         Ok(out) => AppError::Command(format!(
             "merging {base} into {branch} failed — try again to see where it stands.\n{}",
             out.full_failure_text()
@@ -2710,10 +2717,152 @@ mod tests {
         );
     }
 
+    /// [`diverged_repo`]'s conflicting twin: both branches rewrite the SAME line of the
+    /// seed file, so their merge stops with unmerged entries instead of succeeding.
+    async fn conflicting_repo(tag: &str) -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+        let (guard, base_dir) = temp_base(tag);
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "seed.txt").await;
+        let main = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        run(&repo_s, &["switch", "-qc", "feature"]).await;
+        std::fs::write(repo.join("seed.txt"), "feature side\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "feature edit"]).await;
+
+        run(&repo_s, &["switch", "-q", &main]).await;
+        std::fs::write(repo.join("seed.txt"), "main side\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "main edit"]).await;
+
+        (guard, repo, repo_s, main)
+    }
+
+    /// The diverged path's conflict arm. The merge happens in the throwaway worktree,
+    /// so the user's checkout never sees it and the branch ref stays put — the refusal
+    /// is the whole outcome, and it has to name the remedy that does apply.
+    #[tokio::test]
+    async fn a_diverged_update_refuses_a_conflicting_merge_and_leaves_the_branch() {
+        let (_guard, repo, repo_s, main) = conflicting_repo("update-conflict").await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        let pinned_base = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+
+        let tmp = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("conflict-wt");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let err = merge_diverged_in_worktree(
+            &state,
+            &repo_s,
+            &tmp_s,
+            "feature",
+            &main,
+            &UpdatePins {
+                branch_tip: feature_tip.clone(),
+                base_sha: pinned_base,
+            },
+        )
+        .await
+        .unwrap_err();
+        let AppError::InvalidArgument(message) = &err else {
+            panic!("a conflicting merge must take the conflict refusal: {err:?}");
+        };
+        assert_eq!(
+            message,
+            &format!(
+                "feature has changes that conflict with {main}. \
+                 Switch to feature to merge and resolve them."
+            )
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature"]).await.trim(),
+            feature_tip,
+            "the abort leaves the branch exactly where it was"
+        );
+        assert!(!tmp.exists(), "the throwaway worktree is torn down");
+    }
+
+    /// The case an exit-code verdict gets wrong: a `pre-merge-commit` hook that
+    /// declines exits 1 — the conflict's code — with the auto-merge clean and nothing
+    /// unmerged. Hooks resolve from the COMMON dir, so the main repo's hook runs inside
+    /// the throwaway worktree. A hook that failed to fire would let the merge succeed
+    /// and fail this test, which is the safe direction.
+    #[tokio::test]
+    async fn a_declined_merge_hook_is_not_reported_as_a_conflict() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-declined-hook").await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        let pinned_base = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+
+        let hook = repo.join(".git").join("hooks").join("pre-merge-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        // git IGNORES a hook without the executable bit on POSIX, which would let the
+        // merge succeed and leave this test asserting nothing.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let tmp = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("declined-hook-wt");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let err = merge_diverged_in_worktree(
+            &state,
+            &repo_s,
+            &tmp_s,
+            "feature",
+            &main,
+            &UpdatePins {
+                branch_tip: feature_tip.clone(),
+                base_sha: pinned_base,
+            },
+        )
+        .await
+        .expect_err("the declined hook stops the merge");
+        let AppError::Command(message) = &err else {
+            panic!("a clean auto-merge must never be reported as a conflict: {err:?}");
+        };
+        assert!(
+            message.starts_with(&format!("merging {main} into feature failed")),
+            "{message}"
+        );
+        assert!(
+            message.contains("Not committing merge"),
+            "git's own report rides along: {message}"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature"]).await.trim(),
+            feature_tip,
+            "the abort leaves the branch exactly where it was"
+        );
+        assert!(!tmp.exists(), "the throwaway worktree is torn down");
+    }
+
     /// A merge that fails for a reason other than a conflict must not claim one: the
     /// conflict wording names a remedy — switch and resolve — that a hook, a timeout
     /// or unrelated histories give the user no way to act on. Unrelated histories are
-    /// the deterministic non-conflict shape (exit 128, measured git 2.51.1).
+    /// the deterministic shape: git refuses before merging anything, so the index has
+    /// no unmerged entries and the verdict falls to the report-carrying refusal.
     #[tokio::test]
     async fn a_failed_merge_that_is_not_a_conflict_carries_gits_own_report() {
         let (_guard, repo, repo_s, main) = diverged_repo("update-merge-failure").await;
