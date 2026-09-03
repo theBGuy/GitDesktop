@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { ghBranchRequiredChecks } from "@/lib/git/api";
 import type { ForgeProvider, PrCheckOut, RemoteLens } from "@/lib/git/types";
-import { checkPresentation } from "./check-presentation";
+import { isOutstanding } from "./check-presentation";
 
 /**
  * What a pull request's BASE branch requires — status-check contexts and any
@@ -59,21 +59,6 @@ function latestReportedRun(runs: PrCheckOut[]): PrCheckOut | null {
     }
   }
   return latest;
-}
-
-/** Whether one run leaves its context still to come. STALE and CANCELLED count
- *  here but not in the rollup's presentation: GitHub's passing set is success,
- *  skipped or neutral, so either holds the merge until it re-runs even though both
- *  read as finished, neutral results. The rollup imports it to flag those rows,
- *  so the two surfaces share one marker set. */
-export function isOutstanding(
-  check: PrCheckOut,
-  provider: ForgeProvider,
-): boolean {
-  const s = check.status.toUpperCase();
-  if (s === "STALE" || s === "CANCELLED") return true;
-  const { bucket } = checkPresentation(check.status, provider);
-  return bucket === "failed" || bucket === "pending";
 }
 
 /**

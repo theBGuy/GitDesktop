@@ -6,13 +6,13 @@ import {
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
-import type { ForgeProvider } from "@/lib/git/types";
+import type { ForgeProvider, PrCheckOut } from "@/lib/git/types";
 
 /** Tone + glyph for a CI check, so pass/fail is never conveyed by color alone.
  *  `provider` only distinguishes ACTION_REQUIRED — the one state whose meaning
- *  differs per forge. Its own module rather than the rollup's: the required-checks
- *  join reads `bucket` too, and importing it from the component would drag that
- *  component's log/query/opener graph into a hook that needs none of it. */
+ *  differs per forge. This module holds the pure presentation plus the shared
+ *  `isOutstanding` predicate below, so the rollup component and the required-checks
+ *  hook read one marker set without either importing the other. */
 export function checkPresentation(
   status: string,
   provider: ForgeProvider,
@@ -84,4 +84,19 @@ export function checkPresentation(
     label: "pending",
     bucket: "pending",
   };
+}
+
+/** Whether one run leaves its context still to come. STALE and CANCELLED count
+ *  here but not in the presentation above: GitHub's passing set is success,
+ *  skipped or neutral, so either holds the merge until it re-runs even though both
+ *  read as finished, neutral results. `unmetRequiredChecks` decides the join with
+ *  it and `ChecksRollup` flags the rows, so the two share one marker set. */
+export function isOutstanding(
+  check: PrCheckOut,
+  provider: ForgeProvider,
+): boolean {
+  const s = check.status.toUpperCase();
+  if (s === "STALE" || s === "CANCELLED") return true;
+  const { bucket } = checkPresentation(check.status, provider);
+  return bucket === "failed" || bucket === "pending";
 }

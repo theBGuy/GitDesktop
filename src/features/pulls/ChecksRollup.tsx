@@ -44,8 +44,7 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { formatDurationBetween } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-import { checkPresentation } from "./check-presentation";
-import { isOutstanding } from "./useBranchRequiredChecks";
+import { checkPresentation, isOutstanding } from "./check-presentation";
 
 /** The one wording for releasing a held workflow run — this strip and the Actions
  *  run view both ask through it, so the two prompts can't drift apart. It lives
@@ -471,10 +470,16 @@ export function ChecksRollup({
   ).length;
   // Required contexts sitting on a cancelled or stale run. Counted apart from the
   // summary segments, which keep stating run results — such a row still counts as
-  // skipped there, because that is what the run did.
-  const attention = checks.filter((c) =>
-    needsRequiredAttention(c, checks, provider, unmetRequiredContexts),
-  ).length;
+  // skipped there, because that is what the run did. Decided once per render and
+  // keyed by the check OBJECT (a `name` isn't unique): the predicate scans the whole
+  // list, and the count, the sort comparator, and every row all ask for it.
+  const attentionFlags = new Map(
+    checks.map((c) => [
+      c,
+      needsRequiredAttention(c, checks, provider, unmetRequiredContexts),
+    ]),
+  );
+  const attention = checks.filter((c) => attentionFlags.get(c)).length;
 
   // Auto-expand on any failure, or on a required check that reads finished but
   // still holds the merge — either way the PR should show it without a click.
@@ -563,7 +568,7 @@ export function ChecksRollup({
   // pending, passed, and skipped (least interesting); stable within a rank.
   const bucketRank = { failed: 0, pending: 2, passed: 3, skipped: 4 } as const;
   const rank = (c: PrCheckOut) =>
-    needsRequiredAttention(c, checks, provider, unmetRequiredContexts)
+    (attentionFlags.get(c) ?? false)
       ? 1
       : bucketRank[checkPresentation(c.status, provider).bucket];
   const sorted = [...checks].sort((a, b) => rank(a) - rank(b));
@@ -729,12 +734,7 @@ export function ChecksRollup({
                   provider={provider}
                   isRunning={live}
                   runJob={runJob}
-                  requiredAttention={needsRequiredAttention(
-                    c,
-                    checks,
-                    provider,
-                    unmetRequiredContexts,
-                  )}
+                  requiredAttention={attentionFlags.get(c) ?? false}
                 />
               );
             })}

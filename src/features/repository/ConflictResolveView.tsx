@@ -71,6 +71,11 @@ export function ConflictResolveView({
   // Bumped on each run so a superseded continuation (cancel / regenerate /
   // navigate-away) can't settle the shared state the newer run now owns.
   const genRef = useRef(0);
+  // Whether a resolution is genuinely in flight. Tracked explicitly rather than
+  // derived from phase/`generating`: both lag the decision points — `generating`
+  // stays true across a cancel's kill round-trip, and the phase is still
+  // "streaming" while the finished proposal is being diffed.
+  const runningRef = useRef(false);
   const textRef = useLatestRef(text);
   // The resolve view shares the diff pane's width budget, so the preview takes
   // the same legibility gate: below it, render unified.
@@ -87,6 +92,7 @@ export function ConflictResolveView({
     setProposed("");
     setPreviewDiff(null);
     setPhase("loading");
+    runningRef.current = true;
 
     let resolved: ConflictSides;
     try {
@@ -100,6 +106,7 @@ export function ConflictResolveView({
       resolved = await conflictSides(repoPath, path, exclude);
     } catch (e) {
       if (gen === genRef.current) {
+        runningRef.current = false;
         toastError(e);
         setPhase("idle");
       }
@@ -108,6 +115,7 @@ export function ConflictResolveView({
     if (gen !== genRef.current) return;
     setSides(resolved);
     if (resolved.aiIgnored) {
+      runningRef.current = false;
       setPhase("blocked");
       return;
     }
@@ -125,6 +133,7 @@ export function ConflictResolveView({
     setPhase("streaming");
     const completed = await run(reviewAi, { system, prompt, repoPath });
     if (gen !== genRef.current) return;
+    runningRef.current = false;
     // A failed or cancelled run leaves a partial (or provider-error) buffer behind;
     // proposing a "resolution" from it would corrupt the file. The hook already
     // toasted a failure (cancels stay silent by design) — just let the user retry.
@@ -157,10 +166,9 @@ export function ConflictResolveView({
   // Auto-start once per mounted file. Remounts (keyed on path in DiffViewer) as
   // the resolve-all walk advances, so each conflict kicks off on arrival.
   // `<Activity>` replays this effect on every show, so only a fresh session or one
-  // the teardown below interrupted restarts: a settled phase always wins (a hide
-  // between the run and `setPhase("ready")` flags an interruption the result then
-  // overtakes), and a cancelled run waits behind Try again — it settles on the same
-  // "idle" phase as an interrupted one, so the flag is what tells those two apart.
+  // the teardown below interrupted restarts: a settled phase never restarts, and a
+  // cancelled run waits behind Try again — it lands on the same "idle" phase as an
+  // interrupted one, so the flag is what tells those two apart.
   const kickoff = useEffectEvent(() => {
     const resume = interruptedRef.current;
     interruptedRef.current = false;
@@ -172,18 +180,14 @@ export function ConflictResolveView({
   useEffect(() => {
     kickoff();
   }, [path]);
-  const inFlightRef = useLatestRef(
-    phase === "loading" || phase === "streaming" || generating,
-  );
-  // DiffViewer swaps this view out (it's keyed on path) the moment another file
-  // is selected, so without this an in-flight resolution keeps streaming — and
-  // billing — into an orphaned component. `<Activity>` hide runs it too, hence the
-  // flag: only what this cut short is the kickoff's to resume. A hide during the
-  // pre-stream read cancels nothing (the run hasn't started, and it clears the
-  // cancel flag when it does), so that one session streams on until the restart.
+  // DiffViewer swaps this view out (keyed on path) the moment another file is
+  // selected, so without this a streaming resolution keeps billing into an
+  // orphaned component; `<Activity>` hide runs it too. The flag marks a stream
+  // this teardown actually cut short — never a user cancel, never a finished one.
+  // Before the stream starts there is nothing to cancel: `run` clears it on entry.
   useEffect(
     () => () => {
-      if (inFlightRef.current) interruptedRef.current = true;
+      if (runningRef.current) interruptedRef.current = true;
       cancel();
     },
     [cancel],
@@ -191,6 +195,7 @@ export function ConflictResolveView({
 
   function handleCancel() {
     genRef.current++;
+    runningRef.current = false;
     cancel();
     setPhase("idle");
   }
