@@ -259,9 +259,10 @@ export function useWorkflowRunPages(
     // flips `enabled`) — so their cost scales with how deep the user has paged, and the
     // budget they spend is GitHub's shared 5,000 requests/hour that every other gh
     // surface in the app draws on too. Twenty loaded pages on a 5s tick would be
-    // thousands of requests an hour on its own, so all three gate on a single loaded
-    // page: past page 1 the data never goes stale on its own and neither automatic
-    // refetch arms. Refresh still updates everything loaded, and the Actions mutations'
+    // thousands of requests an hour on its own, so all three gate on at most one
+    // loaded page: past page 1 the data never goes stale on its own and neither
+    // automatic refetch arms, while a panel with NO page yet (failed first fetch)
+    // keeps the focus-refetch recovery it always had. Refresh still updates everything loaded, and the Actions mutations'
     // `invalidateQueries` still refetches — an invalidated query is stale whatever the
     // staleTime says, and `refetch()` never consults it.
     staleTime: (query) =>
@@ -275,8 +276,7 @@ export function useWorkflowRunPages(
         ? 5000
         : false;
     },
-    refetchOnWindowFocus: (query) =>
-      (query.state.data?.pages.length ?? 0) === 1,
+    refetchOnWindowFocus: (query) => (query.state.data?.pages.length ?? 0) <= 1,
   });
 }
 
