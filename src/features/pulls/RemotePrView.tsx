@@ -179,6 +179,7 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { queuedMergeKey, useUiStore } from "@/lib/stores/ui";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
@@ -321,6 +322,10 @@ export function RemotePrView({
   // removing the upstream remote collapses the gate, so the same number becomes a
   // different repo's PR.
   const entityKey = `${repoPath}#${lens}#${number}`;
+  // Live identity for mutation continuations: this view swaps PRs without
+  // unmounting, so a callback's captured `entityKey` says which PR it was started
+  // on and this says which one is on screen now.
+  const entityKeyRef = useLatestRef(entityKey);
   // The viewer's push permission on the lens repo — the axis the per-action
   // forge flags don't cover. Only fetched once a provider is known; an
   // unanswered probe leaves every control exactly as it is.
@@ -1158,6 +1163,7 @@ export function RemotePrView({
     if (details.isPlaceholderData || resolve) return;
     const info = details.data;
     if (!info) return;
+    const startedFor = entityKey;
     // Always route through the backend, even when `findResolve` reports a worktree: it
     // re-attaches to one for this PR+lens from live porcelain rather than a cached read
     // (and does so before any fetch, so continuing stays fast). A cached handle can be
@@ -1172,6 +1178,11 @@ export function RemotePrView({
             );
             return;
           }
+          // Past the pushed arm this continuation can outlive the PR it was started
+          // on (the view swaps PRs without unmounting), so nothing below is adopted
+          // once the entity moved; the paused worktree stays resumable from the old
+          // PR via "Continue resolving".
+          if (startedFor !== entityKeyRef.current) return;
           if (outcome.worktreePath && outcome.worktreeId) {
             setResolve({
               worktreePath: outcome.worktreePath,
