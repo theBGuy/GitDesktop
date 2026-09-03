@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withForm } from "@/lib/form";
 import {
+  bindingKey,
   eventToBinding,
   formatBinding,
   hasModifier,
@@ -41,20 +42,13 @@ const NAV_KEYS = new Set([
   "pagedown",
 ]);
 
-/** The key a binding ends on — its final "+"-joined token, so the `shift+`
- *  forms land in the same bucket as the bare key. A lone "+" yields "", which
- *  is in neither refuse set and therefore binds. */
-function finalKey(binding: string): string {
-  return binding.split("+").pop() ?? "";
-}
-
 /** Without a modifier, only the activation and navigation keys above are
  *  refused: each already means something on every focused surface. Every other
  *  key binds, because the dispatcher holds modifier-less bindings back wherever
  *  the keystroke is already typing or driving a menu. */
 function isBindableCombo(binding: string): boolean {
   if (hasModifier(binding)) return true;
-  const key = finalKey(binding);
+  const key = bindingKey(binding);
   return !ACTIVATION_KEYS.has(key) && !NAV_KEYS.has(key);
 }
 
@@ -67,7 +61,7 @@ function consequenceNote(binding: string): string {
     ? "while you're typing or in a menu or picker"
     : "while you're typing";
   const quiet = `${formatBinding(binding)} stays quiet ${zones}, and fires anywhere else`;
-  return finalKey(binding) === "space"
+  return bindingKey(binding) === "space"
     ? `${quiet} — including on a focused button, where it replaces the button's own Space press.`
     : `${quiet}.`;
 }
@@ -75,7 +69,7 @@ function consequenceNote(binding: string): string {
 /** Why a refused key can't stand alone. The two sets collide with different
  *  things, so each names what the bare key would have taken over. */
 function refusalNote(binding: string): string {
-  return ACTIVATION_KEYS.has(finalKey(binding))
+  return ACTIVATION_KEYS.has(bindingKey(binding))
     ? `Enter activates the focused control, so this shortcut needs ${formatBinding("mod")} or ${formatBinding("alt")} added.`
     : `That key scrolls and navigates on its own, so this shortcut needs ${formatBinding("mod")} or ${formatBinding("alt")} added.`;
 }

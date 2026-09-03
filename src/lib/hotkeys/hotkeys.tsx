@@ -144,8 +144,9 @@ export function useHotkeysListener() {
     const binding = eventToBinding(e);
     if (!binding) return;
     if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
-    // Typeahead surfaces only ever swallow modifier-less bindings: a mod/alt
-    // chord is not something they can consume, so it keeps firing everywhere.
+    // Typeahead surfaces only ever swallow modifier-less bindings, and only
+    // character keys, which is all typeahead consumes: a mod/alt chord and a
+    // named key alike keep firing everywhere.
     if (
       !hasModifier(binding) &&
       isTypeaheadKey(binding) &&

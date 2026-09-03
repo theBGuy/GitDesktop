@@ -879,12 +879,19 @@ test("unguarded-binding-dispatcher needs both tokens and clears on the full clau
   );
   assert.deepEqual(unguardedDispatcher("e.preventDefault();"), []);
   // The WHOLE clause named ANYWHERE in the file clears it — the coarseness is
-  // the documented trade: presence, not proof it guards this path.
+  // the documented trade: presence, not proof it guards this path. Mirrors the
+  // canonical clause in hotkeys.tsx, because fixtures get copied.
   const guarded = [
     "function onKeyDown(e) {",
-    "  if (isEditableTarget(e.target) && !isTypeaheadKey(binding)) return;",
-    "  if (isTypeaheadTarget(e.target)) return;",
     "  const binding = eventToBinding(e);",
+    "  if (!binding) return;",
+    "  if (isEditableTarget(e.target) && !firesInEditable(binding)) return;",
+    "  if (",
+    "    !hasModifier(binding) &&",
+    "    isTypeaheadKey(binding) &&",
+    "    isTypeaheadTarget(e.target)",
+    "  )",
+    "    return;",
     "  if (binding === effective) e.preventDefault();",
     "}",
   ].join("\n");

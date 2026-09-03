@@ -170,7 +170,7 @@ export function isTypeaheadTarget(target: EventTarget | null): boolean {
  *  printable character. Named keys (f1, f5, …) are not typeahead input, so a
  *  registered one still has to reach the listener's preventDefault. */
 export function isTypeaheadKey(binding: string): boolean {
-  const key = binding.split("+").pop() ?? "";
+  const key = bindingKey(binding);
   return key.length === 1 || key === "space";
 }
 
@@ -191,6 +191,12 @@ const EDITING_COMBOS = new Set([
  *  test, so the predicate can't drift between them. */
 export function hasModifier(binding: string): boolean {
   return binding.includes("mod+") || binding.includes("alt+");
+}
+
+/** The key token of a canonical binding — whatever follows the fixed
+ *  mod → alt → shift prefix, so the `+` key survives (`shift++` → `+`). */
+export function bindingKey(binding: string): string {
+  return binding.replace(/^(?:mod\+)?(?:alt\+)?(?:shift\+)?/, "");
 }
 
 /**

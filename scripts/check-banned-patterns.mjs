@@ -157,7 +157,7 @@ const onlyWhen = (gate, scan) => (v) => {
 /** Scanner: `scan`'s hits, unless the whole-file view matches EVERY regex in
  *  `required` — the negative twin of `onlyWhen`, for a class whose remedy is the
  *  PRESENCE of shared helpers rather than the absence of a bad shape. All-or-
- *  nothing on purpose: a file carrying one guard of a pair is exactly the
+ *  nothing on purpose: a file carrying any subset of `required` is exactly the
  *  half-guarded shape worth reporting. Same `lastIndex` reset, for the same
  *  reason. */
 const unlessAllPresent = (required, scan) => (v) => {
