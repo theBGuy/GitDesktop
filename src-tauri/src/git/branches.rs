@@ -2801,8 +2801,8 @@ mod tests {
     /// The case an exit-code verdict gets wrong: a `pre-merge-commit` hook that
     /// declines exits 1 — the conflict's code — with the auto-merge clean and nothing
     /// unmerged. Hooks resolve from the COMMON dir, so the main repo's hook runs inside
-    /// the throwaway worktree. A hook that failed to fire would let the merge succeed
-    /// and fail this test, which is the safe direction.
+    /// the throwaway worktree. A hook that failed to fire trips the sentinel assertion
+    /// below rather than passing as a clean merge.
     #[tokio::test]
     async fn a_declined_merge_hook_is_not_reported_as_a_conflict() {
         let (_guard, repo, repo_s, main) = diverged_repo("update-declined-hook").await;
