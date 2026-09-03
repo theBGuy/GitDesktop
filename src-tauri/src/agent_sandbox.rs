@@ -212,28 +212,59 @@ pub(crate) fn global_skills_dir() -> Option<PathBuf> {
         .filter(|p| p.is_dir())
 }
 
-/// Finds Docker or Podman on PATH (Docker preferred). Returns (binary, name).
-pub(crate) async fn detect_runtime() -> Option<(PathBuf, String)> {
-    if let Some(bin) = resolve_named(&["docker"], None).await {
-        return Some((bin, "docker".to_string()));
+/// Preference slots [`candidate_at`] can fill.
+const RUNTIME_SLOTS: usize = 2;
+
+/// The installed runtime in preference slot `i` as `(binary, name)`: 0 is Docker on
+/// PATH, 1 is Podman on PATH else (Windows) Podman Desktop's install dir. Resolved
+/// ONE SLOT AT A TIME because on macOS/Linux `resolve_named` answers for an absent
+/// binary by spawning a login shell (up to `DETECT_TIMEOUT`), so a hot path that
+/// settles on slot 0 must never reach slot 1.
+async fn candidate_at(i: usize) -> Option<(PathBuf, String)> {
+    match i {
+        0 => resolve_named(&["docker"], None)
+            .await
+            .map(|bin| (bin, "docker".to_string())),
+        1 => {
+            let podman = resolve_named(&["podman"], None).await;
+            // Windows: Podman Desktop installs here but isn't on PATH until the app
+            // is relaunched after install — check the known location so a
+            // just-installed Podman is found without a restart.
+            #[cfg(windows)]
+            let podman = podman.or_else(|| {
+                let p = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+                    .join("Programs")
+                    .join("Podman")
+                    .join("podman.exe");
+                p.is_file().then_some(p)
+            });
+            podman.map(|bin| (bin, "podman".to_string()))
+        }
+        _ => None,
     }
-    if let Some(bin) = resolve_named(&["podman"], None).await {
-        return Some((bin, "podman".to_string()));
-    }
-    // Windows: Podman Desktop installs here but isn't on PATH until the app is
-    // relaunched after install — check the known location so a just-installed
-    // Podman is found without a restart.
-    #[cfg(windows)]
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        let p = PathBuf::from(local)
-            .join("Programs")
-            .join("Podman")
-            .join("podman.exe");
-        if p.is_file() {
-            return Some((p, "podman".to_string()));
+}
+
+/// The preferred installed runtime — the first filled slot, resolved no further.
+pub(crate) async fn preferred_runtime() -> Option<(PathBuf, String)> {
+    for i in 0..RUNTIME_SLOTS {
+        if let Some(c) = candidate_at(i).await {
+            return Some(c);
         }
     }
     None
+}
+
+/// Every installed runtime in preference order, for operations that must act on ALL
+/// of them. Resolving each slot has a cost (see [`candidate_at`]), so callers that
+/// only need one runtime take [`pick_runtime`] or [`preferred_runtime`] instead.
+pub(crate) async fn runtime_candidates() -> Vec<(PathBuf, String)> {
+    let mut out: Vec<(PathBuf, String)> = Vec::new();
+    for i in 0..RUNTIME_SLOTS {
+        if let Some(c) = candidate_at(i).await {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// True when `<rt> version` exits 0 (engine reachable, not just the client).
@@ -249,6 +280,128 @@ pub(crate) async fn image_present(bin: &Path) -> bool {
         run_capture(bin, &["image", "inspect", IMAGE], DETECT_TIMEOUT).await,
         Ok((0, _))
     )
+}
+
+/// What a container operation that RUNS something should use.
+#[derive(Debug, Clone)]
+pub(crate) enum RuntimePick {
+    /// Ready engine that has the managed image built.
+    WithImage(PathBuf, String),
+    /// Ready engine, but no candidate's engine holds the image.
+    ReadyNoImage(PathBuf, String),
+    /// Something is installed but no engine answered.
+    NotReady(PathBuf, String),
+    Missing,
+}
+
+/// Where the preference policy landed, as an index into the candidate list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    WithImage(usize),
+    ReadyNoImage(usize),
+    NotReady(usize),
+    Missing,
+}
+
+/// The preference policy over probed candidate states `(ready, has_image)`, in
+/// candidate order. Images are per-engine (Docker's store isn't Podman's), so a
+/// ready engine holding the managed image outranks a merely-ready one; with none
+/// ready the first INSTALLED candidate names the "start your engine" message.
+fn choose(states: &[(bool, bool)]) -> Choice {
+    let mut first_ready = None;
+    for (i, &(ready, has_image)) in states.iter().enumerate() {
+        if !ready {
+            continue;
+        }
+        if has_image {
+            return Choice::WithImage(i);
+        }
+        first_ready.get_or_insert(i);
+    }
+    match first_ready {
+        Some(i) => Choice::ReadyNoImage(i),
+        None if states.is_empty() => Choice::Missing,
+        None => Choice::NotReady(0),
+    }
+}
+
+/// One candidate's `(ready, has_image)` state. `image inspect` needs the daemon, so
+/// only a ready engine gets the second probe.
+async fn probe_runtime(bin: &Path) -> (bool, bool) {
+    let ready = runtime_ready(bin).await;
+    (ready, ready && image_present(bin).await)
+}
+
+/// Maps a settled [`Choice`] back onto the candidate it indexes.
+fn verdict(mut candidates: Vec<(PathBuf, String)>, states: &[(bool, bool)]) -> RuntimePick {
+    match choose(states) {
+        Choice::WithImage(i) => {
+            let (bin, name) = candidates.swap_remove(i);
+            RuntimePick::WithImage(bin, name)
+        }
+        Choice::ReadyNoImage(i) => {
+            let (bin, name) = candidates.swap_remove(i);
+            RuntimePick::ReadyNoImage(bin, name)
+        }
+        Choice::NotReady(i) => {
+            let (bin, name) = candidates.swap_remove(i);
+            RuntimePick::NotReady(bin, name)
+        }
+        Choice::Missing => RuntimePick::Missing,
+    }
+}
+
+/// The runtime a container operation should run on, per [`choose`]. Both the
+/// candidate resolution and its probes are lazy, so a ready Docker holding the image
+/// costs one `version` plus one `image inspect` and never looks for Podman. Sweeps
+/// that remove containers by their stable names take [`runtime_candidates`] instead:
+/// a container created under one engine must still be cleaned up when a different
+/// engine is picked later.
+pub(crate) async fn pick_runtime() -> RuntimePick {
+    let mut candidates: Vec<(PathBuf, String)> = Vec::new();
+    let mut states: Vec<(bool, bool)> = Vec::new();
+    for i in 0..RUNTIME_SLOTS {
+        let Some(candidate) = candidate_at(i).await else {
+            continue;
+        };
+        states.push(probe_runtime(&candidate.0).await);
+        candidates.push(candidate);
+        // Nothing later can beat a ready engine that already holds the image.
+        if matches!(choose(&states), Choice::WithImage(_)) {
+            break;
+        }
+    }
+    verdict(candidates, &states)
+}
+
+/// [`pick_runtime`] over an already-resolved candidate list, so a caller holding one
+/// doesn't pay [`candidate_at`]'s resolution a second time.
+pub(crate) async fn pick_from(known: Vec<(PathBuf, String)>) -> RuntimePick {
+    let mut candidates: Vec<(PathBuf, String)> = Vec::with_capacity(known.len());
+    let mut states: Vec<(bool, bool)> = Vec::with_capacity(known.len());
+    for candidate in known {
+        states.push(probe_runtime(&candidate.0).await);
+        candidates.push(candidate);
+        if matches!(choose(&states), Choice::WithImage(_)) {
+            break;
+        }
+    }
+    verdict(candidates, &states)
+}
+
+/// The runtime to build an image on: the engine already holding the managed image
+/// when there is one, so a rebuild lands where the image lives.
+async fn runtime_for_build() -> AppResult<PathBuf> {
+    match pick_runtime().await {
+        RuntimePick::WithImage(bin, _) | RuntimePick::ReadyNoImage(bin, _) => Ok(bin),
+        RuntimePick::NotReady(..) => Err(AppError::Command(
+            "Docker/Podman is installed but its engine isn't running. Start it and try again."
+                .into(),
+        )),
+        RuntimePick::Missing => Err(AppError::Command(
+            "Docker or Podman is not installed.".into(),
+        )),
+    }
 }
 
 /// Reads the built image's `gdconfig` label (`None` if the image/label is absent).
@@ -288,17 +441,19 @@ pub async fn agent_container_detect(
     node_version: String,
     providers: Vec<String>,
 ) -> AppResult<ContainerStatus> {
-    let Some((bin, name)) = detect_runtime().await else {
-        return Ok(ContainerStatus {
-            runtime: None,
-            ready: false,
-            image_present: false,
-            image_matches: false,
-        });
+    let (bin, name, ready, image_present) = match pick_runtime().await {
+        RuntimePick::WithImage(bin, name) => (bin, name, true, true),
+        RuntimePick::ReadyNoImage(bin, name) => (bin, name, true, false),
+        RuntimePick::NotReady(bin, name) => (bin, name, false, false),
+        RuntimePick::Missing => {
+            return Ok(ContainerStatus {
+                runtime: None,
+                ready: false,
+                image_present: false,
+                image_matches: false,
+            });
+        }
     };
-    let ready = runtime_ready(&bin).await;
-    // Only probe the image if the engine is up (inspect needs the daemon).
-    let image_present = ready && image_present(&bin).await;
     let image_matches = image_present
         && image_config_label(&bin).await.as_deref()
             == Some(config_signature(&node_version, &providers).as_str());
@@ -318,15 +473,7 @@ pub async fn agent_container_prepare(
     providers: Vec<String>,
     force: bool,
 ) -> AppResult<()> {
-    let (bin, _) = detect_runtime()
-        .await
-        .ok_or_else(|| AppError::Command("Docker or Podman is not installed.".into()))?;
-    if !runtime_ready(&bin).await {
-        return Err(AppError::Command(
-            "Docker/Podman is installed but its engine isn't running. Start it and try again."
-                .into(),
-        ));
-    }
+    let bin = runtime_for_build().await?;
 
     // Render + validate the Dockerfile for the selected Node version + providers,
     // and stamp the config as a label so detect can spot a stale image.
@@ -586,12 +733,13 @@ pub async fn agent_custom_image_status(worktree_path: String) -> AppResult<Custo
         });
     }
     // Valid → is it built? Needs the runtime + the base image to compute the tag.
-    let built = match detect_runtime().await {
-        Some((bin, _)) => match base_image_id(&bin).await {
+    let built = match pick_runtime().await {
+        RuntimePick::WithImage(bin, _) => match base_image_id(&bin).await {
             Some(id) => image_exists(&bin, &derived_tag(&id, &dockerfile)).await,
             None => false,
         },
-        None => false,
+        // No engine holds the base image, so no derived image can exist either.
+        _ => false,
     };
     Ok(CustomImageStatus {
         state: if built { "built" } else { "needsBuild" },
@@ -625,15 +773,7 @@ pub async fn agent_build_custom_image(
         ));
     }
     validate_custom_dockerfile(&dockerfile).map_err(AppError::InvalidArgument)?;
-    let (bin, _) = detect_runtime()
-        .await
-        .ok_or_else(|| AppError::Command("Docker or Podman is not installed.".into()))?;
-    if !runtime_ready(&bin).await {
-        return Err(AppError::Command(
-            "Docker/Podman is installed but its engine isn't running. Start it and try again."
-                .into(),
-        ));
-    }
+    let bin = runtime_for_build().await?;
     let id = base_image_id(&bin).await.ok_or_else(|| {
         AppError::Command(
             "Build the base agent image first (Settings → container isolation), then build the custom image."
@@ -768,8 +908,10 @@ pub async fn agent_sandbox_cleanup(app: AppHandle, session_id: String) -> AppRes
     }
     // Drop the generated MCP config too (it may hold resolved secrets).
     crate::mcp::cleanup_host_config(&app, &session_id);
-    if let Some((bin, _)) = detect_runtime().await {
-        let name = container_name(&session_id);
+    // Sweep every installed runtime: the container name is stable, so a session
+    // created under one engine must still be removed when another is preferred now.
+    let name = container_name(&session_id);
+    for (bin, _) in runtime_candidates().await {
         let _ = run_capture(&bin, &["rm", "-f", &name], DETECT_TIMEOUT).await;
     }
     Ok(())
@@ -896,23 +1038,40 @@ pub(crate) async fn container_shell_command(
     worktree_path: &str,
     ports: &[String],
 ) -> AppResult<(String, Vec<String>, String)> {
-    let (bin_path, rt) = detect_runtime().await.ok_or_else(|| {
-        AppError::Command(
-            "Docker or Podman not found on PATH — install one to test a container session."
-                .into(),
-        )
-    })?;
+    let candidates = runtime_candidates().await;
     let name = test_container_name(worktree_path);
-    let bin = bin_path.to_string_lossy().to_string();
 
     // Already running (its terminal was closed without `exit`) → reconnect a fresh
     // shell into it; its server + published ports are untouched. `exec` takes no
-    // ports/mount — those belong to the original `run`.
-    if container_running(&bin_path, &name).await {
-        let args = vec!["exec".into(), "-it".into(), name, "bash".into()];
-        let tip = "Tip: reconnected to the container that is still running - your server and ports are unchanged. Use Stop test container to shut it down.".to_string();
-        return Ok((bin, args, tip));
+    // ports/mount — those belong to the original `run`. Asked of every ready
+    // candidate, since it may sit on an engine other than the preferred one.
+    for (bin_path, _) in &candidates {
+        if runtime_ready(bin_path).await && container_running(bin_path, &name).await {
+            let args = vec!["exec".into(), "-it".into(), name.clone(), "bash".into()];
+            let tip = "Tip: reconnected to the container that is still running - your server and ports are unchanged. Use Stop test container to shut it down.".to_string();
+            return Ok((bin_path.to_string_lossy().to_string(), args, tip));
+        }
     }
+
+    // The Test shell falls back to the base image, so a ready engine without the
+    // managed image still launches; the terminal shows the engine's own error if
+    // neither image is there.
+    let (bin_path, rt) = match pick_from(candidates).await {
+        RuntimePick::WithImage(bin, rt) | RuntimePick::ReadyNoImage(bin, rt) => (bin, rt),
+        RuntimePick::NotReady(..) => {
+            return Err(AppError::Command(
+                "Docker/Podman is installed but its engine isn't running. Start it, then try again."
+                    .into(),
+            ));
+        }
+        RuntimePick::Missing => {
+            return Err(AppError::Command(
+                "Docker or Podman not found on PATH — install one to test a container session."
+                    .into(),
+            ));
+        }
+    };
+    let bin = bin_path.to_string_lossy().to_string();
 
     // Validate the ports before touching anything, so a bad spec fails before we
     // remove/start a container.
@@ -964,23 +1123,26 @@ pub(crate) async fn container_shell_command(
 /// offer to reconnect to it or stop it instead of starting a new one.
 #[tauri::command]
 pub async fn agent_test_container_running(worktree_path: String) -> AppResult<bool> {
-    let Some((bin, _)) = detect_runtime().await else {
-        return Ok(false);
-    };
-    Ok(container_running(&bin, &test_container_name(&worktree_path)).await)
+    let name = test_container_name(&worktree_path);
+    // The container may live on an engine other than the preferred one, so ask each
+    // ready candidate; probes stop at the first hit.
+    for (bin, _) in runtime_candidates().await {
+        if runtime_ready(&bin).await && container_running(&bin, &name).await {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Force-stops + removes this worktree's test-shell container, freeing its
 /// published ports. Best-effort — a no-op if it isn't running / doesn't exist.
 #[tauri::command]
 pub async fn agent_stop_test_container(worktree_path: String) -> AppResult<()> {
-    if let Some((bin, _)) = detect_runtime().await {
-        let _ = run_capture(
-            &bin,
-            &["rm", "-f", &test_container_name(&worktree_path)],
-            DETECT_TIMEOUT,
-        )
-        .await;
+    // Sweep every installed runtime — the name is stable, so the container may sit
+    // on an engine other than the one a fresh Test shell would pick.
+    let name = test_container_name(&worktree_path);
+    for (bin, _) in runtime_candidates().await {
+        let _ = run_capture(&bin, &["rm", "-f", &name], DETECT_TIMEOUT).await;
     }
     Ok(())
 }
@@ -1361,6 +1523,33 @@ mod tests {
         assert!(podman.iter().any(|a| a == "--userns=keep-id"));
         let docker = build_run_args("docker", "claude", "/repos/wt", &home, "n", IMAGE, None, None, &[], &inner);
         assert!(!docker.iter().any(|a| a == "--userns=keep-id"));
+    }
+
+    #[test]
+    fn choose_prefers_the_ready_engine_holding_the_image() {
+        // The preferred candidate, ready and holding the image, wins outright.
+        assert_eq!(choose(&[(true, true), (true, true)]), Choice::WithImage(0));
+        // A stopped engine yields to a running one, image or not.
+        assert_eq!(choose(&[(false, false), (true, true)]), Choice::WithImage(1));
+        assert_eq!(
+            choose(&[(false, false), (true, false)]),
+            Choice::ReadyNoImage(1)
+        );
+        // Between two ready engines the image decides — images are per-engine, so
+        // running on the one that lacks it would launch nothing.
+        assert_eq!(choose(&[(true, false), (true, true)]), Choice::WithImage(1));
+        // No engine holds the image → the first ready one (build/Test shell land there).
+        assert_eq!(
+            choose(&[(true, false), (true, false)]),
+            Choice::ReadyNoImage(0)
+        );
+        // Installed but nothing running → the first installed names the message.
+        assert_eq!(
+            choose(&[(false, false), (false, false)]),
+            Choice::NotReady(0)
+        );
+        // Nothing installed at all.
+        assert_eq!(choose(&[]), Choice::Missing);
     }
 
     #[test]

@@ -1,5 +1,5 @@
-import { PlusIcon, XIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { PlusIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -11,7 +11,12 @@ import {
 } from "@/components/ui/dialog";
 import type { AgentKind } from "@/lib/ai/agent";
 import { formatUsd, type RunCostEstimate } from "@/lib/ai/cost";
-import { AgentPicker, EffortPicker, ModelPicker } from "./AgentPickers";
+import {
+  AgentPicker,
+  EffortPicker,
+  imageMissingAgentText,
+  ModelPicker,
+} from "./AgentPickers";
 
 /** One arm of a best-of-N run: which agent/model/effort attacks the task. */
 export interface EnsembleArm {
@@ -39,6 +44,7 @@ export function EnsembleRunDialog({
   onOpenChange,
   seed,
   estimate,
+  imageAgents,
   onRun,
 }: {
   open: boolean;
@@ -46,6 +52,9 @@ export function EnsembleRunDialog({
   /** Config the arms start from (the composer's current agent/model/effort). */
   seed: EnsembleArm;
   estimate: RunCostEstimate;
+  /** Agent CLIs the saved image config bakes in — set ONLY when this run starts
+   *  containerized; `undefined` (worktree isolation) means no arm can miss. */
+  imageAgents?: readonly AgentKind[];
   onRun: (arms: EnsembleArm[]) => void;
 }) {
   return (
@@ -64,6 +73,7 @@ export function EnsembleRunDialog({
           <EnsembleArms
             seed={seed}
             estimate={estimate}
+            imageAgents={imageAgents}
             onCancel={() => onOpenChange(false)}
             onRun={(arms) => {
               onOpenChange(false);
@@ -79,11 +89,13 @@ export function EnsembleRunDialog({
 function EnsembleArms({
   seed,
   estimate,
+  imageAgents,
   onCancel,
   onRun,
 }: {
   seed: EnsembleArm;
   estimate: RunCostEstimate;
+  imageAgents?: readonly AgentKind[];
   onCancel: () => void;
   onRun: (arms: EnsembleArm[]) => void;
 }) {
@@ -110,8 +122,31 @@ function EnsembleArms({
   const total = perSession != null ? perSession * arms.length : null;
   const usesCopilot = arms.some((a) => a.agent === "copilot");
 
+  // Warn per arm, never block: a stale image can legitimately carry MORE agents
+  // than the saved config lists, and the backend rejects turn 1 anyway.
+  const missingFromImage = (agent: AgentKind) =>
+    imageAgents !== undefined && !imageAgents.includes(agent);
+  const missingSummary = arms
+    .map((arm, i) =>
+      missingFromImage(arm.agent)
+        ? `Arm ${i + 1}: ${imageMissingAgentText(arm.agent)}`
+        : "",
+    )
+    .filter(Boolean)
+    .join(" ");
+  // Content already present when a live region enters the a11y tree is never
+  // announced, and this dialog remounts on every open — so the region mounts empty
+  // and takes its text from an effect. The visible lines stay render-derived.
+  const [announced, setAnnounced] = useState("");
+  useEffect(() => {
+    setAnnounced(missingSummary);
+  }, [missingSummary]);
+
   return (
     <>
+      <p role="status" aria-live="polite" className="sr-only">
+        {announced}
+      </p>
       <div className="space-y-1.5">
         {arms.map((arm, i) => (
           <div
@@ -144,6 +179,18 @@ function EnsembleArms({
             >
               <XIcon />
             </Button>
+            {missingFromImage(arm.agent) && (
+              // `basis-full` wraps the line under the row's controls; the text
+              // carries the meaning, the token only tones it.
+              <p className="flex basis-full items-center gap-1.5 text-[11px] text-warning">
+                <WarningIcon
+                  weight="fill"
+                  className="size-3.5 shrink-0"
+                  aria-hidden
+                />
+                {imageMissingAgentText(arm.agent)}
+              </p>
+            )}
           </div>
         ))}
       </div>

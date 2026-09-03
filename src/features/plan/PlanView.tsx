@@ -122,7 +122,11 @@ export function PlanComposer({
   const modelForAgent = modelAgent === agent ? model : "";
 
   const planningIssue = Boolean(seed?.issueTitle || seed?.issueBody);
-  const canPlan = goal.trim().length > 0 || planningIssue;
+  // `agent` follows the Settings default until an explicit pick, so a submit
+  // before settings resolve would run the fallback agent. Held silently for those
+  // milliseconds; a load that FAILED is deliberately NOT pending.
+  const settingsPending = !settings.data && !settings.isError;
+  const canPlan = (goal.trim().length > 0 || planningIssue) && !settingsPending;
 
   const submit = () => {
     if (!canPlan) return;

@@ -48,6 +48,12 @@ export const AGENT_LABELS: Record<AgentKind, string> = {
   opencode: "opencode",
 };
 
+/** The warning shown when a container session's agent isn't baked into the image.
+ *  One source so the composer's isolation note and the best-of-N arms can't drift. */
+export function imageMissingAgentText(agent: AgentKind): string {
+  return `The agent image wasn't built with ${AGENT_LABELS[agent]} — add it under Settings → AI and rebuild.`;
+}
+
 /** The model for a run: the agent's models are searchable — its live catalog
  *  where the CLI can list one (opencode), else that CLI's static suggestions —
  *  and any other id typed here reaches the CLI verbatim (custom providers publish

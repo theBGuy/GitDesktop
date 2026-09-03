@@ -232,7 +232,11 @@ export function ResearchComposer({
   // Derived, so a default-agent change drops a model that agent wasn't given.
   const modelForAgent = modelAgent === agent ? model : "";
 
-  const canRun = topic.trim().length > 0;
+  // `agent` follows the Settings default until an explicit pick, so a submit
+  // before settings resolve would run the fallback agent. Held silently for those
+  // milliseconds; a load that FAILED is deliberately NOT pending.
+  const settingsPending = !settings.data && !settings.isError;
+  const canRun = topic.trim().length > 0 && !settingsPending;
   const copy = INTENT_COPY[depth];
 
   const submit = () => {

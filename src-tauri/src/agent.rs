@@ -2737,28 +2737,35 @@ pub async fn agent_session(
     // worktree-confined container. The agent CLI lives in the image, so we don't
     // resolve a host binary; the runtime drives it.
     if container {
-        let (runtime, runtime_name) = crate::agent_sandbox::detect_runtime().await.ok_or_else(|| {
-            AppError::Command("Container isolation is on for this session, but Docker/Podman isn't available. Install and start it — or start a new session with Isolation set to Worktree (composer → Options), or turn container isolation off in Settings → AI.".to_string())
-        })?;
-        if !crate::agent_sandbox::image_present(&runtime).await {
-            // `image inspect` needs the daemon, so a stopped engine fails here too — but
-            // this whole branch runs on EVERY turn, so the daemon probe is deliberately on
-            // the failure path only: a healthy session pays nothing, and a failing one
-            // still tells "engine stopped" apart from "image never built".
-            if !crate::agent_sandbox::runtime_ready(&runtime).await {
-                let label = if runtime_name == "podman" {
-                    "Podman"
-                } else {
-                    "Docker"
-                };
-                return Err(AppError::Command(format!(
-                    "{label} is installed but its engine isn't running. Start it, then try again."
-                )));
-            }
-            return Err(AppError::Command(
-                "The agent container image isn't built yet. Open Settings → AI and click \"Build image\", then try again.".to_string(),
-            ));
-        }
+        // This branch runs on EVERY turn, so the preferred runtime holding the image
+        // settles the choice in ONE subprocess — `image inspect` needs the daemon, so
+        // it also proves the engine is up. Only its failure pays for the wider walk,
+        // which is what tells "wrong engine" / "engine stopped" / "never built" apart.
+        let preferred = crate::agent_sandbox::preferred_runtime().await;
+        let preferred_has_image = match &preferred {
+            Some((bin, _)) => crate::agent_sandbox::image_present(bin).await,
+            None => false,
+        };
+        let (runtime, runtime_name) = match preferred.filter(|_| preferred_has_image) {
+            Some(pair) => pair,
+            None => match crate::agent_sandbox::pick_runtime().await {
+                crate::agent_sandbox::RuntimePick::WithImage(bin, name) => (bin, name),
+                crate::agent_sandbox::RuntimePick::ReadyNoImage(..) => {
+                    return Err(AppError::Command(
+                        "The agent container image isn't built yet. Open Settings → AI and click \"Build image\", then try again.".to_string(),
+                    ));
+                }
+                crate::agent_sandbox::RuntimePick::NotReady(_, name) => {
+                    let label = if name == "podman" { "Podman" } else { "Docker" };
+                    return Err(AppError::Command(format!(
+                        "{label} is installed but its engine isn't running. Start it, then try again."
+                    )));
+                }
+                crate::agent_sandbox::RuntimePick::Missing => {
+                    return Err(AppError::Command("Container isolation is on for this session, but Docker/Podman isn't available. Install and start it — or start a new session with Isolation set to Worktree (composer → Options), or turn container isolation off in Settings → AI.".to_string()));
+                }
+            },
+        };
         // The image may have been built without this agent (provider selection) —
         // fail clearly instead of a cryptic in-container "command not found".
         if !crate::agent_sandbox::image_has_agent(&runtime, agent_name).await {
