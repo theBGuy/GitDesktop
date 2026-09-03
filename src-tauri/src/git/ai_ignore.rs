@@ -288,9 +288,9 @@ pub async fn filter_ignored(
 /// text once its verdict is in.
 ///
 /// Semantics, short-circuits and security properties are [`filter_ignored`]'s;
-/// the returned names are a subset of `paths`, byte-identical. A name must not
-/// carry an interior NUL — impossible in the `-z` streams callers read names
-/// from — since the NUL-framed wire would read it as two names.
+/// the returned names are a subset of `paths`, byte-identical. Names must not
+/// carry an interior NUL: the NUL-framed wire (shared with the `String` path)
+/// would read one as two names.
 pub async fn filter_ignored_bytes(
     repo_path: &str,
     paths: &[Vec<u8>],

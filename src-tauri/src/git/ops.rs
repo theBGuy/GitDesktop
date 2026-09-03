@@ -2480,9 +2480,10 @@ pub(crate) async fn classify_failure(
 
 /// A short, stable hash of the repo path, kept in sync BY HAND with
 /// `worktree.rs::repo_hash` (both hash the lower-cased path with `DefaultHasher`).
-/// Resolve worktrees must land under the same `<app_data>/worktrees/<repo-hash>`
-/// root, because that placement is what makes `git_worktree_list_user` hide them
-/// from the user-facing worktree manager (`is_session_worktree`'s app-data check).
+/// Resolve worktrees — and `branches.rs`'s `gd-update-*` checkouts — must land
+/// under the same `<app_data>/worktrees/<repo-hash>` root, because that placement
+/// is what makes `git_worktree_list_user` hide them from the user-facing worktree
+/// manager (`is_session_worktree`'s app-data check).
 fn repo_hash(repo_path: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();

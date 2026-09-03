@@ -531,9 +531,9 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 /// pull that bare git refuses outright ("no such ref was fetched"). Pruned, the
 /// upstream ref stops resolving and that refusal is what the user sees. It prunes
 /// BRANCHES alone: `--no-prune-tags` keeps a `fetch.pruneTags` user's local tags. That
-/// is parity while `fetch.prune` is unset, and a deliberate divergence once it is set —
-/// bare pull deletes those tags there (measured, git 2.51.1), and a transfer this guard
-/// introduced is not where a user should lose refs.
+/// is parity while no prune config is set (`fetch.prune` / `remote.<name>.prune`), and a
+/// deliberate divergence once one is — bare pull deletes those tags there (measured,
+/// git 2.51.1), and a transfer this guard introduced is not where a user should lose refs.
 ///
 /// This phase holds the NETWORK domain and nothing else, so a transfer running for
 /// its whole budget never stalls staging or a commit; the caller takes the working
@@ -2704,9 +2704,10 @@ mod tests {
         }
 
         // The `pruneTags` pair is answered by the fetch's own `--no-prune-tags`: the
-        // split phases keep those tags, matching bare pull while `fetch.prune` is unset
-        // and deliberately diverging from it — in the user's favor — once it is set.
-        // Either way there is no difference left for a stand-down to protect.
+        // split phases keep those tags, matching bare pull while no prune config is set
+        // (`fetch.prune` / `remote.<name>.prune`) and deliberately diverging from it, in
+        // the user's favor, once one is. Either way there is no difference left for a
+        // stand-down to protect.
         for (key, value) in [("fetch.pruneTags", "true"), ("remote.origin.pruneTags", "yes")] {
             git(&clone, &["config", key, value]).await;
             assert!(
@@ -2813,8 +2814,9 @@ mod tests {
     }
 
     /// The rebase arm's probe fetch carries the same flag, for the same reason.
-    /// `submodule.recurse` needs no pin here: `probe` reads no config stand-down key
-    /// (that check belongs to `pin_plain_pull` alone), so no global can divert it.
+    /// `submodule.recurse` needs no pin here: the boolean stand-down keys belong to
+    /// `pin_plain_pull` alone. `probe`'s one config read is the fetch-refspec
+    /// predicate, whose fixture value the clone itself wrote.
     #[tokio::test]
     async fn the_probe_fetch_keeps_local_tags() {
         let (_dir, clone, _work, _tip) = behind_fixture("probe-prune-tags").await;

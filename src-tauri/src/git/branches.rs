@@ -1255,7 +1255,8 @@ async fn merge_diverged_in_worktree(
     // unbounded one holds a finished update's command hostage for the minutes a
     // node_modules-scale removal can hold the shared admin domain. A quit or crash
     // while the detached task waits leaks the `gd-update-*` DIRECTORY — the registry
-    // entry self-heals through `worktree::prune_worktrees_if_free`, the directory does not.
+    // entry self-heals through `worktree::prune_worktrees_if_free` only once the
+    // directory is gone; a surviving directory keeps the entry and the branch hold.
     let domain = state.worktree_admin_lock(repo_path).await;
     match try_acquire_repo_lock(&domain, "a worktree operation") {
         Some(_admin) => remove_tmp_worktree(repo_path, tmp).await,
