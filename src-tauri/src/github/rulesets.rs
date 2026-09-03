@@ -190,6 +190,19 @@ pub struct BranchRequiredRules {
 /// `/` stays raw on purpose: the endpoint takes the rest of the path as the branch, so
 /// `release/1.0` must survive intact. That is why `encode_query_value` is the wrong
 /// tool here — it emits `%2F`.
+/// Refuse a ref that carries `{` or `}` before it reaches an endpoint. gh expands `{…}`
+/// in an endpoint as an owner/repo placeholder, which retargets the request at another
+/// repo; `escape_branch_path` covers `#`/`%` but deliberately not these. `what` names the
+/// value in the message ("this branch" / "the default branch").
+fn refuse_braced(what: &str, value: &str) -> AppResult<()> {
+    if value.contains('{') || value.contains('}') {
+        return Err(AppError::Gh(format!(
+            "{what} cannot be addressed as an endpoint: {value}"
+        )));
+    }
+    Ok(())
+}
+
 fn escape_branch_path(branch: &str) -> String {
     // `%` first: escaping it second would rewrite the `%` of the `%23` just written.
     branch.replace('%', "%25").replace('#', "%23")
@@ -210,14 +223,9 @@ pub async fn gh_branch_required_checks(
     // Both guards are needed: the ref gate rejects refspec metacharacters but permits
     // `#`/`%`, which are legal in a git ref and special in a URL.
     crate::git::branches::validate_branch_name(&branch)?;
-    // Braces are the third case, refused for the reason `gh_check_run_apps` spells out
-    // below: gh reads `{…}` in an endpoint as an owner/repo placeholder. Before the
-    // slug resolution, so a refused name spawns no git or gh.
-    if branch.contains('{') || branch.contains('}') {
-        return Err(AppError::Gh(format!(
-            "this branch cannot be addressed as an endpoint: {branch}"
-        )));
-    }
+    // Braces are the third case. Refused BEFORE the slug resolution, so a bad name
+    // spawns no git or gh.
+    refuse_braced("this branch", &branch)?;
     // The lens slug, not the origin one: a fork PR's base branch — and its rules —
     // live in the repo the PR targets.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
@@ -327,13 +335,7 @@ pub async fn gh_check_run_apps(repo_path: String) -> AppResult<Vec<CheckApp>> {
         .get("default_branch")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::Gh("the repository names no default branch".into()))?;
-    // gh expands `{…}` in an endpoint as an owner/repo placeholder, which would
-    // retarget the request at another repo; `escape_branch_path` covers `#`/`%`.
-    if branch.contains('{') || branch.contains('}') {
-        return Err(AppError::Gh(format!(
-            "the default branch cannot be addressed as an endpoint: {branch}"
-        )));
-    }
+    refuse_braced("the default branch", branch)?;
     let endpoint = format!(
         "repos/{slug}/commits/{}/check-runs",
         escape_branch_path(branch)

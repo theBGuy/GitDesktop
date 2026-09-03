@@ -30,6 +30,16 @@ where
     Ok(Option::<u64>::deserialize(d)?.unwrap_or_default())
 }
 
+/// The list twin of [`de_null_u64`]: an explicit `null` where a REST array is expected
+/// reads as empty rather than failing the enclosing envelope's parse.
+fn de_null_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(d)?.unwrap_or_default())
+}
+
 fn validate_ref(name: &str) -> AppResult<()> {
     if name.is_empty() || name.starts_with('-') {
         return Err(AppError::InvalidArgument(format!("invalid ref: {name}")));
@@ -190,9 +200,9 @@ const RUN_LOG_CAP: usize = 200_000;
 /// untrusted, so a shape change degrades one field instead of sinking the page.
 #[derive(Debug, Default, Deserialize)]
 struct RestRunPage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_u64")]
     total_count: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_vec")]
     workflow_runs: Vec<RestRun>,
 }
 
@@ -262,6 +272,32 @@ fn from_rest_run(r: RestRun, workflow_names: &HashMap<u64, String>) -> WorkflowR
         url: r.html_url,
         head_sha: r.head_sha,
     }
+}
+
+/// The `gh api` argv for one run page. Pure, so the invariants below are testable
+/// without a spawn: `--method GET` is mandatory (`gh api` with `-f` fields present
+/// defaults to POST, and only under GET do they become query params), every field rides
+/// `-f` and never `-F` (`-F`'s leading-`@` magic reads host files), and
+/// `exclude_pull_requests=true` — what `gh run list` itself sends — suppresses a per-run
+/// array nothing here consumes. `branch` must already be validated.
+fn run_page_args(endpoint: &str, limit: u32, page: u32, branch: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "api".into(),
+        "--method".into(),
+        "GET".into(),
+        endpoint.into(),
+        "-f".into(),
+        format!("per_page={limit}"),
+        "-f".into(),
+        format!("page={page}"),
+        "-f".into(),
+        "exclude_pull_requests=true".into(),
+    ];
+    if let Some(b) = branch.filter(|s| !s.is_empty()) {
+        args.push("-f".into());
+        args.push(format!("branch={b}"));
+    }
+    args
 }
 
 /// Whether a page follows the 1-based `page` just fetched. BOTH conditions must
@@ -378,11 +414,8 @@ async fn workflow_name_index(repo_path: &str, slug: &str) -> HashMap<u64, String
 /// One page of workflow runs, newest first; optionally scoped to one branch. `page`
 /// is 1-based.
 ///
-/// REST rather than `gh run list`, which has no page flag. Query params ride `-f`
-/// under `--method GET`: `gh api` with `-f` fields present defaults to POST, and only
-/// under GET do they become query params. `-f` never `-F` — `-F`'s leading-`@` magic
-/// reads host files. `exclude_pull_requests=true` is what `gh run list` itself sends;
-/// it suppresses the per-run `pull_requests` array, which nothing here consumes.
+/// REST rather than `gh run list`, which has no page flag; [`run_page_args`] holds the
+/// argv and the constraints that shape it.
 ///
 /// The workflow-name index resolves alongside, concurrently, because a run's REST
 /// `name` is the RUN's name — `gh run list` resolves `workflowName` through the same
@@ -399,33 +432,14 @@ pub async fn gh_run_page(
     let page = page.max(1);
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let endpoint = format!("repos/{slug}/actions/runs");
-    let per_page_arg = format!("per_page={limit}");
-    let page_arg = format!("page={page}");
-    let branch_arg = match branch.as_deref().filter(|s| !s.is_empty()) {
-        Some(b) => {
-            validate_ref(b)?;
-            Some(format!("branch={b}"))
-        }
-        None => None,
-    };
-    let mut args: Vec<&str> = vec![
-        "api",
-        "--method",
-        "GET",
-        endpoint.as_str(),
-        "-f",
-        per_page_arg.as_str(),
-        "-f",
-        page_arg.as_str(),
-        "-f",
-        "exclude_pull_requests=true",
-    ];
-    if let Some(b) = branch_arg.as_deref() {
-        args.push("-f");
-        args.push(b);
+    let branch = branch.as_deref().filter(|s| !s.is_empty());
+    if let Some(b) = branch {
+        validate_ref(b)?;
     }
+    let args = run_page_args(&endpoint, limit, page, branch);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let (out, workflow_names) = tokio::join!(
-        run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT),
+        run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT),
         workflow_name_index(&repo_path, &slug),
     );
     let parsed: RestRunPage = serde_json::from_str(&out?.stdout_lossy())
@@ -1427,12 +1441,72 @@ mod tests {
 
     /// A body missing the envelope entirely (an error object, a shape change) parses to
     /// an empty page instead of erroring — the tolerant-JSON posture forge reads take.
+    /// Explicit nulls are the case `#[serde(default)]` alone does NOT cover: it fills a
+    /// MISSING key, while a null at either key would sink the whole parse.
     #[test]
     fn a_foreign_envelope_reads_as_an_empty_page() {
         let parsed: RestRunPage = serde_json::from_str(r#"{"message":"Not Found"}"#).unwrap();
         assert_eq!(parsed.total_count, 0);
         assert!(parsed.workflow_runs.is_empty());
         assert!(!gh_has_more(0, 40, 1, 0));
+
+        for body in [
+            r#"{"total_count":null,"workflow_runs":null}"#,
+            r#"{"total_count":null,"workflow_runs":[]}"#,
+            r#"{"total_count":7,"workflow_runs":null}"#,
+        ] {
+            let parsed: RestRunPage = serde_json::from_str(body)
+                .unwrap_or_else(|e| panic!("an explicit null must not sink {body}: {e}"));
+            assert!(parsed.workflow_runs.is_empty(), "body: {body}");
+        }
+    }
+
+    /// The argv invariants `gh_run_page`'s correctness rests on, pinned without a spawn.
+    #[test]
+    fn run_page_argv_keeps_its_invariants() {
+        let args = run_page_args("repos/o/r/actions/runs", 40, 2, None);
+
+        // `gh api` with `-f` fields present defaults to POST; only under GET do they
+        // become query params.
+        let method = args.iter().position(|a| a == "--method").expect("--method");
+        assert_eq!(args[method + 1], "GET");
+
+        // `-F`'s leading-`@` magic reads a HOST FILE into the value. Never, anywhere.
+        assert!(
+            !args.iter().any(|a| a == "-F"),
+            "no field may ride -F: {args:?}"
+        );
+
+        // Every field-shaped arg is introduced by `-f`.
+        for (i, arg) in args.iter().enumerate() {
+            if arg.contains('=') {
+                assert_eq!(args[i - 1], "-f", "{arg} must ride -f: {args:?}");
+            }
+        }
+
+        assert!(args.iter().any(|a| a == "per_page=40"), "{args:?}");
+        assert!(args.iter().any(|a| a == "page=2"), "{args:?}");
+        assert!(
+            args.iter().any(|a| a == "exclude_pull_requests=true"),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|a| a == "repos/o/r/actions/runs"), "{args:?}");
+
+        // The branch field appears only when a branch is given, and only as a `-f`.
+        assert!(!args.iter().any(|a| a.starts_with("branch=")), "{args:?}");
+        for absent in [None, Some("")] {
+            let args = run_page_args("repos/o/r/actions/runs", 40, 1, absent);
+            assert!(
+                !args.iter().any(|a| a.starts_with("branch=")),
+                "{absent:?} must add no branch field: {args:?}"
+            );
+        }
+        let scoped = run_page_args("repos/o/r/actions/runs", 40, 1, Some("feat/x"));
+        let at = scoped
+            .iter()
+            .position(|a| a == "branch=feat/x")
+            .unwrap_or_else(|| panic!("{scoped:?}"));
+        assert_eq!(scoped[at - 1], "-f", "{scoped:?}");
     }
 
     #[test]

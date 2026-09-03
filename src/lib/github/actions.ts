@@ -254,14 +254,20 @@ export function useWorkflowRunPages(
     getNextPageParam: (last, pages) =>
       last.hasMore ? pages.length + 1 : undefined,
     enabled: enabled && active,
-    staleTime: 10_000,
-    // Both auto-refresh paths replay EVERY loaded page serially, so their cost scales
-    // with how deep the user has paged — and the budget they spend is GitHub's shared
-    // 5,000 requests/hour, which every other gh surface in the app draws on too.
-    // Twenty loaded pages on a 5s tick would be thousands of requests an hour on its
-    // own, so both gate on a single loaded page: the poll fires only while page 1 is
-    // all there is and something in it is running. Paging deeper hands refreshing to
-    // the Refresh button, which updates everything loaded on demand.
+    // Three paths replay EVERY loaded page serially — the 5s poll, a window-focus
+    // refetch, and a remount past staleTime (leaving and re-entering the Actions tab
+    // flips `enabled`) — so their cost scales with how deep the user has paged, and the
+    // budget they spend is GitHub's shared 5,000 requests/hour that every other gh
+    // surface in the app draws on too. Twenty loaded pages on a 5s tick would be
+    // thousands of requests an hour on its own, so all three gate on a single loaded
+    // page: past page 1 the data never goes stale on its own and neither automatic
+    // refetch arms. Refresh still updates everything loaded, and the Actions mutations'
+    // `invalidateQueries` still refetches — an invalidated query is stale whatever the
+    // staleTime says, and `refetch()` never consults it.
+    staleTime: (query) =>
+      (query.state.data?.pages.length ?? 0) > 1
+        ? Number.POSITIVE_INFINITY
+        : 10_000,
     refetchInterval: (query) => {
       const pages = query.state.data?.pages ?? [];
       return pages.length === 1 &&

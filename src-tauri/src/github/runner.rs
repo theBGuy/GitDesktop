@@ -58,30 +58,81 @@ const AMBIENT_TOKEN_VARS: [&str; 4] = [
     "GITHUB_ENTERPRISE_TOKEN",
 ];
 
-/// TTL bounding how long a stored-login verdict stays trusted before we re-probe, so a
-/// sign-in or sign-out takes effect within a minute.
-const STORED_LOGIN_TTL: Duration = Duration::from_secs(60);
+/// Deadline for one stored-login probe. `gh auth token` reads gh's config and the OS
+/// keyring — local work that answers in milliseconds — so seconds already mean something
+/// is wedged, and the generous [`GH_TIMEOUT`] is the wrong bound here: this probe runs
+/// during host RESOLUTION, before any caller's own timeout starts, and a ported remote
+/// probes two spellings in sequence. A stalled keyring must not add a minute ahead of
+/// every gh call.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Per-host-spelling cache of `(probe time, has a stored login)`. Bounded by the number
-/// of distinct spellings the open repos use (tiny); a stale entry is overwritten.
-type StoredLoginCache = Mutex<HashMap<String, (Instant, bool)>>;
+/// TTL bounding how long a stored-login verdict stays trusted before we re-probe, per
+/// direction. A MEASURED verdict holds for a minute, so a sign-in or sign-out takes
+/// effect promptly. A probe that never answered — a wedged keyring is the case that
+/// matters — caches its `false` far more briefly: long enough that a persistent stall
+/// costs one probe per window instead of one per call, short enough that a transient
+/// hiccup self-heals.
+const STORED_LOGIN_TTL: LoginTtl = LoginTtl {
+    measured: Duration::from_secs(60),
+    failed: Duration::from_secs(30),
+};
+
+/// The two windows [`STORED_LOGIN_CACHE`] serves, picked by whether the stored verdict
+/// was measured or is a failed probe's `false`.
+#[derive(Debug, Clone, Copy)]
+struct LoginTtl {
+    measured: Duration,
+    failed: Duration,
+}
+
+/// A cached verdict and whether the probe that produced it FAILED (spawn error or
+/// timeout) rather than answering. The flag picks the window and keeps a stalled probe's
+/// `false` distinguishable from a measured "no login here", which is a real answer.
+struct CachedLogin {
+    probed_at: Instant,
+    stored: bool,
+    failed: bool,
+}
+
+/// Per-host-spelling cache. Bounded by the number of distinct spellings the open repos
+/// use (tiny); a stale entry is overwritten.
+type StoredLoginCache = Mutex<HashMap<String, CachedLogin>>;
 static STORED_LOGIN_CACHE: OnceLock<StoredLoginCache> = OnceLock::new();
 
 fn stored_login_cache() -> &'static StoredLoginCache {
     STORED_LOGIN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn stored_login_cache_get(host: &str, ttl: Duration) -> Option<bool> {
+fn stored_login_cache_get(host: &str, ttl: LoginTtl) -> Option<bool> {
     let guard = stored_login_cache().lock().unwrap();
-    let (probed_at, stored) = guard.get(host)?;
-    (probed_at.elapsed() < ttl).then_some(*stored)
+    let entry = guard.get(host)?;
+    let window = if entry.failed { ttl.failed } else { ttl.measured };
+    (entry.probed_at.elapsed() < window).then_some(entry.stored)
 }
 
+/// Record a MEASURED verdict for `host`, stamped now.
 fn stored_login_cache_put(host: &str, stored: bool) {
-    stored_login_cache()
-        .lock()
-        .unwrap()
-        .insert(host.to_string(), (Instant::now(), stored));
+    stored_login_cache().lock().unwrap().insert(
+        host.to_string(),
+        CachedLogin {
+            probed_at: Instant::now(),
+            stored,
+            failed: false,
+        },
+    );
+}
+
+/// Record that the probe for `host` never answered: `false` (no pin) under the short
+/// window, so a wedged keyring costs bounded time per window instead of per call.
+fn stored_login_cache_put_failure(host: &str) {
+    stored_login_cache().lock().unwrap().insert(
+        host.to_string(),
+        CachedLogin {
+            probed_at: Instant::now(),
+            stored: false,
+            failed: true,
+        },
+    );
 }
 
 /// Whether gh holds a login for `host` STORED in its own config or keyring — the gate on
@@ -93,8 +144,10 @@ fn stored_login_cache_put(host: &str, stored: bool) {
 /// aim the user's token at a host of its choosing. That is the first of two deliberate
 /// differences from [`crate::forge::github::gh_authenticated`], which counts env tokens
 /// because an env token is a legitimate answer for the credential-helper injection it
-/// gates. The second is the error arm: a failed spawn here pins nothing and caches
-/// nothing, leaving gh's own host chain in charge, where that helper fails optimistic.
+/// gates. The second is the error arm: a failed or timed-out probe pins nothing, leaving
+/// gh's own host chain in charge, where that helper fails optimistic — and caches that
+/// `false` only for [`STORED_LOGIN_TTL`]'s short failure window, so a wedged keyring
+/// can't re-stall every call while a transient hiccup still self-heals.
 ///
 /// SECURITY: `gh auth token`'s stdout IS the user's token. Only the exit code is read and
 /// the stream goes to null, so no code path can capture or log it.
@@ -102,6 +155,8 @@ async fn gh_stored_login(host: &str) -> bool {
     if let Some(hit) = stored_login_cache_get(host, STORED_LOGIN_TTL) {
         return hit;
     }
+    // A missing gh is not a probe failure: it's re-resolved (and re-cached) by `gh_bin`
+    // itself, and caching a verdict for it here would outlive an install.
     let Ok(gh) = gh_bin().await else { return false };
     let mut cmd = Command::new(&gh);
     apply_probe_env(&mut cmd);
@@ -113,7 +168,8 @@ async fn gh_stored_login(host: &str) -> bool {
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     cmd.kill_on_drop(true);
 
-    let Ok(Ok(status)) = tokio::time::timeout(GH_TIMEOUT, cmd.status()).await else {
+    let Ok(Ok(status)) = tokio::time::timeout(PROBE_TIMEOUT, cmd.status()).await else {
+        stored_login_cache_put_failure(host);
         return false;
     };
     let stored = status.success();
@@ -421,6 +477,12 @@ mod tests {
         assert_eq!(env.get("GH_PAGER"), Some(""), "{env:?}");
     }
 
+    /// Both windows zero — every login entry reads as expired whatever its direction.
+    const EXPIRED_LOGIN: LoginTtl = LoginTtl {
+        measured: Duration::ZERO,
+        failed: Duration::ZERO,
+    };
+
     /// Both verdicts round-trip and both expire: a sign-out must stop pinning within the
     /// window, and a sign-in must start.
     #[test]
@@ -433,15 +495,57 @@ mod tests {
 
         stored_login_cache_put(yes, true);
         assert_eq!(stored_login_cache_get(yes, STORED_LOGIN_TTL), Some(true));
-        assert_eq!(stored_login_cache_get(yes, Duration::ZERO), None);
+        assert_eq!(stored_login_cache_get(yes, EXPIRED_LOGIN), None);
 
         // `false` is a real verdict, not an absence — otherwise every unauthenticated
         // host would re-spawn a probe per call.
         stored_login_cache_put(no, false);
         assert_eq!(stored_login_cache_get(no, STORED_LOGIN_TTL), Some(false));
-        assert_eq!(stored_login_cache_get(no, Duration::ZERO), None);
+        assert_eq!(stored_login_cache_get(no, EXPIRED_LOGIN), None);
 
-        assert_eq!(STORED_LOGIN_TTL, Duration::from_secs(60));
+        assert_eq!(STORED_LOGIN_TTL.measured, Duration::from_secs(60));
+        assert_eq!(STORED_LOGIN_TTL.failed, Duration::from_secs(30));
+        assert!(STORED_LOGIN_TTL.failed < STORED_LOGIN_TTL.measured);
+    }
+
+    /// A probe that never answered caches `false` so a wedged keyring can't re-stall
+    /// every gh call — but under the short window, and never mistaken for a MEASURED
+    /// "no login here", which is a real answer and holds the full minute.
+    #[test]
+    fn a_failed_probe_caches_false_briefly_and_separately() {
+        let host = "ghe.wedged.example";
+        stored_login_cache_put_failure(host);
+
+        // Inside the short window it serves, so the next call spawns nothing.
+        assert_eq!(stored_login_cache_get(host, STORED_LOGIN_TTL), Some(false));
+
+        // Same age, same entry — only the failed flag picks the window. This one is past
+        // the failure window and still inside the measured one.
+        let past_the_failure_window = LoginTtl {
+            measured: Duration::from_secs(60),
+            failed: Duration::ZERO,
+        };
+        assert_eq!(
+            stored_login_cache_get(host, past_the_failure_window),
+            None,
+            "a failed probe must expire on the SHORT window, not the long one"
+        );
+
+        // A MEASURED false at the same age keeps the long window under that same read.
+        let measured = "ghe.measured-no.example";
+        stored_login_cache_put(measured, false);
+        assert_eq!(
+            stored_login_cache_get(measured, past_the_failure_window),
+            Some(false),
+            "a measured verdict must not inherit the failure window"
+        );
+
+        // Recovery replaces the failure entry in place.
+        stored_login_cache_put(host, true);
+        assert_eq!(
+            stored_login_cache_get(host, past_the_failure_window),
+            Some(true)
+        );
     }
 
     #[test]
