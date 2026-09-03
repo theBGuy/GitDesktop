@@ -2790,7 +2790,12 @@ mod tests {
             feature_tip,
             "the abort leaves the branch exactly where it was"
         );
-        assert!(!tmp.exists(), "the throwaway worktree is torn down");
+        let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
+        assert!(
+            !list.contains("conflict-wt"),
+            "the throwaway worktree is unregistered: {list}"
+        );
+        assert!(!tmp.exists(), "and its directory is gone");
     }
 
     /// The case an exit-code verdict gets wrong: a `pre-merge-commit` hook that
@@ -2810,8 +2815,21 @@ mod tests {
             .trim()
             .to_string();
 
+        let base_dir = repo.parent().expect("the repo lives under the temp base");
+        // The hook stamps a sentinel before declining, so a host `core.hooksPath` that
+        // suppressed it fails this test by its real cause rather than as a merge that
+        // unexpectedly succeeded. Forward slashes: the script runs under `sh`, where a
+        // Windows backslash is an escape character.
+        let sentinel = base_dir.join("hook-fired");
         let hook = repo.join(".git").join("hooks").join("pre-merge-commit");
-        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho fired > \"{}\"\nexit 1\n",
+                sentinel.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
         // git IGNORES a hook without the executable bit on POSIX, which would let the
         // merge succeed and leave this test asserting nothing.
         #[cfg(unix)]
@@ -2820,13 +2838,10 @@ mod tests {
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let tmp = repo
-            .parent()
-            .expect("the repo lives under the temp base")
-            .join("declined-hook-wt");
+        let tmp = base_dir.join("declined-hook-wt");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let state = AppState::default();
-        let err = merge_diverged_in_worktree(
+        let result = merge_diverged_in_worktree(
             &state,
             &repo_s,
             &tmp_s,
@@ -2837,8 +2852,12 @@ mod tests {
                 base_sha: pinned_base,
             },
         )
-        .await
-        .expect_err("the declined hook stops the merge");
+        .await;
+        assert!(
+            sentinel.exists(),
+            "the pre-merge-commit hook never fired — check core.hooksPath"
+        );
+        let err = result.expect_err("the declined hook stops the merge");
         let AppError::Command(message) = &err else {
             panic!("a clean auto-merge must never be reported as a conflict: {err:?}");
         };
@@ -2855,7 +2874,12 @@ mod tests {
             feature_tip,
             "the abort leaves the branch exactly where it was"
         );
-        assert!(!tmp.exists(), "the throwaway worktree is torn down");
+        let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
+        assert!(
+            !list.contains("declined-hook-wt"),
+            "the throwaway worktree is unregistered: {list}"
+        );
+        assert!(!tmp.exists(), "and its directory is gone");
     }
 
     /// A merge that fails for a reason other than a conflict must not claim one: the
