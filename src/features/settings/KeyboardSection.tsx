@@ -8,6 +8,7 @@ import {
   eventToBinding,
   formatBinding,
   hasModifier,
+  isTypeaheadKey,
 } from "@/lib/hotkeys/binding";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
@@ -57,11 +58,15 @@ function isBindableCombo(binding: string): boolean {
   return !ACTIVATION_KEYS.has(key) && !NAV_KEYS.has(key);
 }
 
-/** What accepting a modifier-less binding costs. Space earns the longer line:
- *  it is the one bindable key whose native job is activating the focused
- *  control, so a live action takes that keypress instead. */
+/** What accepting a modifier-less binding costs. The menu-and-picker clause is
+ *  true only of character keys, which is all typeahead consumes; Space earns a
+ *  longer line, being the one bindable key whose native job is activating the
+ *  focused control, so a live action takes that keypress instead. */
 function consequenceNote(binding: string): string {
-  const quiet = `${formatBinding(binding)} stays quiet while you're typing or in a menu or picker, and fires anywhere else`;
+  const zones = isTypeaheadKey(binding)
+    ? "while you're typing or in a menu or picker"
+    : "while you're typing";
+  const quiet = `${formatBinding(binding)} stays quiet ${zones}, and fires anywhere else`;
   return finalKey(binding) === "space"
     ? `${quiet} — including on a focused button, where it replaces the button's own Space press.`
     : `${quiet}.`;

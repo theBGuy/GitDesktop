@@ -3,7 +3,10 @@
  *  shows the same count for the same stored date. Null when unparseable.
  *  A pre-Temporal runtime falls back to the legacy Date arithmetic rather than to
  *  null: this drives the Bitbucket token-expiry warning and macOS WKWebView ships
- *  no Temporal, so degrading would silence that warning on a whole platform. */
+ *  no Temporal, so degrading would silence that warning on a whole platform.
+ *  That same catch also takes `PlainDate.from` rejecting an impossible date
+ *  the prefilter admits (2026-02-30), which the legacy arm rolls over into the
+ *  next month instead of reporting as unparseable. */
 export function calendarDaysUntil(
   date: string | null | undefined,
 ): number | null {

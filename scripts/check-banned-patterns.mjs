@@ -154,13 +154,15 @@ const onlyWhen = (gate, scan) => (v) => {
   return gate.test(v.text) ? scan(v) : [];
 };
 
-/** Scanner: `scan`'s hits, but only in files whose whole-file view does NOT
- *  match `absent` — the negative twin of `onlyWhen`, for a class whose remedy is
- *  the PRESENCE of a shared helper somewhere in the file rather than the absence
- *  of a bad shape. Same `lastIndex` reset, for the same reason. */
-const unlessPresent = (absent, scan) => (v) => {
-  absent.lastIndex = 0;
-  return absent.test(v.text) ? [] : scan(v);
+/** Scanner: `scan`'s hits, unless the whole-file view matches EVERY regex in
+ *  `required` — the negative twin of `onlyWhen`, for a class whose remedy is the
+ *  PRESENCE of shared helpers rather than the absence of a bad shape. All-or-
+ *  nothing on purpose: a file carrying one guard of a pair is exactly the
+ *  half-guarded shape worth reporting. Same `lastIndex` reset, for the same
+ *  reason. */
+const unlessAllPresent = (required, scan) => (v) => {
+  for (const re of required) re.lastIndex = 0;
+  return required.every((re) => re.test(v.text)) ? [] : scan(v);
 };
 
 /** Scanner: the union of several `nearPair`s — one check, one allowlist, every
@@ -332,24 +334,34 @@ const NULL_FALLBACK_RE = /\bfallback\s*=\s*\{\s*null\s*\}/g;
 // `className` styles a label without naming anything. `\/?` is what also catches
 // the self-closing forms. A `<Label>` that WRAPS its control is associated at
 // RUNTIME, which no static pattern can see, so those ride the allowlist.
-// Three documented edges, all zero-instance today. Two fail OPEN: an open tag
-// broken across lines is unseen (this reads per line, not the joined view), and
-// an attribute merely ENDING in `id` (`data-id=`) satisfies the `\b` and reads
-// as associated. One fails CLOSED: both `[^>]*` spans stop at the first `>`, so
-// an attribute VALUE containing `>` ahead of the `htmlFor` (a template-literal
-// title reordered before it) hides the association and reports a correct label.
+// Runs over the JOINED view so an open tag the formatter split across lines is
+// still one match — the props of a wrapping label wrap routinely. That view
+// trims each line and rejoins with a single space, which the `\s` between
+// attributes absorbs; both `[^>]*` spans still stop at the tag's own `>`.
+// Two documented edges, both zero-instance today. One fails OPEN: an attribute
+// merely ENDING in `id` (`data-id=`) satisfies the `\b` and reads as associated.
+// One fails CLOSED: those `[^>]*` spans stop at the FIRST `>`, so an attribute
+// VALUE containing `>` ahead of the `htmlFor` (a template-literal title
+// reordered before it) hides the association and reports a correct label.
 const UNASSOCIATED_LABEL_RE =
-  /<Label(?![^>]*\b(?:htmlFor|id)\s*=)(?:\s[^>]*)?\/?>/;
+  /<Label(?![^>]*\b(?:htmlFor|id)\s*=)(?:\s[^>]*)?\/?>/g;
 
 // A key-dispatch path that compares a live event against a user binding and
-// swallows the key, in a file that never mentions the editable-target guard.
-// Deliberately COARSE — presence of a symbol anywhere in the file, not on the
+// swallows the key, in a file missing any predicate of the canonical clause.
+// ALL THREE are required because each covers a different escape: the two target
+// guards refuse different surfaces (a text field vs a typeahead-driven list),
+// and the key half keeps named keys reaching preventDefault on a surface the
+// target guards alone would hand back. A file carrying a subset is the
+// half-guarded shape — drift between two dispatchers is the regression this
+// exists for. Deliberately COARSE — presence anywhere in the file, not on the
 // right path — so it can report a file that guards one handler and not the one
 // added next to it. It is a ratchet, not a proof: its job is to make a NEW
 // dispatch path stop a reader at the allowlist rather than merge unnoticed.
 const EVENT_TO_BINDING_RE = /\beventToBinding\s*\(/;
 const PREVENT_DEFAULT_RE = /\.preventDefault\s*\(/;
 const EDITABLE_GUARD_RE = /\bisEditableTarget\s*\(/;
+const TYPEAHEAD_GUARD_RE = /\bisTypeaheadTarget\s*\(/;
+const TYPEAHEAD_KEY_RE = /\bisTypeaheadKey\s*\(/;
 
 // The two halves of an async settings rollback. The gate: an OPTIMISTIC patch of
 // the settings cache — the file flips the preference itself so the UI can commit
@@ -590,7 +602,7 @@ export const CHECKS = [
   {
     name: "bare-group-label",
     appliesTo: notVendoredUi,
-    scan: perLine(UNASSOCIATED_LABEL_RE),
+    scan: perFile(UNASSOCIATED_LABEL_RE),
     // Keyed per FILE, not per site, for both kinds of entry below: a coarser key
     // means an unrelated edit to one of these files can't turn the entry stale
     // mid-flight. The gate blocks NEW unassociated captions; the deferred group
@@ -613,6 +625,10 @@ export const CHECKS = [
       "src/features/repo-settings/GitLabVariablesSection.tsx",
       // "Secured" on the variable form and its repository-variable twin.
       "src/features/repo-settings/BitbucketVariablesSection.tsx",
+      // One wrapping label per trigger-event checkbox, mapped over the event
+      // list — the same shape, split across lines by the formatter.
+      "src/features/repo-settings/BitbucketWebhooksSection.tsx",
+      "src/features/repo-settings/GitLabWebhooksSection.tsx",
     ],
     message:
       'a `<Label>` with no htmlFor and no id names nothing for assistive tech, however it is styled — whatever sits under it reads as anonymous; caption a GROUP with LabeledGroup (src/components/form/labeled-group.tsx), which pairs the label\'s id with role="group" + aria-labelledby, or point a single-control label at its control with htmlFor; a label that WRAPS its control is associated at runtime and a genuinely decorative one names nothing on purpose — either needs an allowlist entry with rationale',
@@ -620,8 +636,8 @@ export const CHECKS = [
   {
     name: "unguarded-binding-dispatcher",
     appliesTo: notVendoredUi,
-    scan: unlessPresent(
-      EDITABLE_GUARD_RE,
+    scan: unlessAllPresent(
+      [EDITABLE_GUARD_RE, TYPEAHEAD_GUARD_RE, TYPEAHEAD_KEY_RE],
       onlyWhen(PREVENT_DEFAULT_RE, perLine(EVENT_TO_BINDING_RE)),
     ),
     // Neither entry dispatches a REBINDABLE binding, which is what the guards
@@ -636,7 +652,7 @@ export const CHECKS = [
       "src/components/mention-autocomplete.tsx",
     ],
     message:
-      "a path that matches eventToBinding(e) against a user binding and preventDefaults it must apply the same guards as the global listener — isEditableTarget to keep typing out of it, plus the typeahead guard (src/lib/hotkeys/binding.ts) — or a single-key binding steals keystrokes from every text field; a file that dispatches no rebindable binding needs an allowlist entry with rationale",
+      "a path that matches eventToBinding(e) against a user binding and preventDefaults it must apply the same clause the global listener does — isEditableTarget, isTypeaheadTarget, and isTypeaheadKey (src/lib/hotkeys/binding.ts) — or a single-key binding steals keystrokes from text fields or typeahead lists, and named keys stop reaching the surfaces that should still get them; any subset leaves the case the missing predicate covers, and a file that dispatches no rebindable binding needs an allowlist entry with rationale",
   },
 ];
 

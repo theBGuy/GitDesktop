@@ -756,6 +756,29 @@ test("bare-group-label flags a styled caption — className is not association",
     assert.deepEqual(bareGroupLabel(source), [1], `should flag ${source}`);
 });
 
+test("bare-group-label sees an open tag the formatter split across lines", () => {
+  // The joined view is what makes this work: it trims each line and rejoins
+  // with one space, which the `\s` between attributes absorbs.
+  const split = [
+    "<Label",
+    "  key={e.id}",
+    '  className="flex items-center gap-1.5 text-xs"',
+    ">",
+    "  Trigger events",
+    "</Label>",
+  ].join("\n");
+  assert.deepEqual(bareGroupLabel(split), [1]);
+  // A split open tag that DOES associate still passes — the lookahead reaches
+  // across the rejoined attributes.
+  const splitAssociated = [
+    "<Label",
+    "  htmlFor={`${idBase}-name`}",
+    '  className="text-xs"',
+    ">",
+  ].join("\n");
+  assert.deepEqual(bareGroupLabel(splitAssociated), []);
+});
+
 test("bare-group-label leaves every ASSOCIATED label alone", () => {
   for (const source of [
     // The single-control idiom.
@@ -792,6 +815,7 @@ test("bare-group-label allowlists whole files, and exempts vendored ui", () => {
   const files = [
     "src/features/pulls/LinkedIssuesField.tsx",
     "src/features/repo-settings/GitLabVariablesSection.tsx",
+    "src/features/repo-settings/GitLabWebhooksSection.tsx",
     "src/features/repo-settings/PagesSection.tsx",
   ];
   const views = new Map([
@@ -803,6 +827,21 @@ test("bare-group-label allowlists whole files, and exempts vendored ui", () => {
       "src/features/repo-settings/GitLabVariablesSection.tsx",
       view(
         '<Label className="flex items-center gap-1.5 text-xs">\n<Checkbox checked={isProtected} />\nProtected\n</Label>',
+      ),
+    ],
+    // A wrapping label whose open tag the formatter split — the webhook shape.
+    [
+      "src/features/repo-settings/GitLabWebhooksSection.tsx",
+      view(
+        [
+          "<Label",
+          "  key={e.id}",
+          '  className="flex items-center gap-1.5 text-xs font-normal"',
+          ">",
+          "  <Checkbox checked={events.includes(e.id)} />",
+          "  {e.label}",
+          "</Label>",
+        ].join("\n"),
       ),
     ],
     [
@@ -831,7 +870,7 @@ test("unguarded-binding-dispatcher flags a swallowing dispatch with no guard", (
   assert.deepEqual(unguardedDispatcher(source), [2]);
 });
 
-test("unguarded-binding-dispatcher needs BOTH halves and clears on the guard", () => {
+test("unguarded-binding-dispatcher needs both tokens and clears on the full clause", () => {
   // Each token alone is ordinary: a binding read that swallows nothing, and a
   // preventDefault with no binding comparison at all.
   assert.deepEqual(
@@ -839,16 +878,58 @@ test("unguarded-binding-dispatcher needs BOTH halves and clears on the guard", (
     [],
   );
   assert.deepEqual(unguardedDispatcher("e.preventDefault();"), []);
-  // The guard named ANYWHERE in the file clears it — the coarseness is the
-  // documented trade: presence, not proof it guards this path.
+  // The WHOLE clause named ANYWHERE in the file clears it — the coarseness is
+  // the documented trade: presence, not proof it guards this path.
   const guarded = [
+    "function onKeyDown(e) {",
+    "  if (isEditableTarget(e.target) && !isTypeaheadKey(binding)) return;",
+    "  if (isTypeaheadTarget(e.target)) return;",
+    "  const binding = eventToBinding(e);",
+    "  if (binding === effective) e.preventDefault();",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unguardedDispatcher(guarded), []);
+});
+
+test("unguarded-binding-dispatcher flags a HALF-guarded dispatcher", () => {
+  // The two guards refuse different surfaces, so one without the other still
+  // steals keys from the surface it does not cover.
+  const editableOnly = [
     "function onKeyDown(e) {",
     "  if (isEditableTarget(e.target)) return;",
     "  const binding = eventToBinding(e);",
     "  if (binding === effective) e.preventDefault();",
     "}",
   ].join("\n");
-  assert.deepEqual(unguardedDispatcher(guarded), []);
+  assert.deepEqual(unguardedDispatcher(editableOnly), [3]);
+  const typeaheadOnly = [
+    "function onKeyDown(e) {",
+    "  if (isTypeaheadTarget(e.target)) return;",
+    "  const binding = eventToBinding(e);",
+    "  if (binding === effective) e.preventDefault();",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unguardedDispatcher(typeaheadOnly), [3]);
+  // A key-narrowing helper is NOT a substitute for either target guard.
+  const narrowingOnly = [
+    "function onKeyDown(e) {",
+    "  if (!isTypeaheadKey(binding)) return;",
+    "  const binding = eventToBinding(e);",
+    "  if (binding === effective) e.preventDefault();",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unguardedDispatcher(narrowingOnly), [3]);
+  // Two of three is still a subset: both target guards without the key half
+  // is the drift shape — one dispatcher narrowing by key, its twin not.
+  const targetsOnly = [
+    "function onKeyDown(e) {",
+    "  if (isEditableTarget(e.target)) return;",
+    "  if (isTypeaheadTarget(e.target)) return;",
+    "  const binding = eventToBinding(e);",
+    "  if (binding === effective) e.preventDefault();",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unguardedDispatcher(targetsOnly), [4]);
 });
 
 test("unguarded-binding-dispatcher allowlists the non-rebindable dispatchers", () => {

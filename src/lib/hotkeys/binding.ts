@@ -154,16 +154,24 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 /** Surfaces that consume plain keystrokes without being editable targets, where
- *  a bare-key binding would double-act. `combobox` is the measured case: a
+ *  a bare-key binding would double-act — the target half of the pair, with
+ *  {@link isTypeaheadKey} as the key half. `combobox` is the measured case: a
  *  CLOSED Base UI select trigger runs value-mutating typeahead with no
- *  preventDefault. The menu arms are our own invariant, since open Base UI
- *  popups stop character keys but not named ones. `listbox` is excluded: the
- *  app's lists navigate by arrows alone and are its primary keyboard surfaces. */
+ *  preventDefault. `listbox` is excluded: the app's lists navigate by arrows
+ *  alone and are its primary keyboard surfaces. */
 export function isTypeaheadTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   return (
     target.closest('[role="menu"],[role="menubar"],[role="combobox"]') !== null
   );
+}
+
+/** Whether a binding is the kind of keystroke a typeahead surface consumes — a
+ *  printable character. Named keys (f1, f5, …) are not typeahead input, so a
+ *  registered one still has to reach the listener's preventDefault. */
+export function isTypeaheadKey(binding: string): boolean {
+  const key = binding.split("+").pop() ?? "";
+  return key.length === 1 || key === "space";
 }
 
 /** Native text-editing combos a hotkey must never shadow while typing. */

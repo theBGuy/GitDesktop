@@ -103,12 +103,15 @@ separators.
 `@/lib/hotkeys/binding` — never a literal ⌘ or "Ctrl+"; only labels branch.
 
 **Key-dispatch guards are shared, never re-derived:** `hasModifier`,
-`isTypeaheadTarget`, and `isEditableTarget` / `firesInEditable` all live in
-`src/lib/hotkeys/binding.ts`. Any path that compares `eventToBinding(e)` against
-a user binding and then `preventDefault`s applies the same editable + typeahead
-guard pair the global listener does — bindings are rebindable down to a single
-key, so an unguarded second dispatcher steals keystrokes from every text field.
-The `unguarded-binding-dispatcher` guard in `pnpm run checks` is the ratchet.
+`isTypeaheadTarget`, `isTypeaheadKey`, and `isEditableTarget` / `firesInEditable`
+all live in `src/lib/hotkeys/binding.ts`. Any path that compares
+`eventToBinding(e)` against a user binding and then `preventDefault`s applies the
+same three-predicate clause the global listener does — `isEditableTarget`,
+`isTypeaheadTarget`, `isTypeaheadKey` — because bindings are rebindable down
+to a single key, a dispatcher missing any of them either steals keystrokes from
+a text field or typeahead list, or withholds a named key that should still fire.
+Inner-clause drift between two dispatchers is the regression this prevents; the
+`unguarded-binding-dispatcher` guard in `pnpm run checks` is the ratchet.
 
 **Patterns the user has ruled on:**
 - No hover-revealed per-row buttons — contextual actions are always-visible,
