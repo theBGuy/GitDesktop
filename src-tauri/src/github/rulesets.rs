@@ -184,12 +184,6 @@ pub struct BranchRequiredRules {
     pub required_approving_review_count: Option<u32>,
 }
 
-/// A branch name made safe for the `rules/branches/{branch}` path. gh parses the URL
-/// with Go's `url.Parse`, where a raw `#` opens a FRAGMENT — `master#x` reads
-/// `master`'s rules, naming another branch's checks — and a bare `%` fails the parse.
-/// `/` stays raw on purpose: the endpoint takes the rest of the path as the branch, so
-/// `release/1.0` must survive intact. That is why `encode_query_value` is the wrong
-/// tool here — it emits `%2F`.
 /// Refuse a ref that carries `{` or `}` before it reaches an endpoint. gh expands `{…}`
 /// in an endpoint as an owner/repo placeholder, which retargets the request at another
 /// repo; `escape_branch_path` covers `#`/`%` but deliberately not these. `what` names the
@@ -203,6 +197,12 @@ fn refuse_braced(what: &str, value: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// A branch name made safe for the `rules/branches/{branch}` path. gh parses the URL
+/// with Go's `url.Parse`, where a raw `#` opens a FRAGMENT — `master#x` reads
+/// `master`'s rules, naming another branch's checks — and a bare `%` fails the parse.
+/// `/` stays raw on purpose: the endpoint takes the rest of the path as the branch, so
+/// `release/1.0` must survive intact. That is why `encode_query_value` is the wrong
+/// tool here — it emits `%2F`.
 fn escape_branch_path(branch: &str) -> String {
     // `%` first: escaping it second would rewrite the `%` of the `%23` just written.
     branch.replace('%', "%25").replace('#', "%23")

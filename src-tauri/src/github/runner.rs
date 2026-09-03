@@ -95,7 +95,8 @@ struct CachedLogin {
 }
 
 /// Per-host-spelling cache. Bounded by the number of distinct spellings the open repos
-/// use (tiny); a stale entry is overwritten.
+/// use (tiny); a stale entry is overwritten. No single-flight, matching this file's
+/// other caches: concurrent misses compute the same value and the last write wins.
 type StoredLoginCache = Mutex<HashMap<String, CachedLogin>>;
 static STORED_LOGIN_CACHE: OnceLock<StoredLoginCache> = OnceLock::new();
 

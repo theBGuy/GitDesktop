@@ -1714,7 +1714,7 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
 (see below).
 
 - The list shows recent runs with live status, refreshing while any run is active;
-  paging older runs in pauses the auto-refresh, and **Refresh** updates everything
+  loading older runs pauses the auto-refresh, and **Refresh** updates everything
   you've loaded. **Load more** at the bottom pages older runs in, all the way back
   through the repository's history, and shows GitHub's total run count while older
   pages remain. Filter by text or scope to the current branch.
