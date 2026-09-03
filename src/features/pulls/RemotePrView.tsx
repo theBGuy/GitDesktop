@@ -1159,48 +1159,57 @@ export function RemotePrView({
   /** Enter the isolated-worktree resolution: a merge that pauses there on conflicts,
    *  and just pushes when there are none. `withAi` hands the conflicts the backend
    *  just reported straight to the AI walk, so the takeover opens already working. */
-  function runResolve(withAi: boolean) {
+  async function runResolve(withAi: boolean) {
     if (details.isPlaceholderData || resolve) return;
     const info = details.data;
     if (!info) return;
     const startedFor = entityKey;
-    // Always route through the backend, even when `findResolve` reports a worktree: it
-    // re-attaches to one for this PR+lens from live porcelain rather than a cached read
-    // (and does so before any fetch, so continuing stays fast). A cached handle can be
-    // stale — a just-discarded one would mount the takeover on a deleted path.
-    mergeRemotePr.mutate(
-      { number, base: info.baseRefName, head: info.headRefName },
-      {
-        onSuccess: (outcome) => {
-          if (outcome.status === "pushed") {
-            toast.success(
-              `No conflicts after all — merged ${info.baseRefName} and pushed`,
-            );
-            return;
-          }
-          // Past the pushed arm this continuation can outlive the PR it was started
-          // on (the view swaps PRs without unmounting), so nothing below is adopted
-          // once the entity moved; the paused worktree stays resumable from the old
-          // PR via "Continue resolving".
-          if (startedFor !== entityKeyRef.current) return;
-          if (outcome.worktreePath && outcome.worktreeId) {
-            setResolve({
-              worktreePath: outcome.worktreePath,
-              worktreeId: outcome.worktreeId,
-              aiPaths:
-                withAi && outcome.conflicts.length > 0
-                  ? outcome.conflicts
-                  : undefined,
-            });
-            return;
-          }
-          // "conflicts" with no worktree to open is a broken outcome — say so rather
-          // than leaving the user on an unchanged view wondering what happened.
-          toast.error("Could not open the conflict resolution worktree");
-        },
-        onError,
-      },
-    );
+    // Awaited, not per-call callbacks: an `<Activity>` hide mid-merge tears this
+    // observer's subscription down, and react-query drops per-call callbacks once an
+    // observer has no listeners — the takeover would never open for a worktree the
+    // backend had already made, and the push toast would go unsaid.
+    try {
+      // Always route through the backend, even when `findResolve` reports a worktree:
+      // it re-attaches to one for this PR+lens from live porcelain rather than a
+      // cached read (and does so before any fetch, so continuing stays fast). A cached
+      // handle can be stale — a just-discarded one would mount the takeover on a
+      // deleted path.
+      const outcome = await mergeRemotePr.mutateAsync({
+        number,
+        base: info.baseRefName,
+        head: info.headRefName,
+      });
+      if (outcome.status === "pushed") {
+        // Deliberately unguarded, and self-contextualizing instead: the push
+        // landed on the forge whether or not the user navigated away, and the
+        // named PR keeps the toast honest from any screen.
+        toast.success(
+          `No conflicts after all — merged ${info.baseRefName} into #${number} and pushed`,
+        );
+        return;
+      }
+      // Past the pushed arm this continuation can outlive the PR it was started
+      // on (the view swaps PRs without unmounting), so nothing below is adopted
+      // once the entity moved; the paused worktree stays resumable from the old
+      // PR via "Continue resolving".
+      if (startedFor !== entityKeyRef.current) return;
+      if (outcome.worktreePath && outcome.worktreeId) {
+        setResolve({
+          worktreePath: outcome.worktreePath,
+          worktreeId: outcome.worktreeId,
+          aiPaths:
+            withAi && outcome.conflicts.length > 0
+              ? outcome.conflicts
+              : undefined,
+        });
+        return;
+      }
+      // "conflicts" with no worktree to open is a broken outcome — say so rather
+      // than leaving the user on an unchanged view wondering what happened.
+      toast.error("Could not open the conflict resolution worktree");
+    } catch (e) {
+      onError(e);
+    }
   }
 
   async function discardResolve() {
@@ -1223,7 +1232,7 @@ export function RemotePrView({
   // server has flipped back to mergeable, and the banner offers it there.
   useHotkeyAction(
     "pr-resolve-conflicts",
-    () => runResolve(false),
+    () => void runResolve(false),
     isSelectedPr &&
       !details.isPlaceholderData &&
       (canResolveConflicts || resolveWorktree !== null) &&
@@ -2687,8 +2696,8 @@ export function RemotePrView({
         updateAwaitingDefault={defaultBranchSettling}
         updateAwaitingRules={rulesSettling}
         updateSubmitting={updateBranch.isPending}
-        onResolve={() => runResolve(false)}
-        onResolveWithAi={() => runResolve(true)}
+        onResolve={() => void runResolve(false)}
+        onResolveWithAi={() => void runResolve(true)}
         onDiscard={() => void discardResolve()}
         onRetry={mergeability.retry}
         onUpdateBranch={() => void runUpdateBranch(false)}

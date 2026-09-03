@@ -483,7 +483,7 @@ export function ChecksRollup({
   // React identity is content-first: a sorted-index key hands one row's open log to
   // another check when `unmetRequiredContexts` re-ranks, and a `checks`-index key
   // does the same when a refetch rebuilds the array. A `jobId` is per-job unique
-  // (`runId` is NOT — same-named jobs in one run share it), so id-bearing rows keep
+  // (`runId` is NOT — every job in a run shares it), so id-bearing rows keep
   // their state across both; only id-less ones fall back to name+index and still
   // remount on a reorder. `data-row` is recomputed per render, so nav identity
   // stays positional even though the row itself moves with its check.
