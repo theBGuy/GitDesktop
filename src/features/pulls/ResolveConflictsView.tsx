@@ -3,7 +3,7 @@ import {
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -75,8 +75,19 @@ export function ResolveConflictsView({
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
-  // Readers gate on `scopePath` and each resolve worktree carries a fresh uuid
-  // (`gd-resolve-<uuid>`), so a walk left armed here is inert and never re-adopted.
+  // Arming happens at or after mount, so a walk already scoped to this worktree is
+  // left over from an earlier visit — clear it, or re-entering a still-living
+  // worktree would resume a stale run. Keyed on the path (not a bare once-flag) so
+  // `<Activity>` show replays no-op and a peeked walk keeps its place, while a real
+  // re-entry re-arms. A discarded worktree's walk needs no disarm: its path carries
+  // a fresh uuid (`gd-resolve-<uuid>`) that never comes back.
+  const initedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (initedFor.current === worktreePath) return;
+    initedFor.current = worktreePath;
+    const walk = useConflictResolve.getState();
+    if (walk.scopePath === worktreePath) walk.stop();
+  }, [worktreePath]);
 
   const entries = status.data?.entries ?? [];
   const conflicted: FileEntry[] = entries.filter(

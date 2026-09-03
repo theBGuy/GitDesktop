@@ -176,7 +176,6 @@ import {
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
-import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { queuedMergeKey, useUiStore } from "@/lib/stores/ui";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
@@ -477,12 +476,13 @@ export function RemotePrView({
   const updateBranch = usePrUpdateBranch(repoPath);
   const mergeRemotePr = useMergeRemotePr(repoPath, lens);
   const abortRemotePrResolve = useAbortRemotePrResolve(repoPath);
-  // The AI-resolution store the takeover follows — the banner's "Resolve with AI"
-  // seeds its walk here so the surface opens already working through the files.
-  const startAll = useConflictResolve((s) => s.startAll);
   // The conflict resolution this view is driving — started here or resumed from the
-  // rediscovered worktree. Non-null takes the whole view over.
-  const [resolve, setResolve] = useState<RemotePrResolveHandle | null>(null);
+  // rediscovered worktree. Non-null takes the whole view over. `aiPaths` rides along
+  // so the takeover arms its own walk: only the surface that owns a tree starts one
+  // for it, which is what keeps a remount from inheriting a stale run.
+  const [resolve, setResolve] = useState<
+    (RemotePrResolveHandle & { aiPaths?: string[] }) | null
+  >(null);
   const editComment = useEditPrComment(repoPath, lens);
   const deleteComment = useDeletePrComment(repoPath, lens);
   const editReviewComment = useEditReviewComment(repoPath, lens);
@@ -1175,11 +1175,11 @@ export function RemotePrView({
             setResolve({
               worktreePath: outcome.worktreePath,
               worktreeId: outcome.worktreeId,
+              aiPaths:
+                withAi && outcome.conflicts.length > 0
+                  ? outcome.conflicts
+                  : undefined,
             });
-            // The takeover follows this same store's `activePath`, so starting the walk
-            // here makes it open each file as the AI works through it.
-            if (withAi && outcome.conflicts.length > 0)
-              startAll(outcome.conflicts, outcome.worktreePath);
             return;
           }
           // "conflicts" with no worktree to open is a broken outcome — say so rather
@@ -2246,6 +2246,7 @@ export function RemotePrView({
           worktreePath={resolve.worktreePath}
           worktreeId={resolve.worktreeId}
           lens={lens}
+          aiPaths={resolve.aiPaths}
           onDone={() => setResolve(null)}
         />
       </div>
@@ -2609,7 +2610,10 @@ export function RemotePrView({
         {stackOfferNote ? (
           <p className="text-xs text-muted-foreground">{stackOfferNote}</p>
         ) : null}
+        {/* Keyed per PR: the rollup latches its auto-open and remembers the
+            collapse you chose, and this view swaps PRs without remounting. */}
         <ChecksRollup
+          key={entityKey}
           checks={pr.checks}
           repoPath={repoPath}
           provider={providerKey}

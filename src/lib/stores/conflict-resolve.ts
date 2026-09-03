@@ -9,6 +9,11 @@ import { useUiStore } from "./ui";
  * accept lifecycle lives in the component — this store only tracks which file is
  * active, what's next, and whose tree it is.
  *
+ * Exactly one walk at a time: starting a new one replaces whatever was armed,
+ * whatever its scope. ConflictResolveView therefore reads `queue`/`advance`/`stop`
+ * ungated — it only ever mounts under a scope-matched parent, so the single walk it
+ * finds is its own.
+ *
  * Not a liveness signal: a walk outlives the surface that armed it (nothing disarms
  * one when a takeover's worktree is finished or discarded), so a non-null
  * `activePath` means a walk EXISTS, not that one is running. Gate on scope.

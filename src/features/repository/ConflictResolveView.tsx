@@ -157,12 +157,14 @@ export function ConflictResolveView({
   // Auto-start once per mounted file. Remounts (keyed on path in DiffViewer) as
   // the resolve-all walk advances, so each conflict kicks off on arrival.
   // `<Activity>` replays this effect on every show, so only a fresh session or one
-  // the teardown below interrupted restarts: a ready proposal survives a tab peek
-  // un-rebilled, and a cancelled run waits behind Try again — it settles on the
-  // same "idle" phase as an interrupted one, so the flag is what tells them apart.
+  // the teardown below interrupted restarts: a settled phase always wins (a hide
+  // between the run and `setPhase("ready")` flags an interruption the result then
+  // overtakes), and a cancelled run waits behind Try again — it settles on the same
+  // "idle" phase as an interrupted one, so the flag is what tells those two apart.
   const kickoff = useEffectEvent(() => {
     const resume = interruptedRef.current;
     interruptedRef.current = false;
+    if (phase === "ready" || phase === "blocked") return;
     if (phase !== "loading" && !resume) return;
     void start();
   });
@@ -175,8 +177,10 @@ export function ConflictResolveView({
   );
   // DiffViewer swaps this view out (it's keyed on path) the moment another file
   // is selected, so without this an in-flight resolution keeps streaming — and
-  // billing — into an orphaned component. `<Activity>` hide runs it too, hence
-  // the flag: only what this cut short is the kickoff's to resume.
+  // billing — into an orphaned component. `<Activity>` hide runs it too, hence the
+  // flag: only what this cut short is the kickoff's to resume. A hide during the
+  // pre-stream read cancels nothing (the run hasn't started, and it clears the
+  // cancel flag when it does), so that one session streams on until the restart.
   useEffect(
     () => () => {
       if (inFlightRef.current) interruptedRef.current = true;
@@ -191,21 +195,21 @@ export function ConflictResolveView({
     setPhase("idle");
   }
 
-  function accept() {
-    resolve.mutate(
-      { path, content: proposed, stage: true },
-      {
-        onSuccess: () => {
-          toast.success(
-            queue.length > 0
-              ? `Resolved ${baseName(path)} — next conflict`
-              : `Resolved ${baseName(path)}`,
-          );
-          advance();
-        },
-        onError: toastError,
-      },
-    );
+  // Awaited, not per-call callbacks: `<Activity>` hide tears this observer's
+  // subscription down, and react-query drops per-call callbacks once an observer
+  // has no listeners — the walk would stall pinned to an already-resolved file.
+  async function accept() {
+    try {
+      await resolve.mutateAsync({ path, content: proposed, stage: true });
+      toast.success(
+        queue.length > 0
+          ? `Resolved ${baseName(path)} — next conflict`
+          : `Resolved ${baseName(path)}`,
+      );
+      advance();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   // "Reject this proposal": in a resolve-all run, skip to the next file (leaving
@@ -369,7 +373,7 @@ export function ConflictResolveView({
               size="sm"
               className="ml-auto"
               disabled={resolve.isPending}
-              onClick={accept}
+              onClick={() => void accept()}
             >
               {resolve.isPending ? (
                 <Spinner data-icon="inline-start" />

@@ -936,12 +936,13 @@ those sit just after the failures, tagged *required*. Expanding lists the checks
 failures-first (arrow-navigable). A **GitHub Actions** check that's still
 **running** shows its **current step** right in the row and, when expanded, a
 **live step checklist** that updates as the run progresses; a finished Actions
-check **peeks its job log inline** instead — without leaving the PR — **copy** the
-log with the button in its top-right corner — with an **Open full run** link. An
-external check (Vercel and the like) links straight out to its details.
-**GitLab MRs** get the same rollup from the MR's pipeline jobs, with the same **inline
-log peek**; **Bitbucket PRs** get it from the PR's commit build statuses, but those
-**link out only** (name, state, and URL — Bitbucket exposes no fetchable job logs).
+check **peeks its job log inline** instead, so you never leave the PR. You can
+**copy** the log with the button in its top-right corner, or follow the
+**Open full run** link. An external check (Vercel and the like) links straight
+out to its details. **GitLab MRs** get the same rollup from the MR's pipeline
+jobs, with the same **inline log peek**; **Bitbucket PRs** get it from the PR's
+commit build statuses, but those **link out only** (name, state, and URL —
+Bitbucket exposes no fetchable job logs).
 
 Comments, replies, edits, and descriptions use a Markdown editor with **Write / Preview**
 tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and bulleted

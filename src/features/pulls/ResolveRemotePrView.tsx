@@ -3,7 +3,7 @@ import {
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -58,6 +58,7 @@ export function ResolveRemotePrView({
   worktreePath,
   worktreeId,
   lens,
+  aiPaths,
   onDone,
 }: {
   repoPath: string;
@@ -66,6 +67,9 @@ export function ResolveRemotePrView({
   worktreePath: string;
   worktreeId: string;
   lens: RemoteLens;
+  /** Conflicts to hand straight to an AI walk when this surface opens — set only by
+   *  an AI-seeded entry, so the walk is armed here rather than by the caller. */
+  aiPaths?: string[];
   /** Leave the takeover — the worktree is gone (finished or discarded). */
   onDone: () => void;
 }) {
@@ -87,9 +91,21 @@ export function ResolveRemotePrView({
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
-  // Readers gate on `scopePath` and each resolve worktree carries a fresh uuid
-  // (`gd-pr-resolve-…-<uuid>`), so a walk left armed here is inert and never
-  // re-adopted.
+  // The one place a walk is armed for this tree. Any walk already scoped here is
+  // left over from an earlier visit, so it's cleared before the seed — otherwise
+  // re-entering a still-living worktree (including via "resolve manually") would
+  // resume a stale run. Keyed on the path (not a bare once-flag) so `<Activity>`
+  // show replays no-op and a peeked walk keeps its place, while a real re-entry
+  // re-arms. A discarded worktree's walk needs no disarm: its path carries a fresh
+  // uuid (`gd-pr-resolve-…-<uuid>`) that never comes back.
+  const initedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (initedFor.current === worktreePath) return;
+    initedFor.current = worktreePath;
+    const walk = useConflictResolve.getState();
+    if (walk.scopePath === worktreePath) walk.stop();
+    if (aiPaths && aiPaths.length > 0) startAll(aiPaths, worktreePath);
+  }, [aiPaths, startAll, worktreePath]);
 
   const conflicted = conflictedEntries(status.data?.entries ?? []);
   const conflictedPaths = conflicted.map((e) => e.path);
