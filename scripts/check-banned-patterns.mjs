@@ -565,6 +565,9 @@ export const CHECKS = [
       // Scroll/resize-close listeners for the open hovercard; add/remove pair,
       // and re-subscribing after an Activity re-show is the wanted behavior.
       "src/features/repository/insights/DependenciesCard.tsx",
+      // Same class: the blame gutter's scroll-close listener for its open
+      // hovercard — add/remove pair, idempotent to re-subscribe.
+      "src/features/history/BlameDialog.tsx",
     ],
     message:
       "an open-transition reset must ride useSeedOnOpen (src/lib/use-seed-on-open.ts) — a hidden <Activity> tab re-mounts its effects on show, so a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires and wipes the user's draft; a data-arrival or otherwise idempotent seed needs an allowlist entry with rationale",

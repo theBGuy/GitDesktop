@@ -2214,7 +2214,9 @@ others.
 **Best-of-N** runs the same task across 2–5 arms, each with its own agent, model, and
 effort — so different providers attack the problem from different angles. Each arm runs in
 its own worktree; review them side by side and **keep the best one** (it discards the
-rest). Because fanning out costs real money, you get an upfront cost estimate first.
+rest). Because fanning out costs real money, you get an upfront cost estimate first. For a
+container run, an arm whose agent isn't in the built image gets a warning right in the
+dialog, so you can switch that arm (or rebuild the image) before spending.
 
 ## Isolation
 

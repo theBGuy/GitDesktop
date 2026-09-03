@@ -738,7 +738,8 @@ pub async fn agent_custom_image_status(worktree_path: String) -> AppResult<Custo
             Some(id) => image_exists(&bin, &derived_tag(&id, &dockerfile)).await,
             None => false,
         },
-        // No engine holds the base image, so no derived image can exist either.
+        // No ready engine holding the managed image to derive from (or nothing
+        // answered, so it can't be confirmed) — report "needs build" either way.
         _ => false,
     };
     Ok(CustomImageStatus {
