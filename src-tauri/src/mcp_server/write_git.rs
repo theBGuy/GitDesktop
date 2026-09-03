@@ -765,7 +765,8 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "Fetch from all remotes (with --prune) in the bound repository. \
+        description = "Fetch the bound repository's default remote, pruning stale \
+                       remote-tracking branches and keeping local tags. \
                        Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]

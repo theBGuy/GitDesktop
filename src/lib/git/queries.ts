@@ -4950,7 +4950,7 @@ export function useMergePr(repo: string, lens: RemoteLens) {
         lens,
       );
       // The remote advanced but the local repo is now stale (ahead/behind, history,
-      // tracking refs). Kick off a background `git fetch --prune` so they catch up —
+      // tracking refs). Kick off a background pruning fetch so they catch up —
       // NOT awaited, so the merge toast fires the moment the call resolves, and
       // silent: the forge already accepted the merge (landed or queued), so a fetch
       // failure toast would misreport it (header Fetch stays the manual fallback).

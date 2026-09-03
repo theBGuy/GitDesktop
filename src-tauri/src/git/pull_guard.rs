@@ -520,7 +520,7 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 /// Phase A: fetch, then compute the fork-point verdict. Touches nothing the user
 /// owns — no stash, no ref of theirs — so a would-drop refusal leaves the tree
 /// exactly as it found it. `None` stands the guard down: the branch was switched
-/// since `resolve` saw it, the remote's fetch refspec writes into `refs/heads/*`,
+/// since `resolve` saw it, the remote's fetch refspec writes outside `refs/remotes/`,
 /// HEAD or the upstream ref fails to rev-parse, or there is no merge base or no
 /// fork point to decide anything from. A switch DURING the fetch is the one currency
 /// failure that errors instead — see the two-read paragraph below.
@@ -534,6 +534,9 @@ fn parse_dropped(stdout: &str) -> Vec<DroppedCommit> {
 /// is parity while no prune config is set (`fetch.prune` / `remote.<name>.prune`), and a
 /// deliberate divergence once one is — bare pull deletes those tags there (measured,
 /// git 2.51.1), and a transfer this guard introduced is not where a user should lose refs.
+/// The flag reaches only the IMPLICIT tag refspec, so a remote spelling `refs/tags/*` out
+/// in its own fetch config prunes tags regardless (measured on that git); those remotes
+/// never reach this fetch — the destination check above stands them down first.
 ///
 /// This phase holds the NETWORK domain and nothing else, so a transfer running for
 /// its whole budget never stalls staging or a commit; the caller takes the working
@@ -566,15 +569,20 @@ pub(crate) async fn probe(
     if current_branch(repo).await.as_deref() != Some(target.branch.as_str()) {
         return Ok(None);
     }
-    // Checked BEFORE the fetch, because the fetch is what fails: git refuses
-    // ("refusing to fetch into branch") when a destination covers a CHECKED-OUT branch,
-    // where bare pull gets through on the `--update-head-ok` its own fetch carries — a
-    // flag the probe must never adopt, since a fetch free to move checked-out refs
-    // mid-probe invalidates the tips the verdict is pinned to. So it stands down to
-    // bare pull, the behavior those refspecs get from git itself. The predicate
-    // over-approximates deliberately: standing down for refspecs whose fetch would have
-    // worked is the price of never hard-erroring, and it costs only the vaporize check.
-    if target.remote != "." && fetch_maps_into_heads(repo, target.remote.as_str()).await {
+    // Two reasons, one predicate, both of which make the guard's own fetch wrong for
+    // these remotes. A destination outside `refs/remotes/` puts real local refs in
+    // reach of this fetch's unconditional `--prune`, which bare pull leaves alone while
+    // no prune config is set. And a `refs/heads/` destination covering a CHECKED-OUT
+    // branch makes git refuse outright ("refusing to fetch into branch") where bare pull
+    // gets through on the `--update-head-ok` its own fetch carries — a flag the probe
+    // must never adopt, since a fetch free to move checked-out refs mid-probe
+    // invalidates the tips the verdict is pinned to. Hence BEFORE the fetch, the step
+    // that would do the damage. Standing down runs the pull bare, the behavior these
+    // refspecs get from git itself; it over-approximates (a `fetch.prune=true` user
+    // would have been pruned anyway) and costs only the vaporize check.
+    if target.remote != "."
+        && fetch_writes_outside_remote_tracking(repo, target.remote.as_str()).await
+    {
         return Ok(None);
     }
     // ONE network hold spanning the fetch AND every read below it: the verdict is
@@ -691,18 +699,18 @@ pub(crate) async fn pin_plain_pull(
 /// Windows, so they go out together and one combined verdict decides — the whole
 /// check sits in front of the transfer on every plain pull.
 async fn plain_pull_config_stands_down(repo: &str, remote: &str, merge_mode: bool) -> bool {
-    let (recurse, pull_only, into_heads) = tokio::join!(
+    let (recurse, pull_only, outside_remotes) = tokio::join!(
         // `submodule.recurse`: bare pull updates submodule worktrees for these modes,
         // and the guard's measured parity step covers rebase only.
         submodule_recurse(repo),
         pull_only_keys_set(repo, merge_mode),
-        // A refspec writing into `refs/heads/*` may need the `--update-head-ok` bare pull
-        // passes its own fetch: git refuses ("refusing to fetch into branch") when a
-        // destination covers the CHECKED-OUT branch. Over-approximated on purpose — see
-        // [`probe`], which stands down on the same predicate for the same reason.
-        fetch_maps_into_heads(repo, remote),
+        // A refspec writing outside `refs/remotes/` puts real local refs in reach of the
+        // fetch's `--prune`, and a `refs/heads/` destination can additionally make the
+        // fetch refuse ("refusing to fetch into branch"). Over-approximated on purpose —
+        // see [`probe`], which stands down on the same predicate for the same reasons.
+        fetch_writes_outside_remote_tracking(repo, remote),
     );
-    recurse || pull_only || into_heads
+    recurse || pull_only || outside_remotes
 }
 
 /// Whether either pull-only key `git merge` never reads is set, which makes honoring
@@ -734,11 +742,19 @@ async fn config_is_set(repo: &str, key: &str) -> bool {
         .map_or(true, |out| out.code == 0)
 }
 
-/// Whether any of the remote's fetch refspecs writes into `refs/heads/*` — the
-/// mirror-style clone whose fetch would collide with the checked-out branch. A
-/// leading `+` is the force marker, and the destination is the half after `:`; a
-/// refspec with no `:` (an exclusion, a fetch-only ref) writes nowhere local.
-async fn fetch_maps_into_heads(repo: &str, remote: &str) -> bool {
+/// Whether any of the remote's fetch refspecs writes OUTSIDE `refs/remotes/`, which
+/// is the line the guard's unconditional `--prune` is only safe inside: prune deletes
+/// whatever a destination covers that the remote no longer has, and outside
+/// remote-tracking that means real local refs. Measured on git 2.51.1 with
+/// `+refs/heads/*:refs/custom/*`, a pruning fetch deleted a hand-made
+/// `refs/custom/mine-only` the remote never had; bare pull keeps it while
+/// `fetch.prune` is unset. A `refs/heads/*` destination is the same class and can
+/// additionally make the fetch hard-refuse, so this one predicate covers both.
+///
+/// A leading `+` is the force marker, and the destination is the half after `:`; a
+/// refspec with no `:` (a negative refspec, a fetch-only ref) writes nowhere local —
+/// measured: git rejects a destination on a negative refspec, so they never carry one.
+async fn fetch_writes_outside_remote_tracking(repo: &str, remote: &str) -> bool {
     let Ok(out) = run_git_raw(
         Some(repo),
         &["config", "--get-all", &format!("remote.{remote}.fetch")],
@@ -752,7 +768,7 @@ async fn fetch_maps_into_heads(repo: &str, remote: &str) -> bool {
         spec.trim()
             .trim_start_matches('+')
             .split_once(':')
-            .is_some_and(|(_, dst)| dst.starts_with("refs/heads/"))
+            .is_some_and(|(_, dst)| !dst.starts_with("refs/remotes/"))
     })
 }
 
@@ -2728,21 +2744,34 @@ mod tests {
             git(&clone, &["config", "--unset", key]).await;
         }
 
-        // A mirror-style refspec needs the `--update-head-ok` bare pull's fetch carries.
-        git(
-            &clone,
-            &[
-                "config",
-                "--add",
-                "remote.origin.fetch",
-                "+refs/heads/*:refs/heads/upstream/*",
-            ],
-        )
-        .await;
-        assert!(
-            plain_pull_config_stands_down(&clone, "origin", true).await,
-            "a refspec writing into refs/heads/* would hard-refuse"
-        );
+        // Destinations outside `refs/remotes/` put real local refs in reach of the
+        // fetch's `--prune`, and a `refs/heads/` one can additionally make it refuse.
+        // The stock refspec restored between rows is what pins the verdict on the
+        // ADDED spec rather than on config left over from the row before.
+        for spec in [
+            "+refs/heads/*:refs/heads/upstream/*",
+            "+refs/tags/*:refs/tags/*",
+        ] {
+            git(&clone, &["config", "--add", "remote.origin.fetch", spec]).await;
+            assert!(
+                plain_pull_config_stands_down(&clone, "origin", true).await,
+                "{spec} writes outside refs/remotes/ and must stand the split phases down"
+            );
+            git(&clone, &["config", "--unset-all", "remote.origin.fetch"]).await;
+            git(
+                &clone,
+                &[
+                    "config",
+                    "remote.origin.fetch",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+            )
+            .await;
+            assert!(
+                !plain_pull_config_stands_down(&clone, "origin", true).await,
+                "while the stock remote-tracking refspec alone does not"
+            );
+        }
     }
 
     /// A tag-pruning user keeps their local tags through the plain arms' own fetch,
@@ -2839,11 +2868,13 @@ mod tests {
         );
     }
 
-    /// A fetch refspec writing into `refs/heads/*` stands the PROBE down BEFORE its
-    /// fetch, since the fetch is what fails. `Ok(None)` hands the pull to bare
-    /// `git pull --rebase`, which handled this config all along.
+    /// A fetch refspec writing outside `refs/remotes/` stands the PROBE down BEFORE its
+    /// fetch, since the fetch is what does the damage — refusing outright on a
+    /// checked-out `refs/heads/` destination, or pruning real local refs on any other.
+    /// `Ok(None)` hands the pull to bare `git pull --rebase`, which handled these
+    /// configs all along. Each shape carries its own measured control.
     #[tokio::test]
-    async fn the_probe_stands_down_on_a_refspec_that_writes_into_refs_heads() {
+    async fn the_probe_stands_down_on_a_refspec_that_writes_outside_remote_tracking() {
         let (_dir, clone, _work, _tip) = behind_fixture("probe-mirror-refspec").await;
         let state = AppState::default();
         let target = resolve(&clone)
@@ -2895,6 +2926,42 @@ mod tests {
         assert!(
             probe(&state, &clone, &target, &[]).await.unwrap().is_none(),
             "so the probe must never reach that fetch"
+        );
+
+        // The tag shape, which no flag can save: `--no-prune-tags` governs only the
+        // IMPLICIT tag refspec, so an explicit one stays prune-subject. Here the fetch
+        // SUCCEEDS and takes the tag with it, which is why the destination — not the
+        // exit code — is what the predicate reads.
+        git(&clone, &["config", "--unset-all", "remote.origin.fetch"]).await;
+        for spec in [
+            "+refs/heads/*:refs/remotes/origin/*",
+            "+refs/tags/*:refs/tags/*",
+        ] {
+            git(&clone, &["config", "--add", "remote.origin.fetch", spec]).await;
+        }
+        git(&clone, &["tag", "local-only"]).await;
+        let pruned = run_git_raw(
+            Some(&clone),
+            &["fetch", "--prune", "--no-prune-tags", "origin"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .expect("git ran");
+        assert_eq!(pruned.code, 0, "this fetch succeeds — it just takes the tag");
+        assert!(
+            git(&clone, &["tag"]).await.trim().is_empty(),
+            "the control: an explicit tag refspec is pruned despite --no-prune-tags"
+        );
+
+        git(&clone, &["tag", "local-only"]).await;
+        assert!(
+            probe(&state, &clone, &target, &[]).await.unwrap().is_none(),
+            "so the probe stands down rather than running that fetch"
+        );
+        assert_eq!(
+            git(&clone, &["tag"]).await.trim(),
+            "local-only",
+            "and the tag the guarded path would have deleted is still there"
         );
     }
 
