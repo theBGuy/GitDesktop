@@ -57,7 +57,9 @@ import {
  *  winning. Page-number paging over a list that PREPENDS shifts rows across the
  *  boundary whenever a refetch lands after new runs started, so the same run can come
  *  back on two pages — duplicate React keys, and a selection bound to whichever twin
- *  rendered first. */
+ *  rendered first. Freshness follows that rule: page one's copy of a twin is the one
+ *  rendered, even where the later page holds the newer snapshot, until the next
+ *  refetch of the page it sits on. */
 function dedupeRuns(pages: CiRunPage[] | undefined): WorkflowRun[] {
   const seen = new Set<number>();
   const out: WorkflowRun[] = [];

@@ -305,9 +305,10 @@ fn workflow_names_put(repo_path: &str, slug: &str, names: HashMap<u64, String>) 
 /// The `workflow_id` → name index backing every run row's `workflowName`, served from
 /// [`WORKFLOW_NAME_CACHE`] within [`WORKFLOW_NAME_TTL`] — a hit spawns no `gh` at all.
 /// Advisory: a failed fetch yields an EMPTY index (every row falls back to its own
-/// `name`) and is deliberately not cached, so the next call re-probes. No
-/// single-flight, matching this file's other caches: concurrent misses compute the
-/// same value and the last write wins.
+/// `name`) and is deliberately not cached, so the next call re-probes. Bounded by
+/// [`fetch_workflows`]' 100-workflow limit: runs of workflows past it read as their own
+/// names. No single-flight, matching this file's other caches: concurrent misses
+/// compute the same value and the last write wins.
 async fn workflow_name_index(repo_path: &str, slug: &str) -> HashMap<u64, String> {
     if let Some(hit) = workflow_names_get(repo_path, slug, WORKFLOW_NAME_TTL) {
         return hit;
@@ -335,8 +336,8 @@ async fn workflow_name_index(repo_path: &str, slug: &str) -> HashMap<u64, String
 /// The workflow-name index resolves alongside, concurrently, because a run's REST
 /// `name` is the RUN's name — `gh run list` resolves `workflowName` through the same
 /// `workflow_id` lookup, and skipping it would label every dynamic/`run-name:` run
-/// with its own title. [`workflow_name_index`] serves it from cache when it can, so
-/// the common fetch still spawns one `gh`.
+/// with its own title. [`workflow_name_index`] serves it from cache when it can, so a
+/// fetch inside its TTL spawns no additional `gh` for the name index.
 pub async fn gh_run_page(
     repo_path: String,
     limit: u32,
@@ -530,6 +531,9 @@ pub async fn gh_job_logs(repo_path: String, job_id: u64) -> AppResult<String> {
     Ok(text)
 }
 
+/// `-L 100` because gh's own default stops at 50 (measured, gh 2.94), and this list is
+/// what names every run row's workflow — a truncated tail would silently degrade those
+/// rows to their run names.
 async fn fetch_workflows(repo_path: &str, slug: &str) -> AppResult<Vec<Workflow>> {
     let out = run_gh(
         Some(repo_path),
@@ -539,6 +543,8 @@ async fn fetch_workflows(repo_path: &str, slug: &str) -> AppResult<Vec<Workflow>
             "-R",
             slug,
             "--all",
+            "-L",
+            "100",
             "--json",
             "id,name,path,state",
         ],

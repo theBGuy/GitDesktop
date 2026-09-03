@@ -220,8 +220,9 @@ const storedCheckEntries = (
 };
 
 /** Whether the stored ruleset requires one check context through several entries.
- *  Those usually differ only by their app pin (`integration_id`), which the pin
- *  lines beneath the hint name so the repeats read as distinct. */
+ *  Those usually differ only by their app pin (`integration_id`), which the pin lines
+ *  beneath the hint name when any entry carries one — repeats with no pin at all get
+ *  the hint alone. */
 const hasRepeatedCheckContexts = (original: RulesetFull | undefined) => {
   const contexts = storedCheckEntries(original).map((c) => c.context);
   return new Set(contexts).size !== contexts.length;

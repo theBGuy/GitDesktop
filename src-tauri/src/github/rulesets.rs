@@ -210,6 +210,14 @@ pub async fn gh_branch_required_checks(
     // Both guards are needed: the ref gate rejects refspec metacharacters but permits
     // `#`/`%`, which are legal in a git ref and special in a URL.
     crate::git::branches::validate_branch_name(&branch)?;
+    // Braces are the third case, refused for the reason `gh_check_run_apps` spells out
+    // below: gh reads `{…}` in an endpoint as an owner/repo placeholder. Before the
+    // slug resolution, so a refused name spawns no git or gh.
+    if branch.contains('{') || branch.contains('}') {
+        return Err(AppError::Gh(format!(
+            "this branch cannot be addressed as an endpoint: {branch}"
+        )));
+    }
     // The lens slug, not the origin one: a fork PR's base branch — and its rules —
     // live in the repo the PR targets.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
@@ -552,5 +560,30 @@ mod tests {
         ] {
             assert!(apps(raw).is_empty(), "raw: {raw}");
         }
+    }
+
+    /// Both ref gates admit a bare `{`: git allows it in a ref, and the branch gate's
+    /// rev-expression rejections cover `@{` but not `x{y}`. The endpoint guard is
+    /// therefore the only thing between a crafted branch and a retargeted request.
+    #[tokio::test]
+    async fn a_braced_branch_is_refused_before_any_spawn() {
+        assert!(
+            crate::git::branches::validate_branch_name("main{owner}").is_ok(),
+            "the premise: the ref gates let this through"
+        );
+        // A repo path that cannot resolve: if the guard did NOT fire, the failure
+        // would come from git/gh with a different message, so the assertion below is
+        // also the proof that nothing was spawned.
+        let err = gh_branch_required_checks(
+            "C:/no-such-repo-a-braced-branch-test".to_string(),
+            "main{owner}".to_string(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be addressed as an endpoint"),
+            "must fail on the brace guard, not on the unresolvable repo: {err}"
+        );
     }
 }

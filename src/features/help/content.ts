@@ -1715,8 +1715,8 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
 
 - The list shows recent runs with live status, refreshing while any run is active.
   **Load more** at the bottom pages older runs in, all the way back through the
-  repository's history, with the total run count beside it. Filter by text or scope
-  to the current branch.
+  repository's history, and shows GitHub's total run count while older pages remain.
+  Filter by text or scope to the current branch.
 - Click a run to see its **jobs and steps** with status and durations — a job or step
   that's still running counts its elapsed time up live.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run.
