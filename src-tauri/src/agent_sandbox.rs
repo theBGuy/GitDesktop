@@ -21,7 +21,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -215,12 +216,73 @@ pub(crate) fn global_skills_dir() -> Option<PathBuf> {
 /// Preference slots [`candidate_at`] can fill.
 const RUNTIME_SLOTS: usize = 2;
 
-/// The installed runtime in preference slot `i` as `(binary, name)`: 0 is Docker on
-/// PATH, 1 is Podman on PATH else (Windows) Podman Desktop's install dir. Resolved
-/// ONE SLOT AT A TIME because on macOS/Linux `resolve_named` answers for an absent
-/// binary by spawning a login shell (up to `DETECT_TIMEOUT`), so a hot path that
-/// settles on slot 0 must never reach slot 1.
+/// How long a slot's resolution is reused. It buys the one-shot callers (session
+/// discard, Test panel mount, shell open) and a turn burst ONE resolution instead of
+/// one per call, which matters because resolving an ABSENT binary costs a login-shell
+/// spawn on macOS/Linux. Matched to the sandbox status view's 15s recovery poll: a
+/// cached MISS is what holds the "not installed" copy up, so a longer TTL would keep
+/// that copy past the very tick meant to clear it once an engine is installed.
+const CANDIDATE_TTL: Duration = Duration::from_secs(15);
+
+type CandidateCache = [Option<(Instant, Option<(PathBuf, String)>)>; RUNTIME_SLOTS];
+
+fn candidate_cache() -> &'static Mutex<CandidateCache> {
+    static CACHE: OnceLock<Mutex<CandidateCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::array::from_fn(|_| None)))
+}
+
+/// Per-slot single-flight gate. Per SLOT, never one shared gate: the per-turn slot-0
+/// path must not queue behind a slot-1 resolve, which can run to `DETECT_TIMEOUT`.
+fn slot_lock(i: usize) -> &'static tokio::sync::Mutex<()> {
+    static LOCKS: OnceLock<[tokio::sync::Mutex<()>; RUNTIME_SLOTS]> = OnceLock::new();
+    &LOCKS.get_or_init(|| std::array::from_fn(|_| tokio::sync::Mutex::new(())))[i]
+}
+
+/// Whether a cache entry stamped at `at` is still usable at `now`. Pure so the TTL
+/// boundary is testable without waiting on a clock.
+fn cache_entry_fresh(at: Instant, now: Instant, ttl: Duration) -> bool {
+    now.saturating_duration_since(at) < ttl
+}
+
+/// The slot's still-fresh cached resolution. The nesting is meaningful: the outer
+/// `None` is "cold or expired", the inner one is a cached "not installed". A poisoned
+/// cache reads as cold, so resolution falls through rather than failing.
+fn cached_slot(i: usize) -> Option<Option<(PathBuf, String)>> {
+    let entry = {
+        let guard = candidate_cache().lock().ok();
+        guard.and_then(|c| c[i].clone())
+    };
+    let (at, value) = entry?;
+    cache_entry_fresh(at, Instant::now(), CANDIDATE_TTL).then_some(value)
+}
+
+/// The installed runtime in preference slot `i` as `(binary, name)`, memoized for
+/// [`CANDIDATE_TTL`]. Slots resolve INDEPENDENTLY — a hot path that settles on slot 0
+/// must never reach slot 1 — and a cold slot resolves once no matter how many callers
+/// race it.
 async fn candidate_at(i: usize) -> Option<(PathBuf, String)> {
+    if i >= RUNTIME_SLOTS {
+        return None;
+    }
+    if let Some(value) = cached_slot(i) {
+        return value;
+    }
+    // Cold or expired: hold this slot's gate across the resolve and re-check, so N
+    // racing callers spend one resolution rather than N login-shell spawns.
+    let _flight = slot_lock(i).lock().await;
+    if let Some(value) = cached_slot(i) {
+        return value;
+    }
+    let resolved = resolve_slot(i).await;
+    if let Ok(mut c) = candidate_cache().lock() {
+        c[i] = Some((Instant::now(), resolved.clone()));
+    }
+    resolved
+}
+
+/// Resolves preference slot `i` for real: 0 is Docker on PATH, 1 is Podman on PATH,
+/// else (Windows) Podman Desktop's install dir.
+async fn resolve_slot(i: usize) -> Option<(PathBuf, String)> {
     match i {
         0 => resolve_named(&["docker"], None)
             .await
@@ -244,6 +306,17 @@ async fn candidate_at(i: usize) -> Option<(PathBuf, String)> {
     }
 }
 
+/// The engine's display name for user-facing copy. `resolve_slot` emits exactly
+/// "docker"/"podman"; an unknown name deliberately reads as Docker, so a future slot
+/// must be added here too rather than inheriting that default.
+pub(crate) fn runtime_label(name: &str) -> &'static str {
+    if name == "podman" {
+        "Podman"
+    } else {
+        "Docker"
+    }
+}
+
 /// The preferred installed runtime — the first filled slot, resolved no further.
 pub(crate) async fn preferred_runtime() -> Option<(PathBuf, String)> {
     for i in 0..RUNTIME_SLOTS {
@@ -255,7 +328,7 @@ pub(crate) async fn preferred_runtime() -> Option<(PathBuf, String)> {
 }
 
 /// Every installed runtime in preference order, for operations that must act on ALL
-/// of them. Resolving each slot has a cost (see [`candidate_at`]), so callers that
+/// of them. A cold slot costs a real resolve (see [`candidate_at`]), so callers that
 /// only need one runtime take [`pick_runtime`] or [`preferred_runtime`] instead.
 pub(crate) async fn runtime_candidates() -> Vec<(PathBuf, String)> {
     let mut out: Vec<(PathBuf, String)> = Vec::new();
@@ -394,10 +467,10 @@ pub(crate) async fn pick_from(known: Vec<(PathBuf, String)>) -> RuntimePick {
 async fn runtime_for_build() -> AppResult<PathBuf> {
     match pick_runtime().await {
         RuntimePick::WithImage(bin, _) | RuntimePick::ReadyNoImage(bin, _) => Ok(bin),
-        RuntimePick::NotReady(..) => Err(AppError::Command(
-            "Docker/Podman is installed but its engine isn't running. Start it and try again."
-                .into(),
-        )),
+        RuntimePick::NotReady(_, name) => Err(AppError::Command(format!(
+            "{} is installed but its engine isn't running. Start it and try again.",
+            runtime_label(&name)
+        ))),
         RuntimePick::Missing => Err(AppError::Command(
             "Docker or Podman is not installed.".into(),
         )),
@@ -1044,10 +1117,11 @@ pub(crate) async fn container_shell_command(
 
     // Already running (its terminal was closed without `exit`) → reconnect a fresh
     // shell into it; its server + published ports are untouched. `exec` takes no
-    // ports/mount — those belong to the original `run`. Asked of every ready
-    // candidate, since it may sit on an engine other than the preferred one.
+    // ports/mount — those belong to the original `run`. Asked of every candidate,
+    // since it may sit on an engine other than the preferred one; `ps` on a stopped
+    // engine already answers false, so no separate readiness probe.
     for (bin_path, _) in &candidates {
-        if runtime_ready(bin_path).await && container_running(bin_path, &name).await {
+        if container_running(bin_path, &name).await {
             let args = vec!["exec".into(), "-it".into(), name.clone(), "bash".into()];
             let tip = "Tip: reconnected to the container that is still running - your server and ports are unchanged. Use Stop test container to shut it down.".to_string();
             return Ok((bin_path.to_string_lossy().to_string(), args, tip));
@@ -1059,11 +1133,11 @@ pub(crate) async fn container_shell_command(
     // neither image is there.
     let (bin_path, rt) = match pick_from(candidates).await {
         RuntimePick::WithImage(bin, rt) | RuntimePick::ReadyNoImage(bin, rt) => (bin, rt),
-        RuntimePick::NotReady(..) => {
-            return Err(AppError::Command(
-                "Docker/Podman is installed but its engine isn't running. Start it, then try again."
-                    .into(),
-            ));
+        RuntimePick::NotReady(_, engine) => {
+            return Err(AppError::Command(format!(
+                "{} is installed but its engine isn't running. Start it, then try again.",
+                runtime_label(&engine)
+            )));
         }
         RuntimePick::Missing => {
             return Err(AppError::Command(
@@ -1126,9 +1200,9 @@ pub(crate) async fn container_shell_command(
 pub async fn agent_test_container_running(worktree_path: String) -> AppResult<bool> {
     let name = test_container_name(&worktree_path);
     // The container may live on an engine other than the preferred one, so ask each
-    // ready candidate; probes stop at the first hit.
+    // candidate; `ps` on a stopped engine answers false, and probes stop at the first hit.
     for (bin, _) in runtime_candidates().await {
-        if runtime_ready(&bin).await && container_running(&bin, &name).await {
+        if container_running(&bin, &name).await {
             return Ok(true);
         }
     }
@@ -1551,6 +1625,49 @@ mod tests {
         );
         // Nothing installed at all.
         assert_eq!(choose(&[]), Choice::Missing);
+    }
+
+    #[test]
+    fn verdict_carries_the_chosen_candidate_not_the_first() {
+        // Stopped Docker beside a running Podman that holds the image: the pick must
+        // carry slot 1's binary and name, so the run lands on the engine that answered.
+        let candidates = vec![
+            (PathBuf::from("dk"), "docker".to_string()),
+            (PathBuf::from("pm"), "podman".to_string()),
+        ];
+        match verdict(candidates, &[(false, false), (true, true)]) {
+            RuntimePick::WithImage(bin, name) => {
+                assert_eq!(bin, PathBuf::from("pm"));
+                assert_eq!(name, "podman");
+            }
+            other => panic!("expected WithImage(podman), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_entry_expires_at_the_ttl_boundary() {
+        let at = Instant::now();
+        assert!(cache_entry_fresh(at, at, CANDIDATE_TTL));
+        assert!(cache_entry_fresh(
+            at,
+            at + CANDIDATE_TTL - Duration::from_millis(1),
+            CANDIDATE_TTL
+        ));
+        // The boundary is exclusive, so a just-installed engine is rediscovered no
+        // later than the status view's next recovery poll.
+        assert!(!cache_entry_fresh(at, at + CANDIDATE_TTL, CANDIDATE_TTL));
+        // A clock that appears to move backwards reads as fresh, never as expired.
+        assert!(cache_entry_fresh(
+            at + Duration::from_secs(1),
+            at,
+            CANDIDATE_TTL
+        ));
+    }
+
+    #[test]
+    fn runtime_label_names_the_engine() {
+        assert_eq!(runtime_label("podman"), "Podman");
+        assert_eq!(runtime_label("docker"), "Docker");
     }
 
     #[test]

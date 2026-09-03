@@ -2756,9 +2756,9 @@ pub async fn agent_session(
                     ));
                 }
                 crate::agent_sandbox::RuntimePick::NotReady(_, name) => {
-                    let label = if name == "podman" { "Podman" } else { "Docker" };
                     return Err(AppError::Command(format!(
-                        "{label} is installed but its engine isn't running. Start it, then try again."
+                        "{} is installed but its engine isn't running. Start it, then try again.",
+                        crate::agent_sandbox::runtime_label(&name)
                     )));
                 }
                 crate::agent_sandbox::RuntimePick::Missing => {
