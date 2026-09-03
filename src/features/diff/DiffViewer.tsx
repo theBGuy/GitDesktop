@@ -83,6 +83,10 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
   // from "files exist but none picked yet" so the empty pane reads honestly.
   const status = useRepoStatus(repoPath);
   const resolveActive = useConflictResolve((s) => s.activePath);
+  const resolveScope = useConflictResolve((s) => s.scopePath);
+  // A walk armed in a PR takeover's hidden worktree names files by ITS paths — a
+  // same-named conflict here is a different file, so only this tree's walk counts.
+  const resolveHere = resolveScope === repoPath ? resolveActive : null;
   // Render off a deferred selection so rapidly arrowing the changes list only
   // mounts + loads the file landed on (the row keeps WorkingTreeDiff keyed, so
   // it remounts per file). The list highlight still uses the live selection.
@@ -113,7 +117,7 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
     liveEntry?.unstaged === "conflicted" || liveEntry?.staged === "conflicted";
 
   if (isConflicted) {
-    return resolveActive === deferredFile.path ? (
+    return resolveHere === deferredFile.path ? (
       <ConflictResolveView
         key={deferredFile.path}
         repoPath={repoPath}

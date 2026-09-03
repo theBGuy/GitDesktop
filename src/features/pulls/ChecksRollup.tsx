@@ -45,6 +45,7 @@ import { formatDurationBetween } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { checkPresentation } from "./check-presentation";
+import { isOutstanding } from "./useBranchRequiredChecks";
 
 /** The one wording for releasing a held workflow run — this strip and the Actions
  *  run view both ask through it, so the two prompts can't drift apart. It lives
@@ -72,6 +73,36 @@ function isRunningActionsCheck(
     !check.completedAt &&
     checkPresentation(check.status, provider).bucket === "pending"
   );
+}
+
+/** Whether a check is a required context the base branch is still waiting on while
+ *  reading as a finished, neutral result — a cancelled or stale run. Genuinely
+ *  skipped or neutral runs satisfy GitHub, and failed or pending ones already carry
+ *  their own presentation, so this composition is the only one that needs flagging.
+ *  A cancelled run superseded by a green re-run of the same name leaves its context
+ *  met, so the name is absent from the unmet list and the row stays quiet. */
+function needsRequiredAttention(
+  check: PrCheckOut,
+  checks: PrCheckOut[],
+  provider: ForgeProvider,
+  unmetRequiredContexts: string[],
+): boolean {
+  if (
+    !unmetRequiredContexts.includes(check.name) ||
+    checkPresentation(check.status, provider).bucket !== "skipped" ||
+    !isOutstanding(check, provider)
+  ) {
+    return false;
+  }
+  // The unmet list names a context, but a failed or still-running run of that name
+  // is what the merge is actually waiting on, and it already shows that visibly —
+  // so a run this one superseded stays quiet. No self-exclusion needed: the check
+  // reaching here is in the skipped bucket.
+  return !checks.some((other) => {
+    if (other.name !== check.name) return false;
+    const { bucket } = checkPresentation(other.status, provider);
+    return bucket === "failed" || bucket === "pending";
+  });
 }
 
 /** The run's job for a check: by job id first (the reliable key), falling back to
@@ -218,6 +249,7 @@ function CheckRow({
   rowId,
   runJob,
   isRunning,
+  requiredAttention,
 }: {
   repoPath: string;
   check: PrCheckOut;
@@ -232,6 +264,10 @@ function CheckRow({
   /** Whether this is a still-running GitHub Actions check (drives the inline
    *  current-step peek + the expanded step checklist). */
   isRunning: boolean;
+  /** Whether this row is an unmet required context that reads as finished — it
+   *  earns a "required" word beside the name. The status presentation stays as it
+   *  is: the run really was cancelled, and only the requirement is extra. */
+  requiredAttention: boolean;
 }) {
   const { tone, Icon, label } = checkPresentation(check.status, provider);
   // The live counter is gated on `isRunning`, never on `check.completedAt`: that
@@ -281,6 +317,11 @@ function CheckRow({
       >
         {check.name}
       </span>
+      {requiredAttention && (
+        // Visible text, not a tone: the row keeps its muted cancelled glyph, and
+        // this word is what says the merge is still waiting on the check.
+        <span className="shrink-0 text-muted-foreground">· required</span>
+      )}
       {stepPeek !== undefined && (
         // The running check's current step, after the name — muted + truncated so
         // a long step name can't push the row wide (name keeps its flex share).
@@ -391,13 +432,15 @@ function RunDetailFetcher({
  * meaning is never color-alone) expanding to a keyboard-navigable, height-capped
  * list with failures first. Checks with a fetchable run/job (GitHub Actions, GitLab
  * pipeline jobs) peek their log inline; external checks (Bitbucket build statuses,
- * etc.) link out. Auto-expanded when anything failed. Renders nothing with no checks.
+ * etc.) link out. Auto-expanded when anything failed, or when a required check was
+ * cancelled or went stale. Renders nothing with no checks.
  */
 export function ChecksRollup({
   checks,
   repoPath,
   provider,
   crossRepository,
+  unmetRequiredContexts = [],
 }: {
   checks: PrCheckOut[];
   repoPath: string;
@@ -408,6 +451,11 @@ export function ChecksRollup({
    *  Only the approval strip uses it: GitHub holds runs for approval on fork PRs
    *  alone, so the affordance is fork-scoped by design. */
   crossRepository: boolean;
+  /** The base branch's required contexts the PR's checks haven't satisfied, exactly
+   *  as the caller's blocked-merge join computes them. GitHub blocked-by-rules PRs
+   *  only — absent or empty everywhere else, and the rollup never reads the rules
+   *  itself. */
+  unmetRequiredContexts?: string[];
 }) {
   const passed = checks.filter(
     (c) => checkPresentation(c.status, provider).bucket === "passed",
@@ -421,10 +469,17 @@ export function ChecksRollup({
   const skipped = checks.filter(
     (c) => checkPresentation(c.status, provider).bucket === "skipped",
   ).length;
+  // Required contexts sitting on a cancelled or stale run. Counted apart from the
+  // summary segments, which keep stating run results — such a row still counts as
+  // skipped there, because that is what the run did.
+  const attention = checks.filter((c) =>
+    needsRequiredAttention(c, checks, provider, unmetRequiredContexts),
+  ).length;
 
-  // Auto-expand on any failure — a failing PR should show what failed without a
-  // click. Otherwise collapsed by default.
-  const [open, setOpen] = useState(failed > 0);
+  // Auto-expand on any failure, or on a required check that reads finished but
+  // still holds the merge — either way the PR should show it without a click.
+  // Otherwise collapsed by default.
+  const [open, setOpen] = useState(failed > 0 || attention > 0);
   // The jobs of each running Actions run, keyed by run id. Populated by the
   // headless `RunDetailFetcher`s mounted while the rollup is open (one per distinct
   // run id); each row resolves its own job from here. Empty until run detail lands.
@@ -438,6 +493,16 @@ export function ChecksRollup({
     if (prevFailed.current === 0 && failed > 0) setOpen(true);
     prevFailed.current = failed;
   }, [failed]);
+  // Attention gets one auto-open per mount rather than a 0→>0 edge: the unmet list
+  // rides a mergeability gate that empties and refills whenever GitHub reports the
+  // PR unknown after a push, and an edge would reopen a manual collapse each time.
+  const attentionOpened = useRef(attention > 0);
+  useEffect(() => {
+    if (attention > 0 && !attentionOpened.current) {
+      attentionOpened.current = true;
+      setOpen(true);
+    }
+  }, [attention]);
 
   const approveRun = useApproveWorkflowRun(repoPath);
   // Own busy state: the batch spans several sequential mutations, so the
@@ -494,14 +559,14 @@ export function ChecksRollup({
     }
   }
 
-  // Failures first, then pending, then passed, then skipped (least interesting);
-  // stable within a bucket.
-  const bucketRank = { failed: 0, pending: 1, passed: 2, skipped: 3 } as const;
-  const sorted = [...checks].sort(
-    (a, b) =>
-      bucketRank[checkPresentation(a.status, provider).bucket] -
-      bucketRank[checkPresentation(b.status, provider).bucket],
-  );
+  // Failures first, then the required contexts still holding the merge, then
+  // pending, passed, and skipped (least interesting); stable within a rank.
+  const bucketRank = { failed: 0, pending: 2, passed: 3, skipped: 4 } as const;
+  const rank = (c: PrCheckOut) =>
+    needsRequiredAttention(c, checks, provider, unmetRequiredContexts)
+      ? 1
+      : bucketRank[checkPresentation(c.status, provider).bucket];
+  const sorted = [...checks].sort((a, b) => rank(a) - rank(b));
 
   // The distinct run ids of the still-running GitHub Actions checks — one
   // run-detail query mounts per id below (React Query dedupes rows sharing a run),
@@ -664,6 +729,12 @@ export function ChecksRollup({
                   provider={provider}
                   isRunning={live}
                   runJob={runJob}
+                  requiredAttention={needsRequiredAttention(
+                    c,
+                    checks,
+                    provider,
+                    unmetRequiredContexts,
+                  )}
                 />
               );
             })}

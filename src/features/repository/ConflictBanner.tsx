@@ -139,7 +139,7 @@ export function ConflictBanner({
           <Button
             size="xs"
             variant="ghost"
-            onClick={() => startAll(conflictedPaths)}
+            onClick={() => startAll(conflictedPaths, repoPath)}
           >
             <SparkleIcon data-icon="inline-start" />
             {conflictedCount === 1 ? "Resolve with AI" : "Resolve all with AI"}

@@ -451,10 +451,12 @@ export function ConflictFileView({
             Accept all incoming
           </Button>
           {canAi && (
+            // This view's OWN repoPath scopes the walk — the main repo on the
+            // Changes tab, the hidden worktree in a PR takeover.
             <Button
               size="xs"
               disabled={busy}
-              onClick={() => startResolveAi(path)}
+              onClick={() => startResolveAi(path, repoPath)}
             >
               <SparkleIcon data-icon="inline-start" />
               Resolve with AI

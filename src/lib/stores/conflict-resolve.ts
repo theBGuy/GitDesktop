@@ -5,8 +5,13 @@ import { useUiStore } from "./ui";
  * Drives AI conflict resolution in the diff pane. `activePath` is the conflicted
  * file currently in resolution mode (the diff pane swaps to its ConflictResolveView
  * when the selection matches); `queue` is the remaining files to walk in a
- * "resolve all" run. The streaming + accept lifecycle lives in the component —
- * this store only tracks which file is active and what's next.
+ * "resolve all" run; `scopePath` is the tree those paths belong to. The streaming +
+ * accept lifecycle lives in the component — this store only tracks which file is
+ * active, what's next, and whose tree it is.
+ *
+ * Not a liveness signal: a walk outlives the surface that armed it (nothing disarms
+ * one when a takeover's worktree is finished or discarded), so a non-null
+ * `activePath` means a walk EXISTS, not that one is running. Gate on scope.
  */
 interface ConflictResolveState {
   /** The conflicted file with an active resolution session, or null. */
@@ -14,13 +19,18 @@ interface ConflictResolveState {
   /** Remaining conflicted paths to resolve in sequence (excludes `activePath`).
    *  Empty for a single-file resolve. */
   queue: string[];
+  /** The tree this walk belongs to — the main working tree's `repoPath`, or a
+   *  resolve worktree's path for the PR takeovers; null when idle. Readers compare
+   *  it to their own tree and ignore a walk scoped elsewhere, so a walk can never
+   *  be adopted by a surface looking at different files. */
+  scopePath: string | null;
 
-  /** Resolve one file (context-menu / diff-pane button). Selects it so the diff
-   *  pane shows its resolution view. */
-  startOne: (path: string) => void;
-  /** Resolve a list of conflicted files in sequence (the banner's "Resolve all").
-   *  No-op on an empty list. */
-  startAll: (paths: string[]) => void;
+  /** Resolve one file (context-menu / diff-pane button) in `scope`'s tree. Selects
+   *  it so the diff pane shows its resolution view. */
+  startOne: (path: string, scope: string) => void;
+  /** Resolve a list of conflicted files in `scope`'s tree in sequence (the banner's
+   *  "Resolve all"). No-op on an empty list. */
+  startAll: (paths: string[], scope: string) => void;
   /** This file is done (accepted) or skipped — move to the next queued file, or
    *  end the run when the queue is empty. */
   advance: () => void;
@@ -29,52 +39,63 @@ interface ConflictResolveState {
 }
 
 /** Select a conflicted file so the working-tree diff pane shows it (conflicts
- *  always live on the unstaged side). */
-function selectConflicted(path: string) {
-  useUiStore.getState().selectFile({ path, staged: false, untracked: false });
+ *  always live on the unstaged side) — MAIN-tree walks only. A takeover walk's
+ *  paths are relative to a hidden worktree, so steering the changes list with them
+ *  points it at the wrong tree's files; those surfaces follow `activePath` with
+ *  their own local selection instead. */
+function selectConflicted(path: string, scope: string | null) {
+  const ui = useUiStore.getState();
+  if (scope !== ui.repoPath) return;
+  ui.selectFile({ path, staged: false, untracked: false });
 }
 
 export const useConflictResolve = create<ConflictResolveState>()(
   (set, get) => ({
     activePath: null,
     queue: [],
+    scopePath: null,
 
-    startOne: (path) => {
-      set({ activePath: path, queue: [] });
-      selectConflicted(path);
+    startOne: (path, scope) => {
+      set({ activePath: path, queue: [], scopePath: scope });
+      selectConflicted(path, scope);
     },
 
-    startAll: (paths) => {
+    startAll: (paths, scope) => {
       if (paths.length === 0) return;
       const [first, ...rest] = paths;
-      set({ activePath: first, queue: rest });
-      selectConflicted(first);
+      set({ activePath: first, queue: rest, scopePath: scope });
+      selectConflicted(first, scope);
     },
 
     advance: () => {
-      const { queue } = get();
+      const { queue, scopePath } = get();
       if (queue.length === 0) {
-        set({ activePath: null, queue: [] });
+        set({ activePath: null, queue: [], scopePath: null });
         return;
       }
       const [next, ...rest] = queue;
       set({ activePath: next, queue: rest });
-      selectConflicted(next);
+      selectConflicted(next, scopePath);
     },
 
-    stop: () => set({ activePath: null, queue: [] }),
+    stop: () => set({ activePath: null, queue: [], scopePath: null }),
   }),
 );
 
-// A resolve walk belongs to the repo AND tab it started on; this store is separate,
-// so the ui store's CROSS_REPO_RESET can't reach it — drop the walk when either
-// changes. Tabs stay mounted under `<Activity>`, so a surviving walk could be adopted
-// by another tab's resolve surface against a different tree. Subscriptions fire
-// synchronously inside the ui setter, ahead of the commit that flips visibility.
+// A walk belongs to one tree and every reader gates on `scopePath`, so no other
+// surface can adopt it — a tab switch leaves it armed (an `<Activity>`-hidden view
+// cancels its stream on effect cleanup and restarts it on show). A repo switch still
+// ends it: this store is separate, so the ui store's CROSS_REPO_RESET can't reach it.
+// Subscriptions fire synchronously inside the ui setter, ahead of the commit that
+// flips visibility.
 useUiStore.subscribe((s, prev) => {
-  if (s.repoPath === prev.repoPath && s.repoTab === prev.repoTab) return;
+  if (s.repoPath === prev.repoPath) return;
   const { activePath, queue } = useConflictResolve.getState();
   if (activePath !== null || queue.length > 0) {
-    useConflictResolve.setState({ activePath: null, queue: [] });
+    useConflictResolve.setState({
+      activePath: null,
+      queue: [],
+      scopePath: null,
+    });
   }
 });

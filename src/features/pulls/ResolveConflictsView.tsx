@@ -64,19 +64,19 @@ export function ResolveConflictsView({
   const reviewConfigured = useReviewConfigured();
   // Same AI-resolution store the Changes tab drives: `activePath` decides whether
   // the selected file shows the AI streaming view or the manual editor, and
-  // `startAll` kicks off a "resolve all" walk. It selects files via the main UI store,
-  // so its paths bleed across surfaces — and here they live in a HIDDEN worktree. The
-  // store drops any armed walk on a repo or tab switch, so this surface can't adopt
-  // one started in another repo or tab; finer per-tree scoping remains deferred.
+  // `startAll` kicks off a "resolve all" walk. The walk is scoped to the tree it
+  // started in (`scopePath`), so surfaces of any other tree ignore it and it
+  // survives a tab peek; a repo switch still clears it.
   const startAll = useConflictResolve((s) => s.startAll);
   const activePath = useConflictResolve((s) => s.activePath);
-  const stopResolveWalk = useConflictResolve((s) => s.stop);
+  const scopePath = useConflictResolve((s) => s.scopePath);
+  // Only this worktree's walk drives this surface.
+  const walkActive = scopePath === worktreePath ? activePath : null;
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
-  // Leaving the takeover must disarm the walk: a leftover `activePath` pointing into
-  // the hidden worktree would otherwise hijack the Changes tab's selection.
-  useEffect(() => () => stopResolveWalk(), [stopResolveWalk]);
+  // Readers gate on `scopePath` and each resolve worktree carries a fresh uuid
+  // (`gd-resolve-<uuid>`), so a walk left armed here is inert and never re-adopted.
 
   const entries = status.data?.entries ?? [];
   const conflicted: FileEntry[] = entries.filter(
@@ -85,21 +85,21 @@ export function ResolveConflictsView({
   const conflictedPaths = conflicted.map((e) => e.path);
 
   // Keep a valid selection: default to the first conflict, and drop it once that
-  // file is resolved (leaves the list). Following `activePath` lets an AI
+  // file is resolved (leaves the list). Following `walkActive` lets an AI
   // "resolve all" run visibly walk the list as each file completes. Keyed on
   // `status.data` (the source of `conflicted`) so it re-runs as files resolve.
   // biome-ignore lint/correctness/useExhaustiveDependencies: derived from status.data
   useEffect(() => {
     const paths = conflicted.map((e) => e.path);
-    if (activePath && paths.includes(activePath)) {
-      setSelectedPath(activePath);
+    if (walkActive && paths.includes(walkActive)) {
+      setSelectedPath(walkActive);
       return;
     }
     setSelectedPath((cur) => {
       if (cur && paths.includes(cur)) return cur;
       return paths[0] ?? null;
     });
-  }, [activePath, status.data]);
+  }, [walkActive, status.data]);
 
   if (!pending) return null;
 
@@ -195,7 +195,7 @@ export function ResolveConflictsView({
             <Button
               size="xs"
               variant="ghost"
-              onClick={() => startAll(conflictedPaths)}
+              onClick={() => startAll(conflictedPaths, worktreePath)}
             >
               <SparkleIcon data-icon="inline-start" />
               {remaining === 1 ? "Resolve with AI" : "Resolve all with AI"}
@@ -270,7 +270,7 @@ export function ResolveConflictsView({
               All conflicts resolved — Finish to complete the merge.
             </div>
           ) : selectedPath ? (
-            activePath === selectedPath ? (
+            walkActive === selectedPath ? (
               <ConflictResolveView
                 key={selectedPath}
                 repoPath={worktreePath}

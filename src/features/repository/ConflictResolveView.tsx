@@ -151,17 +151,39 @@ export function ConflictResolveView({
     setPhase("ready");
   }
 
+  // Set by the teardown below when it cut a session short, so the next setup can
+  // tell a resumable interruption from a session that settled on its own.
+  const interruptedRef = useRef(false);
   // Auto-start once per mounted file. Remounts (keyed on path in DiffViewer) as
   // the resolve-all walk advances, so each conflict kicks off on arrival.
-  const kickoff = useEffectEvent(() => void start());
+  // `<Activity>` replays this effect on every show, so only a fresh session or one
+  // the teardown below interrupted restarts: a ready proposal survives a tab peek
+  // un-rebilled, and a cancelled run waits behind Try again — it settles on the
+  // same "idle" phase as an interrupted one, so the flag is what tells them apart.
+  const kickoff = useEffectEvent(() => {
+    const resume = interruptedRef.current;
+    interruptedRef.current = false;
+    if (phase !== "loading" && !resume) return;
+    void start();
+  });
   // biome-ignore lint/correctness/useExhaustiveDependencies: start once per file
   useEffect(() => {
     kickoff();
   }, [path]);
+  const inFlightRef = useLatestRef(
+    phase === "loading" || phase === "streaming" || generating,
+  );
   // DiffViewer swaps this view out (it's keyed on path) the moment another file
   // is selected, so without this an in-flight resolution keeps streaming — and
-  // billing — into an orphaned component.
-  useEffect(() => () => cancel(), [cancel]);
+  // billing — into an orphaned component. `<Activity>` hide runs it too, hence
+  // the flag: only what this cut short is the kickoff's to resume.
+  useEffect(
+    () => () => {
+      if (inFlightRef.current) interruptedRef.current = true;
+      cancel();
+    },
+    [cancel],
+  );
 
   function handleCancel() {
     genRef.current++;

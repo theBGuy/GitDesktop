@@ -702,9 +702,9 @@ export function ChangesPanel({
     "resolve-conflict-ai",
     () => {
       if (selectedFile && conflictedPaths.includes(selectedFile.path)) {
-        startResolveOne(selectedFile.path);
+        startResolveOne(selectedFile.path, repoPath);
       } else {
-        startResolveAll(conflictedPaths);
+        startResolveAll(conflictedPaths, repoPath);
       }
     },
     canResolveConflicts,
@@ -1030,7 +1030,7 @@ export function ChangesPanel({
                   ignoreSelected,
                   untrackSelected,
                   toggle: handleToggle,
-                  resolveWithAi: startResolveOne,
+                  resolveWithAi: (path) => startResolveOne(path, repoPath),
                   discardFile: (entry) =>
                     setDiscardScope({ kind: "files", entries: [entry] }),
                   stashFile: (entry) =>

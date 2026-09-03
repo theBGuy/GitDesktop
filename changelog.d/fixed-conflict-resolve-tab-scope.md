@@ -1,1 +1,1 @@
-- AI conflict resolution stays scoped to the tab that started it — a resolve queue now ends cleanly when you switch repo tabs.
+- AI conflict resolution stays where it started: a resolve walk can't be picked up by another tab or pull request, and it keeps its place while you glance elsewhere.

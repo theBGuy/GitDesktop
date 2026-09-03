@@ -64,8 +64,12 @@ function latestReportedRun(runs: PrCheckOut[]): PrCheckOut | null {
 /** Whether one run leaves its context still to come. STALE and CANCELLED count
  *  here but not in the rollup's presentation: GitHub's passing set is success,
  *  skipped or neutral, so either holds the merge until it re-runs even though both
- *  read as finished, neutral results. */
-function isOutstanding(check: PrCheckOut, provider: ForgeProvider): boolean {
+ *  read as finished, neutral results. The rollup imports it to flag those rows,
+ *  so the two surfaces share one marker set. */
+export function isOutstanding(
+  check: PrCheckOut,
+  provider: ForgeProvider,
+): boolean {
   const s = check.status.toUpperCase();
   if (s === "STALE" || s === "CANCELLED") return true;
   const { bucket } = checkPresentation(check.status, provider);

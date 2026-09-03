@@ -339,11 +339,13 @@ in one click.
   add commits, merge/close, and approved / changes-requested (no labels or
   review-requests).
 - **CI rollup**: checks collapse into a **✓ passed · ✕ failed · ● pending ·
-  ⊖ skipped** summary that auto-expands on failure. A running **GitHub
-  Actions** check shows its current step inline and a live step checklist
-  when expanded; finished **GitHub Actions** and **GitLab pipeline** jobs
-  peek their logs inline; **Bitbucket** build statuses and other external
-  checks link out (name/state/URL, no fetchable logs).
+  ⊖ skipped** summary that auto-expands on failure — or on a required
+  GitHub check that was cancelled or went stale, surfaced just below the
+  failures and tagged *required*. A running **GitHub Actions** check shows
+  its current step inline and a live step checklist when expanded;
+  finished **GitHub Actions** and **GitLab pipeline** jobs peek their logs
+  inline; **Bitbucket** build statuses and other external checks link out
+  (name/state/URL, no fetchable logs).
 - **Line-anchored review comments**, from Copilot, CodeRabbit, or humans:
   rendered grouped by file in the Conversation and at their exact line in
   the Files diff, with reply-in-thread, resolve/unresolve, and edit/delete

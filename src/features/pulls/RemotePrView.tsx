@@ -1179,7 +1179,7 @@ export function RemotePrView({
             // The takeover follows this same store's `activePath`, so starting the walk
             // here makes it open each file as the AI works through it.
             if (withAi && outcome.conflicts.length > 0)
-              startAll(outcome.conflicts);
+              startAll(outcome.conflicts, outcome.worktreePath);
             return;
           }
           // "conflicts" with no worktree to open is a broken outcome — say so rather
@@ -2614,6 +2614,7 @@ export function RemotePrView({
           repoPath={repoPath}
           provider={providerKey}
           crossRepository={!!pr.crossRepository}
+          unmetRequiredContexts={blockedRequirements}
         />
         <div className="flex flex-wrap gap-1 pt-1">
           {availableSections.map((s) => (
