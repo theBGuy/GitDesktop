@@ -1776,7 +1776,15 @@ pub async fn gh_pr_unminimize_comment(repo_path: String, comment_id: String) -> 
 
 /// Checks out a PR's branch locally (handles fork-sourced PRs too).
 #[tauri::command]
-pub async fn gh_pr_checkout(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
+pub async fn gh_pr_checkout(
+    state: tauri::State<'_, crate::state::AppState>,
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<()> {
+    // Repo-scoped: gh resolves the PR's local branch name, so this side can't know it
+    // before the checkout runs.
+    crate::git::update_marker::refuse_if_any_updating(&state, &repo_path).await?;
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(

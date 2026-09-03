@@ -723,6 +723,10 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
     // uncommitted work when target is the current branch — refuse first.
     ensure_clean_tree(repo_path).await?;
 
+    // With the other pre-flight guards, so nothing is journaled or switched before an
+    // update holding `target` is ruled out.
+    crate::git::update_marker::refuse_if_branch_updating(state, repo_path, target_branch).await?;
+
     // Where we are now, so we can return on failure. A detached HEAD has no
     // branch name, so fall back to restoring its commit directly.
     let original_ref = run_git(
@@ -2552,6 +2556,18 @@ pub(crate) fn parse_worktree_paths(porcelain: &str) -> Vec<String> {
         .collect()
 }
 
+/// The worktree checking `branch` out, from one `worktree list --porcelain` read.
+/// Both parsers emit one entry per stanza in list order, so the zip pairs each path
+/// with its own branch; a detached stanza (our resolve worktrees) carries an empty
+/// name and never matches.
+fn worktree_holding(porcelain: &str, branch: &str) -> Option<String> {
+    parse_worktree_paths(porcelain)
+        .into_iter()
+        .zip(parse_worktree_branches(porcelain))
+        .find(|(_, b)| b == branch)
+        .map(|(path, _)| path)
+}
+
 /// Whether a worktree path is one of our resolve worktrees — its final path
 /// segment starts with `gd-resolve-`. The basename is the reliable signal:
 /// `git_merge_local_pr` names them `gd-resolve-<id>`, and porcelain may
@@ -2686,12 +2702,39 @@ async fn finalize_base(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let porcelain = listed.stdout_lossy();
-    let owning_worktree = parse_worktree_paths(&porcelain)
-        .into_iter()
-        .zip(parse_worktree_branches(&porcelain))
-        .find(|(_, branch)| branch == base)
-        .map(|(path, _)| path);
+    let mut owning_worktree = worktree_holding(&listed.stdout_lossy(), base);
+
+    // An update's hidden checkout is never a fast-forward target: advancing `base`
+    // under a running update moves the branch it pinned and kills it at its pin
+    // verify. Live refuses; a dead one is cleared on the spot and the scan retried
+    // once, and anything still holding `base` afterwards refuses as INTERRUPTED —
+    // claiming a running update would be a state this arm just disproved.
+    if let Some(holder) = owning_worktree
+        .as_deref()
+        .filter(|w| crate::git::update_marker::is_update_worktree_path(w))
+        .map(str::to_string)
+    {
+        if crate::git::update_marker::update_worktree_is_live(&holder) {
+            return Err(crate::git::update_marker::branch_update_refusal(base));
+        }
+        if !crate::git::update_marker::claim_dead_update_worktree(state, repo_path, &holder).await
+        {
+            return Err(crate::git::update_marker::interrupted_update_refusal(base));
+        }
+        let relisted = run_git(
+            Some(repo_path),
+            &["worktree", "list", "--porcelain"],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        owning_worktree = worktree_holding(&relisted.stdout_lossy(), base);
+        if owning_worktree
+            .as_deref()
+            .is_some_and(crate::git::update_marker::is_update_worktree_path)
+        {
+            return Err(crate::git::update_marker::interrupted_update_refusal(base));
+        }
+    }
 
     if let Some(worktree) = owning_worktree {
         // Route the fast-forward INTO the worktree holding `base` so its index and

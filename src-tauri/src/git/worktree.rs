@@ -153,10 +153,17 @@ pub async fn git_worktree_list(repo_path: String) -> AppResult<Vec<WorktreeInfo>
 /// `true` when the prune ran.
 pub(crate) async fn prune_worktrees_if_free(state: &AppState, repo_path: &str) -> bool {
     let domain = state.worktree_admin_lock(repo_path).await;
-    let Some(_guard) = try_acquire_repo_lock(&domain, "a worktree operation") else {
+    let Some(guard) = try_acquire_repo_lock(&domain, "a worktree operation") else {
         return false;
     };
     let _ = run_git(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    // Released before the sweep is fired, and the sweep detached: it heals what prune
+    // cannot (an interrupted update's checkout is never prunable, still holds a branch,
+    // and is filtered from every listing), but removing one runs for minutes, which
+    // this read must never wait on — and a task spawned under our own hold would lose
+    // its try-acquire to us and do nothing.
+    drop(guard);
+    crate::git::update_marker::spawn_orphan_sweep(state, repo_path).await;
     true
 }
 
@@ -264,6 +271,12 @@ pub async fn git_worktree_add_user(
     if new_branch {
         args.extend_from_slice(&["-b", branch, path, base]);
     } else {
+        // Existing-branch arm only: `-b` creates the name, so a collision there is
+        // already git's clear "already exists". Here the branch may be held by an
+        // update's hidden checkout, which git names by an app-data path. Heal-free:
+        // the `worktree add` below takes the admin domain, and a sweep fired here
+        // would win it first and turn a would-succeed add into a `Busy`.
+        crate::git::update_marker::refuse_if_branch_updating_no_heal(&repo_path, branch)?;
         args.extend_from_slice(&[path, branch]);
     }
     run_git_worktree_admin(&state, &repo_path, &args, WORKTREE_OP_TIMEOUT).await?;

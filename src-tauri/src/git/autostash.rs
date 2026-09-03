@@ -368,6 +368,9 @@ pub(crate) async fn git_switch_autostash_core(
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a checkout").await?;
     crate::git::ops::refuse_mid_op(&repo_path).await?;
+    // Ahead of the stash: the switch would fail on the update's hold anyway, after
+    // pushing and popping the user's changes for nothing.
+    crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &name).await?;
 
     let stashed = autostash_push(&repo_path).await?;
     let args: Vec<&str> = match &tracking {

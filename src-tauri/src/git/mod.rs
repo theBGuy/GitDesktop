@@ -19,4 +19,5 @@ pub mod status;
 pub mod submodule;
 pub mod todos;
 pub mod types;
+pub mod update_marker;
 pub mod worktree;
