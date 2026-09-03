@@ -468,7 +468,7 @@ async fn runtime_for_build() -> AppResult<PathBuf> {
     match pick_runtime().await {
         RuntimePick::WithImage(bin, _) | RuntimePick::ReadyNoImage(bin, _) => Ok(bin),
         RuntimePick::NotReady(_, name) => Err(AppError::Command(format!(
-            "{} is installed but its engine isn't running. Start it and try again.",
+            "{} is installed but its engine isn't running. Start it, then try again.",
             runtime_label(&name)
         ))),
         RuntimePick::Missing => Err(AppError::Command(

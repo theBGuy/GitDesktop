@@ -187,10 +187,9 @@ function BlameCommitCell({
   // Built once: the latch compares rows by this object's identity, so it has to
   // outlive every render.
   const [card] = useState<CardOwner>(() => ({ setOpen }));
-  const whenIso =
-    line.time && validEpochMs(line.time * 1000)
-      ? new Date(line.time * 1000).toISOString()
-      : "";
+  const whenIso = validEpochMs(line.time * 1000)
+    ? new Date(line.time * 1000).toISOString()
+    : "";
 
   // The virtualizer evicts rows mid-dwell, and an evicted row that still held
   // the latch would tear down whichever card claims it next. Release only — a

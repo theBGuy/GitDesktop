@@ -1060,9 +1060,13 @@ export function SessionComposer({
         }}
         estimate={costEstimate}
         // Only a containerized run can fail on image membership; undefined means
-        // the arms run on the host, where every agent is fair game.
+        // the arms run on the host, where every agent is fair game — or settings
+        // never loaded (an errored load doesn't hold submit), where a defined []
+        // would falsely flag every arm.
         imageAgents={
-          isContainer ? (settings.data?.agentImageProviders ?? []) : undefined
+          isContainer && settings.data
+            ? (settings.data.agentImageProviders ?? [])
+            : undefined
         }
         onRun={runEnsemble}
       />

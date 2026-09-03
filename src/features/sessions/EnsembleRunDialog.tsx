@@ -53,7 +53,8 @@ export function EnsembleRunDialog({
   seed: EnsembleArm;
   estimate: RunCostEstimate;
   /** Agent CLIs the saved image config bakes in — set ONLY when this run starts
-   *  containerized; `undefined` (worktree isolation) means no arm can miss. */
+   *  containerized AND settings resolved; `undefined` (worktree isolation, or an
+   *  unknown config) means no arm can be judged, so none warns. */
   imageAgents?: readonly AgentKind[];
   onRun: (arms: EnsembleArm[]) => void;
 }) {
