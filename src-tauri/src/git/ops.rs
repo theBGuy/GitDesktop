@@ -2692,16 +2692,16 @@ async fn finalize_base(
         return Ok(());
     }
 
-    // Is `base` checked out in some OTHER worktree? `paths` and `branches` come
-    // from the same porcelain stanzas in list order, so they line up per stanza.
-    // Our resolve worktree is detached, so it never carries `base` as a branch and
-    // is safely excluded.
+    use crate::git::update_marker::{self as marker, LockProbe};
+
     // An update that has minted its marker but not yet registered its checkout is
     // invisible to the porcelain read below, so the marker covers that half of the
     // window and the arm below covers it once registered. Heal-free: this call's own
     // continuation takes the admin domain to tear the resolve worktree down.
-    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, base)?;
+    marker::refuse_if_branch_updating_no_heal(repo_path, base)?;
 
+    // Is `base` checked out in some OTHER worktree? Our resolve worktree is detached,
+    // so it never carries `base` as a branch and is safely excluded.
     let listed = run_git(
         Some(repo_path),
         &["worktree", "list", "--porcelain"],
@@ -2713,24 +2713,16 @@ async fn finalize_base(
     // An update's hidden checkout is never a fast-forward target: advancing `base`
     // under a running update moves the branch it pinned and kills it at its pin verify.
     // Only a HELD lock refuses and only a RELEASED one authorizes the age-free removal;
-    // a marker that proves neither leaves this routing exactly as it was before markers
+    // a marker that proves neither — and any `gd-update-*` worktree outside our own
+    // root, which is the user's — leaves this routing exactly as it was before markers
     // existed, which the update's own pin verify already makes data-safe.
-    if let Some(holder) = owning_worktree
-        .as_deref()
-        .filter(|w| crate::git::update_marker::is_update_worktree_path(w))
-        .map(str::to_string)
-    {
-        match crate::git::update_marker::update_worktree_probe(&holder) {
-            crate::git::update_marker::LockProbe::Live => {
-                return Err(crate::git::update_marker::branch_update_refusal(base));
-            }
-            crate::git::update_marker::LockProbe::Released => {
-                if !crate::git::update_marker::claim_dead_update_worktree(
-                    state, repo_path, &holder,
-                )
-                .await
-                {
-                    return Err(crate::git::update_marker::interrupted_update_refusal(base));
+    let managed = |w: &&str| marker::is_managed_update_worktree(repo_path, w);
+    if let Some(holder) = owning_worktree.as_deref().filter(managed).map(str::to_string) {
+        match marker::update_worktree_probe(&holder) {
+            LockProbe::Live => return Err(marker::branch_update_refusal(base)),
+            LockProbe::Released => {
+                if !marker::claim_dead_update_worktree(state, repo_path, &holder).await {
+                    return Err(marker::interrupted_update_refusal(base));
                 }
                 let relisted = run_git(
                     Some(repo_path),
@@ -2742,26 +2734,17 @@ async fn finalize_base(
                 // Another update may hold `base` by now. Same rule as above, so each
                 // message stays true: a held lock says running, a released one says
                 // interrupted, and an unprovable one routes as it always did.
-                if let Some(next) = owning_worktree
-                    .as_deref()
-                    .filter(|w| crate::git::update_marker::is_update_worktree_path(w))
-                {
-                    match crate::git::update_marker::update_worktree_probe(next) {
-                        crate::git::update_marker::LockProbe::Live => {
-                            return Err(crate::git::update_marker::branch_update_refusal(base));
+                if let Some(next) = owning_worktree.as_deref().filter(managed) {
+                    match marker::update_worktree_probe(next) {
+                        LockProbe::Live => return Err(marker::branch_update_refusal(base)),
+                        LockProbe::Released => {
+                            return Err(marker::interrupted_update_refusal(base))
                         }
-                        crate::git::update_marker::LockProbe::Released => {
-                            return Err(crate::git::update_marker::interrupted_update_refusal(
-                                base,
-                            ));
-                        }
-                        crate::git::update_marker::LockProbe::Missing
-                        | crate::git::update_marker::LockProbe::Unknown => {}
+                        LockProbe::Missing | LockProbe::Unknown => {}
                     }
                 }
             }
-            crate::git::update_marker::LockProbe::Missing
-            | crate::git::update_marker::LockProbe::Unknown => {}
+            LockProbe::Missing | LockProbe::Unknown => {}
         }
     }
 
@@ -9805,5 +9788,44 @@ detached
 
         assert!(created);
         assert_eq!(stash_count(&repo).await, 1);
+    }
+
+    /// A local-PR merge must never advance `base` while an update holds it. The marker
+    /// alone is the signal in the PRE-ADD window — nothing is in `worktree list` yet —
+    /// so `finalize_base` has to refuse before it reads the porcelain at all.
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn finalize_base_refuses_while_an_update_holds_the_base_branch() {
+        use crate::git::update_marker as marker;
+        let (dir, repo) = setup_repo("finalize-update-guard").await;
+        git(&repo, &["branch", "feature"]).await;
+        let tip = rev(&repo, "refs/heads/feature").await;
+        let root = dir.path().join("gd-worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let _serialized = marker::test_root_lock();
+        let _override = marker::TestRootOverride::set(&root);
+        let _live = marker::UpdateMarker::create_for(&root.join("gd-update-live"), "feature")
+            .expect("the marker mints");
+
+        let state = AppState::default();
+        let current = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let err = finalize_base(&state, &repo, "feature", &tip, &current, Some(&tip))
+            .await
+            .expect_err("advancing a branch an update is merging is refused");
+        assert_eq!(
+            err.to_string(),
+            marker::branch_update_refusal("feature").to_string()
+        );
+        assert_eq!(
+            rev(&repo, "refs/heads/feature").await,
+            tip,
+            "and the branch is exactly where it was"
+        );
     }
 }

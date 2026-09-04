@@ -328,7 +328,9 @@ async fn clear_update_holder(
     holder: &str,
 ) -> AppResult<bool> {
     use crate::git::update_marker::{self as marker, LockProbe};
-    if !marker::is_update_worktree_path(holder) {
+    // Root-scoped: a `gd-update-*` worktree the USER made, outside our app-data root, is
+    // their own and takes the ordinary path however its neighbours look.
+    if !marker::is_managed_update_worktree(repo_path, holder) {
         return Ok(false);
     }
     match marker::update_worktree_probe(holder) {
@@ -1332,13 +1334,20 @@ async fn merge_diverged_in_worktree(
     pins: &UpdatePins,
     marker: Option<crate::git::update_marker::UpdateMarker>,
 ) -> AppResult<String> {
-    run_git_worktree_admin(
+    // A killed add can still leave a registered entry over a partial directory, so its
+    // early return settles the marker rather than dropping it: the checkout it may have
+    // left behind needs a recoverable marker exactly as much as a finished one does.
+    if let Err(e) = run_git_worktree_admin(
         state,
         repo_path,
         &["worktree", "add", "--quiet", tmp, branch],
         WORKTREE_OP_TIMEOUT,
     )
-    .await?;
+    .await
+    {
+        settle_marker(marker, tmp);
+        return Err(e);
+    }
 
     let result = verify_pin_and_merge(state, repo_path, tmp, branch, base, pins).await;
 
@@ -1347,25 +1356,37 @@ async fn merge_diverged_in_worktree(
     // unbounded one holds a finished update's command hostage for the minutes a
     // node_modules-scale removal can hold the shared admin domain. On both arms the
     // marker outlives the checkout, since the branch stays held until the directory is
-    // gone; a quit or crash leaks that directory with its marker dead beside it, which
-    // the orphan sweep claims once it ages out.
+    // gone, and `settle_marker` keeps it on disk when the removal did not finish. A
+    // quit or crash leaks the directory with its marker still beside it — released, so
+    // the next branch operation clears it without waiting out the age gate.
     let domain = state.worktree_admin_lock(repo_path).await;
     match try_acquire_repo_lock(&domain, "a worktree operation") {
         Some(_admin) => {
             remove_tmp_worktree(repo_path, tmp).await;
-            drop(marker);
+            settle_marker(marker, tmp);
         }
         None => {
             let (repo, tmp) = (repo_path.to_string(), tmp.to_string());
             tauri::async_runtime::spawn(async move {
                 let _admin = acquire_repo_lock_unbounded(&domain, "a worktree operation").await;
                 remove_tmp_worktree(&repo, &tmp).await;
-                drop(marker);
+                settle_marker(marker, &tmp);
             });
         }
     }
 
     result
+}
+
+/// Drops `marker` after a teardown attempt. Its files go only when the checkout is
+/// confirmed gone; a surviving directory keeps them, unlocked, so the age-free claims
+/// can recover it on the next branch operation. Deleting them there would leave a
+/// markerless holder instead, which nothing may clear until the age gate expires.
+fn settle_marker(marker: Option<crate::git::update_marker::UpdateMarker>, tmp: &str) {
+    let Some(mut marker) = marker else { return };
+    if std::path::Path::new(tmp).exists() {
+        marker.retain_for_recovery();
+    }
 }
 
 /// `worktree remove --force` then `prune`, both best-effort and both lock-free: every
@@ -1549,7 +1570,8 @@ mod tests {
     use super::{
         branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args,
         divergence_out_of_range, git_branch_merge_states, git_branches, git_create_branch_core,
-        git_default_branch, git_rename_branch_core, merge_diverged_in_worktree,
+        git_default_branch, git_delete_branch_core, git_rename_branch_core,
+        merge_diverged_in_worktree,
         parse_cherry_counts, parse_upstream_track, update_branch_from, update_worktree_path,
         validate_branch_name, validate_ref_name, BranchRewriteStatus, MergePair, UpdatePins,
     };
@@ -3339,5 +3361,131 @@ mod tests {
             "git's own merge subject survives: {subject}"
         );
         assert!(!tmp.exists(), "the throwaway worktree is torn down");
+    }
+
+    /// A repo with `feature` tracking `master` through the local `.` remote, so
+    /// `feature@{upstream}` resolves without a network or a second repo. Returns the
+    /// temp guard, the repo path, the default branch name, and its tip.
+    async fn repo_with_local_upstream(tag: &str) -> (tempfile::TempDir, String, String, String) {
+        let (guard, base_dir) = temp_base(tag);
+        let repo = base_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        let main = run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["branch", "feature"]).await;
+        run(&repo_s, &["config", "branch.feature.remote", "."]).await;
+        run(
+            &repo_s,
+            &["config", "branch.feature.merge", &format!("refs/heads/{main}")],
+        )
+        .await;
+        let tip = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+        (guard, repo_s, main, tip)
+    }
+
+    /// The PRE-ADD window: an update has minted its marker but its `worktree add` has
+    /// not registered anything yet, so `worktree list` is empty. Both porcelain-only
+    /// sites must still refuse — without this guard a delete succeeds here and the
+    /// update dies moments later on a missing ref.
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_live_marker_refuses_delete_and_reset_before_the_checkout_exists() {
+        use crate::git::update_marker as marker;
+        let (_guard, repo_s, _main, tip) = repo_with_local_upstream("premint-guard").await;
+        let root = std::path::Path::new(&repo_s)
+            .parent()
+            .unwrap()
+            .join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let _serialized = marker::test_root_lock();
+        let _override = marker::TestRootOverride::set(&root);
+        // Minted, not yet added: nothing is in the worktree registry.
+        let _live = marker::UpdateMarker::create_for(&root.join("gd-update-live"), "feature")
+            .expect("the marker mints");
+
+        let state = AppState::default();
+        let expected = marker::branch_update_refusal("feature").to_string();
+        let deleted = git_delete_branch_core(&state, repo_s.clone(), "feature".into())
+            .await
+            .expect_err("a delete during the pre-add window is refused");
+        assert_eq!(deleted.to_string(), expected);
+        let reset = branch_reset_to_upstream(&state, &repo_s, "feature", &tip)
+            .await
+            .expect_err("a reset during the pre-add window is refused");
+        assert_eq!(reset.to_string(), expected);
+        assert!(
+            !run(&repo_s, &["branch", "--list", "feature"])
+                .await
+                .trim()
+                .is_empty(),
+            "and the branch is still there"
+        );
+    }
+
+    /// The post-add half, both outcomes. A RELEASED marker over a registered checkout is
+    /// claimed age-free and the delete then succeeds; a MARKERLESS one (a pre-marker
+    /// build's checkout, which may still be running) is left alone and takes the
+    /// pre-existing generic message naming the holding worktree.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_registered_holder_is_claimed_when_released_and_left_when_markerless() {
+        use crate::git::update_marker as marker;
+        let (_guard, repo_s, _main, _tip) = repo_with_local_upstream("registered-holder").await;
+        let root = std::path::Path::new(&repo_s)
+            .parent()
+            .unwrap()
+            .join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let _serialized = marker::test_root_lock();
+        let _override = marker::TestRootOverride::set(&root);
+        let state = AppState::default();
+
+        // MARKERLESS: registered, no sidecars — the generic message, unchanged.
+        let bare = root.join("gd-update-premarker");
+        let bare_s = bare.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "--quiet", &bare_s, "feature"]).await;
+        let err = git_delete_branch_core(&state, repo_s.clone(), "feature".into())
+            .await
+            .expect_err("a markerless holder still blocks the delete");
+        assert!(
+            err.to_string().starts_with("feature is checked out in the worktree at")
+                && err.to_string().ends_with(
+                    "(or switch it to another branch) before deleting feature."
+                ),
+            "the pre-marker path keeps its original wording: {err}"
+        );
+        assert!(bare.exists(), "and its checkout is untouched");
+        run(&repo_s, &["worktree", "remove", "--force", &bare_s]).await;
+
+        // RELEASED: registered, sidecars present, lock free — claimed with no age gate.
+        let dead = root.join("gd-update-crashed");
+        let dead_s = dead.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "--quiet", &dead_s, "feature"]).await;
+        let mut minted = marker::UpdateMarker::create_for(&dead, "feature").expect("mints");
+        minted.retain_for_recovery();
+        drop(minted);
+
+        git_delete_branch_core(&state, repo_s.clone(), "feature".into())
+            .await
+            .expect("a released holder is cleared and the delete proceeds");
+        assert!(!dead.exists(), "the orphaned checkout was removed");
+        assert!(
+            run(&repo_s, &["branch", "--list", "feature"])
+                .await
+                .trim()
+                .is_empty(),
+            "and the branch it was holding is gone"
+        );
     }
 }

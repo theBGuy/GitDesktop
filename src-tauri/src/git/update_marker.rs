@@ -33,8 +33,10 @@ use crate::git::runner::{
 use crate::state::AppState;
 
 /// The basename prefix every update mint carries (`branches.rs::update_worktree_path`).
-/// The sweep claims on this prefix ALONE, so it must never widen: the same root holds
-/// the user's `gd/session/*` agent worktrees.
+/// It is the NAME filter for every claim and must never widen — the same root holds the
+/// user's `gd/session/*` agent worktrees. It is only the first gate: a claim also has to
+/// pass the root-scope check, the lock probe, and (for the markerless shape) the age
+/// gate before anything is removed.
 const MARKER_PREFIX: &str = "gd-update-";
 
 /// How stale a leftover must be before the sweep claims it. Uniform and generous: the
@@ -45,6 +47,71 @@ const ORPHAN_MIN_AGE: Duration = Duration::from_secs(600);
 /// One detached sweep at a time across the process — the healing pass is best-effort
 /// and idempotent, so a second concurrent run would only contend for the admin domain.
 static SWEEP_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// In-process test override, consulted by [`root_for`] before the real app-data
+/// resolution — the ONLY seam a test may use to reach this module's entry points
+/// (mirrors [`crate::local_issues`]'s; never process env, which races parallel tests'
+/// env reads).
+#[cfg(test)]
+static TEST_ROOT_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Serializes the tests that install [`TEST_ROOT_DIR`], since the override is
+/// process-wide. Test-only.
+#[cfg(test)]
+static TEST_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Installs (or clears) the in-process override, returning the previous value so a
+/// caller can restore it. Test-only.
+#[cfg(test)]
+pub(crate) fn swap_test_root_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+    let mut slot = TEST_ROOT_DIR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::replace(&mut *slot, dir)
+}
+
+/// Takes the serializing guard for the process-wide root override. Test-only.
+#[cfg(test)]
+pub(crate) fn test_root_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_ROOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Points this module's root resolution at `dir` for as long as it is held, restoring
+/// the prior override on drop — panics included, so a failing test cannot leave one
+/// standing for whichever test is next through the lock. Test-only.
+#[cfg(test)]
+pub(crate) struct TestRootOverride(Option<PathBuf>);
+
+#[cfg(test)]
+impl TestRootOverride {
+    pub(crate) fn set(dir: &Path) -> Self {
+        Self(swap_test_root_dir(Some(dir.to_path_buf())))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestRootOverride {
+    fn drop(&mut self) {
+        swap_test_root_dir(self.0.take());
+    }
+}
+
+/// The worktree root this module works in. Every entry point resolves through here so a
+/// test can point the whole module at a temp directory; outside tests it is exactly
+/// `ops::worktree_root_dir`.
+fn root_for(repo_path: &str) -> AppResult<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_ROOT_DIR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return Ok(dir);
+    }
+    crate::git::ops::worktree_root_dir(repo_path)
+}
 
 /// The marker manifest. Plain readable JSON so a probe in another process can answer
 /// "which branch?" while the update still holds the lock beside it.
@@ -94,6 +161,8 @@ pub(crate) struct UpdateMarker {
     /// The locked handle. `Option` only so `Drop` can close it BEFORE the deletes:
     /// Windows refuses to unlink a file with an open handle.
     handle: Option<std::fs::File>,
+    /// When cleared, `Drop` releases the lock but LEAVES both sidecars on disk.
+    delete_on_drop: bool,
 }
 
 impl UpdateMarker {
@@ -142,7 +211,19 @@ impl UpdateMarker {
             json_path,
             lock_path,
             handle: Some(file),
+            delete_on_drop: true,
         })
+    }
+
+    /// Keeps both sidecars on disk when this marker drops, releasing only the lock.
+    ///
+    /// For a teardown that could not confirm the checkout is gone: deleting the sidecars
+    /// there would turn a surviving directory into the `Missing` shape, which no
+    /// age-free claim may touch and which therefore sits holding its branch until the
+    /// age gate expires. Retained, it is a `Released` marker the very next branch
+    /// operation can clear.
+    pub(crate) fn retain_for_recovery(&mut self) {
+        self.delete_on_drop = false;
     }
 }
 
@@ -150,6 +231,9 @@ impl Drop for UpdateMarker {
     fn drop(&mut self) {
         // Closing releases the lock and, on Windows, is what makes the unlink legal.
         drop(self.handle.take());
+        if !self.delete_on_drop {
+            return;
+        }
         let _ = std::fs::remove_file(&self.lock_path);
         let _ = std::fs::remove_file(&self.json_path);
     }
@@ -179,10 +263,18 @@ pub(crate) enum LockProbe {
 }
 
 /// Probes the marker lock at `lock_path`.
+///
+/// SHARED, not exclusive: an exclusive probe excludes other PROBES, so two running
+/// concurrently would have one read `WouldBlock` and call a dead marker `Live`. A shared
+/// request still blocks against the minter's exclusive hold, which is the only signal
+/// this needs. Two probes may now both read `Released` at once, which is harmless —
+/// every destructive path re-probes under the worktree-admin domain, and
+/// `remove_update_leftover` is idempotent.
 fn probe_lock(lock_path: &Path) -> LockProbe {
     match std::fs::File::open(lock_path) {
-        // The probe's own acquisition is released when `file` closes at end of scope.
-        Ok(file) => match file.try_lock() {
+        // The probe's own SHARED acquisition is released when `file` closes at end of
+        // scope.
+        Ok(file) => match file.try_lock_shared() {
             Ok(()) => LockProbe::Released,
             Err(std::fs::TryLockError::WouldBlock) => LockProbe::Live,
             Err(std::fs::TryLockError::Error(_)) => LockProbe::Unknown,
@@ -209,10 +301,33 @@ pub(crate) fn is_update_worktree_path(path: &str) -> bool {
         .is_some_and(|name| name.starts_with(MARKER_PREFIX))
 }
 
-/// The lock state of the `gd-update-*` checkout at `path`. Every caller needs all four
-/// answers apart — `Live` refuses, `Released` claims, and `Missing`/`Unknown` prove
-/// nothing and behave exactly as if markers did not exist — so this replaces the
-/// is-live predicate a two-state probe could afford. An unusable path reads `Unknown`.
+/// Whether `path` is an update checkout THIS app manages for `repo_path`: the mint
+/// basename AND a parent that is the repo's own worktree root. The root scope is what
+/// keeps a user's own worktree that merely happens to be named `gd-update-*` — with
+/// some stray unlocked `.lock` beside it — out of every marker arm, refusal and
+/// removal alike.
+///
+/// Compared through the repo's two path spellings (`canonical_wt_path` resolves
+/// symlinks and Windows short names, `normalize_wt_path` is the second chance for a
+/// path that no longer exists), since porcelain prints resolved paths while the root is
+/// app-built. Any resolution failure answers `false`: cleanup fails CLOSED.
+pub(crate) fn is_managed_update_worktree(repo_path: &str, path: &str) -> bool {
+    use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
+    if !is_update_worktree_path(path) {
+        return false;
+    }
+    let (Ok(root), Some(parent)) = (root_for(repo_path), Path::new(path).parent()) else {
+        return false;
+    };
+    let (parent, root) = (parent.to_string_lossy(), root.to_string_lossy());
+    canonical_wt_path(&parent) == canonical_wt_path(&root)
+        || normalize_wt_path(&parent) == normalize_wt_path(&root)
+}
+
+/// The lock state of the `gd-update-*` checkout at `path`. Callers match on all four
+/// answers rather than a predicate: `Live` refuses, `Released` claims, and
+/// `Missing`/`Unknown` prove nothing and behave exactly as if markers did not exist.
+/// An unusable path reads `Unknown`.
 pub(crate) fn update_worktree_probe(path: &str) -> LockProbe {
     match sidecar(Path::new(path), "lock") {
         Some(lock) => probe_lock(&lock),
@@ -221,7 +336,7 @@ pub(crate) fn update_worktree_probe(path: &str) -> LockProbe {
 }
 
 /// One scan of a worktree root's markers.
-pub(crate) struct RefuseOutcome {
+struct RefuseOutcome {
     /// The ready-to-return refusal, when a LIVE update matches the query.
     pub(crate) refusal: Option<AppError>,
     /// A dead marker was seen — its leftovers are worth sweeping.
@@ -235,7 +350,7 @@ pub(crate) struct RefuseOutcome {
 /// Deliberately liveness-only in `None` mode: an unreadable manifest still proves an
 /// update is running, and that mode needs nothing else. In branch mode the manifest is
 /// the match, so an unreadable one fails open.
-pub(crate) fn refuse_in(root: &Path, branch: Option<&str>) -> RefuseOutcome {
+fn refuse_in(root: &Path, branch: Option<&str>) -> RefuseOutcome {
     let mut outcome = RefuseOutcome {
         refusal: None,
         saw_dead: false,
@@ -300,7 +415,7 @@ pub(crate) async fn refuse_if_any_updating(state: &AppState, repo_path: &str) ->
 /// the worktree-admin domain: a detached sweep fired here would win that domain by
 /// milliseconds and turn an operation that would have succeeded into a `Busy`.
 pub(crate) fn refuse_if_branch_updating_no_heal(repo_path: &str, branch: &str) -> AppResult<()> {
-    let Ok(root) = crate::git::ops::worktree_root_dir(repo_path) else {
+    let Ok(root) = root_for(repo_path) else {
         return Ok(());
     };
     match refuse_in(&root, Some(branch)).refusal {
@@ -310,7 +425,7 @@ pub(crate) fn refuse_if_branch_updating_no_heal(repo_path: &str, branch: &str) -
 }
 
 async fn refuse_and_heal(state: &AppState, repo_path: &str, branch: Option<&str>) -> AppResult<()> {
-    let Ok(root) = crate::git::ops::worktree_root_dir(repo_path) else {
+    let Ok(root) = root_for(repo_path) else {
         return Ok(());
     };
     let outcome = refuse_in(&root, branch);
@@ -361,12 +476,16 @@ pub(crate) async fn spawn_orphan_sweep(state: &AppState, repo_path: &str) {
 /// registered holder means a pre-marker binary minted it, and such a binary can still
 /// be running the update right now (a stale MCP-server exe beside a rebuilt GUI), so it
 /// is refused here and left to the age-gated background sweep.
+///
+/// Root-scoped: only a checkout directly under THIS repo's app-data worktree root is
+/// ours to force-remove. A user's own worktree that happens to be named `gd-update-*`
+/// is never touched, whatever sits beside it.
 pub(crate) async fn claim_dead_update_worktree(
     state: &AppState,
     repo_path: &str,
     holder: &str,
 ) -> bool {
-    if !is_update_worktree_path(holder) {
+    if !is_managed_update_worktree(repo_path, holder) {
         return false;
     }
     let path = Path::new(holder);
@@ -402,7 +521,7 @@ pub(crate) async fn claim_dead_update_worktree(
 /// markerless checkout is never claimed here. No porcelain read is needed — the lock
 /// file alone carries the proof.
 pub(crate) async fn claim_dead_updates_for_branch(state: &AppState, repo_path: &str, branch: &str) {
-    let Ok(root) = crate::git::ops::worktree_root_dir(repo_path) else {
+    let Ok(root) = root_for(repo_path) else {
         return;
     };
     // Nothing to heal is the overwhelmingly common case; answer it without paying for
@@ -472,7 +591,7 @@ pub(crate) async fn sweep_orphaned_update_worktrees(state: &AppState, repo_path:
 /// `run_git_worktree_admin` would re-acquire it and deadlock, so the runners here are
 /// the lock-free ones, exactly as `branches.rs::remove_tmp_worktree` does.
 async fn sweep_update_orphans_locked(repo_path: &str) {
-    let Ok(root) = crate::git::ops::worktree_root_dir(repo_path) else {
+    let Ok(root) = root_for(repo_path) else {
         return;
     };
     sweep_in(repo_path, &root, ORPHAN_MIN_AGE).await;
@@ -511,8 +630,11 @@ async fn remove_update_leftover(repo_path: &str, root: &Path, stem: &str) {
 
 /// The claim decision: which `gd-update-<stem>` leftovers under `root` a sweep may
 /// take. Three conditions, all required — the basename prefix (this root also holds
-/// the user's agent-session worktrees, and a mis-claim would delete one), a dead or
+/// the user's agent-session worktrees, and a mis-claim would delete one), a released or
 /// absent lock, and an age past `min_age`. Anything unreadable is left alone.
+///
+/// The two shapes measure age from different things, because for a markerless checkout
+/// the sidecars that would carry a mint time do not exist (see [`stem_age`]).
 fn orphaned_update_stems(root: &Path, min_age: Duration) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -545,31 +667,55 @@ fn orphaned_update_stems(root: &Path, min_age: Duration) -> Vec<String> {
     let now = SystemTime::now();
     candidates
         .into_iter()
-        // `Missing` is claimable HERE and nowhere else: the age gate is what stands in
-        // for the proof a lock file would have given. `Unknown` and `Live` are spared.
-        .filter(|(stem, _)| {
-            matches!(
-                probe_lock(&root.join(format!("{stem}.lock"))),
-                LockProbe::Released | LockProbe::Missing
-            )
+        .filter_map(|(stem, paths)| {
+            // `Missing` is claimable HERE and nowhere else: the age gate is what stands
+            // in for the proof a lock file would have given. `Unknown` and `Live` are
+            // spared.
+            let probe = probe_lock(&root.join(format!("{stem}.lock")));
+            if !matches!(probe, LockProbe::Released | LockProbe::Missing) {
+                return None;
+            }
+            let age = stem_age(root, &stem, &probe, &paths, now)?;
+            (age >= min_age).then_some(stem)
         })
-        .filter(|(_, paths)| {
-            // The NEWEST mtime of anything the stem owns: the most recent sign of life
-            // is what has to be old, not the oldest.
-            newest_mtime(paths)
-                .is_some_and(|m| now.duration_since(m).unwrap_or(Duration::ZERO) >= min_age)
-        })
-        .map(|(stem, _)| stem)
         .collect()
 }
 
-/// The latest mtime among `paths`, or `None` when none of them can be read — which
-/// leaves the entry unclaimed, the safe direction.
-fn newest_mtime(paths: &[PathBuf]) -> Option<SystemTime> {
-    paths
+/// How long ago a stem last showed a sign of life. `None` whenever nothing readable can
+/// answer, which leaves it unclaimed — the safe direction in every shape.
+///
+/// A marker-bearing (`Released`) stem measures from its own files: the sidecars are
+/// written at mint time and never rewritten, so their mtime IS the update's start.
+///
+/// A markerless checkout has no such file, and its directory's mtime cannot stand in —
+/// a directory's mtime does not move when git writes inside its SUBdirectories, so a
+/// pre-marker binary's hours-long merge would read as untouched and be force-removed
+/// mid-flight. It measures from the worktree's own git activity instead, via the
+/// worktree manager's probe: the `index` (HEAD as fallback) inside the admin directory
+/// its `.git` pointer names, which git rewrites on checkout, merge and commit alike.
+/// Following the pointer also sidesteps guessing the admin directory's name, which git
+/// de-duplicates. A checkout with no readable git state answers `None`.
+fn stem_age(
+    root: &Path,
+    stem: &str,
+    probe: &LockProbe,
+    paths: &[PathBuf],
+    now: SystemTime,
+) -> Option<Duration> {
+    let dir = root.join(stem);
+    if *probe == LockProbe::Missing && dir.is_dir() {
+        let ms = crate::git::worktree::worktree_last_activity_ms(&dir.to_string_lossy())?;
+        let last =
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(u64::try_from(ms).ok()?))?;
+        return Some(now.duration_since(last).unwrap_or(Duration::ZERO));
+    }
+    // The NEWEST mtime of anything the stem owns: the most recent sign of life is what
+    // has to be old, not the oldest.
+    let newest = paths
         .iter()
         .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok())
-        .max()
+        .max()?;
+    Some(now.duration_since(newest).unwrap_or(Duration::ZERO))
 }
 
 #[cfg(test)]
@@ -705,7 +851,9 @@ mod tests {
         let live = UpdateMarker::create_for(&root.join("gd-update-busy"), "feature")
             .expect("the live marker mints");
 
-        // A pre-marker build's orphan: the checkout with no marker at all.
+        // A pre-marker build's orphan: the checkout with no marker at all. This bare
+        // directory has no git state, so no activity signal can be read from it — and
+        // the markerless shape claims only on that signal.
         std::fs::create_dir_all(root.join("gd-update-markerless")).unwrap();
 
         // The marker pair whose checkout is already gone.
@@ -720,12 +868,9 @@ mod tests {
         claimed.sort();
         assert_eq!(
             claimed,
-            vec![
-                "gd-update-dead".to_string(),
-                "gd-update-markerless".to_string(),
-                "gd-update-pruned".to_string(),
-            ],
-            "a live marker and every non-mint basename are spared"
+            vec!["gd-update-dead".to_string(), "gd-update-pruned".to_string()],
+            "a live marker, every non-mint basename, and a checkout whose activity \
+             cannot be read are all spared"
         );
 
         assert!(
@@ -846,10 +991,10 @@ mod tests {
         drop(live);
     }
 
-    /// The three-state probe. `Unknown` is the arm that matters: it must never read as
-    /// dead, because only `Dead` authorizes a removal.
+    /// All four probe states. `Missing` and `Unknown` are the arms that matter: neither
+    /// may read as released, because only `Released` authorizes an age-free removal.
     #[test]
-    fn the_lock_probe_separates_live_dead_and_unreadable() {
+    fn the_lock_probe_separates_all_four_states() {
         let (_guard, root) = temp_root("probe");
         let marker = UpdateMarker::create_for(&root.join("gd-update-held"), "feature")
             .expect("the marker mints");
@@ -1018,11 +1163,132 @@ mod tests {
         );
         assert!(orphan.exists(), "and its checkout is left untouched");
 
-        // The age-gated sweep is the ONLY thing that may claim it.
+        // Nor does the background sweep take it on this fixture: a bare directory has no
+        // git state, and the markerless shape is claimable only off an activity signal.
+        assert!(
+            orphaned_update_stems(&root, Duration::ZERO).is_empty(),
+            "an unreadable checkout is never claimed, at any age"
+        );
+    }
+
+    /// A teardown that could not remove the checkout must leave the marker RECOVERABLE:
+    /// sidecars retained and unlocked, i.e. `Released`, so the next branch operation
+    /// clears it age-free. Deleting them there would leave a markerless holder that
+    /// nothing may touch until the age gate expires.
+    #[test]
+    fn a_failed_teardown_retains_the_marker_as_released() {
+        let (_guard, root) = temp_root("retain");
+        let dir = root.join("gd-update-stuck");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut marker = UpdateMarker::create_for(&dir, "feature").expect("the marker mints");
+        assert_eq!(
+            probe_lock(&root.join("gd-update-stuck.lock")),
+            LockProbe::Live
+        );
+
+        // The teardown could not confirm the directory was gone.
+        marker.retain_for_recovery();
+        drop(marker);
+
+        assert!(
+            root.join("gd-update-stuck.lock").exists()
+                && root.join("gd-update-stuck.json").exists(),
+            "both sidecars survive a failed teardown"
+        );
+        assert_eq!(
+            probe_lock(&root.join("gd-update-stuck.lock")),
+            LockProbe::Released,
+            "and the lock is released, so a claim can recover it immediately"
+        );
+        assert_eq!(
+            dead_stems_for_branch(&root, "feature"),
+            vec!["gd-update-stuck".to_string()],
+            "the age-free branch claim picks it up with no waiting"
+        );
+    }
+
+    /// Root scope: a `gd-update-*` worktree the USER made, outside our app-data root, is
+    /// theirs. Even with a stray unlocked `.lock` beside it — which would otherwise read
+    /// `Released` — no marker arm may claim or refuse on it.
+    #[test]
+    fn a_user_worktree_outside_the_root_is_never_managed() {
+        let (_guard, base) = temp_root("scope");
+        let root = base.join("worktrees");
+        let elsewhere = base.join("user-repos");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        let _serialized = test_root_lock();
+        let _override = TestRootOverride::set(&root);
+        let repo = "C:/repos/app";
+
+        let mine = root.join("gd-update-1-2");
+        std::fs::create_dir_all(&mine).unwrap();
+        assert!(is_managed_update_worktree(repo, &mine.to_string_lossy()));
+
+        // Same basename, same stray sidecar, different parent.
+        let theirs = elsewhere.join("gd-update-1-2");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(elsewhere.join("gd-update-1-2.lock"), b"").unwrap();
+        assert_eq!(
+            probe_lock(&elsewhere.join("gd-update-1-2.lock")),
+            LockProbe::Released,
+            "the fixture must reproduce the tempting shape"
+        );
+        assert!(
+            !is_managed_update_worktree(repo, &theirs.to_string_lossy()),
+            "a user's own worktree is out of scope however its neighbours look"
+        );
+        // A nested path under our root is not a direct child, so it is not ours either.
+        assert!(!is_managed_update_worktree(
+            repo,
+            &root.join("nested").join("gd-update-1-2").to_string_lossy()
+        ));
+    }
+
+    /// The markerless shape's age gate must read a signal git actually MOVES. A
+    /// directory's own mtime does not change when git writes inside its subdirectories,
+    /// so measuring from it would call a pre-marker binary's hours-long merge idle and
+    /// force-remove it mid-flight. This drives a REAL worktree, where the activity probe
+    /// has something to read.
+    #[tokio::test]
+    async fn a_markerless_checkout_ages_from_its_git_activity() {
+        let (_guard, base) = temp_root("markerless-age");
+        let repo = base.join("repo");
+        let root = base.join("worktrees");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "seed"]).await;
+        git(&repo_s, &["branch", "feature"]).await;
+
+        // A pre-marker binary's checkout: registered, no sidecars anywhere.
+        let wt = root.join("gd-update-premarker");
+        let wt_s = wt.to_string_lossy().into_owned();
+        git(&repo_s, &["worktree", "add", "--quiet", &wt_s, "feature"]).await;
+        assert_eq!(update_worktree_probe(&wt_s), LockProbe::Missing);
+        assert!(
+            crate::git::worktree::worktree_last_activity_ms(&wt_s).is_some(),
+            "the fixture must give the probe an index to read"
+        );
+
+        // Freshly checked out, so at the production gate it reads BUSY, not orphaned —
+        // this is the arm that protects a still-running pre-marker update.
+        assert!(
+            orphaned_update_stems(&root, ORPHAN_MIN_AGE).is_empty(),
+            "a checkout git touched moments ago is never claimed"
+        );
+        // And it stays reachable: with the threshold dropped, the same signal claims it.
         assert_eq!(
             orphaned_update_stems(&root, Duration::ZERO),
             vec!["gd-update-premarker".to_string()],
-            "the background sweep still owns this shape"
+            "the shape still heals once it is genuinely stale"
         );
     }
 }

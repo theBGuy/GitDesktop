@@ -1782,11 +1782,39 @@ pub async fn gh_pr_checkout(
     number: u64,
     lens: Option<String>,
 ) -> AppResult<()> {
-    // Repo-scoped: gh resolves the PR's local branch name, so this side can't know it
-    // before the checkout runs.
-    crate::git::update_marker::refuse_if_any_updating(&state, &repo_path).await?;
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    // Ask gh which branch this PR lands on, so the guard can name it: an update's
+    // window runs to minutes on the diverged path, and a repo-scoped refusal would
+    // block checkouts of every OTHER branch for all of it. Any failure of this extra
+    // read (offline, no such PR, an older gh) falls back to the repo-scoped guard
+    // rather than failing the checkout on a guard's behalf.
+    let head_branch = run_gh(
+        Some(&repo_path),
+        &[
+            "pr",
+            "view",
+            &n,
+            "--repo",
+            &slug,
+            "--json",
+            "headRefName",
+            "-q",
+            ".headRefName",
+        ],
+        GH_TIMEOUT,
+    )
+    .await
+    .ok()
+    .map(|out| out.stdout_lossy().trim().to_string())
+    .filter(|b| !b.is_empty());
+    match head_branch {
+        Some(branch) => {
+            crate::git::update_marker::refuse_if_branch_updating(&state, &repo_path, &branch)
+                .await?
+        }
+        None => crate::git::update_marker::refuse_if_any_updating(&state, &repo_path).await?,
+    }
     run_gh(
         Some(&repo_path),
         &["pr", "checkout", &n, "--repo", &slug],
