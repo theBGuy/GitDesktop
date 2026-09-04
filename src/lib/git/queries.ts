@@ -4790,11 +4790,30 @@ export function useUnrequestChangesPr(repo: string) {
   );
 }
 
+/** Drops one review's unsubmitted line comments from a threads list: whole threads it
+ *  opened, plus its draft replies inside threads someone else opened (a thread carries
+ *  only its FIRST comment's review id). Mirrors `usePrThreadClaims`' pending-draft
+ *  filter, so the optimistic window shows what the reconciling refetch will. */
+function dropReviewDrafts(
+  threads: ReviewThreadOut[],
+  reviewId: string,
+): ReviewThreadOut[] {
+  return threads.flatMap((t) => {
+    if (t.reviewId === reviewId) return [];
+    const comments = t.comments.filter((c) => c.reviewId !== reviewId);
+    if (comments.length === 0) return [];
+    return [comments.length === t.comments.length ? t : { ...t, comments }];
+  });
+}
+
 /** Delete the viewer's unfinished (PENDING) review, dropping it from the cached PR
- *  details optimistically so the notice strip goes at once. Field-scoped rollback:
- *  only the reviews list is captured, so a failed discard doesn't revert a concurrent
- *  assignee/reviewer-set sharing this PR key. GitHub-only — no other provider models
- *  a pending review. */
+ *  details optimistically so the notice strip goes at once. The review-threads cache
+ *  is patched in the same breath: the feed hides that review's drafts by matching them
+ *  against the PENDING review, so dropping only the review would flash the drafts in as
+ *  ordinary comments until the settle refetch lands. Rollback is field-scoped on the
+ *  details key (only `reviews`, so a concurrent assignee-set survives); the threads key
+ *  holds nothing else, so it restores whole. GitHub-only — no other provider models a
+ *  pending review. */
 export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -4802,23 +4821,39 @@ export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
       api.discardPendingReview(repo, args.reviewId),
     onMutate: async (args) => {
       const key = ["repo", repo, "pr", lens, args.number] as const;
-      await queryClient.cancelQueries({ queryKey: key });
+      const threadsKey = prReviewThreadsKey(repo, args.number, lens);
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: key }),
+        queryClient.cancelQueries({ queryKey: threadsKey }),
+      ]);
       const prev = queryClient.getQueryData<PrDetails>(key);
+      const prevThreads =
+        queryClient.getQueryData<ReviewThreadOut[]>(threadsKey);
       queryClient.setQueryData<PrDetails>(key, (d) =>
         d
           ? { ...d, reviews: d.reviews.filter((r) => r.id !== args.reviewId) }
           : d,
       );
-      return { key, prevReviews: prev?.reviews };
+      queryClient.setQueryData<ReviewThreadOut[]>(threadsKey, (list) =>
+        list ? dropReviewDrafts(list, args.reviewId) : list,
+      );
+      return { key, threadsKey, prevReviews: prev?.reviews, prevThreads };
     },
     onError: (_e, _args, ctx) => {
-      const prevReviews = ctx?.prevReviews;
-      const key = ctx?.key;
-      if (prevReviews === undefined || key === undefined) return;
-      queryClient.setQueryData<PrDetails>(key, (cur) =>
-        cur ? { ...cur, reviews: prevReviews } : cur,
-      );
+      if (ctx === undefined) return;
+      // Locals, not `ctx.x`: a property read doesn't stay narrowed inside the
+      // updater closure below.
+      const { key, threadsKey, prevReviews, prevThreads } = ctx;
+      if (prevReviews !== undefined) {
+        queryClient.setQueryData<PrDetails>(key, (cur) =>
+          cur ? { ...cur, reviews: prevReviews } : cur,
+        );
+      }
+      if (prevThreads !== undefined) {
+        queryClient.setQueryData(threadsKey, prevThreads);
+      }
     },
+    // Prefix-matches the threads key too, so one invalidate reconciles both.
     onSettled: (_d, _e, args) =>
       queryClient.invalidateQueries({
         queryKey: ["repo", repo, "pr", lens, args.number],

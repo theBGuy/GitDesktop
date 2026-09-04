@@ -107,7 +107,6 @@ export function PendingReviewStrip({
           disabled={discard.isPending}
           onClick={finishReview}
           title={`Open this pull request on ${remoteLabel} to submit or edit your review`}
-          className="cursor-pointer"
         >
           <ArrowSquareOutIcon data-icon="inline-start" />
           {`Finish on ${remoteLabel}`}

@@ -271,11 +271,13 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 - Multi-toggle settings batch behind a Save/Discard bar (draft + dirty), not
   per-toggle auto-save; a single discrete select may apply-on-change.
 - A stored note/verdict that DESCRIBES form-draft values carries the draft
-  signature it was produced under and renders only while the current signature
-  matches (`testConfig` and `warn` in AiProviderSection, `note` in
-  KeyboardSection) — never clear-at-every-writer: the footer's Discard
-  `form.reset()`s from outside the section, which no in-file clear can reach.
-  Imperative clears only for validity axes the signature can't see (typed input).
+  signature it was produced under — never clear-at-every-writer: the footer's
+  Discard `form.reset()`s from outside the section, which no in-file clear can
+  reach. An advisory NOTICE is retired — state cleared — on the first mismatch,
+  so a draft returning to that signature can't resurrect a dismissed one (`note`
+  in KeyboardSection, `warn` in AllowedHostsField); a VERDICT stays render-gated
+  (`testConfig` in AiProviderSection), being valid again on return. Imperative
+  clears only for validity axes the signature can't see (typed input).
 - Repo-content config features (FUNDING.yml, CODEOWNERS, …) scaffold the
   local file for the user to commit — never write repo content via an API.
 - A mutation whose host can unmount mid-flight (a dialog closable by Esc / ✕ /

@@ -54,6 +54,16 @@ export interface PrThreadClaims {
   claimedThreadIds: Set<string>;
   /** Threads no review claimed — the residual block under the feed. */
   residualThreads: ReviewThreadOut[];
+  /** Every thread that survives the pending-draft filter — the ONE list both the
+   *  Conversation feed and the Files pane's line anchors read, so the viewer's
+   *  unsubmitted drafts can't be hidden on one tab and posted-looking on the other.
+   *  `undefined` (not `[]`) while the read hasn't landed, so a consumer can still
+   *  tell loading from empty. */
+  visibleThreads: ReviewThreadOut[] | undefined;
+  /** {@link visibleThreads}' length, 0 while it's still loading — what the feed can
+   *  actually render, claimed and residual together. The empty state reads this
+   *  rather than the raw query length, which still counts drafts nothing renders. */
+  visibleThreadCount: number;
 }
 
 /**
@@ -78,6 +88,9 @@ export function usePrThreadClaims(
     // read as well, and they stay drafts on GitHub until the review is finished or
     // discarded, so rendering them as ordinary threads would offer Reply and Resolve
     // on comments nobody else can see. The notice strip names the review instead.
+    // Comments are filtered as well as whole threads: a thread carries only its FIRST
+    // comment's review id, so a draft REPLY to an already-submitted thread would ride
+    // through the thread-level test.
     const pendingReviews = all.filter((r) => r.state === "PENDING");
     const renderedReviews = all.filter(
       (r) => r.state !== "PENDING" && (hasVisibleBody(r.body) || r.state),
@@ -87,9 +100,14 @@ export function usePrThreadClaims(
     const pendingIds = new Set(
       pendingReviews.map((r) => r.id).filter((id) => id !== ""),
     );
-    const threads = (reviewThreads ?? []).filter(
-      (t) => !pendingIds.has(t.reviewId),
-    );
+    const threads = (reviewThreads ?? []).flatMap((t) => {
+      if (pendingIds.has(t.reviewId)) return [];
+      const comments = t.comments.filter((c) => !pendingIds.has(c.reviewId));
+      if (comments.length === 0) return [];
+      // Identity preserved when nothing was dropped — the thread objects key and
+      // memoize the rendered rows.
+      return [comments.length === t.comments.length ? t : { ...t, comments }];
+    });
     const threadsByReview = new Map<string, ReviewThreadOut[]>();
     // The thread a wrapper review wraps: the FIRST thread holding a comment whose
     // `reviewId` is that review's — a map rather than a per-row scan over every
@@ -139,6 +157,10 @@ export function usePrThreadClaims(
       wrappedThreadFor,
       claimedThreadIds,
       residualThreads,
+      // The `?? []` above is an internal convenience; the loading arm is preserved
+      // here rather than reported as an empty result.
+      visibleThreads: reviewThreads === undefined ? undefined : threads,
+      visibleThreadCount: threads.length,
     };
   }, [reviews, reviewThreads]);
 }

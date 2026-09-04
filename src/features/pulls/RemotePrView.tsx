@@ -2963,13 +2963,14 @@ export function RemotePrView({
                 onRevealed={() => setRevealThreadId(null)}
               />
               {/* What the FEED holds, not what the payload does: the viewer's own
-                  pending review is carried by the notice strip, so counting it here
-                  would silence this line over an empty feed. */}
+                  pending review and its draft line comments are carried by the notice
+                  strip, so counting either here would silence this line over an empty
+                  feed. */}
               {threadClaims.renderedReviews.length === 0 &&
                 pr.comments.length === 0 &&
                 pr.commits.length === 0 &&
                 !timeline.data?.length &&
-                !reviewThreads.data?.length && (
+                threadClaims.visibleThreadCount === 0 && (
                   <p className="text-xs text-muted-foreground">
                     No activity yet.
                   </p>
@@ -3177,10 +3178,13 @@ export function RemotePrView({
             fileDiff={fileDiff}
             isPending={prDiff.isPending}
             isError={prDiff.isError}
-            // The same threads + handlers/gates the Conversation block uses —
-            // reuse the top-level read/mutations, don't re-fetch. Quoting from a
-            // diff card feeds the view-level composer (persists to Conversation).
-            threads={reviewThreads.data}
+            // The same threads + handlers/gates the Conversation block uses — one
+            // filtered list off the top-level read, not a second fetch, so an
+            // unsubmitted GitHub review's drafts stay out of BOTH tabs rather than
+            // anchoring here as ordinary Reply/Resolve threads. The app's own drafts
+            // arrive separately below, badged. Quoting from a diff card feeds the
+            // view-level composer (persists to Conversation).
+            threads={threadClaims.visibleThreads}
             drafts={drafts.data}
             repoPath={repoPath}
             lens={lens}
