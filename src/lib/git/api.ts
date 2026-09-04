@@ -1442,14 +1442,16 @@ export const gitTodoScan = (
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
   invoke<Record<string, string>>("git_branch_tips", { repoPath, branches });
 
-/** Creates a throwaway detached worktree at `sha` so a repo-aware CLI review
- *  reads the PR head's files without moving the active branch. Returns the
- *  worktree path, or null when one isn't needed/possible (already on that
- *  commit, object not local, or checkout failed) — caller uses the repo root. */
+/** Hands a repo-aware CLI review a detached checkout of `sha` so it reads the
+ *  PR head's files without moving the active branch: one reused worktree per
+ *  repository, or a throwaway mint when that one is unavailable. Returns the
+ *  path, or null when one isn't needed/possible (already on that commit, object
+ *  not local, or both checkouts failed) — caller uses the repo root. */
 export const gitReviewWorktree = (repoPath: string, sha: string) =>
   invoke<string | null>("git_review_worktree", { repoPath, sha });
 
-/** Removes a review worktree (best-effort, idempotent). */
+/** Releases the review workspace: the reused per-repo worktree is unclaimed, a
+ *  throwaway mint is removed. Best-effort, idempotent. */
 export const gitRemoveWorktree = (repoPath: string, worktreePath: string) =>
   invoke<void>("git_remove_worktree", { repoPath, worktreePath });
 

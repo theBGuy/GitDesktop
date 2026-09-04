@@ -730,7 +730,7 @@ async fn git_remove_worktree_core(
     }
     // Admin work on the shared registry: serialized against a branch update's own
     // add/remove, with the same bounded wait every other worktree command takes.
-    let _ = crate::git::runner::run_git_worktree_admin(
+    let removal = crate::git::runner::run_git_worktree_admin(
         state,
         &repo_path,
         &["worktree", "remove", "--force", &worktree_path],
@@ -744,9 +744,15 @@ async fn git_remove_worktree_core(
         DEFAULT_TIMEOUT,
     )
     .await;
+    // A `Busy` removal never reached git, so the registration still stands — deleting
+    // the directory underneath it would mint a prunable entry. Leave both halves for a
+    // later teardown or the husk sweep.
+    if matches!(removal, Err(AppError::Busy { .. })) {
+        return Ok(());
+    }
     // `git worktree remove` deletes the directory itself, but on Windows that
     // recursive delete can lose a handle race (antivirus/indexer still holding the
-    // dir) and leave an EMPTY husk behind — and every result above is discarded, so
+    // dir) and leave an EMPTY husk behind — and the results above are discarded, so
     // it would leak in %TEMP% forever. Finish the delete ourselves, best-effort with
     // a short backoff, GUARDED to the `gd-review-*` temp shape: an unguarded
     // `remove_dir_all` would turn this command into an arbitrary recursive-delete
@@ -843,11 +849,29 @@ fn persistent_review_lock_is_free(lock_path: &std::path::Path) -> bool {
     }
 }
 
+/// A file's mtime as epoch ms, or `None` when it is unreadable.
+fn file_mtime_ms(path: &std::path::Path) -> Option<i64> {
+    let ms = std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    i64::try_from(ms).ok()
+}
+
 /// The testable core of [`sweep_stale_persistent_review_worktrees`], over an explicit
 /// worktrees root so a test never scans real app data. Only `<hash>/gd-review-persistent`
 /// is ever considered — the exact basename, one level down — and only when its git
 /// activity is older than [`PERSISTENT_REVIEW_MAX_IDLE_MS`] AND its sidecar carries no
-/// live claim. An unreadable age proves nothing and skips.
+/// live claim.
+///
+/// Age comes from git activity, falling back to the `.git` pointer file's own mtime:
+/// a checkout whose SOURCE REPO was deleted has an unresolvable admin dir, so without
+/// that fallback its activity reads unknown forever and it could never age out. A live
+/// workspace answers from index/HEAD first, and a mid-review checkout is spared by its
+/// claim regardless.
 ///
 /// No git runs here: the source repo's stale registration is cleaned by its own
 /// `prune_worktrees_if_free`, the same division every other app-data checkout uses.
@@ -864,6 +888,7 @@ fn sweep_stale_persistent_reviews_in(
             continue;
         }
         let Some(last_ms) = crate::git::worktree::worktree_last_activity_ms(&dir.to_string_lossy())
+            .or_else(|| file_mtime_ms(&dir.join(".git")))
         else {
             continue;
         };
@@ -1607,14 +1632,20 @@ mod tests {
         }
     }
 
-    /// Whether `path` is currently registered as a worktree of `repo`.
+    /// Whether `path` is currently registered as a worktree of `repo`, compared in
+    /// BOTH spellings like `update_marker::is_managed_update_worktree_in`: porcelain
+    /// prints RESOLVED paths, so an app-built path never matches on its own where the
+    /// temp root is a symlink (macOS `/var` → `/private/var`) or carries an 8.3 short
+    /// component. The normalized form is the fallback for a path git can't resolve.
     async fn is_registered_worktree(repo: &str, path: &str) -> bool {
+        use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
         let listed = run(repo, &["worktree", "list", "--porcelain"]).await;
-        let wanted = crate::git::worktree::normalize_wt_path(path);
+        let (want_canon, want_norm) = (canonical_wt_path(path), normalize_wt_path(path));
         listed
             .lines()
             .filter_map(|l| l.strip_prefix("worktree "))
-            .any(|p| crate::git::worktree::normalize_wt_path(p.trim()) == wanted)
+            .map(str::trim)
+            .any(|p| canonical_wt_path(p) == want_canon || normalize_wt_path(p) == want_norm)
     }
 
     /// The review workspace is ONE persistent per-repo checkout: a second review at a
@@ -1858,6 +1889,37 @@ mod tests {
         git_remove_worktree_core(&state, repo, reused).await.unwrap();
     }
 
+    /// A persistent path that EXISTS but is not a worktree — a plain directory a
+    /// crash or a half-finished `worktree add` left behind — is torn down and rebuilt
+    /// in place. This is the only route through the demolish arm's `remove_dir_all`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_non_worktree_at_the_persistent_path_is_rebuilt() {
+        let (base, repo, sha1, _sha2) = seed_review_repo("review-rebuild").await;
+        let root = base.path().join("worktrees");
+        let planted = root.join(PERSISTENT_REVIEW_DIR);
+        std::fs::create_dir_all(&planted).unwrap();
+        let debris = planted.join("debris.txt");
+        std::fs::write(&debris, b"not a worktree").unwrap();
+        let _serialized = test_root_lock();
+        let _override = TestRootOverride::set(&root);
+        let state = AppState::default();
+
+        let path = git_review_worktree_core(&state, repo.clone(), sha1.clone())
+            .await
+            .unwrap()
+            .expect("a wreck at the persistent path is rebuilt, not refused");
+        assert_eq!(
+            std::path::Path::new(&path),
+            planted,
+            "rebuilt in place rather than falling back to a mint"
+        );
+        assert_eq!(run(&path, &["rev-parse", "HEAD"]).await.trim(), sha1);
+        assert!(!debris.exists(), "the planted debris was cleared by the rebuild");
+        assert!(is_registered_worktree(&repo, &path).await);
+        git_remove_worktree_core(&state, repo, path).await.unwrap();
+    }
+
     /// With no root override installed, `cfg(test)` resolves NO persistent path, so a
     /// test can never read or write real app data — the review falls open to an
     /// ephemeral OS-temp mint rather than erroring.
@@ -1885,36 +1947,55 @@ mod tests {
     }
 
     /// The idle sweep reclaims only what it can prove is idle AND unclaimed: a
-    /// week-old unclaimed checkout goes (sidecar included), while a fresh one, a
-    /// week-old one a live review still holds, and anything not named
-    /// `gd-review-persistent` all survive.
+    /// week-old unclaimed checkout goes, sidecar included, and so does one whose
+    /// source repo was deleted (its age comes from the dangling `.git` pointer). A
+    /// fresh checkout, one a live review still holds, and a differently-named sibling
+    /// in the SAME hash dir all survive.
     #[tokio::test]
     async fn stale_review_worktree_sweep_is_age_and_claim_gated() {
         let (base, repo, sha1, _sha2) = seed_review_repo("review-sweep").await;
         let scan = base.path().join("scan");
 
-        // Four checkouts under their own hash dirs, as the real root holds them.
+        // Checkouts under their own hash dirs, as the real root holds them — plus a
+        // differently-named sibling INSIDE the aged one, which the sweep must leave
+        // standing while it reclaims its neighbour.
         let mut made = Vec::new();
         for (hash, name) in [
             ("aged", PERSISTENT_REVIEW_DIR),
             ("fresh", PERSISTENT_REVIEW_DIR),
             ("locked", PERSISTENT_REVIEW_DIR),
-            ("other", "gd-review-something-else"),
+            ("dangling", PERSISTENT_REVIEW_DIR),
+            ("aged", "gd-review-something-else"),
         ] {
             let dir = scan.join(hash).join(name);
             std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
             let dir_s = dir.to_string_lossy().into_owned();
             run(&repo, &["worktree", "add", "--detach", &dir_s, &sha1]).await;
-            assert!(dir.exists(), "fixture worktree {hash} was created");
+            assert!(dir.exists(), "fixture worktree {hash}/{name} was created");
             made.push(dir);
         }
-        let (aged, fresh, locked, other) = (&made[0], &made[1], &made[2], &made[3]);
+        let (aged, fresh, locked, dangling, sibling) =
+            (&made[0], &made[1], &made[2], &made[3], &made[4]);
 
-        // Age three of them by eight days; `fresh` keeps its real mtime.
-        let eight_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
-        for dir in [aged, locked, other] {
+        // Age all but `fresh` by eight days.
+        let eight_days_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
+        for dir in [aged, locked, sibling] {
             age_worktree(&dir.to_string_lossy(), eight_days_ago).await;
         }
+        // `dangling` loses its source repo: the admin dir behind the pointer is gone,
+        // so only the pointer FILE's own mtime can age it.
+        std::fs::write(dangling.join(".git"), b"gitdir: /nonexistent/gd-gone\n").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dangling.join(".git"))
+            .unwrap()
+            .set_modified(eight_days_ago)
+            .unwrap();
+        assert!(
+            crate::git::worktree::worktree_last_activity_ms(&dangling.to_string_lossy()).is_none(),
+            "the fixture's activity probe really is unreadable"
+        );
 
         // A live review holds `locked`'s sidecar for the whole sweep.
         let locked_sidecar = persistent_review_lock_path(locked).unwrap();
@@ -1938,12 +2019,19 @@ mod tests {
         .unwrap();
         let removed = sweep_stale_persistent_reviews_in(&scan, now_ms).unwrap();
 
-        assert_eq!(removed, 1, "exactly the idle, unclaimed checkout is reclaimed");
+        assert_eq!(removed, 2, "the idle unclaimed checkout and the dangling one");
         assert!(!aged.exists(), "a week-idle unclaimed review worktree is reclaimed");
         assert!(!aged_sidecar.exists(), "its sidecar goes with it");
+        assert!(
+            !dangling.exists(),
+            "a checkout whose source repo is gone still ages out"
+        );
         assert!(fresh.exists(), "a recently used review worktree is kept");
         assert!(locked.exists(), "a live claim outranks age");
-        assert!(other.exists(), "only the exact `gd-review-persistent` name is swept");
+        assert!(
+            sibling.exists(),
+            "only the exact `gd-review-persistent` name is swept, even beside one that is"
+        );
         drop(claim);
     }
 

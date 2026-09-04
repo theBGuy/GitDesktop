@@ -72,8 +72,10 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
 /// path, extension or not, so `nul.txt` is as unopenable as `nul`. Win32 also
 /// strips trailing dots and SPACES off the final component, which makes `nul `
 /// the device too (measured); the first-dot split covers the dots, the trim
-/// covers the spaces. Only COM/LPT 1–9 are devices; `com0`, `com10` and
-/// `console` are ordinary names.
+/// covers the spaces. Only a single COM/LPT ordinal 1–9 is a device, written
+/// either as an ASCII digit or as a Latin-1 superscript (`com¹`, `com²`,
+/// `com³`); `com0`, `com10`, `com⁴` (U+2074, outside Latin-1) and `console` are
+/// ordinary names.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_reserved_device_name(name: &str) -> bool {
     let stem = name
@@ -87,7 +89,12 @@ fn is_reserved_device_name(name: &str) -> bool {
         _ => stem
             .strip_prefix("COM")
             .or_else(|| stem.strip_prefix("LPT"))
-            .is_some_and(|d| d.len() == 1 && matches!(d.as_bytes()[0], b'1'..=b'9')),
+            // Exactly one ordinal CHAR, not byte: a superscript is two bytes.
+            .is_some_and(|d| {
+                let mut ordinal = d.chars();
+                matches!(ordinal.next(), Some('1'..='9' | '¹' | '²' | '³'))
+                    && ordinal.next().is_none()
+            }),
     }
 }
 
@@ -1208,6 +1215,9 @@ mod tests {
             // Win32 strips trailing dots and spaces off the final component, so
             // these spell the device too (measured).
             "nul ", "nul .txt", "nul.",
+            // Latin-1 superscript ordinals are devices too (measured: `com¹`
+            // resolves to `\\.\com¹` and survives a plain-path delete).
+            "com\u{b9}", "LPT\u{b3}.txt", "com\u{b2}  ",
         ] {
             assert!(is_reserved_device_name(name), "{name:?} is a device name");
         }
@@ -1216,6 +1226,9 @@ mod tests {
             "com", "lpt", "", "a.nul",
             // Only TRAILING spaces are stripped — an interior one is part of the name.
             "nul x", "nul x.txt",
+            // U+2074 is outside Latin-1 and reserves nothing (measured: `com⁴` is
+            // an ordinary file); an ordinal is one char, so a suffix disqualifies.
+            "com\u{2074}", "com\u{b9}x",
         ] {
             assert!(!is_reserved_device_name(name), "{name:?} is an ordinary name");
         }
@@ -1229,19 +1242,22 @@ mod tests {
     #[test]
     fn trash_delete_removes_a_reserved_device_name_the_recycle_bin_refuses() {
         let tmp = tempfile::tempdir().expect("create temp dir");
-        let plain = tmp.path().join("nul");
-        let verbatim = verbatim_path(&plain).expect("a temp path is absolute");
-        std::fs::write(&verbatim, b"x").expect("the verbatim path creates the file");
+        // The superscript spelling rides the same path as the ASCII one.
+        for name in ["nul", "com\u{b9}"] {
+            let plain = tmp.path().join(name);
+            let verbatim = verbatim_path(&plain).expect("a temp path is absolute");
+            std::fs::write(&verbatim, b"x").expect("the verbatim path creates the file");
 
-        assert!(
-            trash::delete(&plain).is_err(),
-            "the plain path resolves to the device, so trash cannot take it"
-        );
-        trash_delete(&plain).expect("the verbatim fallback removes it");
-        assert!(
-            std::fs::metadata(&verbatim).is_err(),
-            "the file is gone from disk"
-        );
+            assert!(
+                trash::delete(&plain).is_err(),
+                "{name:?}: the plain path resolves to the device, so trash cannot take it"
+            );
+            trash_delete(&plain).expect("the verbatim fallback removes it");
+            assert!(
+                std::fs::metadata(&verbatim).is_err(),
+                "{name:?} is gone from disk"
+            );
+        }
     }
 
     #[cfg(windows)]

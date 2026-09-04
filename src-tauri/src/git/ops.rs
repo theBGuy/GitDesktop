@@ -2714,6 +2714,9 @@ async fn finalize_base(
 
     // Resolved once, up front: the `managed` predicate below sits in a closure that
     // cannot await, and both arms must read the same root set the refusal did.
+    // Fail-open per `update_marker`'s contract — a root this process cannot resolve
+    // must never block the merge, and the update's own pin verify is what keeps the
+    // fast-forward data-safe without it.
     let marker_roots = marker::roots_for(repo_path).await.ok();
 
     // An update that has minted its marker but not yet registered its checkout is

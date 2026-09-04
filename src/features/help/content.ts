@@ -580,8 +580,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   its remote* is available from the command palette too.
 - **While an update runs, its branch is held.** Switching to that branch, renaming or
   deleting it, or starting a second update is turned away with a short message until the
-  merge lands. Every worktree of the repository sees the same hold, and an update that a
-  crash or a quit cut short is cleaned up on the next branch action.
+  update completes. Every worktree of the repository sees the same hold. An update a crash
+  or a quit cut short doesn't stay in the way: the next update, delete, or reset of that
+  branch clears it on the spot, and a background pass catches the rest.
 - **Push a branch without switching to it** — the outbound counterpart: a branch ahead
   of the remote it tracks offers **Push to _its remote/…_** in its context menu — so a
   branch tracking a fork's _upstream_ is pushed there, not to origin. An unpushed or
