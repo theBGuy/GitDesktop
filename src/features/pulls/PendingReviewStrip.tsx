@@ -110,6 +110,7 @@ export function PendingReviewStrip({
         <Button
           variant="ghost"
           size="xs"
+          className="text-destructive"
           disabled={discard.isPending}
           onClick={() => void discardReview()}
         >

@@ -4805,6 +4805,9 @@ export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
     mutationFn: (args: { number: number; reviewId: string }) =>
       api.ghPrDiscardPendingReview(repo, args.reviewId),
     onMutate: async (args) => {
+      // An "" id would hand dropDraftsByReviewIds a set member its contract bans;
+      // skipping the patch keeps the caches whole while the backend rejects the call.
+      if (!args.reviewId) return;
       const key = ["repo", repo, "pr", lens, args.number] as const;
       const threadsKey = prReviewThreadsKey(repo, args.number, lens);
       await Promise.all([

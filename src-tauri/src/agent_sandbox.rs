@@ -216,12 +216,14 @@ pub(crate) fn global_skills_dir() -> Option<PathBuf> {
 /// Preference slots [`candidate_at`] can fill.
 const RUNTIME_SLOTS: usize = 2;
 
-/// How long a slot's resolution is reused. It buys the one-shot callers (session
-/// discard, Test panel mount, shell open) and a turn burst ONE resolution instead of
-/// one per call, which matters because resolving an ABSENT binary costs a login-shell
-/// spawn on macOS/Linux. Matched to the sandbox status view's 15s recovery poll: a
-/// cached MISS is what holds the "not installed" copy up, so a longer TTL would keep
-/// that copy past the very tick meant to clear it once an engine is installed.
+/// How long a cached resolution is reused — by the runtime-candidate slots here, by
+/// `agent.rs`'s per-kind CLI resolve cache, and by the settled-runtime memo, so tuning
+/// it moves all three. It buys the one-shot callers (session discard, Test panel
+/// mount, shell open) and a turn burst ONE resolution instead of one per call, which
+/// matters because resolving an ABSENT binary costs a login-shell spawn on
+/// macOS/Linux. Matched to the sandbox status view's 15s recovery poll: a cached MISS
+/// is what holds the "not installed" copy up, so a longer TTL would keep that copy
+/// past the very tick meant to clear it once an engine is installed.
 pub(crate) const CANDIDATE_TTL: Duration = Duration::from_secs(15);
 
 type CandidateCache = [Option<(Instant, Option<(PathBuf, String)>)>; RUNTIME_SLOTS];
