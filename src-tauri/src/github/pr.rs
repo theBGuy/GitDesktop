@@ -1789,7 +1789,7 @@ pub async fn gh_pr_checkout(
     // block checkouts of every OTHER branch for all of it. Any failure of this extra
     // read (offline, no such PR, an older gh) falls back to the repo-scoped guard
     // rather than failing the checkout on a guard's behalf.
-    let head_branch = run_gh(
+    let view = run_gh(
         Some(&repo_path),
         &[
             "pr",
@@ -1798,20 +1798,26 @@ pub async fn gh_pr_checkout(
             "--repo",
             &slug,
             "--json",
-            "headRefName",
-            "-q",
-            ".headRefName",
+            "headRefName,isCrossRepository",
         ],
         GH_TIMEOUT,
     )
     .await
     .ok()
-    .map(|out| out.stdout_lossy().trim().to_string())
-    .filter(|b| !b.is_empty());
-    match head_branch {
+    .and_then(|out| serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()).ok());
+    // Only a PR from this same repo checks out under its own `headRefName`; gh gives a
+    // fork's branch a prefixed local name whose shape has changed between gh versions,
+    // so guessing it is not worth the guard — a cross-repository PR keeps repo scope.
+    // `isCrossRepository` must say false explicitly: an absent field proves nothing.
+    let branch = view
+        .as_ref()
+        .filter(|v| v["isCrossRepository"].as_bool() == Some(false))
+        .and_then(|v| v["headRefName"].as_str())
+        .map(str::trim)
+        .filter(|b| !b.is_empty());
+    match branch {
         Some(branch) => {
-            crate::git::update_marker::refuse_if_branch_updating(&state, &repo_path, &branch)
-                .await?
+            crate::git::update_marker::refuse_if_branch_updating(&state, &repo_path, branch).await?
         }
         None => crate::git::update_marker::refuse_if_any_updating(&state, &repo_path).await?,
     }

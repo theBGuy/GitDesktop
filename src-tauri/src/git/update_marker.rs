@@ -98,19 +98,37 @@ impl Drop for TestRootOverride {
     }
 }
 
-/// The worktree root this module works in. Every entry point resolves through here so a
-/// test can point the whole module at a temp directory; outside tests it is exactly
+/// The worktree root this module works in. Every entry point — and the mint in
+/// `branches.rs::update_worktree_path` — resolves through here, so a test can point the
+/// whole module at a temp directory. Outside tests it is exactly
 /// `ops::worktree_root_dir`.
-fn root_for(repo_path: &str) -> AppResult<PathBuf> {
+///
+/// Under `cfg(test)` an installed override is the ONLY resolution: with none, this
+/// ERRORS instead of falling through to the real app data, mirroring
+/// [`crate::app_store`]'s "under `cfg!(test)`, NO store, whatever the environment says".
+/// The override is process-wide, so a test that never installed one must neither read a
+/// concurrently-scheduled sibling's root nor mint under the developer's own app data.
+/// Every caller already fails open on an unresolvable root — refusals answer `Ok`,
+/// claims and sweeps return, `is_managed_update_worktree` answers `false` — which is
+/// exactly what an un-overridden test should see.
+pub(crate) fn root_for(repo_path: &str) -> AppResult<PathBuf> {
     #[cfg(test)]
-    if let Some(dir) = TEST_ROOT_DIR
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
     {
-        return Ok(dir);
+        let _ = repo_path;
+        TEST_ROOT_DIR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                AppError::Command(
+                    "no update-marker root override is installed for this test".to_string(),
+                )
+            })
     }
-    crate::git::ops::worktree_root_dir(repo_path)
+    #[cfg(not(test))]
+    {
+        crate::git::ops::worktree_root_dir(repo_path)
+    }
 }
 
 /// The marker manifest. Plain readable JSON so a probe in another process can answer
@@ -338,9 +356,9 @@ pub(crate) fn update_worktree_probe(path: &str) -> LockProbe {
 /// One scan of a worktree root's markers.
 struct RefuseOutcome {
     /// The ready-to-return refusal, when a LIVE update matches the query.
-    pub(crate) refusal: Option<AppError>,
+    refusal: Option<AppError>,
     /// A dead marker was seen — its leftovers are worth sweeping.
-    pub(crate) saw_dead: bool,
+    saw_dead: bool,
 }
 
 /// Core of the refusal guards, over an explicit `root` so tests never write under the

@@ -1283,8 +1283,11 @@ pub(crate) async fn update_branch_from(
 /// Where an update's throwaway checkout goes: `<app-data>/worktrees/<repo-hash>/
 /// gd-update-<unique>`. Resolution only — creating the root is the caller's job,
 /// which keeps this callable from a test without writing under the real app data.
+///
+/// Through `update_marker::root_for`, not `ops::worktree_root_dir` directly, so the
+/// mint and the guards that police it can never disagree about which root they mean.
 fn update_worktree_path(repo_path: &str) -> AppResult<std::path::PathBuf> {
-    Ok(crate::git::ops::worktree_root_dir(repo_path)?
+    Ok(crate::git::update_marker::root_for(repo_path)?
         .join(format!("gd-update-{}", unique_suffix())))
 }
 
@@ -2695,13 +2698,20 @@ mod tests {
         }
     }
 
-    /// The throwaway checkout is minted under the app-data worktrees root, which is
-    /// what keeps it out of the worktree manager, with a unique `gd-update-` name.
-    /// Shape only — resolving a path creates nothing under the real app data.
+    /// The throwaway checkout is minted as a direct child of the SAME root the marker
+    /// guards read, with a unique `gd-update-` name — which is what keeps it out of the
+    /// worktree manager and inside `is_managed_update_worktree`'s scope. That root being
+    /// the app-data one in production is `root_for`'s non-test arm, pinned by
+    /// `ops::worktree_root_dir_uses_the_shipped_bundle_identifier`. Shape only: resolving
+    /// a path creates nothing.
     #[test]
-    fn update_worktree_path_sits_under_the_app_data_root() {
+    fn update_worktree_path_sits_directly_under_the_marker_root() {
+        use crate::git::update_marker as marker;
+        let (_temp, root) = temp_base("mint-root");
+        let _serialized = marker::test_root_lock();
+        let _override = marker::TestRootOverride::set(&root);
+
         let repo = "C:\\repos\\app";
-        let root = crate::git::ops::worktree_root_dir(repo).expect("app-data root resolves");
         let first = update_worktree_path(repo).expect("update path resolves");
         assert_eq!(first.parent(), Some(root.as_path()));
         let name = first
@@ -2709,6 +2719,10 @@ mod tests {
             .and_then(|s| s.to_str())
             .expect("the mint has a basename");
         assert!(name.starts_with("gd-update-"), "{name}");
+        assert!(
+            marker::is_managed_update_worktree(repo, &first.to_string_lossy()),
+            "the mint must land inside the scope its own guards enforce"
+        );
         assert_ne!(
             first,
             update_worktree_path(repo).expect("update path resolves"),
@@ -3363,10 +3377,10 @@ mod tests {
         assert!(!tmp.exists(), "the throwaway worktree is torn down");
     }
 
-    /// A repo with `feature` tracking `master` through the local `.` remote, so
-    /// `feature@{upstream}` resolves without a network or a second repo. Returns the
-    /// temp guard, the repo path, the default branch name, and its tip.
-    async fn repo_with_local_upstream(tag: &str) -> (tempfile::TempDir, String, String, String) {
+    /// A repo with `feature` tracking the default branch through the local `.` remote,
+    /// so `feature@{upstream}` resolves without a network or a second repo. Returns the
+    /// temp guard, the repo path, and the upstream tip.
+    async fn repo_with_local_upstream(tag: &str) -> (tempfile::TempDir, String, String) {
         let (guard, base_dir) = temp_base(tag);
         let repo = base_dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -3387,7 +3401,7 @@ mod tests {
             .await
             .trim()
             .to_string();
-        (guard, repo_s, main, tip)
+        (guard, repo_s, tip)
     }
 
     /// The PRE-ADD window: an update has minted its marker but its `worktree add` has
@@ -3400,7 +3414,7 @@ mod tests {
     #[tokio::test]
     async fn a_live_marker_refuses_delete_and_reset_before_the_checkout_exists() {
         use crate::git::update_marker as marker;
-        let (_guard, repo_s, _main, tip) = repo_with_local_upstream("premint-guard").await;
+        let (_guard, repo_s, tip) = repo_with_local_upstream("premint-guard").await;
         let root = std::path::Path::new(&repo_s)
             .parent()
             .unwrap()
@@ -3440,7 +3454,7 @@ mod tests {
     #[tokio::test]
     async fn a_registered_holder_is_claimed_when_released_and_left_when_markerless() {
         use crate::git::update_marker as marker;
-        let (_guard, repo_s, _main, _tip) = repo_with_local_upstream("registered-holder").await;
+        let (_guard, repo_s, _tip) = repo_with_local_upstream("registered-holder").await;
         let root = std::path::Path::new(&repo_s)
             .parent()
             .unwrap()
