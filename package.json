@@ -88,7 +88,7 @@
     "globals": "^17.11.0",
     "jscpd": "^5.0.16",
     "knip": "^6.32.3",
-    "typescript": "~6.0.3",
+    "typescript": "~7.0.2",
     "vite": "^8.2.1"
   },
   "engines": {
