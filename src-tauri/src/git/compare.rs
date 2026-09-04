@@ -508,8 +508,8 @@ async fn is_persistent_review_path(repo_path: &str, path: &str) -> bool {
 }
 
 /// Re-points an existing persistent review worktree at `sha`. `false` when it is
-/// absent, is no longer a worktree, or the checkout failed — the caller then
-/// rebuilds it.
+/// absent, is no longer a worktree, the forcing checkout failed, or the tree
+/// could not be cleaned — the caller then rebuilds it.
 ///
 /// The checkout runs UNCONDITIONALLY, even when HEAD already names `sha`: only a
 /// forcing checkout restores a tracked file a previous run left modified, and a
@@ -741,13 +741,17 @@ async fn git_remove_worktree_core(
         WORKTREE_OP_TIMEOUT,
     )
     .await;
-    let _ = crate::git::runner::run_git_worktree_admin(
-        state,
-        &repo_path,
-        &["worktree", "prune"],
-        DEFAULT_TIMEOUT,
-    )
-    .await;
+    // Skipped when the removal already read `Busy`: the same held domain would charge
+    // this prune a second full bounded wait, and the lock-free arm below re-runs both.
+    if !matches!(removal, Err(AppError::Busy { .. })) {
+        let _ = crate::git::runner::run_git_worktree_admin(
+            state,
+            &repo_path,
+            &["worktree", "prune"],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+    }
     // A `Busy` removal never reached git — the domain was held past the bounded wait.
     // Retry WITHOUT the domain rather than leave the mint registered: nothing else
     // would ever reclaim it (the husk sweep takes only EMPTY dirs, prune only absent
