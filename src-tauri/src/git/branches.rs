@@ -1281,8 +1281,7 @@ pub(crate) async fn update_branch_from(
 }
 
 /// Where an update's throwaway checkout goes: `<app-data>/worktrees/<repo-hash>/
-/// gd-update-<unique>`. Resolution only — creating the root is the caller's job,
-/// which keeps this callable from a test without writing under the real app data.
+/// gd-update-<unique>`. Resolution only — creating the root is the caller's job.
 ///
 /// Through `update_marker::root_for`, not `ops::worktree_root_dir` directly, so the
 /// mint and the guards that police it can never disagree about which root they mean.

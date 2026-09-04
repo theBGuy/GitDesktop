@@ -60,16 +60,11 @@ static TEST_ROOT_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(
 #[cfg(test)]
 static TEST_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Writes a RELEASED marker pair — the manifest plus an unlocked `.lock` — which is
-/// exactly what a crashed update leaves behind: the OS drops the flock when the process
-/// dies, so the file simply exists with no holder.
-///
-/// Fixtures build this shape by writing rather than by minting and dropping a real
-/// marker, because on Linux `drop` does not reliably release the lock in a
-/// process-spawning test binary: an `flock` belongs to the open file description, and a
-/// concurrently forked child inherits the fd, holding the lock alive until its copy
-/// closes at exec (measured: 157 spurious `WouldBlock` in 20k mint/drop/probe cycles
-/// with 3 forking threads, 0 with none, 0 on Windows at any rate).
+/// Writes a RELEASED marker pair — the manifest plus an unlocked `.lock` — the shape a
+/// crashed update leaves once the OS drops its flock. Written, never minted-and-dropped:
+/// a Linux flock rides `fork()` into concurrently spawned children until their exec, so
+/// a post-drop probe can read a live lock (157 spurious `WouldBlock` per 20k cycles
+/// under 3 forking threads, 0 without, 0 on Windows — PR #297's container experiment).
 #[cfg(test)]
 pub(crate) fn write_released_marker(root: &Path, stem: &str, branch: &str) {
     std::fs::write(
@@ -1185,10 +1180,15 @@ mod tests {
 
     /// Regression pin: a REGISTERED `gd-update-*` checkout with no lock file must never
     /// take the age-free claim. Its minter was a pre-marker binary, which can still be
-    /// running the update — only the age-gated sweep may ever touch it.
+    /// running the update — only the age-gated sweep may ever touch it. The override is
+    /// what lets the claim pass its managed-root gate and reach the Missing probe this
+    /// test exists to pin — without it the refusal is the seam's, not the probe's.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_markerless_holder_is_never_claimed_age_free() {
         let (_guard, root) = temp_root("markerless-claim");
+        let _serialized = test_root_lock();
+        let _override = TestRootOverride::set(&root);
         let orphan = root.join("gd-update-premarker");
         std::fs::create_dir_all(&orphan).unwrap();
         assert_eq!(
@@ -1216,11 +1216,13 @@ mod tests {
     /// the success path deletes them — that retention is what later lets an age-free
     /// claim recover the holder rather than leaving a markerless one nothing may touch.
     ///
-    /// File survival only. The lock's post-drop state is deliberately NOT asserted here:
-    /// on Linux a concurrently forked child inherits the fd and holds the flock past
-    /// `drop`, so that verdict is scheduling-dependent in a test binary that spawns git.
-    /// The released-marker consequences are pinned on WRITTEN fixtures instead, which
-    /// take no lock at all — see `the_branch_claim_takes_only_released_locks_for_that_branch`.
+    /// File survival everywhere; the lock's post-drop state is asserted on Windows only
+    /// (its per-handle locks measured 0 spurious `WouldBlock` at any fork rate), which is
+    /// what pins `Drop`'s close-before-early-return ordering — reordered, a retained
+    /// marker would keep its lock for the life of the process and probe `Live` forever.
+    /// On Linux that verdict is scheduling-dependent (forked children inherit the fd), so
+    /// the released-marker consequences are pinned on WRITTEN fixtures instead — see
+    /// `the_branch_claim_takes_only_released_locks_for_that_branch`.
     #[test]
     fn a_failed_teardown_retains_both_sidecars() {
         let (_guard, root) = temp_root("retain");
@@ -1235,6 +1237,13 @@ mod tests {
         // The teardown could not confirm the directory was gone.
         marker.retain_for_recovery();
         drop(marker);
+
+        #[cfg(windows)]
+        assert_eq!(
+            probe_lock(&root.join("gd-update-stuck.lock")),
+            LockProbe::Released,
+            "a retained marker releases its lock on drop"
+        );
 
         assert!(
             root.join("gd-update-stuck.lock").exists()
