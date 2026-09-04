@@ -1181,8 +1181,16 @@ disabled, and names what it's waiting on — *available once GitDesktop connects
 (or Bitbucket) — so you can see the option exists and what makes it work.
 **Request changes** requires a summary. Submit posts all your pending drafts as one batch
 review (it works with no drafts too, for a plain verdict + summary). **Submit review…** and
-**Discard pending review** are also available from the command palette
-({{kbd:command-palette}}).
+**Discard pending review** (both act on this local draft) are also available from the
+command palette ({{kbd:command-palette}}).
+
+An unfinished review of yours **on GitHub** (started on github.com or by another tool,
+never submitted) is different: the pull request shows a notice at the top, *You have an
+unfinished review on this pull request*, with **Finish on GitHub**, which opens the PR
+page where the draft can be submitted, and **Discard on GitHub…**, which permanently
+deletes the unfinished review and its draft comments after a confirm. Its draft line
+comments stay out of the app's threads until the review is submitted. Both actions are
+palette-only: **Finish review on GitHub** and **Discard review on GitHub**.
 
 ## The Commits tab
 
