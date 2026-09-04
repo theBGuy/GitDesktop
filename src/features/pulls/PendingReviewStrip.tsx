@@ -34,7 +34,7 @@ export function PendingReviewStrip({
   review: PrThreadOut | undefined;
   /** The pull request's page on the forge, where the review can be submitted. */
   prUrl: string;
-  /** The detected remote's name, for the action labels. */
+  /** The detected provider's label ("GitHub"), for the action labels. */
   remoteLabel: string;
   /** The view is showing the PREVIOUS pull request's details while the switch lands.
    *  Everything here addresses `number`, which is already the new one, so the strip
