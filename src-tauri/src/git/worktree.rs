@@ -810,7 +810,7 @@ fn is_session_worktree(
 }
 
 /// A file's mtime as epoch ms, or `None` when it is unreadable.
-fn file_mtime_ms(path: &std::path::Path) -> Option<i64> {
+pub(crate) fn file_mtime_ms(path: &std::path::Path) -> Option<i64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let ms = modified
         .duration_since(std::time::UNIX_EPOCH)

@@ -536,9 +536,13 @@ async fn reuse_persistent_review_worktree(path_str: &str, sha: &str) -> bool {
         return false;
     }
     // The forcing checkout restores tracked files; this clears the untracked ones a
-    // CLI agent may have strayed into the previous review's tree.
-    let _ = run_git_raw(Some(path_str), &["clean", "-fdx", "-q"], WORKTREE_OP_TIMEOUT).await;
-    true
+    // CLI agent may have strayed into the previous review's tree. `-ff`, not `-f`:
+    // single-force SKIPS an untracked nested git repository (a repo the agent cloned
+    // in) and still exits 0, so it would survive every reuse and contaminate later
+    // reviews. A tree we failed to clean is one we cannot vouch for — refusing here
+    // sends the caller to a full rebuild, which is the cheap safe direction.
+    let cleaned = run_git_raw(Some(path_str), &["clean", "-ffdx", "-q"], WORKTREE_OP_TIMEOUT).await;
+    matches!(&cleaned, Ok(out) if out.code == 0)
 }
 
 /// Tears down an unusable persistent review worktree so a fresh `worktree add` can
@@ -744,11 +748,19 @@ async fn git_remove_worktree_core(
         DEFAULT_TIMEOUT,
     )
     .await;
-    // A `Busy` removal never reached git, so the registration still stands — deleting
-    // the directory underneath it would mint a prunable entry. Leave both halves for a
-    // later teardown or the husk sweep.
+    // A `Busy` removal never reached git — the domain was held past the bounded wait.
+    // Retry WITHOUT the domain rather than leave the mint registered: nothing else
+    // would ever reclaim it (the husk sweep takes only EMPTY dirs, prune only absent
+    // ones), and an OS-temp worktree passes every session filter, so it would render
+    // as one of the user's own worktrees forever. A lock-free run cannot report Busy.
     if matches!(removal, Err(AppError::Busy { .. })) {
-        return Ok(());
+        let _ = run_git_raw(
+            Some(&repo_path),
+            &["worktree", "remove", "--force", &worktree_path],
+            WORKTREE_OP_TIMEOUT,
+        )
+        .await;
+        let _ = run_git_raw(Some(&repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
     }
     // `git worktree remove` deletes the directory itself, but on Windows that
     // recursive delete can lose a handle race (antivirus/indexer still holding the
@@ -849,29 +861,18 @@ fn persistent_review_lock_is_free(lock_path: &std::path::Path) -> bool {
     }
 }
 
-/// A file's mtime as epoch ms, or `None` when it is unreadable.
-fn file_mtime_ms(path: &std::path::Path) -> Option<i64> {
-    let ms = std::fs::metadata(path)
-        .ok()?
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    i64::try_from(ms).ok()
-}
-
 /// The testable core of [`sweep_stale_persistent_review_worktrees`], over an explicit
 /// worktrees root so a test never scans real app data. Only `<hash>/gd-review-persistent`
 /// is ever considered — the exact basename, one level down — and only when its git
 /// activity is older than [`PERSISTENT_REVIEW_MAX_IDLE_MS`] AND its sidecar carries no
 /// live claim.
 ///
-/// Age comes from git activity, falling back to the `.git` pointer file's own mtime:
-/// a checkout whose SOURCE REPO was deleted has an unresolvable admin dir, so without
-/// that fallback its activity reads unknown forever and it could never age out. A live
-/// workspace answers from index/HEAD first, and a mid-review checkout is spared by its
-/// claim regardless.
+/// Age comes from git activity, falling back to the `.git` pointer file's mtime and
+/// finally to the directory's own. Each fallback covers a shape that would otherwise
+/// read unknown forever and could never age out: a checkout whose SOURCE REPO was
+/// deleted has an unresolvable admin dir, and a bare wreck (a half-finished add, no
+/// `.git` at all) answers neither probe. A live workspace answers from index/HEAD
+/// first, and a mid-review checkout is spared by its claim regardless.
 ///
 /// No git runs here: the source repo's stale registration is cleaned by its own
 /// `prune_worktrees_if_free`, the same division every other app-data checkout uses.
@@ -888,7 +889,8 @@ fn sweep_stale_persistent_reviews_in(
             continue;
         }
         let Some(last_ms) = crate::git::worktree::worktree_last_activity_ms(&dir.to_string_lossy())
-            .or_else(|| file_mtime_ms(&dir.join(".git")))
+            .or_else(|| crate::git::worktree::file_mtime_ms(&dir.join(".git")))
+            .or_else(|| crate::git::worktree::file_mtime_ms(&dir))
         else {
             continue;
         };
@@ -1617,6 +1619,17 @@ mod tests {
         (base, repo, sha1, sha2)
     }
 
+    /// Epoch ms now — the clock the sweep's age gate subtracts a fixture's mtime from.
+    fn now_epoch_ms() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the clock is past the epoch")
+                .as_millis(),
+        )
+        .expect("epoch ms fits an i64")
+    }
+
     /// Backdates a worktree's recorded git activity. `worktree_last_activity_ms` reads
     /// its admin `index` and falls back to `HEAD`, so both move.
     async fn age_worktree(worktree: &str, when: std::time::SystemTime) {
@@ -1719,10 +1732,19 @@ mod tests {
             .await
             .unwrap();
 
-        // What a strayed agent run leaves behind between reviews.
+        // What a strayed agent run leaves behind between reviews. The nested repo is
+        // the case single-force `clean` skips while still exiting 0 — it has to be
+        // gone whether the reuse cleaned it or the caller rebuilt the workspace.
         std::fs::write(&tracked, "tampered\n").unwrap();
         let stray = std::path::Path::new(&first).join("stray.txt");
         std::fs::write(&stray, "stray\n").unwrap();
+        // A REAL nested repo, not a bare `.git` folder: git only skips a subdirectory
+        // it recognizes as a repository, so an empty `.git` would be swept by plain
+        // `-fdx` and the case would go untested.
+        let nested = std::path::Path::new(&first).join("cloned-repo");
+        std::fs::create_dir_all(&nested).unwrap();
+        run(&nested.to_string_lossy(), &["init", "-q"]).await;
+        std::fs::write(nested.join("README.md"), "cloned by an agent\n").unwrap();
 
         let second = git_review_worktree_core(&state, repo.clone(), sha2.clone())
             .await
@@ -1735,6 +1757,10 @@ mod tests {
             "the modified TRACKED file is restored to the PR's content"
         );
         assert!(!stray.exists(), "the untracked stray is cleaned");
+        assert!(
+            !nested.exists(),
+            "an untracked nested git repo is cleaned too — single-force `clean` skips it"
+        );
         git_remove_worktree_core(&state, repo, second).await.unwrap();
     }
 
@@ -2010,14 +2036,7 @@ mod tests {
         let aged_sidecar = persistent_review_lock_path(aged).unwrap();
         std::fs::write(&aged_sidecar, b"").unwrap();
 
-        let now_ms = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
-        )
-        .unwrap();
-        let removed = sweep_stale_persistent_reviews_in(&scan, now_ms).unwrap();
+        let removed = sweep_stale_persistent_reviews_in(&scan, now_epoch_ms()).unwrap();
 
         assert_eq!(removed, 2, "the idle unclaimed checkout and the dangling one");
         assert!(!aged.exists(), "a week-idle unclaimed review worktree is reclaimed");
@@ -2033,6 +2052,27 @@ mod tests {
             "only the exact `gd-review-persistent` name is swept, even beside one that is"
         );
         drop(claim);
+
+        // A bare wreck — a half-finished add with no `.git` at all — answers neither
+        // git probe, so only the directory's own mtime can age it. Its own scan root
+        // and an advanced clock, because setting a DIRECTORY mtime is not portable in
+        // std; the gate subtracts the same either way.
+        let bare_scan = base.path().join("scan-bare");
+        let bare = bare_scan.join("wreck").join(PERSISTENT_REVIEW_DIR);
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(bare.join("debris.txt"), b"not a worktree").unwrap();
+        assert!(
+            crate::git::worktree::worktree_last_activity_ms(&bare.to_string_lossy()).is_none(),
+            "the fixture really has no git activity to read"
+        );
+        // Read the clock AFTER planting it, so the fixture's own mtime can't outrun it.
+        let later_ms = now_epoch_ms() + PERSISTENT_REVIEW_MAX_IDLE_MS + 1;
+        assert_eq!(
+            sweep_stale_persistent_reviews_in(&bare_scan, later_ms).unwrap(),
+            1,
+            "a `.git`-less wreck still ages out on the directory's own mtime"
+        );
+        assert!(!bare.exists());
     }
 
     /// The `remove_dir_all` fallback guard admits only `gd-review-*` dirs directly
