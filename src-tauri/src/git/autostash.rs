@@ -1782,4 +1782,42 @@ mod tests {
             other => panic!("expected two conflicts, got {other:?}"),
         }
     }
+
+    /// The guard runs BEFORE `autostash_push`, which is the whole point of its
+    /// placement: a refused switch must not have pushed and popped the user's changes
+    /// on the way to reporting the refusal. An empty stash list after the refusal is
+    /// what proves the ordering — a guard placed after the push would leave a stash
+    /// entry behind on any pop failure, and would churn the working tree regardless.
+    // The serializing guard MUST span the awaits — it keeps the process-wide root
+    // override installed for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_refused_switch_never_stashes() {
+        use crate::git::update_marker as marker;
+        let (dir, repo) = setup_repo("update-guard-order").await;
+        git(&repo, &["branch", "feature"]).await;
+        // Uncommitted work: without the guard this is exactly what would be stashed.
+        write(dir.path(), "a.txt", "dirty\n");
+
+        let root = dir.path().join("gd-worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+        let _serialized = marker::test_root_lock();
+        let _override = marker::TestRootOverride::set(&root);
+        let _live = marker::UpdateMarker::create_for(&root.join("gd-update-live"), "feature")
+            .expect("the marker mints");
+
+        let state = AppState::default();
+        let err = git_switch_autostash_core(&state, repo.clone(), "feature".into(), None, true)
+            .await
+            .expect_err("switching to a branch an update holds is refused");
+        assert_eq!(
+            err.to_string(),
+            marker::branch_update_refusal("feature").to_string()
+        );
+        assert!(
+            git(&repo, &["stash", "list"]).await.trim().is_empty(),
+            "a refused switch must not have touched the stash"
+        );
+        assert_eq!(read(dir.path(), "a.txt"), "dirty\n", "nor the working tree");
+    }
 }

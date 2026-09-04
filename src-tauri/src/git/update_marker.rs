@@ -60,10 +60,34 @@ static TEST_ROOT_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(
 #[cfg(test)]
 static TEST_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Writes a RELEASED marker pair — the manifest plus an unlocked `.lock` — which is
+/// exactly what a crashed update leaves behind: the OS drops the flock when the process
+/// dies, so the file simply exists with no holder.
+///
+/// Fixtures build this shape by writing rather than by minting and dropping a real
+/// marker, because on Linux `drop` does not reliably release the lock in a
+/// process-spawning test binary: an `flock` belongs to the open file description, and a
+/// concurrently forked child inherits the fd, holding the lock alive until its copy
+/// closes at exec (measured: 157 spurious `WouldBlock` in 20k mint/drop/probe cycles
+/// with 3 forking threads, 0 with none, 0 on Windows at any rate).
+#[cfg(test)]
+pub(crate) fn write_released_marker(root: &Path, stem: &str, branch: &str) {
+    std::fs::write(
+        root.join(format!("{stem}.json")),
+        serde_json::to_vec(&UpdateManifest {
+            branch: branch.to_string(),
+            pid: 4242,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(root.join(format!("{stem}.lock")), b"").unwrap();
+}
+
 /// Installs (or clears) the in-process override, returning the previous value so a
 /// caller can restore it. Test-only.
 #[cfg(test)]
-pub(crate) fn swap_test_root_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+fn swap_test_root_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
     let mut slot = TEST_ROOT_DIR
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -108,9 +132,11 @@ impl Drop for TestRootOverride {
 /// [`crate::app_store`]'s "under `cfg!(test)`, NO store, whatever the environment says".
 /// The override is process-wide, so a test that never installed one must neither read a
 /// concurrently-scheduled sibling's root nor mint under the developer's own app data.
-/// Every caller already fails open on an unresolvable root — refusals answer `Ok`,
-/// claims and sweeps return, `is_managed_update_worktree` answers `false` — which is
-/// exactly what an un-overridden test should see.
+/// Every GUARD caller fails open on an unresolvable root — refusals answer `Ok`, claims
+/// and sweeps return, `is_managed_update_worktree` answers `false` — which is exactly
+/// what an un-overridden test should see. The MINT is the loud exception:
+/// `branches.rs::update_worktree_path` propagates the error rather than place a
+/// checkout somewhere nobody is guarding.
 pub(crate) fn root_for(repo_path: &str) -> AppResult<PathBuf> {
     #[cfg(test)]
     {
@@ -312,7 +338,7 @@ fn read_manifest(json_path: &Path) -> Option<UpdateManifest> {
 /// Whether `path` names an update's throwaway checkout — its basename starts with
 /// `gd-update-`. Modeled on `ops::is_resolve_worktree_path`: the basename is the
 /// reliable signal, since porcelain may print a normalized leading path.
-pub(crate) fn is_update_worktree_path(path: &str) -> bool {
+fn is_update_worktree_path(path: &str) -> bool {
     Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
@@ -750,21 +776,6 @@ mod tests {
         (dir, root)
     }
 
-    /// A DEAD marker pair: the manifest plus an unlocked `.lock`, the shape a crashed
-    /// update leaves behind once the OS drops its lock.
-    fn write_dead_marker(root: &Path, stem: &str, branch: &str) {
-        std::fs::write(
-            root.join(format!("{stem}.json")),
-            serde_json::to_vec(&UpdateManifest {
-                branch: branch.to_string(),
-                pid: 4242,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        std::fs::write(root.join(format!("{stem}.lock")), b"").unwrap();
-    }
-
     #[test]
     fn create_writes_a_readable_manifest_and_holds_the_lock() {
         let (_guard, root) = temp_root("create");
@@ -816,7 +827,7 @@ mod tests {
     #[test]
     fn a_dead_marker_refuses_nothing_and_flags_a_sweep() {
         let (_guard, root) = temp_root("dead");
-        write_dead_marker(&root, "gd-update-dead", "feature");
+        write_released_marker(&root, "gd-update-dead", "feature");
 
         for query in [Some("feature"), None] {
             let outcome = refuse_in(&root, query);
@@ -862,7 +873,7 @@ mod tests {
         let (_guard, root) = temp_root("claims");
 
         std::fs::create_dir_all(root.join("gd-update-dead")).unwrap();
-        write_dead_marker(&root, "gd-update-dead", "feature");
+        write_released_marker(&root, "gd-update-dead", "feature");
 
         // A live update — its lock is held for the length of this test.
         std::fs::create_dir_all(root.join("gd-update-busy")).unwrap();
@@ -875,7 +886,7 @@ mod tests {
         std::fs::create_dir_all(root.join("gd-update-markerless")).unwrap();
 
         // The marker pair whose checkout is already gone.
-        write_dead_marker(&root, "gd-update-pruned", "feature");
+        write_released_marker(&root, "gd-update-pruned", "feature");
 
         // Decoys: an agent-session worktree (named by session id) and a near-miss.
         std::fs::create_dir_all(root.join("1a2b3c4d")).unwrap();
@@ -938,7 +949,7 @@ mod tests {
             &["worktree", "add", "--quiet", &orphan_s, "feature"],
         )
         .await;
-        write_dead_marker(&root, "gd-update-crashed", "feature");
+        write_released_marker(&root, "gd-update-crashed", "feature");
         assert!(
             run_git_raw(Some(&repo_s), &["branch", "-D", "feature"], DEFAULT_TIMEOUT)
                 .await
@@ -960,7 +971,7 @@ mod tests {
             .expect("the live marker mints");
         // A dead leftover that is simply too young to claim.
         std::fs::create_dir_all(root.join("gd-update-young")).unwrap();
-        write_dead_marker(&root, "gd-update-young", "feature");
+        write_released_marker(&root, "gd-update-young", "feature");
 
         // The production age gate spares everything here: every fixture is seconds old,
         // which is exactly the young-dead case.
@@ -1068,6 +1079,18 @@ mod tests {
         }
     }
 
+    /// The seam fails CLOSED: with no override installed, in-test resolution errors
+    /// rather than reaching the developer's real app data. Holding `test_root_lock` is
+    /// what makes the premise true — it is the guarantee no sibling has one installed.
+    #[test]
+    fn root_for_refuses_to_resolve_without_a_test_override() {
+        let _serialized = test_root_lock();
+        assert!(
+            root_for("C:/repos/app").is_err(),
+            "an un-overridden test must never resolve the real worktree root"
+        );
+    }
+
     /// Negative control for the guard MECHANISM: the root holds a live marker and no
     /// worktree at all, so nothing but the marker scan can produce this refusal —
     /// delete the scan and the same fixture answers `Ok`.
@@ -1106,7 +1129,7 @@ mod tests {
         let (_guard, root) = temp_root("branch-claim");
 
         std::fs::create_dir_all(root.join("gd-update-dead")).unwrap();
-        write_dead_marker(&root, "gd-update-dead", "feature");
+        write_released_marker(&root, "gd-update-dead", "feature");
 
         // A live update of the same branch.
         std::fs::create_dir_all(root.join("gd-update-busy")).unwrap();
@@ -1114,7 +1137,7 @@ mod tests {
             .expect("the live marker mints");
 
         // A dead update of a DIFFERENT branch.
-        write_dead_marker(&root, "gd-update-other", "release");
+        write_released_marker(&root, "gd-update-other", "release");
 
         // A pre-marker build's checkout: no lock file at all.
         std::fs::create_dir_all(root.join("gd-update-markerless")).unwrap();
@@ -1189,12 +1212,17 @@ mod tests {
         );
     }
 
-    /// A teardown that could not remove the checkout must leave the marker RECOVERABLE:
-    /// sidecars retained and unlocked, i.e. `Released`, so the next branch operation
-    /// clears it age-free. Deleting them there would leave a markerless holder that
-    /// nothing may touch until the age gate expires.
+    /// A teardown that could not remove the checkout must RETAIN both sidecars, where
+    /// the success path deletes them — that retention is what later lets an age-free
+    /// claim recover the holder rather than leaving a markerless one nothing may touch.
+    ///
+    /// File survival only. The lock's post-drop state is deliberately NOT asserted here:
+    /// on Linux a concurrently forked child inherits the fd and holds the flock past
+    /// `drop`, so that verdict is scheduling-dependent in a test binary that spawns git.
+    /// The released-marker consequences are pinned on WRITTEN fixtures instead, which
+    /// take no lock at all — see `the_branch_claim_takes_only_released_locks_for_that_branch`.
     #[test]
-    fn a_failed_teardown_retains_the_marker_as_released() {
+    fn a_failed_teardown_retains_both_sidecars() {
         let (_guard, root) = temp_root("retain");
         let dir = root.join("gd-update-stuck");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1213,15 +1241,15 @@ mod tests {
                 && root.join("gd-update-stuck.json").exists(),
             "both sidecars survive a failed teardown"
         );
-        assert_eq!(
-            probe_lock(&root.join("gd-update-stuck.lock")),
-            LockProbe::Released,
-            "and the lock is released, so a claim can recover it immediately"
-        );
-        assert_eq!(
-            dead_stems_for_branch(&root, "feature"),
-            vec!["gd-update-stuck".to_string()],
-            "the age-free branch claim picks it up with no waiting"
+
+        // The control: the SUCCESS path, with no retain, deletes the very same pair.
+        let clean = root.join("gd-update-clean");
+        std::fs::create_dir_all(&clean).unwrap();
+        drop(UpdateMarker::create_for(&clean, "feature").expect("the marker mints"));
+        assert!(
+            !root.join("gd-update-clean.lock").exists()
+                && !root.join("gd-update-clean.json").exists(),
+            "a confirmed teardown still cleans up after itself"
         );
     }
 

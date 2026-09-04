@@ -74,12 +74,6 @@ const REFSPEC_ALLOWLIST = [
       "validates each pair's head/base with validate_branch_name inline",
   },
   {
-    file: "git/branches.rs",
-    fn: "repo_with_local_upstream",
-    rationale:
-      "#[cfg(test)] fixture — interpolates the default-branch name read back from git's own rev-parse on a repo the test creates; no user-named ref reaches it",
-  },
-  {
     file: "git/ops.rs",
     fn: "branch_tip",
     rationale:

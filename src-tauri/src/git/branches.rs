@@ -1286,6 +1286,9 @@ pub(crate) async fn update_branch_from(
 ///
 /// Through `update_marker::root_for`, not `ops::worktree_root_dir` directly, so the
 /// mint and the guards that police it can never disagree about which root they mean.
+/// Alone among that function's callers this one PROPAGATES an unresolvable root instead
+/// of failing open: a guard that cannot resolve simply stays quiet, but a mint that
+/// cannot would put a checkout where nothing is watching it.
 fn update_worktree_path(repo_path: &str) -> AppResult<std::path::PathBuf> {
     Ok(crate::git::update_marker::root_for(repo_path)?
         .join(format!("gd-update-{}", unique_suffix())))
@@ -3391,12 +3394,9 @@ mod tests {
             .trim()
             .to_string();
         run(&repo_s, &["branch", "feature"]).await;
-        run(&repo_s, &["config", "branch.feature.remote", "."]).await;
-        run(
-            &repo_s,
-            &["config", "branch.feature.merge", &format!("refs/heads/{main}")],
-        )
-        .await;
+        // One call sets both `branch.feature.remote` (`.`) and `.merge`, which keeps
+        // any `refs/heads/<name>` template out of this fixture entirely.
+        run(&repo_s, &["branch", "--set-upstream-to", &main, "feature"]).await;
         let tip = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
             .await
             .trim()
@@ -3483,12 +3483,13 @@ mod tests {
         run(&repo_s, &["worktree", "remove", "--force", &bare_s]).await;
 
         // RELEASED: registered, sidecars present, lock free — claimed with no age gate.
+        // The pair is WRITTEN, not minted-and-dropped: a crashed update's lock is
+        // released by the OS, and on Linux `drop` cannot be relied on to release one in
+        // a process-spawning test binary (see `write_released_marker`).
         let dead = root.join("gd-update-crashed");
         let dead_s = dead.to_string_lossy().into_owned();
         run(&repo_s, &["worktree", "add", "--quiet", &dead_s, "feature"]).await;
-        let mut minted = marker::UpdateMarker::create_for(&dead, "feature").expect("mints");
-        minted.retain_for_recovery();
-        drop(minted);
+        marker::write_released_marker(&root, "gd-update-crashed", "feature");
 
         git_delete_branch_core(&state, repo_s.clone(), "feature".into())
             .await
