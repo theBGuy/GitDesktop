@@ -9,6 +9,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ignoreLines, REPLACEMENT_CHAR } from "@/lib/ai/ignore";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
+import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
 import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
@@ -4790,22 +4791,6 @@ export function useUnrequestChangesPr(repo: string) {
   );
 }
 
-/** Drops one review's unsubmitted line comments from a threads list: whole threads it
- *  opened, plus its draft replies inside threads someone else opened (a thread carries
- *  only its FIRST comment's review id). Mirrors `usePrThreadClaims`' pending-draft
- *  filter, so the optimistic window shows what the reconciling refetch will. */
-function dropReviewDrafts(
-  threads: ReviewThreadOut[],
-  reviewId: string,
-): ReviewThreadOut[] {
-  return threads.flatMap((t) => {
-    if (t.reviewId === reviewId) return [];
-    const comments = t.comments.filter((c) => c.reviewId !== reviewId);
-    if (comments.length === 0) return [];
-    return [comments.length === t.comments.length ? t : { ...t, comments }];
-  });
-}
-
 /** Delete the viewer's unfinished (PENDING) review, dropping it from the cached PR
  *  details optimistically so the notice strip goes at once. The review-threads cache
  *  is patched in the same breath: the feed hides that review's drafts by matching them
@@ -4818,7 +4803,7 @@ export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (args: { number: number; reviewId: string }) =>
-      api.discardPendingReview(repo, args.reviewId),
+      api.ghPrDiscardPendingReview(repo, args.reviewId),
     onMutate: async (args) => {
       const key = ["repo", repo, "pr", lens, args.number] as const;
       const threadsKey = prReviewThreadsKey(repo, args.number, lens);
@@ -4835,7 +4820,7 @@ export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
           : d,
       );
       queryClient.setQueryData<ReviewThreadOut[]>(threadsKey, (list) =>
-        list ? dropReviewDrafts(list, args.reviewId) : list,
+        list ? dropDraftsByReviewIds(list, new Set([args.reviewId])) : list,
       );
       return { key, threadsKey, prevReviews: prev?.reviews, prevThreads };
     },

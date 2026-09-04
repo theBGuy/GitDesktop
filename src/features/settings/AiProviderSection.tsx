@@ -550,6 +550,9 @@ function AllowedHostsField({
    *  field stays mounted, and allow-list writes from elsewhere; the input axis
    *  rides the typing and Escape clears below. */
   const hostsSig = JSON.stringify(hosts);
+  // Set during render of the component that owns the state: React's derived-state
+  // reset, re-rendered before commit with no cross-component warning. An effect
+  // would commit a stale warning for a frame first.
   if (warn && warn.sig !== hostsSig) setWarn(null);
   const visibleWarn = warn && warn.sig === hostsSig ? warn.text : null;
 

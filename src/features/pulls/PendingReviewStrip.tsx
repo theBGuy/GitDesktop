@@ -47,15 +47,17 @@ export function PendingReviewStrip({
   const discard = useDiscardPendingReview(repoPath, lens);
   const reviewId = review?.id;
   // Held by both the buttons and the palette entries, so a keyboard route can never
-  // do what the disabled control refuses.
-  const ready = reviewId !== undefined && !stale && !discard.isPending;
+  // do what the disabled control refuses. An absent id is spelled "" here, the way
+  // the backend spells a review whose source supplied none.
+  const ready = !!reviewId && !stale && !discard.isPending;
 
   function finishReview() {
+    if (!ready) return;
     openUrl(prUrl);
   }
 
   async function discardReview() {
-    if (reviewId === undefined) return;
+    if (!ready) return;
     const ok = await useConfirm.getState().ask({
       title: `Discard your review on ${remoteLabel}?`,
       body: "Your unfinished review and any draft comments in it are permanently deleted on GitHub.",
@@ -74,14 +76,26 @@ export function PendingReviewStrip({
     }
   }
 
-  useHotkeyAction("finish-review-on-github", finishReview, ready && selected);
+  // The dispatch route re-checks `selected` at invoke: `enabled` de-registers one
+  // commit late and the dispatcher runs the LATEST closure, so a keydown in that
+  // window would otherwise act on a pull request the user has already left. A click
+  // can't land that way — its closure is all one PR's — so the buttons don't consult it.
+  useHotkeyAction(
+    "finish-review-on-github",
+    () => {
+      if (selected) finishReview();
+    },
+    ready && selected,
+  );
   useHotkeyAction(
     "discard-review-on-github",
-    () => void discardReview(),
+    () => {
+      if (selected) void discardReview();
+    },
     ready && selected,
   );
 
-  if (review === undefined || stale) return null;
+  if (!review?.id || stale) return null;
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">

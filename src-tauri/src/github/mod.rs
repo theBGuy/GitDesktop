@@ -57,9 +57,12 @@ pub(crate) async fn gh_origin_slug(repo_path: &str) -> AppResult<String> {
 /// `upstream` on a non-fork clone reads clearly. `git_remote_url`'s TTL cache is
 /// keyed by (repo, name), so each lens caches independently — no extra work here.
 ///
-/// This is also where the slug is grammar-checked ([`valid_github_slug`]): every
-/// `gh` spawn resolves its slug here or through [`gh_origin_slug`], so the 100+
-/// `repos/{slug}/…` endpoint sites inherit the guard and none re-check it.
+/// This is also where the slug is grammar-checked ([`valid_github_slug`]): slugs for
+/// the checked-out repository resolve here or through [`gh_origin_slug`], so those
+/// `repos/{slug}/…` sites inherit the guard and none re-check it. Slug-shaped values
+/// from elsewhere sit outside it — the fork/star paths in `forge/github.rs` validate
+/// their own owner/name pair, while that file's viewer-login probe and readiness poll,
+/// plus the cross-repo branch delete in `pr.rs`, interpolate API-produced values.
 pub(crate) async fn gh_lens_slug(repo_path: &str, lens: Option<&str>) -> AppResult<String> {
     let remote = lens_remote(lens)?;
     let url =

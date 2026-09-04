@@ -92,6 +92,9 @@ export const KeyboardSection = withForm({
      *  knowing to clear them; the refusal note is advisory (an attempted key, not
      *  the draft), and retiring it early is the safe direction. */
     const draftSig = JSON.stringify(overrides);
+    // Set during render of the component that owns the state: React's derived-state
+    // reset, re-rendered before commit. An effect would commit — and announce — the
+    // stale note for a frame first.
     if (note && note.sig !== draftSig) setNote(null);
     const visibleNote = note && note.sig === draftSig ? note.text : null;
     // View state only: the filter never touches the form, so it can't dirty

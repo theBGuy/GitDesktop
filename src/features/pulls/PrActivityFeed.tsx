@@ -17,6 +17,7 @@ import type {
   PrThreadOut,
   ReviewThreadOut,
 } from "@/lib/git/types";
+import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
 import { parseableDate } from "@/lib/time";
 import {
   coalesceCommitRuns,
@@ -84,30 +85,17 @@ export function usePrThreadClaims(
     const all = reviews ?? [];
     // A PENDING review is the viewer's own unsubmitted draft — dateless, so a feed row
     // would sort ahead of everything. Excluded on STATE, not on body: a started review
-    // can already carry a draft summary. Its line comments come back from the threads
-    // read as well, and they stay drafts on GitHub until the review is finished or
-    // discarded, so rendering them as ordinary threads would offer Reply and Resolve
-    // on comments nobody else can see. The notice strip names the review instead.
-    // Comments are filtered as well as whole threads: a thread carries only its FIRST
-    // comment's review id, so a draft REPLY to an already-submitted thread would ride
-    // through the thread-level test.
+    // can already carry a draft summary. The notice strip names the review instead,
+    // and `dropDraftsByReviewIds` takes its line comments out of the threads read.
     const pendingReviews = all.filter((r) => r.state === "PENDING");
     const renderedReviews = all.filter(
       (r) => r.state !== "PENDING" && (hasVisibleBody(r.body) || r.state),
     );
-    // Non-empty ids only: GitLab/Bitbucket threads carry `reviewId: ""`, and an
-    // ""-member here would swallow every one of them.
+    // Non-empty ids only — see `dropDraftsByReviewIds` on why an "" member is unsafe.
     const pendingIds = new Set(
       pendingReviews.map((r) => r.id).filter((id) => id !== ""),
     );
-    const threads = (reviewThreads ?? []).flatMap((t) => {
-      if (pendingIds.has(t.reviewId)) return [];
-      const comments = t.comments.filter((c) => !pendingIds.has(c.reviewId));
-      if (comments.length === 0) return [];
-      // Identity preserved when nothing was dropped — the thread objects key and
-      // memoize the rendered rows.
-      return [comments.length === t.comments.length ? t : { ...t, comments }];
-    });
+    const threads = dropDraftsByReviewIds(reviewThreads ?? [], pendingIds);
     const threadsByReview = new Map<string, ReviewThreadOut[]>();
     // The thread a wrapper review wraps: the FIRST thread holding a comment whose
     // `reviewId` is that review's — a map rather than a per-row scan over every

@@ -2682,7 +2682,7 @@ export const ghPrUnminimizeComment = (repoPath: string, commentId: string) =>
   invoke<void>("gh_pr_unminimize_comment", { repoPath, commentId });
 
 /** Discards an unsubmitted (PENDING) review by its node id; only its author sees one. */
-export const discardPendingReview = (repoPath: string, reviewId: string) =>
+export const ghPrDiscardPendingReview = (repoPath: string, reviewId: string) =>
   invoke<void>("gh_pr_discard_pending_review", { repoPath, reviewId });
 
 /** Outcome of an ACCEPTED forge merge (a failure rejects the invoke instead).
