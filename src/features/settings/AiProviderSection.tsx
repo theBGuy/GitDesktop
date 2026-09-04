@@ -543,23 +543,30 @@ function AllowedHostsField({
   onChange: (next: string[]) => void;
 }) {
   const [draft, setDraft] = useState("");
-  const [warn, setWarn] = useState<string | null>(null);
+  const [warn, setWarn] = useState<{ text: string; sig: string } | null>(null);
+  /** A warning is valid on two axes. The hosts-draft axis rides this signature —
+   *  a mismatch retires the warning outright, so restoring the hosts can't
+   *  resurrect it — covering the footer's Discard, which form.reset()s while this
+   *  field stays mounted, and allow-list writes from elsewhere; the input axis
+   *  rides the typing and Escape clears below. */
+  const hostsSig = JSON.stringify(hosts);
+  if (warn && warn.sig !== hostsSig) setWarn(null);
+  const visibleWarn = warn && warn.sig === hostsSig ? warn.text : null;
 
   function add() {
     const host = normalizeHost(draft);
     if (!host) {
-      setWarn("Enter a host like 192.168.1.50:11434");
+      setWarn({ text: "Enter a host like 192.168.1.50:11434", sig: hostsSig });
       return;
     }
     // isHostAllowed also covers built-in/local hosts and a port already covered
     // by a no-port entry, so this blocks adding a redundant or always-allowed one.
     if (isHostAllowed(`http://${host}`, hosts)) {
-      setWarn(`${host} is already allowed`);
+      setWarn({ text: `${host} is already allowed`, sig: hostsSig });
       return;
     }
     onChange([...hosts, host]);
     setDraft("");
-    setWarn(null);
   }
 
   return (
@@ -594,7 +601,7 @@ function AllowedHostsField({
               }
             }}
           />
-          {warn && <p className="text-xs text-warning">{warn}</p>}
+          {visibleWarn && <p className="text-xs text-warning">{visibleWarn}</p>}
         </div>
         <Button
           type="button"

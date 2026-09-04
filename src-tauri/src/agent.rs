@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -128,6 +128,17 @@ impl AgentKind {
             AgentKind::Codex => "Codex",
             AgentKind::Copilot => "GitHub Copilot",
             AgentKind::Opencode => "opencode",
+        }
+    }
+
+    /// This kind's index into [`RESOLVE_SLOTS`]-wide caches. Spelled out rather than
+    /// derived, so adding a kind is a compile error here instead of a silent collision.
+    fn slot(self) -> usize {
+        match self {
+            AgentKind::Claude => 0,
+            AgentKind::Codex => 1,
+            AgentKind::Copilot => 2,
+            AgentKind::Opencode => 3,
         }
     }
 }
@@ -679,9 +690,68 @@ pub(crate) async fn resolve_named(names: &[&str], bin_path: Option<&str>) -> Opt
     }
 }
 
-/// Resolves the agent CLI's binary (override → PATH → login shell).
+/// One cache slot per [`AgentKind`].
+const RESOLVE_SLOTS: usize = 4;
+
+type ResolveCache = [Option<(Instant, Option<PathBuf>)>; RESOLVE_SLOTS];
+
+/// Per-kind memo of the no-override resolution, held for
+/// [`crate::agent_sandbox::CANDIDATE_TTL`]. Caching the MISS is the point — an absent
+/// CLI costs a login-shell spawn per resolution on macOS/Linux — so a just-installed CLI
+/// can read "not installed" until the entry expires, on the same cadence as the container
+/// runtimes' recovery.
+fn resolve_cache() -> &'static Mutex<ResolveCache> {
+    static CACHE: OnceLock<Mutex<ResolveCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::array::from_fn(|_| None)))
+}
+
+/// Per-slot single-flight gate. Per SLOT, never one shared gate: a resolve that runs to
+/// `DETECT_TIMEOUT` for one agent must not queue another agent's detection behind it.
+fn resolve_lock(i: usize) -> &'static tokio::sync::Mutex<()> {
+    static LOCKS: OnceLock<[tokio::sync::Mutex<()>; RESOLVE_SLOTS]> = OnceLock::new();
+    &LOCKS.get_or_init(|| std::array::from_fn(|_| tokio::sync::Mutex::new(())))[i]
+}
+
+/// The slot's still-fresh cached resolution. The nesting is meaningful: the outer `None`
+/// is "cold or expired", the inner one a cached "not installed". A poisoned cache reads
+/// as cold, so resolution falls through rather than failing.
+fn cached_resolve(i: usize) -> Option<Option<PathBuf>> {
+    let entry = {
+        let guard = resolve_cache().lock().ok();
+        guard.and_then(|c| c[i].clone())
+    };
+    let (at, value) = entry?;
+    crate::agent_sandbox::cache_entry_fresh(
+        at,
+        Instant::now(),
+        crate::agent_sandbox::CANDIDATE_TTL,
+    )
+    .then_some(value)
+}
+
+/// Resolves the agent CLI's binary (override → PATH → login shell). The override arm
+/// bypasses the cache in both directions — it is a bare `is_file()`, and a Settings path
+/// edit must take effect on the next call rather than after a TTL.
 async fn resolve(kind: AgentKind, bin_path: Option<&str>) -> Option<PathBuf> {
-    resolve_named(kind.binary_names(), bin_path).await
+    let override_path = bin_path.map(str::trim).filter(|s| !s.is_empty());
+    if override_path.is_some() {
+        return resolve_named(kind.binary_names(), override_path).await;
+    }
+    let i = kind.slot();
+    if let Some(value) = cached_resolve(i) {
+        return value;
+    }
+    // Cold or expired: hold this slot's gate across the resolve and re-check, so N
+    // racing callers spend one resolution rather than N login-shell spawns.
+    let _flight = resolve_lock(i).lock().await;
+    if let Some(value) = cached_resolve(i) {
+        return value;
+    }
+    let resolved = resolve_named(kind.binary_names(), None).await;
+    if let Ok(mut c) = resolve_cache().lock() {
+        c[i] = Some((Instant::now(), resolved.clone()));
+    }
+    resolved
 }
 
 // --- detection -------------------------------------------------------------
@@ -2737,11 +2807,16 @@ pub async fn agent_session(
     // worktree-confined container. The agent CLI lives in the image, so we don't
     // resolve a host binary; the runtime drives it.
     if container {
-        // This branch runs on EVERY turn, so the preferred runtime holding the image
-        // settles the choice in ONE subprocess — `image inspect` needs the daemon, so
-        // it also proves the engine is up. Only its failure pays for the wider walk,
-        // which is what tells "wrong engine" / "engine stopped" / "never built" apart.
-        let preferred = crate::agent_sandbox::preferred_runtime().await;
+        // This branch runs on EVERY turn, so one candidate holding the image settles the
+        // choice in ONE subprocess — `image inspect` needs the daemon, so it also proves
+        // the engine is up. That candidate is the engine a recent fallback walk settled
+        // on when there is one (a stopped preferred engine would otherwise re-probe to
+        // its timeout every turn), else the preferred one. Only its failure pays for the
+        // wider walk, which tells "wrong engine" / "engine stopped" / "never built" apart.
+        let preferred = match crate::agent_sandbox::settled_runtime() {
+            Some(engine) => Some(engine),
+            None => crate::agent_sandbox::preferred_runtime().await,
+        };
         let preferred_has_image = match &preferred {
             Some((bin, _)) => crate::agent_sandbox::image_present(bin).await,
             None => false,
@@ -2749,7 +2824,12 @@ pub async fn agent_session(
         let (runtime, runtime_name) = match preferred.filter(|_| preferred_has_image) {
             Some(pair) => pair,
             None => match crate::agent_sandbox::pick_runtime().await {
-                crate::agent_sandbox::RuntimePick::WithImage(bin, name) => (bin, name),
+                crate::agent_sandbox::RuntimePick::WithImage(bin, name) => {
+                    // Only the fallback outcome is memoized: the happy path above needs no
+                    // memo, so its behavior stays exactly one subprocess either way.
+                    crate::agent_sandbox::remember_settled_runtime(&bin, &name);
+                    (bin, name)
+                }
                 crate::agent_sandbox::RuntimePick::ReadyNoImage(..) => {
                     return Err(AppError::Command(
                         "The agent container image isn't built yet. Open Settings → AI and click \"Build image\", then try again.".to_string(),
@@ -3184,6 +3264,46 @@ mod child_env_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_agent_kind_owns_a_distinct_cache_slot() {
+        let kinds = [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Copilot,
+            AgentKind::Opencode,
+        ];
+        let mut slots: Vec<usize> = kinds.iter().map(|k| k.slot()).collect();
+        assert!(slots.iter().all(|&i| i < RESOLVE_SLOTS));
+        slots.sort_unstable();
+        slots.dedup();
+        assert_eq!(slots.len(), kinds.len(), "two kinds share a cache slot");
+    }
+
+    #[tokio::test]
+    async fn resolve_serves_the_cache_but_an_override_bypasses_it() {
+        // A planted path that no real resolution could produce (it doesn't exist), so
+        // getting it back proves the cached value was served without re-resolving.
+        let kind = AgentKind::Opencode;
+        let planted = std::env::temp_dir().join("gd-planted-opencode-never-resolved");
+        {
+            let mut cache = resolve_cache().lock().unwrap();
+            cache[kind.slot()] = Some((Instant::now(), Some(planted.clone())));
+        }
+        assert_eq!(resolve(kind, None).await, Some(planted));
+        // An override is a bare `is_file()` check that never reads the cache, so a
+        // Settings path edit takes effect immediately.
+        let override_file =
+            std::env::temp_dir().join(format!("gd-override-cli-{}.bin", std::process::id()));
+        std::fs::write(&override_file, b"x").unwrap();
+        let found = resolve(kind, override_file.to_str()).await;
+        let _ = std::fs::remove_file(&override_file);
+        {
+            let mut cache = resolve_cache().lock().unwrap();
+            cache[kind.slot()] = None;
+        }
+        assert_eq!(found, Some(override_file));
+    }
 
     #[tokio::test]
     async fn capture_capped_round_trips_both_streams_under_cap() {

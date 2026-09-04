@@ -79,7 +79,21 @@ export const KeyboardSection = withForm({
   render: function KeyboardSectionRender({ form }) {
     const overrides = useSelector(form.store, (s) => s.values.hotkeys);
     const [recordingId, setRecordingId] = useState<string | null>(null);
-    const [note, setNote] = useState<string | null>(null);
+    const [note, setNote] = useState<{
+      text: string;
+      /** The overrides-draft signature this note was posted under. */
+      sig: string;
+    } | null>(null);
+    /** Signature over the overrides draft a note was posted under. A mismatch
+     *  retires the note outright, so a draft that later returns to that signature
+     *  can't resurrect a dismissed message. Steal and consequence notes describe
+     *  the draft, so any route changing it — including the footer's Discard, which
+     *  form.reset()s while this section stays mounted — retires them without
+     *  knowing to clear them; the refusal note is advisory (an attempted key, not
+     *  the draft), and retiring it early is the safe direction. */
+    const draftSig = JSON.stringify(overrides);
+    if (note && note.sig !== draftSig) setNote(null);
+    const visibleNote = note && note.sig === draftSig ? note.text : null;
     // View state only: the filter never touches the form, so it can't dirty
     // the Save/Discard bar or survive into saved settings.
     const [filter, setFilter] = useState("");
@@ -95,9 +109,14 @@ export const KeyboardSection = withForm({
       return ACTIONS.find((a) => a.id === id)?.defaultBinding ?? null;
     };
 
-    /** Assigns or clears a binding, returning true when it posted the steal
-     *  message — that note outranks any softer one the caller would add. */
-    function setBinding(id: string, binding: string | null): boolean {
+    /** Assigns or clears a binding. Reports whether it posted the steal message
+     *  — that note outranks any softer one the caller would add — along with the
+     *  signature of the draft it just wrote, so the caller's own note rides the
+     *  same one. */
+    function setBinding(
+      id: string,
+      binding: string | null,
+    ): { stole: boolean; sig: string } {
       const next = { ...overrides };
       let stolenFrom: string | null = null;
       if (binding) {
@@ -115,12 +134,13 @@ export const KeyboardSection = withForm({
       if (binding === def) delete next[id];
       else next[id] = binding;
       form.setFieldValue("hotkeys", next);
+      const sig = JSON.stringify(next);
       const stealNote =
         stolenFrom && binding
           ? `${formatBinding(binding)} was taken from "${stolenFrom}", which is now unbound.`
           : null;
-      setNote(stealNote);
-      return stealNote !== null;
+      setNote(stealNote ? { text: stealNote, sig } : null);
+      return { stole: stealNote !== null, sig };
     }
 
     // While recording, capture every keypress before the app's own hotkey
@@ -147,14 +167,15 @@ export const KeyboardSection = withForm({
       const binding = eventToBinding(e);
       if (!binding) return; // bare modifier — keep waiting
       if (!isBindableCombo(binding)) {
-        setNote(refusalNote(binding));
+        setNote({ text: refusalNote(binding), sig: draftSig });
         return;
       }
       // The assignment always stands; a modifier-less binding only earns a note
       // about where it stays quiet, and never over the steal message. (Chords
       // are exempt: the quiet zones named by the note don't apply to them.)
-      if (!setBinding(id, binding) && !hasModifier(binding)) {
-        setNote(consequenceNote(binding));
+      const { stole, sig } = setBinding(id, binding);
+      if (!stole && !hasModifier(binding)) {
+        setNote({ text: consequenceNote(binding), sig });
       }
       setRecordingId(null);
     });
@@ -220,14 +241,16 @@ export const KeyboardSection = withForm({
             unbinds. Unbound actions stay available in the command palette.
             Changes apply when you save.
           </p>
-          {note && <p className="mt-1 text-xs text-warning">{note}</p>}
+          {visibleNote && (
+            <p className="mt-1 text-xs text-warning">{visibleNote}</p>
+          )}
           {/* Announce recording state + notes to screen readers. */}
           <span role="status" aria-live="assertive" className="sr-only">
             {recordingId
               ? `Recording shortcut for ${
                   ACTIONS.find((a) => a.id === recordingId)?.label ?? "action"
                 }. Press the new combination, or Escape to cancel.`
-              : (note ?? "")}
+              : (visibleNote ?? "")}
           </span>
         </div>
         <div className="flex gap-2">
@@ -261,10 +284,7 @@ export const KeyboardSection = withForm({
             variant="outline"
             size="sm"
             disabled={overrideCount === 0}
-            onClick={() => {
-              form.setFieldValue("hotkeys", {});
-              setNote(null);
-            }}
+            onClick={() => form.setFieldValue("hotkeys", {})}
           >
             Reset all to defaults
           </Button>
@@ -327,7 +347,6 @@ export const KeyboardSection = withForm({
                         const next = { ...overrides };
                         delete next[action.id];
                         form.setFieldValue("hotkeys", next);
-                        setNote(null);
                       }}
                     >
                       <ArrowCounterClockwiseIcon />

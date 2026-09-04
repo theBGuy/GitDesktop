@@ -35,8 +35,13 @@ import {
 
 /** Which reviews render, and which line-comment threads each of them claims. */
 export interface PrThreadClaims {
-  /** Reviews worth a row: a visible body, or a state to report. */
+  /** Reviews worth a row: a visible body, or a state to report — never the viewer's
+   *  own PENDING review, which the notice strip carries instead. */
   renderedReviews: PrThreadOut[];
+  /** The viewer's own unfinished reviews, which the notice strip owns instead of the
+   *  feed. GitHub returns a PENDING review only to its author and allows one at a
+   *  time; the array shape keeps the derivation total. */
+  pendingReviews: PrThreadOut[];
   /** Threads grouped by the review that owns them — one pass, reused for the
    *  claimed-id set and each review's inline slice. */
   threadsByReview: Map<string, ReviewThreadOut[]>;
@@ -66,10 +71,25 @@ export function usePrThreadClaims(
     // `reviewId`; always "" on GitLab/Bitbucket, which don't model reviews).
     // Claimed threads render inline under their review; the rest fall to the
     // residual block.
-    const renderedReviews = (reviews ?? []).filter(
-      (r) => hasVisibleBody(r.body) || r.state,
+    const all = reviews ?? [];
+    // A PENDING review is the viewer's own unsubmitted draft — dateless, so a feed row
+    // would sort ahead of everything. Excluded on STATE, not on body: a started review
+    // can already carry a draft summary. Its line comments come back from the threads
+    // read as well, and they stay drafts on GitHub until the review is finished or
+    // discarded, so rendering them as ordinary threads would offer Reply and Resolve
+    // on comments nobody else can see. The notice strip names the review instead.
+    const pendingReviews = all.filter((r) => r.state === "PENDING");
+    const renderedReviews = all.filter(
+      (r) => r.state !== "PENDING" && (hasVisibleBody(r.body) || r.state),
     );
-    const threads = reviewThreads ?? [];
+    // Non-empty ids only: GitLab/Bitbucket threads carry `reviewId: ""`, and an
+    // ""-member here would swallow every one of them.
+    const pendingIds = new Set(
+      pendingReviews.map((r) => r.id).filter((id) => id !== ""),
+    );
+    const threads = (reviewThreads ?? []).filter(
+      (t) => !pendingIds.has(t.reviewId),
+    );
     const threadsByReview = new Map<string, ReviewThreadOut[]>();
     // The thread a wrapper review wraps: the FIRST thread holding a comment whose
     // `reviewId` is that review's — a map rather than a per-row scan over every
@@ -113,6 +133,7 @@ export function usePrThreadClaims(
     const residualThreads = threads.filter((t) => !claimedThreadIds.has(t.id));
     return {
       renderedReviews,
+      pendingReviews,
       threadsByReview,
       wrapperReviewIds,
       wrappedThreadFor,

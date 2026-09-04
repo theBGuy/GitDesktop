@@ -790,6 +790,22 @@ export const ACTIONS = [
     category: "Pull requests",
     defaultBinding: null,
   },
+  // The forge-side twin of the pair above: those act on the LOCAL draft comments this
+  // app stores, these on a review already started on GitHub. Labels name the provider
+  // literally because a registry label is a static string, while the strip's own
+  // buttons template the detected remote's name.
+  {
+    id: "finish-review-on-github",
+    label: "Finish review on GitHub",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "discard-review-on-github",
+    label: "Discard review on GitHub",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
   {
     id: "pr-stack-next",
     label: "Next pull request in stack",

@@ -222,7 +222,7 @@ const RUNTIME_SLOTS: usize = 2;
 /// spawn on macOS/Linux. Matched to the sandbox status view's 15s recovery poll: a
 /// cached MISS is what holds the "not installed" copy up, so a longer TTL would keep
 /// that copy past the very tick meant to clear it once an engine is installed.
-const CANDIDATE_TTL: Duration = Duration::from_secs(15);
+pub(crate) const CANDIDATE_TTL: Duration = Duration::from_secs(15);
 
 type CandidateCache = [Option<(Instant, Option<(PathBuf, String)>)>; RUNTIME_SLOTS];
 
@@ -240,7 +240,7 @@ fn slot_lock(i: usize) -> &'static tokio::sync::Mutex<()> {
 
 /// Whether a cache entry stamped at `at` is still usable at `now`. Pure so the TTL
 /// boundary is testable without waiting on a clock.
-fn cache_entry_fresh(at: Instant, now: Instant, ttl: Duration) -> bool {
+pub(crate) fn cache_entry_fresh(at: Instant, now: Instant, ttl: Duration) -> bool {
     now.saturating_duration_since(at) < ttl
 }
 
@@ -325,6 +325,44 @@ pub(crate) async fn preferred_runtime() -> Option<(PathBuf, String)> {
         }
     }
     None
+}
+
+type SettledMemo = Option<(Instant, (PathBuf, String))>;
+
+/// The engine a turn-path fallback walk last settled on, with the stamp it settled at.
+/// Set ONLY when the walk lands on [`RuntimePick::WithImage`], so a turn taking the
+/// preferred engine stays byte-identical (one `image inspect`); a config whose preferred
+/// engine is stopped then pays that doomed double-probe once per [`CANDIDATE_TTL`] window
+/// instead of every turn, and expiry — never a refresh — re-prefers a recovered engine.
+fn settled_runtime_memo() -> &'static Mutex<SettledMemo> {
+    static MEMO: OnceLock<Mutex<SettledMemo>> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(None))
+}
+
+/// The memoized settled engine while it is still fresh. A poisoned memo reads as absent,
+/// so the caller falls through to the full walk rather than failing.
+pub(crate) fn settled_runtime() -> Option<(PathBuf, String)> {
+    let (at, engine) = {
+        let guard = settled_runtime_memo().lock().ok();
+        guard.and_then(|m| m.clone())
+    }?;
+    cache_entry_fresh(at, Instant::now(), CANDIDATE_TTL).then_some(engine)
+}
+
+/// Records the engine a fallback walk settled on. The stamp is taken here and never
+/// refreshed on a later confirm — its expiry IS the recheck of the preferred engine.
+pub(crate) fn remember_settled_runtime(bin: &Path, name: &str) {
+    if let Ok(mut m) = settled_runtime_memo().lock() {
+        *m = Some((Instant::now(), (bin.to_path_buf(), name.to_string())));
+    }
+}
+
+/// Drops the memo wherever image presence or container state changes under our control,
+/// so the next turn re-walks instead of confirming a pick that may no longer hold.
+pub(crate) fn forget_settled_runtime() {
+    if let Ok(mut m) = settled_runtime_memo().lock() {
+        *m = None;
+    }
 }
 
 /// Every installed runtime in preference order, for operations that must act on ALL
@@ -613,6 +651,9 @@ async fn run_build(bin: &Path, build_args: &[String]) -> AppResult<()> {
             "Building the agent image failed:\n{tail}"
         )));
     }
+    // A finished build changes which engine holds an image, so the settled pick a
+    // turn would confirm is no longer trustworthy.
+    forget_settled_runtime();
     Ok(())
 }
 
@@ -988,6 +1029,9 @@ pub async fn agent_sandbox_cleanup(app: AppHandle, session_id: String) -> AppRes
     for (bin, _) in runtime_candidates().await {
         let _ = run_capture(&bin, &["rm", "-f", &name], DETECT_TIMEOUT).await;
     }
+    // Container state just changed under us; drop the settled pick so the next turn
+    // re-walks rather than confirming a stale one.
+    forget_settled_runtime();
     Ok(())
 }
 
@@ -1662,6 +1706,27 @@ mod tests {
             at,
             CANDIDATE_TTL
         ));
+    }
+
+    #[test]
+    fn settled_runtime_memo_is_read_until_invalidated_or_expired() {
+        remember_settled_runtime(Path::new("pm"), "podman");
+        assert_eq!(
+            settled_runtime(),
+            Some((PathBuf::from("pm"), "podman".to_string()))
+        );
+        forget_settled_runtime();
+        assert_eq!(settled_runtime(), None);
+        // An entry older than the TTL reads as absent, so a stopped preferred engine is
+        // re-probed on the next window rather than the fallback pick riding forever.
+        let old = Instant::now()
+            .checked_sub(CANDIDATE_TTL)
+            .expect("host uptime exceeds the TTL, so the expiry arm must run");
+        if let Ok(mut m) = settled_runtime_memo().lock() {
+            *m = Some((old, (PathBuf::from("pm"), "podman".to_string())));
+        }
+        assert_eq!(settled_runtime(), None);
+        forget_settled_runtime();
     }
 
     #[test]

@@ -56,15 +56,35 @@ pub(crate) async fn gh_origin_slug(repo_path: &str) -> AppResult<String> {
 /// scp-style URLs). The error NAMES the remote it failed on so a missing
 /// `upstream` on a non-fork clone reads clearly. `git_remote_url`'s TTL cache is
 /// keyed by (repo, name), so each lens caches independently — no extra work here.
+///
+/// This is also where the slug is grammar-checked ([`valid_github_slug`]): every
+/// `gh` spawn resolves its slug here or through [`gh_origin_slug`], so the 100+
+/// `repos/{slug}/…` endpoint sites inherit the guard and none re-check it.
 pub(crate) async fn gh_lens_slug(repo_path: &str, lens: Option<&str>) -> AppResult<String> {
     let remote = lens_remote(lens)?;
     let url =
         crate::git::remote::git_remote_url(repo_path.to_string(), remote.to_string()).await?;
-    crate::forge::remote_path(&url).ok_or_else(|| {
+    let slug = crate::forge::remote_path(&url).ok_or_else(|| {
         AppError::Gh(format!(
             "could not determine the GitHub repository from the {remote} remote"
         ))
-    })
+    })?;
+    if !valid_github_slug(&slug) {
+        return Err(AppError::Gh(format!(
+            "the {remote} remote's repository path {slug:?} isn't a valid GitHub owner/repo slug"
+        )));
+    }
+    Ok(slug)
+}
+
+/// Whether a slug is safe to interpolate into a `gh api` endpoint and to pass as
+/// `gh -R <slug>` argv: gh expands `{…}` in an endpoint and splits it on `?`/`#`
+/// (query/fragment), a leading `-` reads as a flag, and `.`/`..` traverse the path.
+fn valid_github_slug(slug: &str) -> bool {
+    let Some((owner, repo)) = slug.split_once('/') else {
+        return false;
+    };
+    crate::forge::validate_owner(owner).is_ok() && crate::forge::validate_repo_name(repo).is_ok()
 }
 
 /// Validate a lens value and map it to the git remote name it resolves. Pure —
@@ -89,7 +109,7 @@ pub(crate) fn fork_owner_of(slug: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{fork_owner_of, lens_remote};
+    use super::{fork_owner_of, lens_remote, valid_github_slug};
 
     #[test]
     fn lens_remote_accepts_none_origin_upstream() {
@@ -116,5 +136,44 @@ mod tests {
         // A malformed slug with no slash yields the whole string (gh then errors).
         assert_eq!(fork_owner_of("nowhere"), "nowhere");
         assert_eq!(fork_owner_of(""), "");
+    }
+
+    #[test]
+    fn valid_github_slug_accepts_real_slugs() {
+        for slug in [
+            "theBGuy/GitDesktop",
+            "octo-cat/hello.world_2",
+            "a1/b2",
+            "user/repo-name.js",
+        ] {
+            assert!(valid_github_slug(slug), "{slug:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn valid_github_slug_refuses_unaddressable_slugs() {
+        for slug in [
+            // Endpoint-retargeting characters: gh expands `{…}` and splits on `?`/`#`.
+            "own{er}/repo",
+            "owner/rep}o",
+            "owner/re?po",
+            "owner/re#po",
+            "owner/re po",
+            "a/b%7D",
+            // Shape: exactly one slash, both segments present.
+            "a/b/c",
+            "a",
+            "",
+            "/repo",
+            "owner/",
+            // A leading `-` reads as a flag in `gh -R <slug>` argv.
+            "-x/y",
+            "x/-y",
+            // Dot segments traverse the endpoint path.
+            "./x",
+            "x/..",
+        ] {
+            assert!(!valid_github_slug(slug), "{slug:?} should be refused");
+        }
     }
 }

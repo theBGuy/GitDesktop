@@ -4790,6 +4790,42 @@ export function useUnrequestChangesPr(repo: string) {
   );
 }
 
+/** Delete the viewer's unfinished (PENDING) review, dropping it from the cached PR
+ *  details optimistically so the notice strip goes at once. Field-scoped rollback:
+ *  only the reviews list is captured, so a failed discard doesn't revert a concurrent
+ *  assignee/reviewer-set sharing this PR key. GitHub-only — no other provider models
+ *  a pending review. */
+export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { number: number; reviewId: string }) =>
+      api.discardPendingReview(repo, args.reviewId),
+    onMutate: async (args) => {
+      const key = ["repo", repo, "pr", lens, args.number] as const;
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev = queryClient.getQueryData<PrDetails>(key);
+      queryClient.setQueryData<PrDetails>(key, (d) =>
+        d
+          ? { ...d, reviews: d.reviews.filter((r) => r.id !== args.reviewId) }
+          : d,
+      );
+      return { key, prevReviews: prev?.reviews };
+    },
+    onError: (_e, _args, ctx) => {
+      const prevReviews = ctx?.prevReviews;
+      const key = ctx?.key;
+      if (prevReviews === undefined || key === undefined) return;
+      queryClient.setQueryData<PrDetails>(key, (cur) =>
+        cur ? { ...cur, reviews: prevReviews } : cur,
+      );
+    },
+    onSettled: (_d, _e, args) =>
+      queryClient.invalidateQueries({
+        queryKey: ["repo", repo, "pr", lens, args.number],
+      }),
+  });
+}
+
 /** Toggle a PR/MR's draft state both ways on all three providers. `lens` threads the
  *  fork identity through to the GitHub arm. Optimistically patches `isDraft` with
  *  field-scoped rollback so the badge flips instantly; the repo-wide invalidate on

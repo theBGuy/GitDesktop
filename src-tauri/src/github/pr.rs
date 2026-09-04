@@ -1774,6 +1774,31 @@ pub async fn gh_pr_unminimize_comment(repo_path: String, comment_id: String) -> 
     Ok(())
 }
 
+/// Discards an unsubmitted (PENDING) review by its GraphQL node id — the same id
+/// [`RawReview::id`] already carries — so no repo slug or lens is involved and this
+/// works through any remote. GitHub only ever returns a PENDING review to its own
+/// author, so the caller can only reach (and delete) its own.
+#[tauri::command]
+pub async fn gh_pr_discard_pending_review(repo_path: String, review_id: String) -> AppResult<()> {
+    if review_id.trim().is_empty() {
+        return Err(AppError::InvalidArgument("a review id is required".into()));
+    }
+    run_gh(
+        Some(&repo_path),
+        &[
+            "api",
+            "graphql",
+            "-f",
+            "query=mutation($id:ID!){deletePullRequestReview(input:{pullRequestReviewId:$id}){clientMutationId}}",
+            "-f",
+            &format!("id={review_id}"),
+        ],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Checks out a PR's branch locally (handles fork-sourced PRs too).
 #[tauri::command]
 pub async fn gh_pr_checkout(
@@ -2987,8 +3012,11 @@ struct RawReview {
     state: String,
     #[serde(default)]
     body: String,
+    /// A PENDING review has no submit time; gh ≥2.94 spells that as literal JSON
+    /// `null` and `#[serde(default)]` only fills an ABSENT key, so an explicit
+    /// `null` needs `Option` or the whole `gh pr view` document fails to parse.
     #[serde(default)]
-    submitted_at: String,
+    submitted_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3067,10 +3095,10 @@ fn parse_actions_run_job(url: &str) -> (Option<String>, Option<String>) {
     (Some(run_id), job_id)
 }
 
-/// Whether a timestamp is a real time. `gh` serializes a null GraphQL timestamp as
-/// Go's zero value (`"0001-01-01T00:00:00Z"`), so a still-running check "has" a
-/// `completedAt` and a PENDING review "has" a `submittedAt` unless that sentinel is
-/// dropped along with "".
+/// Whether a timestamp is a real time. gh ≥2.94 emits a null GraphQL timestamp as
+/// literal JSON `null` (the deserializers take `Option` for those fields); older gh
+/// spelled it as Go's zero value (`"0001-01-01T00:00:00Z"`), so a still-running check
+/// "has" a `completedAt` unless that sentinel is dropped along with "".
 fn real_check_time(s: &str) -> bool {
     !s.is_empty() && !s.starts_with("0001-01-01")
 }
@@ -3714,7 +3742,7 @@ pub async fn gh_pr_view(
                     author_avatar_url: String::new(),
                     state: r.state,
                     body: r.body,
-                    date: real_time_or_empty(r.submitted_at),
+                    date: real_time_or_empty(r.submitted_at.unwrap_or_default()),
                     id: r.id,
                     url: String::new(),
                     viewer_did_author: false,
@@ -3733,7 +3761,7 @@ pub async fn gh_pr_view(
                 author_avatar_url: String::new(),
                 state: r.state,
                 body: r.body,
-                date: real_time_or_empty(r.submitted_at),
+                date: real_time_or_empty(r.submitted_at.unwrap_or_default()),
                 id: r.id,
                 url: String::new(),
                 viewer_did_author: false,
@@ -5933,7 +5961,8 @@ mod tests {
     use super::{
         apply_stack_join, classify_gh_merge_refusal, classify_merge_async,
         external_items_from_thread_nodes,
-        flatten_slurped_pages, fork_head_identity, gh_api_error_message, host_from_url,
+        flatten_slurped_pages, fork_head_identity, gh_api_error_message,
+        gh_pr_discard_pending_review, host_from_url,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
         parse_auth_accounts, parse_pr_url_repo, parse_publish_owners, pr_edit_args, pr_poll_query,
         pull_stack_ref,
@@ -5950,7 +5979,7 @@ mod tests {
         ForgeTimelineEventOut,
         batch_check_present, build_divergence_compare_path, oid_outside_origin_graph,
         select_fork_pr_match, validate_branch,
-        ForkPrMatch, RawDivergenceRefs, RawForkPr, RawLogin, RawPr,
+        ForkPrMatch, RawDivergenceRefs, RawForkPr, RawLogin, RawPr, RawReview,
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
@@ -6876,6 +6905,16 @@ mod tests {
         assert_eq!(pick(vec![other_name, m(3, "contrib", 2)]), None);
     }
 
+    #[tokio::test]
+    async fn discard_pending_review_rejects_an_empty_id_before_spawning_gh() {
+        // The guard fires before any `gh` invocation, so a nonexistent repo path is
+        // enough to prove nothing was spawned.
+        for id in ["", "   "] {
+            let r = gh_pr_discard_pending_review("C:/nonexistent".into(), id.into()).await;
+            assert!(matches!(r, Err(AppError::InvalidArgument(_))));
+        }
+    }
+
     /// The anti-spoofing gate, against a real repo (temp_dir, git on PATH): a fork
     /// PR head that origin already reaches must never anchor a match, because forks
     /// share an object network and a crafted PR could otherwise claim unrelated
@@ -7636,6 +7675,57 @@ github.acme.com
         }))
         .expect("real submitted_at must deserialize");
         assert_eq!(rest_review_to_out(r2).date, "2026-07-18T12:34:56Z");
+    }
+
+    #[test]
+    fn graphql_review_null_submitted_at_deserializes_to_empty_date() {
+        // gh ≥2.94 spells a PENDING review's submit time as literal JSON null; a
+        // plain String field would fail the whole `gh pr view` document, so the PR
+        // wouldn't load at all. Mirrors the reviews arm's mapping expression.
+        let mapped = |r: RawReview| real_time_or_empty(r.submitted_at.unwrap_or_default());
+
+        let pending: RawReview = serde_json::from_value(serde_json::json!({
+            "id": "PRR_1",
+            "author": {"login": "alice"},
+            "state": "PENDING",
+            "body": "",
+            "submittedAt": null,
+        }))
+        .expect("null submittedAt must deserialize");
+        assert_eq!(pending.submitted_at, None);
+        assert_eq!(mapped(pending), "");
+
+        // An absent key is the case `#[serde(default)]` already covered.
+        let absent: RawReview = serde_json::from_value(serde_json::json!({
+            "id": "PRR_2",
+            "author": {"login": "bob"},
+            "state": "PENDING",
+            "body": "",
+        }))
+        .expect("absent submittedAt must deserialize");
+        assert_eq!(absent.submitted_at, None);
+        assert_eq!(mapped(absent), "");
+
+        // Older gh spelled the same null as Go's zero value; it still clears.
+        let sentinel: RawReview = serde_json::from_value(serde_json::json!({
+            "id": "PRR_3",
+            "state": "PENDING",
+            "submittedAt": "0001-01-01T00:00:00Z",
+        }))
+        .expect("Go-zero submittedAt must deserialize");
+        assert_eq!(sentinel.submitted_at.as_deref(), Some("0001-01-01T00:00:00Z"));
+        assert_eq!(mapped(sentinel), "");
+
+        // A submitted review's real timestamp passes straight through.
+        let submitted: RawReview = serde_json::from_value(serde_json::json!({
+            "id": "PRR_4",
+            "author": {"login": "carol"},
+            "state": "APPROVED",
+            "body": "lgtm",
+            "submittedAt": "2026-07-18T12:34:56Z",
+        }))
+        .expect("real submittedAt must deserialize");
+        assert_eq!(mapped(submitted), "2026-07-18T12:34:56Z");
     }
 
     #[test]

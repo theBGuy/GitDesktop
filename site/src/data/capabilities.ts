@@ -236,6 +236,11 @@ export const capabilities: Capability[] = [
     label:
       "Retarget a pull request's base branch from the edit dialog — on GitHub, GitLab, and Bitbucket",
   },
+  {
+    group: "Pull requests & review",
+    label:
+      "Unfinished-review notice — a review you started on GitHub surfaces on the PR, to finish or discard",
+  },
 
   // — Forges & trackers —
   {

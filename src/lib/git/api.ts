@@ -2681,6 +2681,10 @@ export const ghPrMinimizeComment = (
 export const ghPrUnminimizeComment = (repoPath: string, commentId: string) =>
   invoke<void>("gh_pr_unminimize_comment", { repoPath, commentId });
 
+/** Discards an unsubmitted (PENDING) review by its node id; only its author sees one. */
+export const discardPendingReview = (repoPath: string, reviewId: string) =>
+  invoke<void>("gh_pr_discard_pending_review", { repoPath, reviewId });
+
 /** Outcome of an ACCEPTED forge merge (a failure rejects the invoke instead).
  *  `queued` means the forge took the merge but hasn't completed it — the PR is
  *  NOT merged yet. `cleanupWarning` carries the human-readable detail either

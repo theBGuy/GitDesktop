@@ -185,6 +185,7 @@ import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { PendingReviewBar } from "./PendingReviewBar";
+import { PendingReviewStrip } from "./PendingReviewStrip";
 import { PrActivityFeed, usePrThreadClaims } from "./PrActivityFeed";
 import { PrCommitDetail } from "./PrCommitDetail";
 import {
@@ -2705,6 +2706,20 @@ export function RemotePrView({
         retryBusy={mergeability.isFetching}
       />
 
+      {/* Same slot as the banner above, and shown whatever section is active: an
+          unfinished review is PR state, and the feed no longer carries a row for it.
+          GitHub allows one per viewer — the first is the only one. */}
+      <PendingReviewStrip
+        repoPath={repoPath}
+        lens={lens}
+        number={number}
+        review={threadClaims.pendingReviews[0]}
+        prUrl={pr.url}
+        remoteLabel={remoteLabel}
+        stale={detailsStale}
+        selected={isSelectedPr}
+      />
+
       {aiEnabled && canComment && section === "review" && (
         <PrReviewPanel
           prKind="remote"
@@ -2947,7 +2962,10 @@ export function RemotePrView({
                 revealThreadId={revealThreadId}
                 onRevealed={() => setRevealThreadId(null)}
               />
-              {pr.reviews.length === 0 &&
+              {/* What the FEED holds, not what the payload does: the viewer's own
+                  pending review is carried by the notice strip, so counting it here
+                  would silence this line over an empty feed. */}
+              {threadClaims.renderedReviews.length === 0 &&
                 pr.comments.length === 0 &&
                 pr.commits.length === 0 &&
                 !timeline.data?.length &&
