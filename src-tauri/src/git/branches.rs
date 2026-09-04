@@ -1389,7 +1389,9 @@ async fn merge_diverged_in_worktree(
 /// markerless holder instead, which nothing may clear until the age gate expires.
 fn settle_marker(marker: Option<crate::git::update_marker::UpdateMarker>, tmp: &str) {
     let Some(mut marker) = marker else { return };
-    if std::path::Path::new(tmp).exists() {
+    // try_exists: an UNREADABLE answer must retain (the sidecars' deletion is the one
+    // destructive direction here); only a confirmed-gone checkout lets them go.
+    if std::path::Path::new(tmp).try_exists().unwrap_or(true) {
         marker.retain_for_recovery();
     }
 }
@@ -3449,6 +3451,8 @@ mod tests {
     /// claimed age-free and the delete then succeeds; a MARKERLESS one (a pre-marker
     /// build's checkout, which may still be running) is left alone and takes the
     /// pre-existing generic message naming the holding worktree.
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the whole body.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_registered_holder_is_claimed_when_released_and_left_when_markerless() {

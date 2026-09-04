@@ -6,8 +6,11 @@
 //! switching, renaming, deleting, cherry-picking onto it — would otherwise collide
 //! with git's own message naming a hidden app-data path. A marker minted before the
 //! `worktree add` turns those collisions into one sentence the user can act on, and
-//! it works ACROSS PROCESSES (the MCP server runs these same functions) because the
-//! signal is filesystem state, not process state.
+//! the signal is filesystem state, not process state, so it reaches every process
+//! bound to the same checkout path (the MCP server runs these same functions). The
+//! recorded limit: the root is keyed on that path, so a SIBLING worktree of the same
+//! repository resolves its own root and sees no marker — those callers keep pre-marker
+//! behavior until the root is keyed by git common dir.
 //!
 //! The marker is two files beside the checkout, sharing its stem: an unlocked `.json`
 //! manifest and an exclusively-locked `.lock`. Two files is forced by Windows —
@@ -1183,6 +1186,8 @@ mod tests {
     /// running the update — only the age-gated sweep may ever touch it. The override is
     /// what lets the claim pass its managed-root gate and reach the Missing probe this
     /// test exists to pin — without it the refusal is the seam's, not the probe's.
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the whole body.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_markerless_holder_is_never_claimed_age_free() {
