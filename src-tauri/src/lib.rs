@@ -107,6 +107,13 @@ pub fn run() {
                 tauri::async_runtime::spawn_blocking(|| {
                     git::compare::sweep_review_worktree_husks();
                 });
+                // Reclaim persistent review worktrees a week idle (see
+                // `git::compare::sweep_stale_persistent_review_worktrees`) — their
+                // only lifecycle. Same fire-and-forget shape: plain fs work, and a
+                // live review's claim keeps its own checkout out of the sweep.
+                tauri::async_runtime::spawn_blocking(|| {
+                    git::compare::sweep_stale_persistent_review_worktrees();
+                });
             }
             Ok(())
         })

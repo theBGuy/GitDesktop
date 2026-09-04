@@ -7,10 +7,16 @@
 //! with git's own message naming a hidden app-data path. A marker minted before the
 //! `worktree add` turns those collisions into one sentence the user can act on, and
 //! the signal is filesystem state, not process state, so it reaches every process
-//! bound to the same checkout path (the MCP server runs these same functions). The
-//! recorded limit: the root is keyed on that path, so a SIBLING worktree of the same
-//! repository resolves its own root and sees no marker — those callers keep pre-marker
-//! behavior until the root is keyed by git common dir.
+//! bound to the same repository (the MCP server runs these same functions).
+//!
+//! The root is keyed on the repository's worktree-stable identity — its absolute
+//! common git dir — so the main checkout and every linked worktree of a repository
+//! share one marker root, and a branch operation run from one sees the other's live
+//! update. Mints go to that root alone; refusals, claims and sweeps ALSO read the
+//! pre-rekey root keyed on the checkout path, because a not-yet-restarted process
+//! still mints under it and its live locks must still refuse. That second scan is the
+//! migration as well: leftovers a pre-rekey build stranded keep being found and healed
+//! rather than going invisible.
 //!
 //! The marker is two files beside the checkout, sharing its stem: an unlocked `.json`
 //! manifest and an exclusively-locked `.lock`. Two files is forced by Windows —
@@ -120,26 +126,66 @@ impl Drop for TestRootOverride {
     }
 }
 
-/// The worktree root this module works in. Every entry point — and the mint in
+/// The worktree roots this module works in for one repository.
+pub(crate) struct MarkerRoots {
+    /// Keyed on the repository's identity, so every worktree of it resolves this same
+    /// directory. The only root a MINT may use.
+    primary: PathBuf,
+    /// The pre-rekey root, keyed on the checkout path. `None` when it IS `primary`,
+    /// which is what an unresolvable identity degrades to.
+    legacy: Option<PathBuf>,
+}
+
+impl MarkerRoots {
+    /// Collapses to ONE root when the identity resolution fell back to the checkout
+    /// path, which is exactly the pre-rekey keying — there is no second place to look.
+    fn new(primary: PathBuf, legacy: PathBuf) -> Self {
+        Self {
+            legacy: (legacy != primary).then_some(legacy),
+            primary,
+        }
+    }
+
+    /// Where a mint goes — never the pre-rekey root, since a new marker belongs where
+    /// every worktree of the repository is looking.
+    fn mint_root(&self) -> &Path {
+        &self.primary
+    }
+
+    /// Every root a scan reads, primary first — the first refusal wins, so the root
+    /// this build mints under is the one that gets to answer.
+    fn all(&self) -> impl Iterator<Item = &Path> {
+        std::iter::once(self.primary.as_path()).chain(self.legacy.as_deref())
+    }
+}
+
+/// The roots this module works in. Every entry point — and the mint in
 /// `branches.rs::update_worktree_path` — resolves through here, so a test can point the
-/// whole module at a temp directory. Outside tests it is exactly
-/// `ops::worktree_root_dir`.
+/// whole module at a temp directory.
 ///
-/// Under `cfg(test)` an installed override is the ONLY resolution: with none, this
-/// ERRORS instead of falling through to the real app data, mirroring
-/// [`crate::app_store`]'s "under `cfg!(test)`, NO store, whatever the environment says".
-/// The override is process-wide, so a test that never installed one must neither read a
-/// concurrently-scheduled sibling's root nor mint under the developer's own app data.
-/// Every GUARD caller fails open on an unresolvable root — refusals answer `Ok`, claims
-/// and sweeps return, `is_managed_update_worktree` answers `false` — which is exactly
-/// what an un-overridden test should see. The MINT is the loud exception:
-/// `branches.rs::update_worktree_path` propagates the error rather than place a
-/// checkout somewhere nobody is guarding.
-pub(crate) fn root_for(repo_path: &str) -> AppResult<PathBuf> {
+/// Outside tests the primary root hashes [`crate::git::repo::repo_identity`]'s output,
+/// the ONE shared resolver the MCP server uses too, so two processes can never key a
+/// repository differently. Deliberately uncached: a stale identity would re-open the
+/// cross-worktree blindness this keying closes, and these are user-action paths where
+/// one `rev-parse` is affordable. `repo_identity` answers with its input when git
+/// cannot resolve it, so a failure degrades to plain checkout-path keying and the two
+/// roots collapse into one.
+///
+/// Under `cfg(test)` an installed override is the ONLY resolution and is the whole root
+/// set: with none, this ERRORS instead of falling through to the real app data,
+/// mirroring [`crate::app_store`]'s "under `cfg!(test)`, NO store, whatever the
+/// environment says". The override is process-wide, so a test that never installed one
+/// must neither read a concurrently-scheduled sibling's root nor mint under the
+/// developer's own app data. Every GUARD caller fails open on an unresolvable root —
+/// refusals answer `Ok`, claims and sweeps return, `is_managed_update_worktree` answers
+/// `false` — which is exactly what an un-overridden test should see. The MINT is the
+/// loud exception: `branches.rs::update_worktree_path` propagates the error rather than
+/// place a checkout somewhere nobody is guarding.
+pub(crate) async fn roots_for(repo_path: &str) -> AppResult<MarkerRoots> {
     #[cfg(test)]
     {
         let _ = repo_path;
-        TEST_ROOT_DIR
+        let primary = TEST_ROOT_DIR
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -147,12 +193,25 @@ pub(crate) fn root_for(repo_path: &str) -> AppResult<PathBuf> {
                 AppError::Command(
                     "no update-marker root override is installed for this test".to_string(),
                 )
-            })
+            })?;
+        Ok(MarkerRoots {
+            primary,
+            legacy: None,
+        })
     }
     #[cfg(not(test))]
     {
-        crate::git::ops::worktree_root_dir(repo_path)
+        let identity = crate::git::repo::repo_identity(repo_path).await;
+        Ok(MarkerRoots::new(
+            crate::git::ops::identity_worktree_root_dir(&identity)?,
+            crate::git::ops::worktree_root_dir(repo_path)?,
+        ))
     }
+}
+
+/// Where a mint goes ([`MarkerRoots::mint_root`]).
+pub(crate) async fn root_for(repo_path: &str) -> AppResult<PathBuf> {
+    Ok(roots_for(repo_path).await?.mint_root().to_path_buf())
 }
 
 /// The marker manifest. Plain readable JSON so a probe in another process can answer
@@ -343,27 +402,40 @@ fn is_update_worktree_path(path: &str) -> bool {
         .is_some_and(|name| name.starts_with(MARKER_PREFIX))
 }
 
-/// Whether `path` is an update checkout THIS app manages for `repo_path`: the mint
-/// basename AND a parent that is the repo's own worktree root. The root scope is what
+/// Whether `path` is an update checkout THIS app manages, over already-resolved
+/// `roots`: the mint basename AND a parent that is one of them. The root scope is what
 /// keeps a user's own worktree that merely happens to be named `gd-update-*` — with
 /// some stray unlocked `.lock` beside it — out of every marker arm, refusal and
-/// removal alike.
+/// removal alike. Both roots count, so a leftover a pre-rekey build minted stays ours
+/// to claim.
 ///
 /// Compared through the repo's two path spellings (`canonical_wt_path` resolves
 /// symlinks and Windows short names, `normalize_wt_path` is the second chance for a
 /// path that no longer exists), since porcelain prints resolved paths while the root is
 /// app-built. Any resolution failure answers `false`: cleanup fails CLOSED.
-pub(crate) fn is_managed_update_worktree(repo_path: &str, path: &str) -> bool {
+pub(crate) fn is_managed_update_worktree_in(roots: &MarkerRoots, path: &str) -> bool {
     use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
     if !is_update_worktree_path(path) {
         return false;
     }
-    let (Ok(root), Some(parent)) = (root_for(repo_path), Path::new(path).parent()) else {
+    let Some(parent) = Path::new(path).parent() else {
         return false;
     };
-    let (parent, root) = (parent.to_string_lossy(), root.to_string_lossy());
-    canonical_wt_path(&parent) == canonical_wt_path(&root)
-        || normalize_wt_path(&parent) == normalize_wt_path(&root)
+    let parent = parent.to_string_lossy();
+    let (parent_canon, parent_norm) = (canonical_wt_path(&parent), normalize_wt_path(&parent));
+    roots.all().any(|root| {
+        let root = root.to_string_lossy();
+        canonical_wt_path(&root) == parent_canon || normalize_wt_path(&root) == parent_norm
+    })
+}
+
+/// [`is_managed_update_worktree_in`] resolving the roots itself, for a single-call site
+/// that has no other use for them.
+pub(crate) async fn is_managed_update_worktree(repo_path: &str, path: &str) -> bool {
+    match roots_for(repo_path).await {
+        Ok(roots) => is_managed_update_worktree_in(&roots, path),
+        Err(_) => false,
+    }
 }
 
 /// The lock state of the `gd-update-*` checkout at `path`. Callers match on all four
@@ -437,6 +509,25 @@ fn refuse_in(root: &Path, branch: Option<&str>) -> RefuseOutcome {
     outcome
 }
 
+/// [`refuse_in`] over the whole root set. The first refusal wins and stops the scan,
+/// while `saw_dead` ORs across every root reached — a leftover in either one is worth
+/// the same sweep.
+fn refuse_across(roots: &MarkerRoots, branch: Option<&str>) -> RefuseOutcome {
+    let mut acc = RefuseOutcome {
+        refusal: None,
+        saw_dead: false,
+    };
+    for root in roots.all() {
+        let outcome = refuse_in(root, branch);
+        acc.saw_dead |= outcome.saw_dead;
+        if outcome.refusal.is_some() {
+            acc.refusal = outcome.refusal;
+            return acc;
+        }
+    }
+    acc
+}
+
 /// Refuses when a live update is bringing `branch` up to date, and schedules a sweep
 /// if the scan met a crash orphan on the way. Every guarded site is therefore also a
 /// healing trigger.
@@ -456,21 +547,30 @@ pub(crate) async fn refuse_if_any_updating(state: &AppState, repo_path: &str) ->
 /// The same refusal WITHOUT the healing sweep, for a caller whose very next step takes
 /// the worktree-admin domain: a detached sweep fired here would win that domain by
 /// milliseconds and turn an operation that would have succeeded into a `Busy`.
-pub(crate) fn refuse_if_branch_updating_no_heal(repo_path: &str, branch: &str) -> AppResult<()> {
-    let Ok(root) = root_for(repo_path) else {
+pub(crate) async fn refuse_if_branch_updating_no_heal(
+    repo_path: &str,
+    branch: &str,
+) -> AppResult<()> {
+    let Ok(roots) = roots_for(repo_path).await else {
         return Ok(());
     };
-    match refuse_in(&root, Some(branch)).refusal {
+    refuse_if_branch_updating_in(&roots, branch)
+}
+
+/// The heal-free refusal over already-resolved `roots`, for a site that resolves them
+/// once and reuses them across arms that cannot await.
+pub(crate) fn refuse_if_branch_updating_in(roots: &MarkerRoots, branch: &str) -> AppResult<()> {
+    match refuse_across(roots, Some(branch)).refusal {
         Some(err) => Err(err),
         None => Ok(()),
     }
 }
 
 async fn refuse_and_heal(state: &AppState, repo_path: &str, branch: Option<&str>) -> AppResult<()> {
-    let Ok(root) = root_for(repo_path) else {
+    let Ok(roots) = roots_for(repo_path).await else {
         return Ok(());
     };
-    let outcome = refuse_in(&root, branch);
+    let outcome = refuse_across(&roots, branch);
     if outcome.saw_dead {
         spawn_orphan_sweep(state, repo_path).await;
     }
@@ -519,15 +619,16 @@ pub(crate) async fn spawn_orphan_sweep(state: &AppState, repo_path: &str) {
 /// be running the update right now (a stale MCP-server exe beside a rebuilt GUI), so it
 /// is refused here and left to the age-gated background sweep.
 ///
-/// Root-scoped: only a checkout directly under THIS repo's app-data worktree root is
-/// ours to force-remove. A user's own worktree that happens to be named `gd-update-*`
-/// is never touched, whatever sits beside it.
+/// Root-scoped: only a checkout directly under one of THIS repository's app-data
+/// worktree roots is ours to force-remove, and the leftover is claimed in whichever of
+/// them it sits. A user's own worktree that happens to be named `gd-update-*` is never
+/// touched, whatever sits beside it.
 pub(crate) async fn claim_dead_update_worktree(
     state: &AppState,
     repo_path: &str,
     holder: &str,
 ) -> bool {
-    if !is_managed_update_worktree(repo_path, holder) {
+    if !is_managed_update_worktree(repo_path, holder).await {
         return false;
     }
     let path = Path::new(holder);
@@ -563,19 +664,25 @@ pub(crate) async fn claim_dead_update_worktree(
 /// markerless checkout is never claimed here. No porcelain read is needed — the lock
 /// file alone carries the proof.
 pub(crate) async fn claim_dead_updates_for_branch(state: &AppState, repo_path: &str, branch: &str) {
-    let Ok(root) = root_for(repo_path) else {
+    let Ok(roots) = roots_for(repo_path).await else {
         return;
     };
     // Nothing to heal is the overwhelmingly common case; answer it without paying for
     // the domain resolution or its lock.
-    if dead_stems_for_branch(&root, branch).is_empty() {
+    let holding: Vec<&Path> = roots
+        .all()
+        .filter(|root| !dead_stems_for_branch(root, branch).is_empty())
+        .collect();
+    if holding.is_empty() {
         return;
     }
     let domain = state.worktree_admin_lock(repo_path).await;
     let Some(_admin) = try_acquire_repo_lock(&domain, "a worktree operation") else {
         return;
     };
-    claim_dead_stems_for_branch_locked(repo_path, &root, branch).await;
+    for root in holding {
+        claim_dead_stems_for_branch_locked(repo_path, root, branch).await;
+    }
 }
 
 /// The body of [`claim_dead_updates_for_branch`], over an explicit root so tests can
@@ -633,10 +740,19 @@ pub(crate) async fn sweep_orphaned_update_worktrees(state: &AppState, repo_path:
 /// `run_git_worktree_admin` would re-acquire it and deadlock, so the runners here are
 /// the lock-free ones, exactly as `branches.rs::remove_tmp_worktree` does.
 async fn sweep_update_orphans_locked(repo_path: &str) {
-    let Ok(root) = root_for(repo_path) else {
+    let Ok(roots) = roots_for(repo_path).await else {
         return;
     };
-    sweep_in(repo_path, &root, ORPHAN_MIN_AGE).await;
+    sweep_roots(repo_path, &roots, ORPHAN_MIN_AGE).await;
+}
+
+/// The sweep across every root, over an explicit age threshold so tests can drive it.
+/// The pre-rekey root is included because it is where a build from before the re-key
+/// stranded its leftovers, and this pass is the only thing that will ever find them.
+async fn sweep_roots(repo_path: &str, roots: &MarkerRoots, min_age: Duration) {
+    for root in roots.all() {
+        sweep_in(repo_path, root, min_age).await;
+    }
 }
 
 /// The sweep over an explicit root and age threshold, so tests can drive it against a
@@ -918,6 +1034,127 @@ mod tests {
             .stdout_lossy()
     }
 
+    /// The production primary-root composition — the resolver plus the mapping that
+    /// [`roots_for`]'s non-test arm chains. Callable here because the mapping takes an
+    /// already-resolved identity, so the `cfg(test)` override never stands in the way.
+    async fn primary_root_of(repo_path: &str) -> PathBuf {
+        let identity = crate::git::repo::repo_identity(repo_path).await;
+        crate::git::ops::identity_worktree_root_dir(&identity).expect("the marker root resolves")
+    }
+
+    /// The re-key, against a real repository: a linked worktree and the main checkout
+    /// resolve ONE primary root, where the checkout-path keying gives them two. Path
+    /// computation only — nothing is created under the real app data.
+    #[tokio::test]
+    async fn sibling_worktrees_resolve_one_marker_root() {
+        let (_guard, base) = temp_root("sibling-root");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "seed"]).await;
+
+        let linked = base.join("linked");
+        let linked_s = linked.to_string_lossy().into_owned();
+        git(
+            &repo_s,
+            &["worktree", "add", "--quiet", "-b", "sibling", &linked_s],
+        )
+        .await;
+
+        let main_root = primary_root_of(&repo_s).await;
+        assert_eq!(
+            main_root,
+            primary_root_of(&linked_s).await,
+            "a linked worktree must guard the same root as its main checkout"
+        );
+        assert_ne!(
+            main_root,
+            crate::git::ops::worktree_root_dir(&repo_s).expect("the legacy root resolves"),
+            "and the re-key genuinely moved the key off the checkout path"
+        );
+    }
+
+    /// The pre-rekey root stays a first-class scan target: a build that has not been
+    /// restarted still mints there, so its LIVE lock must refuse from the new root's
+    /// side, and its crash leftovers must stay claimable and sweepable. Driven through
+    /// the explicit-root cores, since `roots_for` under `cfg(test)` is the single-root
+    /// override.
+    #[tokio::test]
+    async fn a_legacy_root_marker_refuses_and_is_still_healed() {
+        let (_guard, base) = temp_root("two-root");
+        let primary = base.join("primary");
+        let legacy = base.join("legacy");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        let roots = MarkerRoots::new(primary.clone(), legacy.clone());
+        assert_eq!(
+            roots.all().collect::<Vec<_>>(),
+            vec![primary.as_path(), legacy.as_path()],
+            "both roots are scanned, the mint root first"
+        );
+        assert_eq!(
+            roots.mint_root(),
+            primary.as_path(),
+            "and a mint never lands in the pre-rekey root"
+        );
+        assert_eq!(
+            MarkerRoots::new(primary.clone(), primary.clone())
+                .all()
+                .count(),
+            1,
+            "an identity that fell back to the checkout path leaves one root, not two"
+        );
+
+        // LIVE in the pre-rekey root, nothing in the primary one.
+        let live =
+            UpdateMarker::create_for(&legacy.join("gd-update-old"), "feature").expect("mints");
+        assert!(
+            refuse_in(&primary, Some("feature")).refusal.is_none(),
+            "the fixture's primary root is clean, so only the second scan can refuse"
+        );
+        assert_eq!(
+            refuse_across(&roots, Some("feature"))
+                .refusal
+                .expect("a pre-rekey process's live update still refuses")
+                .to_string(),
+            branch_update_refusal("feature").to_string()
+        );
+        assert!(
+            is_managed_update_worktree_in(&roots, &legacy.join("gd-update-old").to_string_lossy()),
+            "a checkout in either root is ours to arbitrate"
+        );
+        drop(live);
+
+        // RELEASED in the pre-rekey root: taken by the branch-scoped, age-free claim.
+        // The repo path is bogus on purpose — every git call fails and the filesystem
+        // fallback finishes the job, as in the single-root claim test.
+        std::fs::create_dir_all(legacy.join("gd-update-dead")).unwrap();
+        write_released_marker(&legacy, "gd-update-dead", "feature");
+        claim_dead_stems_for_branch_locked("C:/nonexistent-repo", &legacy, "feature").await;
+        assert!(
+            !legacy.join("gd-update-dead").exists()
+                && !legacy.join("gd-update-dead.lock").exists()
+                && !legacy.join("gd-update-dead.json").exists(),
+            "a pre-rekey leftover is claimed for its branch"
+        );
+
+        // And by the background sweep, which reads both roots in one pass.
+        write_released_marker(&legacy, "gd-update-stale", "feature");
+        write_released_marker(&primary, "gd-update-fresh", "feature");
+        sweep_roots("C:/nonexistent-repo", &roots, Duration::ZERO).await;
+        assert!(
+            !legacy.join("gd-update-stale.lock").exists()
+                && !primary.join("gd-update-fresh.lock").exists(),
+            "the sweep clears leftovers in both roots"
+        );
+    }
+
     /// End to end against a real repo, with every kind of neighbour present: the
     /// crash-orphaned update worktree is removed, its admin entry pruned, its marker
     /// files deleted, and the branch it held is free again — while a live update, a
@@ -1080,11 +1317,14 @@ mod tests {
     /// The seam fails CLOSED: with no override installed, in-test resolution errors
     /// rather than reaching the developer's real app data. Holding `test_root_lock` is
     /// what makes the premise true — it is the guarantee no sibling has one installed.
-    #[test]
-    fn root_for_refuses_to_resolve_without_a_test_override() {
+    // The serializing guard MUST span the await — it is what makes "no override is
+    // installed" true for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn root_for_refuses_to_resolve_without_a_test_override() {
         let _serialized = test_root_lock();
         assert!(
-            root_for("C:/repos/app").is_err(),
+            root_for("C:/repos/app").await.is_err(),
             "an un-overridden test must never resolve the real worktree root"
         );
     }
@@ -1270,8 +1510,11 @@ mod tests {
     /// Root scope: a `gd-update-*` worktree the USER made, outside our app-data root, is
     /// theirs. Even with a stray unlocked `.lock` beside it — which would otherwise read
     /// `Released` — no marker arm may claim or refuse on it.
-    #[test]
-    fn a_user_worktree_outside_the_root_is_never_managed() {
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_user_worktree_outside_the_root_is_never_managed() {
         let (_guard, base) = temp_root("scope");
         let root = base.join("worktrees");
         let elsewhere = base.join("user-repos");
@@ -1284,7 +1527,7 @@ mod tests {
 
         let mine = root.join("gd-update-1-2");
         std::fs::create_dir_all(&mine).unwrap();
-        assert!(is_managed_update_worktree(repo, &mine.to_string_lossy()));
+        assert!(is_managed_update_worktree(repo, &mine.to_string_lossy()).await);
 
         // Same basename, same stray sidecar, different parent.
         let theirs = elsewhere.join("gd-update-1-2");
@@ -1296,14 +1539,17 @@ mod tests {
             "the fixture must reproduce the tempting shape"
         );
         assert!(
-            !is_managed_update_worktree(repo, &theirs.to_string_lossy()),
+            !is_managed_update_worktree(repo, &theirs.to_string_lossy()).await,
             "a user's own worktree is out of scope however its neighbours look"
         );
         // A nested path under our root is not a direct child, so it is not ours either.
-        assert!(!is_managed_update_worktree(
-            repo,
-            &root.join("nested").join("gd-update-1-2").to_string_lossy()
-        ));
+        assert!(
+            !is_managed_update_worktree(
+                repo,
+                &root.join("nested").join("gd-update-1-2").to_string_lossy()
+            )
+            .await
+        );
     }
 
     /// The markerless shape's age gate must read a signal git actually MOVES. A

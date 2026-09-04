@@ -1,12 +1,15 @@
 use serde::Serialize;
+use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::diff::{parse_numstat_z, truncate_at_char_boundary};
 use crate::git::history::{parse_commit_log, LOG_FORMAT};
 use crate::git::runner::{
-    run_git, run_git_raw, DEFAULT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    run_git, run_git_raw, try_acquire_repo_lock, DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
+    WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{CommitSummary, DiffStatEntry, FileDiff, StagedDiff};
+use crate::state::AppState;
 
 /// Commits that distinguish two branches, from the current branch's point of
 /// view: `ahead` are on `compare` but not `base`, `behind` are on `base` but
@@ -340,14 +343,311 @@ pub async fn git_branch_tips(
     Ok(map)
 }
 
-/// Creates a throwaway DETACHED worktree pinned at `sha`, so a repo-aware CLI
-/// review can read the PR head's files without moving the user's active branch.
-/// Returns `None` when a worktree isn't needed or possible — the repo is already
-/// on that commit (its own working tree matches), the object isn't local (an
-/// un-fetched remote PR), or the checkout fails — so the caller falls back to the
-/// repo root. Best-effort: never the source of a review failure.
+/// Basename of the single review worktree each repo reuses across reviews.
+const PERSISTENT_REVIEW_DIR: &str = "gd-review-persistent";
+
+/// In-process test override for the persistent review worktree's PARENT dir,
+/// consulted by [`persistent_review_path`] before the real app-data resolution
+/// (mirrors [`crate::git::update_marker`]'s; never process env, which races
+/// parallel tests' env reads).
+#[cfg(test)]
+static TEST_ROOT_DIR: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Serializes the tests that install [`TEST_ROOT_DIR`], since the override is
+/// process-wide. Test-only.
+#[cfg(test)]
+static TEST_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Installs (or clears) the in-process override, returning the previous value so a
+/// caller can restore it. Test-only.
+#[cfg(test)]
+fn swap_test_root_dir(dir: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    let mut slot = TEST_ROOT_DIR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::replace(&mut *slot, dir)
+}
+
+/// Takes the serializing guard for the process-wide root override. Test-only.
+#[cfg(test)]
+fn test_root_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_ROOT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Points the persistent review root at `dir` for as long as it is held, restoring
+/// the prior override on drop — panics included, so a failing test cannot leave one
+/// standing for whichever test is next through the lock. Test-only.
+#[cfg(test)]
+struct TestRootOverride(Option<std::path::PathBuf>);
+
+#[cfg(test)]
+impl TestRootOverride {
+    fn set(dir: &std::path::Path) -> Self {
+        Self(swap_test_root_dir(Some(dir.to_path_buf())))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestRootOverride {
+    fn drop(&mut self) {
+        swap_test_root_dir(self.0.take());
+    }
+}
+
+/// This repo's reused review worktree, or `None` when no root resolves — in which
+/// case the caller mints an ephemeral one rather than failing a review.
+///
+/// Keyed by repo IDENTITY (the common git dir), so every checkout of a repository —
+/// the main one and each linked worktree — shares a single warm review copy instead
+/// of minting one apiece.
+///
+/// The app-data worktrees root is the required placement: `is_session_worktree`'s
+/// app-data arm hides the checkout from every user-facing worktree surface, the
+/// OS-temp husk sweeper never scans app data, and [`is_review_worktree_temp_path`]
+/// still refuses it — so `git_remove_worktree`'s `remove_dir_all` fallback can
+/// never reach it either.
+///
+/// Under `cfg(test)` an installed override is the ONLY resolution: with none, this
+/// answers `None` so a test neither reads nor writes the developer's real app data.
+async fn persistent_review_path(repo_path: &str) -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    {
+        let _ = repo_path;
+        TEST_ROOT_DIR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .map(|root| root.join(PERSISTENT_REVIEW_DIR))
+    }
+    #[cfg(not(test))]
+    {
+        let identity = crate::git::repo::repo_identity(repo_path).await;
+        crate::git::ops::identity_worktree_root_dir(&identity)
+            .ok()
+            .map(|root| root.join(PERSISTENT_REVIEW_DIR))
+    }
+}
+
+/// The sidecar whose OS lock claims the review worktree at `dir`, named for it and
+/// placed BESIDE it — inside the directory it would be destroyed by the demolish
+/// that precedes a rebuild, and the claim has to outlive that.
+fn persistent_review_lock_path(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let name = dir.file_name()?.to_str()?;
+    Some(dir.with_file_name(format!("{name}.lock")))
+}
+
+/// The persistent review worktrees THIS process holds, keyed by normalized path with
+/// the locked sidecar handle as the value — the map owns the handles, the OS lock
+/// does the excluding. A dev build beside a release build resolves the same app-data
+/// path, so the claim has to be visible across processes; on a crash the OS drops the
+/// lock, which is what makes a leaked claim self-healing.
+static REVIEW_WORKTREE_CLAIMS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Claims the persistent worktree at `dir` for one review. `false` when another
+/// review holds it — in this process or another — or when the sidecar is unusable,
+/// in which case the caller mints an ephemeral worktree instead.
+fn try_claim_review_worktree(dir: &std::path::Path) -> bool {
+    let Some(lock_path) = persistent_review_lock_path(dir) else {
+        return false;
+    };
+    let Some(parent) = lock_path.parent() else {
+        return false;
+    };
+    let key = crate::git::worktree::normalize_wt_path(&dir.to_string_lossy());
+    let mut claims = REVIEW_WORKTREE_CLAIMS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if claims.contains_key(&key) {
+        return false;
+    }
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    // `create`, never `create_new`: the sidecar outlives every claim, so a leftover
+    // from an earlier review has to be re-lockable rather than fatal. No truncate —
+    // the file's CONTENT is nothing; its lock is the whole signal.
+    let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+    else {
+        return false;
+    };
+    if file.try_lock().is_err() {
+        return false;
+    }
+    claims.insert(key, file);
+    true
+}
+
+/// Drops this process's claim on `path`, releasing the OS lock. `true` when a claim
+/// was actually held — the authoritative answer for a release, since it needs no
+/// path resolution to succeed.
+fn release_review_worktree(path: &str) -> bool {
+    let key = crate::git::worktree::normalize_wt_path(path);
+    REVIEW_WORKTREE_CLAIMS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&key)
+        .is_some()
+}
+
+/// Whether `path` is exactly this repo's persistent review worktree. Normalized on
+/// both sides: git prints forward slashes while the app carries native separators.
+async fn is_persistent_review_path(repo_path: &str, path: &str) -> bool {
+    let Some(persistent) = persistent_review_path(repo_path).await else {
+        return false;
+    };
+    crate::git::worktree::normalize_wt_path(&persistent.to_string_lossy())
+        == crate::git::worktree::normalize_wt_path(path)
+}
+
+/// Re-points an existing persistent review worktree at `sha`. `false` when it is
+/// absent, is no longer a worktree, or the checkout failed — the caller then
+/// rebuilds it.
+///
+/// The checkout runs UNCONDITIONALLY, even when HEAD already names `sha`: only a
+/// forcing checkout restores a tracked file a previous run left modified, and a
+/// review that reads content the PR does not contain is worse than a redundant
+/// near-free checkout. `checkout --detach`, never `reset --hard`: a reset would move
+/// a branch if HEAD ever ended up attached here, while a detaching checkout cannot
+/// move a ref.
+async fn reuse_persistent_review_worktree(path_str: &str, sha: &str) -> bool {
+    if !std::path::Path::new(path_str).exists() {
+        return false;
+    }
+    let git_dir = run_git_raw(Some(path_str), &["rev-parse", "--git-dir"], DEFAULT_TIMEOUT).await;
+    if !matches!(&git_dir, Ok(out) if out.code == 0) {
+        return false;
+    }
+    // Same budget as the `add` — a big tree is the same order of work.
+    let out = run_git_raw(
+        Some(path_str),
+        &["checkout", "--detach", "--force", sha],
+        NETWORK_TIMEOUT,
+    )
+    .await;
+    if !matches!(&out, Ok(out) if out.code == 0) {
+        return false;
+    }
+    // The forcing checkout restores tracked files; this clears the untracked ones a
+    // CLI agent may have strayed into the previous review's tree.
+    let _ = run_git_raw(Some(path_str), &["clean", "-fdx", "-q"], WORKTREE_OP_TIMEOUT).await;
+    true
+}
+
+/// Tears down an unusable persistent review worktree so a fresh `worktree add` can
+/// take its path. The unguarded delete is last and narrow — only a path that still
+/// exists AND is exactly this repo's persistent review dir.
+async fn demolish_persistent_review_worktree(repo_path: &str, path: &std::path::Path) {
+    let path_str = path.to_string_lossy().into_owned();
+    let _ = run_git_raw(
+        Some(repo_path),
+        &["worktree", "remove", "--force", &path_str],
+        WORKTREE_OP_TIMEOUT,
+    )
+    .await;
+    let _ = run_git_raw(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    if path.exists() && is_persistent_review_path(repo_path, &path_str).await {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+/// Brings this repo's persistent review worktree to `sha`, rebuilding it when it is
+/// missing or unusable. `false` ⇒ the caller falls back to an ephemeral mint.
+///
+/// Only the rebuild takes the worktree-admin domain — `worktree add`/`remove`/`prune`
+/// write the shared registry a branch update also writes. The re-point above stays
+/// outside it: `checkout` in our own detached checkout is working-tree work on a tree
+/// nothing else owns. A busy domain answers `false` rather than queueing, so a review
+/// never waits behind a multi-minute removal.
+async fn prepare_persistent_review_worktree(
+    state: &AppState,
+    repo_path: &str,
+    path: &std::path::Path,
+    sha: &str,
+) -> bool {
+    let path_str = path.to_string_lossy().into_owned();
+    if reuse_persistent_review_worktree(&path_str, sha).await {
+        return true;
+    }
+    let domain = state.worktree_admin_lock(repo_path).await;
+    // Lock-free runners only from here down — the domain is not reentrant.
+    let Some(_admin) = try_acquire_repo_lock(&domain, "a worktree operation") else {
+        return false;
+    };
+    demolish_persistent_review_worktree(repo_path, path).await;
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return false;
+        }
+    }
+    matches!(
+        run_git_raw(
+            Some(repo_path),
+            &["worktree", "add", "--detach", &path_str, sha],
+            NETWORK_TIMEOUT,
+        )
+        .await,
+        Ok(out) if out.code == 0
+    )
+}
+
+/// A throwaway detached worktree in the OS temp dir, deleted whole by
+/// `git_remove_worktree`. The fallback whenever the persistent one is unavailable
+/// or already hosting a review.
+async fn ephemeral_review_worktree(repo_path: &str, sha: &str) -> AppResult<Option<String>> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let short = &sha[..sha.len().min(8)];
+    let path = std::env::temp_dir().join(format!("gd-review-{short}-{nanos}"));
+    let path_str = path.to_string_lossy().into_owned();
+    let out = run_git_raw(
+        Some(repo_path),
+        &["worktree", "add", "--detach", &path_str, sha],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    if out.code != 0 {
+        return Ok(None);
+    }
+    Ok(Some(path_str))
+}
+
+/// Hands a repo-aware CLI review a DETACHED checkout of `sha`, so it reads the PR
+/// head's files without moving the user's active branch. One worktree per repository
+/// — shared by all its checkouts — is reused across reviews: a later run re-points it
+/// with `checkout --detach --force`, which rewrites only the files that differ. A
+/// review that finds it claimed gets a throwaway OS-temp mint instead. Returns `None`
+/// when a worktree isn't needed or possible — the repo is already on that commit (its
+/// own working tree matches), the object isn't local (an un-fetched remote PR), or
+/// both checkouts fail — so the caller falls back to the repo root. Best-effort:
+/// never the source of a review failure.
+///
+/// The claim taken here is released by `git_remove_worktree`, which the caller runs
+/// when the review settles.
 #[tauri::command]
-pub async fn git_review_worktree(repo_path: String, sha: String) -> AppResult<Option<String>> {
+pub async fn git_review_worktree(
+    state: State<'_, AppState>,
+    repo_path: String,
+    sha: String,
+) -> AppResult<Option<String>> {
+    git_review_worktree_core(state.inner(), repo_path, sha).await
+}
+
+/// [`git_review_worktree`] over a bare state, so tests drive it without a Tauri app.
+async fn git_review_worktree_core(
+    state: &AppState,
+    repo_path: String,
+    sha: String,
+) -> AppResult<Option<String>> {
     validate_ref(&sha)?;
     // Already on this commit → the repo's own working tree already matches.
     let head = run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
@@ -362,23 +662,16 @@ pub async fn git_review_worktree(repo_path: String, sha: String) -> AppResult<Op
     if !present {
         return Ok(None);
     }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let short = &sha[..sha.len().min(8)];
-    let path = std::env::temp_dir().join(format!("gd-review-{short}-{nanos}"));
-    let path_str = path.to_string_lossy().into_owned();
-    let out = run_git_raw(
-        Some(&repo_path),
-        &["worktree", "add", "--detach", &path_str, &sha],
-        NETWORK_TIMEOUT,
-    )
-    .await?;
-    if out.code != 0 {
-        return Ok(None);
+    if let Some(persistent) = persistent_review_path(&repo_path).await {
+        let path_str = persistent.to_string_lossy().into_owned();
+        if try_claim_review_worktree(&persistent) {
+            if prepare_persistent_review_worktree(state, &repo_path, &persistent, &sha).await {
+                return Ok(Some(path_str));
+            }
+            release_review_worktree(&path_str);
+        }
     }
-    Ok(Some(path_str))
+    ephemeral_review_worktree(&repo_path, &sha).await
 }
 
 /// Whether `path` is a `git_review_worktree`-shaped review temp dir: DIRECTLY under
@@ -406,17 +699,51 @@ fn is_review_worktree_temp_path(path: &std::path::Path) -> bool {
     name.to_ascii_lowercase().starts_with("gd-review-")
 }
 
-/// Removes a review worktree created by `git_review_worktree` and prunes stale
-/// administrative entries. Best-effort and idempotent.
+/// Releases the review workspace `git_review_worktree` handed out. The persistent
+/// per-repo worktree is only unclaimed — its checkout and registration stay in place
+/// for the next review to re-point — while an ephemeral mint is removed and its
+/// administrative entry pruned. Best-effort and idempotent.
 #[tauri::command]
-pub async fn git_remove_worktree(repo_path: String, worktree_path: String) -> AppResult<()> {
-    let _ = run_git_raw(
-        Some(&repo_path),
+pub async fn git_remove_worktree(
+    state: State<'_, AppState>,
+    repo_path: String,
+    worktree_path: String,
+) -> AppResult<()> {
+    git_remove_worktree_core(state.inner(), repo_path, worktree_path).await
+}
+
+/// [`git_remove_worktree`] over a bare state, so tests drive it without a Tauri app.
+async fn git_remove_worktree_core(
+    state: &AppState,
+    repo_path: String,
+    worktree_path: String,
+) -> AppResult<()> {
+    // A held claim is the authoritative answer: this process handed the path out, so
+    // releasing it needs no path resolution that a git failure could spoil.
+    if release_review_worktree(&worktree_path) {
+        return Ok(());
+    }
+    // Unclaimed but still ours — a claim lost to a restart. Keep the checkout anyway;
+    // the next review re-points it.
+    if is_persistent_review_path(&repo_path, &worktree_path).await {
+        return Ok(());
+    }
+    // Admin work on the shared registry: serialized against a branch update's own
+    // add/remove, with the same bounded wait every other worktree command takes.
+    let _ = crate::git::runner::run_git_worktree_admin(
+        state,
+        &repo_path,
         &["worktree", "remove", "--force", &worktree_path],
         WORKTREE_OP_TIMEOUT,
     )
     .await;
-    let _ = run_git_raw(Some(&repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    let _ = crate::git::runner::run_git_worktree_admin(
+        state,
+        &repo_path,
+        &["worktree", "prune"],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
     // `git worktree remove` deletes the directory itself, but on Windows that
     // recursive delete can lose a handle race (antivirus/indexer still holding the
     // dir) and leave an EMPTY husk behind — and every result above is discarded, so
@@ -468,6 +795,89 @@ fn sweep_review_husks_in(dir: &std::path::Path) -> std::io::Result<usize> {
         // NEVER remove_dir_all here: `remove_dir` refuses a non-empty dir, which is
         // exactly the guard that keeps a live review's populated worktree safe.
         if std::fs::remove_dir(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// How long a persistent review worktree may sit untouched before the startup sweep
+/// reclaims its disk. Generous on purpose: a repo reviewed weekly keeps its warm
+/// checkout, and the cost of being wrong is one slow review, not lost work.
+const PERSISTENT_REVIEW_MAX_IDLE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Reclaim persistent review worktrees that no review has touched in a week — the
+/// only lifecycle they have, since nothing prunes them per repo (one bounded
+/// directory per repository, recreated on demand). Best-effort, fire-and-forget on
+/// startup.
+pub(crate) fn sweep_stale_persistent_review_worktrees() {
+    let Some(data) = dirs::data_dir() else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    // An unreadable clock authorizes no deletion at all.
+    let Ok(now_ms) = i64::try_from(now) else {
+        return;
+    };
+    let roots = data
+        .join(crate::local_prs::APP_IDENTIFIER)
+        .join("worktrees");
+    let _ = sweep_stale_persistent_reviews_in(&roots, now_ms);
+}
+
+/// Whether the sidecar at `lock_path` shows NO live claim. SHARED like
+/// `update_marker::probe_lock`, so two concurrent probes never read each other as a
+/// holder. Every doubt — an unreadable file, a lock error — answers `false`: this
+/// verdict authorizes a delete, so it fails toward leaving bytes on disk.
+fn persistent_review_lock_is_free(lock_path: &std::path::Path) -> bool {
+    match std::fs::File::open(lock_path) {
+        // The probe's own shared hold is released when `file` closes at end of scope,
+        // which also has to happen before any caller unlinks it on Windows.
+        Ok(file) => matches!(file.try_lock_shared(), Ok(())),
+        // No sidecar at all: nothing can be holding a claim.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+/// The testable core of [`sweep_stale_persistent_review_worktrees`], over an explicit
+/// worktrees root so a test never scans real app data. Only `<hash>/gd-review-persistent`
+/// is ever considered — the exact basename, one level down — and only when its git
+/// activity is older than [`PERSISTENT_REVIEW_MAX_IDLE_MS`] AND its sidecar carries no
+/// live claim. An unreadable age proves nothing and skips.
+///
+/// No git runs here: the source repo's stale registration is cleaned by its own
+/// `prune_worktrees_if_free`, the same division every other app-data checkout uses.
+/// Returns how many were reclaimed.
+fn sweep_stale_persistent_reviews_in(
+    worktrees_root: &std::path::Path,
+    now_ms: i64,
+) -> std::io::Result<usize> {
+    let mut removed = 0;
+    // "Can't list it" ⇒ skip the whole sweep conservatively.
+    for entry in std::fs::read_dir(worktrees_root)?.flatten() {
+        let dir = entry.path().join(PERSISTENT_REVIEW_DIR);
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(last_ms) = crate::git::worktree::worktree_last_activity_ms(&dir.to_string_lossy())
+        else {
+            continue;
+        };
+        if now_ms.saturating_sub(last_ms) < PERSISTENT_REVIEW_MAX_IDLE_MS {
+            continue;
+        }
+        let Some(lock_path) = persistent_review_lock_path(&dir) else {
+            continue;
+        };
+        if !persistent_review_lock_is_free(&lock_path) {
+            continue;
+        }
+        if std::fs::remove_dir_all(&dir).is_ok() {
+            let _ = std::fs::remove_file(&lock_path);
             removed += 1;
         }
     }
@@ -1131,6 +1541,13 @@ mod tests {
         let live = base.join("gd-review-def456-7");
         std::fs::create_dir(&live).unwrap();
         std::fs::write(live.join("file.txt"), b"content").unwrap();
+        // The reused per-repo review worktree matches the `gd-review-` prefix too, so
+        // the NAME filter does NOT spare it — being non-empty does, exactly as for any
+        // live review. (In production it is unreachable anyway: this sweep only ever
+        // scans the OS temp dir, and that worktree lives under app data.)
+        let persistent = base.join(super::PERSISTENT_REVIEW_DIR);
+        std::fs::create_dir(&persistent).unwrap();
+        std::fs::write(persistent.join("file.txt"), b"content").unwrap();
         // A non-matching empty dir → kept (name filter).
         let other = base.join("gd-resolve-xyz-1");
         std::fs::create_dir(&other).unwrap();
@@ -1139,7 +1556,395 @@ mod tests {
         assert_eq!(removed, 1, "exactly the one empty gd-review-* husk is removed");
         assert!(!empty_husk.exists(), "empty gd-review-* husk was removed");
         assert!(live.exists(), "non-empty gd-review-* (live review) is kept");
+        assert!(persistent.exists(), "the reused review worktree is kept");
         assert!(other.exists(), "non-matching name is kept");
+    }
+
+    /// Seeds a repo whose HEAD is on NEITHER review target — a commit on the default
+    /// branch, two more on a side branch, then back to the default — so
+    /// `git_review_worktree`'s "already on this commit" short-circuit never fires.
+    /// Returns `(guard, repo, sha1, sha2)`.
+    async fn seed_review_repo(tag: &str) -> (tempfile::TempDir, String, String, String) {
+        let (base, repo) = seed_repo(tag).await;
+        let root = std::path::Path::new(&repo).to_path_buf();
+
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        // `git init` picks the default branch name from the host's config.
+        let default_branch = run(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        run(&repo, &["checkout", "-qb", "feature"]).await;
+        std::fs::write(root.join("one.txt"), "one\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "one"]).await;
+        let sha1 = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        std::fs::write(root.join("two.txt"), "two\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "two"]).await;
+        let sha2 = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+
+        run(&repo, &["checkout", "-q", &default_branch]).await;
+        (base, repo, sha1, sha2)
+    }
+
+    /// Backdates a worktree's recorded git activity. `worktree_last_activity_ms` reads
+    /// its admin `index` and falls back to `HEAD`, so both move.
+    async fn age_worktree(worktree: &str, when: std::time::SystemTime) {
+        let admin = run(worktree, &["rev-parse", "--absolute-git-dir"]).await;
+        let admin = std::path::PathBuf::from(admin.trim());
+        for name in ["index", "HEAD"] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(admin.join(name))
+                .expect("the worktree's admin file is writable")
+                .set_modified(when)
+                .expect("the mtime is settable");
+        }
+    }
+
+    /// Whether `path` is currently registered as a worktree of `repo`.
+    async fn is_registered_worktree(repo: &str, path: &str) -> bool {
+        let listed = run(repo, &["worktree", "list", "--porcelain"]).await;
+        let wanted = crate::git::worktree::normalize_wt_path(path);
+        listed
+            .lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .any(|p| crate::git::worktree::normalize_wt_path(p.trim()) == wanted)
+    }
+
+    /// The review workspace is ONE persistent per-repo checkout: a second review at a
+    /// DIFFERENT sha gets the same path re-pointed in place, with no add and no
+    /// removal in between. (Before reuse, every call minted a fresh nanos path.)
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn review_worktree_reuses_one_persistent_checkout() {
+        let (base, repo, sha1, sha2) = seed_review_repo("review-reuse").await;
+        let root = base.path().join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+        let _serialized = test_root_lock();
+        let _override = TestRootOverride::set(&root);
+        let state = AppState::default();
+
+        let first = git_review_worktree_core(&state, repo.clone(), sha1.clone())
+            .await
+            .unwrap()
+            .expect("a repo checked out elsewhere gets a review worktree");
+        assert_eq!(
+            std::path::Path::new(&first),
+            root.join(PERSISTENT_REVIEW_DIR),
+            "the review worktree is the per-repo persistent one"
+        );
+        assert_eq!(run(&first, &["rev-parse", "HEAD"]).await.trim(), sha1);
+        assert_eq!(
+            run(&first, &["rev-parse", "--abbrev-ref", "HEAD"]).await.trim(),
+            "HEAD",
+            "the review checkout is detached"
+        );
+        assert!(is_registered_worktree(&repo, &first).await);
+
+        // Settling the review releases the claim without touching the checkout.
+        git_remove_worktree_core(&state, repo.clone(), first.clone())
+            .await
+            .unwrap();
+        assert!(std::path::Path::new(&first).exists());
+
+        let second = git_review_worktree_core(&state, repo.clone(), sha2.clone())
+            .await
+            .unwrap()
+            .expect("the released worktree is handed out again");
+        assert_eq!(second, first, "the same path, re-pointed rather than re-minted");
+        assert_eq!(run(&second, &["rev-parse", "HEAD"]).await.trim(), sha2);
+        assert!(is_registered_worktree(&repo, &second).await);
+        git_remove_worktree_core(&state, repo, second).await.unwrap();
+    }
+
+    /// A re-review of the SAME sha re-checks the tree out rather than trusting it: a
+    /// tracked file a previous run left modified is restored, so a review can never
+    /// read content the PR does not contain. The untracked stray beside it is cleaned.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn re_reviewing_the_same_sha_restores_the_prs_content() {
+        let (base, repo, _sha1, sha2) = seed_review_repo("review-samesha").await;
+        let root = base.path().join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+        let _serialized = test_root_lock();
+        let _override = TestRootOverride::set(&root);
+        let state = AppState::default();
+
+        let first = git_review_worktree_core(&state, repo.clone(), sha2.clone())
+            .await
+            .unwrap()
+            .expect("a review worktree is handed out");
+        let tracked = std::path::Path::new(&first).join("one.txt");
+        // EOL-normalized: `core.autocrlf` checks the file out CRLF on this host.
+        let content = |p: &std::path::Path| std::fs::read_to_string(p).unwrap().replace("\r\n", "\n");
+        assert_eq!(content(&tracked), "one\n");
+        git_remove_worktree_core(&state, repo.clone(), first.clone())
+            .await
+            .unwrap();
+
+        // What a strayed agent run leaves behind between reviews.
+        std::fs::write(&tracked, "tampered\n").unwrap();
+        let stray = std::path::Path::new(&first).join("stray.txt");
+        std::fs::write(&stray, "stray\n").unwrap();
+
+        let second = git_review_worktree_core(&state, repo.clone(), sha2.clone())
+            .await
+            .unwrap()
+            .expect("the same head reuses the worktree");
+        assert_eq!(second, first, "still the same reused path");
+        assert_eq!(
+            content(&tracked),
+            "one\n",
+            "the modified TRACKED file is restored to the PR's content"
+        );
+        assert!(!stray.exists(), "the untracked stray is cleaned");
+        git_remove_worktree_core(&state, repo, second).await.unwrap();
+    }
+
+    /// Releasing the persistent worktree leaves the checkout AND its registration on
+    /// disk — the whole point of reusing it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn removing_the_persistent_review_worktree_only_releases_it() {
+        let (base, repo, sha1, _sha2) = seed_review_repo("review-release").await;
+        let root = base.path().join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+        let _serialized = test_root_lock();
+        let _override = TestRootOverride::set(&root);
+        let state = AppState::default();
+
+        let path = git_review_worktree_core(&state, repo.clone(), sha1)
+            .await
+            .unwrap()
+            .expect("a review worktree is handed out");
+        git_remove_worktree_core(&state, repo.clone(), path.clone())
+            .await
+            .unwrap();
+
+        assert!(std::path::Path::new(&path).exists(), "the directory survives");
+        let git_dir = run_git_raw(Some(&path), &["rev-parse", "--git-dir"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(git_dir.code, 0, "it is still a worktree: {}", git_dir.stderr);
+        assert!(
+            is_registered_worktree(&repo, &path).await,
+            "its administrative entry is left intact"
+        );
+    }
+
+    /// While one review holds the persistent worktree, a concurrent review gets a
+    /// throwaway OS-temp mint — which `git_remove_worktree` still deletes whole.
+    /// Once the first review settles, the persistent worktree is handed out again.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn review_worktree_falls_back_to_a_temp_mint_while_busy() {
+        let (base, repo, sha1, sha2) = seed_review_repo("review-busy").await;
+        let root = base.path().join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+        let _serialized = test_root_lock();
+        let _override = TestRootOverride::set(&root);
+        let state = AppState::default();
+
+        // Acquired and deliberately never released — a review is running in it.
+        let held = git_review_worktree_core(&state, repo.clone(), sha1)
+            .await
+            .unwrap()
+            .expect("the first review takes the persistent worktree");
+
+        let fallback = git_review_worktree_core(&state, repo.clone(), sha2.clone())
+            .await
+            .unwrap()
+            .expect("a busy persistent worktree falls back to a mint");
+        assert_ne!(fallback, held, "the two reviews get different workspaces");
+        assert!(
+            is_review_worktree_temp_path(std::path::Path::new(&fallback)),
+            "the fallback is a gd-review-* mint in the OS temp dir: {fallback}"
+        );
+        assert_eq!(run(&fallback, &["rev-parse", "HEAD"]).await.trim(), sha2);
+
+        git_remove_worktree_core(&state, repo.clone(), fallback.clone())
+            .await
+            .unwrap();
+        assert!(
+            !std::path::Path::new(&fallback).exists(),
+            "the ephemeral mint is still deleted whole"
+        );
+
+        git_remove_worktree_core(&state, repo.clone(), held.clone())
+            .await
+            .unwrap();
+        let again = git_review_worktree_core(&state, repo.clone(), sha2)
+            .await
+            .unwrap()
+            .expect("the released worktree is available again");
+        assert_eq!(again, held, "the freed persistent worktree is reused");
+        git_remove_worktree_core(&state, repo, again).await.unwrap();
+    }
+
+    /// The claim is keyed on the exact path, so the release arms can't reach past
+    /// their own worktree: a same-BASENAME checkout under another parent still takes
+    /// the real removal path, and another root's persistent path never frees this
+    /// one's claim.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn review_worktree_release_is_scoped_to_its_own_path() {
+        let (base, repo, sha1, sha2) = seed_review_repo("review-scope").await;
+        let root = base.path().join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+        let _serialized = test_root_lock();
+        let _override = TestRootOverride::set(&root);
+        let state = AppState::default();
+
+        let held = git_review_worktree_core(&state, repo.clone(), sha1.clone())
+            .await
+            .unwrap()
+            .expect("the review takes the persistent worktree");
+
+        // (a) Same basename, DIFFERENT parent — not this repo's persistent worktree,
+        // so the removal runs and the checkout is gone.
+        let elsewhere = base.path().join("elsewhere").join(PERSISTENT_REVIEW_DIR);
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        let elsewhere_s = elsewhere.to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "--detach", &elsewhere_s, &sha2]).await;
+        assert!(elsewhere.exists(), "the decoy worktree was created");
+        git_remove_worktree_core(&state, repo.clone(), elsewhere_s)
+            .await
+            .unwrap();
+        assert!(
+            !elsewhere.exists(),
+            "a same-named checkout elsewhere still takes the removal path"
+        );
+
+        // (b) Another root's persistent path — the release-and-keep arm answers it,
+        // but it must not free THIS root's claim.
+        {
+            let other_root = base.path().join("worktrees-other");
+            let _other = TestRootOverride::set(&other_root);
+            let other_path = other_root.join(PERSISTENT_REVIEW_DIR);
+            git_remove_worktree_core(
+                &state,
+                repo.clone(),
+                other_path.to_string_lossy().into_owned(),
+            )
+            .await
+            .unwrap();
+        }
+        let still_busy = git_review_worktree_core(&state, repo.clone(), sha2.clone())
+            .await
+            .unwrap()
+            .expect("a review still gets a workspace");
+        assert_ne!(
+            still_busy, held,
+            "the claim survived another root's release, so this review is a mint"
+        );
+        git_remove_worktree_core(&state, repo.clone(), still_busy)
+            .await
+            .unwrap();
+
+        git_remove_worktree_core(&state, repo.clone(), held.clone())
+            .await
+            .unwrap();
+        let reused = git_review_worktree_core(&state, repo.clone(), sha2)
+            .await
+            .unwrap()
+            .expect("its own release frees it");
+        assert_eq!(reused, held);
+        git_remove_worktree_core(&state, repo, reused).await.unwrap();
+    }
+
+    /// With no root override installed, `cfg(test)` resolves NO persistent path, so a
+    /// test can never read or write real app data — the review falls open to an
+    /// ephemeral OS-temp mint rather than erroring.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn review_worktree_without_a_root_override_mints_in_temp() {
+        let (_base, repo, sha1, _sha2) = seed_review_repo("review-noroot").await;
+        let _serialized = test_root_lock();
+        let state = AppState::default();
+
+        let path = git_review_worktree_core(&state, repo.clone(), sha1.clone())
+            .await
+            .unwrap()
+            .expect("a review still gets a workspace with no root resolved");
+        assert!(
+            is_review_worktree_temp_path(std::path::Path::new(&path)),
+            "no override ⇒ the OS-temp mint: {path}"
+        );
+        assert_eq!(run(&path, &["rev-parse", "HEAD"]).await.trim(), sha1);
+
+        git_remove_worktree_core(&state, repo, path.clone())
+            .await
+            .unwrap();
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    /// The idle sweep reclaims only what it can prove is idle AND unclaimed: a
+    /// week-old unclaimed checkout goes (sidecar included), while a fresh one, a
+    /// week-old one a live review still holds, and anything not named
+    /// `gd-review-persistent` all survive.
+    #[tokio::test]
+    async fn stale_review_worktree_sweep_is_age_and_claim_gated() {
+        let (base, repo, sha1, _sha2) = seed_review_repo("review-sweep").await;
+        let scan = base.path().join("scan");
+
+        // Four checkouts under their own hash dirs, as the real root holds them.
+        let mut made = Vec::new();
+        for (hash, name) in [
+            ("aged", PERSISTENT_REVIEW_DIR),
+            ("fresh", PERSISTENT_REVIEW_DIR),
+            ("locked", PERSISTENT_REVIEW_DIR),
+            ("other", "gd-review-something-else"),
+        ] {
+            let dir = scan.join(hash).join(name);
+            std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+            let dir_s = dir.to_string_lossy().into_owned();
+            run(&repo, &["worktree", "add", "--detach", &dir_s, &sha1]).await;
+            assert!(dir.exists(), "fixture worktree {hash} was created");
+            made.push(dir);
+        }
+        let (aged, fresh, locked, other) = (&made[0], &made[1], &made[2], &made[3]);
+
+        // Age three of them by eight days; `fresh` keeps its real mtime.
+        let eight_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
+        for dir in [aged, locked, other] {
+            age_worktree(&dir.to_string_lossy(), eight_days_ago).await;
+        }
+
+        // A live review holds `locked`'s sidecar for the whole sweep.
+        let locked_sidecar = persistent_review_lock_path(locked).unwrap();
+        let claim = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&locked_sidecar)
+            .unwrap();
+        claim.try_lock().expect("the fixture takes the claim");
+        // The aged one gets an UNCLAIMED sidecar, which the sweep must delete with it.
+        let aged_sidecar = persistent_review_lock_path(aged).unwrap();
+        std::fs::write(&aged_sidecar, b"").unwrap();
+
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let removed = sweep_stale_persistent_reviews_in(&scan, now_ms).unwrap();
+
+        assert_eq!(removed, 1, "exactly the idle, unclaimed checkout is reclaimed");
+        assert!(!aged.exists(), "a week-idle unclaimed review worktree is reclaimed");
+        assert!(!aged_sidecar.exists(), "its sidecar goes with it");
+        assert!(fresh.exists(), "a recently used review worktree is kept");
+        assert!(locked.exists(), "a live claim outranks age");
+        assert!(other.exists(), "only the exact `gd-review-persistent` name is swept");
+        drop(claim);
     }
 
     /// The `remove_dir_all` fallback guard admits only `gd-review-*` dirs directly

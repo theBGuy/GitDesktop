@@ -1025,8 +1025,7 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
         tauri::async_runtime::spawn_blocking(move || {
             for path in untracked {
                 let full = Path::new(&repo).join(&path);
-                trash::delete(&full)
-                    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+                crate::fsops::trash_delete(&full).map_err(AppError::Io)?;
             }
             Ok::<(), AppError>(())
         })
@@ -1116,8 +1115,7 @@ pub(crate) async fn git_discard_paths_core(
         tauri::async_runtime::spawn_blocking(move || {
             for path in untracked {
                 let full = Path::new(&repo).join(&path);
-                trash::delete(&full)
-                    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+                crate::fsops::trash_delete(&full).map_err(AppError::Io)?;
             }
             Ok::<(), AppError>(())
         })
@@ -2482,31 +2480,51 @@ pub(crate) async fn classify_failure(
     }
 }
 
-/// A short, stable hash of the repo path, kept in sync BY HAND with
-/// `worktree.rs::repo_hash` (both hash the lower-cased path with `DefaultHasher`).
+/// A short, stable hash of a repo key, kept in sync BY HAND with
+/// `worktree.rs::repo_hash` (both hash the lower-cased key with `DefaultHasher`) —
+/// `ops_and_worktree_repo_hash_agree` is what enforces that by-hand sync.
 /// Resolve worktrees — and `branches.rs`'s `gd-update-*` checkouts — must land
-/// under the same `<app_data>/worktrees/<repo-hash>` root, because that placement
+/// under the same `<app_data>/worktrees/<hash>` root, because that placement
 /// is what makes `git_worktree_list_user` hide them from the user-facing worktree
 /// manager (`is_session_worktree`'s app-data check).
-fn repo_hash(repo_path: &str) -> String {
+pub(crate) fn repo_hash(repo_path: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     repo_path.to_lowercase().hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
-/// The app-data worktree root for a repo — `<data_dir>/<identifier>/worktrees/
-/// <repo-hash>`. Mirrors `worktree.rs::worktree_root`, but resolved via
+/// The app-data worktree root for a repo KEY — `<data_dir>/<identifier>/worktrees/
+/// <hash>`. Mirrors `worktree.rs::worktree_root`, but resolved via
 /// `dirs::data_dir()` (as `local_prs.rs` / `oplog.rs` do) since the local-PR
 /// merge commands carry no `AppHandle`. Tauri's `app_data_dir()` is exactly
 /// `dirs::data_dir()/<identifier>`, so this points at the same directory.
-pub(crate) fn worktree_root_dir(repo_path: &str) -> AppResult<std::path::PathBuf> {
+///
+/// Two keys are in use, and the base path must never differ between them: the checkout
+/// path ([`worktree_root_dir`]) and the repository's worktree-stable identity
+/// ([`identity_worktree_root_dir`]).
+fn worktree_root_for_key(key: &str) -> AppResult<std::path::PathBuf> {
     let data = dirs::data_dir()
         .ok_or_else(|| AppError::Command("could not resolve the app-data directory".to_string()))?;
     Ok(data
         .join(crate::local_prs::APP_IDENTIFIER)
         .join("worktrees")
-        .join(repo_hash(repo_path)))
+        .join(repo_hash(key)))
+}
+
+/// The checkout-path-keyed worktree root: resolve worktrees, agent-session worktrees,
+/// and the pre-rekey update-marker root all live here.
+pub(crate) fn worktree_root_dir(repo_path: &str) -> AppResult<std::path::PathBuf> {
+    worktree_root_for_key(repo_path)
+}
+
+/// The worktree root every checkout of a repository SHARES, keyed on `identity`
+/// ([`crate::git::repo::repo_identity`]'s output, the absolute common git dir) rather
+/// than the checkout path. `update_marker` mints and guards here so a sibling worktree
+/// resolves the same directory and sees the same markers. Takes the resolved identity
+/// so the mapping stays callable without a repo on disk.
+pub(crate) fn identity_worktree_root_dir(identity: &str) -> AppResult<std::path::PathBuf> {
+    worktree_root_for_key(identity)
 }
 
 /// Tears down a resolve worktree: `git worktree remove --force <path>` then
@@ -2694,11 +2712,17 @@ async fn finalize_base(
 
     use crate::git::update_marker::{self as marker, LockProbe};
 
+    // Resolved once, up front: the `managed` predicate below sits in a closure that
+    // cannot await, and both arms must read the same root set the refusal did.
+    let marker_roots = marker::roots_for(repo_path).await.ok();
+
     // An update that has minted its marker but not yet registered its checkout is
     // invisible to the porcelain read below, so the marker covers that half of the
     // window and the arm below covers it once registered. Heal-free: this call's own
     // continuation takes the admin domain to tear the resolve worktree down.
-    marker::refuse_if_branch_updating_no_heal(repo_path, base)?;
+    if let Some(roots) = marker_roots.as_ref() {
+        marker::refuse_if_branch_updating_in(roots, base)?;
+    }
 
     // Is `base` checked out in some OTHER worktree? Our resolve worktree is detached,
     // so it never carries `base` as a branch and is safely excluded.
@@ -2716,7 +2740,11 @@ async fn finalize_base(
     // a marker that proves neither — and any `gd-update-*` worktree outside our own
     // root, which is the user's — leaves this routing exactly as it was before markers
     // existed, which the update's own pin verify already makes data-safe.
-    let managed = |w: &&str| marker::is_managed_update_worktree(repo_path, w);
+    let managed = |w: &&str| {
+        marker_roots
+            .as_ref()
+            .is_some_and(|roots| marker::is_managed_update_worktree_in(roots, w))
+    };
     if let Some(holder) = owning_worktree.as_deref().filter(managed).map(str::to_string) {
         match marker::update_worktree_probe(&holder) {
             LockProbe::Live => return Err(marker::branch_update_refusal(base)),
@@ -7346,6 +7374,31 @@ detached
         );
     }
 
+    /// `repo_hash` exists twice — here and in `worktree.rs` — and the comment on each
+    /// says "kept in sync BY HAND". This is that sync, mechanized: a drift would split
+    /// one repo's hidden checkouts across two roots, so the guards, the sweeps, and the
+    /// filter that hides them from the worktree manager would each read a different
+    /// directory. Mixed case and both separators, since the hash lower-cases but does
+    /// not normalize separators.
+    #[test]
+    fn ops_and_worktree_repo_hash_agree() {
+        for key in [
+            "C:\\repos\\app",
+            "C:/repos/app",
+            "C:\\Repos\\App",
+            "c:/repos/APP",
+            "C:\\repos\\app\\.git",
+            "/home/u/repos/app/.git",
+            "",
+        ] {
+            assert_eq!(
+                repo_hash(key),
+                crate::git::worktree::repo_hash(key),
+                "the two hand-kept copies disagree on {key:?}"
+            );
+        }
+    }
+
     #[test]
     fn orphaned_resolve_worktrees_picks_gd_resolve_paths_not_kept() {
         let all = vec![
@@ -9182,6 +9235,58 @@ detached
             "PRECIOUS\n",
             "the glob-sibling keeps its uncommitted work"
         );
+    }
+
+    /// Both discard cores remove an untracked file named after a reserved DOS
+    /// device. Such a file enumerates normally but resolves to the DEVICE for
+    /// every open/stat/unlink by its plain path, so the recycle bin refuses it
+    /// and only a `\\?\` verbatim unlink gets rid of it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_removes_reserved_device_named_files() {
+        // Creating and probing these names is only possible through the verbatim
+        // path — the plain one answers for the device, not the file.
+        fn verbatim(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+            std::path::PathBuf::from(format!(
+                r"\\?\{}",
+                dir.join(name).to_string_lossy().replace('/', "\\")
+            ))
+        }
+
+        let (dir, repo) = setup_repo("discard-reserved").await;
+        let root = dir.path().to_path_buf();
+        for name in ["nul", "nul.txt"] {
+            std::fs::write(verbatim(&root, name), b"x\n").expect("verbatim write");
+        }
+
+        let state = AppState::default();
+        git_discard_paths_core(
+            &state,
+            repo.clone(),
+            vec![DiscardPath {
+                path: "nul".into(),
+                untracked: true,
+            }],
+        )
+        .await
+        .expect("the selected reserved-name file is discarded");
+        // `git_discard_all_core` takes the remaining one off the untracked list.
+        git_discard_all_core(&state, repo.clone())
+            .await
+            .expect("discard-all clears the reserved-name file");
+
+        let listed: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        for name in ["nul", "nul.txt"] {
+            assert!(
+                std::fs::metadata(verbatim(&root, name)).is_err(),
+                "{name} is gone from disk"
+            );
+            assert!(!listed.contains(&name.to_string()), "{name} is not listed");
+        }
     }
 
     // --- git_stash_paths_core: selective stash must not leak unselected staged files ---

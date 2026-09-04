@@ -327,8 +327,7 @@ pub async fn git_hook_delete(repo_path: String, name: String) -> AppResult<()> {
     for path in [dir.join(&name), dir.join(format!("{name}.disabled"))] {
         if path.exists() {
             tauri::async_runtime::spawn_blocking(move || {
-                trash::delete(&path)
-                    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
+                crate::fsops::trash_delete(&path).map_err(AppError::Io)
             })
             .await
             .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;

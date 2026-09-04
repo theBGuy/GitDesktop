@@ -330,7 +330,7 @@ async fn clear_update_holder(
     use crate::git::update_marker::{self as marker, LockProbe};
     // Root-scoped: a `gd-update-*` worktree the USER made, outside our app-data root, is
     // their own and takes the ordinary path however its neighbours look.
-    if !marker::is_managed_update_worktree(repo_path, holder) {
+    if !marker::is_managed_update_worktree(repo_path, holder).await {
         return Ok(false);
     }
     match marker::update_worktree_probe(holder) {
@@ -366,7 +366,7 @@ pub(crate) async fn git_delete_branch_core(
     // Two halves of one window: the marker covers an update that has minted but not yet
     // registered its checkout (the `worktree add` is the long part), the porcelain arm
     // below covers it once registered. Heal-free — the healing lives in the claim arm.
-    crate::git::update_marker::refuse_if_branch_updating_no_heal(&repo_path, &name)?;
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(&repo_path, &name).await?;
     // Pre-mutation guard: git's own refusal for a branch checked out in a worktree
     // is terse. Detect the holding worktree here — shared by every caller, not just
     // the switcher's UI guard — and surface an actionable message.
@@ -1068,7 +1068,7 @@ pub(crate) async fn branch_reset_to_upstream(
     // Two halves of one window, as in `git_delete_branch_core`: the marker covers an
     // update that has minted but not yet registered its checkout, the porcelain arm
     // below covers it once registered. Heal-free — healing lives in the claim arm.
-    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, branch)?;
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, branch).await?;
     // Pre-mutation guards: git refuses both of these itself, but only after the
     // user has confirmed a destructive action, and its wording names neither
     // remedy. The linked-worktree probe excludes THIS checkout, so the current
@@ -1152,7 +1152,7 @@ pub(crate) async fn update_branch_from(
     // against a branch held by the first update's checkout. Heal-free deliberately —
     // this path's own `worktree add` takes the admin domain, and a detached sweep
     // fired here would win it first and time that bounded acquire out.
-    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, branch)?;
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, branch).await?;
     // Healing, in two tiers. THIS branch's provably-dead leftovers go first and
     // synchronously, so the first update after a crash clears its own predecessor
     // before the add rather than racing it; everything else waits for the age gate and
@@ -1259,7 +1259,7 @@ pub(crate) async fn update_branch_from(
     // Minted under the app-data worktrees root, never the OS temp dir: that
     // placement is what hides the checkout from the user-facing worktree listing
     // and the surfaces built on it (`is_session_worktree`'s app-data arm).
-    let tmp = update_worktree_path(repo_path)?;
+    let tmp = update_worktree_path(repo_path).await?;
     if let Some(root) = tmp.parent() {
         std::fs::create_dir_all(root).map_err(AppError::Io)?;
     }
@@ -1280,7 +1280,7 @@ pub(crate) async fn update_branch_from(
     .await
 }
 
-/// Where an update's throwaway checkout goes: `<app-data>/worktrees/<repo-hash>/
+/// Where an update's throwaway checkout goes: `<app-data>/worktrees/<identity-hash>/
 /// gd-update-<unique>`. Resolution only — creating the root is the caller's job.
 ///
 /// Through `update_marker::root_for`, not `ops::worktree_root_dir` directly, so the
@@ -1288,8 +1288,9 @@ pub(crate) async fn update_branch_from(
 /// Alone among that function's callers this one PROPAGATES an unresolvable root instead
 /// of failing open: a guard that cannot resolve simply stays quiet, but a mint that
 /// cannot would put a checkout where nothing is watching it.
-fn update_worktree_path(repo_path: &str) -> AppResult<std::path::PathBuf> {
-    Ok(crate::git::update_marker::root_for(repo_path)?
+async fn update_worktree_path(repo_path: &str) -> AppResult<std::path::PathBuf> {
+    Ok(crate::git::update_marker::root_for(repo_path)
+        .await?
         .join(format!("gd-update-{}", unique_suffix())))
 }
 
@@ -2708,15 +2709,18 @@ mod tests {
     /// the app-data one in production is `root_for`'s non-test arm, pinned by
     /// `ops::worktree_root_dir_uses_the_shipped_bundle_identifier`. Shape only: resolving
     /// a path creates nothing.
-    #[test]
-    fn update_worktree_path_sits_directly_under_the_marker_root() {
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn update_worktree_path_sits_directly_under_the_marker_root() {
         use crate::git::update_marker as marker;
         let (_temp, root) = temp_base("mint-root");
         let _serialized = marker::test_root_lock();
         let _override = marker::TestRootOverride::set(&root);
 
         let repo = "C:\\repos\\app";
-        let first = update_worktree_path(repo).expect("update path resolves");
+        let first = update_worktree_path(repo).await.expect("update path resolves");
         assert_eq!(first.parent(), Some(root.as_path()));
         let name = first
             .file_name()
@@ -2724,12 +2728,12 @@ mod tests {
             .expect("the mint has a basename");
         assert!(name.starts_with("gd-update-"), "{name}");
         assert!(
-            marker::is_managed_update_worktree(repo, &first.to_string_lossy()),
+            marker::is_managed_update_worktree(repo, &first.to_string_lossy()).await,
             "the mint must land inside the scope its own guards enforce"
         );
         assert_ne!(
             first,
-            update_worktree_path(repo).expect("update path resolves"),
+            update_worktree_path(repo).await.expect("update path resolves"),
             "two mints in one process must not collide"
         );
     }
@@ -3379,6 +3383,83 @@ mod tests {
             "git's own merge subject survives: {subject}"
         );
         assert!(!tmp.exists(), "the throwaway worktree is torn down");
+    }
+
+    /// The diverged arm end to end, from the public core: the merge lands on `feature`
+    /// while `main` stays checked out, and the update leaves nothing behind — no
+    /// checkout, no marker pair, no worktree registration. The regression net for the
+    /// whole marker path, every step of which resolves its root asynchronously.
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_diverged_update_leaves_no_trace_in_the_marker_root() {
+        use crate::git::update_marker as marker;
+        let (_guard, repo, repo_s, main) = diverged_repo("update-e2e").await;
+        let root = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let _serialized = marker::test_root_lock();
+        let _override = marker::TestRootOverride::set(&root);
+        // A branch name no other test uses: the override root is process-wide, and this
+        // test holds a LIVE marker for the length of a real merge, which would refuse a
+        // parallel test's guard on a shared name.
+        run(&repo_s, &["branch", "-m", "feature", "update-e2e"]).await;
+
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/update-e2e"])
+            .await
+            .trim()
+            .to_string();
+        let base_tip = run(&repo_s, &["rev-parse", &format!("{main}^{{commit}}")])
+            .await
+            .trim()
+            .to_string();
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .await
+                .trim(),
+            main,
+            "the fixture must update a branch that is NOT the current one"
+        );
+
+        let state = AppState::default();
+        let outcome = update_branch_from(&state, &repo_s, "update-e2e", &main)
+            .await
+            .expect("a diverged update merges");
+        assert_eq!(outcome, "merge");
+
+        // A merge commit carrying exactly the two tips the update pinned.
+        let merged = run(
+            &repo_s,
+            &["rev-list", "--parents", "-n", "1", "refs/heads/update-e2e"],
+        )
+        .await;
+        let parents: Vec<&str> = merged.split_whitespace().skip(1).collect();
+        assert_eq!(
+            parents,
+            vec![feature_tip.as_str(), base_tip.as_str()],
+            "the updated branch merges its old tip and base, in that order: {merged}"
+        );
+
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .expect("the marker root is readable")
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|name| name.starts_with("gd-update-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no checkout and no marker pair survive the update: {leftovers:?}"
+        );
+        assert!(
+            !run(&repo_s, &["worktree", "list", "--porcelain"])
+                .await
+                .contains("gd-update-"),
+            "and git holds no registration for it either"
+        );
     }
 
     /// A repo with `feature` tracking the default branch through the local `.` remote,

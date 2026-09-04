@@ -442,7 +442,9 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
   it has no parent to fall back to, so the branch ref goes with it.
 
 > Discarding an **untracked** file moves it to the recycle bin, so it's recoverable —
-> it isn't deleted outright.`,
+> it isn't deleted outright. The exception is a name Windows reserves for a device
+> (\`nul\`, \`con\`, \`com3\`): the recycle bin can't take one, so those are removed
+> permanently.`,
   },
   {
     id: "history",
@@ -576,6 +578,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   every branch's row shows its own push/pull state (↑/↓ vs. its upstream) after a fetch, so
   the branches with commits to pull are visible at a glance, and *Update default branch from
   its remote* is available from the command palette too.
+- **While an update runs, its branch is held.** Switching to that branch, renaming or
+  deleting it, or starting a second update is turned away with a short message until the
+  merge lands. Every worktree of the repository sees the same hold, and an update that a
+  crash or a quit cut short is cleaned up on the next branch action.
 - **Push a branch without switching to it** — the outbound counterpart: a branch ahead
   of the remote it tracks offers **Push to _its remote/…_** in its context menu — so a
   branch tracking a fork's _upstream_ is pushed there, not to origin. An unpushed or

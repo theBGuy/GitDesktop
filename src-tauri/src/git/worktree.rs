@@ -64,8 +64,9 @@ pub(crate) fn normalize_wt_path(p: &str) -> String {
 }
 
 /// A short, stable hash of the repo path, used to namespace a repo's session
-/// worktrees. Lower-cased first since Windows paths are case-insensitive.
-fn repo_hash(repo_path: &str) -> String {
+/// worktrees. Lower-cased first since Windows paths are case-insensitive. Kept in sync
+/// BY HAND with `ops::repo_hash`, which `ops_and_worktree_repo_hash_agree` enforces.
+pub(crate) fn repo_hash(repo_path: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     repo_path.to_lowercase().hash(&mut h);
@@ -278,7 +279,7 @@ pub async fn git_worktree_add_user(
         // update's hidden checkout, which git names by an app-data path. Heal-free:
         // the `worktree add` below takes the admin domain, and a sweep fired here
         // would win it first and turn a would-succeed add into a `Busy`.
-        crate::git::update_marker::refuse_if_branch_updating_no_heal(&repo_path, branch)?;
+        crate::git::update_marker::refuse_if_branch_updating_no_heal(&repo_path, branch).await?;
         args.extend_from_slice(&[path, branch]);
     }
     run_git_worktree_admin(&state, &repo_path, &args, WORKTREE_OP_TIMEOUT).await?;

@@ -67,6 +67,106 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
+/// True when `name`'s stem (everything before the first dot) is a reserved DOS
+/// device name. Windows resolves such a name to the DEVICE at any position in a
+/// path, extension or not, so `nul.txt` is as unopenable as `nul`. Win32 also
+/// strips trailing dots and SPACES off the final component, which makes `nul `
+/// the device too (measured); the first-dot split covers the dots, the trim
+/// covers the spaces. Only COM/LPT 1–9 are devices; `com0`, `com10` and
+/// `console` are ordinary names.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|d| d.len() == 1 && matches!(d.as_bytes()[0], b'1'..=b'9')),
+    }
+}
+
+/// Rewrites an absolute path into its `\\?\` verbatim form, which the Win32 layer
+/// passes to the filesystem without the DOS-name resolution that turns `nul` into
+/// a device. Returns `None` for a relative path — resolving one against the
+/// process cwd would target a file the caller never named — and for a `\\.\`
+/// device-namespace path, which names a device rather than a file on disk.
+#[cfg(windows)]
+fn verbatim_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    // Verbatim paths take no forward slashes; repo paths arrive from the frontend
+    // with them. A non-UTF-8 name (unpaired surrogate) simply gets no verbatim form.
+    let text = path.to_str()?.replace('/', "\\");
+    if text.starts_with(r"\\.\") {
+        return None;
+    }
+    if text.starts_with(r"\\?\") {
+        return Some(PathBuf::from(text));
+    }
+    Some(PathBuf::from(match text.strip_prefix(r"\\") {
+        Some(share) => format!(r"\\?\UNC\{share}"),
+        None => format!(r"\\?\{text}"),
+    }))
+}
+
+/// Permanently removes a reserved-device-named entry through its verbatim path.
+/// Returns whether it did; a non-reserved name is left for the caller to report.
+#[cfg(windows)]
+fn permanent_delete_reserved(path: &Path) -> bool {
+    use std::os::windows::fs::FileTypeExt;
+
+    let reserved = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_reserved_device_name);
+    if !reserved {
+        return false;
+    }
+    let Some(verbatim) = verbatim_path(path) else {
+        return false;
+    };
+    // The dir-vs-file probe rides the verbatim path too: a plain-path probe would
+    // describe the device rather than the entry on disk.
+    // It also does not follow links: a reparse point is classified and removed as
+    // ITSELF, so a directory link unlinks with `remove_dir` and only a real
+    // directory earns the recursive sweep.
+    let kind = std::fs::symlink_metadata(&verbatim)
+        .map(|m| m.file_type())
+        .ok();
+    let removed = match kind {
+        Some(k) if k.is_symlink_dir() => std::fs::remove_dir(&verbatim),
+        Some(k) if k.is_dir() => std::fs::remove_dir_all(&verbatim),
+        // Plain file, file link, or an entry the probe couldn't describe — the
+        // file unlink is the only attempt left, and it fails harmlessly.
+        _ => std::fs::remove_file(&verbatim),
+    };
+    removed.is_ok()
+}
+
+/// Moves `path` to the OS trash. Trash is always tried first, so anything the
+/// recycle bin accepts stays recoverable; only on Windows, and only after trash
+/// has refused a reserved-device name (`nul`, `con`, `com3`, …), does the
+/// permanent verbatim-path unlink run. A failed fallback reports the original
+/// trash error — the second one names the same refusal with less context.
+pub(crate) fn trash_delete(path: &Path) -> std::io::Result<()> {
+    let err = match trash::delete(path) {
+        Ok(()) => return Ok(()),
+        Err(e) => std::io::Error::other(e.to_string()),
+    };
+    #[cfg(windows)]
+    if permanent_delete_reserved(path) {
+        return Ok(());
+    }
+    Err(err)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectedEditor {
@@ -205,7 +305,7 @@ pub async fn delete_repo_folder(path: String) -> AppResult<()> {
 
         let mut cause = String::new();
         for attempt in 0..ATTEMPTS {
-            match trash::delete(&dir) {
+            match trash_delete(&dir) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     cause = e.to_string();
@@ -1098,6 +1198,73 @@ mod tests {
         // A trailing TAB is part of the pattern — git trims spaces only (measured,
         // 2.51.1: pattern `foo\t` matches `foo\t`, not `foo`).
         assert_eq!(trim_ignore_pattern("/notes.md\t"), "/notes.md\t");
+    }
+
+    #[test]
+    fn is_reserved_device_name_matches_dos_devices_only() {
+        for name in [
+            "nul", "NUL.txt", "Com3.log", "con", "PRN", "aux", "com1", "COM9", "lpt1", "LPT9",
+            "nul.tar.gz",
+            // Win32 strips trailing dots and spaces off the final component, so
+            // these spell the device too (measured).
+            "nul ", "nul .txt", "nul.",
+        ] {
+            assert!(is_reserved_device_name(name), "{name:?} is a device name");
+        }
+        for name in [
+            "nully", "null", "com0", "com10", "lpt10", "lpt0", "console", "prnt", "auxiliary",
+            "com", "lpt", "", "a.nul",
+            // Only TRAILING spaces are stripped — an interior one is part of the name.
+            "nul x", "nul x.txt",
+        ] {
+            assert!(!is_reserved_device_name(name), "{name:?} is an ordinary name");
+        }
+    }
+
+    /// Pins the premise the Windows fallback exists for: a file named after a
+    /// reserved device is unreachable by its plain path, so trash refuses it and
+    /// only the verbatim path can unlink it. A red here means the fallback is
+    /// dead code.
+    #[cfg(windows)]
+    #[test]
+    fn trash_delete_removes_a_reserved_device_name_the_recycle_bin_refuses() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plain = tmp.path().join("nul");
+        let verbatim = verbatim_path(&plain).expect("a temp path is absolute");
+        std::fs::write(&verbatim, b"x").expect("the verbatim path creates the file");
+
+        assert!(
+            trash::delete(&plain).is_err(),
+            "the plain path resolves to the device, so trash cannot take it"
+        );
+        trash_delete(&plain).expect("the verbatim fallback removes it");
+        assert!(
+            std::fs::metadata(&verbatim).is_err(),
+            "the file is gone from disk"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_path_normalizes_slashes_and_unc_and_refuses_relative() {
+        assert_eq!(
+            verbatim_path(Path::new("C:/repo/sub/nul")).unwrap(),
+            PathBuf::from(r"\\?\C:\repo\sub\nul")
+        );
+        assert_eq!(
+            verbatim_path(Path::new(r"\\server\share\nul")).unwrap(),
+            PathBuf::from(r"\\?\UNC\server\share\nul")
+        );
+        // An already-verbatim path is passed through, never re-prefixed.
+        assert_eq!(
+            verbatim_path(Path::new(r"\\?\C:\repo\nul")).unwrap(),
+            PathBuf::from(r"\\?\C:\repo\nul")
+        );
+        assert!(verbatim_path(Path::new("sub/nul")).is_none());
+        // A device-namespace path names a device, not a file on disk — no
+        // verbatim form, so the caller keeps the plain trash error.
+        assert!(verbatim_path(Path::new(r"\\.\nul")).is_none());
+        assert!(verbatim_path(Path::new(r"\\.\PhysicalDrive0")).is_none());
     }
 
     fn gitignore_test_repo() -> (tempfile::TempDir, PathBuf) {

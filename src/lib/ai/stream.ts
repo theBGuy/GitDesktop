@@ -20,8 +20,8 @@ export interface CliStreamOpts {
   /** Working directory the CLI agent runs in (also its repo-aware root). */
   repoPath: string;
   /** PR head SHA. When repo-aware and this isn't the active checkout, the agent
-   *  runs in a throwaway detached worktree at this commit, so it reads the PR's
-   *  files instead of the user's current branch. Removed when the run settles. */
+   *  runs in a detached review worktree pinned at this commit, so it reads the PR's
+   *  files instead of the user's current branch. Released when the run settles. */
   headSha?: string;
   setText: (text: string) => void;
   setStatus: (status: string) => void;
@@ -103,8 +103,10 @@ export async function runCliStream({
   registerId(reviewId);
 
   // Repo-aware reviews read files from the working tree. When the PR head isn't
-  // the active checkout, run the agent in a throwaway detached worktree pinned at
-  // that commit so it reads the PR's files, not the user's current branch.
+  // the active checkout, run the agent in a detached review worktree pinned at that
+  // commit so it reads the PR's files, not the user's current branch. The backend
+  // hands out one reused per-repo worktree, and a throwaway mint when another
+  // review already holds it.
   let cwd = repoPath;
   let worktree: string | null = null;
   if (ai.cliRepoAware && headSha) {
@@ -197,7 +199,8 @@ export async function runCliStream({
         .catch(reject);
     });
   } finally {
-    // Tear down the ephemeral worktree on every exit (done/cancel/error).
+    // Release the review workspace on every exit (done/cancel/error): the reused
+    // per-repo worktree is unclaimed for the next review, a throwaway mint deleted.
     if (worktree) {
       void gitRemoveWorktree(repoPath, worktree).catch(() => undefined);
     }
