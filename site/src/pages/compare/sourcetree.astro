@@ -11,13 +11,13 @@ import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
 import CompareTable from "../../components/CompareTable.astro";
 import SiteLayout from "../../layouts/SiteLayout.astro";
-import type { Group } from "../../lib/compare";
+import { type Group, verifiedOn } from "../../lib/compare";
 
 const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
-const VERIFIED_ON = "August 24, 2026";
+const VERIFIED_ON = verifiedOn.sourcetree;
 const ST_WIN_VERSION = "3.4.31";
 const ST_MAC_VERSION = "4.2.19";
 
@@ -275,7 +275,11 @@ const faqs = [
   description="GitDesktop vs Sourcetree, verified August 2026: Linux support, the in-app PR loop, CI, issues, optional AI, and no vendor account — plus what Sourcetree still does better."
   ogTitle="GitDesktop vs Sourcetree"
   ogDescription="Linux support, the in-app PR loop, CI, issues, optional AI, and no vendor account — a verified, dated comparison."
-  breadcrumbs={[{ name: "GitDesktop vs Sourcetree", path: "/compare/sourcetree/" }]}
+  breadcrumbs={[
+    { name: "Compare", path: "/compare/" },
+    { name: "GitDesktop vs Sourcetree", path: "/compare/sourcetree/" },
+  ]}
+  active="compare"
 >
   <section class="border-b border-line">
     <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
@@ -400,10 +404,18 @@ const faqs = [
           href={`${base}compare/github-desktop/`}
           class="text-mint underline-offset-4 hover:underline"
           >GitDesktop vs GitHub Desktop</a
-        > and <a
+        >, <a
           href={`${base}compare/gitkraken/`}
           class="text-mint underline-offset-4 hover:underline"
           >GitDesktop vs GitKraken</a
+        >, and <a
+          href={`${base}compare/tower/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >GitDesktop vs Tower</a
+        > — or see <a
+          href={`${base}compare/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >all comparisons</a
         >.
       </p>
     </div>

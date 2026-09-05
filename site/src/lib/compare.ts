@@ -32,3 +32,14 @@ export const stateClass: Record<State, string> = {
   partial: "text-muted",
   no: "text-faint",
 };
+
+// One last-verified date per comparison, read by BOTH the page's hero stamp
+// and the /compare/ hub — a re-verify updates it here so the two can't drift.
+export const verifiedOn = {
+  "github-desktop": "August 20, 2026",
+  sourcetree: "August 24, 2026",
+  gitkraken: "August 28, 2026",
+  tower: "September 5, 2026",
+} as const;
+
+export type CompareSlug = keyof typeof verifiedOn;
