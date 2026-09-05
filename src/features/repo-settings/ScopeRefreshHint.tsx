@@ -11,10 +11,10 @@ import { useUiStore } from "@/lib/stores/ui";
 
 /**
  * Offers the in-app reconnect (and a copyable `gh auth refresh -s <scope>`) when
- * the active gh token is a classic OAuth/PAT token missing `scope`. Renders
- * nothing when the scope is present, or for a fine-grained/App token (those have
- * no readable scopes and can't be refreshed this way) — so it never nags about a
- * non-problem.
+ * the active gh token is a classic OAuth/PAT token missing every scope in
+ * `coveredBy` (default: `scope` alone). Renders nothing when any covering scope
+ * is present, or for a fine-grained/App token (those have no readable scopes and
+ * can't be refreshed this way) — so it never nags about a non-problem.
  */
 export function ScopeRefreshHint({
   scope,

@@ -985,7 +985,8 @@ function JiraWorklogItem({
   async function doDelete() {
     if (stale) return;
     // The confirm dialog closes on the same tick as the request rather than on
-    // its outcome, matching the comment-delete sibling.
+    // its outcome — its pre-conversion timing; the delete hook is
+    // non-optimistic, so the row leaves on the refetch, not an optimistic patch.
     const deleted = del.mutateAsync({ issueKey, worklogId: worklog.id });
     setConfirmDelete(false);
     try {

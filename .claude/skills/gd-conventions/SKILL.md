@@ -289,6 +289,14 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   that lived in them silently never runs. The house idiom is `form.ts`'s
   awaited-submit convention (`SquashDialog` in
   `src/features/history/RewriteDialogs.tsx` is the reference).
+- An awaited continuation that writes GLOBAL selection/navigation state
+  (`selectIssue` / `selectTag` / `selectDiscussion`, `setRepoTab`,
+  `setCommitDraft`) guards on the live `repoPath` — and the live entity, for
+  deselects — read via `useUiStore.getState()` after the await: mutateAsync
+  continuations outlive Activity hides AND unmounts, so an unguarded write
+  retargets whatever repo/entity the user switched to (reference:
+  `deselectIfStillHere` in `src/features/issues/RemoteIssueView.tsx`). Toasts
+  stay unconditional — the operation happened regardless.
 - A follow-up that needs the DOM from a state flip (focus a just-revealed
   input, re-pin a grown scroll region) never rides a bare
   `requestAnimationFrame` from the event handler: when the state lives in

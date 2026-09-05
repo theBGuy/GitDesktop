@@ -582,7 +582,8 @@ const DISCUSSION_SCOPE_HINT: &str = "Writing discussions needs the write:discuss
 
 /// Discussion mutations need the `write:discussion` OAuth scope, which a default
 /// `gh auth login` often lacks — name that cause instead of the raw gh failure.
-/// The discussions surfaces carry the reconnect path, so this stays a sentence.
+/// The GUI discussions surfaces carry the reconnect path; other callers (MCP)
+/// get the cause alone, so this stays a sentence.
 fn map_scope_error(e: AppError) -> AppError {
     if let AppError::Gh(ref msg) = e {
         let lower = msg.to_lowercase();
@@ -986,7 +987,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_scope_becomes_the_actionable_hint() {
+    fn a_missing_scope_becomes_the_scope_sentence() {
         // A realistic GraphQL denial carries both substrings; the trailing two
         // pin each arm of the match on its own.
         for raw in [

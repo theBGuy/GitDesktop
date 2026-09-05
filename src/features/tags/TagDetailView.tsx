@@ -249,6 +249,14 @@ export function TagDetailView({
     toast.success(`Pushed ${tag}`);
   }
 
+  // `selectTag` is global — deselect only while THIS tag in THIS repo is still
+  // the live selection (a delete can settle after the user switched away).
+  function deselectIfStillHere() {
+    const live = useUiStore.getState();
+    if (live.repoPath === repoPath && live.selectedTag?.tag === tag)
+      selectTag(null);
+  }
+
   async function onDeleteTag() {
     try {
       await deleteTag.mutateAsync({ name: tag, onRemote: deleteTagRemote });
@@ -259,7 +267,7 @@ export function TagDetailView({
     }
     toast.success(`Deleted ${tag}`);
     setDeleteTagOpen(false);
-    selectTag(null);
+    deselectIfStillHere();
   }
 
   // ── Release view ───────────────────────────────────────────────────────────
@@ -369,7 +377,7 @@ export function TagDetailView({
       }
       toast.success("Release deleted");
       setDeleteOpen(false);
-      selectTag(null);
+      deselectIfStillHere();
     };
 
     return (

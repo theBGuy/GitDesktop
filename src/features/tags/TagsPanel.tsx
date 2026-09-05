@@ -136,7 +136,9 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
     toast.success(`Created tag ${name}`);
     setNewTagOpen(false);
     setNewTagName("");
-    selectTag({ tag: name });
+    // `selectTag` is global — a repo switch mid-create must not adopt this
+    // tag into the other repo's selection.
+    if (useUiStore.getState().repoPath === repoPath) selectTag({ tag: name });
   }
 
   return (

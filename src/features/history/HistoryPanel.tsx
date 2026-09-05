@@ -248,8 +248,13 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       onError(e);
       return;
     }
-    setCommitDraft(details.subject, details.body);
-    setRepoTab("changes");
+    // The draft restore and tab flip write the LIVE repo's state — a repo
+    // switch mid-undo must not land this repo's message in another repo's
+    // draft. The toast stays: the undo itself happened regardless.
+    if (useUiStore.getState().repoPath === repoPath) {
+      setCommitDraft(details.subject, details.body);
+      setRepoTab("changes");
+    }
     toast.success(
       `Undid ${lastCommit.hash.slice(0, 7)} — changes are staged again`,
     );

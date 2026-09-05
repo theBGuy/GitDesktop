@@ -1007,8 +1007,9 @@ export function DiscussionView({
           )}
         </div>
       </ScrollArea>
-      {/* empty:hidden: the hint self-gates to null when the scope is present, and
-          the wrapper must then contribute no border or padding of its own. */}
+      {/* empty:hidden: the hint self-gates to null (scopes covered, non-classic
+          token, or still loading), and the wrapper must then contribute no
+          border or padding of its own. */}
       <div className="empty:hidden shrink-0 border-t p-2">
         {/* GitHub's scope error names write:discussion, but `repo` covers
             repository-discussion writes — warn only when neither is present. */}

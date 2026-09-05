@@ -549,16 +549,18 @@ export const CHECKS = [
   {
     name: "bare-mutate-in-converted-trees",
     // Scoped to the trees that are fully converted, so the check can only ever
-    // see a NEW site: the settings dialog's own sections (which unmount on BOTH
-    // dialog close and every rail section switch — the keyed crossfade), Explore,
+    // see a NEW site: the repo-settings dialog's own sections (which unmount on
+    // BOTH dialog close and every rail section switch — the keyed crossfade), Explore,
     // whose detail pane is keyed per repo, Actions, whose run detail is keyed per
     // run and whose dispatch dialog unmounts with the repo view, the repository
     // and commit trees, whose panels ride <Activity>-hidden tabs and whose
     // dialogs close mid-flight, and pulls / issues / history / discussions /
     // tags, whose surfaces go through an `<Activity>` tab hide on every repo-tab
-    // switch. What is left is scattered singles (diff, compare, settings,
+    // switch. What is left is scattered singles (diff, compare, app settings,
     // welcome, automations, conversations, scripts, hooks, branch-rules,
-    // updates, App.tsx, the detail rail), each joining on its own conversion.
+    // updates, App.tsx, the detail rail), each joining on its own conversion —
+    // plus src/lib/settings/queries.ts's theme write, which STAYS: its onError
+    // is the synchronous rollback the async-settings-rollback check pins.
     appliesTo: (file) =>
       file.startsWith("src/features/repo-settings/") ||
       file.startsWith("src/features/explore/") ||
@@ -575,8 +577,9 @@ export const CHECKS = [
     // nothing an unmount can drop; the token match is the ratchet, and an
     // exemption is an entry here rather than a hole in the pattern.
     allowlist: [
-      // Three single-arg `update.mutate(vars)` field write-throughs; nothing to
-      // drop.
+      // The local-conversation write-through and the archive/unarchive toggles,
+      // all single-arg `update.mutate(vars)` — the deselect the archive pairs
+      // with is synchronous.
       "src/features/issues/LocalIssueView.tsx",
       // Eight single-arg picker/field writes; their hooks report failures at the
       // mutation level.
