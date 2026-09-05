@@ -8,6 +8,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -74,11 +75,11 @@ import {
 import { fileExt } from "./diff-lang";
 import { ImagePanes } from "./ImageDiff";
 import {
+  canPreviewMarkdown,
   type MarkdownDiffView,
   MarkdownDocPreview,
   MarkdownViewToggle,
 } from "./MarkdownPreview";
-import { isMarkdownPath } from "./markdown-preview";
 import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
 import { useHiddenTriggerFocus } from "./use-hidden-trigger-focus";
 
@@ -171,6 +172,15 @@ function WorkingTreeDiff({
   const untracked =
     !file.staged &&
     (liveEntry ? liveEntry.unstaged === "untracked" : file.untracked);
+  // Full-text revs aligned to the diff's actual sides: staged = HEAD↔index,
+  // unstaged = index↔worktree, added = worktree only. ONE derivation for both
+  // arms — the fallback surface, the staging view's highlight context, the
+  // markdown preview, and the preview-availability predicate all read it.
+  const workingRevs: DiffContentRevs = untracked
+    ? { newRev: null }
+    : file.staged
+      ? { oldRev: "HEAD", newRev: ":0" }
+      : { oldRev: ":0", newRev: null };
   const diff = useFileDiff(repoPath, { ...file, untracked });
   const applyPatch = useApplyPatch(repoPath);
   const applyPartial = useApplyPartial(repoPath);
@@ -256,9 +266,21 @@ function WorkingTreeDiff({
       : null;
   // Preview swaps the staging view out entirely, so the selection actions and
   // the toggle can never be on screen together (the selection arm owns the
-  // whole cluster while a drag selection exists).
-  const canPreview = hunkMode && isMarkdownPath(file.path);
+  // whole cluster while a drag selection exists). Same predicate as the
+  // read-only surface, so the two hosts can't drift on what's previewable.
+  const canPreview =
+    hunkMode && canPreviewMarkdown(file.path, repoPath, workingRevs);
   const previewOn = canPreview && mdView === "preview";
+  // A palette-driven flip unmounts the control that held focus (the picker and
+  // Unified/Split leave the cluster entering Preview), dropping focus to
+  // <body>; land it on the cluster's silent landing spot instead. Change-only
+  // (prev-ref guard), so a mount can never steal focus from elsewhere.
+  const prevPreviewOnRef = useRef(previewOn);
+  useLayoutEffect(() => {
+    if (prevPreviewOnRef.current === previewOn) return;
+    prevPreviewOnRef.current = previewOn;
+    if (document.activeElement === document.body) controlsRef.current?.focus();
+  }, [previewOn, controlsRef]);
   // One contextual chord: stage the selection on an unstaged file's diff,
   // unstage it on a staged one — mirroring the toolbar's primary button. Dead
   // while the Discard confirm is open (the global listener has no dialog guard)
@@ -298,16 +320,6 @@ function WorkingTreeDiff({
   useEffect(() => {
     if (discard !== null && discard.forText !== liveText) setDiscard(null);
   }, [discard, liveText]);
-
-  // Full-text revs aligned to the diff's actual sides: staged = HEAD↔index,
-  // unstaged = index↔worktree, added = worktree only. ONE derivation for both
-  // arms — the fallback surface, the staging view's highlight context, and the
-  // markdown preview must all read the same pair.
-  const workingRevs: DiffContentRevs = untracked
-    ? { newRev: null }
-    : file.staged
-      ? { oldRev: "HEAD", newRev: ":0" }
-      : { oldRev: ":0", newRev: null };
 
   if (!hunkMode) {
     return (

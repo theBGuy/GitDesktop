@@ -18,6 +18,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -182,7 +183,7 @@ export function DiffModeToggle({
     // DisabledReasonButton's wrapper span has no `data-slot`, so it opts out of
     // ButtonGroup's border-collapse/rounding child selectors — this call site
     // owns the seam on the Button instead (same arrangement as SyncControls).
-    <ButtonGroup>
+    <ButtonGroup aria-label="Diff view mode">
       <Button
         variant={effectiveViewMode === "unified" ? "secondary" : "ghost"}
         size="xs"
@@ -1234,6 +1235,9 @@ export function DiffContent({
   // that are most of a diff list, so every file opens on Raw.
   const [mdView, setMdView] = useState<MarkdownDiffView>("raw");
   const [prevMdPath, setPrevMdPath] = useState(filePath);
+  // Guarded same-component reset during render (React's adjust-state-when-
+  // props-change idiom, same as RenderedDiff's prevPath resets): it converges
+  // before commit, where an effect would paint the outgoing file's view first.
   if (prevMdPath !== filePath) {
     setPrevMdPath(filePath);
     if (mdView !== "raw") setMdView("raw");
@@ -1257,6 +1261,16 @@ export function DiffContent({
   const canPreview =
     showsToolbar && canPreviewMarkdown(filePath, repoPath, contentRevs);
   const previewOn = canPreview && mdView === "preview";
+  // A palette-driven flip unmounts the control that held focus (the picker and
+  // Unified/Split leave the cluster entering Preview), dropping focus to
+  // <body>; land it on the cluster's silent landing spot instead. Change-only
+  // (prev-ref guard), so a mount can never steal focus from elsewhere.
+  const prevPreviewOnRef = useRef(previewOn);
+  useLayoutEffect(() => {
+    if (prevPreviewOnRef.current === previewOn) return;
+    prevPreviewOnRef.current = previewOn;
+    if (document.activeElement === document.body) controlsRef.current?.focus();
+  }, [previewOn, controlsRef]);
   useHotkeyAction(
     "change-diff-language",
     () => setLangOpen(true),
@@ -1314,8 +1328,9 @@ export function DiffContent({
         </span>
         {/* ~200px of unshrinkable text, so it shows only where the pane has the
             room; the sr-only twin carries it at every width, and `aria-hidden`
-            on the visible copy keeps the two from announcing twice. */}
-        {data.isTruncated && (
+            on the visible copy keeps the two from announcing twice. Hidden in
+            Preview, which reads the full file rather than the truncated diff. */}
+        {data.isTruncated && !previewOn && (
           <>
             <span aria-hidden className="hidden shrink-0 @2xl/diff-pane:inline">
               (truncated — diff too large)

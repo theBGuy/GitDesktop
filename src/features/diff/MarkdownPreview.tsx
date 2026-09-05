@@ -103,9 +103,15 @@ export function MarkdownDocPreview({
   const oldQ = useFileAtRev(repoPath, revs.oldRev ?? null, filePath, showOld);
   const activeQ = showOld ? oldQ : newQ;
   const b64 = activeQ.data;
+  // The backend caps reads at 20MB — far past the preview cap — so a clearly
+  // oversized file is rejected on its base64 length instead of being decoded
+  // first: UTF-8 yields at least one UTF-16 unit per 3 bytes, so past 4× the
+  // cap in base64 (3× in bytes) the decoded length cannot come in under it.
+  const tooLarge =
+    typeof b64 === "string" && b64.length > PREVIEW_MAX_CHARS * 4;
   const text = useMemo(
-    () => (typeof b64 === "string" ? decodeBase64Utf8(b64) : null),
-    [b64],
+    () => (typeof b64 === "string" && !tooLarge ? decodeBase64Utf8(b64) : null),
+    [b64, tooLarge],
   );
   const cleaned = useMemo(
     () =>
@@ -124,6 +130,9 @@ export function MarkdownDocPreview({
   if (activeQ.isError) {
     return <DiffPlaceholder message="Could not load this file to preview" />;
   }
+  if (tooLarge) {
+    return <DiffPlaceholder message="File too large to preview" />;
+  }
   if (text === null) {
     return <DiffPlaceholder message="Nothing to preview" />;
   }
@@ -133,21 +142,19 @@ export function MarkdownDocPreview({
   if (cleaned.trim() === "") {
     return <DiffPlaceholder message="Nothing to preview" />;
   }
+  // Repo docs routinely carry repository-relative hrefs (LICENSE, docs/…).
+  // The shared renderer's dispatch opens only http(s)/mailto externally and
+  // leaves every other anchor its default navigation — which in the webview
+  // walks the SPA away to the app's own origin. Capture-phase, and on BOTH
+  // click and auxclick: a middle-click's default open rides auxclick, which
+  // never fires click. Mirrors markdown.tsx's module-private EXTERNAL_HREF
+  // set, kept in sync by hand.
+  const guardLinkClick = (e: React.MouseEvent) => {
+    const href = (e.target as HTMLElement).closest("a")?.getAttribute("href");
+    if (href && !/^(https?:|mailto:)/i.test(href)) e.preventDefault();
+  };
   return (
-    // Repo docs routinely carry repository-relative hrefs (LICENSE, docs/…).
-    // The shared renderer's dispatch opens only http(s)/mailto externally and
-    // leaves every other anchor its default navigation — which in the webview
-    // walks the SPA away to the app's own origin. Capture-phase, so this runs
-    // before that dispatch. Mirrors markdown.tsx's module-private
-    // EXTERNAL_HREF set, kept in sync by hand.
-    <div
-      onClickCapture={(e) => {
-        const href = (e.target as HTMLElement)
-          .closest("a")
-          ?.getAttribute("href");
-        if (href && !/^(https?:|mailto:)/i.test(href)) e.preventDefault();
-      }}
-    >
+    <div onClickCapture={guardLinkClick} onAuxClickCapture={guardLinkClick}>
       {showOld && (
         <PreviewNote>
           File deleted — previewing the previous version.
