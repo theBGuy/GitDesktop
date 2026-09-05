@@ -505,9 +505,10 @@ export function CleanupBranchesDialog({
         if (mode === "archive") {
           await api.gitSetBranchArchived(repoPath, name, true);
         } else if (isProtected(name)) {
-          // Re-checked with the rules as of batch start, not only when the list
-          // was built: a rule can change while the dialog sits open, and a
-          // protected branch belongs in the failure rows rather than deleted.
+          // Defensive: `candidates` already excludes protected names in delete
+          // mode off this same predicate, so this arm is unreachable today — it
+          // exists so a future change to that filter can't silently reopen
+          // bulk-deleting a protected branch; failure rows beat silent success.
           fails.set(name, "protected by a branch rule");
         } else {
           await api.gitDeleteBranch(repoPath, name);

@@ -1,3 +1,3 @@
-- Cleaning up branches now waits for branch protection rules to finish loading
-  before offering or running a bulk delete, so a protected branch stays out of
-  the batch.
+- Cleaning up branches and deleting a branch now wait for branch protection
+  rules to finish loading before any delete runs, so a protected branch can't
+  slip through while the rules are still being read.

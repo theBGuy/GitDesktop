@@ -130,6 +130,9 @@ export function ChangesContextMenuItems({
   }
   const { entry, staged } = target;
   if (inSelection && selectionCount > 1) {
+    // The stageable count can drop to 1 (or 0) inside a >1 selection when the
+    // rest are Windows-reserved names, so this label pluralizes off its own n.
+    const n = stageableSelectionCount;
     return (
       <>
         {!staged && (
@@ -137,9 +140,9 @@ export function ChangesContextMenuItems({
             disabled={stageableSelectionCount === 0}
             onClick={actions.stageSelected}
           >
-            {stageableSelectionCount === 0
-              ? `Stage files${RESERVED_HINT}`
-              : `Stage ${stageableSelectionCount} files`}
+            {n === 0
+              ? "Stage files (Windows-reserved names)"
+              : `Stage ${n} file${n === 1 ? "" : "s"}`}
           </ContextMenuItem>
         )}
         {staged && (

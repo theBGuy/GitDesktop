@@ -449,8 +449,8 @@ export function ChangesPanel({
       void unstage.mutateAsync(unstagePaths(entry)).catch(onError);
       return;
     }
-    // Fire-time guard: the affordances are already disabled, but a hotkey or a
-    // later call site must not reach a `git add` that dies reading the device.
+    // Fire-time guard: the affordances are already disabled, but a later call
+    // site must not reach a `git add` that dies reading the device.
     if (!canStage(entry)) return;
     void stage.mutateAsync([literalPathspec(entry.path)]).catch(onError);
   }
