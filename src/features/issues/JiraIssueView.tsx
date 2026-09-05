@@ -79,6 +79,7 @@ import {
   type JiraIssueDetails,
   type JiraStatusCategory,
   type JiraTimeTracking as JiraTimeTrackingData,
+  type JiraTransitionResult,
   type JiraWorklog,
 } from "@/lib/jira/types";
 import { useUiStore } from "@/lib/stores/ui";
@@ -152,7 +153,7 @@ function StatusMenu({
     toStatusName: string;
     toStatusCategory: JiraStatusCategory;
   }) {
-    let result: Awaited<ReturnType<typeof transitionTo.mutateAsync>>;
+    let result: JiraTransitionResult;
     try {
       result = await transitionTo.mutateAsync({
         issueKey,
@@ -1611,7 +1612,7 @@ export function JiraIssueView({
   }
 
   async function doTransition(direction: "close" | "reopen") {
-    let result: Awaited<ReturnType<typeof transition.mutateAsync>>;
+    let result: JiraTransitionResult;
     try {
       result = await transition.mutateAsync({ issueKey, direction });
     } catch (e) {

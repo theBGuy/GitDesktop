@@ -552,7 +552,6 @@ export function DiscussionView({
 
   async function doDelete() {
     if (!d || detailsStale) return;
-    const deleted = number;
     try {
       await deleteDiscussion.mutateAsync(d.id);
     } catch (e) {
@@ -568,7 +567,7 @@ export function DiscussionView({
     const live = useUiStore.getState();
     if (
       live.repoPath === repoPath &&
-      live.selectedDiscussion?.number === deleted
+      live.selectedDiscussion?.number === number
     )
       selectDiscussion(null);
   }
@@ -1016,7 +1015,7 @@ export function DiscussionView({
         <ScopeRefreshHint
           scope="write:discussion"
           action="Writing in discussions"
-          coveredBy={["repo", "write:discussion"]}
+          coveredBy={["repo"]}
         />
       </div>
       <CommentComposer

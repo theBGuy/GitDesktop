@@ -187,7 +187,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           <ScopeRefreshHint
             scope="write:discussion"
             action="Writing in discussions"
-            coveredBy={["repo", "write:discussion"]}
+            coveredBy={["repo"]}
           />
         )}
       </div>

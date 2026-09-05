@@ -11,10 +11,10 @@ import { useUiStore } from "@/lib/stores/ui";
 
 /**
  * Offers the in-app reconnect (and a copyable `gh auth refresh -s <scope>`) when
- * the active gh token is a classic OAuth/PAT token missing every scope in
- * `coveredBy` (default: `scope` alone). Renders nothing when any covering scope
- * is present, or for a fine-grained/App token (those have no readable scopes and
- * can't be refreshed this way) — so it never nags about a non-problem.
+ * the active gh token is a classic OAuth/PAT token missing `scope` and every
+ * scope in `coveredBy`. Renders nothing when any of them is present, or for a
+ * fine-grained/App token (those have no readable scopes and can't be refreshed
+ * this way) — so it never nags about a non-problem.
  */
 export function ScopeRefreshHint({
   scope,
@@ -23,15 +23,14 @@ export function ScopeRefreshHint({
 }: {
   scope: string;
   action: string;
-  /** Scopes that each satisfy the need on their own — the hint hides when ANY
-   *  is present (a broader scope can cover the named one). Defaults to `scope`
-   *  alone. */
+  /** Additional scopes that each satisfy the need on their own (a broader
+   *  scope can cover the named one) — `scope` is always included. */
   coveredBy?: string[];
 }) {
   const host = useActiveGhHost();
   const scopes = useGhScopes(host);
   const openReconnect = useUiStore((s) => s.openReconnect);
-  const satisfied = (coveredBy ?? [scope]).some((s) =>
+  const satisfied = [scope, ...(coveredBy ?? [])].some((s) =>
     scopes.data?.scopes.includes(s),
   );
   if (!scopes.data?.classic || satisfied) return null;

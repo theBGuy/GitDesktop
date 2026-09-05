@@ -14,8 +14,8 @@ import {
  * Open while `commentId` is non-null. The dialog does NOT close itself on
  * confirm — `onConfirm(id)` runs the caller's delete and the caller closes
  * (synchronously for local comments; for remote ones in BOTH arms of the
- * awaited continuation — close-on-error is deliberate). `pending` disables Delete during a
- * remote mutation; local callers omit it.
+ * awaited continuation — close-on-error is deliberate). `pending` disables
+ * Delete during a remote mutation; local callers omit it.
  */
 export function DeleteCommentDialog({
   commentId,

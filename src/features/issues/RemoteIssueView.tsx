@@ -138,6 +138,11 @@ export function RemoteIssueView({
   // The single lens-resolution point for this surface (package B2): every issue
   // read/write below targets the fork (origin) or its parent (upstream).
   const lens = useRepoLens(repoPath);
+  // Live lens for post-await guards: `selectedIssue` carries no lens, so a
+  // continuation fired on one side of a fork pair must not clear a
+  // same-numbered selection made on the other.
+  const lensRef = useRef(lens);
+  lensRef.current = lens;
   // The viewer's permission on the lens repo — a PERMISSION axis the per-action
   // flags below don't cover, so it never hides a control: it only disables one,
   // and only on an explicit denial. Triage is its own, LOWER tier: labels,
@@ -556,14 +561,14 @@ export function RemoteIssueView({
    *  can settle after the user has selected another one. */
   function deselectIfStillHere() {
     const { selectedIssue: sel, repoPath: liveRepo } = useUiStore.getState();
-    if (liveRepo !== repoPath) return;
+    if (liveRepo !== repoPath || lensRef.current !== lens) return;
     if (sel?.kind === "remote" && sel.id === String(number)) selectIssue(null);
   }
 
   async function submitTransfer() {
     const destination = transferDest.trim();
     if (!destination) return;
-    let url: Awaited<ReturnType<typeof transferIssue.mutateAsync>>;
+    let url: string;
     try {
       url = await transferIssue.mutateAsync({ number, destination });
     } catch (e) {

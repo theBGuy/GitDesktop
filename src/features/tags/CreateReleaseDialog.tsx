@@ -163,7 +163,9 @@ export function CreateReleaseDialog({
           action: { label: "View", onClick: () => openUrl(url) },
         });
         onOpenChange(false);
-        selectTag({ tag });
+        // Adopt the new release's tag only while this repo is still on screen —
+        // the create can settle after a repo switch.
+        if (useUiStore.getState().repoPath === repoPath) selectTag({ tag });
       } catch (e) {
         toastError(e);
       }
@@ -226,10 +228,11 @@ export function CreateReleaseDialog({
   // while generation is still in flight.
   async function generateFromGithub() {
     if (!tagTrimmed) return;
+    const requestedFor = tagTrimmed;
     let gen: GeneratedNotes;
     try {
       gen = await githubNotes.mutateAsync({
-        tag: tagTrimmed,
+        tag: requestedFor,
         target: showTarget ? target.trim() : "",
         previousTag: effectivePreviousTag,
       });
@@ -237,6 +240,9 @@ export function CreateReleaseDialog({
       toastError(e);
       return;
     }
+    // The response belongs to the tag it was requested for — a reseeded or
+    // retyped form is another release, and stale notes must not touch it.
+    if (form.getFieldValue("tag").trim() !== requestedFor) return;
     if (gen.body) form.setFieldValue("notes", gen.body);
     if (gen.name && !form.getFieldValue("title").trim()) {
       form.setFieldValue("title", gen.name);
