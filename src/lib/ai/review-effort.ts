@@ -1,4 +1,3 @@
-import { isCliProvider } from "./providers";
 import type { AiProviderId } from "./types";
 
 /** The Review-effort choices offered in Settings, in render order. The
@@ -16,13 +15,21 @@ export const REVIEW_EFFORTS = [
  *  own configured default governs, exactly as before the setting existed. */
 export type ReviewEffort = (typeof REVIEW_EFFORTS)[number];
 
-/** Whether `provider`'s reviews honor the Review-effort setting: the agent
- *  CLIs with a reasoning lever the review path drives (Claude a thinking
- *  keyword, Copilot `--effort`, opencode `--variant`). Codex is deliberately
- *  out — its reasoning config tops out at "high", so the scale's Max would
- *  overpromise — and the HTTP providers have no effort plumbing at all. */
+/** The agent CLIs whose review path maps the Review-effort setting onto a real
+ *  lever (Claude a thinking keyword, Copilot `--effort`, opencode `--variant`).
+ *  Deliberately an allow-list, so a newly added CLI stays effort-hidden until
+ *  `agent_review` actually maps its level. Codex is out — its reasoning config
+ *  tops out at "high", so the scale's Max would overpromise — and the HTTP
+ *  providers have no effort plumbing at all. */
+const EFFORT_CLI_PROVIDERS: readonly AiProviderId[] = [
+  "claude-cli",
+  "copilot-cli",
+  "opencode-cli",
+];
+
+/** Whether `provider`'s reviews honor the Review-effort setting. */
 export function reviewEffortCapable(provider: AiProviderId): boolean {
-  return isCliProvider(provider) && provider !== "codex-cli";
+  return EFFORT_CLI_PROVIDERS.includes(provider);
 }
 
 /** The `agent_review` effort level for a review on `provider`, or `""` (the

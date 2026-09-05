@@ -1449,7 +1449,8 @@ reviewing model's context window (probing Ollama live), or pick Compact / Standa
 Expanded. **Review effort** (shown when Claude Code, GitHub Copilot, or opencode drives
 reviews or security audits) picks how hard the reviewer thinks: **Default** keeps the
 CLI's own setting, or choose **Low** through **Max** for a lighter or deeper pass. Codex
-and the API providers always run at their own defaults. **Review timeout** (shown when an agent CLI drives reviews or security audits)
+and the API providers always run at their own defaults. **Review timeout** (shown
+when an agent CLI drives reviews or security audits)
 caps how long such a review may run before it's stopped: **Auto** allows 5 minutes (20 when
 the review is agentic — always, for Codex), or pin a fixed limit that applies to every
 agent-CLI review. Whatever the reviewer already wrote is kept when the limit hits, for an

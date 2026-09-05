@@ -29,9 +29,9 @@ export interface CliStreamOpts {
   /** The run's reported cost (USD), delivered with the terminal `done` event.
    *  Null when the CLI doesn't report one. Optional — most callers ignore it. */
   onCost?: (costUsd: number | null) => void;
-  /** Reasoning/effort level for the run ("" / absent = provider default).
-   *  Review flows resolve it from the Review-effort setting; picker flows
-   *  (e.g. Plan) pass their per-run choice. */
+  /** Reasoning/effort level for the run ("" / absent = provider default) —
+   *  review flows resolve it from the Review-effort setting; other callers
+   *  leave it unset. (Plan/sessions route effort via `agent_session`.) */
   effort?: string;
   /** Attach GitDesktop's own read-only MCP server to the run (reviews only), so an agentic
    *  reviewer can pull the full PR diff and read files at any ref. Default off. */
