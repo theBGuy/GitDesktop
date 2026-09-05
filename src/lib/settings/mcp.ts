@@ -201,17 +201,21 @@ export function mcpSecretRef(serverId: string, entryKey: string): string {
 
 /** Registration-time host gate for http servers: the reason a server can't be
  *  saved/imported/added yet, or null. Rows already IN the registry are never
- *  gated by this (they keep the warn-only badge) — only the three registration
- *  seams call it. An empty or unparseable URL returns null: emptiness and URL
- *  validity are validateMcpServer's own checks, and a URL-less stub is gated
- *  later, when the edit dialog saves the URL the user fills in. */
+ *  gated by this (they keep the warn-only badge) — only the registration seams
+ *  and the write funnel call it. An EMPTY url returns null: emptiness is
+ *  validateMcpServer's own check, and a URL-less stub is gated later, when the
+ *  edit dialog saves the URL the user fills in. An unparseable one fails
+ *  CLOSED — browse/import candidates carry third-party URLs that reach no
+ *  other validation, so there is nothing else to catch them. */
 export function mcpHostGateReason(
   server: McpServer,
   allowedHosts: readonly string[],
 ): string | null {
   if (server.transport !== "http") return null;
   const url = server.url.trim();
-  if (!url || !normalizeHost(url)) return null;
+  if (!url) return null;
+  if (!normalizeHost(url))
+    return `${url.slice(0, 60)} isn't a valid server URL.`;
   if (isHostAllowed(url, allowedHosts)) return null;
   return `${hostLabel(url)} isn't in your AI allowed hosts.`;
 }

@@ -1,3 +1,3 @@
-- Discard all runs as one atomic operation: the repository stays held from
-  snapshot to reset, so a stage or commit attempted mid-discard waits behind
-  a labeled busy notice.
+- Discard all is atomic: nothing can slip into the repository mid-discard, so
+  work you stage while one runs gets a labeled busy notice instead of being
+  destroyed by the discard's reset.

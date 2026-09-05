@@ -72,8 +72,8 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
 /// whatever directory it sits, extension or not, so `nul.txt` and
 /// `src/nul` are as unopenable as `nul` (callers pass ONE component;
 /// [`path_has_reserved_component`] walks a whole path). Win32 also
-/// strips trailing dots and SPACES off the final component, which makes `nul `
-/// the device too (measured); the first-dot split covers the dots, the trim
+/// strips trailing dots and SPACES off each component it resolves this way, which
+/// makes `nul ` the device too (measured); the first-dot split covers the dots, the trim
 /// covers the spaces. Only a single COM/LPT ordinal 1–9 is a device, written
 /// either as an ASCII digit or as a Latin-1 superscript (`com¹`, `com²`,
 /// `com³`); `com0`, `com10`, `com⁴` (U+2074, outside Latin-1) and `console` are
@@ -1273,9 +1273,10 @@ mod tests {
 
     /// The enumerable list is spelled to git as pathspec patterns, which take no
     /// predicate — so a name the matcher accepts but this array omits would
-    /// silently stop being excluded. Pinned in both directions: every listed name
-    /// is reserved, and every reserved name a generated sweep of the whole
-    /// candidate space produces is listed.
+    /// silently stop being excluded. Pinned in both directions, but the reverse one
+    /// only over TODAY's families (CON/PRN/AUX/NUL and COM/LPT ordinals): it catches
+    /// an ordinal or spelling the matcher gains inside that space, not a new
+    /// singleton or a third family, which needs its own candidate arm here.
     #[test]
     fn reserved_device_names_agrees_with_the_matcher_and_is_complete() {
         for name in RESERVED_DEVICE_NAMES {
@@ -1292,8 +1293,10 @@ mod tests {
             assert!(!is_reserved_device_name(name), "{name:?} is an ordinary name");
         }
 
-        // Matcher → array: a future matcher extension that skips this array goes
-        // red here rather than silently narrowing the force-add exclusions.
+        // Matcher → array, across the candidate space below: a matcher that starts
+        // accepting another COM/LPT ordinal without an array entry goes red here
+        // rather than silently narrowing the force-add exclusions. A brand-new
+        // family is outside this sweep and needs a row added to `stems`.
         let mut stems: Vec<String> = ["CON", "PRN", "AUX", "NUL"].map(String::from).to_vec();
         for family in ["com", "lpt"] {
             for ordinal in [

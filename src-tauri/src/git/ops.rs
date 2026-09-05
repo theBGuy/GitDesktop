@@ -1006,8 +1006,9 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
     // recycle-bin copy. That means the lock-free `run_git` for the reset —
     // `run_git_mutating` re-acquires this non-reentrant lock and deadlocks —
     // trading away its one-shot index.lock retry (as the stash compound does). The
-    // hold spans the whole trash loop deliberately: a huge untracked set can queue
-    // other work for minutes behind the labeled Busy, which is the price of
+    // hold spans the whole trash loop deliberately: on a huge untracked set it can
+    // last minutes, and a waiter is refused with the labeled Busy once its 10s
+    // `LOCK_WAIT_TIMEOUT` runs out. That refusal is the price of
     // point-of-acquisition semantics.
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a discard").await?;
@@ -1077,43 +1078,7 @@ pub(crate) async fn git_stash_all_core(state: &AppState, repo_path: String) -> A
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a stash operation").await?;
     refuse_mid_op(&repo_path).await?;
 
-    // Windows-only: an untracked path holding a reserved device name is
-    // plain-path-unreachable, and `stash push --include-untracked` writes the entry
-    // and THEN fails removing it (exit 1) — leaving a stash plus an unchanged tree
-    // (measured, git 2.51.1). Excluding those paths stashes everything else; an
-    // exclude-only pathspec means "everything else" to git.
-    let excludes: Vec<String> = if cfg!(windows) {
-        let status_out = run_git(
-            Some(&repo_path),
-            &["status", "--porcelain=v2", "--untracked-files=all", "-z"],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-        let status = crate::git::status::parse_status_v2(&status_out.stdout_lossy());
-        let reserved: Vec<&str> = status
-            .entries
-            .iter()
-            .filter(|e| {
-                e.unstaged == Some(crate::git::types::ChangeKind::Untracked)
-                    && crate::fsops::path_has_reserved_component(Path::new(&e.path))
-            })
-            .map(|e| e.path.as_str())
-            .collect();
-        // Excluding every change leaves git with nothing to stash, which it reports
-        // as success — say why instead of silently doing nothing.
-        if !reserved.is_empty() && reserved.len() == status.entries.len() {
-            return Err(AppError::InvalidArgument(
-                "Can't stash — the only changes are Windows-reserved filenames (nul, con, com1, …), which Git can't put in a stash.".to_string(),
-            ));
-        }
-        reserved
-            .iter()
-            .map(|p| format!(":(exclude,literal){p}"))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
+    let excludes = reserved_stash_excludes(&repo_path).await?;
     // The common path keeps the exact argv it always had, on every platform.
     if excludes.is_empty() {
         run_git(
@@ -1122,12 +1087,59 @@ pub(crate) async fn git_stash_all_core(state: &AppState, repo_path: String) -> A
             DEFAULT_TIMEOUT,
         )
         .await?;
-    } else {
-        let mut args: Vec<&str> = vec!["stash", "push", "--include-untracked", "--"];
-        args.extend(excludes.iter().map(String::as_str));
-        run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
+        return Ok(());
+    }
+
+    let mut args: Vec<&str> = vec!["stash", "push", "--include-untracked", "--"];
+    args.extend(excludes.iter().map(String::as_str));
+    let out = run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
+    // Excluding every change leaves git nothing to stash, which it reports as
+    // success — stash-ALL names the reason rather than silently doing nothing. The
+    // autostash compounds read the same answer as "nothing to stash" and carry on,
+    // which is right for them and wrong here.
+    if stash_saved_nothing(&out.stdout_lossy()) {
+        return Err(AppError::InvalidArgument(
+            "Can't stash — the only changes are Windows-reserved filenames (nul, con, com1, …), which Git can't put in a stash.".to_string(),
+        ));
     }
     Ok(())
+}
+
+/// `:(exclude,literal)` pathspecs for every untracked path holding a reserved
+/// device name, so `stash push --include-untracked` skips what it cannot touch:
+/// such a path is plain-path-unreachable, and git writes the stash entry and THEN
+/// fails removing the file (exit 1), leaving a stash plus an unchanged tree
+/// (measured, git 2.51.1). Empty off Windows and on a tree holding none, so the
+/// caller's usual argv is untouched. Lock-free — every caller already holds the
+/// working-tree lock, where `run_git_mutating` would deadlock.
+pub(crate) async fn reserved_stash_excludes(repo_path: &str) -> AppResult<Vec<String>> {
+    if !cfg!(windows) {
+        return Ok(Vec::new());
+    }
+    let status_out = run_git(
+        Some(repo_path),
+        &["status", "--porcelain=v2", "--untracked-files=all", "-z"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(
+        crate::git::status::parse_status_v2(&status_out.stdout_lossy())
+            .entries
+            .iter()
+            .filter(|e| {
+                e.unstaged == Some(crate::git::types::ChangeKind::Untracked)
+                    && crate::fsops::path_has_reserved_component(Path::new(&e.path))
+            })
+            .map(|e| format!(":(exclude,literal){}", e.path))
+            .collect(),
+    )
+}
+
+/// True when `git stash push` found nothing to save: it exits 0 without creating
+/// an entry, so this stdout line is the only signal (`run_git` pins `LC_ALL=C`).
+/// Shared so the stash-all and autostash readings of git's sentinel cannot drift.
+pub(crate) fn stash_saved_nothing(stdout: &str) -> bool {
+    stdout.trim_start().starts_with("No local changes to save")
 }
 
 /// One selected file to discard, paired with whether it's untracked (which
@@ -1540,9 +1552,11 @@ pub(crate) async fn git_force_add_core(
     // Windows-only: a reserved-device FILE under a force-added directory aborts the
     // WHOLE add ("unable to index file", measured, git 2.51.1) and the user never
     // saw it — `git_ignored_files` collapses a fully-ignored directory to one entry.
-    // Exclude all four shapes `path_has_reserved_component` calls reserved: the bare
-    // name, any extension, and either spelled as a directory (unreadable by plain
-    // path, so git only warns there). A leading `**/` matches at the repo root too.
+    // Exclude four of the shapes `path_has_reserved_component` calls reserved: the
+    // bare name, any extension, and either spelled as a directory (unreadable by
+    // plain path, so git only warns there). A leading `**/` matches at the repo root
+    // too. Not covered: a trailing-space stem (`nul `), which the predicate accepts
+    // and no glob can spell — an accepted residual, not an oversight.
     let reserved_excludes: Vec<String> = if cfg!(windows) {
         crate::fsops::RESERVED_DEVICE_NAMES
             .iter()
@@ -9405,8 +9419,12 @@ detached
             let repo = repo.clone();
             tokio::spawn(async move { git_discard_all_core(&state, repo).await })
         };
-        // Lock-free, the sweep trashes the file within milliseconds — this window
-        // is what the hold has to keep shut.
+        // Lock-free, the sweep trashes the file within milliseconds — this window is
+        // what the hold has to keep shut. One-directional: a discard that had not yet
+        // reached the acquire would also leave the file in place, so a green here is
+        // only meaningful against the revert control (trash outside the hold → red),
+        // which is what calibrates the wait. Nothing observable marks the acquire
+        // itself, and inventing a seam for it would only move the race.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(
             dir.path().join("untracked.txt").exists(),

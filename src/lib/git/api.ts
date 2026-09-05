@@ -345,8 +345,8 @@ export const gitOpContinue = (repoPath: string, op: RepoOp) =>
 export interface FileBytes {
   /** Base64 of the file bytes; null when the preview is refused. */
   base64: string | null;
-  /** Media type sniffed from the bytes, not the extension; null when they're
-   *  not one of the four sniffable raster formats (SVG, BMP, ICO, text, …). */
+  /** Media type sniffed from the bytes, not the extension — one of PNG, GIF,
+   *  JPEG, WebP. null for anything else (SVG, BMP, ICO, text, …). */
   mime: string | null;
   /** Past the byte cap, or a raster whose header declares more than the
    *  webview's decoder should be handed. */

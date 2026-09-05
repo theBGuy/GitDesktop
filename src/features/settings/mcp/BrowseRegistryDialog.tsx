@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { normalizeHost } from "@/lib/ai/allowed-hosts";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { McpServer } from "@/lib/settings/api";
@@ -322,10 +323,17 @@ export function BrowseRegistryDialog({
                 const entries = entriesFor(c.server);
                 const secretSet = new Set(c.server.secretKeys);
                 const gateReason = mcpHostGateReason(c.server, allowedHosts);
+                // "Allow host" only fixes a gate that HAS a host to add: an
+                // unparseable URL (the gate's fail-closed arm) has none, so it
+                // gets no note and no pointer at one.
+                const allowFixable =
+                  gateReason !== null && normalizeHost(c.server.url) !== null;
                 // Why Add is held, plus where the one-click fix lives.
-                const addReason = gateReason
-                  ? `${gateReason} Expand the row to allow it.`
-                  : null;
+                const addReason = !gateReason
+                  ? null
+                  : allowFixable
+                    ? `${gateReason} Expand the row to allow it.`
+                    : gateReason;
                 return (
                   <div
                     key={c.registryName}
@@ -503,10 +511,7 @@ export function BrowseRegistryDialog({
                               <ArrowSquareOutIcon />
                             </button>
                           )}
-                          {/* A non-null gate reason IS the mount condition: with
-                              `defaultNote={null}` the note's all-clear branch
-                              would render an empty <p>. */}
-                          {gateReason ? (
+                          {allowFixable ? (
                             <HostAllowNote
                               url={c.server.url}
                               allowedHosts={allowedHosts}

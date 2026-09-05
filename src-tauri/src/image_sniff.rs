@@ -30,23 +30,53 @@ fn le_u24_at(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes([triple[0], triple[1], triple[2], 0]))
 }
 
-/// The format some bytes actually are, and the raster their HEADER declares — header
-/// fields only, nothing is decoded. `None` when the bytes are not one of the four raster
-/// formats this module reads, or when the header they need is truncated.
-pub(crate) fn sniff_image(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+/// The four raster containers this module reads, named by magic bytes alone.
+enum RasterMagic {
+    Png,
+    Gif,
+    Jpeg,
+    Webp,
+}
+
+/// Which container the bytes OPEN with, before any header is read. The single
+/// dispatch [`sniff_image`] and [`has_raster_magic`] share, so the format a caller
+/// recognizes and the format the sniffer tries to read can never drift apart.
+fn raster_magic(bytes: &[u8]) -> Option<RasterMagic> {
     if bytes.starts_with(PNG_SIGNATURE) {
-        return sniff_png(bytes);
+        return Some(RasterMagic::Png);
     }
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return sniff_gif(bytes);
+        return Some(RasterMagic::Gif);
     }
     if bytes.starts_with(&[0xff, 0xd8]) {
-        return sniff_jpeg(bytes);
+        return Some(RasterMagic::Jpeg);
     }
-    if bytes.starts_with(b"RIFF") && header_field::<4>(bytes, 8)? == *b"WEBP" {
-        return sniff_webp(bytes);
+    if bytes.starts_with(b"RIFF") && header_field::<4>(bytes, 8) == Some(*b"WEBP") {
+        return Some(RasterMagic::Webp);
     }
     None
+}
+
+/// Whether the bytes open with a raster container this module dispatches on, whatever
+/// its header turns out to say. A caller pairs this with [`sniff_image`] to tell the
+/// two reasons that function answers `None` apart: bytes that are no raster at all,
+/// and a recognized container whose header the walk refuses — which is a REFUSAL, not
+/// a clean bill of health.
+pub(crate) fn has_raster_magic(bytes: &[u8]) -> bool {
+    raster_magic(bytes).is_some()
+}
+
+/// The format some bytes actually are, and the raster their HEADER declares — header
+/// fields only, nothing is decoded. `None` when the bytes are not one of the four raster
+/// formats this module reads, or when the header they need is truncated or malformed;
+/// [`has_raster_magic`] separates those two cases.
+pub(crate) fn sniff_image(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    match raster_magic(bytes)? {
+        RasterMagic::Png => sniff_png(bytes),
+        RasterMagic::Gif => sniff_gif(bytes),
+        RasterMagic::Jpeg => sniff_jpeg(bytes),
+        RasterMagic::Webp => sniff_webp(bytes),
+    }
 }
 
 /// IHDR carries the dimensions and the spec requires it to be the first chunk, so a PNG
@@ -328,6 +358,17 @@ pub(crate) fn jpeg_fixture(sof_marker: u8, leading: &[u8], width: u16, height: u
     bytes
 }
 
+/// SOI, a stuffed `FF 00` pair, then a frame header declaring a raster past the caps.
+/// The pair is not length-bearing, so the walk stops on it and reads no size — while
+/// libjpeg's `next_marker` discards the pair and reads the frame header behind it.
+/// The exact shape a caller's fail-closed arm has to refuse.
+#[cfg(test)]
+pub(crate) fn stuffed_pair_jpeg() -> Vec<u8> {
+    let mut bytes = vec![0xffu8, 0xd8, 0xff, 0x00];
+    bytes.extend_from_slice(&jpeg_fixture(0xc0, &[], 9000, 9000)[2..]);
+    bytes
+}
+
 /// The desync layout, hand-rolled because the byte placement IS the test: a non
 /// length-bearing pair whose following two bytes read as a length only if the walk is
 /// wrong, sized to jump it over the real frame header and land it exactly on a decoy
@@ -398,6 +439,57 @@ mod tests {
     fn gated(bytes: &[u8]) -> Option<&'static str> {
         let (media_type, width, height) = sniff_image(bytes)?;
         dimensions_within_caps(width, height).then_some(media_type)
+    }
+
+    /// A caller's fail-closed arm keys on [`has_raster_magic`] while the type comes from
+    /// [`sniff_image`], so the two must dispatch on exactly the same prefixes — a drift
+    /// between them is a bypass, not a cosmetic mismatch. The middle group is the class
+    /// that matters: magic present, header unreadable.
+    #[test]
+    fn has_raster_magic_covers_exactly_the_sniffer_dispatch() {
+        for readable in [
+            png_fixture(10, 10),
+            gif_fixture(b"GIF89a", 10, 10),
+            jpeg_fixture(0xc0, &[], 10, 10),
+            webp_lossy_fixture(10, 10),
+        ] {
+            assert!(has_raster_magic(&readable));
+            assert!(sniff_image(&readable).is_some());
+        }
+
+        let mut wrong_chunk = png_fixture(10, 10);
+        wrong_chunk[12..16].copy_from_slice(b"iCCP");
+        for unreadable in [
+            // A stuffed `FF 00` pair stops the marker walk; the decoder skips it.
+            stuffed_pair_jpeg(),
+            wrong_chunk,
+            // A GIF header with no image descriptor after it.
+            gif_header(b"GIF89a", 10, 10, 0x00),
+            // A WebP container whose first chunk this module cannot read.
+            webp_fixture(b"ANIM", &[0u8; 16]),
+        ] {
+            assert!(
+                has_raster_magic(&unreadable),
+                "the magic still names a container"
+            );
+            assert_eq!(sniff_image(&unreadable), None);
+        }
+
+        for plain in [
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+            b"BM\x36\x00\x00\x00".to_vec(),
+            // RIFF is not WebP on its own, and a form type that never arrives is not
+            // one either — both must answer the same way here as in the dispatch.
+            b"RIFF\x00\x00\x00\x00AVI ".to_vec(),
+            b"RIFF".to_vec(),
+            Vec::new(),
+        ] {
+            assert!(
+                !has_raster_magic(&plain),
+                "{plain:?} names no raster container"
+            );
+            assert_eq!(sniff_image(&plain), None);
+        }
     }
 
     #[test]

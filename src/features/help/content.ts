@@ -2127,14 +2127,14 @@ so it needs the container's sandbox). **Remote (HTTP)** servers are checked agai
 **host not allowed** badge as a reminder, while adding a new server, importing one, or
 saving an edit needs its host on the list first. Each route offers a one-click
 **Allow host** that adds it; the registry browser keeps it in the row's expanded
-detail. In a container the servers run *inside* the sandbox,
-sharing an npm cache so an \`npx\` server is downloaded only once. A Claude run is **strict** —
-it gets *only* the servers you picked and never inherits others on your machine — while
-Copilot and opencode layer your picks onto their own config. The composer's **MCP** picker
-shows for every agent and tells you when a pick needs a container session — with Codex it
-points you at the **Isolation** control in the same **Options** popover. You can also change the
-selection **mid-session** — the picker appears in a running session's reply box too, and a
-new choice applies from your next turn.
+detail. In a container the servers run *inside* the sandbox, sharing an npm cache so an
+\`npx\` server is downloaded only once. A Claude run is **strict** — it gets *only* the
+servers you picked and never inherits others on your machine — while Copilot and opencode
+layer your picks onto their own config. The composer's **MCP** picker shows for every agent
+and tells you when a pick needs a container session — with Codex it points you at the
+**Isolation** control in the same **Options** popover. You can also change the selection
+**mid-session** — the picker appears in a running session's reply box too, and a new choice
+applies from your next turn.
 
 **The other direction — GitDesktop *as* a server.** At the bottom of the panel, **Use
 GitDesktop as an MCP server** lets any external MCP client — Claude Desktop, Cursor, Claude

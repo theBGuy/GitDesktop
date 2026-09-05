@@ -3,7 +3,7 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{run_git, run_git_mutating_input, run_git_raw, DEFAULT_TIMEOUT};
 use crate::git::types::{DiffStatEntry, FileDiff, StagedDiff};
-use crate::image_sniff::{dimensions_within_caps, sniff_image};
+use crate::image_sniff::{dimensions_within_caps, has_raster_magic, sniff_image};
 use crate::state::AppState;
 
 /// Cap on file bytes shipped for image previews.
@@ -16,8 +16,8 @@ const IMAGE_MAX_BYTES: usize = 20_000_000;
 pub struct FileBytes {
     /// Base64 of the file bytes; `None` when the preview is refused.
     pub base64: Option<String>,
-    /// Sniffed raster media type; `None` when the bytes are not one of the
-    /// four sniffable formats (SVG, BMP, ICO, text, …).
+    /// Media type sniffed from the bytes — one of PNG, GIF, JPEG, WebP. `None` for
+    /// anything else (SVG, BMP, ICO, text, …), which ships bounded by bytes alone.
     pub mime: Option<String>,
     pub too_large: bool,
 }
@@ -59,20 +59,30 @@ pub async fn git_file_base64(
     // a few KB of PNG can otherwise ask the renderer for gigabytes. The type comes from
     // the bytes rather than the extension, which any commit can spell freely.
     let sniffed = sniff_image(&bytes);
-    if let Some((media_type, width, height)) = sniffed {
-        if !dimensions_within_caps(width, height) {
-            return Ok(Some(FileBytes {
-                base64: None,
-                mime: Some(media_type.into()),
-                too_large: true,
-            }));
-        }
+    let refuse = match sniffed {
+        Some((_, width, height)) => !dimensions_within_caps(width, height),
+        // `sniff_image`'s `None` is fail-CLOSED, not "nothing to gate": its walk stops
+        // at any header it cannot read with certainty, while the webview's decoder is
+        // more lenient than the walk (it discards the stuffed `FF 00` pairs the walk
+        // refuses and reads the frame header behind them). A recognized container with
+        // an unreadable header therefore has no measured raster, and must not reach
+        // that decoder — only magic-less bytes fall through to the byte cap.
+        None => has_raster_magic(&bytes),
+    };
+    if refuse {
+        return Ok(Some(FileBytes {
+            base64: None,
+            mime: sniffed.map(|(media_type, _, _)| media_type.to_string()),
+            too_large: true,
+        }));
     }
-    // Bytes with no declared raster to gate ship under the byte cap alone. SVG is kept
-    // deliberately: in an `<img>` it is a non-scripting document — no script runs and
-    // external references are blocked — so unlike the link-preview gate, which carries
-    // third-party bytes into a hover card, this surface can render a repository's own
-    // SVGs. BMP and ICO have no reader here either and are likewise byte-bound.
+    // Bytes that open with no raster magic at all ship under the byte cap alone. SVG is
+    // kept deliberately: in an `<img>` it is a non-scripting document — no script runs
+    // and external references are blocked — so unlike the link-preview gate, which
+    // carries third-party bytes into a hover card, this surface can render a
+    // repository's own SVGs. It is also outside what a declared-dimensions cap could
+    // bound: the webview rasterizes SVG at display size, so its header states no
+    // decode. BMP and ICO have no reader here either and are likewise byte-bound.
     Ok(Some(FileBytes {
         base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
         mime: sniffed.map(|(media_type, _, _)| media_type.to_string()),
@@ -621,7 +631,7 @@ pub(crate) fn parse_numstat_z_rows(text: &str) -> Vec<DiffStatRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_sniff::{jpeg_fixture, png_fixture};
+    use crate::image_sniff::{jpeg_fixture, png_fixture, stuffed_pair_jpeg};
 
     #[test]
     fn parses_numstat_with_rename_and_binary() {
@@ -1290,6 +1300,7 @@ mod tests {
         std::fs::write(dir.join("area.png"), png_fixture(7000, 7000)).unwrap();
         std::fs::write(dir.join("ok.png"), png_fixture(1200, 630)).unwrap();
         std::fs::write(dir.join("lying.png"), jpeg_fixture(0xc0, &[], 40, 30)).unwrap();
+        std::fs::write(dir.join("stuffed.jpg"), stuffed_pair_jpeg()).unwrap();
         std::fs::write(
             dir.join("icon.svg"),
             b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"9000\" height=\"9000\"/>",
@@ -1356,6 +1367,38 @@ mod tests {
             assert!(!svg.too_large);
             assert!(svg.base64.is_some());
         }
+    }
+
+    /// The sniffer refuses a header it cannot read, and that refusal has to survive the
+    /// trip through this gate. A JPEG opening with a stuffed `FF 00` pair stops the
+    /// marker walk — but not the webview's decoder, which discards the pair and reads
+    /// the 9000x9000 frame header behind it. Shipping those bytes byte-bound would hand
+    /// the renderer a raster the caps never saw.
+    #[tokio::test]
+    async fn a_recognized_container_with_an_unreadable_header_is_refused() {
+        let (_tmp, _dir, repo) = init_preview_repo().await;
+        // The premise, pinned: the magic names a JPEG, the walk reads no size from it.
+        let bytes = stuffed_pair_jpeg();
+        assert!(crate::image_sniff::has_raster_magic(&bytes));
+        assert_eq!(sniff_image(&bytes), None);
+
+        for rev in [None, Some("HEAD".to_string())] {
+            let got = git_file_base64(repo.clone(), rev.clone(), "stuffed.jpg".into())
+                .await
+                .unwrap()
+                .expect("the file exists on both paths");
+            assert!(got.too_large, "at {rev:?} the container must be refused");
+            assert_eq!(got.base64, None, "no bytes may reach the decoder");
+        }
+
+        // The control that keeps the refusal from swallowing everything typeless: bytes
+        // with no raster magic still ship, bounded by the byte cap alone.
+        let svg = git_file_base64(repo.clone(), None, "icon.svg".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!svg.too_large);
+        assert!(svg.base64.is_some());
     }
 
     /// The byte cap is a refusal STATE now, not an error, and an absent file is still

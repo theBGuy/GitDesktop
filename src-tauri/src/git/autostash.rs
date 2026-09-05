@@ -50,23 +50,28 @@ pub enum AutostashOutcome {
     OpFailedStashKept { stderr: String, in_progress: bool },
 }
 
-/// `git stash push --include-untracked` (parity with `git_stash_all_core`).
-/// `false` when git found nothing to stash: it exits 0 without creating an entry,
-/// so this stdout line is the only signal (`run_git` pins `LC_ALL=C`).
+/// `git stash push --include-untracked` (parity with `git_stash_all_core`,
+/// reserved-name exclusions included). `false` when git found nothing to stash.
+///
+/// Excluding the Windows-reserved untracked names is what keeps the parity: git
+/// would otherwise write the entry and then fail removing the unreachable file,
+/// aborting the compound around an orphan stash. When they are the ONLY changes
+/// the exclusion leaves nothing to save, and `false` is the right answer here —
+/// the compound runs its op unstashed, exactly as it would on a clean tree.
+/// Stash-ALL refuses on that same answer instead; only it is a user-chosen "put
+/// my work away" whose silence would be a lie.
 ///
 /// `pub(crate)` for `git::pull_guard`, whose decided-pull compound is this
 /// module's shape run from another entry point.
 pub(crate) async fn autostash_push(repo: &str) -> AppResult<bool> {
-    let out = run_git(
-        Some(repo),
-        &["stash", "push", "--include-untracked"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    Ok(!out
-        .stdout_lossy()
-        .trim_start()
-        .starts_with("No local changes to save"))
+    let excludes = crate::git::ops::reserved_stash_excludes(repo).await?;
+    let mut args: Vec<&str> = vec!["stash", "push", "--include-untracked"];
+    if !excludes.is_empty() {
+        args.push("--");
+        args.extend(excludes.iter().map(String::as_str));
+    }
+    let out = run_git(Some(repo), &args, DEFAULT_TIMEOUT).await?;
+    Ok(!crate::git::ops::stash_saved_nothing(&out.stdout_lossy()))
 }
 
 /// Raw so a conflicted pop (exit 1) can be classified rather than propagated.
@@ -1819,5 +1824,59 @@ mod tests {
             "a refused switch must not have touched the stash"
         );
         assert_eq!(read(dir.path(), "a.txt"), "dirty\n", "nor the working tree");
+    }
+
+    /// An untracked Windows-reserved name would make `stash push` write the entry
+    /// and then fail removing the unreachable file (exit 1), aborting the whole
+    /// compound around an orphan stash. Excluded, the compound stashes and reapplies
+    /// the real work and leaves the reserved file where it is.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn autostash_push_works_around_a_reserved_device_named_file() {
+        let (dir, repo) = setup_repo("reserved-name").await;
+        // Only the verbatim path reaches such a name; the plain one is the device.
+        let nul = std::path::PathBuf::from(format!(
+            r"\\?\{}",
+            dir.path().join("nul").to_string_lossy().replace('/', "\\")
+        ));
+        std::fs::write(&nul, b"x\n").expect("verbatim write");
+        write(dir.path(), "a.txt", "dirty\n");
+
+        let stashed = autostash_push(&repo)
+            .await
+            .expect("the reserved name is excluded instead of failing the push");
+        assert!(stashed, "the tracked change was stashed");
+        assert_eq!(read(dir.path(), "a.txt"), "v0\n", "the tree came back clean");
+        assert!(!stash_list(&repo).await.is_empty());
+        assert!(
+            std::fs::metadata(&nul).is_ok(),
+            "the reserved-name file stays put"
+        );
+
+        let pop = autostash_pop(&repo).await.expect("pop runs");
+        assert_eq!(pop.code, 0, "{}", pop.full_failure_text());
+        assert_eq!(read(dir.path(), "a.txt"), "dirty\n", "the work came back");
+
+        // The temp dir's cleanup walks plain paths and cannot reach this one.
+        std::fs::remove_file(&nul).expect("verbatim unlink");
+    }
+
+    /// The compound must not refuse when the reserved name is the ONLY change:
+    /// excluding it leaves nothing to save, which is the clean-tree answer.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn autostash_push_reports_nothing_stashed_when_only_a_reserved_name_changed() {
+        let (dir, repo) = setup_repo("reserved-name-only").await;
+        let nul = std::path::PathBuf::from(format!(
+            r"\\?\{}",
+            dir.path().join("nul").to_string_lossy().replace('/', "\\")
+        ));
+        std::fs::write(&nul, b"x\n").expect("verbatim write");
+
+        let stashed = autostash_push(&repo).await.expect("no refusal here");
+        assert!(!stashed, "nothing to stash, so the compound runs unstashed");
+        assert!(stash_list(&repo).await.is_empty());
+
+        std::fs::remove_file(&nul).expect("verbatim unlink");
     }
 }

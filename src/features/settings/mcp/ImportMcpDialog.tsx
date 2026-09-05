@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { normalizeHost } from "@/lib/ai/allowed-hosts";
 import { setMcpSecret } from "@/lib/git/api";
 import type { McpServer } from "@/lib/settings/api";
 import { mcpHostGateReason } from "@/lib/settings/mcp";
@@ -171,6 +172,11 @@ export function ImportMcpDialog({
             candidates.map((c) => {
               const gateReason = mcpHostGateReason(c.server, allowedHosts);
               const held = c.duplicate || gateReason !== null;
+              // "Allow host" only fixes a gate that HAS a host to add: an
+              // unparseable URL (the gate's fail-closed arm) has none, and
+              // HostAllowNote's all-clear branch would render an empty <p>.
+              const allowFixable =
+                gateReason !== null && normalizeHost(c.server.url) !== null;
               return (
                 // The row's border wraps the label plus the gate note, so the
                 // note's Allow host button stays OUTSIDE the label — inside it,
@@ -224,18 +230,19 @@ export function ImportMcpDialog({
                       )}
                     </div>
                   </label>
-                  {/* A non-null gate reason IS the mount condition: with
-                      `defaultNote={null}` the note's all-clear branch would
-                      render an empty <p>. */}
                   {gateReason ? (
                     <div className="px-2 pb-2 pl-8">
-                      <HostAllowNote
-                        url={c.server.url}
-                        allowedHosts={allowedHosts}
-                        onAllowHost={onAllowHost}
-                        defaultNote={null}
-                        consequence="the agent CLI connects outside GitDesktop's AI allowlist, so allow it before importing."
-                      />
+                      {allowFixable ? (
+                        <HostAllowNote
+                          url={c.server.url}
+                          allowedHosts={allowedHosts}
+                          onAllowHost={onAllowHost}
+                          defaultNote={null}
+                          consequence="the agent CLI connects outside GitDesktop's AI allowlist, so allow it before importing."
+                        />
+                      ) : (
+                        <p className="text-xs text-warning">{gateReason}</p>
+                      )}
                     </div>
                   ) : null}
                 </div>

@@ -1010,7 +1010,7 @@ review via its subscription login. The full list is under
   at a box on your network, not just `localhost`. Non-built-in hosts must be
   added to the **Allowed hosts** list (Settings → AI; one-click *Allow
   host* on the URL field), which GitDesktop enforces before every AI
-  request.
+  request and checks new MCP server registrations against.
 - **Custom instructions**, included in every generation and every AI review:
   - **Global**: Settings → AI instructions (e.g. "Follow Conventional
     Commits").

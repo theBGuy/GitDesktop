@@ -23,6 +23,7 @@ import {
   isServerInScope,
   MCP_SCOPE_GLOBAL,
   type McpRepoState,
+  mcpHostGateReason,
   serverScope,
 } from "@/lib/settings/mcp";
 import { useRepoKeys } from "@/lib/settings/queries";
@@ -41,8 +42,9 @@ export const McpServersSection = withForm({
     const servers = useSelector(form.store, (s) => s.values.mcpServers);
     // The draft AI allow list, shared with the AI provider screen. Rows already
     // in the registry keep a warn-only "host not allowed" badge and go on
-    // working; the three REGISTRATION seams (add/edit dialog, import, browse)
-    // block an http server until its host is on this list.
+    // working. On REGISTRATION the seams explain the block in place and the
+    // write funnel (admitServers) enforces it, so a route that skips a seam
+    // still can't append an unchecked http server.
     const allowedHosts = useSelector(
       form.store,
       (s) => s.values.aiAllowedHosts,
@@ -73,18 +75,38 @@ export const McpServersSection = withForm({
       form.setFieldValue("mcpServers", next);
     }
 
+    /** The host gate at the WRITE funnel, applied the moment a server would land
+     *  in the registry. Every seam already explains and blocks its own case, so
+     *  this never fires today; it exists so a new registration route can't append
+     *  an unchecked http server silently. Returns the servers that may be written,
+     *  naming the host in a refusal toast for any it drops. */
+    function admitServers(incoming: McpServer[]): McpServer[] {
+      const admitted: McpServer[] = [];
+      for (const s of incoming) {
+        const reason = mcpHostGateReason(s, allowedHosts);
+        if (reason) toast.error(`"${s.name}" wasn't registered — ${reason}`);
+        else admitted.push(s);
+      }
+      return admitted;
+    }
+
     function addServers(added: McpServer[]) {
-      if (added.length) setServers([...list, ...added]);
+      const admitted = admitServers(added);
+      if (admitted.length) setServers([...list, ...admitted]);
       setImportOpen(false);
     }
 
     // Append one server (registry browser), without closing — the dialog stays
     // open for adding several. Functional update so back-to-back adds compose.
     function appendServer(server: McpServer) {
+      if (admitServers([server]).length === 0) return;
       form.setFieldValue("mcpServers", (prev) => [...(prev ?? []), server]);
     }
 
     async function saveServer(server: McpServer) {
+      // Refuse before the optimistic close, so a rejected draft stays on screen
+      // for the user to fix rather than vanishing with its edits.
+      if (admitServers([server]).length === 0) return;
       // Close optimistically FIRST: foldServerScopeKeys' cold repoIdentity IPC
       // call would otherwise visibly delay the dialog closing. It never rejects,
       // and the write below composes via the functional setter, so closing before
