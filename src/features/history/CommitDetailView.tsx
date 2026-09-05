@@ -251,15 +251,18 @@ export function CommitDetailView({
   // menu. All three act on the `hash` PROP for the same reason `copyHash` does.
   async function doCheckoutCommit() {
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
-    checkoutCommit.mutate(hash, {
-      onSuccess: () => toast.success(checkoutCommitSuccessToast(hash)),
-      onError,
-    });
+    try {
+      await checkoutCommit.mutateAsync(hash);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(checkoutCommitSuccessToast(hash));
   }
 
   async function doRevertCommit() {
     if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
-    revertCommit.mutate(hash, { onError });
+    void revertCommit.mutateAsync(hash).catch(onError);
   }
 
   // No branch name: this view doesn't subscribe to repo status, and doing so for
@@ -269,18 +272,20 @@ export function CommitDetailView({
       .getState()
       .ask(cherryPickCommitConfirm(hash, null));
     if (!ok) return;
-    cherryPick.mutate(hash, {
-      onSuccess: (applied) => {
-        if (applied) {
-          toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
-        } else {
-          toast.info(
-            "Nothing to cherry-pick — these changes are already on this branch.",
-          );
-        }
-      },
-      onError,
-    });
+    let applied: boolean;
+    try {
+      applied = await cherryPick.mutateAsync(hash);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    if (applied) {
+      toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
+    } else {
+      toast.info(
+        "Nothing to cherry-pick — these changes are already on this branch.",
+      );
+    }
   }
 
   const fileList = files.data;

@@ -155,7 +155,7 @@ export function JiraIssueSidebar({
           open={issue.statusCategory !== "done"}
           pending={setDueDate.isPending}
           onChange={(dueDate) =>
-            setDueDate.mutate({ issueKey, dueDate }, { onError: toastError })
+            void setDueDate.mutateAsync({ issueKey, dueDate }).catch(toastError)
           }
         />
       ) : (

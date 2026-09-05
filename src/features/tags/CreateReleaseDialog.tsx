@@ -59,7 +59,7 @@ import {
   useRepoStatus,
   useTagList,
 } from "@/lib/git/queries";
-import type { CommitSummary } from "@/lib/git/types";
+import type { CommitSummary, GeneratedNotes } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useAiEnabled } from "@/lib/settings/queries";
@@ -221,25 +221,27 @@ export function CreateReleaseDialog({
 
   const busyGenerating = githubNotes.isPending || aiNotes.generating;
 
-  function generateFromGithub() {
+  // Awaited like the submit above: react-query drops per-call callbacks once the
+  // observer loses listeners, and this dialog's host panel hides with its tab
+  // while generation is still in flight.
+  async function generateFromGithub() {
     if (!tagTrimmed) return;
-    githubNotes.mutate(
-      {
+    let gen: GeneratedNotes;
+    try {
+      gen = await githubNotes.mutateAsync({
         tag: tagTrimmed,
         target: showTarget ? target.trim() : "",
         previousTag: effectivePreviousTag,
-      },
-      {
-        onSuccess: (gen) => {
-          if (gen.body) form.setFieldValue("notes", gen.body);
-          if (gen.name && !form.getFieldValue("title").trim()) {
-            form.setFieldValue("title", gen.name);
-          }
-          notesEditorRef.current?.showPreview();
-        },
-        onError: toastError,
-      },
-    );
+      });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    if (gen.body) form.setFieldValue("notes", gen.body);
+    if (gen.name && !form.getFieldValue("title").trim()) {
+      form.setFieldValue("title", gen.name);
+    }
+    notesEditorRef.current?.showPreview();
   }
 
   function generateWithAi() {
@@ -475,7 +477,9 @@ export function CreateReleaseDialog({
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="min-w-56">
                         {!isGitLab && (
-                          <DropdownMenuItem onClick={generateFromGithub}>
+                          <DropdownMenuItem
+                            onClick={() => void generateFromGithub()}
+                          >
                             From GitHub (commits & PRs)
                           </DropdownMenuItem>
                         )}

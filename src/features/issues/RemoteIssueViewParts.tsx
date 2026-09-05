@@ -771,6 +771,17 @@ function IssueLinksSection({
     selectIssue({ kind: "remote", id: String(n) });
   }
 
+  async function link(target: number) {
+    try {
+      await linkIssue.mutateAsync({ number, targetNumber: target });
+    } catch {
+      // useLinkIssue toasts at the mutation level, so a second report here
+      // would double up.
+      return;
+    }
+    setAdding(false);
+  }
+
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
@@ -823,12 +834,7 @@ function IssueLinksSection({
               exclude={exclude}
               pending={linkIssue.isPending}
               lens={lens}
-              onPick={(target) =>
-                linkIssue.mutate(
-                  { number, targetNumber: target },
-                  { onSuccess: () => setAdding(false) },
-                )
-              }
+              onPick={(target) => void link(target)}
             />
           </div>
           <Button variant="ghost" size="xs" onClick={() => setAdding(false)}>

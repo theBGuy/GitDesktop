@@ -164,13 +164,19 @@ export function TagDetailView({
     );
   }
 
+  // Every mutation below awaits its continuation: react-query drops per-call
+  // callbacks once the observer loses listeners, and this whole view hides with
+  // its <Activity> tab while a write is still in flight.
   async function onUpload() {
     const file = await openDialog({ multiple: false });
     if (typeof file !== "string") return;
-    uploadAsset.mutate(
-      { tag, filePath: file },
-      { onSuccess: () => toast.success("Asset uploaded"), onError },
-    );
+    try {
+      await uploadAsset.mutateAsync({ tag, filePath: file });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Asset uploaded");
   }
 
   async function onDownload(assetName: string) {
@@ -179,10 +185,13 @@ export function TagDetailView({
     if (relStale) return;
     const dir = await openDialog({ directory: true });
     if (typeof dir !== "string") return;
-    downloadAsset.mutate(
-      { tag, assetName, dir },
-      { onSuccess: () => toast.success(`Downloaded ${assetName}`), onError },
-    );
+    try {
+      await downloadAsset.mutateAsync({ tag, assetName, dir });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(`Downloaded ${assetName}`);
   }
 
   // Shared by both provider arms, which differ in what is actually lost: GitHub's
@@ -201,10 +210,13 @@ export function TagDetailView({
       confirmVariant: "destructive",
     });
     if (!ok) return;
-    deleteAsset.mutate(
-      { tag, assetName },
-      { onSuccess: () => toast.success("Asset deleted"), onError },
-    );
+    try {
+      await deleteAsset.mutateAsync({ tag, assetName });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Asset deleted");
   }
 
   // Checking out a tag detaches HEAD exactly as checking out its commit does, so
@@ -218,10 +230,36 @@ export function TagDetailView({
       .getState()
       .ask(checkoutDetachedConfirm("tag", tag));
     if (!ok) return;
-    checkout.mutate(target, {
-      onSuccess: () => toast.success(checkoutTagSuccessToast(tag)),
-      onError,
-    });
+    try {
+      await checkout.mutateAsync(target);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(checkoutTagSuccessToast(tag));
+  }
+
+  async function onPushTag() {
+    try {
+      await pushTag.mutateAsync(tag);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(`Pushed ${tag}`);
+  }
+
+  async function onDeleteTag() {
+    try {
+      await deleteTag.mutateAsync({ name: tag, onRemote: deleteTagRemote });
+    } catch (e) {
+      onError(e);
+      setDeleteTagOpen(false);
+      return;
+    }
+    toast.success(`Deleted ${tag}`);
+    setDeleteTagOpen(false);
+    selectTag(null);
   }
 
   // ── Release view ───────────────────────────────────────────────────────────
@@ -237,6 +275,103 @@ export function TagDetailView({
     // (nothing armed) stays dismissible exactly as it always was.
     const savePending = editRelease.isPending || syncUpdaterNotes.isPending;
     const saveLatched = syncArmed && savePending;
+
+    // Arrow consts, not declarations: only an expression created after the
+    // narrowing keeps `rel` non-nullable inside the closure.
+    const onPublish = async () => {
+      // `prerelease` rides the rendered release's flag, so a stale one would
+      // really flip the new release's state on the forge.
+      if (relStale) return;
+      try {
+        await editRelease.mutateAsync({
+          tag,
+          title: "",
+          notes: "",
+          prerelease: rel.isPrerelease,
+          draft: false,
+          // Omit --latest so GitHub applies its default (a newly published
+          // stable release becomes Latest, like the web UI). A draft's isLatest
+          // is structurally false — sending it here was the bug that stripped
+          // Latest on publish.
+          latest: undefined,
+        });
+      } catch (e) {
+        onError(e);
+        return;
+      }
+      toast.success("Published");
+    };
+
+    const saveEdit = async () => {
+      // `draft`/`latest` below are read off the rendered release at submit
+      // time, so a switch behind the open dialog holds the save.
+      if (relStale) return;
+      // Empty notes leave the body untouched (the edit skips `--notes`), so
+      // there's nothing to carry into the manifest either.
+      const syncManifest =
+        canSyncUpdater && editSyncUpdater && !!editNotes.trim();
+      setSyncArmed(syncManifest);
+      try {
+        await editRelease.mutateAsync({
+          tag,
+          title: editTitle.trim(),
+          notes: editNotes,
+          prerelease: editPrerelease,
+          draft: rel.isDraft,
+          // Only round-trip Latest for published releases (real user intent on
+          // an eligible release). A draft can't be Latest, so omit the flag and
+          // let GitHub decide on publish.
+          latest: rel.isDraft ? undefined : editLatest,
+        });
+      } catch (e) {
+        // The capture dies with the save it was taken for — phase 1 failing
+        // means no phase 2 will ever consume it.
+        setSyncArmed(false);
+        onError(e);
+        return;
+      }
+      if (!syncManifest) {
+        setSyncArmed(false);
+        toast.success("Release updated");
+        setEditOpen(false);
+        return;
+      }
+      // The body edit has already landed, so a manifest failure is partial
+      // state, not a failed save: close and disclose it — re-submitting would
+      // only repeat the edit.
+      try {
+        await syncUpdaterNotes.mutateAsync({ tag, notes: editNotes.trim() });
+      } catch (err) {
+        setSyncArmed(false);
+        // Which stage failed decides what recovery is possible — only a failed
+        // upload leaves a parked copy — so the summary stays arm-neutral and the
+        // backend's own text (carried into Details by toastError) names the specifics.
+        toastError(
+          new Error(
+            `Release updated, but the updater manifest may not have been.\n\n${presentError(err).fullText}`,
+          ),
+        );
+        setEditOpen(false);
+        return;
+      }
+      setSyncArmed(false);
+      toast.success("Release updated");
+      setEditOpen(false);
+    };
+
+    const onDeleteRelease = async () => {
+      try {
+        await deleteRelease.mutateAsync({ tag, cleanupTag });
+      } catch (e) {
+        onError(e);
+        setDeleteOpen(false);
+        return;
+      }
+      toast.success("Release deleted");
+      setDeleteOpen(false);
+      selectTag(null);
+    };
+
     return (
       <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
         <header className="space-y-2 border-b px-4 py-3">
@@ -256,29 +391,7 @@ export function TagDetailView({
                     size="xs"
                     disabled={editRelease.isPending || writeBlocked || relStale}
                     reason={blockReason}
-                    onClick={() => {
-                      // `prerelease` rides the rendered release's flag, so a stale
-                      // one would really flip the new release's state on the forge.
-                      if (relStale) return;
-                      editRelease.mutate(
-                        {
-                          tag,
-                          title: "",
-                          notes: "",
-                          prerelease: rel.isPrerelease,
-                          draft: false,
-                          // Omit --latest so GitHub applies its default (a newly
-                          // published stable release becomes Latest, like the web UI).
-                          // A draft's isLatest is structurally false — sending it here
-                          // was the bug that stripped Latest on publish.
-                          latest: undefined,
-                        },
-                        {
-                          onSuccess: () => toast.success("Published"),
-                          onError,
-                        },
-                      );
-                    }}
+                    onClick={() => void onPublish()}
                   >
                     Publish
                   </DisabledReasonButton>
@@ -479,69 +592,7 @@ export function TagDetailView({
               className="flex min-h-0 flex-1 flex-col gap-4"
               onSubmit={(e) => {
                 e.preventDefault();
-                // `draft`/`latest` below are read off the rendered release at
-                // submit time, so a switch behind the open dialog holds the save.
-                if (relStale) return;
-                // Empty notes leave the body untouched (the edit skips `--notes`),
-                // so there's nothing to carry into the manifest either.
-                const syncManifest =
-                  canSyncUpdater && editSyncUpdater && !!editNotes.trim();
-                setSyncArmed(syncManifest);
-                editRelease.mutate(
-                  {
-                    tag,
-                    title: editTitle.trim(),
-                    notes: editNotes,
-                    prerelease: editPrerelease,
-                    draft: rel.isDraft,
-                    // Only round-trip Latest for published releases (real user intent
-                    // on an eligible release). A draft can't be Latest, so omit the flag
-                    // and let GitHub decide on publish.
-                    latest: rel.isDraft ? undefined : editLatest,
-                  },
-                  {
-                    onSuccess: () => {
-                      if (!syncManifest) {
-                        setSyncArmed(false);
-                        toast.success("Release updated");
-                        setEditOpen(false);
-                        return;
-                      }
-                      // The body edit has already landed, so a manifest failure is
-                      // partial state, not a failed save: close and disclose it —
-                      // re-submitting would only repeat the edit.
-                      syncUpdaterNotes.mutate(
-                        { tag, notes: editNotes.trim() },
-                        {
-                          onSuccess: () => {
-                            setSyncArmed(false);
-                            toast.success("Release updated");
-                            setEditOpen(false);
-                          },
-                          onError: (err) => {
-                            setSyncArmed(false);
-                            // Which stage failed decides what recovery is possible —
-                            // only a failed upload leaves a parked copy — so the
-                            // summary stays arm-neutral and the backend's own text
-                            // (carried into Details by toastError) names the specifics.
-                            toastError(
-                              new Error(
-                                `Release updated, but the updater manifest may not have been.\n\n${presentError(err).fullText}`,
-                              ),
-                            );
-                            setEditOpen(false);
-                          },
-                        },
-                      );
-                    },
-                    // The capture dies with the save it was taken for — phase 1
-                    // failing means no phase 2 will ever consume it.
-                    onError: (e) => {
-                      setSyncArmed(false);
-                      onError(e);
-                    },
-                  },
-                );
+                void saveEdit();
               }}
             >
               <DialogHeader>
@@ -682,22 +733,7 @@ export function TagDetailView({
                 variant="destructive"
                 disabled={deleteRelease.isPending || relStale}
                 reason={blockReason}
-                onClick={() =>
-                  deleteRelease.mutate(
-                    { tag, cleanupTag },
-                    {
-                      onSuccess: () => {
-                        toast.success("Release deleted");
-                        setDeleteOpen(false);
-                        selectTag(null);
-                      },
-                      onError: (e) => {
-                        onError(e);
-                        setDeleteOpen(false);
-                      },
-                    },
-                  )
-                }
+                onClick={() => void onDeleteRelease()}
               >
                 {deleteRelease.isPending && (
                   <Spinner data-icon="inline-start" />
@@ -770,12 +806,7 @@ export function TagDetailView({
           variant="outline"
           size="sm"
           disabled={pushTag.isPending}
-          onClick={() =>
-            pushTag.mutate(tag, {
-              onSuccess: () => toast.success(`Pushed ${tag}`),
-              onError,
-            })
-          }
+          onClick={() => void onPushTag()}
         >
           Push tag
         </Button>
@@ -821,22 +852,7 @@ export function TagDetailView({
             <Button
               variant="destructive"
               disabled={deleteTag.isPending}
-              onClick={() =>
-                deleteTag.mutate(
-                  { name: tag, onRemote: deleteTagRemote },
-                  {
-                    onSuccess: () => {
-                      toast.success(`Deleted ${tag}`);
-                      setDeleteTagOpen(false);
-                      selectTag(null);
-                    },
-                    onError: (e) => {
-                      onError(e);
-                      setDeleteTagOpen(false);
-                    },
-                  },
-                )
-              }
+              onClick={() => void onDeleteTag()}
             >
               {deleteTag.isPending && <Spinner data-icon="inline-start" />}
               Delete

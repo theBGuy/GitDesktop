@@ -147,23 +147,24 @@ function StatusMenu({
   const [open, setOpen] = useState(false);
   const transitions = useJiraTransitions(repoPath, link, issueKey, open);
 
-  function apply(t: {
+  async function apply(t: {
     id: string;
     toStatusName: string;
     toStatusCategory: JiraStatusCategory;
   }) {
-    transitionTo.mutate(
-      {
+    let result: Awaited<ReturnType<typeof transitionTo.mutateAsync>>;
+    try {
+      result = await transitionTo.mutateAsync({
         issueKey,
         transitionId: t.id,
         toStatusName: t.toStatusName,
         toStatusCategory: t.toStatusCategory,
-      },
-      {
-        onSuccess: (r) => toast.success(`${issueKey} · ${r.statusName}`),
-        onError: toastError,
-      },
-    );
+      });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(`${issueKey} · ${result.statusName}`);
   }
 
   return (
@@ -204,7 +205,7 @@ function StatusMenu({
               );
             }
             return (
-              <DropdownMenuItem key={t.id} onClick={() => apply(t)}>
+              <DropdownMenuItem key={t.id} onClick={() => void apply(t)}>
                 <Icon className={`size-3.5 shrink-0 ${tone}`} />
                 {t.toStatusName}
               </DropdownMenuItem>
@@ -284,20 +285,19 @@ export function JiraAssigneePicker({
     ...(users.data ?? []).filter((u) => u.id !== ""),
   ];
 
-  function apply(next: ForgeUserRef | null) {
+  async function apply(next: ForgeUserRef | null) {
     setOpen(false);
     setQuery("");
     // Skip a no-op assign (re-picking the current assignee, or clearing an
     // already-empty one) so we never fire a redundant PUT.
     if ((next?.id ?? null) === (assignee?.id ?? null)) return;
-    assign.mutate(
-      { issueKey, assignee: next },
-      {
-        onSuccess: () =>
-          toast.success(next ? `Assigned to ${next.label}` : "Unassigned"),
-        onError: toastError,
-      },
-    );
+    try {
+      await assign.mutateAsync({ issueKey, assignee: next });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(next ? `Assigned to ${next.label}` : "Unassigned");
   }
 
   return (
@@ -308,7 +308,7 @@ export function JiraAssigneePicker({
       itemToStringLabel={(u: ForgeUserRef) => u.label}
       value={null}
       onValueChange={(u: ForgeUserRef | null) => {
-        if (u) apply(u.id === UNASSIGN.id ? null : u);
+        if (u) void apply(u.id === UNASSIGN.id ? null : u);
       }}
       inputValue={query}
       onInputValueChange={setQuery}
@@ -372,16 +372,20 @@ export function JiraPriorityMenu({
   const priorities = useJiraPriorities(link, open);
   const setPriority = useJiraSetPriority(repoPath, link);
 
-  function apply(p: { id: string; name: string }) {
+  async function apply(p: { id: string; name: string }) {
     // Skip a no-op re-pick of the current priority.
     if (p.name === priorityName) return;
-    setPriority.mutate(
-      { issueKey, priorityId: p.id, priorityName: p.name },
-      {
-        onSuccess: () => toast.success(`${issueKey} · ${p.name}`),
-        onError: toastError,
-      },
-    );
+    try {
+      await setPriority.mutateAsync({
+        issueKey,
+        priorityId: p.id,
+        priorityName: p.name,
+      });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(`${issueKey} · ${p.name}`);
   }
 
   return (
@@ -422,7 +426,7 @@ export function JiraPriorityMenu({
               // fires) and it toggles its own check. closeOnClick because checkbox
               // items default to staying OPEN — priority is single-select.
               closeOnClick
-              onClick={() => apply(p)}
+              onClick={() => void apply(p)}
             >
               <Avatar size="sm" className="size-3.5 shrink-0 rounded-none">
                 {p.iconUrl && <AvatarImage src={p.iconUrl} alt="" />}
@@ -532,10 +536,9 @@ export function JiraLabelsPopover({
     const changed =
       draft.size !== applied.size || [...draft].some((n) => !applied.has(n));
     if (changed) {
-      setLabels.mutate(
-        { issueKey, labels: [...draft].sort() },
-        { onError: toastError },
-      );
+      void setLabels
+        .mutateAsync({ issueKey, labels: [...draft].sort() })
+        .catch(toastError);
     }
   }
 
@@ -770,30 +773,33 @@ function JiraCommentItem({
     setEditing(true);
   }
 
-  function saveEdit() {
+  async function saveEdit() {
     const body = draft.trim();
     // An editor opened before the switch would pair this comment's id with the
     // newly selected `issueKey`, which Jira routes as a 404.
     if (stale) return;
-    edit.mutate(
-      { issueKey, commentId: comment.id, bodyMd: body },
-      {
-        onSuccess: () => setEditing(false),
-        onError: toastError,
-      },
-    );
+    try {
+      await edit.mutateAsync({ issueKey, commentId: comment.id, bodyMd: body });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    setEditing(false);
   }
 
-  function doDelete() {
+  async function doDelete() {
     if (stale) return;
-    del.mutate(
-      { issueKey, commentId: comment.id },
-      {
-        onSuccess: () => toast.success("Comment deleted"),
-        onError: toastError,
-      },
-    );
+    // The confirm dialog closes on the same tick as the request rather than on
+    // its outcome — the hook removes the comment optimistically.
+    const deleted = del.mutateAsync({ issueKey, commentId: comment.id });
     setConfirmDelete(false);
+    try {
+      await deleted;
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success("Comment deleted");
   }
 
   return (
@@ -849,7 +855,7 @@ function JiraCommentItem({
           ariaLabel="Edit comment"
           value={draft}
           onChange={setDraft}
-          onSubmit={saveEdit}
+          onSubmit={() => void saveEdit()}
           onCancel={() => setEditing(false)}
           canSubmit={
             draft.trim().length > 0 &&
@@ -876,7 +882,7 @@ function JiraCommentItem({
         confirmLabel="Delete comment"
         confirmVariant="destructive"
         pending={del.isPending}
-        onConfirm={doDelete}
+        onConfirm={() => void doDelete()}
       />
     </div>
   );
@@ -955,10 +961,10 @@ function JiraWorklogItem({
     setEditing(true);
   }
 
-  function saveEdit() {
+  async function saveEdit() {
     if (!canSaveEdit) return;
-    update.mutate(
-      {
+    try {
+      await update.mutateAsync({
         issueKey,
         worklogId: worklog.id,
         timeSpent: durationTrimmed,
@@ -968,24 +974,27 @@ function JiraWorklogItem({
         // rather than tripping the backend's can't-remove-a-note error.
         commentMd:
           noteChanged && noteDraft.trim().length > 0 ? noteDraft : undefined,
-      },
-      {
-        onSuccess: () => setEditing(false),
-        onError: toastError,
-      },
-    );
+      });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    setEditing(false);
   }
 
-  function doDelete() {
+  async function doDelete() {
     if (stale) return;
-    del.mutate(
-      { issueKey, worklogId: worklog.id },
-      {
-        onSuccess: () => toast.success("Worklog deleted"),
-        onError: toastError,
-      },
-    );
+    // The confirm dialog closes on the same tick as the request rather than on
+    // its outcome, matching the comment-delete sibling.
+    const deleted = del.mutateAsync({ issueKey, worklogId: worklog.id });
     setConfirmDelete(false);
+    try {
+      await deleted;
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success("Worklog deleted");
   }
 
   return (
@@ -1045,7 +1054,7 @@ function JiraWorklogItem({
               }
               if (e.key === "Enter" && canSaveEdit) {
                 e.preventDefault();
-                saveEdit();
+                void saveEdit();
               }
             }}
             placeholder="Time spent (e.g. 3h 30m)"
@@ -1065,7 +1074,7 @@ function JiraWorklogItem({
               }
               if (e.key === "Enter" && canSaveEdit) {
                 e.preventDefault();
-                saveEdit();
+                void saveEdit();
               }
             }}
             placeholder="Note (optional)"
@@ -1088,7 +1097,7 @@ function JiraWorklogItem({
               size="xs"
               variant="outline"
               disabled={!canSaveEdit}
-              onClick={saveEdit}
+              onClick={() => void saveEdit()}
             >
               Save
             </Button>
@@ -1117,7 +1126,7 @@ function JiraWorklogItem({
         confirmLabel="Delete worklog"
         confirmVariant="destructive"
         pending={del.isPending}
-        onConfirm={doDelete}
+        onConfirm={() => void doDelete()}
       />
     </div>
   );
@@ -1197,25 +1206,23 @@ export function JiraTimeTrackingSection({
   const logTrimmed = logDuration.trim();
   const logValid = isValidJiraDuration(logTrimmed);
 
-  function submitLog() {
+  async function submitLog() {
     if (!logValid || logWork.isPending) return;
     const note = logNote.trim();
-    logWork.mutate(
-      {
+    try {
+      await logWork.mutateAsync({
         issueKey,
         timeSpent: logTrimmed,
         // Only send a note when the user typed one (empty ⇒ noteless entry).
         commentMd: note ? note : undefined,
-      },
-      {
-        onSuccess: () => {
-          setLogDuration("");
-          setLogNote("");
-          toast.success(`Logged ${logTrimmed} on ${issueKey}`);
-        },
-        onError: toastError,
-      },
-    );
+      });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    setLogDuration("");
+    setLogNote("");
+    toast.success(`Logged ${logTrimmed} on ${issueKey}`);
   }
 
   return (
@@ -1274,7 +1281,7 @@ export function JiraTimeTrackingSection({
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                submitLog();
+                void submitLog();
               }
             }}
             placeholder="Log work (e.g. 3h 30m)"
@@ -1289,7 +1296,7 @@ export function JiraTimeTrackingSection({
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                submitLog();
+                void submitLog();
               }
             }}
             placeholder="Note (optional)"
@@ -1305,7 +1312,7 @@ export function JiraTimeTrackingSection({
             size="xs"
             variant="outline"
             disabled={!logValid || logWork.isPending}
-            onClick={submitLog}
+            onClick={() => void submitLog()}
           >
             Log
           </Button>
@@ -1323,10 +1330,9 @@ export function JiraTimeTrackingSection({
             hasValue={originalSeconds > 0}
             pending={setOriginal.isPending}
             onSet={(estimate) =>
-              setOriginal.mutate(
-                { issueKey, estimate },
-                { onError: toastError },
-              )
+              void setOriginal
+                .mutateAsync({ issueKey, estimate })
+                .catch(toastError)
             }
           />
           <JiraEstimateInput
@@ -1336,10 +1342,9 @@ export function JiraTimeTrackingSection({
             hasValue={(tracking.remainingEstimateSeconds ?? 0) > 0}
             pending={setRemaining.isPending}
             onSet={(estimate) =>
-              setRemaining.mutate(
-                { issueKey, estimate },
-                { onError: toastError },
-              )
+              void setRemaining
+                .mutateAsync({ issueKey, estimate })
+                .catch(toastError)
             }
           />
         </div>
@@ -1598,29 +1603,24 @@ export function JiraIssueView({
     // if that issue's composer is still empty so we never clobber newly-typed text.
     const submittedFor = issueIdentity;
     compose.set("");
-    comment.mutate(
-      { issueKey, bodyMd: body },
-      {
-        onError: (e) => {
-          compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
-          toastError(e);
-        },
-      },
-    );
+    void comment.mutateAsync({ issueKey, bodyMd: body }).catch((e) => {
+      compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
+      toastError(e);
+    });
   }
 
-  function doTransition(direction: "close" | "reopen") {
-    transition.mutate(
-      { issueKey, direction },
-      {
-        onSuccess: (r) =>
-          toast.success(
-            direction === "close"
-              ? `Closed ${issueKey} · ${r.statusName}`
-              : `Reopened ${issueKey} · ${r.statusName}`,
-          ),
-        onError: toastError,
-      },
+  async function doTransition(direction: "close" | "reopen") {
+    let result: Awaited<ReturnType<typeof transition.mutateAsync>>;
+    try {
+      result = await transition.mutateAsync({ issueKey, direction });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(
+      direction === "close"
+        ? `Closed ${issueKey} · ${result.statusName}`
+        : `Reopened ${issueKey} · ${result.statusName}`,
     );
   }
 
@@ -1659,7 +1659,7 @@ export function JiraIssueView({
                 variant="outline"
                 size="xs"
                 disabled={busy}
-                onClick={() => doTransition("reopen")}
+                onClick={() => void doTransition("reopen")}
                 title="Reopen this issue"
               >
                 <ArrowCounterClockwiseIcon data-icon="inline-start" />
@@ -1670,7 +1670,7 @@ export function JiraIssueView({
                 variant="outline"
                 size="xs"
                 disabled={busy}
-                onClick={() => doTransition("close")}
+                onClick={() => void doTransition("close")}
                 title="Close this issue"
               >
                 <CheckCircleIcon data-icon="inline-start" />

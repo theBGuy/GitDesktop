@@ -11,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { required, useAppForm } from "@/lib/form";
 import { useCreateDiscussion, useDiscussionMeta } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -96,6 +97,11 @@ export function CreateDiscussionDialog({
 
           {/* Fields scroll; header and submit footer stay pinned. */}
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            <ScopeRefreshHint
+              scope="write:discussion"
+              action="Creating a discussion"
+              coveredBy={["repo", "write:discussion"]}
+            />
             <div className="min-w-0">
               <form.AppField name="categoryId">
                 {(field) => (

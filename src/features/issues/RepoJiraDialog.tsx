@@ -224,32 +224,31 @@ export function RepoJiraDialog({
     existingLink.siteHost !== siteHost ||
     existingLink.projectKey !== project?.key;
 
-  function doSave() {
+  async function doSave() {
     if (!project) return;
-    save.mutate(
-      {
+    try {
+      await save.mutateAsync({
         siteHost,
         projectKey: project.key,
         projectName: project.name || project.key,
-      },
-      {
-        onSuccess: () => {
-          toast.success(`Linked ${project.key}`);
-          onOpenChange(false);
-        },
-        onError: toastError,
-      },
-    );
+      });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(`Linked ${project.key}`);
+    onOpenChange(false);
   }
 
-  function doUnlink() {
-    clear.mutate(undefined, {
-      onSuccess: () => {
-        toast.success("Jira project unlinked");
-        onOpenChange(false);
-      },
-      onError: toastError,
-    });
+  async function doUnlink() {
+    try {
+      await clear.mutateAsync(undefined);
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success("Jira project unlinked");
+    onOpenChange(false);
   }
 
   const showCredentialFields =
@@ -457,7 +456,7 @@ export function RepoJiraDialog({
               size="sm"
               className="mr-auto text-destructive"
               disabled={clear.isPending}
-              onClick={doUnlink}
+              onClick={() => void doUnlink()}
               title="Remove this repository's Jira link (keeps your saved credential)"
             >
               <LinkBreakIcon data-icon="inline-start" />
@@ -477,7 +476,7 @@ export function RepoJiraDialog({
                   ? undefined
                   : "No changes to save")
             }
-            onClick={doSave}
+            onClick={() => void doSave()}
           >
             Save
           </DisabledReasonButton>

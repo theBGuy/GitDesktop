@@ -153,14 +153,14 @@ export function LocalIssueView({
   /** Close/Reopen, carrying any typed note. The note is appended in the SAME
    *  record mutation as the status flip, so the store can never persist one
    *  without the other; the draft clears only once that write lands. */
-  function setStatus(next: "open" | "closed") {
+  async function setStatus(next: "open" | "closed") {
     // Appending the note makes this non-idempotent, and the mutate callback
     // re-reads the record from disk — so a second click lands after the first
     // note is already stored and would post it twice.
     if (!issue || update.isPending) return;
     const note = comment.trim();
-    update.mutate(
-      {
+    try {
+      await update.mutateAsync({
         id: issue.id,
         mutate: (cur) => ({
           ...cur,
@@ -177,14 +177,29 @@ export function LocalIssueView({
           status: next,
           closedAt: next === "closed" ? new Date().toISOString() : undefined,
         }),
-      },
-      {
-        onSuccess: () => setComment(""),
-        // Nothing was written, the note included — say so rather than leave a
-        // silent no-op behind a button that promised to post it.
-        onError: toastError,
-      },
-    );
+      });
+    } catch (e) {
+      // Nothing was written, the note included — say so rather than leave a
+      // silent no-op behind a button that promised to post it.
+      toastError(e);
+      return;
+    }
+    setComment("");
+  }
+
+  async function deleteIssue(issueId: string) {
+    try {
+      await del.mutateAsync(issueId);
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    setConfirmDelete(false);
+    // Deselect only while the deleted issue is still the selection in THIS
+    // repo — the write can settle after the user has moved on.
+    const { selectedIssue: sel, repoPath: liveRepo } = useUiStore.getState();
+    if (liveRepo === repoPath && sel?.kind === "local" && sel.id === issueId)
+      selectIssue(null);
   }
 
   return (
@@ -442,7 +457,7 @@ export function LocalIssueView({
               size="sm"
               disabled={update.isPending}
               reason="Saving…"
-              onClick={() => setStatus("closed")}
+              onClick={() => void setStatus("closed")}
               title={
                 draftRidesStateChange
                   ? "Closes and posts your draft as a comment"
@@ -459,7 +474,7 @@ export function LocalIssueView({
             size="sm"
             disabled={update.isPending}
             reason="Saving…"
-            onClick={() => setStatus("open")}
+            onClick={() => void setStatus("open")}
             title={
               draftRidesStateChange
                 ? "Reopens and posts your draft as a comment"
@@ -500,15 +515,7 @@ export function LocalIssueView({
             <Button
               variant="destructive"
               disabled={del.isPending}
-              onClick={() =>
-                del.mutate(issue.id, {
-                  onSuccess: () => {
-                    setConfirmDelete(false);
-                    selectIssue(null);
-                  },
-                  onError: toastError,
-                })
-              }
+              onClick={() => void deleteIssue(issue.id)}
             >
               Delete
             </Button>

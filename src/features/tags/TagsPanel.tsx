@@ -122,21 +122,21 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
     rowKey: (t) => t.id,
   });
 
-  function createNewTag() {
+  // Awaited, not per-call callbacks: a panel hidden mid-create (repo-tab switch)
+  // drops react-query's callbacks, and with them the selection onto the new tag.
+  async function createNewTag() {
     const name = newTagName.trim();
     if (!name || !headOid) return;
-    createTag.mutate(
-      { name, hash: headOid },
-      {
-        onSuccess: () => {
-          toast.success(`Created tag ${name}`);
-          setNewTagOpen(false);
-          setNewTagName("");
-          selectTag({ tag: name });
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await createTag.mutateAsync({ name, hash: headOid });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(`Created tag ${name}`);
+    setNewTagOpen(false);
+    setNewTagName("");
+    selectTag({ tag: name });
   }
 
   return (
@@ -256,7 +256,7 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
             className="space-y-4"
             onSubmit={(e) => {
               e.preventDefault();
-              createNewTag();
+              void createNewTag();
             }}
           >
             <DialogHeader>

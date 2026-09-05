@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { LabelChip } from "@/features/conversations/Thread";
+import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import {
   forgeReady,
@@ -173,7 +174,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           New
         </DisabledReasonButton>
       </div>
-      <div className="border-b p-2">
+      <div className="space-y-2 border-b p-2">
         <Input
           ref={filterRef}
           value={filterText}
@@ -182,6 +183,13 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           className="h-7"
           autoComplete="off"
         />
+        {listEnabled && (
+          <ScopeRefreshHint
+            scope="write:discussion"
+            action="Writing in discussions"
+            coveredBy={["repo", "write:discussion"]}
+          />
+        )}
       </div>
       {/* overflow-hidden: the vendored ScrollArea Root is upstream-faithful
           (`relative` only), so without containment the list's natural height

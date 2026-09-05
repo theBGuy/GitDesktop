@@ -373,15 +373,12 @@ export function RemoteIssueView({
     // that issue's composer is still empty so we never clobber newly-typed text.
     const submittedFor = issueIdentity;
     compose.set("");
-    comment.mutate(
-      { number, body, author: forge.data?.login ?? "You" },
-      {
-        onError: (e) => {
-          compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
-          onError(e);
-        },
-      },
-    );
+    void comment
+      .mutateAsync({ number, body, author: forge.data?.login ?? "You" })
+      .catch((e) => {
+        compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
+        onError(e);
+      });
   }
 
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
@@ -441,64 +438,77 @@ export function RemoteIssueView({
     });
     if (!ok) return;
     if (!(await postRidingDraft())) return;
-    closeIssue.mutate(
-      { number, reason },
-      {
-        onSuccess: () => toast.success(`Closed #${number}`),
-        onError: (e) =>
-          withComment
-            ? toastErrorWithNote(
-                e,
-                "Your comment was posted, but closing failed — try Close again.",
-              )
-            : onError(e),
-      },
-    );
+    try {
+      await closeIssue.mutateAsync({ number, reason });
+    } catch (e) {
+      if (withComment) {
+        toastErrorWithNote(
+          e,
+          "Your comment was posted, but closing failed — try Close again.",
+        );
+      } else {
+        onError(e);
+      }
+      return;
+    }
+    toast.success(`Closed #${number}`);
   }
 
   async function doReopen() {
     if (busy || triageBlocked) return;
     const withComment = draftRidesStateChange;
     if (!(await postRidingDraft())) return;
-    reopenIssue.mutate(number, {
-      onSuccess: () => toast.success(`Reopened #${number}`),
-      onError: (e) =>
-        withComment
-          ? toastErrorWithNote(
-              e,
-              "Your comment was posted, but reopening failed — try Reopen again.",
-            )
-          : onError(e),
-    });
+    try {
+      await reopenIssue.mutateAsync(number);
+    } catch (e) {
+      if (withComment) {
+        toastErrorWithNote(
+          e,
+          "Your comment was posted, but reopening failed — try Reopen again.",
+        );
+      } else {
+        onError(e);
+      }
+      return;
+    }
+    toast.success(`Reopened #${number}`);
   }
 
   function saveCommentEdit(commentId: string, body: string) {
     // The comment id is the rendered issue's while the write addresses `number`
     // — GitLab routes by both, so a mismatched pair 404s.
     if (detailsStale) return;
-    editComment.mutate(
-      { number, commentId, body },
-      { onSuccess: () => toast.success("Comment updated"), onError },
-    );
+    // Detached: Thread closes its inline editor on submit, so there is nothing
+    // left for an await to hold open.
+    void editComment
+      .mutateAsync({ number, commentId, body })
+      .then(() => toast.success("Comment updated"))
+      .catch(onError);
   }
 
   // Both take a comment id off the RENDERED issue, which through a switch is the
   // previous one, so either would hide a comment on the issue the viewer just
   // left. The menu items disable on the same wait; these arms back them up.
-  function hideComment(commentId: string, classifier: MinimizeReason) {
+  async function hideComment(commentId: string, classifier: MinimizeReason) {
     if (detailsStale) return;
-    minimizeComment.mutate(
-      { commentId, classifier },
-      { onSuccess: () => toast.success("Comment hidden"), onError },
-    );
+    try {
+      await minimizeComment.mutateAsync({ commentId, classifier });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Comment hidden");
   }
 
-  function unhideComment(commentId: string) {
+  async function unhideComment(commentId: string) {
     if (detailsStale) return;
-    unminimizeComment.mutate(commentId, {
-      onSuccess: () => toast.success("Comment shown"),
-      onError,
-    });
+    try {
+      await unminimizeComment.mutateAsync(commentId);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Comment shown");
   }
 
   function toggleReaction(subjectId: string, content: string, active: boolean) {
@@ -507,7 +517,9 @@ export function RemoteIssueView({
     // a mismatched pair awards the wrong note or 404s. The bars disable on the
     // same flag; this arm is the belt-and-braces behind them.
     if (detailsStale) return;
-    toggleReactionMutation.mutate({ subjectId, content, active }, { onError });
+    void toggleReactionMutation
+      .mutateAsync({ subjectId, content, active })
+      .catch(onError);
   }
 
   /** Opens the title/body editor seeded from the issue as it stands. */
@@ -540,43 +552,95 @@ export function RemoteIssueView({
     selectIssue({ kind: "remote", id: String(refNumber) });
   }
 
-  function submitTransfer() {
-    const destination = transferDest.trim();
-    if (!destination) return;
-    transferIssue.mutate(
-      { number, destination },
-      {
-        onSuccess: (url) => {
-          toast.success(
-            `${isGitLab ? "Moved" : "Transferred"} #${number}`,
-            url
-              ? {
-                  description: url,
-                  action: { label: "View", onClick: () => openUrl(url) },
-                }
-              : undefined,
-          );
-          setTransferOpen(false);
-          // The issue no longer lives in this repo; clear the now-stale view.
-          selectIssue(null);
-        },
-        onError,
-      },
-    );
+  /** Clear the selection only while it still points at this issue — the write
+   *  can settle after the user has selected another one. */
+  function deselectIfStillHere() {
+    const { selectedIssue: sel, repoPath: liveRepo } = useUiStore.getState();
+    if (liveRepo !== repoPath) return;
+    if (sel?.kind === "remote" && sel.id === String(number)) selectIssue(null);
   }
 
-  function confirmDelete() {
-    deleteIssue.mutate(number, {
-      onSuccess: () => {
-        toast.success(`Deleted #${number}`);
-        setDeleteOpen(false);
-        selectIssue(null);
-      },
-      onError: (e) => {
-        onError(e);
-        setDeleteOpen(false);
-      },
-    });
+  async function submitTransfer() {
+    const destination = transferDest.trim();
+    if (!destination) return;
+    let url: Awaited<ReturnType<typeof transferIssue.mutateAsync>>;
+    try {
+      url = await transferIssue.mutateAsync({ number, destination });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(
+      `${isGitLab ? "Moved" : "Transferred"} #${number}`,
+      url
+        ? {
+            description: url,
+            action: { label: "View", onClick: () => openUrl(url) },
+          }
+        : undefined,
+    );
+    setTransferOpen(false);
+    // The issue no longer lives in this repo; clear the now-stale view.
+    deselectIfStillHere();
+  }
+
+  async function confirmDelete() {
+    try {
+      await deleteIssue.mutateAsync(number);
+    } catch (e) {
+      onError(e);
+      setDeleteOpen(false);
+      return;
+    }
+    toast.success(`Deleted #${number}`);
+    setDeleteOpen(false);
+    deselectIfStillHere();
+  }
+
+  /** `wasPinned` comes from the render the click landed on: the refetch that
+   *  follows already carries the new state, so the verb has to be captured. */
+  async function togglePin(wasPinned: boolean) {
+    try {
+      await pinIssue.mutateAsync({ number, pinned: !wasPinned });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(wasPinned ? "Unpinned" : "Pinned");
+  }
+
+  async function doLock(reason: LockReason | null) {
+    try {
+      await lockIssue.mutateAsync({ number, reason });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Conversation locked");
+  }
+
+  async function doUnlock() {
+    try {
+      await unlockIssue.mutateAsync(number);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Conversation unlocked");
+  }
+
+  async function removeComment(commentId: string) {
+    try {
+      await deleteComment.mutateAsync({ number, commentId });
+    } catch (e) {
+      // Closes on failure too: DeleteCommentDialog never closes itself, and the
+      // toast already carries the outcome.
+      onError(e);
+      setDeletingCommentId(null);
+      return;
+    }
+    toast.success("Comment deleted");
+    setDeletingCommentId(null);
   }
 
   // Repo suggestions for the transfer/move destination (excludes archived
@@ -622,11 +686,13 @@ export function RemoteIssueView({
           }
           onHide={
             canWrite && !c.isMinimized
-              ? (classifier) => hideComment(c.id, classifier)
+              ? (classifier) => void hideComment(c.id, classifier)
               : undefined
           }
           onUnhide={
-            canWrite && c.isMinimized ? () => unhideComment(c.id) : undefined
+            canWrite && c.isMinimized
+              ? () => void unhideComment(c.id)
+              : undefined
           }
           // Hide/Unhide stay visible but disabled through the switch. The
           // permission reason ranks first — it's the one still true once
@@ -835,18 +901,7 @@ export function RemoteIssueView({
                 {canWrite && !detailsStale && (
                   <DropdownMenuItem
                     disabled={writeBlocked}
-                    onClick={() =>
-                      pinIssue.mutate(
-                        { number, pinned: !issue.isPinned },
-                        {
-                          onSuccess: () =>
-                            toast.success(
-                              issue.isPinned ? "Unpinned" : "Pinned",
-                            ),
-                          onError,
-                        },
-                      )
-                    }
+                    onClick={() => void togglePin(issue.isPinned)}
                   >
                     {issue.isPinned ? "Unpin issue" : "Pin issue"}
                     {itemSuffix}
@@ -860,13 +915,7 @@ export function RemoteIssueView({
                   (issue.locked ? (
                     <DropdownMenuItem
                       disabled={lockBlocked}
-                      onClick={() =>
-                        unlockIssue.mutate(number, {
-                          onSuccess: () =>
-                            toast.success("Conversation unlocked"),
-                          onError,
-                        })
-                      }
+                      onClick={() => void doUnlock()}
                     >
                       Unlock conversation{lockSuffix}
                     </DropdownMenuItem>
@@ -874,16 +923,7 @@ export function RemoteIssueView({
                     // GitLab locks without a reason — a plain item, no submenu.
                     <DropdownMenuItem
                       disabled={lockBlocked}
-                      onClick={() =>
-                        lockIssue.mutate(
-                          { number, reason: null },
-                          {
-                            onSuccess: () =>
-                              toast.success("Conversation locked"),
-                            onError,
-                          },
-                        )
-                      }
+                      onClick={() => void doLock(null)}
                     >
                       Lock conversation{lockSuffix}
                     </DropdownMenuItem>
@@ -902,16 +942,7 @@ export function RemoteIssueView({
                         {LOCK_REASONS.map(([label, reason]) => (
                           <DropdownMenuItem
                             key={reason ?? "none"}
-                            onClick={() =>
-                              lockIssue.mutate(
-                                { number, reason },
-                                {
-                                  onSuccess: () =>
-                                    toast.success("Conversation locked"),
-                                  onError,
-                                },
-                              )
-                            }
+                            onClick={() => void doLock(reason)}
                           >
                             {label}
                           </DropdownMenuItem>
@@ -1201,21 +1232,7 @@ export function RemoteIssueView({
         onClose={() => setDeletingCommentId(null)}
         pending={deleteComment.isPending}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
-        onConfirm={(commentId) =>
-          deleteComment.mutate(
-            { number, commentId },
-            {
-              onSuccess: () => {
-                toast.success("Comment deleted");
-                setDeletingCommentId(null);
-              },
-              onError: (e) => {
-                onError(e);
-                setDeletingCommentId(null);
-              },
-            },
-          )
-        }
+        onConfirm={(commentId) => void removeComment(commentId)}
       />
 
       <TransferIssueDialog
@@ -1226,7 +1243,7 @@ export function RemoteIssueView({
         onDestChange={setTransferDest}
         suggestions={repoSuggestions}
         pending={transferIssue.isPending}
-        onSubmit={submitTransfer}
+        onSubmit={() => void submitTransfer()}
         move={isGitLab}
       />
 
@@ -1236,7 +1253,7 @@ export function RemoteIssueView({
         number={number}
         title={issue.title}
         pending={deleteIssue.isPending}
-        onConfirm={confirmDelete}
+        onConfirm={() => void confirmDelete()}
         remoteLabel={remoteLabel}
         roleHint={
           isGitLab ? "needs Owner access" : "requires admin or triage access"

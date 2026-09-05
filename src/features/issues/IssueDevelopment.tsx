@@ -109,21 +109,19 @@ export function IssueDevelopment({
     setRepoTab("pulls");
   }
 
-  function submitBranch() {
+  async function submitBranch() {
     const name = branchName.trim();
     if (!name) return;
-    createBranch.mutate(
-      { issueId, name },
-      {
-        onSuccess: () => {
-          toast.success(`Created branch ${name}`, {
-            description: "Fetch to check it out locally.",
-          });
-          setBranchOpen(false);
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await createBranch.mutateAsync({ issueId, name });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    toast.success(`Created branch ${name}`, {
+      description: "Fetch to check it out locally.",
+    });
+    setBranchOpen(false);
   }
 
   return (
@@ -200,7 +198,7 @@ export function IssueDevelopment({
             className="space-y-4"
             onSubmit={(e) => {
               e.preventDefault();
-              submitBranch();
+              void submitBranch();
             }}
           >
             <DialogHeader>
