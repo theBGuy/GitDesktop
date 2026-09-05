@@ -79,5 +79,12 @@ Write-Host "Launching GitDesktop in COLD-START test mode" -ForegroundColor Cyan
 Write-Host "  NoGit = $NoGit   NoGh = $NoGh   Automations = $Automations" -ForegroundColor Cyan
 Write-Host "  Real settings / local PRs / API keys are untouched." -ForegroundColor DarkGray
 
-Set-Location $repoRoot
-pnpm tauri dev
+# The script runs in-process, so the flags above would outlive it in the calling
+# shell, and a later bare `pnpm tauri dev` there would silently boot a cold instance.
+# The finally clears the whole flag family once the dev server exits.
+try {
+  Set-Location $repoRoot
+  pnpm tauri dev
+} finally {
+  Remove-Item Env:\VITE_COLD_START, Env:\VITE_COLD_START_NO_GIT, Env:\VITE_COLD_START_NO_GH, Env:\VITE_COLD_START_AUTOMATIONS -ErrorAction SilentlyContinue
+}
