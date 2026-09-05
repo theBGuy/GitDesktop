@@ -137,12 +137,14 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   fails on a new pair.
 - Disabled actions explain why via `DisabledReasonButton`
   (`src/components/disabled-reason-button.tsx`) — reason as tooltip + AT
-  announcement; menu/popover trigger sites keep the reason on a titled span
-  wrapper (its doc comment shows the idiom — a bare `title` on a disabled
-  element never shows). A disabled submit may instead explain via the field's
-  `warning` hint. Raw-`<button>` sites the vendored Button can't size (reaction
-  chips, the discussion upvote chip) take the SAME contract from the shared
-  `useDisabledReason` hook + `ARIA_DISABLED_CLASS`
+  announcement; menu/popover trigger sites take the render arm with `disabled`
+  on the BUTTON, never the Trigger — a disabled Trigger leaves the tab order,
+  so its reason would reach hover only. The exact composition to copy is
+  `<Trigger render={<DisabledReasonButton disabled reason/>}>`; the full
+  contract sits in the primitive's doc comment. A disabled submit may instead
+  explain via the field's `warning` hint. Raw-`<button>` sites the vendored
+  Button can't size (reaction chips, the discussion upvote chip) take the SAME
+  contract from the shared `useDisabledReason` hook + `ARIA_DISABLED_CLASS`
   (`src/lib/use-disabled-reason.ts`) — never hand-rolled.
 - A conversation surface's own actions sit before the submit button via
   `CommentComposer`'s `leadingActions` slot when submit is the row's last

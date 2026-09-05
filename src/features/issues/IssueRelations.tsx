@@ -279,8 +279,8 @@ export function IssueSubIssues({
           <span className="flex-1" />
           {mode === null && (
             <DropdownMenu>
-              {/* Every item in this menu is a write, so the gate sits on the
-                  trigger rather than on each item. */}
+              {/* Every item in this menu is a write, so the whole trigger
+                  button disables rather than each item. */}
               <DropdownMenuTrigger
                 render={
                   <DisabledReasonButton
@@ -414,8 +414,8 @@ export function IssueRelationships({
         <span className="flex-1" />
         {addRelation === null && (
           <DropdownMenu>
-            {/* Every item in this menu is a write, so the gate sits on the
-                trigger rather than on each item. */}
+            {/* Every item in this menu is a write, so the whole trigger
+                button disables rather than each item. */}
             <DropdownMenuTrigger
               render={
                 <DisabledReasonButton

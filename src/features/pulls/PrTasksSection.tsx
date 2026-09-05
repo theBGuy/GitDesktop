@@ -291,14 +291,14 @@ export function PrTasksSection({
   if (!tasks && !tasksQuery.isError) return null;
 
   const list = tasks ?? [];
-  // Every continuation below rides the awaited promise, never per-call mutate
-  // callbacks: an `<Activity>` tab hide tears this observer's subscription down
-  // mid-write, and react-query drops per-call callbacks once an observer has no
-  // listeners — the rollback, the field clear, and the dialog close would silently
-  // never run.
   const total = list.length;
   const resolvedCount = total - unresolved(list);
 
+  // Every continuation in the helpers below rides the awaited promise, never
+  // per-call mutate callbacks: an `<Activity>` tab hide tears this observer's
+  // subscription down mid-write, and react-query drops per-call callbacks once
+  // an observer has no listeners — the rollback, the field clears, and the
+  // dialog close would silently never run.
   // Resolve toggle is optimistic: patch the one task's state in the cache, then
   // mutate with rollback on error (mirrors RemotePrView's toggleApproval). The
   // mutation's onSettled invalidation reconciles the real state.

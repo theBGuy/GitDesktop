@@ -212,7 +212,11 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     try {
       await deleteLocalPr.mutateAsync(id);
       setConfirmDeleteSelected(false);
-      selectPr(null);
+      // Deselect only if the deleted PR is still the selection — the await can
+      // resolve after the user has selected another PR or navigated, and a
+      // blind clear would wipe that newer selection.
+      const sel = useUiStore.getState().selectedPr;
+      if (sel?.kind === "local" && sel.id === id) selectPr(null);
     } catch (e) {
       toastError(e);
     }

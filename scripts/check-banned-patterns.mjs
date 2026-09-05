@@ -247,11 +247,12 @@ const SELECT_ITEM_BLOCK_TRUNCATE_RE = new RegExp(
 // The flex sibling of that dead span: a `min-w-0 flex-1 truncate` child, equally
 // inert unless the item ALSO carries a first-child shrink override — a pairing no
 // static pattern can see, so a legal site takes an allowlist entry. The window
-// doubles PAIR_GAP for headroom: that override plus the item's own props already
-// put the one live site 150 normalized chars from its tag, and a site drifting
-// past 160 would turn its allowlist entry stale rather than report. Reach stays
-// bounded by the tempered `(?!</SelectItem\b)` step, which holds only while no
-// SelectItem in src/ is self-closing (grep-verified: 67 tags, 67 closers).
+// doubles PAIR_GAP for headroom, which 160 alone would not give: the override
+// plus the item's own props already put the one live site 150 normalized chars
+// from its tag, and a site drifting past a bare-PAIR_GAP window would turn its
+// allowlist entry stale rather than report. Reach stays bounded by the tempered
+// `(?!</SelectItem\b)` step, which holds only while no SelectItem in src/ is
+// self-closing (grep-verified: 67 tags, 67 closers).
 const SELECT_ITEM_FLEX_TRUNCATE_RE = new RegExp(
   `<SelectItem\\b(?:(?!</SelectItem\\b)[\\s\\S]){0,${PAIR_GAP * 2}}?` +
     `\\bmin-w-0 flex-1 truncate\\b`,
@@ -476,9 +477,11 @@ export const CHECKS = [
       perFile(SELECT_ITEM_FLEX_TRUNCATE_RE),
     ]),
     allowlist: [
-      // SelectControl's rich rows: the item-level first-child override lets the
-      // ItemText wrapper (a div under Base UI 1.7.0) shrink, which is what keeps
-      // the label's truncate live — a pairing the pattern cannot see.
+      // SelectControl's rich rows trip two arms, both false positives: the
+      // item-level first-child override lets the ItemText wrapper (a div under
+      // Base UI 1.7.0) shrink, which is what keeps the label's truncate live,
+      // and the clipTitle handler rides that same non-self-bounding label span —
+      // pairings the patterns cannot see.
       "src/components/form/fields.tsx",
     ],
     message:
@@ -513,9 +516,10 @@ export const CHECKS = [
     // whose detail pane is keyed per repo, Actions, whose run detail is keyed per
     // run and whose dispatch dialog unmounts with the repo view, and pulls, whose
     // surfaces go through an `<Activity>` tab hide on every repo-tab switch. The
-    // wider app is a separate tier: repository/ still carries per-call callback
-    // sites in bulk, so scanning it would report a backlog rather than a
-    // regression. Each tree joins this check on the change that converts it.
+    // wider app is a separate tier — repository/, issues/, and the smaller trees
+    // still carry per-call callback sites in bulk, so scanning them would report
+    // a backlog rather than a regression. Each tree joins this check on the
+    // change that converts it.
     appliesTo: (file) =>
       file.startsWith("src/features/repo-settings/") ||
       file.startsWith("src/features/explore/") ||
