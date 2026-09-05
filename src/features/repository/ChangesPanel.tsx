@@ -82,6 +82,13 @@ function canStage(entry: FileEntry): boolean {
   return reservedDeviceName(entry.path) === null;
 }
 
+/** The discard-copy predicate: recycle-bin refusal keys on the reserved NAME,
+ *  not on stageability — kept a sibling of `canStage` so the two rules can
+ *  diverge without silently changing the confirm copy. */
+function isReservedName(entry: FileEntry): boolean {
+  return reservedDeviceName(entry.path) !== null;
+}
+
 /** Appended to a multi-file discard confirm: the recycle bin refuses a reserved
  *  device name, so the backend removes those outright. */
 const RESERVED_DISCARD_NOTE =
@@ -788,17 +795,21 @@ export function ChangesPanel({
   // deleted outright; "all" discards the whole tree, not just what's on screen.
   const discardHasReserved = (
     shownDiscardScope?.kind === "all" ? entries : discardFiles
-  ).some((e) => e.unstaged === "untracked" && !canStage(e));
-  const discardBody =
-    shownDiscardScope?.kind === "all"
-      ? `All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`
-      : discardOne
-        ? discardOne.unstaged === "untracked"
-          ? discardHasReserved
-            ? `${discardOne.path} is untracked. Its Windows-reserved name can't go to the recycle bin, so it will be deleted permanently.`
-            : `${discardOne.path} is untracked — it will be moved to the recycle bin.`
-          : `Unstaged changes to ${discardOne.path} will be restored to the last committed version. This cannot be undone.`
-        : `Changes to ${discardFiles.length} files will be discarded — tracked files are restored and untracked files moved to the recycle bin. This cannot be undone.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
+  ).some((e) => e.unstaged === "untracked" && isReservedName(e));
+  const discardBody = ((): string => {
+    switch (true) {
+      case shownDiscardScope?.kind === "all":
+        return `All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
+      case discardOne !== null && discardOne.unstaged !== "untracked":
+        return `Unstaged changes to ${discardOne.path} will be restored to the last committed version. This cannot be undone.`;
+      case discardOne !== null && discardHasReserved:
+        return `${discardOne.path} is untracked. Its Windows-reserved name can't go to the recycle bin, so it will be deleted permanently.`;
+      case discardOne !== null:
+        return `${discardOne.path} is untracked — it will be moved to the recycle bin.`;
+      default:
+        return `Changes to ${discardFiles.length} files will be discarded — tracked files are restored and untracked files moved to the recycle bin. This cannot be undone.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
+    }
+  })();
 
   const stashFiles =
     shownStashScope?.kind === "files" ? shownStashScope.entries : [];

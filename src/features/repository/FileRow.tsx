@@ -114,7 +114,7 @@ export const FileRow = memo(function FileRow({
         disabled={disabled || reservedName !== null}
         reason={
           reservedName &&
-          `"${reservedName}" is a Windows-reserved device name — git can't stage it`
+          `"${reservedName}" resolves to a Windows device name — git can't stage it`
         }
         onClick={(e) => {
           e.stopPropagation();

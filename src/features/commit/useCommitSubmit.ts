@@ -3,7 +3,10 @@ import { toast } from "sonner";
 import { track } from "@/lib/analytics";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { requiresPullRequest } from "@/lib/branch-rules/match";
-import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
+import {
+  useEffectiveBranchRules,
+  useEffectiveBranchRulesSettling,
+} from "@/lib/branch-rules/queries";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
 import { useCommit, useRepoStatus } from "@/lib/git/queries";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
@@ -60,6 +63,9 @@ export function useCommitSubmit(
   const aiEnabled = useAiEnabled();
   const aiConfigured = useAiConfigured();
   const rulesConfig = useEffectiveBranchRules(repoPath);
+  // While either rules scope is on its FIRST read the effective config stands in
+  // as empty, so `locked` is vacuously false — commit holds on this instead.
+  const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
 
   const amending = amendingHash !== null;
   const branchName = status.data?.branch?.name ?? null;
@@ -88,12 +94,15 @@ export function useCommitSubmit(
     title.trim().length > 0 &&
     (stagedCount > 0 || amending) &&
     !commit.isPending &&
-    !locked;
+    !locked &&
+    !rulesSettling;
   const canGenerate = aiEnabled && aiConfigured && stagedCount > 0;
   // Why Commit is refused, most-blocking first: a branch rule nothing the user
   // types can lift, then the missing title, then the empty stage.
   const commitDisabledReason = ((): string | null => {
     switch (true) {
+      case rulesSettling:
+        return "Checking branch protection rules…";
       case locked:
         return "This branch requires changes via a pull request";
       case title.trim().length === 0:
@@ -129,6 +138,10 @@ export function useCommitSubmit(
   // <Activity>-hidden tab), and react-query drops per-call callbacks once the
   // observer has no listeners.
   async function doCommit() {
+    // Belt for a gate that flipped under an open surface: `canCommit` disables
+    // the button and hotkey, but the rules can settle to "locked" between the
+    // render that enabled them and the click.
+    if (rulesSettling || locked) return;
     const commitTitle = title.trim();
     // Trailers must be the final paragraph of the message.
     const fullBody = [body.trim(), coAuthorTrailers(coAuthors)]

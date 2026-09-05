@@ -68,14 +68,16 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
 }
 
 /// True when `name`'s stem (everything before the first dot) is a reserved DOS
-/// device name. Windows resolves such a name to the DEVICE at any position in a
-/// path, extension or not, so `nul.txt` is as unopenable as `nul`. Win32 also
+/// device name. Windows resolves such a FINAL path component to the DEVICE in
+/// whatever directory the file sits, extension or not, so `nul.txt` and
+/// `src/nul` are as unopenable as `nul` (callers pass `file_name()`). Win32 also
 /// strips trailing dots and SPACES off the final component, which makes `nul `
 /// the device too (measured); the first-dot split covers the dots, the trim
 /// covers the spaces. Only a single COM/LPT ordinal 1–9 is a device, written
 /// either as an ASCII digit or as a Latin-1 superscript (`com¹`, `com²`,
 /// `com³`); `com0`, `com10`, `com⁴` (U+2074, outside Latin-1) and `console` are
-/// ordinary names.
+/// ordinary names. Mirrored by `src/lib/git/reserved-device-name.ts` — a change
+/// here moves there in the same change.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn is_reserved_device_name(name: &str) -> bool {
     let stem = name

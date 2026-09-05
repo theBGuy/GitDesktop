@@ -1,3 +1,3 @@
-- Cleaning up branches and deleting a branch now wait for branch protection
-  rules to finish loading before any delete runs, so a protected branch can't
-  slip through while the rules are still being read.
+- Deleting local branches (singly or through bulk clean-up) and committing now
+  wait for branch protection rules to load first, so protection applies from the
+  moment a repository opens.

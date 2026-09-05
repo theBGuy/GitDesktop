@@ -703,16 +703,33 @@ export function CleanupBranchesDialog({
                   nothing about the check — what a `role="status"` region can
                   honestly repeat on every mode and window change. */}
               {stillChecking ? (
-                <CheckingLine
-                  what={
-                    checkingMerged
-                      ? "merged"
-                      : checkingWorktrees
-                        ? "worktrees"
-                        : "rules"
-                  }
-                  paused={pausedMergedCheck}
-                />
+                (() => {
+                  // A RUNNING local read outranks the parked merged fetch — the
+                  // line names the one actually running, and the waiting copy
+                  // shows only when the parked check is the sole outstanding one.
+                  const what = ((): "merged" | "worktrees" | "rules" => {
+                    switch (true) {
+                      case checkingMerged && !pausedMergedCheck:
+                        return "merged";
+                      case checkingWorktrees:
+                        return "worktrees";
+                      case rulesSettling:
+                        return "rules";
+                      default:
+                        return "merged";
+                    }
+                  })();
+                  return (
+                    <CheckingLine
+                      what={what}
+                      paused={
+                        pausedMergedCheck &&
+                        !checkingWorktrees &&
+                        !rulesSettling
+                      }
+                    />
+                  );
+                })()
               ) : (
                 <p className="sr-only">
                   {candidates.length === 0

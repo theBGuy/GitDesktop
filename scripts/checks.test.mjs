@@ -528,10 +528,7 @@ test("bare-mutate-in-converted-trees applies to the converted trees only", () =>
     "src/features/repo-settings/RulesetsSection.tsx",
     "src/features/explore/ExploreDetail.tsx",
     "src/features/actions/RunDetailView.tsx",
-  ]) {
-    assert.equal(appliesTo(file), true, `should scan ${file}`);
-  }
-  for (const file of [
+    // Joined when the repository/commit conversions landed:
     "src/features/repository/ChangesPanel.tsx",
     "src/features/commit/CommitBox.tsx",
   ]) {
