@@ -299,6 +299,16 @@ function WorkingTreeDiff({
     if (discard !== null && discard.forText !== liveText) setDiscard(null);
   }, [discard, liveText]);
 
+  // Full-text revs aligned to the diff's actual sides: staged = HEAD↔index,
+  // unstaged = index↔worktree, added = worktree only. ONE derivation for both
+  // arms — the fallback surface, the staging view's highlight context, and the
+  // markdown preview must all read the same pair.
+  const workingRevs: DiffContentRevs = untracked
+    ? { newRev: null }
+    : file.staged
+      ? { oldRev: "HEAD", newRev: ":0" }
+      : { oldRev: ":0", newRev: null };
+
   if (!hunkMode) {
     return (
       <DiffSurface
@@ -309,15 +319,7 @@ function WorkingTreeDiff({
         imageRevs={
           file.staged ? { old: "HEAD", new: ":0" } : { old: "HEAD", new: null }
         }
-        // Full-text highlight context, aligned to the diff's actual sides:
-        // staged = HEAD↔index, unstaged = index↔worktree, added = worktree only.
-        contentRevs={
-          untracked
-            ? { newRev: null }
-            : file.staged
-              ? { oldRev: "HEAD", newRev: ":0" }
-              : { oldRev: ":0", newRev: null }
-        }
+        contentRevs={workingRevs}
       />
     );
   }
@@ -373,15 +375,6 @@ function WorkingTreeDiff({
       { onError, onSuccess: clearSelection },
     );
   }
-
-  // Full-text revs aligned to the diff's actual sides: staged = HEAD↔index,
-  // unstaged = index↔worktree, added = worktree only. One pair feeds both the
-  // staging view's highlight context and the markdown preview.
-  const workingRevs: DiffContentRevs = untracked
-    ? { newRev: null }
-    : file.staged
-      ? { oldRev: "HEAD", newRev: ":0" }
-      : { oldRev: ":0", newRev: null };
 
   // A whole-hunk action, fired by the per-hunk overlay buttons.
   function onHunkAction(hunk: DiffHunk, kind: "stage" | "unstage" | "discard") {

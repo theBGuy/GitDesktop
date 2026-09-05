@@ -1244,8 +1244,8 @@ export function DiffContent({
     returnFocusIfTriggerHidden,
   } = useHiddenTriggerFocus();
   // Computed above the early-return chain (which the `emptyDiff` arm joins, so
-  // the text is trimmed once) because the registration below is a hook: offer
-  // the action only in the states that actually render the picker.
+  // the text is trimmed once) because the registrations below are hooks: offer
+  // each action only in the states that actually render its control.
   const emptyDiff = data !== undefined && data.text.trim() === "";
   const showsToolbar =
     !isPending &&

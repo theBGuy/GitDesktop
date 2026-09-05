@@ -11,34 +11,42 @@ export function isMdxPath(filePath: string): boolean {
   return fileExt(filePath) === "mdx";
 }
 
-// Preview parses + sanitizes + injects the whole document synchronously, so a
-// pathological file gets a placeholder instead of a freeze (the pane's
-// no-freeze invariant, same as the diff renderer's caps).
-export const PREVIEW_MAX_CHARS = 2_000_000;
+// Past this the preview shows a placeholder instead of parsing: marked, the
+// hljs fence pass, and DOMPurify all run synchronously on the main thread, so
+// the budget stays in the diff's own highlight-cap band
+// (HIGHLIGHT_MAX_CHARS_HLJS = 400_000).
+export const PREVIEW_MAX_CHARS = 400_000;
 
 const stripCr = (line: string): string =>
   line.endsWith("\r") ? line.slice(0, -1) : line;
 
 /**
- * Drop a leading YAML frontmatter block. marked renders one as an `<hr>`
- * followed by a giant setext `<h2>` of the raw YAML (the closing `---`
- * underlines it), so every Astro/Jekyll/Hugo post would open its preview with
- * heading-sized YAML. An unterminated opener is left alone (it's a thematic
- * break, not frontmatter).
+ * Drop a leading YAML (`---`) or TOML (`+++`) frontmatter block. marked
+ * renders a YAML block as an `<hr>` plus a giant setext `<h2>` of the raw
+ * YAML (the closing `---` underlines it), so every Astro/Jekyll/Hugo post
+ * would open its preview with heading-sized YAML. The scan bails at a blank
+ * line or a missing closer: a doc that merely opens with a thematic break
+ * keeps its content — this fails toward showing text, never toward eating it.
  */
 function stripFrontmatter(text: string): string {
   const lines = text.split("\n");
-  if (stripCr(lines[0] ?? "") !== "---") return text;
+  const open = stripCr(lines[0] ?? "");
+  if (open !== "---" && open !== "+++") return text;
   for (let i = 1; i < lines.length; i++) {
     const line = stripCr(lines[i]);
-    if (line === "---" || line === "...") return lines.slice(i + 1).join("\n");
+    if (line === open) return lines.slice(i + 1).join("\n");
+    if (line.trim() === "") return text;
   }
   return text;
 }
 
-// CommonMark fences: up to 3 leading spaces; closing needs the same char and
-// at least the opening run's length.
+// CommonMark fences: up to 3 leading spaces; closing needs the same char, at
+// least the opening run's length, and no info string — a fenced example like
+// ```js inside an open block must not close it.
 const FENCE_RE = /^ {0,3}(`{3,}|~{3,})/;
+const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})\s*$/;
+// An indented (≥4-space) line is a markdown code block — never transformed.
+const INDENTED_CODE_RE = /^(?: {4}|\t)/;
 // In MDX, any block starting with these words IS an ESM block (prose that
 // starts a line with them is a compile error there), running to the next
 // blank line.
@@ -51,9 +59,10 @@ const INLINE_CODE_RE = /(`[^`]*`)/;
 
 /**
  * Make MDX renderable by the plain markdown pipeline: drop top-level
- * import/export blocks and unwrap component JSX tags (keeping their text
- * children), leaving fenced code untouched. `{expr}` stays literal. The result
- * is approximate BY DESIGN — components resolve against the host project's own
+ * import/export blocks and unwrap single-line component JSX tags (keeping
+ * their text children), leaving fenced and indented code untouched. `{expr}`
+ * stays literal and a multi-line opening tag survives as text. The result is
+ * approximate BY DESIGN — components resolve against the host project's own
  * build, which this app cannot see, and compiling/evaluating MDX to close that
  * gap would be arbitrary code execution from repo content. Never do it.
  */
@@ -66,7 +75,7 @@ function cleanMdx(text: string): string {
     const line = stripCr(raw);
     if (fence !== null) {
       out.push(raw);
-      const close = line.match(FENCE_RE)?.[1];
+      const close = line.match(FENCE_CLOSE_RE)?.[1];
       if (close && close[0] === fence[0] && close.length >= fence.length) {
         fence = null;
       }
@@ -93,18 +102,20 @@ function cleanMdx(text: string): string {
     }
     prevBlank = line.trim() === "";
     out.push(
-      raw
-        .split(INLINE_CODE_RE)
-        .map((seg, i) => (i % 2 === 1 ? seg : seg.replace(JSX_TAG_RE, "")))
-        .join(""),
+      INDENTED_CODE_RE.test(line)
+        ? raw
+        : raw
+            .split(INLINE_CODE_RE)
+            .map((seg, i) => (i % 2 === 1 ? seg : seg.replace(JSX_TAG_RE, "")))
+            .join(""),
     );
   }
   return out.join("\n");
 }
 
 /** The pre-pass handing diff-pane text to the shared `<Markdown>` renderer.
- *  Lives here at the call-site layer deliberately — the shared component has
- *  31 consumers that must keep rendering their input verbatim. */
+ *  Lives here at the call-site layer deliberately — the shared component's
+ *  consumers must keep rendering their input verbatim. */
 export function cleanMarkdownForPreview(
   text: string,
   filePath: string,

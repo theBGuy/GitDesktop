@@ -95,8 +95,8 @@ export function MarkdownDocPreview({
   const hasOld = revs.oldRev !== undefined;
   const newQ = useFileAtRev(repoPath, revs.newRev ?? null, filePath, hasNew);
   // The old side is read only once it's the side to show, so the common case
-  // costs one IPC read. Each read is gated on its own rev being defined, which
-  // is what keeps a disabled null-rev read from cache-hitting the other side.
+  // costs one IPC read. Every ENABLED read has a defined rev, which is what
+  // keeps a disabled null-rev read from cache-hitting the other side.
   const newAbsent =
     hasNew && !newQ.isPending && !newQ.isError && newQ.data === null;
   const showOld = hasOld && (!hasNew || newAbsent);
@@ -134,7 +134,20 @@ export function MarkdownDocPreview({
     return <DiffPlaceholder message="Nothing to preview" />;
   }
   return (
-    <div>
+    // Repo docs routinely carry repository-relative hrefs (LICENSE, docs/…).
+    // The shared renderer's dispatch opens only http(s)/mailto externally and
+    // leaves every other anchor its default navigation — which in the webview
+    // walks the SPA away to the app's own origin. Capture-phase, so this runs
+    // before that dispatch. Mirrors markdown.tsx's module-private
+    // EXTERNAL_HREF set, kept in sync by hand.
+    <div
+      onClickCapture={(e) => {
+        const href = (e.target as HTMLElement)
+          .closest("a")
+          ?.getAttribute("href");
+        if (href && !/^(https?:|mailto:)/i.test(href)) e.preventDefault();
+      }}
+    >
       {showOld && (
         <PreviewNote>
           File deleted — previewing the previous version.
