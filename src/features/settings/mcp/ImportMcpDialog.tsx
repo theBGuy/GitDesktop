@@ -11,10 +11,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { normalizeHost } from "@/lib/ai/allowed-hosts";
 import { setMcpSecret } from "@/lib/git/api";
 import type { McpServer } from "@/lib/settings/api";
-import { mcpHostGateReason } from "@/lib/settings/mcp";
+import { mcpHostAllowFixable, mcpHostGateReason } from "@/lib/settings/mcp";
 import {
   discoverMcpServers,
   type ImportCandidate,
@@ -22,7 +21,6 @@ import {
 } from "@/lib/settings/mcp-import";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
-import { HostAllowNote } from "../HostAllowNote";
 
 /**
  * Reviewed import of servers the user already configured for Claude — the open
@@ -170,17 +168,20 @@ export function ImportMcpDialog({
             </p>
           ) : (
             candidates.map((c) => {
-              const gateReason = mcpHostGateReason(c.server, allowedHosts);
+              // Gate UI belongs only to rows the user can still act on: a
+              // duplicate is already refused on its own terms, so re-explaining
+              // an allow-list block it can never reach is noise.
+              const gateReason = c.duplicate
+                ? null
+                : mcpHostGateReason(c.server, allowedHosts);
               const held = c.duplicate || gateReason !== null;
-              // "Allow host" only fixes a gate that HAS a host to add: an
-              // unparseable URL (the gate's fail-closed arm) has none, and
-              // HostAllowNote's all-clear branch would render an empty <p>.
               const allowFixable =
-                gateReason !== null && normalizeHost(c.server.url) !== null;
+                !c.duplicate && mcpHostAllowFixable(c.server, allowedHosts);
               return (
-                // The row's border wraps the label plus the gate note, so the
-                // note's Allow host button stays OUTSIDE the label — inside it,
-                // it would read as part of the checkbox's accessible name.
+                // The reason TEXT rides inside the label so it joins the disabled
+                // checkbox's accessible name, like the duplicate note beside it;
+                // the Allow host BUTTON stays outside — nested interactive
+                // content would be read as part of that same name.
                 <div
                   key={c.server.id}
                   className="overflow-hidden rounded-md border text-xs"
@@ -228,21 +229,25 @@ export function ImportMcpDialog({
                           </p>
                         )
                       )}
+                      {gateReason && (
+                        <p className="text-[10px] text-warning">
+                          {gateReason}
+                          {allowFixable &&
+                            " The agent CLI connects outside GitDesktop's AI allowlist."}
+                        </p>
+                      )}
                     </div>
                   </label>
-                  {gateReason ? (
+                  {allowFixable ? (
                     <div className="px-2 pb-2 pl-8">
-                      {allowFixable ? (
-                        <HostAllowNote
-                          url={c.server.url}
-                          allowedHosts={allowedHosts}
-                          onAllowHost={onAllowHost}
-                          defaultNote={null}
-                          consequence="the agent CLI connects outside GitDesktop's AI allowlist, so allow it before importing."
-                        />
-                      ) : (
-                        <p className="text-xs text-warning">{gateReason}</p>
-                      )}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="xs"
+                        onClick={() => onAllowHost(c.server.url)}
+                      >
+                        Allow host
+                      </Button>
                     </div>
                   ) : null}
                 </div>

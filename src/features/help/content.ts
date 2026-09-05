@@ -458,7 +458,8 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 > permanently. On Windows git can't stage such a file at all, so its **Stage**
 > control explains that rather than failing, and **Stage all** stages everything else.
 > **Stash all** works around them too: everything else is stashed and the reserved-named
-> file stays put.`,
+> file stays put; if they're the only changes, Stash all explains why nothing can be
+> stashed.`,
   },
   {
     id: "history",

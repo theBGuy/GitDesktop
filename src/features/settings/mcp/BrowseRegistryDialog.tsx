@@ -24,11 +24,14 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import { normalizeHost } from "@/lib/ai/allowed-hosts";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { McpServer } from "@/lib/settings/api";
-import { entriesFor, mcpHostGateReason } from "@/lib/settings/mcp";
+import {
+  entriesFor,
+  mcpHostAllowFixable,
+  mcpHostGateReason,
+} from "@/lib/settings/mcp";
 import {
   ghRepoStats,
   npmWeeklyDownloadsBatch,
@@ -322,13 +325,16 @@ export function BrowseRegistryDialog({
                 const isOpen = expanded.has(c.registryName);
                 const entries = entriesFor(c.server);
                 const secretSet = new Set(c.server.secretKeys);
-                const gateReason = mcpHostGateReason(c.server, allowedHosts);
-                // "Allow host" only fixes a gate that HAS a host to add: an
-                // unparseable URL (the gate's fail-closed arm) has none, so it
-                // gets no note and no pointer at one.
+                // Gate UI belongs only to rows still offering Add: an added or
+                // already-registered row has no action to hold, and the registry
+                // list's own warn-only badge is what covers those.
+                const gateReason = disabled
+                  ? null
+                  : mcpHostGateReason(c.server, allowedHosts);
                 const allowFixable =
-                  gateReason !== null && normalizeHost(c.server.url) !== null;
-                // Why Add is held, plus where the one-click fix lives.
+                  !disabled && mcpHostAllowFixable(c.server, allowedHosts);
+                // Why Add is held, plus where the one-click fix lives — pointed
+                // at the row's detail only when a fix actually waits there.
                 const addReason = !gateReason
                   ? null
                   : allowFixable

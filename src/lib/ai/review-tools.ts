@@ -148,11 +148,13 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
           const payload = await gitFileBase64(ctx.repoPath, rev, path);
           if (payload === null) return `File does not exist at ${rev}: ${path}`;
           const b64 = payload.base64;
-          if (
-            payload.tooLarge ||
-            b64 === null ||
-            b64.length > READ_FILE_BASE64_MAX
-          )
+          // The backend withholds bytes for reasons that are not a size verdict — a
+          // raster declaring more than the decoder should be handed, a recognized
+          // container with an unreadable header — so its refusal cannot borrow the
+          // length cap's wording: a crafted image is tiny.
+          if (payload.tooLarge || b64 === null)
+            return `Error: ${path} can't be read here — the preview gate refused it (too large, binary, or unsafe to decode); use grep or diff_refs to inspect it.`;
+          if (b64.length > READ_FILE_BASE64_MAX)
             return `Error: ${path} is too large for review reads (over ~1 MB) — use grep or diff_refs to inspect it instead.`;
           let text: string;
           try {

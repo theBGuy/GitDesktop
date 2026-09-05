@@ -1,8 +1,4 @@
-import {
-  hostLabel,
-  isHostAllowed,
-  normalizeHost,
-} from "@/lib/ai/allowed-hosts";
+import { hostLabel, isHostAllowed } from "@/lib/ai/allowed-hosts";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { McpKeyValue, McpServer } from "./api";
 
@@ -199,25 +195,58 @@ export function mcpSecretRef(serverId: string, entryKey: string): string {
   return `mcp-server/${serverId}/${entryKey}`;
 }
 
-/** Registration-time host gate for http servers: the reason a server can't be
- *  saved/imported/added yet, or null. Rows already IN the registry are never
- *  gated by this (they keep the warn-only badge) — only the registration seams
- *  and the write funnel call it. An EMPTY url returns null: emptiness is
- *  validateMcpServer's own check, and a URL-less stub is gated later, when the
- *  edit dialog saves the URL the user fills in. An unparseable one fails
- *  CLOSED — browse/import candidates carry third-party URLs that reach no
- *  other validation, so there is nothing else to catch them. */
+/** Classifies an http server's URL for the registration gate, parsing it once.
+ *  `null` = nothing to gate (stdio, or an empty URL — emptiness is
+ *  validateMcpServer's own check, and a URL-less stub is gated later when the
+ *  edit dialog saves a filled URL). A `reason` refuses the URL outright; a `url`
+ *  is a well-formed http(s) target still to be host-checked. Browse/import
+ *  candidates carry third-party URLs that reach NO other validation — neither
+ *  `toImportCandidate` nor the registry mapper checks a protocol — so malformed
+ *  and non-http(s) URLs both fail CLOSED here rather than at validateMcpServer,
+ *  which only ever runs on the dialog path. */
+type HttpGateTarget = { url: string } | { reason: string };
+function httpGateTarget(server: McpServer): HttpGateTarget | null {
+  if (server.transport !== "http") return null;
+  const url = server.url.trim();
+  if (!url) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { reason: `${url.slice(0, 60)} isn't a valid server URL.` };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return { reason: "URL must be http(s)." };
+  return { url };
+}
+
+/** Registration-time host gate: the reason a server can't be saved/imported/added
+ *  yet, or null. Rows already IN the registry are never gated by this (they keep
+ *  the warn-only badge) — only the registration seams and the write funnel call
+ *  it. See {@link httpGateTarget} for which URLs are refused outright. */
 export function mcpHostGateReason(
   server: McpServer,
   allowedHosts: readonly string[],
 ): string | null {
-  if (server.transport !== "http") return null;
-  const url = server.url.trim();
-  if (!url) return null;
-  if (!normalizeHost(url))
-    return `${url.slice(0, 60)} isn't a valid server URL.`;
-  if (isHostAllowed(url, allowedHosts)) return null;
-  return `${hostLabel(url)} isn't in your AI allowed hosts.`;
+  const target = httpGateTarget(server);
+  if (!target) return null;
+  if ("reason" in target) return target.reason;
+  if (isHostAllowed(target.url, allowedHosts)) return null;
+  return `${hostLabel(target.url)} isn't in your AI allowed hosts.`;
+}
+
+/** Whether the one-click "Allow host" can clear this server's gate — true only
+ *  when the block IS the allow-list one. A malformed or non-http(s) URL is
+ *  refused for a reason adding a host won't fix, and HostAllowNote would render
+ *  an empty note for it, so every seam guards its note on this rather than on
+ *  {@link mcpHostGateReason} being non-null. */
+export function mcpHostAllowFixable(
+  server: McpServer,
+  allowedHosts: readonly string[],
+): boolean {
+  const target = httpGateTarget(server);
+  if (!target || "reason" in target) return false;
+  return !isHostAllowed(target.url, allowedHosts);
 }
 
 /**

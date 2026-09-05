@@ -20,13 +20,13 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { isHostAllowed, normalizeHost } from "@/lib/ai/allowed-hosts";
 import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";
 import type { McpServer } from "@/lib/settings/api";
 import {
   emptyMcpServer,
   entriesFor,
   MCP_SCOPE_GLOBAL,
+  mcpHostAllowFixable,
   scopeRepoPath,
   serverScope,
   validateMcpServer,
@@ -329,20 +329,19 @@ export function McpServerDialog({
               {/* The guided fix for the registration gate: Save stays blocked
                   (validateMcpServer carries the same host check) until this host
                   is on the draft allow list, and allowing it here clears both.
-                  The outer guard duplicates HostAllowNote's internal checks ON
-                  PURPOSE: with `defaultNote={null}` the component's all-clear
-                  branch would render an empty <p>, so it must never mount for a
-                  parseable-and-allowed (or unparseable mid-typing) URL. */}
-              {normalizeHost(draft.url) &&
-                !isHostAllowed(draft.url, allowedHosts) && (
-                  <HostAllowNote
-                    url={draft.url}
-                    allowedHosts={allowedHosts}
-                    onAllowHost={onAllowHost}
-                    defaultNote={null}
-                    consequence="the agent CLI connects outside GitDesktop's AI allowlist, so allow it before saving."
-                  />
-                )}
+                  Mounted only where Allow host actually clears the block — with
+                  `defaultNote={null}` the all-clear branch renders an empty <p>,
+                  and a malformed or non-http(s) URL is refused for a reason no
+                  host can fix. */}
+              {mcpHostAllowFixable(draft, allowedHosts) && (
+                <HostAllowNote
+                  url={draft.url}
+                  allowedHosts={allowedHosts}
+                  onAllowHost={onAllowHost}
+                  defaultNote={null}
+                  consequence="the agent CLI connects outside GitDesktop's AI allowlist, so allow it before saving."
+                />
+              )}
             </div>
           )}
 

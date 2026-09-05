@@ -1,3 +1,3 @@
-- Discard all is atomic: nothing can slip into the repository mid-discard, so
-  work you stage while one runs gets a labeled busy notice instead of being
-  destroyed by the discard's reset.
+- Discard all runs as one atomic operation: another GitDesktop action
+  attempted mid-discard is refused with a labeled busy notice, and the
+  discard finishes on the snapshot it started from.

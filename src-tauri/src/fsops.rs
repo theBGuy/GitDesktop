@@ -79,7 +79,6 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
 /// `com³`); `com0`, `com10`, `com⁴` (U+2074, outside Latin-1) and `console` are
 /// ordinary names. Mirrored by `src/lib/git/reserved-device-name.ts` — a change
 /// here moves there in the same change.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn is_reserved_device_name(name: &str) -> bool {
     let stem = name
         .split('.')
