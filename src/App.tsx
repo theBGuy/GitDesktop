@@ -35,7 +35,7 @@ import {
   useSettings,
 } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { COLD_START } from "@/lib/test-mode";
+import { COLD_INSTANCE_ID, COLD_START } from "@/lib/test-mode";
 import { nextTheme, THEME_LABELS } from "@/lib/theme";
 import { useLatestRef } from "@/lib/use-latest-ref";
 
@@ -262,6 +262,7 @@ function App() {
         <div className="pointer-events-none fixed right-2 bottom-2 z-50 flex items-center gap-1.5 border border-warning/40 bg-warning/10 px-2 py-1 text-[11px] font-medium text-warning">
           <span className="size-1.5 rounded-full bg-warning" />
           Cold-start test mode
+          {COLD_INSTANCE_ID ? ` · ${COLD_INSTANCE_ID}` : ""}
         </div>
       )}
     </>

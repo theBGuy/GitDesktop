@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Launch GitDesktop in cold-start test mode — a brand-new-user simulation for
+  Launch GitDesktop in cold-start test mode, a brand-new-user simulation for
   walking the onboarding flow.
 
 .DESCRIPTION
@@ -13,7 +13,7 @@
   unborn-repo "Make your first commit" state. Use -NoGit / -NoGh to exercise the
   GitMissingScreen and GitHub-not-connected empty states without uninstalling
   anything. Automations are off by default in cold-start mode; -Automations
-  re-enables them.
+  enables them.
 
 .PARAMETER NoGit
   Force the "Git is not installed" screen.
@@ -24,10 +24,12 @@
 .PARAMETER Automations
   Run automations in the cold instance. They are OFF by default in cold-start mode:
   the automation claims are shared with your real instance, so an armed cold instance
-  can win a claim and suppress the real run's review. Pass this to re-enable them.
+  can win a claim and suppress the real run's review. Pass this to enable them.
 
 .PARAMETER Reset
-  Delete the throwaway cold-start store files, then exit (does not launch).
+  Delete the throwaway cold-start store files, then exit (does not launch). The
+  per-instance WebView2 profiles under %TEMP%\gd-coldstart-* are left alone; delete
+  those yourself if you want a sibling instance's browser state gone too.
 
 .EXAMPLE
   ./scripts/cold-start.ps1
@@ -58,7 +60,7 @@ if ($Reset) {
   } else {
     Write-Host "No cold-start store files to clear in $dataDir" -ForegroundColor Yellow
   }
-  Write-Host "Note: any test API keys live in the 'coldstart:' keychain namespace — clear them from the app's AI settings while in cold-start mode."
+  Write-Host "Note: any test API keys live in the 'coldstart:' keychain namespace; clear them from the app's AI settings while in cold-start mode."
   return
 }
 

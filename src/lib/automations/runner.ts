@@ -50,7 +50,7 @@ import {
   resetReview,
 } from "@/lib/stores/reviews";
 import { errorMessage, invoke } from "@/lib/tauri/invoke";
-import { COLD_START, COLD_START_AUTOMATIONS } from "@/lib/test-mode";
+import { COLD_START_AUTOMATIONS_OFF } from "@/lib/test-mode";
 import {
   clearDismissedHead,
   getDismissedHeadMap,
@@ -263,8 +263,7 @@ async function run(
   // Cold-start instances share the automation-claims dir with the real instance, so an
   // armed cold instance can win a claim meant for the real run and suppress it. Gate
   // before loadAutomations() so a gated tick reads no config and takes no claim.
-  if (COLD_START && !COLD_START_AUTOMATIONS)
-    return { matched: 0, attempted: 0 };
+  if (COLD_START_AUTOMATIONS_OFF) return { matched: 0, attempted: 0 };
   const config = await loadAutomations();
   const repo = await repoAutomationsFor(config, event.repoPath);
   const actions = effectiveActions(config, repo, event.kind);
@@ -705,7 +704,7 @@ export function rerunAutomation(
       }
       // Same reason: the clear below runs before run()'s cold-start gate, so an
       // automations-off cold instance stops here rather than consuming the watermark.
-      if (COLD_START && !COLD_START_AUTOMATIONS) {
+      if (COLD_START_AUTOMATIONS_OFF) {
         toast.info("Automations are off in cold-start test mode.");
         return;
       }

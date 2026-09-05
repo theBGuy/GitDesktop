@@ -56,11 +56,13 @@ pub fn run() {
         tray::show_main_window(app);
     }));
     // Interpolating the id straight into JS source is safe only because
-    // `instance_id::read` enforces `[A-Za-z0-9-]{1,32}`. This script runs before any
-    // page script, so the frontend reads the global synchronously at module scope.
+    // `instance_id::read` enforces `[a-z0-9-]{1,32}`. The leading newline keeps us
+    // off the upstream invoke script's trailing newline for statement separation.
+    // This script runs before any page script, so the frontend reads the global
+    // synchronously at module scope.
     let builder = match instance_id::read() {
         Some(id) => builder.append_invoke_initialization_script(format!(
-            "window.__GD_INSTANCE_ID__ = \"{id}\";"
+            "\nwindow.__GD_INSTANCE_ID__ = \"{id}\";"
         )),
         None => builder,
     };
