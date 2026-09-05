@@ -223,7 +223,9 @@ export function useStashReapplyRecovery(repoPath: string) {
     // Write only on change (AmendForcePush precedent) — the prompt never shows
     // while the preference is already on.
     if (always && settings.data && !settings.data.autoStashOnPull) {
-      saveSettings.mutate({ ...settings.data, autoStashOnPull: true });
+      void saveSettings
+        .mutateAsync({ ...settings.data, autoStashOnPull: true })
+        .catch(() => undefined);
     }
     void runRecovery(request);
   }

@@ -16,6 +16,7 @@ import {
   globLiteralPath,
   literalPathspec,
 } from "@/lib/git/glob";
+import { reservedDeviceName } from "@/lib/git/reserved-device-name";
 import type { FileEntry } from "@/lib/git/types";
 import { isWindows } from "@/lib/hotkeys/binding";
 import {
@@ -63,6 +64,9 @@ export interface ChangesMenuActions {
   aiExcludeSelected: () => void;
 }
 
+/** A disabled menu item can't carry a tooltip, so the reason rides its label. */
+const RESERVED_HINT = " (Windows-reserved name)";
+
 /** "src/lib/x.ts" -> ["src/lib", "src"] (closest folder first). */
 function ancestorFolders(path: string): string[] {
   const folders: string[] = [];
@@ -87,6 +91,7 @@ export function ChangesContextMenuItems({
   repoPath,
   inSelection,
   selectionCount,
+  stageableSelectionCount,
   selectedTrackedCount,
   actions,
 }: {
@@ -95,6 +100,10 @@ export function ChangesContextMenuItems({
   /** Whether the right-clicked row is part of the active multi-selection. */
   inSelection: boolean;
   selectionCount: number;
+  /** Selected files staging can actually reach — the whole selection minus the
+   *  Windows-reserved device names `git add` refuses. Drives the Stage item's
+   *  count, and disables it at 0. */
+  stageableSelectionCount: number;
   selectedTrackedCount: number;
   actions: ChangesMenuActions;
 }) {
@@ -121,11 +130,19 @@ export function ChangesContextMenuItems({
   }
   const { entry, staged } = target;
   if (inSelection && selectionCount > 1) {
+    // The stageable count can drop to 1 (or 0) inside a >1 selection when the
+    // rest are Windows-reserved names, so this label pluralizes off its own n.
+    const n = stageableSelectionCount;
     return (
       <>
         {!staged && (
-          <ContextMenuItem onClick={actions.stageSelected}>
-            Stage {selectionCount} files
+          <ContextMenuItem
+            disabled={stageableSelectionCount === 0}
+            onClick={actions.stageSelected}
+          >
+            {n === 0
+              ? "Stage files (Windows-reserved names)"
+              : `Stage ${n} file${n === 1 ? "" : "s"}`}
           </ContextMenuItem>
         )}
         {staged && (
@@ -168,6 +185,8 @@ export function ChangesContextMenuItems({
   // hold a metacharacter of its own (`a.ts[x]`), which would widen the match.
   const extensionPattern = extension && `*.${globLiteralPath(extension)}`;
   const isTracked = entry.unstaged !== "untracked" && entry.staged !== "added";
+  // Only staging reads the working-tree file, so only it hits the device.
+  const stageBlocked = !staged && reservedDeviceName(entry.path) !== null;
   const isConflicted =
     entry.unstaged === "conflicted" || entry.staged === "conflicted";
   return (
@@ -180,8 +199,12 @@ export function ChangesContextMenuItems({
           <ContextMenuSeparator />
         </>
       )}
-      <ContextMenuItem onClick={() => actions.toggle(entry, staged)}>
+      <ContextMenuItem
+        disabled={stageBlocked}
+        onClick={() => actions.toggle(entry, staged)}
+      >
         {staged ? "Unstage file" : "Stage file"}
+        {stageBlocked ? RESERVED_HINT : ""}
       </ContextMenuItem>
       {!staged && (
         <ContextMenuItem onClick={() => actions.discardFile(entry)}>

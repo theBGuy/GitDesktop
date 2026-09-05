@@ -109,6 +109,41 @@ export function ConflictBanner({
   // the commit via the Changes tab, then continues.
   const editPaused = Boolean(opState.data?.editPaused) && conflictedCount === 0;
 
+  // Awaited rather than per-call callbacks: this banner unmounts the moment the
+  // op ends (and rides an <Activity>-hidden tab), and react-query drops per-call
+  // callbacks once the observer has no listeners. The op travels as an argument
+  // because `op` is nullable at component scope.
+  async function doContinue(target: RepoOp) {
+    try {
+      const recorded = await continueOp.mutateAsync(target);
+      // Only a resolution that emptied the pick reaches this: a commit whose
+      // changes the destination already had never conflicts, so it is skipped
+      // inside the pick itself and never pauses here. The flag speaks for that
+      // one pick — a longer sequence may still have applied its remaining
+      // commits.
+      if (!recorded) {
+        toast.info("Commit skipped — your resolution left nothing to commit.");
+        return;
+      }
+      toast.success(
+        target === "merge" ? "Merge completed" : `${opVerb} continued`,
+      );
+    } catch (e) {
+      onError(e);
+    }
+  }
+
+  async function doAbort(target: RepoOp) {
+    try {
+      await abortOp.mutateAsync(target);
+      setConfirmAbort(false);
+      toast.success(`Aborted the ${target}`);
+    } catch (e) {
+      setConfirmAbort(false);
+      onError(e);
+    }
+  }
+
   return (
     // One calm status line — the per-file resolution actions live in the diff
     // pane's conflict view, so this just carries merge state + Continue/Abort
@@ -161,29 +196,7 @@ export function ConflictBanner({
               reason={
                 conflictedCount > 0 ? "Resolve every conflict first" : undefined
               }
-              onClick={() =>
-                continueOp.mutate(op, {
-                  onSuccess: (recorded) => {
-                    // Only a resolution that emptied the pick reaches this: a commit
-                    // whose changes the destination already had never conflicts, so
-                    // it is skipped inside the pick itself and never pauses here.
-                    // The flag speaks for that one pick — a longer sequence may
-                    // still have applied its remaining commits.
-                    if (!recorded) {
-                      toast.info(
-                        "Commit skipped — your resolution left nothing to commit.",
-                      );
-                      return;
-                    }
-                    toast.success(
-                      op === "merge"
-                        ? "Merge completed"
-                        : `${opVerb} continued`,
-                    );
-                  },
-                  onError,
-                })
-              }
+              onClick={() => void doContinue(op)}
             >
               {continueOp.isPending && <Spinner data-icon="inline-start" />}
               {OP_LABELS[op].cont}
@@ -211,18 +224,7 @@ export function ConflictBanner({
                   <Button
                     variant="destructive"
                     disabled={abortOp.isPending}
-                    onClick={() =>
-                      abortOp.mutate(op, {
-                        onSuccess: () => {
-                          setConfirmAbort(false);
-                          toast.success(`Aborted the ${op}`);
-                        },
-                        onError: (e) => {
-                          setConfirmAbort(false);
-                          onError(e);
-                        },
-                      })
-                    }
+                    onClick={() => void doAbort(op)}
                   >
                     {abortOp.isPending && <Spinner data-icon="inline-start" />}
                     Abort {op}

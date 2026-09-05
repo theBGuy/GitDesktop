@@ -39,6 +39,7 @@ import {
   useUnignoreRules,
   useUntrack,
 } from "@/lib/git/queries";
+import { reservedDeviceName } from "@/lib/git/reserved-device-name";
 import type { AiIgnoreVerdict, IgnoredFile } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
@@ -357,6 +358,12 @@ export function RepositoryFilesDialog({
   // filter clears), so you never touch something you can't see.
   const selectedPaths = filtered.filter((p) => selected.has(p));
   const count = selectedPaths.length;
+  // Windows resolves a reserved device name to the DEVICE, so `git add --force`
+  // reads it and aborts the whole pathspec batch — force-add offers, counts and
+  // runs on this subset alone. The other bulk actions never read the file.
+  const stageableSelected = selectedPaths.filter(
+    (p) => reservedDeviceName(p) === null,
+  );
 
   function toggle(path: string) {
     setSelected((prev) => {
@@ -444,56 +451,56 @@ export function RepositoryFilesDialog({
     });
   }
 
-  function runUntrack(paths: string[]) {
-    untrack.mutate(
-      {
+  async function runUntrack(paths: string[]) {
+    try {
+      await untrack.mutateAsync({
         pathspecs: paths.map(literalPathspec),
         ignorePatterns: paths.map(ignorePattern),
-      },
-      {
-        onSuccess: () => {
-          toast.success(
-            `Untracked ${paths.length} file${paths.length === 1 ? "" : "s"} — kept on disk, added to .gitignore`,
-          );
-          setSelected(new Set());
-          setPending(null);
-        },
-        onError: (e) => {
-          onError(e);
-          setPending(null);
-        },
-      },
-    );
+      });
+      toast.success(
+        `Untracked ${paths.length} file${paths.length === 1 ? "" : "s"} — kept on disk, added to .gitignore`,
+      );
+      setSelected(new Set());
+      setPending(null);
+    } catch (e) {
+      onError(e);
+      setPending(null);
+    }
   }
 
-  function runForceAdd(paths: string[]) {
-    forceAdd.mutate(paths.map(literalPathspec), {
-      onSuccess: () => {
-        toast.success(`Force-added ${paths.length} items`);
-        setSelected(new Set());
-        setPending(null);
-      },
-      onError: (e) => {
-        onError(e);
-        setPending(null);
-      },
-    });
+  async function runForceAdd(paths: string[]) {
+    // Defensive — the offer path already filters. Kept so a future caller can't
+    // reopen the device read that aborts the whole pathspec batch.
+    const stageable = paths.filter((p) => reservedDeviceName(p) === null);
+    if (stageable.length === 0) {
+      setPending(null);
+      return;
+    }
+    try {
+      await forceAdd.mutateAsync(stageable.map(literalPathspec));
+      toast.success(
+        `Force-added ${stageable.length} ${stageable.length === 1 ? "item" : "items"}`,
+      );
+      setSelected(new Set());
+      setPending(null);
+    } catch (e) {
+      onError(e);
+      setPending(null);
+    }
   }
 
-  function runRemoveRules(rules: { source: string; pattern: string }[]) {
-    unignore.mutate(rules, {
-      onSuccess: () => {
-        toast.success(
-          `Removed ${rules.length} rule${rules.length === 1 ? "" : "s"} from .gitignore`,
-        );
-        setSelected(new Set());
-        setPending(null);
-      },
-      onError: (e) => {
-        onError(e);
-        setPending(null);
-      },
-    });
+  async function runRemoveRules(rules: { source: string; pattern: string }[]) {
+    try {
+      await unignore.mutateAsync(rules);
+      toast.success(
+        `Removed ${rules.length} rule${rules.length === 1 ? "" : "s"} from .gitignore`,
+      );
+      setSelected(new Set());
+      setPending(null);
+    } catch (e) {
+      onError(e);
+      setPending(null);
+    }
   }
 
   // Bulk AI-exclude from the tracked list — the add path for files with nothing
@@ -839,15 +846,25 @@ export function RepositoryFilesDialog({
               )}
               {tab === "ignored" && (
                 <>
-                  <Button
+                  <DisabledReasonButton
                     size="sm"
-                    disabled={busy}
+                    disabled={busy || stageableSelected.length === 0}
+                    reason={
+                      stageableSelected.length === 0
+                        ? "Git can't stage Windows-reserved device names, and every selected file has one"
+                        : null
+                    }
                     onClick={() =>
-                      setPending({ kind: "forceAdd", paths: selectedPaths })
+                      setPending({
+                        kind: "forceAdd",
+                        paths: stageableSelected,
+                      })
                     }
                   >
-                    Force-add {count}
-                  </Button>
+                    {stageableSelected.length === 0
+                      ? "Force-add"
+                      : `Force-add ${stageableSelected.length}`}
+                  </DisabledReasonButton>
                   <Button
                     variant="outline"
                     size="sm"
@@ -966,13 +983,13 @@ export function RepositoryFilesDialog({
             <Button
               disabled={busy}
               onClick={() => {
-                if (pending?.kind === "untrack") runUntrack(pending.paths);
+                if (pending?.kind === "untrack") void runUntrack(pending.paths);
                 else if (pending?.kind === "forceAdd")
-                  runForceAdd(pending.paths);
+                  void runForceAdd(pending.paths);
                 else if (pending?.kind === "removeRule")
-                  runRemoveRules(pending.rules);
+                  void runRemoveRules(pending.rules);
                 else if (pending?.kind === "removeAiRule")
-                  runRemoveAiRules(pending.rules);
+                  void runRemoveAiRules(pending.rules);
               }}
             >
               {shownPending && PENDING_COPY[shownPending.kind].confirm}

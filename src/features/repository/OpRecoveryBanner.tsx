@@ -71,9 +71,7 @@ export function OpRecoveryBanner({ repoPath }: { repoPath: string }) {
           size="icon-xs"
           aria-label="Dismiss"
           disabled={dismiss.isPending}
-          onClick={() =>
-            dismiss.mutate(op.id, { onError: (e) => toastError(e) })
-          }
+          onClick={() => void dismiss.mutateAsync(op.id).catch(toastError)}
         >
           {dismiss.isPending ? <Spinner /> : <XIcon />}
         </Button>

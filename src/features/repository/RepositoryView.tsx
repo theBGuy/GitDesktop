@@ -522,23 +522,24 @@ export function RepositoryView() {
     // two. A failed write restores the previous value synchronously, so the
     // hand-off can ride the rollback's own commit.
     queryClient.setQueryData(settingsKeys.settings, updated);
-    saveSettings.mutate(updated, {
-      onError: () => {
-        // Only roll back if this call's change is still the latest: otherwise a
-        // late-failing earlier write would stomp a newer successful one (two
-        // fast presses where the first write rejects after the second lands).
-        const latest = queryClient.getQueryData<AppSettings>(
-          settingsKeys.settings,
-        );
-        if (latest?.sidebarCollapsed !== next) return;
-        if (
-          handoffRef.current ||
-          sidebarRef.current?.contains(document.activeElement)
-        ) {
-          refocusToggleRef.current = !next;
-        }
-        queryClient.setQueryData(settingsKeys.settings, current);
-      },
+    // Awaited in a detached chain rather than a per-call onError: react-query
+    // drops per-call callbacks once the observer has no listeners, and this
+    // writer must keep reporting `changed` synchronously to its callers.
+    void saveSettings.mutateAsync(updated).catch(() => {
+      // Only roll back if this call's change is still the latest: otherwise a
+      // late-failing earlier write would stomp a newer successful one (two
+      // fast presses where the first write rejects after the second lands).
+      const latest = queryClient.getQueryData<AppSettings>(
+        settingsKeys.settings,
+      );
+      if (latest?.sidebarCollapsed !== next) return;
+      if (
+        handoffRef.current ||
+        sidebarRef.current?.contains(document.activeElement)
+      ) {
+        refocusToggleRef.current = !next;
+      }
+      queryClient.setQueryData(settingsKeys.settings, current);
     });
     return true;
   }

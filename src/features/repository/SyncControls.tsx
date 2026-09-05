@@ -183,11 +183,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // One entry point for every fetch — manual (button/hotkey) and automatic —
   // so a successful fetch always records its freshness. Auto-fetches stay quiet
   // (a failed background fetch just retries next tick).
-  function doFetch(silent: boolean) {
-    fetchRemote.mutate(undefined, {
-      onSuccess: () => markFetched(repoPath),
-      onError: silent ? undefined : onError,
-    });
+  async function doFetch(silent: boolean) {
+    try {
+      await fetchRemote.mutateAsync(undefined);
+      markFetched(repoPath);
+    } catch (e) {
+      if (!silent) onError(e);
+    }
   }
 
   // Opt-out periodic background fetch (Settings → General). Shares the fetch
@@ -198,7 +200,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     intervalMs: Number(settings.data?.autoFetchInterval ?? "10") * 60_000,
     hasOrigin,
     busy,
-    fetch: () => doFetch(true),
+    fetch: () => void doFetch(true),
   });
 
   // The Fetch tooltip is a plain attribute string, so the shared clock has to be
@@ -324,58 +326,56 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // dirty-tree recovery only ever sees refusals from the run itself. Every other
   // error keeps its normal toast. Both are triggered by the refusal, never
   // pre-flighted.
-  function doPull(mode: PullMode) {
+  async function doPull(mode: PullMode) {
     const plain = pullSuccessMessage(mode);
-    pull.mutate(mode, {
-      onSuccess: () => {
-        if (plain) toast.success(plain);
-      },
-      onError: (e) => {
-        if (pullDropGuard.handleError(e)) return;
-        const taken = recovery.handleError(e, {
-          operationLabel: "pull",
-          reappliedMessage: "Pulled and reapplied your changes.",
-          // ff-only has no ordinary success toast, but a recovery the user ran
-          // deliberately still has to confirm itself.
-          plainMessage: plain ?? "Pulled.",
-          run: { op: "pull", mode },
-          // The retried pull re-runs the fork-point guard before it stashes, so
-          // a rebase pull can raise the decision here too.
-          onUnhandledError: pullDropGuard.handleRecoveryError,
-        });
-        if (!taken) onError(e);
-      },
-    });
+    try {
+      await pull.mutateAsync(mode);
+      if (plain) toast.success(plain);
+    } catch (e) {
+      if (pullDropGuard.handleError(e)) return;
+      const taken = recovery.handleError(e, {
+        operationLabel: "pull",
+        reappliedMessage: "Pulled and reapplied your changes.",
+        // ff-only has no ordinary success toast, but a recovery the user ran
+        // deliberately still has to confirm itself.
+        plainMessage: plain ?? "Pulled.",
+        run: { op: "pull", mode },
+        // The retried pull re-runs the fork-point guard before it stashes, so
+        // a rebase pull can raise the decision here too.
+        onUnhandledError: pullDropGuard.handleRecoveryError,
+      });
+      if (!taken) onError(e);
+    }
   }
 
   // Sync the current branch with the fork's upstream: fetch upstream, resolve
   // its default branch, then fast-forward or merge. Honest terminal toast per
   // outcome; a conflicting merge rejects and the conflict banner takes over
   // (its error still toasts). No auto-push — Push lights up on its own.
-  function doUpdateFromUpstream() {
-    updateUpstream.mutate(undefined, {
-      onSuccess: (outcome) => {
-        const ref = `upstream/${outcome.branch}`;
-        if (outcome.kind === "up-to-date") {
-          toast.success(`Already up to date with ${ref}.`);
-        } else if (outcome.kind === "fast-forwarded") {
-          toast.success(`Fast-forwarded to ${ref}.`);
-        } else if (outcome.kind === "dirty-blocked") {
-          // The merge was refused, not attempted-and-broken: recover from the
-          // already-resolved ref, so confirming costs no second fetch.
-          recovery.begin({
-            operationLabel: "update",
-            detail: ref,
-            reappliedMessage: `Updated from ${ref} and reapplied your changes.`,
-            plainMessage: `Merged ${ref} into your branch.`,
-            run: { op: "merge", ref: outcome.ref },
-          });
-        } else {
-          toast.success(`Merged ${ref} into your branch.`);
-        }
-      },
-      onError,
-    });
+  async function doUpdateFromUpstream() {
+    try {
+      const outcome = await updateUpstream.mutateAsync(undefined);
+      const ref = `upstream/${outcome.branch}`;
+      if (outcome.kind === "up-to-date") {
+        toast.success(`Already up to date with ${ref}.`);
+      } else if (outcome.kind === "fast-forwarded") {
+        toast.success(`Fast-forwarded to ${ref}.`);
+      } else if (outcome.kind === "dirty-blocked") {
+        // The merge was refused, not attempted-and-broken: recover from the
+        // already-resolved ref, so confirming costs no second fetch.
+        recovery.begin({
+          operationLabel: "update",
+          detail: ref,
+          reappliedMessage: `Updated from ${ref} and reapplied your changes.`,
+          plainMessage: `Merged ${ref} into your branch.`,
+          run: { op: "merge", ref: outcome.ref },
+        });
+      } else {
+        toast.success(`Merged ${ref} into your branch.`);
+      }
+    } catch (e) {
+      onError(e);
+    }
   }
 
   // The remedy when the upstream already carries this branch's commits under
@@ -409,31 +409,31 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       toast.info("HEAD moved while the dialog was open — nothing was reset.");
       return;
     }
-    hardReset.mutate(tip, {
-      onSuccess: () => toast.success(`Reset ${branch} to ${upstream}`),
-      onError,
-    });
+    try {
+      await hardReset.mutateAsync(tip);
+      toast.success(`Reset ${branch} to ${upstream}`);
+    } catch (e) {
+      onError(e);
+    }
   }
 
-  function doPush(force: boolean) {
-    push.mutate(
-      { setUpstream: !hasUpstream, force },
-      {
-        onSuccess: (guard) => {
-          // Only a force push has a guarantee to report, and only the two
-          // degraded values say more than the plain confirmation does.
-          if (force)
-            toast.success("Force pushed", {
-              description: FORCE_PUSH_DEGRADED[guard],
-            });
-          setForceConfirmOpen(false);
-        },
-        onError: (e) => {
-          onError(e);
-          setForceConfirmOpen(false);
-        },
-      },
-    );
+  async function doPush(force: boolean) {
+    try {
+      const guard = await push.mutateAsync({
+        setUpstream: !hasUpstream,
+        force,
+      });
+      // Only a force push has a guarantee to report, and only the two
+      // degraded values say more than the plain confirmation does.
+      if (force)
+        toast.success("Force pushed", {
+          description: FORCE_PUSH_DEGRADED[guard],
+        });
+      setForceConfirmOpen(false);
+    } catch (e) {
+      onError(e);
+      setForceConfirmOpen(false);
+    }
   }
 
   // Publishing an untracked branch that is really a local copy of a fork PR's
@@ -445,7 +445,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   async function beginPush(force: boolean) {
     const branch = head?.name;
     if (force || hasUpstream || !branch) {
-      doPush(force);
+      void doPush(force);
       return;
     }
     setDetecting(true);
@@ -458,18 +458,18 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // fast-forward of the wrong work, so the moment has passed — just publish.
     if (match && headNameRef.current === branch)
       setForkGuard({ match, branch });
-    else doPush(false);
+    else void doPush(false);
   }
 
   // Hotkeys mirror the buttons' disabled states exactly.
-  useHotkeyAction("fetch", () => doFetch(false), !noOrigin && !busy);
+  useHotkeyAction("fetch", () => void doFetch(false), !noOrigin && !busy);
   // Pull needs no explicit `!detached` term: `hasUpstream` is already false on a
   // detached HEAD (the backend leaves `head.upstream` null, mirroring git's "no
   // upstream for a detached HEAD"), so this hotkey and the Pull button below are
   // disabled there for free — unlike Push, which has no upstream precondition.
   useHotkeyAction(
     "pull",
-    () => doPull("ffOnly"),
+    () => void doPull("ffOnly"),
     !noOrigin && !busy && hasUpstream && !diverged,
   );
   useHotkeyAction(
@@ -485,7 +485,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // to sync from or nowhere to merge into.
   useHotkeyAction(
     "update-from-upstream",
-    doUpdateFromUpstream,
+    () => void doUpdateFromUpstream(),
     canUpdateUpstream && !busy,
   );
 
@@ -525,7 +525,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           // sm size is px-2.5 and the leading-icon rule already pulls the left
           // side to pl-1.5, so without this the icon sits 4px off-center.
           className="focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
-          onClick={() => doFetch(false)}
+          onClick={() => void doFetch(false)}
         >
           {fetchRemote.isPending ? (
             <Spinner data-icon="inline-start" />
@@ -547,7 +547,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           aria-label={pullDescription ?? "Pull"}
           aria-keyshortcuts={pullKeyshortcuts}
           className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
-          onClick={() => doPull("ffOnly")}
+          onClick={() => void doPull("ffOnly")}
         >
           {/* Covers the recovery compounds too: with the preference on they
               run with no dialog open to show progress. */}
@@ -587,7 +587,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             <DropdownMenuContent align="end" className="min-w-48">
               {hasUpstream && (
                 <>
-                  <DropdownMenuItem onClick={() => doPull("rebase")}>
+                  <DropdownMenuItem onClick={() => void doPull("rebase")}>
                     Pull with rebase
                   </DropdownMenuItem>
                   {/* Disabled with the reason IN the label: a disabled menu item
@@ -596,7 +596,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                   <DropdownMenuItem
                     disabled={mixedRewrite}
                     title={mixedRewrite ? mergeDuplicatesReason : undefined}
-                    onClick={() => doPull("merge")}
+                    onClick={() => void doPull("merge")}
                   >
                     {mixedRewrite
                       ? `Pull with merge (${head?.upstream} already carries these changes under different ids)`
@@ -617,7 +617,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                 <>
                   {hasUpstream && <DropdownMenuSeparator />}
                   {/* Base UI menu items fire on onClick, NOT onSelect. */}
-                  <DropdownMenuItem onClick={doUpdateFromUpstream}>
+                  <DropdownMenuItem onClick={() => void doUpdateFromUpstream()}>
                     Update from upstream
                   </DropdownMenuItem>
                 </>
@@ -711,7 +711,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             <Button
               variant="destructive"
               disabled={push.isPending}
-              onClick={() => doPush(true)}
+              onClick={() => void doPush(true)}
             >
               {push.isPending && <Spinner data-icon="inline-start" />}
               Force push
@@ -727,7 +727,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         onClose={() => setForkGuard(null)}
         onPublishAnyway={() => {
           setForkGuard(null);
-          doPush(false);
+          void doPush(false);
         }}
       />
 

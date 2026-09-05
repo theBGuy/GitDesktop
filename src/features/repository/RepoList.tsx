@@ -166,7 +166,7 @@ export function RepoList({
   // NEXT open groups (and labels its context menu) synchronously. Fires once
   // whenever a record's stored value is stale; the helper no-ops when nothing
   // changed, so its settings refetch doesn't loop.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: mutate() is stable; rerun only on resolved owners / records
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mutateAsync() is stable; rerun only on resolved owners / records
   useEffect(() => {
     const resolved = owners.data;
     if (!resolved?.length) return;
@@ -178,7 +178,7 @@ export function RepoList({
         (o.provider || undefined) !== r?.provider
       );
     });
-    if (stale) persistOwners.mutate(resolved);
+    if (stale) void persistOwners.mutateAsync(resolved).catch(() => undefined);
   }, [owners.data, recents]);
 
   // Backfill visibility + fork provenance for rows whose provider resolves but

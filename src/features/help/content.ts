@@ -444,7 +444,8 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 > Discarding an **untracked** file moves it to the recycle bin, so it's recoverable —
 > it isn't deleted outright. The exception is a name Windows reserves for a device
 > (\`nul\`, \`con\`, \`com3\`): the recycle bin can't take one, so those are removed
-> permanently.`,
+> permanently. On Windows git can't stage such a file at all, so its **Stage**
+> control explains that rather than failing, and **Stage all** stages everything else.`,
   },
   {
     id: "history",

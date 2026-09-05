@@ -3,7 +3,10 @@ import { toast } from "sonner";
 import { track } from "@/lib/analytics";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { requiresPullRequest } from "@/lib/branch-rules/match";
-import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
+import {
+  useEffectiveBranchRules,
+  useEffectiveBranchRulesSettling,
+} from "@/lib/branch-rules/queries";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
 import { useCommit, useRepoStatus } from "@/lib/git/queries";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
@@ -60,6 +63,9 @@ export function useCommitSubmit(
   const aiEnabled = useAiEnabled();
   const aiConfigured = useAiConfigured();
   const rulesConfig = useEffectiveBranchRules(repoPath);
+  // While either rules scope is on its FIRST read the effective config stands in
+  // as empty, so `locked` is vacuously false — commit holds on this instead.
+  const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
 
   const amending = amendingHash !== null;
   const branchName = status.data?.branch?.name ?? null;
@@ -88,12 +94,16 @@ export function useCommitSubmit(
     title.trim().length > 0 &&
     (stagedCount > 0 || amending) &&
     !commit.isPending &&
-    !locked;
+    !locked &&
+    !rulesSettling;
   const canGenerate = aiEnabled && aiConfigured && stagedCount > 0;
-  // Why Commit is refused, most-blocking first: a branch rule nothing the user
-  // types can lift, then the missing title, then the empty stage.
+  // Why Commit is refused, most-blocking first: the still-unread rules, then a
+  // branch rule nothing the user types can lift, then the missing title, then
+  // the empty stage.
   const commitDisabledReason = ((): string | null => {
     switch (true) {
+      case rulesSettling:
+        return "Checking branch protection rules…";
       case locked:
         return "This branch requires changes via a pull request";
       case title.trim().length === 0:
@@ -124,7 +134,15 @@ export function useCommitSubmit(
     active && canGenerate && !generating,
   );
 
-  function doCommit() {
+  // Awaited rather than per-call callbacks: both hosts can go while the commit
+  // is in flight (the dialog closes itself, the inline box rides an
+  // <Activity>-hidden tab), and react-query drops per-call callbacks once the
+  // observer has no listeners.
+  async function doCommit() {
+    // Belt for a gate that flipped under an open surface: `canCommit` disables
+    // the button and hotkey, but the rules can settle to "locked" between the
+    // render that enabled them and the click.
+    if (rulesSettling || locked) return;
     const commitTitle = title.trim();
     // Trailers must be the final paragraph of the message.
     const fullBody = [body.trim(), coAuthorTrailers(coAuthors)]
@@ -142,46 +160,45 @@ export function useCommitSubmit(
     // Desktop feel) instead of snapping empty once the commit resolves. Also
     // flips canCommit false, which blocks an accidental double-submit.
     clearCommitDraft();
-    commit.mutate(
-      { title: commitTitle, body: fullBody || undefined, amend: wasAmending },
-      {
-        onSuccess: (result) => {
-          // First, so the pop-out closes the instant the commit lands rather
-          // than behind the reporting work below.
-          onCommitted?.();
-          if (!wasAmending) {
-            track({
-              name: "commit_created",
-              properties: {
-                file_count: fileCount,
-                has_ai_message: snapshot.aiGenerated,
-                has_co_authors: snapshot.coAuthors.length > 0,
-              },
-            });
-          }
-          toast.success(
-            `${wasAmending ? "Amended" : "Committed"} ${result.hash.slice(0, 7)}`,
-          );
-          // Amending rewrites an existing commit; only new commits fire
-          // on-commit automations.
-          if (!wasAmending) {
-            triggerAutomations({
-              kind: "commit",
-              repoPath,
-              hash: result.hash,
-              title: commitTitle,
-              branch: branchName ?? "",
-            });
-          }
-        },
-        onError: (e) => {
-          // The commit failed — put the message back so it isn't lost (restores
-          // amending mode too).
-          restoreCommitDraft({ ...snapshot, amendingHash }, draftKey);
-          toastError(e);
-        },
-      },
-    );
+    try {
+      const result = await commit.mutateAsync({
+        title: commitTitle,
+        body: fullBody || undefined,
+        amend: wasAmending,
+      });
+      // First, so the pop-out closes the instant the commit lands rather
+      // than behind the reporting work below.
+      onCommitted?.();
+      if (!wasAmending) {
+        track({
+          name: "commit_created",
+          properties: {
+            file_count: fileCount,
+            has_ai_message: snapshot.aiGenerated,
+            has_co_authors: snapshot.coAuthors.length > 0,
+          },
+        });
+      }
+      toast.success(
+        `${wasAmending ? "Amended" : "Committed"} ${result.hash.slice(0, 7)}`,
+      );
+      // Amending rewrites an existing commit; only new commits fire
+      // on-commit automations.
+      if (!wasAmending) {
+        triggerAutomations({
+          kind: "commit",
+          repoPath,
+          hash: result.hash,
+          title: commitTitle,
+          branch: branchName ?? "",
+        });
+      }
+    } catch (e) {
+      // The commit failed — put the message back so it isn't lost (restores
+      // amending mode too).
+      restoreCommitDraft({ ...snapshot, amendingHash }, draftKey);
+      toastError(e);
+    }
   }
 
   return {

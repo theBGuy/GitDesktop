@@ -323,20 +323,17 @@ export function ConflictFileView({
     open.catch(toastError);
   }
 
-  function acceptRegion(index: number, choice: ConflictChoice) {
+  async function acceptRegion(index: number, choice: ConflictChoice) {
     if (!segments) return;
     const content = resolveBlock(segments, index, choice);
     // Stage once the last marker is gone — same end state as the AI flow.
     const stage = !hasConflictMarkers(content);
-    resolve.mutate(
-      { path, content, stage },
-      {
-        onSuccess: () => {
-          if (stage) toast.success(`Resolved ${baseName(path)}`);
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await resolve.mutateAsync({ path, content, stage });
+      if (stage) toast.success(`Resolved ${baseName(path)}`);
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   async function acceptAll(side: "ours" | "theirs") {
@@ -364,16 +361,14 @@ export function ConflictFileView({
       confirmVariant: "destructive",
     });
     if (!ok) return;
-    checkoutSide.mutate(
-      { path, side },
-      {
-        onSuccess: () =>
-          toast.success(
-            `Resolved ${baseName(path)} — took ${side === "ours" ? "current" : "incoming"}`,
-          ),
-        onError: toastError,
-      },
-    );
+    try {
+      await checkoutSide.mutateAsync({ path, side });
+      toast.success(
+        `Resolved ${baseName(path)} — took ${side === "ours" ? "current" : "incoming"}`,
+      );
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   // Which fallback state is on screen, and so whether Mark resolved is offered.

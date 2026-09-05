@@ -31,7 +31,10 @@ import {
   isMergeMethodAllowed,
   requiresPullRequest,
 } from "@/lib/branch-rules/match";
-import { useEffectiveBranchRules } from "@/lib/branch-rules/queries";
+import {
+  useEffectiveBranchRules,
+  useEffectiveBranchRulesSettling,
+} from "@/lib/branch-rules/queries";
 import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
@@ -219,6 +222,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const settings = useSettings();
   const saveSettings = useSaveSettings();
   const rulesConfig = useEffectiveBranchRules(repoPath);
+  // While either rules scope is on its first read the effective config stands in
+  // as empty, so every protection check reads not-blocked — the delete surfaces
+  // hold on this rather than acting on that stand-in.
+  const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
   const amendingHash = useUiStore((s) => s.amendingHash);
   const openSettings = useUiStore((s) => s.openSettings);
   const aiEnabled = useAiEnabled();
@@ -699,27 +706,45 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   const onError = (e: unknown) => toastError(e);
 
-  function setArchived(name: string, archived: boolean) {
-    setBranchArchived.mutate(
-      { name, archived },
-      {
-        onSuccess: () =>
-          toast.success(archived ? `Archived ${name}` : `Unarchived ${name}`),
-        onError,
-      },
-    );
+  // Awaited, not per-call callbacks: react-query drops those when the observer
+  // loses its listeners — a hidden `<Activity>` tab or an unmounted host — and
+  // the outcome would never reach the user. Every mutation below follows suit.
+  async function setArchived(name: string, archived: boolean) {
+    try {
+      await setBranchArchived.mutateAsync({ name, archived });
+      toast.success(archived ? `Archived ${name}` : `Unarchived ${name}`);
+    } catch (e) {
+      onError(e);
+    }
+  }
+
+  async function doUnlockWorktree(path: string) {
+    try {
+      await unlockWorktree.mutateAsync(path);
+      toast.success("Worktree unlocked");
+    } catch (e) {
+      onError(e);
+    }
   }
 
   // Dispatch the actual checkout — remote-only targets track a specific remote,
-  // local targets use plain switch. Both share the guards in `switchTo`.
-  function runCheckout(
+  // local targets use plain switch. Both share the guards in `switchTo`. The
+  // failure handler stays per-CALLER: each one recovers differently.
+  async function runCheckout(
     target: { name: string; remote: string | null },
     opts?: { onError?: (e: unknown) => void },
   ) {
-    if (target.remote) {
-      checkoutRemote.mutate({ remote: target.remote, name: target.name }, opts);
-    } else {
-      checkout.mutate(target.name, opts);
+    try {
+      if (target.remote) {
+        await checkoutRemote.mutateAsync({
+          remote: target.remote,
+          name: target.name,
+        });
+      } else {
+        await checkout.mutateAsync(target.name);
+      }
+    } catch (e) {
+      opts?.onError?.(e);
     }
   }
 
@@ -743,14 +768,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       setSwitchTarget({ name, remote });
       return;
     }
-    runCheckout({ name, remote }, { onError });
+    void runCheckout({ name, remote }, { onError });
   }
 
   function bringAndSwitch() {
     if (!switchTarget) return;
     const target = switchTarget;
     setSwitchTarget(null);
-    runCheckout(target, {
+    void runCheckout(target, {
       onError: (e) => {
         // git refused to carry the changes over rather than failing outright —
         // re-open the choice with stashing pointed out, instead of a dead-end
@@ -775,7 +800,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const reapply = reapplyOnSwitch;
     setSwitchTarget(null);
     if (settings.data && settings.data.reapplyStashOnSwitch !== reapply) {
-      saveSettings.mutate({ ...settings.data, reapplyStashOnSwitch: reapply });
+      // Fire-and-forget, and deliberately silent: a preference that didn't
+      // persist must neither delay the switch nor report over its outcome.
+      void saveSettings
+        .mutateAsync({ ...settings.data, reapplyStashOnSwitch: reapply })
+        .catch(() => undefined);
     }
     try {
       const outcome = await switchAutostash.mutateAsync({
@@ -811,6 +840,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   async function doDelete() {
     if (!deleteTarget) return;
+    // The guard below reads not-blocked from the stand-in config while the rules
+    // are still loading, so it would pass vacuously — refuse instead of deleting
+    // a branch a settled rule protects.
+    if (rulesSettling) {
+      toast.error("Branch rules are still loading — try again in a moment");
+      setDeleteTarget(null);
+      return;
+    }
     // Belt-and-suspenders: the menu items are already disabled for protected
     // branches, but guard here too in case a rule changed under an open dialog.
     if (isDeletionBlocked(rulesConfig, deleteTarget)) {
@@ -863,6 +900,52 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
   }
 
+  async function doDeleteRemoteBranch() {
+    if (!remoteDeleteTarget) return;
+    const target = remoteDeleteTarget;
+    try {
+      await deleteRemoteBranch.mutateAsync(target);
+      toast.success(`Deleted ${target.name} on ${target.remote}`);
+    } catch (e) {
+      onError(e);
+    } finally {
+      setRemoteDeleteTarget(null);
+    }
+  }
+
+  async function doDiscardAll() {
+    try {
+      await discardAll.mutateAsync(undefined);
+      toast.success("All changes discarded");
+    } catch (e) {
+      onError(e);
+    } finally {
+      setDiscardAllOpen(false);
+    }
+  }
+
+  async function doStashAll() {
+    try {
+      await stashAll.mutateAsync(undefined);
+      toast.success("Changes stashed");
+    } catch (e) {
+      onError(e);
+    } finally {
+      setStashAllOpen(false);
+    }
+  }
+
+  async function doStashPop() {
+    try {
+      await stashPop.mutateAsync(undefined);
+      toast.success("Stash restored");
+    } catch (e) {
+      onError(e);
+    } finally {
+      setStashPopOpen(false);
+    }
+  }
+
   // The picker dialog seeds its own branch + options on open; the switcher only
   // flags which mode is active.
   function openPicker(mode: PickerMode) {
@@ -900,20 +983,20 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   // The dialog collects the branch + options; the switcher owns the mutations
   // (they feed `busy`) and dispatches them here after closing the picker.
-  function runPicker(
+  async function runPicker(
     mode: PickerMode,
     branch: string,
     options: MergeRunOptions,
   ) {
     setPickerMode(null);
     if (mode === "rebase") {
-      rebaseBranch.mutate(branch, {
-        onSuccess: () => toast.success(`Rebased onto ${branch}`),
-        onError: (e) => {
-          if (beginRebaseRecovery(e, branch)) return;
-          onError(e);
-        },
-      });
+      try {
+        await rebaseBranch.mutateAsync(branch);
+        toast.success(`Rebased onto ${branch}`);
+      } catch (e) {
+        if (beginRebaseRecovery(e, branch)) return;
+        onError(e);
+      }
     } else {
       const squash = mode === "squash";
       // Options apply to a regular merge only, not squash.
@@ -923,21 +1006,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       // only redo a merge that asked for nothing else — offering it for the
       // others would quietly drop the option the user chose.
       const plain = !squash && !noFf && strategy === "none";
-      mergeBranch.mutate(
-        { branch, squash, noFf, strategy },
-        {
-          onSuccess: () =>
-            toast.success(
-              squash
-                ? `Squashed ${branch} — changes are staged, review and commit`
-                : `Merged ${branch}`,
-            ),
-          onError: (e) => {
-            if (plain && beginMergeRecovery(e, branch)) return;
-            onError(e);
-          },
-        },
-      );
+      try {
+        await mergeBranch.mutateAsync({ branch, squash, noFf, strategy });
+        toast.success(
+          squash
+            ? `Squashed ${branch} — changes are staged, review and commit`
+            : `Merged ${branch}`,
+        );
+      } catch (e) {
+        if (plain && beginMergeRecovery(e, branch)) return;
+        onError(e);
+      }
     }
   }
 
@@ -960,7 +1039,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Proactive rather than error-triggered: the dialog already knows the tree is
   // dirty, and git would refuse before touching anything, so offering the
   // compound up front beats a round-trip that can only fail.
-  function runRebaseOnto(newBase: string, oldBase: string) {
+  async function runRebaseOnto(newBase: string, oldBase: string) {
     setRebaseOntoOpen(false);
     const request = {
       operationLabel: "rebase",
@@ -974,19 +1053,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       recovery.begin(request);
       return;
     }
-    rebaseOnto.mutate(
-      { newBase, oldBase },
-      {
-        onSuccess: () => toast.success(`Rebased onto ${newBase}`),
-        // `hasTrackedChanges` is a query-state read that can trail the tree: a
-        // file saved between the check and the run still deserves the offer, so
-        // a dirty refusal routes back into the same recovery.
-        onError: (e) => {
-          if (recovery.handleError(e, request)) return;
-          onError(e);
-        },
-      },
-    );
+    try {
+      await rebaseOnto.mutateAsync({ newBase, oldBase });
+      toast.success(`Rebased onto ${newBase}`);
+    } catch (e) {
+      // `hasTrackedChanges` is a query-state read that can trail the tree: a
+      // file saved between the check and the run still deserves the offer, so
+      // a dirty refusal routes back into the same recovery.
+      if (recovery.handleError(e, request)) return;
+      onError(e);
+    }
   }
 
   // A branch update only touches the working tree when it merges in place, i.e.
@@ -1008,45 +1084,43 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // it (unless it's already current): fast-forwards when possible, otherwise
   // merges via a throwaway worktree so the working tree — and its watchers —
   // stay put. A conflicting merge aborts and reports rather than switching.
-  function doUpdateFromDefault(target: string) {
+  async function doUpdateFromDefault(target: string) {
     if (!defaultName || target === defaultName) return;
     const base = defaultName;
     setOpen(false);
-    updateBranchFrom.mutate(
-      { branch: target, base },
-      {
-        onSuccess: (status) =>
-          toast.success(
-            status === "up-to-date"
-              ? `${target} is already up to date with ${base}`
-              : `Updated ${target} from ${base}`,
-          ),
-        onError: (e) => {
-          if (!beginUpdateRecovery(e, target, base)) onError(e);
-        },
-      },
-    );
+    try {
+      const outcome = await updateBranchFrom.mutateAsync({
+        branch: target,
+        base,
+      });
+      toast.success(
+        outcome === "up-to-date"
+          ? `${target} is already up to date with ${base}`
+          : `Updated ${target} from ${base}`,
+      );
+    } catch (e) {
+      if (!beginUpdateRecovery(e, target, base)) onError(e);
+    }
   }
 
   // Pull `target`'s own upstream (e.g. `origin/master`) into it without checking
   // it out — the "just merged a PR, bring master current before I switch back"
   // flow. Merges in place when `target` is current, fast-forwards otherwise.
-  function doUpdateFromUpstream(target: string, base: string) {
+  async function doUpdateFromUpstream(target: string, base: string) {
     setOpen(false);
-    updateBranchFrom.mutate(
-      { branch: target, base },
-      {
-        onSuccess: (status) =>
-          toast.success(
-            status === "up-to-date"
-              ? `${target} is already up to date with ${base}`
-              : `Updated ${target} from ${base}`,
-          ),
-        onError: (e) => {
-          if (!beginUpdateRecovery(e, target, base)) onError(e);
-        },
-      },
-    );
+    try {
+      const outcome = await updateBranchFrom.mutateAsync({
+        branch: target,
+        base,
+      });
+      toast.success(
+        outcome === "up-to-date"
+          ? `${target} is already up to date with ${base}`
+          : `Updated ${target} from ${base}`,
+      );
+    } catch (e) {
+      if (!beginUpdateRecovery(e, target, base)) onError(e);
+    }
   }
 
   // The remedy for a branch whose upstream already carries its changes under
@@ -1074,26 +1148,33 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       confirmVariant: "destructive",
     });
     if (!ok) return;
-    const done = {
-      onSuccess: () => toast.success(`Reset ${branch.name} to ${base}`),
-      onError,
-    };
-    if (branch.isCurrent) {
-      // The confirmation above spans an await, and HEAD can move under it — an
-      // out-of-app `git switch`, or the app's own checkout. `reset --hard` names
-      // no branch, so a moved HEAD would rewrite whatever is checked out NOW to a
-      // tip measured for a branch the user is no longer on. The ref reads live;
-      // the captured name is the only branch the confirmation described. Says so
-      // rather than returning quietly: the user just confirmed a destructive
-      // action, and silence there reads as "it worked". Wording kept in step with
-      // the sync controls' twin.
-      if (currentNameRef.current !== branch.name) {
-        toast.info("HEAD moved while the dialog was open — nothing was reset.");
-        return;
+    try {
+      if (branch.isCurrent) {
+        // The confirmation above spans an await, and HEAD can move under it — an
+        // out-of-app `git switch`, or the app's own checkout. `reset --hard`
+        // names no branch, so a moved HEAD would rewrite whatever is checked out
+        // NOW to a tip measured for a branch the user is no longer on. The ref
+        // reads live; the captured name is the only branch the confirmation
+        // described. Says so rather than returning quietly: the user just
+        // confirmed a destructive action, and silence there reads as "it
+        // worked". Wording kept in step with the sync controls' twin.
+        if (currentNameRef.current !== branch.name) {
+          toast.info(
+            "HEAD moved while the dialog was open — nothing was reset.",
+          );
+          return;
+        }
+        await hardReset.mutateAsync(tip);
+      } else {
+        await resetToUpstream.mutateAsync({
+          branch: branch.name,
+          expectedTip: tip,
+        });
       }
-      hardReset.mutate(tip, done);
-    } else
-      resetToUpstream.mutate({ branch: branch.name, expectedTip: tip }, done);
+      toast.success(`Reset ${branch.name} to ${base}`);
+    } catch (e) {
+      onError(e);
+    }
   }
 
   // Push a branch's ref without checking it out — the outbound counterpart of
@@ -1103,7 +1184,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // the backend resolves to the branch's own upstream remote.
   function doPushBranch(branch: Branch, remote?: string) {
     setOpen(false);
-    if (branch.upstream && !branch.upstreamGone) runPushBranch(branch, remote);
+    if (branch.upstream && !branch.upstreamGone)
+      void runPushBranch(branch, remote);
     else void beginPublishBranch(branch, remote);
   }
 
@@ -1118,23 +1200,25 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
     setDetecting(false);
     if (match) setForkGuard({ match, branch, remote });
-    else runPushBranch(branch, remote);
+    else void runPushBranch(branch, remote);
   }
 
-  function runPushBranch(branch: Branch, remote?: string) {
+  async function runPushBranch(branch: Branch, remote?: string) {
     const publishing = !branch.upstream || branch.upstreamGone;
-    push.mutate(
-      { setUpstream: false, branch: branch.name, remote },
-      {
-        onSuccess: () =>
-          toast.success(
-            publishing
-              ? `Published ${branch.name} to ${remote ?? "origin"}`
-              : `Pushed ${branch.name} to ${branch.upstream}`,
-          ),
-        onError,
-      },
-    );
+    try {
+      await push.mutateAsync({
+        setUpstream: false,
+        branch: branch.name,
+        remote,
+      });
+      toast.success(
+        publishing
+          ? `Published ${branch.name} to ${remote ?? "origin"}`
+          : `Pushed ${branch.name} to ${branch.upstream}`,
+      );
+    } catch (e) {
+      onError(e);
+    }
   }
 
   const busy =
@@ -1256,7 +1340,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   });
   useHotkeyAction(
     "update-from-default",
-    () => currentName && doUpdateFromDefault(currentName),
+    () => {
+      if (currentName) void doUpdateFromDefault(currentName);
+    },
     Boolean(defaultName && defaultName !== currentName && !busy),
   );
   const defaultBranchRow = allBranches.find((b) => b.name === defaultName);
@@ -1291,7 +1377,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         return;
       }
     }
-    doUpdateFromUpstream(row.name, row.upstream);
+    void doUpdateFromUpstream(row.name, row.upstream);
   }
   useHotkeyAction(
     "update-default-from-upstream",
@@ -1727,7 +1813,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               {canUpdate && (
                 <ContextMenuItem
                   disabled={busy}
-                  onClick={() => doUpdateFromDefault(branch.name)}
+                  onClick={() => void doUpdateFromDefault(branch.name)}
                 >
                   Update from {defaultName}
                 </ContextMenuItem>
@@ -1774,7 +1860,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   return (
                     <ContextMenuItem
                       disabled={busy}
-                      onClick={() => doUpdateFromUpstream(branch.name, base)}
+                      onClick={() =>
+                        void doUpdateFromUpstream(branch.name, base)
+                      }
                     >
                       Update from {base}
                     </ContextMenuItem>
@@ -1833,7 +1921,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           </ContextMenuItem>
           <ContextMenuItem
             disabled={archiveBlockedReason !== null}
-            onClick={() => setArchived(branch.name, !branch.archived)}
+            onClick={() => void setArchived(branch.name, !branch.archived)}
           >
             {archiveBlockedReason === null
               ? archiveLabel
@@ -2194,11 +2282,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                                   // re-renders it.
                                   if (refuseWhileLeaving(w.path, isRemoving))
                                     return;
-                                  unlockWorktree.mutate(w.path, {
-                                    onSuccess: () =>
-                                      toast.success("Worktree unlocked"),
-                                    onError,
-                                  });
+                                  void doUnlockWorktree(w.path);
                                 }}
                               >
                                 {itemLabel("Unlock")}
@@ -2350,9 +2434,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     defaultName === currentName ||
                     busy
                   }
-                  onClick={() =>
-                    currentName && doUpdateFromDefault(currentName)
-                  }
+                  onClick={() => {
+                    if (currentName) void doUpdateFromDefault(currentName);
+                  }}
                 >
                   Update from {defaultName ?? "default branch"}
                 </MenuRow>
@@ -2435,6 +2519,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         defaultBranch={defaultName}
         currentBranch={currentName}
         isProtected={(name) => isDeletionBlocked(rulesConfig, name)}
+        // Until both rules scopes land, `isProtected` excludes nothing, so the
+        // dialog holds its list rather than offering a branch a rule refuses.
+        rulesSettling={rulesSettling}
         isInWorktree={(name) => worktreeByBranch.has(name)}
         // From the removal store, not the worktree read: `isInWorktree` still
         // matches a worktree git lists until its removal finishes, and that
@@ -2502,20 +2589,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         confirmLabel="Delete"
         confirmVariant="destructive"
         pending={deleteRemoteBranch.isPending}
-        onConfirm={() => {
-          if (!remoteDeleteTarget) return;
-          const target = remoteDeleteTarget;
-          deleteRemoteBranch.mutate(target, {
-            onSuccess: () => {
-              toast.success(`Deleted ${target.name} on ${target.remote}`);
-              setRemoteDeleteTarget(null);
-            },
-            onError: (e) => {
-              onError(e);
-              setRemoteDeleteTarget(null);
-            },
-          });
-        }}
+        onConfirm={doDeleteRemoteBranch}
       />
 
       <DeleteWorktreeDialog
@@ -2569,18 +2643,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         confirmLabel="Discard all"
         confirmVariant="destructive"
         pending={discardAll.isPending}
-        onConfirm={() =>
-          discardAll.mutate(undefined, {
-            onSuccess: () => {
-              toast.success("All changes discarded");
-              setDiscardAllOpen(false);
-            },
-            onError: (e) => {
-              onError(e);
-              setDiscardAllOpen(false);
-            },
-          })
-        }
+        onConfirm={doDiscardAll}
       />
 
       <ConfirmDialog
@@ -2592,18 +2655,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         }
         confirmLabel="Stash changes"
         pending={stashAll.isPending}
-        onConfirm={() =>
-          stashAll.mutate(undefined, {
-            onSuccess: () => {
-              toast.success("Changes stashed");
-              setStashAllOpen(false);
-            },
-            onError: (e) => {
-              onError(e);
-              setStashAllOpen(false);
-            },
-          })
-        }
+        onConfirm={doStashAll}
       />
 
       <ConfirmDialog
@@ -2613,18 +2665,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         body="Applies the most recent stash to your working tree and removes it from the stash list. If applying conflicts, the stash is kept."
         confirmLabel="Pop stash"
         pending={stashPop.isPending}
-        onConfirm={() =>
-          stashPop.mutate(undefined, {
-            onSuccess: () => {
-              toast.success("Stash restored");
-              setStashPopOpen(false);
-            },
-            onError: (e) => {
-              onError(e);
-              setStashPopOpen(false);
-            },
-          })
-        }
+        onConfirm={doStashPop}
       />
 
       <BranchMergePickerDialog
@@ -2655,7 +2696,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         onClose={() => setForkGuard(null)}
         onPublishAnyway={() => {
           setForkGuard(null);
-          if (forkGuard) runPushBranch(forkGuard.branch, forkGuard.remote);
+          if (forkGuard) void runPushBranch(forkGuard.branch, forkGuard.remote);
         }}
       />
 
