@@ -698,16 +698,15 @@ export function rerunAutomation(
   const noun = event.kind === "commit" ? "commit" : "pull request";
   void (async () => {
     try {
-      // The dismissal clear below mutates BEFORE run()'s own pause gate, so a paused
-      // re-run has to stop here — clearing nothing and running nothing.
-      if ((await loadSettings()).hideAi) {
-        toast.info("Automations are paused while AI features are hidden.");
-        return;
-      }
-      // Same reason: the clear below runs before run()'s cold-start gate, so an
-      // automations-off cold instance stops here rather than consuming the watermark.
+      // The dismissal clear below mutates BEFORE run()'s own pause gates, so a paused
+      // re-run has to stop here — clearing nothing and running nothing. The cold-start
+      // gate comes first, like run()'s: a gated cold instance reads no store at all.
       if (COLD_START_AUTOMATIONS_OFF) {
         toast.info("Automations are off in cold-start test mode.");
+        return;
+      }
+      if ((await loadSettings()).hideAi) {
+        toast.info("Automations are paused while AI features are hidden.");
         return;
       }
       // Best-effort ONLY here: a cleared-dismissal failure must not block the

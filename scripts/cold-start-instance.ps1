@@ -106,13 +106,13 @@ $attached = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'
     if ($_.CommandLine -notmatch '--user-data-dir=(?:"([^"]*)"|(\S+))') { return $false }
     $val = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
     $val = $val.TrimEnd('\', '/').ToLowerInvariant()
-    $root = if ($val.EndsWith('\ebwebview')) { $val.Substring(0, $val.Length - 10) } else { $val }
+    $root = if ($val.EndsWith('\ebwebview')) { $val.Substring(0, $val.Length - '\ebwebview'.Length) } else { $val }
     $val -eq $dataRootKey -or
     $val.StartsWith("$dataRootKey\") -or
     ($root -split '[\\/]')[-1] -eq $defaultLeaf
   })
 if ($attached.Count -gt 0) {
-  throw "A WebView2 process (pid $($attached[0].ProcessId)) already owns $DataRoot. Launching now would attach to that instance's browser instead of opening -DebugPort $DebugPort. Use a different -Id, or close that instance first."
+  throw "A WebView2 process (pid $($attached[0].ProcessId)) already owns a profile for -Id '$Id' ($DataRoot, or another folder named gd-coldstart-$Id). Launching now would attach to that instance's browser instead of opening -DebugPort $DebugPort. Use a different -Id, or close that instance first."
 }
 
 # Start-Process snapshots the child's env at spawn, so clearing after it is safe, and it
