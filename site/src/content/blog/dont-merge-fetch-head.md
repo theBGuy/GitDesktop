@@ -182,11 +182,10 @@ $ git reflog -3
 f0995ba HEAD@{2}: clone: from …/origin.git
 ```
 
-The newest entry is the merge, logged against a raw hash — there was
-no branch name for it to record. The line under it is where you
-stood, and ORIG_HEAD points at the same place (Git set it just
-before the merge moved you). With a clean tree, straight after the
-merge, returning is one command:
+The newest entry is the merge, logged against a raw hash. The line
+under it is where you stood, and ORIG_HEAD points at the same place
+(Git set it just before the merge moved you). With a clean tree,
+straight after the merge, returning is one command:
 
 ```sh
 $ git reset --hard ORIG_HEAD
@@ -205,42 +204,45 @@ hard reset of its own, and that repoints ORIG_HEAD at the bad merge,
 turning the reset above into a no-op. So copy the hash from the
 reflog line under the merge first, then `git stash --include-untracked`,
 then `git reset --hard` to the copied hash, then `git stash pop`
-once you're back. The copied-hash form is also the fallback whenever
-ORIG_HEAD has been repointed by anything else that ran in between (a
-rebase, a reset, that stash); the reflog keeps answering after
-ORIG_HEAD has moved on.
+once you're back. If the pop lands in a conflict (your edits overlap
+a file the merge changed), the stash entry is kept: resolve the
+markers, then `git stash drop`. The copied-hash form is also the
+fallback whenever ORIG_HEAD has been repointed by anything that ran
+in between (a rebase, a reset, that stash); the reflog keeps
+answering after ORIG_HEAD has moved on.
 
 One more exit: if you'd already built commits on top of the bad
-merge, a hard reset discards those as well. Write down their hashes
-before resetting and `git cherry-pick` them back, oldest first — or
-skip the reset entirely and merge the branch you actually meant on
-top; the next section gives it a name.
+merge, a hard reset takes those off the branch as well. Write down
+their hashes before resetting and `git cherry-pick` them back,
+oldest first — or skip the reset entirely and merge the branch you
+actually meant on top; the refspec fix below gives it a name.
 
 ## One file, last writer wins
 
-All of it is one mechanism. `.git/FETCH_HEAD` is a single file, and
-every fetch in the clone rewrites the whole thing; you've already
-met the cast that might run one. Each line is one ref the fetch
-brought, and the second column marks it either as a merge candidate
-(the empty slot you saw) or `not-for-merge`. Name a branch in the
-fetch command and that branch is the candidate. Run a bare
-`git fetch origin` and the candidate is whatever your current
-branch's configured upstream is. `git merge FETCH_HEAD` merges the
-candidate lines and nothing else; on a branch with no upstream,
-where a bare fetch marks every line `not-for-merge`, it merges
-nothing at all and still prints "Already up to date".
+All of it is one mechanism. `.git/FETCH_HEAD` is one file per
+checkout (a linked worktree keeps its own copy), and every fetch in
+that checkout rewrites the whole thing; you've already met the cast.
+Each line is one ref the fetch brought, and the second column
+marks it either as a merge candidate (the empty slot you saw) or
+`not-for-merge`. Name a branch in the fetch command and that
+branch is the candidate. Run a bare `git fetch origin` and the
+candidate is whatever your current branch's configured upstream
+is. `git merge FETCH_HEAD` merges the candidate lines and nothing
+else; on a branch with no upstream, where a bare fetch marks every
+line `not-for-merge`, it merges nothing at all and still prints
+"Already up to date".
 
-So the old two-command pattern decodes as: merge whatever the most
-recent fetch, run by anyone, was told to bring. When those
+So the old two-command pattern decodes as: merge whatever this
+checkout's most recent fetch, run by anyone, was told to bring. When those
 instructions were first written, you were usually the only fetcher
 on the machine. What changed isn't the file; it's how much software
 now fetches on your behalf.
 
 ## Give the fetch a destination
 
-The fix is to stop treating the note as a name. Tell the fetch where
-to put what it brings, with the same colon refspec that
-[updates a branch you're not on](/blog/update-a-branch-without-checking-it-out/):
+The fix is to stop treating the note as a name. Tell the fetch where to
+put what it brings, with exactly the same colon refspec that [updates a
+branch you're not on](/blog/update-a-branch-without-checking-it-out/):
 
 ```sh
 $ git fetch …/fork.git retry-backoff:pr-retry-backoff
@@ -274,14 +276,15 @@ The backoff commit is in your history at last, under a subject line
 that names what you merged. Delete `pr-retry-backoff` with
 `git branch -d` when the review is done; if you decided against
 merging, `-d` will refuse, and that refusal is Git guarding unmerged
-commits (`-D` deletes them once you mean it). If you'd rather not
-make a branch at all, the narrower fix is to read the receipt before
-anything else rewrites it: `cat .git/FETCH_HEAD` right after the
-fetch, confirm the line shows their branch, then merge the hash on
-it. That narrows the race without closing it, and a merge by bare
-hash records a subject with no branch name in it; the refspec keeps
-the name. Both fixes are one idea: merge against something the next
-fetch can't rewrite.
+commits (deleting anyway takes `-D`). If you'd rather not make a
+branch at all, the narrower fix is to read the receipt before
+anything else rewrites it: right after the fetch, run the command
+`cat "$(git rev-parse --git-path FETCH_HEAD)"` (in a plain clone
+that's just `.git/FETCH_HEAD`), confirm the line shows their
+branch, then merge the hash on it. That narrows the race without
+closing it, and a merge by bare hash records a subject with no
+branch name in it; the refspec keeps the name. Both fixes are one
+idea: merge against something the next fetch can't rewrite.
 
 ```sh
 $ git status -sb
