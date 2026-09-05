@@ -1448,18 +1448,19 @@ controls how much diff and prior-discussion context reviews send — **Auto** fi
 reviewing model's context window (probing Ollama live), or pick Compact / Standard /
 Expanded. **Review effort** (shown when Claude Code, GitHub Copilot, or opencode drives
 reviews or security audits) picks how hard the reviewer thinks: **Default** keeps the
-CLI's own setting, or choose **Low** through **Max** for a lighter or deeper pass. Codex
-and the API providers always run at their own defaults. **Review timeout** (shown
-when an agent CLI drives reviews or security audits)
-caps how long such a review may run before it's stopped: **Auto** allows 5 minutes (20 when
-the review is agentic — always, for Codex), or pin a fixed limit that applies to every
-agent-CLI review. Whatever the reviewer already wrote is kept when the limit hits, for an
-automated pull-request review as much as one you started yourself: it stays on screen and is saved with
-the pull request, labelled **Timed out — partial output kept**, so it's still there after a
-restart. It also gets its own row under **Previous reviews**, where you can read, copy, or
-delete it like any other record. Kept output is never treated as a finished review — it
-doesn't feed the next run's context and doesn't count as coverage for an automated review,
-so run it again for a full one.
+CLI's own setting, or choose **Low** through **Max** for a lighter or deeper pass. A deeper
+pass takes longer, so pair a high effort with a roomier **Review timeout**. Codex and the
+API providers always run at their own defaults. **Review timeout** (shown when an agent
+CLI drives reviews or security audits) caps how long such a review may run before it's
+stopped: **Auto** allows 5 minutes (20 when the review is agentic — always, for Codex), or
+pin a fixed limit that applies to every agent-CLI review. Whatever the reviewer already
+wrote is kept when the limit hits, for an automated pull-request review as much as one
+you started yourself: it stays on screen and is saved with the pull request, labelled
+**Timed out — partial output kept**, so it's still there after a restart. It also gets
+its own row under **Previous reviews**, where you can read, copy, or delete it like any
+other record. Kept output is never treated as a finished review — it doesn't feed the
+next run's context and doesn't count as coverage for an automated review, so run it
+again for a full one.
 
 **Critical** is the top severity an audit finding can carry — remote code execution,
 execution triggered by content you only clone or open, full compromise, or a mass data

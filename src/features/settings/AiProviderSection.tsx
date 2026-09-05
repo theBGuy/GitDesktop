@@ -690,10 +690,13 @@ export const AiProviderSection = withForm({
       form.store,
       (s) => s.values.reviewTimeout ?? "auto",
     );
-    const reviewEffort = useSelector(
-      form.store,
-      (s) => s.values.reviewEffort ?? "auto",
-    );
+    // Render-coerce junk from a hand-edited settings.json to "auto" so the
+    // trigger shows what the run will actually do (reviewEffortLevel treats
+    // unknown values as ""); the stored value heals on the next pick.
+    const reviewEffort = useSelector(form.store, (s) => {
+      const v = s.values.reviewEffort;
+      return v && REVIEW_EFFORTS.includes(v) ? v : "auto";
+    });
     // `undefined` = Auto (no explicit default; new runs follow `ai.provider`).
     const defaultAgent = useSelector(form.store, (s) => s.values.defaultAgent);
     const agentIsolation = useSelector(
