@@ -5,9 +5,9 @@
 
 .DESCRIPTION
   Boots `pnpm tauri dev` with the cold-start Vite flags set. The app then reads
-  and writes only throwaway namespaces (coldstart-*.json store files + a
-  `coldstart:` keychain namespace), so your real settings, local PRs, and API
-  keys are never touched.
+  and writes only throwaway namespaces: coldstart-*.json store files, and API keys
+  held in sessionStorage instead of the OS keychain. Your real settings, local PRs
+  and API keys are never touched.
 
   Run a fresh repo (e.g. `git init` in a temp folder) inside it to see the
   unborn-repo "Make your first commit" state. Use -NoGit / -NoGh to exercise the
@@ -60,7 +60,7 @@ if ($Reset) {
   } else {
     Write-Host "No cold-start store files to clear in $dataDir" -ForegroundColor Yellow
   }
-  Write-Host "Note: any test API keys live in the 'coldstart:' keychain namespace; clear them from the app's AI settings while in cold-start mode."
+  Write-Host "Note: test API keys never reach the OS keychain; they live in sessionStorage and are gone the moment the cold-start window closes."
   return
 }
 
@@ -71,6 +71,9 @@ if ($NoGh) { $env:VITE_COLD_START_NO_GH = "1" }
 else { Remove-Item Env:\VITE_COLD_START_NO_GH -ErrorAction SilentlyContinue }
 if ($Automations) { $env:VITE_COLD_START_AUTOMATIONS = "1" }
 else { Remove-Item Env:\VITE_COLD_START_AUTOMATIONS -ErrorAction SilentlyContinue }
+# A sibling launch may have left an id in this shell; the primary instance must not
+# adopt it. WEBVIEW2_* stay untouched: operators set those to get a CDP port here.
+Remove-Item Env:\GD_INSTANCE_ID -ErrorAction SilentlyContinue
 
 Write-Host "Launching GitDesktop in COLD-START test mode" -ForegroundColor Cyan
 Write-Host "  NoGit = $NoGit   NoGh = $NoGh   Automations = $Automations" -ForegroundColor Cyan

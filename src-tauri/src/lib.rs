@@ -12,6 +12,9 @@ mod git;
 mod github;
 mod health;
 mod hooks;
+// Dev-only, like the cold-start mode it serves: gated so release builds carry no
+// unused reader (and no dead_code warning for it).
+#[cfg(debug_assertions)]
 mod instance_id;
 mod instructions;
 mod jira_field_maps;
@@ -60,6 +63,7 @@ pub fn run() {
     // off the upstream invoke script's trailing newline for statement separation.
     // This script runs before any page script, so the frontend reads the global
     // synchronously at module scope.
+    #[cfg(debug_assertions)]
     let builder = match instance_id::read() {
         Some(id) => builder.append_invoke_initialization_script(format!(
             "\nwindow.__GD_INSTANCE_ID__ = \"{id}\";"

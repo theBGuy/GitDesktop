@@ -243,27 +243,28 @@ interface RunOutcome {
 }
 
 /**
- * Runs the automation rules matching `event`, unless AI features are hidden — that
- * pauses automations, so it returns immediately with a zero outcome. `only` scopes a
- * re-run to a single mode. `replacesKey` is the stopped row a re-run replaces — removed
- * the instant its replacement registers, so the stopped row survives whenever nothing
- * registers. Returns a {@link RunOutcome} so a re-run can tell "rule gone" from
- * "blocked" from "started".
+ * Runs the automation rules matching `event`, unless AI features are hidden or this is
+ * a cold-start instance without the automations opt-in — either pauses automations, so
+ * it returns immediately with a zero outcome. `only` scopes a re-run to a single mode.
+ * `replacesKey` is the stopped row a re-run replaces — removed the instant its
+ * replacement registers, so the stopped row survives whenever nothing registers.
+ * Returns a {@link RunOutcome} so a re-run can tell "rule gone" from "blocked" from
+ * "started".
  */
 async function run(
   event: AutomationEvent,
   only?: ReviewMode,
   replacesKey?: string,
 ): Promise<RunOutcome> {
+  // Cold-start instances share the automation-claims dir with the real instance, so an
+  // armed cold instance can win a claim meant for the real run and suppress it. First
+  // gate of all, so a gated tick reads no store at all and takes no claim.
+  if (COLD_START_AUTOMATIONS_OFF) return { matched: 0, attempted: 0 };
   // Hiding AI features PAUSES automations: no NEW run starts while `hideAi` is set
   // (an in-flight run still completes and delivers — deliberate). Rules are kept and
   // resume when AI is shown again.
   const settings = await loadSettings();
   if (settings.hideAi) return { matched: 0, attempted: 0 };
-  // Cold-start instances share the automation-claims dir with the real instance, so an
-  // armed cold instance can win a claim meant for the real run and suppress it. Gate
-  // before loadAutomations() so a gated tick reads no config and takes no claim.
-  if (COLD_START_AUTOMATIONS_OFF) return { matched: 0, attempted: 0 };
   const config = await loadAutomations();
   const repo = await repoAutomationsFor(config, event.repoPath);
   const actions = effectiveActions(config, repo, event.kind);
@@ -684,8 +685,9 @@ async function run(
  * cancelled run wrote one, and the pr-sync `sameSha(dismissedHead, headSha)` gate would
  * otherwise make the re-run a silent no-op. The run then flows through the normal pipeline
  * scoped to `only`. If the rule was disabled since, nothing matches and we toast rather
- * than leave a dead button. While AI features are hidden it stops before the clear —
- * a paused re-run must not consume the watermark.
+ * than leave a dead button. While AI features are hidden — or in a cold-start instance
+ * that never opted automations in — it stops before the clear: a paused re-run must not
+ * consume the watermark.
  */
 export function rerunAutomation(
   event: AutomationEvent,

@@ -28,6 +28,11 @@ fn valid_instance_id(s: &str) -> bool {
 /// The launcher-supplied instance id, or `None` when unset, blank or invalid.
 /// Never fails: an unusable id must leave the instance on the shared `coldstart-`
 /// namespace rather than break the boot path that reads it.
+///
+/// The trim is the one canonicalization step every consumer downstream of the env
+/// var inherits. Validating the raw value instead would drop a whitespace-padded id
+/// onto the SHARED legacy namespace — a worse collision than converging on the id
+/// the operator plainly meant.
 pub fn read() -> Option<String> {
     let raw = std::env::var("GD_INSTANCE_ID").ok()?;
     let id = raw.trim();

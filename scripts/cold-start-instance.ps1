@@ -41,7 +41,9 @@
 
 .PARAMETER DevPort
   Port the cold-start Vite server is already serving on. Defaults to 1420; a worktree
-  build serves its own port, so pass -DevPort 1430 for one of those.
+  build serves its own port, so pass -DevPort 1430 for one of those. The exe's
+  dev-server URL is baked in at build time (tauri.conf devUrl), so this has to be the
+  port THAT exe was built against; the check only proves a server answers there.
 
 .PARAMETER ExePath
   The already-built debug exe. Defaults to src-tauri\target\debug\gitdesktop.exe.
@@ -50,6 +52,9 @@
 
 .PARAMETER DataRoot
   WebView2 user-data folder for this instance. Defaults to %TEMP%\gd-coldstart-<Id>.
+  Passing an explicit one while reusing an -Id that is already running forfeits the
+  double-launch guard, and both instances then share the same coldstart-<Id>-*.json
+  stores.
 
 .EXAMPLE
   ./scripts/cold-start-instance.ps1 -Id b -DebugPort 9223
@@ -91,32 +96,44 @@ if (-not (Get-NetTCPConnection -LocalPort $DevPort -State Listen -ErrorAction Si
 # live one silently attaches to that instance and this -DebugPort never opens. The
 # compare is extracted-arg equality or separator-bounded prefix (the browser appends
 # \EBWebView), never substring: gd-coldstart-b must not match inside gd-coldstart-b2.
+# The leaf arm catches the same id relaunched under a different parent path (another
+# TEMP, a moved default), where the resolved root no longer matches.
 $dataRootKey = $DataRoot.TrimEnd('\', '/').ToLowerInvariant()
+$defaultLeaf = "gd-coldstart-$Id".ToLowerInvariant()
 $attached = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue |
   Where-Object {
     if (-not $_.CommandLine) { return $false }
     if ($_.CommandLine -notmatch '--user-data-dir=(?:"([^"]*)"|(\S+))') { return $false }
     $val = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
     $val = $val.TrimEnd('\', '/').ToLowerInvariant()
-    $val -eq $dataRootKey -or $val.StartsWith("$dataRootKey\")
+    $root = if ($val.EndsWith('\ebwebview')) { $val.Substring(0, $val.Length - 10) } else { $val }
+    $val -eq $dataRootKey -or
+    $val.StartsWith("$dataRootKey\") -or
+    ($root -split '[\\/]')[-1] -eq $defaultLeaf
   })
 if ($attached.Count -gt 0) {
   throw "A WebView2 process (pid $($attached[0].ProcessId)) already owns $DataRoot. Launching now would attach to that instance's browser instead of opening -DebugPort $DebugPort. Use a different -Id, or close that instance first."
 }
 
-$env:GD_INSTANCE_ID = $Id
-$env:WEBVIEW2_USER_DATA_FOLDER = $DataRoot
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$DebugPort"
+# Start-Process snapshots the child's env at spawn, so clearing after it is safe, and it
+# has to happen: a later cold-start.ps1 in this shell would inherit a sibling's identity.
+# The finally is what makes that reliable: with $ErrorActionPreference = "Stop", a
+# Start-Process that throws (the watcher mid-relink, say) would otherwise leave all three
+# behind in the operator's shell.
+$proc = $null
+try {
+  $env:GD_INSTANCE_ID = $Id
+  $env:WEBVIEW2_USER_DATA_FOLDER = $DataRoot
+  $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$DebugPort"
 
-# Hidden hides only the console (debug exes are console-subsystem; the GUI window
-# shows itself regardless). Sibling stdout is lost; the watcher instance keeps logs.
-$proc = Start-Process $ExePath -WindowStyle Hidden -PassThru
-
-# Start-Process snapshots the child's env at spawn, so clearing now is safe, and it has
-# to happen: a later cold-start.ps1 in this shell would inherit a sibling's identity.
-Remove-Item Env:\GD_INSTANCE_ID -ErrorAction SilentlyContinue
-Remove-Item Env:\WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
-Remove-Item Env:\WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+  # Hidden hides only the console (debug exes are console-subsystem; the GUI window
+  # shows itself regardless). Sibling stdout is lost; the watcher instance keeps logs.
+  $proc = Start-Process $ExePath -WindowStyle Hidden -PassThru
+} finally {
+  Remove-Item Env:\GD_INSTANCE_ID -ErrorAction SilentlyContinue
+  Remove-Item Env:\WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
+  Remove-Item Env:\WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+}
 
 Write-Host "Launched cold-start instance '$Id'" -ForegroundColor Cyan
 Write-Host "  pid        = $($proc.Id)"

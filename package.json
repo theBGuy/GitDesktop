@@ -16,6 +16,7 @@
     "release:prepare": "node scripts/changelog-release.mjs",
     "release": "node scripts/release.mjs",
     "cold-start": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/cold-start.ps1",
+    "cold-start-instance": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/cold-start-instance.ps1",
     "tauri": "tauri",
     "dev:site": "pnpm --filter site dev",
     "build:site": "pnpm --filter site build"
