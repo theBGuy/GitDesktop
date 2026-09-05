@@ -97,8 +97,9 @@ export function useCommitSubmit(
     !locked &&
     !rulesSettling;
   const canGenerate = aiEnabled && aiConfigured && stagedCount > 0;
-  // Why Commit is refused, most-blocking first: a branch rule nothing the user
-  // types can lift, then the missing title, then the empty stage.
+  // Why Commit is refused, most-blocking first: the still-unread rules, then a
+  // branch rule nothing the user types can lift, then the missing title, then
+  // the empty stage.
   const commitDisabledReason = ((): string | null => {
     switch (true) {
       case rulesSettling:

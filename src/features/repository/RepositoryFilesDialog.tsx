@@ -472,6 +472,10 @@ export function RepositoryFilesDialog({
     // Defensive — the offer path already filters. Kept so a future caller can't
     // reopen the device read that aborts the whole pathspec batch.
     const stageable = paths.filter((p) => reservedDeviceName(p) === null);
+    if (stageable.length === 0) {
+      setPending(null);
+      return;
+    }
     try {
       await forceAdd.mutateAsync(stageable.map(literalPathspec));
       toast.success(
@@ -979,13 +983,13 @@ export function RepositoryFilesDialog({
             <Button
               disabled={busy}
               onClick={() => {
-                if (pending?.kind === "untrack") runUntrack(pending.paths);
+                if (pending?.kind === "untrack") void runUntrack(pending.paths);
                 else if (pending?.kind === "forceAdd")
-                  runForceAdd(pending.paths);
+                  void runForceAdd(pending.paths);
                 else if (pending?.kind === "removeRule")
-                  runRemoveRules(pending.rules);
+                  void runRemoveRules(pending.rules);
                 else if (pending?.kind === "removeAiRule")
-                  runRemoveAiRules(pending.rules);
+                  void runRemoveAiRules(pending.rules);
               }}
             >
               {shownPending && PENDING_COPY[shownPending.kind].confirm}
