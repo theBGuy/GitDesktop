@@ -348,6 +348,14 @@ export const gitFileBase64 = (
   filePath: string,
 ) => invoke<string | null>("git_file_base64", { repoPath, rev, filePath });
 
+/** Decode base64 file bytes (from git_file_base64) to a UTF-8 string. */
+export function decodeBase64Utf8(b64: string): string {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
 export const gitApplyPatch = (
   repoPath: string,
   patch: string,

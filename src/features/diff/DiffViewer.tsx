@@ -73,6 +73,12 @@ import {
 } from "./DiffSurface";
 import { fileExt } from "./diff-lang";
 import { ImagePanes } from "./ImageDiff";
+import {
+  type MarkdownDiffView,
+  MarkdownDocPreview,
+  MarkdownViewToggle,
+} from "./MarkdownPreview";
+import { isMarkdownPath } from "./markdown-preview";
 import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
 import { useHiddenTriggerFocus } from "./use-hidden-trigger-focus";
 
@@ -203,6 +209,9 @@ function WorkingTreeDiff({
   // the trigger under @md like the read-only surface does, so below that width
   // the action is the only route to it.
   const [langOpen, setLangOpen] = useState(false);
+  // Raw ⇄ Preview for markdown/MDX. Never persisted, and this component is
+  // keyed per file, so every file opens on Raw.
+  const [mdView, setMdView] = useState<MarkdownDiffView>("raw");
   const {
     wrapRef: langWrapRef,
     controlsRef,
@@ -245,6 +254,11 @@ function WorkingTreeDiff({
     selectionState !== null && selectionState.forText === diff.data?.text
       ? selectionState.lines
       : null;
+  // Preview swaps the staging view out entirely, so the selection actions and
+  // the toggle can never be on screen together (the selection arm owns the
+  // whole cluster while a drag selection exists).
+  const canPreview = hunkMode && isMarkdownPath(file.path);
+  const previewOn = canPreview && mdView === "preview";
   // One contextual chord: stage the selection on an unstaged file's diff,
   // unstage it on a staged one — mirroring the toolbar's primary button. Dead
   // while the Discard confirm is open (the global listener has no dialog guard)
@@ -267,7 +281,15 @@ function WorkingTreeDiff({
   useHotkeyAction(
     "change-diff-language",
     () => setLangOpen(true),
-    hunkMode && selection === null && Boolean(fileExt(file.path)),
+    // In Preview the picker isn't mounted, so the action would open nothing.
+    hunkMode && selection === null && !previewOn && Boolean(fileExt(file.path)),
+  );
+  // Inert while a selection or the Discard confirm is up — the selection arm
+  // owns the cluster, and the global listener has no dialog guard.
+  useHotkeyAction(
+    "toggle-markdown-preview",
+    () => setMdView((v) => (v === "raw" ? "preview" : "raw")),
+    canPreview && selection === null && discard === null,
   );
   // Any Discard confirm's `run` captured line numbers (or a hunk) at open
   // time — close it the moment the diff text moves on from the text it was
@@ -351,6 +373,15 @@ function WorkingTreeDiff({
       { onError, onSuccess: clearSelection },
     );
   }
+
+  // Full-text revs aligned to the diff's actual sides: staged = HEAD↔index,
+  // unstaged = index↔worktree, added = worktree only. One pair feeds both the
+  // staging view's highlight context and the markdown preview.
+  const workingRevs: DiffContentRevs = untracked
+    ? { newRev: null }
+    : file.staged
+      ? { oldRev: "HEAD", newRev: ":0" }
+      : { oldRev: ":0", newRev: null };
 
   // A whole-hunk action, fired by the per-hunk overlay buttons.
   function onHunkAction(hunk: DiffHunk, kind: "stage" | "unstage" | "discard") {
@@ -476,27 +507,38 @@ function WorkingTreeDiff({
             </>
           ) : (
             <>
-              {/* Same treatment as the read-only surface's toolbar: the picker
-                  is this row's only variable-width control (its label follows
-                  the language name), so it goes under @md to give the row a
-                  fixed floor — but stays laid out while its popup is open,
-                  since Base UI anchors to the trigger and a display:none
-                  trigger positions the popup at 0,0. `empty:hidden` keeps the
-                  row's gap off an extensionless file. */}
-              <span
-                ref={langWrapRef}
-                className="hidden @md/staging-pane:flex empty:hidden has-[[data-popup-open]]:flex"
-              >
-                <DiffLanguagePicker
-                  filePath={file.path}
-                  open={langOpen}
-                  onOpenChange={(open) => {
-                    setLangOpen(open);
-                    if (!open) returnFocusIfTriggerHidden();
-                  }}
-                />
-              </span>
-              <DiffModeToggle splitDisabled={narrowPane} />
+              {canPreview && (
+                <MarkdownViewToggle view={mdView} onChange={setMdView} />
+              )}
+              {/* The picker and Unified/Split configure the raw diff, so they
+                  leave the cluster while Preview is up — the same swap this
+                  row already does for the selection actions. */}
+              {!previewOn && (
+                <>
+                  {/* Same treatment as the read-only surface's toolbar: the
+                      picker is this row's only variable-width control (its
+                      label follows the language name), so it goes under @md to
+                      give the row a fixed floor — but stays laid out while its
+                      popup is open, since Base UI anchors to the trigger and a
+                      display:none trigger positions the popup at 0,0.
+                      `empty:hidden` keeps the row's gap off an extensionless
+                      file. */}
+                  <span
+                    ref={langWrapRef}
+                    className="hidden @md/staging-pane:flex empty:hidden has-[[data-popup-open]]:flex"
+                  >
+                    <DiffLanguagePicker
+                      filePath={file.path}
+                      open={langOpen}
+                      onOpenChange={(open) => {
+                        setLangOpen(open);
+                        if (!open) returnFocusIfTriggerHidden();
+                      }}
+                    />
+                  </span>
+                  <DiffModeToggle splitDisabled={narrowPane} />
+                </>
+              )}
             </>
           )}
         </span>
@@ -521,59 +563,65 @@ function WorkingTreeDiff({
             />
           </div>
         )}
-        {(settings.data?.showLineStageHint ?? true) && (
-          <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
-            <InfoIcon className="size-3.5 shrink-0" />
-            <span className="flex-1 leading-snug">
-              Drag across the line numbers to{" "}
-              {file.staged ? "unstage" : "stage"} just those lines. Hold{" "}
-              {ADDITIVE_MODIFIER} while dragging to add to the selection, so one
-              selection can mix added and removed lines.
-              {selectionBinding !== null && (
-                <>
-                  {" "}
-                  Press {formatBinding(selectionBinding)} to{" "}
-                  {file.staged ? "unstage" : "stage"} the selection.
-                </>
-              )}
-            </span>
-            <button
-              type="button"
-              onClick={() =>
-                settings.data &&
-                saveSettings.mutate({
-                  ...settings.data,
-                  showLineStageHint: false,
-                })
+        {previewOn ? (
+          <MarkdownDocPreview
+            repoPath={repoPath}
+            filePath={file.path}
+            revs={workingRevs}
+          />
+        ) : (
+          <>
+            {/* The drag-the-line-numbers hint is about the staging gutter, so
+                it stays out of Preview, which has no line numbers at all. */}
+            {(settings.data?.showLineStageHint ?? true) && (
+              <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
+                <InfoIcon className="size-3.5 shrink-0" />
+                <span className="flex-1 leading-snug">
+                  Drag across the line numbers to{" "}
+                  {file.staged ? "unstage" : "stage"} just those lines. Hold{" "}
+                  {ADDITIVE_MODIFIER} while dragging to add to the selection, so
+                  one selection can mix added and removed lines.
+                  {selectionBinding !== null && (
+                    <>
+                      {" "}
+                      Press {formatBinding(selectionBinding)} to{" "}
+                      {file.staged ? "unstage" : "stage"} the selection.
+                    </>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    settings.data &&
+                    saveSettings.mutate({
+                      ...settings.data,
+                      showLineStageHint: false,
+                    })
+                  }
+                  className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
+                >
+                  Don't show again
+                </button>
+              </div>
+            )}
+            <StagingDiffView
+              repoPath={repoPath}
+              filePath={file.path}
+              diffText={diff.data?.text ?? ""}
+              contentRevs={workingRevs}
+              viewMode={viewMode}
+              isDark={isDark}
+              hunks={parsed.hunks}
+              staged={file.staged}
+              busy={busy}
+              selection={selection}
+              onSelect={(lines, forText) =>
+                setSelectionState(lines === null ? null : { lines, forText })
               }
-              className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
-            >
-              Don't show again
-            </button>
-          </div>
+              onHunkAction={onHunkAction}
+            />
+          </>
         )}
-        <StagingDiffView
-          repoPath={repoPath}
-          filePath={file.path}
-          diffText={diff.data?.text ?? ""}
-          contentRevs={
-            untracked
-              ? { newRev: null }
-              : file.staged
-                ? { oldRev: "HEAD", newRev: ":0" }
-                : { oldRev: ":0", newRev: null }
-          }
-          viewMode={viewMode}
-          isDark={isDark}
-          hunks={parsed.hunks}
-          staged={file.staged}
-          busy={busy}
-          selection={selection}
-          onSelect={(lines, forText) =>
-            setSelectionState(lines === null ? null : { lines, forText })
-          }
-          onHunkAction={onHunkAction}
-        />
       </div>
 
       <Dialog

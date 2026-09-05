@@ -120,7 +120,10 @@ delete), and deep links to the settings GitHub keeps browser-only.
 ### Changes and commits
 
 A unified or split diff with syntax highlighting, collapsible surrounding
-context, and image diffing. Filter the changes list by path or category, and
+context, and image diffing. Markdown and MDX files add a Raw/Preview toggle,
+so you can read a doc change as rendered prose — headings, tables, and code
+blocks — on the working tree, commits, stashes, and the other local views.
+Filter the changes list by path or category, and
 read a file's `+added -deleted` line counts without opening it. The
 working-tree diff is one whole-file view with hunk- and line-level staging
 and discarding (drag across the line numbers; hold Ctrl, or Cmd on macOS, to

@@ -55,6 +55,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Diffs & staging",
+    label:
+      "Raw ⇄ Preview toggle on markdown & MDX diffs — read the change as rendered prose",
+  },
+  {
+    group: "Diffs & staging",
     label: "Filter the changes list by path or category",
   },
   {

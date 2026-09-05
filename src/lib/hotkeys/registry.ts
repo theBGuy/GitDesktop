@@ -669,6 +669,14 @@ export const ACTIONS = [
     // hides at narrow pane widths.
     defaultBinding: null,
   },
+  {
+    id: "toggle-markdown-preview",
+    label: "Toggle Markdown preview",
+    category: "Changes",
+    // Palette-only: live only while a markdown/MDX diff with readable local
+    // revs is on screen (the toolbar's Raw ⇄ Preview control).
+    defaultBinding: null,
+  },
 
   // Agent (only live on the Agent tab, which exists when AI features are on)
   {
