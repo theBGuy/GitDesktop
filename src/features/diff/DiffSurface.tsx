@@ -18,7 +18,6 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -67,7 +66,10 @@ import {
 } from "./shiki-highlighter";
 import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
 import { ensureCustomLanguages } from "./syntax";
-import { useHiddenTriggerFocus } from "./use-hidden-trigger-focus";
+import {
+  useFocusOnControlsSwap,
+  useHiddenTriggerFocus,
+} from "./use-hidden-trigger-focus";
 import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
 
 /**
@@ -1261,16 +1263,7 @@ export function DiffContent({
   const canPreview =
     showsToolbar && canPreviewMarkdown(filePath, repoPath, contentRevs);
   const previewOn = canPreview && mdView === "preview";
-  // A palette-driven flip unmounts the control that held focus (the picker and
-  // Unified/Split leave the cluster entering Preview), dropping focus to
-  // <body>; land it on the cluster's silent landing spot instead. Change-only
-  // (prev-ref guard), so a mount can never steal focus from elsewhere.
-  const prevPreviewOnRef = useRef(previewOn);
-  useLayoutEffect(() => {
-    if (prevPreviewOnRef.current === previewOn) return;
-    prevPreviewOnRef.current = previewOn;
-    if (document.activeElement === document.body) controlsRef.current?.focus();
-  }, [previewOn, controlsRef]);
+  useFocusOnControlsSwap(previewOn, controlsRef);
   useHotkeyAction(
     "change-diff-language",
     () => setLangOpen(true),

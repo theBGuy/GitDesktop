@@ -8,7 +8,6 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -81,7 +80,10 @@ import {
   MarkdownViewToggle,
 } from "./MarkdownPreview";
 import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
-import { useHiddenTriggerFocus } from "./use-hidden-trigger-focus";
+import {
+  useFocusOnControlsSwap,
+  useHiddenTriggerFocus,
+} from "./use-hidden-trigger-focus";
 
 /** Working-tree diff for the file selected in the changes panel. */
 export function DiffViewer({ repoPath }: { repoPath: string }) {
@@ -271,16 +273,7 @@ function WorkingTreeDiff({
   const canPreview =
     hunkMode && canPreviewMarkdown(file.path, repoPath, workingRevs);
   const previewOn = canPreview && mdView === "preview";
-  // A palette-driven flip unmounts the control that held focus (the picker and
-  // Unified/Split leave the cluster entering Preview), dropping focus to
-  // <body>; land it on the cluster's silent landing spot instead. Change-only
-  // (prev-ref guard), so a mount can never steal focus from elsewhere.
-  const prevPreviewOnRef = useRef(previewOn);
-  useLayoutEffect(() => {
-    if (prevPreviewOnRef.current === previewOn) return;
-    prevPreviewOnRef.current = previewOn;
-    if (document.activeElement === document.body) controlsRef.current?.focus();
-  }, [previewOn, controlsRef]);
+  useFocusOnControlsSwap(previewOn, controlsRef);
   // One contextual chord: stage the selection on an unstaged file's diff,
   // unstage it on a staged one — mirroring the toolbar's primary button. Dead
   // while the Discard confirm is open (the global listener has no dialog guard)
