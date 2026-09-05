@@ -291,6 +291,37 @@ const DESTRUCTURED_MUTATE_RE = /\bconst\s*\{[^}]*\bmutate\b[^}]*\}\s*=/g;
 const CONTEXT_MENU_SUPPRESS_RE =
   /\bset[A-Z]\w*\(\s*null\s*\)[^}]{0,160}?\.preventDefault\s*\(\s*\)/g;
 
+// The superseded disabled-trigger idiom: a reason exposed as `title` on a
+// wrapper around a popover/menu trigger whose control is natively disabled —
+// hover-only, because a disabled trigger leaves the tab order entirely, so
+// keyboard and assistive tech reach neither the control nor its reason.
+// Anchoring on the titled WRAPPER rather than on where `disabled` sits is what
+// lets one pattern cover both spellings the class shipped in (`disabled` on the
+// trigger, and `disabled` inside a plain `<Button/>` render element), and it is
+// what excludes the legitimate neighbours structurally instead of by name: a
+// titled span around a disabled Input or Switch carries no trigger tag, and a
+// menu SUB-trigger keeps its reason in its own label (a disabled item has no
+// room for a tooltip), so neither is ever wrapped in one. Sub/Submenu triggers
+// are excluded by name as well, pinning that idiom rather than resting on the
+// absence of a wrapper. Discriminating on a `Reason`-suffixed value instead
+// would miss the live sites whose hint is a bare conditional string rather than
+// a named reason (the discussions category menu, the branch trigger).
+// The tempered `(?!</)` steps hold the match inside one unclosed element chain,
+// so a titled span that already closed cannot pair with a later sibling's
+// trigger; the `DisabledReasonButton` step makes the FIXED composition
+// unmatchable even where a wrapper survives to carry layout classes. Both
+// windows are PAIR_GAP with ~1.4x headroom: across the live sites the widest
+// title→trigger run measures 113 normalized chars, the widest trigger→disabled
+// 84. Accepted evasions, all zero-instance today: a hint delivered by something
+// other than `title`, a wrapper that is a component rather than a tag, and a
+// `disabled` computed too far from the tag.
+const TITLED_TRIGGER_DISABLED_RE = new RegExp(
+  `title\\s*=(?:(?!</|DisabledReasonButton)[\\s\\S]){0,${PAIR_GAP}}?` +
+    `<(?![A-Za-z][\\w.]*Sub(?:menu)?Trigger\\b)[A-Za-z][\\w.]*Trigger\\b` +
+    `(?:(?!</|DisabledReasonButton)[\\s\\S]){0,${PAIR_GAP}}?\\bdisabled\\s*=`,
+  "g",
+);
+
 // Vendored shadcn/Base UI primitives are off-limits to edit (CLAUDE.md), so a
 // hit inside them could only ever be silenced by an allowlist entry, never
 // fixed. Their CALL SITES — the app code that composes them — stay scanned.
@@ -691,6 +722,35 @@ export const CHECKS = [
     ],
     message:
       "a path that matches eventToBinding(e) against a user binding and preventDefaults it must apply the same clause the global listener does — isEditableTarget, isTypeaheadTarget, and isTypeaheadKey (src/lib/hotkeys/binding.ts) — or a single-key binding steals keystrokes from text fields or typeahead lists, and named keys stop reaching the surfaces that should still get them; any subset leaves the case the missing predicate covers, and a file that dispatches no rebindable binding needs an allowlist entry with rationale",
+  },
+  {
+    name: "titled-disabled-trigger",
+    appliesTo: notVendoredUi,
+    scan: perFile(TITLED_TRIGGER_DISABLED_RE),
+    // DEFERRED, not exempt: every entry is a residual site of the class the
+    // pickers were converted out of, held back because each needs its own live
+    // keyboard pass. The gate blocks NEW sites; these come off the list as they
+    // convert, and the stale-entry rule turns each conversion into a required
+    // edit here.
+    allowlist: [
+      // The projects picker — the direct twin of the converted labels picker.
+      "src/features/conversations/ProjectsPopover.tsx",
+      // Category menu; its hint is a bare sign-in string rather than a reason
+      // prop, so the conversion has to introduce the reason first.
+      "src/features/discussions/DiscussionsPanel.tsx",
+      // Two menus (close options, more actions) whose `disabled` sits inside the
+      // render Button rather than on the trigger.
+      "src/features/issues/RemoteIssueView.tsx",
+      // Merge menus: the wrapper is what refuses the click a disabled Button
+      // drops, so converting them wants the live merge-gate pass.
+      "src/features/pulls/LocalPrView.tsx",
+      "src/features/pulls/RemotePrView.tsx",
+      // The branch trigger's wrapper also owns the header shrink cascade, so a
+      // conversion has to move those classes to wrapperClassName.
+      "src/features/repository/BranchSwitcher.tsx",
+    ],
+    message:
+      "a menu/popover trigger that carries its disabled reason on a titled wrapper is hover-only — a natively disabled trigger leaves the tab order, so keyboard and screen-reader users reach neither the control nor the reason; compose `<Trigger render={<DisabledReasonButton disabled reason/>}>` instead (src/components/disabled-reason-button.tsx), which holds the reason on a focusable aria-disabled button whose own useButton swallows activation; a site that genuinely cannot take the primitive needs an allowlist entry with rationale",
   },
 ];
 

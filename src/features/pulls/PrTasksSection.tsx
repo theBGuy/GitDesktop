@@ -299,6 +299,7 @@ export function PrTasksSection({
   // subscription down mid-write, and react-query drops per-call callbacks once
   // an observer has no listeners — the rollback, the field clears, and the
   // dialog close would silently never run.
+
   // Resolve toggle is optimistic: patch the one task's state in the cache, then
   // mutate with rollback on error (mirrors RemotePrView's toggleApproval). The
   // mutation's onSettled invalidation reconciles the real state.

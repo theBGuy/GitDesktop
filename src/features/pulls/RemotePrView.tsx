@@ -2277,9 +2277,9 @@ export function RemotePrView({
     try {
       await deleteComment.mutateAsync({ number, commentId });
       toast.success("Comment deleted");
-      setDeletingCommentId(null);
     } catch (e) {
       onError(e);
+    } finally {
       setDeletingCommentId(null);
     }
   }
@@ -2288,9 +2288,9 @@ export function RemotePrView({
     try {
       await deleteReviewComment.mutateAsync({ number, commentId });
       toast.success("Comment deleted");
-      setDeletingThreadCommentId(null);
     } catch (e) {
       onError(e);
+    } finally {
       setDeletingThreadCommentId(null);
     }
   }

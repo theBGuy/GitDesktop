@@ -55,6 +55,7 @@ const diffStatPair = scanner("hand-rolled-diff-stat");
 const nullFallback = scanner("null-suspense-fallback");
 const bareGroupLabel = scanner("bare-group-label");
 const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
+const titledDisabledTrigger = scanner("titled-disabled-trigger");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -305,6 +306,12 @@ test("select-item-clip-title flags the flex clip span across the override", () =
     "</SelectItem>",
   ].join("\n");
   assert.deepEqual(selectItemClipTitle(overridden), [1]);
+  // The arm's bound: the same utility trio is ordinary flex layout anywhere
+  // else, so only the SelectItem anchor makes it the dead span.
+  assert.deepEqual(
+    selectItemClipTitle('<div className="min-w-0 flex-1 truncate">{d}</div>'),
+    [],
+  );
 });
 
 test("select-item-clip-title allowlists the flex spelling per file", () => {
@@ -994,6 +1001,138 @@ test("unguarded-binding-dispatcher allowlists the non-rebindable dispatchers", (
   // The recorder is exempt by contract; a NEW file with the same shape is not.
   assert.deepEqual(runCheck(check, files, views).violations, [
     "src/features/pulls/SomeNewView.tsx:1",
+  ]);
+});
+
+test("titled-disabled-trigger flags both spellings of the hover-only reason", () => {
+  // `disabled` on the trigger — the shape the pickers shipped in.
+  const onTrigger = [
+    "<span",
+    "  title={disabledReason}",
+    '  className={disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"}',
+    ">",
+    "  <Popover.Trigger",
+    "    disabled={!!disabledReason}",
+    '    render={<Button variant="ghost" size="xs" aria-label="Edit labels" />}',
+    "  >",
+    "    Labels",
+    "  </Popover.Trigger>",
+    "</span>",
+  ].join("\n");
+  // Line 2, not 1: the match starts at the `title`, so a hit points at the
+  // reason carrier rather than at the wrapper's opening tag.
+  assert.deepEqual(titledDisabledTrigger(onTrigger), [2]);
+  // Same class, `disabled` inside the render element instead — the reason is
+  // hover-only either way, which is why the pattern anchors on the wrapper.
+  const inRender = [
+    '<span title={staleReason} className="inline-flex">',
+    "  <DropdownMenuTrigger",
+    "    render={",
+    '      <Button variant="outline" size="xs" disabled={detailsStale} />',
+    "    }",
+    "  >",
+    "    <DotsThreeIcon />",
+    "  </DropdownMenuTrigger>",
+    "</span>",
+  ].join("\n");
+  assert.deepEqual(titledDisabledTrigger(inRender), [1]);
+});
+
+test("titled-disabled-trigger leaves the primitive and the non-trigger wrappers alone", () => {
+  // The fixed composition: no wrapper of its own, and the primitive's name in
+  // the window blocks the match even if one survived for layout.
+  const converted = [
+    "<Popover.Trigger",
+    "  render={",
+    "    <DisabledReasonButton",
+    '      variant="ghost"',
+    '      aria-label="Edit labels"',
+    "      disabled={!!disabledReason}",
+    "      reason={disabledReason}",
+    "    />",
+    "  }",
+    ">",
+    "  Labels",
+    "</Popover.Trigger>",
+  ].join("\n");
+  assert.deepEqual(titledDisabledTrigger(converted), []);
+  const survivingWrapper = [
+    '<span title={disabledReason} className="inline-flex">',
+    "  <Popover.Trigger",
+    "    render={<DisabledReasonButton disabled={!!disabledReason} reason={disabledReason} />}",
+    "  >",
+    "    Labels",
+    "  </Popover.Trigger>",
+    "</span>",
+  ].join("\n");
+  assert.deepEqual(titledDisabledTrigger(survivingWrapper), []);
+  // A titled wrapper around a disabled NON-trigger control is the sanctioned
+  // idiom for inputs the primitive can't wrap — no trigger tag, no match.
+  for (const control of [
+    '  <Input id="issue-due-date" type="date" disabled={blocked} />',
+    '  <Switch id="issue-confidential" disabled={!!disabledReason} />',
+  ]) {
+    const wrapped = [
+      '<span title={disabledReason} className="inline-flex">',
+      control,
+      "</span>",
+    ].join("\n");
+    assert.deepEqual(titledDisabledTrigger(wrapped), []);
+  }
+  // A menu SUB-trigger carries its reason in its own label (a disabled item has
+  // no room for a tooltip), so it is excluded by name as well as by structure —
+  // this fixture puts a titled wrapper around one to prove the name arm.
+  const subTrigger = [
+    '<span title={disabledReason} className="inline-flex">',
+    "  <DropdownMenuSubTrigger",
+    "    disabled={!!disabledReason}",
+    '    className="data-disabled:opacity-50"',
+    "  >",
+    "    Hide…{disabledSuffix}",
+    "  </DropdownMenuSubTrigger>",
+    "</span>",
+  ].join("\n");
+  assert.deepEqual(titledDisabledTrigger(subTrigger), []);
+  // Triggers that take `disabled` with no reason contract at all: nothing titles
+  // them, so the wrapper anchor keeps them out without naming them.
+  const plain = [
+    '<TabsTrigger value="files" disabled={!hasFiles}>Files</TabsTrigger>',
+    '<ContextMenuTrigger disabled={locked} render={<button type="button" />} />',
+  ].join("\n");
+  assert.deepEqual(titledDisabledTrigger(plain), []);
+  // Tempering stops the scan where an element closes: a titled span that already
+  // finished cannot pair with a later sibling's disabled trigger.
+  const stacked = [
+    '<span title={hint} className="inline-flex">',
+    "  <Badge>{count}</Badge>",
+    "</span>",
+    "<DropdownMenuTrigger disabled={busy} render={<Button />}>",
+    "  Menu",
+    "</DropdownMenuTrigger>",
+  ].join("\n");
+  assert.deepEqual(titledDisabledTrigger(stacked), []);
+});
+
+test("titled-disabled-trigger allowlists the residual sites per file", () => {
+  const check = CHECKS.find((c) => c.name === "titled-disabled-trigger");
+  const row = [
+    '<span title={heldReason} className="inline-flex">',
+    "  <Popover.Trigger",
+    "    disabled={!!heldReason}",
+    '    render={<Button variant="ghost" size="xs" />}',
+    "  >",
+    "    Projects",
+    "  </Popover.Trigger>",
+    "</span>",
+  ].join("\n");
+  const files = [
+    "src/features/conversations/ProjectsPopover.tsx",
+    "src/features/issues/SomeNewPicker.tsx",
+  ];
+  const views = new Map(files.map((f) => [f, view(row)]));
+  // A deferred residual stays quiet; the same markup in a fresh picker reports.
+  assert.deepEqual(runCheck(check, files, views).violations, [
+    "src/features/issues/SomeNewPicker.tsx:1",
   ]);
 });
 
