@@ -134,6 +134,8 @@ From …/origin
    f0995ba..23af86b  main       -> origin/main
 ```
 
+The receipt, one more time:
+
 ```sh
 $ cat .git/FETCH_HEAD
 23af86bc38666439c01cd3d740f98c0d1edf1581		branch 'main' of …/origin
@@ -220,17 +222,17 @@ actually meant on top; the refspec fix below gives it a name.
 ## One file, last writer wins
 
 All of it is one mechanism. `.git/FETCH_HEAD` is one file per
-checkout (a linked worktree keeps its own copy), and every fetch in
-that checkout rewrites the whole thing; you've already met the cast.
-Each line is one ref the fetch brought, and the second column
-marks it either as a merge candidate (the empty slot you saw) or
-`not-for-merge`. Name a branch in the fetch command and that
-branch is the candidate. Run a bare `git fetch origin` and the
-candidate is whatever your current branch's configured upstream
-is. `git merge FETCH_HEAD` merges the candidate lines and nothing
-else; on a branch with no upstream, where a bare fetch marks every
-line `not-for-merge`, it merges nothing at all and still prints
-"Already up to date".
+checkout (a linked worktree keeps its own copy), and every plain
+fetch in that checkout rewrites the whole thing; you've already
+met the cast. Each line is one ref the fetch brought, and the
+second column marks it either as a merge candidate (the empty
+slot you saw) or `not-for-merge`. Name a branch in the fetch
+command and that branch is the candidate. Run a bare `git fetch origin`
+and the candidate is whatever your current branch's configured
+upstream is. `git merge FETCH_HEAD` merges the candidate lines
+and nothing else; on a branch with no upstream, where a bare
+fetch marks every line `not-for-merge`, it merges nothing at
+all and still prints "Already up to date".
 
 So the old two-command pattern decodes as: merge whatever this
 checkout's most recent fetch, run by anyone, was told to bring. When those
