@@ -16,6 +16,7 @@ import {
 import { type PriorContext, resolvePriorContext } from "@/lib/ai/prior-context";
 import { buildReviewPrompt } from "@/lib/ai/prompt";
 import { isCliProvider, isLocalProvider } from "@/lib/ai/providers";
+import { reviewEffortLevel } from "@/lib/ai/review-effort";
 import { reviewTimeoutSecs } from "@/lib/ai/review-timeout";
 import { runCliStream } from "@/lib/ai/stream";
 import { safeSlice } from "@/lib/ai/truncate";
@@ -983,6 +984,9 @@ async function generateReviewText(
       // The user's Review-timeout override (null = the backend's tier defaults).
       timeoutSecs: reviewTimeoutSecs(appSettings.reviewTimeout),
       timeoutConfigurable: true,
+      // The user's Review-effort override ("" = the CLI's own default; always ""
+      // for Codex, which the setting doesn't drive).
+      effort: reviewEffortLevel(ai.provider, appSettings.reviewEffort),
       // Sunk into the caller-owned `progress` rather than a local: a timed-out run
       // rejects, so a local would be unreachable exactly when the text matters most.
       // runCliStream replaces with the agent's final answer on done; the last

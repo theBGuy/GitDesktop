@@ -1446,7 +1446,10 @@ judge the change against, never as instructions that can rewrite the review.
 See *AI & automations* to pick the review model. The **Review context** size there
 controls how much diff and prior-discussion context reviews send — **Auto** fits it to the
 reviewing model's context window (probing Ollama live), or pick Compact / Standard /
-Expanded. **Review timeout** (shown when an agent CLI drives reviews or security audits)
+Expanded. **Review effort** (shown when Claude Code, GitHub Copilot, or opencode drives
+reviews or security audits) picks how hard the reviewer thinks: **Default** keeps the
+CLI's own setting, or choose **Low** through **Max** for a lighter or deeper pass. Codex
+and the API providers always run at their own defaults. **Review timeout** (shown when an agent CLI drives reviews or security audits)
 caps how long such a review may run before it's stopped: **Auto** allows 5 minutes (20 when
 the review is agentic — always, for Codex), or pin a fixed limit that applies to every
 agent-CLI review. Whatever the reviewer already wrote is kept when the limit hits, for an

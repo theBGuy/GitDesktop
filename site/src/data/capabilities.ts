@@ -603,6 +603,12 @@ export const capabilities: Capability[] = [
     group: "AI · generate & review",
     ai: true,
     label:
+      "Review effort — dial the reviewer's reasoning from a light pass to Max",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
+    label:
       "Review timeout — agentic reviews get 20 minutes, or pin your own limit",
   },
   {

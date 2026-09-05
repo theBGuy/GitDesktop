@@ -59,6 +59,11 @@ import {
   PROVIDER_LABELS,
   PROVIDERS_REQUIRING_KEY,
 } from "@/lib/ai/providers";
+import {
+  REVIEW_EFFORTS,
+  type ReviewEffort,
+  reviewEffortCapable,
+} from "@/lib/ai/review-effort";
 import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiProviderId, AiSettings } from "@/lib/ai/types";
 import { required, useAppForm, withForm } from "@/lib/form";
@@ -349,6 +354,15 @@ const REVIEW_TIMEOUT_ITEMS: Record<ReviewTimeout, string> = {
   "30": "30 minutes",
   "45": "45 minutes",
   "60": "60 minutes",
+};
+
+/** Review-effort labels — same `items` contract as the maps above. */
+const REVIEW_EFFORT_ITEMS: Record<ReviewEffort, string> = {
+  auto: "Default — the CLI's own setting",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Max",
 };
 
 /** Default-agent labels — same `items` contract as the maps above. "auto" is the
@@ -675,6 +689,10 @@ export const AiProviderSection = withForm({
     const reviewTimeout = useSelector(
       form.store,
       (s) => s.values.reviewTimeout ?? "auto",
+    );
+    const reviewEffort = useSelector(
+      form.store,
+      (s) => s.values.reviewEffort ?? "auto",
     );
     // `undefined` = Auto (no explicit default; new runs follow `ai.provider`).
     const defaultAgent = useSelector(form.store, (s) => s.values.defaultAgent);
@@ -1104,6 +1122,39 @@ export const AiProviderSection = withForm({
               probes the model's context window where possible.
             </p>
           </div>
+          {/* Effort rides each CLI's own reasoning lever, so the row shows only
+              when an effort-capable CLI (see reviewEffortCapable) drives
+              reviews or security audits. */}
+          {(reviewEffortCapable(reviewAi.provider) ||
+            (securityReviewAi &&
+              reviewEffortCapable(securityReviewAi.provider))) && (
+            <div className="space-y-2">
+              <Label htmlFor="review-effort">Review effort</Label>
+              <Select
+                items={REVIEW_EFFORT_ITEMS}
+                value={reviewEffort}
+                onValueChange={(v) => {
+                  if (v) form.setFieldValue("reviewEffort", v as ReviewEffort);
+                }}
+              >
+                <SelectTrigger id="review-effort" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {REVIEW_EFFORTS.map((id) => (
+                    <SelectItem key={id} value={id}>
+                      {REVIEW_EFFORT_ITEMS[id]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                How hard the reviewing agent thinks, for reviews and security
+                audits alike. Lower is a quicker, lighter pass; Codex and the
+                API providers always run at their own defaults.
+              </p>
+            </div>
+          )}
           {/* Only the agent-CLI providers run under a kill timeout, so the row
               shows when a CLI drives reviews or security audits. */}
           {(isCliProvider(reviewAi.provider) ||

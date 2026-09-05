@@ -20,6 +20,7 @@ import {
 import { type PriorContext, resolvePriorContext } from "@/lib/ai/prior-context";
 import { buildReviewPrompt } from "@/lib/ai/prompt";
 import { isLocalProvider } from "@/lib/ai/providers";
+import { reviewEffortLevel } from "@/lib/ai/review-effort";
 import { reviewTimeoutSecs } from "@/lib/ai/review-timeout";
 import { buildReviewTools } from "@/lib/ai/review-tools";
 import { streamAi } from "@/lib/ai/stream";
@@ -599,6 +600,9 @@ export async function startReview(
     // The user's Review-timeout override (null = the backend's tier defaults).
     // CLI providers only; the HTTP path ignores it.
     const timeoutSecs = reviewTimeoutSecs(appSettings.reviewTimeout);
+    // The user's Review-effort override ("" = the CLI's own default; always ""
+    // for Codex and HTTP providers, which the setting doesn't drive).
+    const effort = reviewEffortLevel(ai.provider, appSettings.reviewEffort);
     if (control.cancelled) return;
     // Own-comments distillation runs a generation-model call that can outlast a dock
     // Cancel, and the review stream only gets an abort handle later (via `onAbort`).
@@ -740,6 +744,7 @@ export async function startReview(
       mcpSelf: mcpTools,
       timeoutSecs,
       timeoutConfigurable: true,
+      effort,
       reviewTools,
       setText: pushText,
       setStatus: (s) => patch({ status: s }),

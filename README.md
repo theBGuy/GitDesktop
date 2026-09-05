@@ -442,6 +442,10 @@ close the window.
   context budget to the reviewing model's window (Auto probes a local
   **Ollama** model's context length live), so a larger model sees more of
   the PR before agentic review is needed.
+- **Dial the review effort**: a **Review effort** setting picks how hard an
+  agent-CLI reviewer thinks, from a lighter, quicker pass to deepest
+  reasoning — for reviews and security audits alike, on Claude Code, GitHub
+  Copilot, and opencode. Default keeps each CLI's own setting.
 - **Timeboxed on your terms**: agent-CLI reviews are timeboxed. Agentic ones
   get 20 minutes before they're stopped (plain 5; Codex reviews are always
   agentic), and a **Review timeout** setting pins a fixed limit when your

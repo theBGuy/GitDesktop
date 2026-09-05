@@ -1,5 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ReviewContextSize } from "@/lib/ai/context-budget";
+import type { ReviewEffort } from "@/lib/ai/review-effort";
 import type { ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiSettings, ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
@@ -176,6 +177,10 @@ export interface AppSettings {
    *  security audits alike). Absent — settings written before this shipped — reads as
    *  `"auto"`, the backend's tier defaults. */
   reviewTimeout?: ReviewTimeout;
+  /** How hard an agent-CLI review reasons (interactive, automated, and security audits
+   *  alike), via each CLI's own effort lever. Absent/`"auto"` sends nothing — the CLI's
+   *  configured default governs, exactly as before the setting shipped. */
+  reviewEffort?: ReviewEffort;
   /** Hide every AI surface — commit/PR helpers, review panel, and the AI-related
    *  settings sections (AI, Slash commands, MCP servers, Automations) — and pause
    *  automations: no new automated run starts while set (an in-flight run finishes).
@@ -321,6 +326,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   reviewContextSize: "auto",
   reviewTimeout: "auto",
+  reviewEffort: "auto",
   hideAi: false,
   notifications: {
     automations: true,

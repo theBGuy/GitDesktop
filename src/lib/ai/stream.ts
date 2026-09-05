@@ -29,8 +29,9 @@ export interface CliStreamOpts {
   /** The run's reported cost (USD), delivered with the terminal `done` event.
    *  Null when the CLI doesn't report one. Optional — most callers ignore it. */
   onCost?: (costUsd: number | null) => void;
-  /** Reasoning/effort level for the run ("" = provider default). Optional — only
-   *  the repo-aware flows that expose a picker (e.g. Plan) set it. */
+  /** Reasoning/effort level for the run ("" / absent = provider default).
+   *  Review flows resolve it from the Review-effort setting; picker flows
+   *  (e.g. Plan) pass their per-run choice. */
   effort?: string;
   /** Attach GitDesktop's own read-only MCP server to the run (reviews only), so an agentic
    *  reviewer can pull the full PR diff and read files at any ref. Default off. */
@@ -225,6 +226,10 @@ export interface StreamAiOpts {
   /** True only for the AI-review flows the Review-timeout setting governs; drives
    *  the timed-out message's settings hint. CLI path only. */
   timeoutConfigurable?: boolean;
+  /** Reasoning/effort level for a CLI review run ("" / absent = the CLI's own
+   *  default). Review flows resolve it per-provider via `reviewEffortLevel`;
+   *  other callers omit it. CLI path only — HTTP providers have no lever. */
+  effort?: string;
   /** Native AI-SDK review tools for an HTTP-provider agentic review — the model explores
    *  via a tool loop (no MCP, no worktree). HTTP agentic reviews only; CLI and non-review
    *  callers omit it. */
@@ -261,6 +266,7 @@ export async function streamAi({
   mcpSelf,
   timeoutSecs,
   timeoutConfigurable,
+  effort,
   reviewTools,
   setText,
   setStatus,
@@ -279,6 +285,7 @@ export async function streamAi({
       mcpSelf,
       timeoutSecs,
       timeoutConfigurable,
+      effort,
       setText,
       setStatus,
       registerId: onCliId,
