@@ -84,16 +84,18 @@ export function ForkPrPublishGuard({
       return;
     }
     setEnsuring(false);
-    push.mutate(
-      { setUpstream: false, branch, remote, remoteBranch: match.headRefName },
-      {
-        onSuccess: () => {
-          toast.success(`Pushed ${commits} to ${slug}:${match.headRefName}.`);
-          onClose();
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await push.mutateAsync({
+        setUpstream: false,
+        branch,
+        remote,
+        remoteBranch: match.headRefName,
+      });
+      toast.success(`Pushed ${commits} to ${slug}:${match.headRefName}.`);
+      onClose();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   return (

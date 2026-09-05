@@ -444,56 +444,47 @@ export function RepositoryFilesDialog({
     });
   }
 
-  function runUntrack(paths: string[]) {
-    untrack.mutate(
-      {
+  async function runUntrack(paths: string[]) {
+    try {
+      await untrack.mutateAsync({
         pathspecs: paths.map(literalPathspec),
         ignorePatterns: paths.map(ignorePattern),
-      },
-      {
-        onSuccess: () => {
-          toast.success(
-            `Untracked ${paths.length} file${paths.length === 1 ? "" : "s"} — kept on disk, added to .gitignore`,
-          );
-          setSelected(new Set());
-          setPending(null);
-        },
-        onError: (e) => {
-          onError(e);
-          setPending(null);
-        },
-      },
-    );
+      });
+      toast.success(
+        `Untracked ${paths.length} file${paths.length === 1 ? "" : "s"} — kept on disk, added to .gitignore`,
+      );
+      setSelected(new Set());
+      setPending(null);
+    } catch (e) {
+      onError(e);
+      setPending(null);
+    }
   }
 
-  function runForceAdd(paths: string[]) {
-    forceAdd.mutate(paths.map(literalPathspec), {
-      onSuccess: () => {
-        toast.success(`Force-added ${paths.length} items`);
-        setSelected(new Set());
-        setPending(null);
-      },
-      onError: (e) => {
-        onError(e);
-        setPending(null);
-      },
-    });
+  async function runForceAdd(paths: string[]) {
+    try {
+      await forceAdd.mutateAsync(paths.map(literalPathspec));
+      toast.success(`Force-added ${paths.length} items`);
+      setSelected(new Set());
+      setPending(null);
+    } catch (e) {
+      onError(e);
+      setPending(null);
+    }
   }
 
-  function runRemoveRules(rules: { source: string; pattern: string }[]) {
-    unignore.mutate(rules, {
-      onSuccess: () => {
-        toast.success(
-          `Removed ${rules.length} rule${rules.length === 1 ? "" : "s"} from .gitignore`,
-        );
-        setSelected(new Set());
-        setPending(null);
-      },
-      onError: (e) => {
-        onError(e);
-        setPending(null);
-      },
-    });
+  async function runRemoveRules(rules: { source: string; pattern: string }[]) {
+    try {
+      await unignore.mutateAsync(rules);
+      toast.success(
+        `Removed ${rules.length} rule${rules.length === 1 ? "" : "s"} from .gitignore`,
+      );
+      setSelected(new Set());
+      setPending(null);
+    } catch (e) {
+      onError(e);
+      setPending(null);
+    }
   }
 
   // Bulk AI-exclude from the tracked list — the add path for files with nothing

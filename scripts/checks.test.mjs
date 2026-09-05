@@ -52,6 +52,7 @@ const menuSuppression = scanner("context-menu-suppression");
 const loneActivity = scanner("lone-activity-boundary");
 const seedOnOpen = scanner("seed-effect-on-open");
 const diffStatPair = scanner("hand-rolled-diff-stat");
+const kindBadge = scanner("kind-badge-single-source");
 const nullFallback = scanner("null-suspense-fallback");
 const bareGroupLabel = scanner("bare-group-label");
 const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
@@ -531,9 +532,12 @@ test("bare-mutate-in-converted-trees applies to the converted trees only", () =>
     assert.equal(appliesTo(file), true, `should scan ${file}`);
   }
   for (const file of [
-    "src/features/pulls/LocalPrView.tsx",
     "src/features/repository/ChangesPanel.tsx",
+    "src/features/commit/CommitBox.tsx",
   ]) {
+    assert.equal(appliesTo(file), true, `should scan ${file}`);
+  }
+  for (const file of ["src/features/pulls/LocalPrView.tsx"]) {
     assert.equal(appliesTo(file), false, `should not scan ${file}`);
   }
 });
@@ -699,6 +703,45 @@ test("hand-rolled-diff-stat exempts the component file and vendored ui only", ()
   assert.equal(appliesTo("src/components/diff-stat.tsx"), false);
   assert.equal(appliesTo("src/components/ui/badge.tsx"), false);
   assert.equal(appliesTo("src/features/repository/FileRow.tsx"), true);
+});
+
+test("kind-badge-single-source flags a re-declared table, exported or not", () => {
+  // The two duplicates' own shape: a typed Record the formatter splits after
+  // the `=`, so only the keyword-plus-name line has to match.
+  const local = [
+    "const KIND_BADGE: Record<",
+    "  ChangeKind,",
+    "  { letter: string; label: string; className: string }",
+    "> = {",
+    '  added: { letter: "A", label: "Added", className: "text-success" },',
+    "};",
+  ].join("\n");
+  assert.deepEqual(kindBadge(local), [1]);
+  assert.deepEqual(
+    kindBadge('export const KIND_BADGE = { added: { letter: "A" } };'),
+    [1],
+  );
+});
+
+test("kind-badge-single-source leaves imports and reads of the shared table alone", () => {
+  for (const source of [
+    'import { KIND_BADGE } from "@/lib/git/change-kind-badge";',
+    "const badge = KIND_BADGE[kind];",
+    // A differently-named table is outside this check's shape by design.
+    "const KIND_GLYPH = { added: PlusIcon };",
+    // The comment naming the banned shape is what comment stripping keeps clean.
+    "// a second `const KIND_BADGE` drifts from the shared table",
+  ])
+    assert.deepEqual(kindBadge(source), [], `should ignore ${source}`);
+});
+
+test("kind-badge-single-source exempts the shared module only", () => {
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "kind-badge-single-source",
+  );
+  assert.equal(appliesTo("src/lib/git/change-kind-badge.ts"), false);
+  assert.equal(appliesTo("src/features/repository/FileRow.tsx"), true);
+  assert.equal(appliesTo("src/features/commit/CommitDialog.tsx"), true);
 });
 
 test("null-suspense-fallback flags the literal on one line or wrapped", () => {

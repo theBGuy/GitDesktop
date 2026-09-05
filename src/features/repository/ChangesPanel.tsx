@@ -9,6 +9,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { type MouseEvent, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -43,6 +44,7 @@ import {
   useUntrack,
   useWorkingLineStats,
 } from "@/lib/git/queries";
+import { reservedDeviceName } from "@/lib/git/reserved-device-name";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -73,6 +75,17 @@ function unstagePaths(entry: FileEntry): string[] {
     literalPathspec,
   );
 }
+
+/** Windows resolves a reserved device name to the DEVICE, so `git add` reads it
+ *  and aborts the whole pathspec batch — every stage path filters these out. */
+function canStage(entry: FileEntry): boolean {
+  return reservedDeviceName(entry.path) === null;
+}
+
+/** Appended to a multi-file discard confirm: the recycle bin refuses a reserved
+ *  device name, so the backend removes those outright. */
+const RESERVED_DISCARD_NOTE =
+  ' Files with Windows-reserved names (like "nul") skip the recycle bin and are deleted permanently.';
 
 type FilterKind = "included" | "excluded" | "new" | "modified" | "deleted";
 
@@ -239,6 +252,9 @@ export function ChangesPanel({
     (e) => e.unstaged !== null && visible(e),
   );
   const stagedEntries = entries.filter((e) => e.staged !== null && visible(e));
+  // What "Stage all" can actually reach: the excluded rows stay listed, each
+  // wearing its own explanation, so skipping them needs no toast.
+  const stageableUnstaged = unstagedEntries.filter(canStage);
   const nothingMatches =
     entries.length > 0 &&
     stagedEntries.length === 0 &&
@@ -262,6 +278,7 @@ export function ChangesPanel({
   );
   const selectedEntries = entries.filter((e) => selectedPaths.has(e.path));
   const selectionCount = selectedEntries.length;
+  const stageableSelected = selectedEntries.filter(canStage);
   // Untracking only applies to files git already tracks (not fresh untracked
   // files or brand-new staged adds) — mirrors FileRow's per-file rule.
   const selectedTracked = selectedEntries.filter(
@@ -428,45 +445,56 @@ export function ChangesPanel({
 
   // Toggle one file's staged state — the row's +/- button and the single menu.
   function handleToggle(entry: FileEntry, staged: boolean) {
-    if (staged) unstage.mutate(unstagePaths(entry), { onError });
-    else stage.mutate([literalPathspec(entry.path)], { onError });
+    if (staged) {
+      void unstage.mutateAsync(unstagePaths(entry)).catch(onError);
+      return;
+    }
+    // Fire-time guard: the affordances are already disabled, but a hotkey or a
+    // later call site must not reach a `git add` that dies reading the device.
+    if (!canStage(entry)) return;
+    void stage.mutateAsync([literalPathspec(entry.path)]).catch(onError);
   }
 
   // Single-file ignore / untrack (the per-row menu); the bulk equivalents are
   // ignoreSelected / untrackSelected below.
-  function ignoreOne(pattern: string, label: string) {
-    appendIgnore.mutate([pattern], {
-      onSuccess: (added) =>
-        toast.success(
-          added === 0
-            ? `"${label}" is already in .gitignore`
-            : `Added "${label}" to .gitignore`,
-        ),
-      onError,
-    });
+  async function ignoreOne(pattern: string, label: string) {
+    try {
+      const added = await appendIgnore.mutateAsync([pattern]);
+      toast.success(
+        added === 0
+          ? `"${label}" is already in .gitignore`
+          : `Added "${label}" to .gitignore`,
+      );
+    } catch (e) {
+      onError(e);
+    }
   }
-  function aiExcludeOne(patterns: string[], label: string) {
-    appendAiIgnore.mutate(patterns, {
-      onSuccess: (added) =>
-        toast.success(
-          added === 0
-            ? `"${label}" is already in .gitdesktop/aiignore`
-            : `Added "${label}" to .gitdesktop/aiignore`,
-        ),
-      onError,
-    });
+  async function aiExcludeOne(patterns: string[], label: string) {
+    try {
+      const added = await appendAiIgnore.mutateAsync(patterns);
+      toast.success(
+        added === 0
+          ? `"${label}" is already in .gitdesktop/aiignore`
+          : `Added "${label}" to .gitdesktop/aiignore`,
+      );
+    } catch (e) {
+      onError(e);
+    }
   }
-  function untrackOne(pathspec: string, ignorePattern: string, label: string) {
-    untrack.mutate(
-      { pathspecs: [pathspec], ignorePatterns: [ignorePattern] },
-      {
-        onSuccess: () =>
-          toast.success(
-            `Untracked ${label} — kept on disk, added to .gitignore`,
-          ),
-        onError,
-      },
-    );
+  async function untrackOne(
+    pathspec: string,
+    ignorePattern: string,
+    label: string,
+  ) {
+    try {
+      await untrack.mutateAsync({
+        pathspecs: [pathspec],
+        ignorePatterns: [ignorePattern],
+      });
+      toast.success(`Untracked ${label} — kept on disk, added to .gitignore`);
+    } catch (e) {
+      onError(e);
+    }
   }
 
   // Right-click anywhere in the list: act on the row under the cursor, or fall
@@ -487,33 +515,40 @@ export function ChangesPanel({
   }
 
   function stageAll() {
-    stage.mutate(
-      unstagedEntries.map((e) => literalPathspec(e.path)),
-      { onError },
-    );
+    void stage
+      .mutateAsync(stageableUnstaged.map((e) => literalPathspec(e.path)))
+      .catch(onError);
   }
 
   function unstageAll() {
-    unstage.mutate(stagedEntries.flatMap(unstagePaths), { onError });
+    void unstage
+      .mutateAsync(stagedEntries.flatMap(unstagePaths))
+      .catch(onError);
   }
 
   // Bulk stage/unstage of the selection. Direction comes from the section the
   // row was right-clicked in; re-staging an already-staged path (or vice versa)
   // is a harmless git no-op, so every selected file ends up in that state.
-  function stageSelected() {
-    if (selectionCount === 0) return;
-    stage.mutate(
-      selectedEntries.map((e) => literalPathspec(e.path)),
-      { onError, onSuccess: () => setSelectedKeys(new Set()) },
-    );
+  async function stageSelected() {
+    if (stageableSelected.length === 0) return;
+    try {
+      await stage.mutateAsync(
+        stageableSelected.map((e) => literalPathspec(e.path)),
+      );
+      setSelectedKeys(new Set());
+    } catch (e) {
+      onError(e);
+    }
   }
 
-  function unstageSelected() {
+  async function unstageSelected() {
     if (selectionCount === 0) return;
-    unstage.mutate(selectedEntries.flatMap(unstagePaths), {
-      onError,
-      onSuccess: () => setSelectedKeys(new Set()),
-    });
+    try {
+      await unstage.mutateAsync(selectedEntries.flatMap(unstagePaths));
+      setSelectedKeys(new Set());
+    } catch (e) {
+      onError(e);
+    }
   }
 
   function requestDiscardSelected() {
@@ -528,23 +563,23 @@ export function ChangesPanel({
 
   // Bulk ignore: add a `/path` line per selected file (any kind). The Rust side
   // de-dupes and skips lines already present.
-  function ignoreSelected() {
+  async function ignoreSelected() {
     if (selectionCount === 0) return;
     const patterns = selectedEntries.map((e) => `/${globLiteralPath(e.path)}`);
-    appendIgnore.mutate(patterns, {
-      onSuccess: (added) => {
-        toast.success(ignoreToast(added, patterns.length, ".gitignore"));
-        setSelectedKeys(new Set());
-      },
-      onError,
-    });
+    try {
+      const added = await appendIgnore.mutateAsync(patterns);
+      toast.success(ignoreToast(added, patterns.length, ".gitignore"));
+      setSelectedKeys(new Set());
+    } catch (e) {
+      onError(e);
+    }
   }
 
   // Bulk AI-exclude: add a `/path` line per selected file — the leading slash
   // anchors each pattern to THIS file rather than every file with that name.
   // A path holding `\` contributes a second line, so the count below is LINES,
   // which is what the toast names. The Rust side skips lines already in EFFECT.
-  function aiExcludeSelected() {
+  async function aiExcludeSelected() {
     if (selectionCount === 0) return;
     // Deduped: a literal `weird\name.env` and a real `weird/name.env` both emit
     // the `/`-separated line, and the duplicate would read as a false partial
@@ -554,127 +589,118 @@ export function ChangesPanel({
         selectedEntries.flatMap((e) => aiExcludePatternLinesForPath(e.path)),
       ),
     ];
-    appendAiIgnore.mutate(patterns, {
-      onSuccess: (added) => {
-        toast.success(
-          ignoreToast(added, patterns.length, ".gitdesktop/aiignore"),
-        );
-        setSelectedKeys(new Set());
-      },
-      onError,
-    });
+    try {
+      const added = await appendAiIgnore.mutateAsync(patterns);
+      toast.success(
+        ignoreToast(added, patterns.length, ".gitdesktop/aiignore"),
+      );
+      setSelectedKeys(new Set());
+    } catch (e) {
+      onError(e);
+    }
   }
 
   // Bulk untrack: `git rm --cached` the tracked files in the selection (kept on
   // disk) + add their ignore lines, in one shot.
-  function untrackSelected() {
+  async function untrackSelected() {
     if (selectedTracked.length === 0) return;
-    untrack.mutate(
-      {
+    try {
+      await untrack.mutateAsync({
         pathspecs: selectedTracked.map((e) => literalPathspec(e.path)),
         ignorePatterns: selectedTracked.map(
           (e) => `/${globLiteralPath(e.path)}`,
         ),
-      },
-      {
-        onSuccess: () => {
-          toast.success(
-            `Untracked ${selectedTracked.length} files — kept on disk, added to .gitignore`,
-          );
-          setSelectedKeys(new Set());
-        },
-        onError,
-      },
-    );
+      });
+      toast.success(
+        `Untracked ${selectedTracked.length} files — kept on disk, added to .gitignore`,
+      );
+      setSelectedKeys(new Set());
+    } catch (e) {
+      onError(e);
+    }
   }
 
-  function confirmDiscard() {
+  async function confirmDiscard() {
     if (!discardScope) return;
     const finish = () => {
       setDiscardScope(null);
       setSelectedKeys(new Set());
     };
     if (discardScope.kind === "all") {
-      discardAll.mutate(undefined, {
-        onSuccess: () => {
-          toast.success("All changes discarded");
-          finish();
-        },
-        onError: (e) => {
-          onError(e);
-          finish();
-        },
-      });
+      try {
+        await discardAll.mutateAsync(undefined);
+        toast.success("All changes discarded");
+        finish();
+      } catch (e) {
+        onError(e);
+        finish();
+      }
       return;
     }
     const targets = discardScope.entries.map((e) => ({
       path: e.path,
       untracked: e.unstaged === "untracked",
     }));
-    discardPaths.mutate(targets, {
-      onSuccess: () => {
-        toast.success(
-          targets.length === 1
-            ? `Discarded changes to ${targets[0].path}`
-            : `Discarded changes to ${targets.length} files`,
-        );
-        finish();
-      },
-      onError: (e) => {
-        onError(e);
-        finish();
-      },
-    });
+    try {
+      await discardPaths.mutateAsync(targets);
+      toast.success(
+        targets.length === 1
+          ? `Discarded changes to ${targets[0].path}`
+          : `Discarded changes to ${targets.length} files`,
+      );
+      finish();
+    } catch (e) {
+      onError(e);
+      finish();
+    }
   }
 
-  function confirmStash() {
+  async function confirmStash() {
     if (!stashScope) return;
     const finish = () => {
       setStashScope(null);
       setSelectedKeys(new Set());
     };
     if (stashScope.kind === "all") {
-      stashAll.mutate(undefined, {
-        onSuccess: () => {
-          toast.success("Changes stashed");
-          finish();
-        },
-        onError: (e) => {
-          onError(e);
-          finish();
-        },
-      });
+      try {
+        await stashAll.mutateAsync(undefined);
+        toast.success("Changes stashed");
+        finish();
+      } catch (e) {
+        onError(e);
+        finish();
+      }
       return;
     }
     const targets = stashScope.entries.map((e) => e.path);
-    // Literal pathspecs so a `[slug]`-style path can't sweep a sibling's work
-    // into the stash; `targets` stays raw for the toast below.
-    stashPaths.mutate(targets.map(literalPathspec), {
+    try {
+      // Literal pathspecs so a `[slug]`-style path can't sweep a sibling's work
+      // into the stash; `targets` stays raw for the toast below.
+      const matched = await stashPaths.mutateAsync(
+        targets.map(literalPathspec),
+      );
       // `matched` is false when the paths matched nothing, so no stash exists to
       // report — the selection no longer had changes when git ran.
-      onSuccess: (matched) => {
-        if (matched) {
-          toast.success(
-            targets.length === 1
-              ? `Stashed ${targets[0]}`
-              : `Stashed ${targets.length} files`,
-          );
-        } else {
-          toast.info("Nothing to stash");
-        }
-        finish();
-      },
-      onError: (e) => {
-        onError(e);
-        finish();
-      },
-    });
+      if (matched) {
+        toast.success(
+          targets.length === 1
+            ? `Stashed ${targets[0]}`
+            : `Stashed ${targets.length} files`,
+        );
+      } else {
+        toast.info("Nothing to stash");
+      }
+      finish();
+    } catch (e) {
+      onError(e);
+      finish();
+    }
   }
 
   useHotkeyAction(
     "stage-all",
     stageAll,
-    !mutating && unstagedEntries.length > 0,
+    !mutating && stageableUnstaged.length > 0,
   );
   useHotkeyAction(
     "unstage-all",
@@ -683,12 +709,12 @@ export function ChangesPanel({
   );
   useHotkeyAction(
     "stage-selected-files",
-    stageSelected,
-    !mutating && selectedEntries.some((e) => e.unstaged !== null),
+    () => void stageSelected(),
+    !mutating && stageableSelected.some((e) => e.unstaged !== null),
   );
   useHotkeyAction(
     "unstage-selected-files",
-    unstageSelected,
+    () => void unstageSelected(),
     !mutating && selectedEntries.some((e) => e.staged !== null),
   );
   useHotkeyAction(
@@ -758,14 +784,21 @@ export function ChangesPanel({
       : discardOne
         ? "Discard changes?"
         : `Discard ${discardFiles.length} changes?`;
+  // Only untracked entries reach the recycle bin, so only they can be the ones
+  // deleted outright; "all" discards the whole tree, not just what's on screen.
+  const discardHasReserved = (
+    shownDiscardScope?.kind === "all" ? entries : discardFiles
+  ).some((e) => e.unstaged === "untracked" && !canStage(e));
   const discardBody =
     shownDiscardScope?.kind === "all"
-      ? "All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin."
+      ? `All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`
       : discardOne
         ? discardOne.unstaged === "untracked"
-          ? `${discardOne.path} is untracked — it will be moved to the recycle bin.`
+          ? discardHasReserved
+            ? `${discardOne.path} is untracked. Its Windows-reserved name can't go to the recycle bin, so it will be deleted permanently.`
+            : `${discardOne.path} is untracked — it will be moved to the recycle bin.`
           : `Unstaged changes to ${discardOne.path} will be restored to the last committed version. This cannot be undone.`
-        : `Changes to ${discardFiles.length} files will be discarded — tracked files are restored and untracked files moved to the recycle bin. This cannot be undone.`;
+        : `Changes to ${discardFiles.length} files will be discarded — tracked files are restored and untracked files moved to the recycle bin. This cannot be undone.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
 
   const stashFiles =
     shownStashScope?.kind === "files" ? shownStashScope.entries : [];
@@ -883,13 +916,15 @@ export function ChangesPanel({
                 </span>
                 <button
                   type="button"
-                  onClick={() =>
-                    settings.data &&
-                    saveSettings.mutate({
-                      ...settings.data,
-                      showSelectionHint: false,
-                    })
-                  }
+                  onClick={() => {
+                    if (!settings.data) return;
+                    void saveSettings
+                      .mutateAsync({
+                        ...settings.data,
+                        showSelectionHint: false,
+                      })
+                      .catch(() => undefined);
+                  }}
                   className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
                 >
                   Don't show again
@@ -965,11 +1000,21 @@ export function ChangesPanel({
                                 ? `Staged (${row.count})`
                                 : `Changes (${row.count})`}
                             </h3>
-                            <Button
+                            <DisabledReasonButton
                               variant="ghost"
                               size="xs"
                               className="text-muted-foreground"
-                              disabled={mutating}
+                              disabled={
+                                mutating ||
+                                (row.section === "unstaged" &&
+                                  stageableUnstaged.length === 0)
+                              }
+                              reason={
+                                row.section === "unstaged" &&
+                                stageableUnstaged.length === 0
+                                  ? "Git can't stage Windows-reserved device names, and every file here has one"
+                                  : null
+                              }
                               onClick={
                                 row.section === "staged" ? unstageAll : stageAll
                               }
@@ -977,7 +1022,7 @@ export function ChangesPanel({
                               {row.section === "staged"
                                 ? "Unstage all"
                                 : "Stage all"}
-                            </Button>
+                            </DisabledReasonButton>
                           </div>
                         ) : (
                           <FileRow
@@ -1019,16 +1064,17 @@ export function ChangesPanel({
                     : false
                 }
                 selectionCount={selectionCount}
+                stageableSelectionCount={stageableSelected.length}
                 selectedTrackedCount={selectedTracked.length}
                 actions={{
                   discardAll: () => setDiscardScope({ kind: "all" }),
                   stashAll: () => setStashScope({ kind: "all" }),
-                  stageSelected,
-                  unstageSelected,
+                  stageSelected: () => void stageSelected(),
+                  unstageSelected: () => void unstageSelected(),
                   discardSelected: requestDiscardSelected,
                   stashSelected: requestStashSelected,
-                  ignoreSelected,
-                  untrackSelected,
+                  ignoreSelected: () => void ignoreSelected(),
+                  untrackSelected: () => void untrackSelected(),
                   toggle: handleToggle,
                   resolveWithAi: (path) => startResolveOne(path, repoPath),
                   discardFile: (entry) =>
@@ -1037,10 +1083,12 @@ export function ChangesPanel({
                     setStashScope({ kind: "files", entries: [entry] }),
                   viewHistory: setHistoryPath,
                   blame: setBlamePath,
-                  ignore: ignoreOne,
-                  untrack: untrackOne,
-                  aiExclude: aiExcludeOne,
-                  aiExcludeSelected,
+                  ignore: (pattern, label) => void ignoreOne(pattern, label),
+                  untrack: (pathspec, ignorePattern, label) =>
+                    void untrackOne(pathspec, ignorePattern, label),
+                  aiExclude: (patterns, label) =>
+                    void aiExcludeOne(patterns, label),
+                  aiExcludeSelected: () => void aiExcludeSelected(),
                 }}
               />
             </ContextMenuContent>
@@ -1101,7 +1149,7 @@ export function ChangesPanel({
         }
         confirmVariant="destructive"
         pending={discardPaths.isPending || discardAll.isPending}
-        onConfirm={confirmDiscard}
+        onConfirm={() => void confirmDiscard()}
       />
 
       <ConfirmDialog
@@ -1111,7 +1159,7 @@ export function ChangesPanel({
         body={stashBody}
         confirmLabel={shownStashScope?.kind === "all" ? "Stash all" : "Stash"}
         pending={stashPaths.isPending || stashAll.isPending}
-        onConfirm={confirmStash}
+        onConfirm={() => void confirmStash()}
       />
     </div>
   );

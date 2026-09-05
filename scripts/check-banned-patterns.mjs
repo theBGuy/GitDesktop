@@ -314,6 +314,13 @@ const DIFF_STAT_PAIR_RE = new RegExp(
   "g",
 );
 
+// A local DEFINITION of the change-kind badge table — the `const KIND_BADGE`
+// binding, not a read of the shared one (an import names it without `const`).
+// Matched per line: nothing wraps between the keyword and the name. A table
+// under a different name is invisible here, so this holds the copy-paste route
+// the two duplicates actually took, not the whole class.
+const KIND_BADGE_DEF_RE = /\bconst\s+KIND_BADGE\b/;
+
 // `<Activity` as a JSX open tag. The lookahead is what separates it from the
 // app's own `<ActivityDock>`/`<ActivityBell>`/`<ActivityStrip>` components, and
 // comment stripping is what keeps the many prose mentions of `<Activity>` clean.
@@ -491,15 +498,19 @@ export const CHECKS = [
     // Scoped to the trees that are fully converted, so the check can only ever
     // see a NEW site: the settings dialog's own sections (which unmount on BOTH
     // dialog close and every rail section switch — the keyed crossfade), Explore,
-    // whose detail pane is keyed per repo, and Actions, whose run detail is keyed
-    // per run and whose dispatch dialog unmounts with the repo view. The wider app
-    // is a separate tier: pulls/ and repository/ still carry per-call callback
-    // sites in bulk, so scanning them would report a backlog rather than a
-    // regression. Each tree joins this check on the change that converts it.
+    // whose detail pane is keyed per repo, Actions, whose run detail is keyed per
+    // run and whose dispatch dialog unmounts with the repo view, and the
+    // repository + commit trees, whose panels ride <Activity>-hidden tabs and
+    // whose dialogs close mid-flight. The wider app is a separate tier: pulls/
+    // still carries per-call callback sites in bulk, so scanning it would report a
+    // backlog rather than a regression. Each tree joins this check on the change
+    // that converts it.
     appliesTo: (file) =>
       file.startsWith("src/features/repo-settings/") ||
       file.startsWith("src/features/explore/") ||
-      file.startsWith("src/features/actions/"),
+      file.startsWith("src/features/actions/") ||
+      file.startsWith("src/features/repository/") ||
+      file.startsWith("src/features/commit/"),
     scan: anyOf([perLine(MUTATE_CALL_RE), perFile(DESTRUCTURED_MUTATE_RE)]),
     allowlist: [],
     message:
@@ -581,6 +592,15 @@ export const CHECKS = [
     allowlist: [],
     message:
       "`+added -deleted` counts render through DiffStat (src/components/diff-stat.tsx) — a hand-rolled pair drifts from the canonical spacing, minus glyph, and tabular digits one site at a time; a site the component genuinely can't express needs an allowlist entry with rationale",
+  },
+  {
+    name: "kind-badge-single-source",
+    // The shared module IS the table; everything else imports it.
+    appliesTo: (file) => file !== "src/lib/git/change-kind-badge.ts",
+    scan: perLine(KIND_BADGE_DEF_RE),
+    allowlist: [],
+    message:
+      "the change-kind letter, screen-reader label, and colour token come from KIND_BADGE in src/lib/git/change-kind-badge.ts — a second definition drifts one surface at a time, so the Changes list and the commit dialog's staged summary stop agreeing on the same file; import it rather than re-spelling the table",
   },
   {
     name: "lone-activity-boundary",

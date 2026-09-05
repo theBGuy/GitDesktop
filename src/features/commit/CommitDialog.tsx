@@ -15,8 +15,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { clipTitle } from "@/lib/clip-title";
+import { KIND_BADGE } from "@/lib/git/change-kind-badge";
 import { useWorkingLineStats } from "@/lib/git/queries";
-import type { ChangeKind, FileEntry } from "@/lib/git/types";
+import type { FileEntry } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
@@ -25,26 +26,6 @@ import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { CoAuthorPicker } from "./CoAuthorPicker";
 import { useCommitSubmit } from "./useCommitSubmit";
-
-// The Changes panel's status letters and tokens, for the read-only staged
-// summary: the same file in both surfaces must read the same letter and colour.
-const KIND_BADGE: Record<
-  ChangeKind,
-  { letter: string; label: string; className: string }
-> = {
-  added: { letter: "A", label: "Added", className: "text-success" },
-  untracked: { letter: "U", label: "Untracked", className: "text-success" },
-  modified: { letter: "M", label: "Modified", className: "text-warning" },
-  typechange: { letter: "T", label: "Type changed", className: "text-warning" },
-  deleted: { letter: "D", label: "Deleted", className: "text-destructive" },
-  renamed: { letter: "R", label: "Renamed", className: "text-info" },
-  copied: { letter: "C", label: "Copied", className: "text-info" },
-  conflicted: {
-    letter: "!",
-    label: "Conflicted",
-    className: "text-destructive",
-  },
-};
 
 /**
  * The pop-out commit composer. Rendered exactly ONCE, hoisted in RepositoryView:

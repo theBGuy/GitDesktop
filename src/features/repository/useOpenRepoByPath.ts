@@ -128,7 +128,8 @@ export function useOpenRepoByPath() {
               },
               cancel: {
                 label: "Remove",
-                onClick: () => removeRecent.mutate(path),
+                onClick: () =>
+                  void removeRecent.mutateAsync(path).catch(() => undefined),
               },
             });
           }

@@ -37,7 +37,9 @@ export function AmendForcePushDialog({
 
   function confirm() {
     if (dontShowAgain && settings.data) {
-      saveSettings.mutate({ ...settings.data, confirmAmendForcePush: false });
+      void saveSettings
+        .mutateAsync({ ...settings.data, confirmAmendForcePush: false })
+        .catch(() => undefined);
     }
     onConfirm();
   }

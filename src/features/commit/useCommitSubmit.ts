@@ -124,7 +124,11 @@ export function useCommitSubmit(
     active && canGenerate && !generating,
   );
 
-  function doCommit() {
+  // Awaited rather than per-call callbacks: both hosts can go while the commit
+  // is in flight (the dialog closes itself, the inline box rides an
+  // <Activity>-hidden tab), and react-query drops per-call callbacks once the
+  // observer has no listeners.
+  async function doCommit() {
     const commitTitle = title.trim();
     // Trailers must be the final paragraph of the message.
     const fullBody = [body.trim(), coAuthorTrailers(coAuthors)]
@@ -142,46 +146,45 @@ export function useCommitSubmit(
     // Desktop feel) instead of snapping empty once the commit resolves. Also
     // flips canCommit false, which blocks an accidental double-submit.
     clearCommitDraft();
-    commit.mutate(
-      { title: commitTitle, body: fullBody || undefined, amend: wasAmending },
-      {
-        onSuccess: (result) => {
-          // First, so the pop-out closes the instant the commit lands rather
-          // than behind the reporting work below.
-          onCommitted?.();
-          if (!wasAmending) {
-            track({
-              name: "commit_created",
-              properties: {
-                file_count: fileCount,
-                has_ai_message: snapshot.aiGenerated,
-                has_co_authors: snapshot.coAuthors.length > 0,
-              },
-            });
-          }
-          toast.success(
-            `${wasAmending ? "Amended" : "Committed"} ${result.hash.slice(0, 7)}`,
-          );
-          // Amending rewrites an existing commit; only new commits fire
-          // on-commit automations.
-          if (!wasAmending) {
-            triggerAutomations({
-              kind: "commit",
-              repoPath,
-              hash: result.hash,
-              title: commitTitle,
-              branch: branchName ?? "",
-            });
-          }
-        },
-        onError: (e) => {
-          // The commit failed — put the message back so it isn't lost (restores
-          // amending mode too).
-          restoreCommitDraft({ ...snapshot, amendingHash }, draftKey);
-          toastError(e);
-        },
-      },
-    );
+    try {
+      const result = await commit.mutateAsync({
+        title: commitTitle,
+        body: fullBody || undefined,
+        amend: wasAmending,
+      });
+      // First, so the pop-out closes the instant the commit lands rather
+      // than behind the reporting work below.
+      onCommitted?.();
+      if (!wasAmending) {
+        track({
+          name: "commit_created",
+          properties: {
+            file_count: fileCount,
+            has_ai_message: snapshot.aiGenerated,
+            has_co_authors: snapshot.coAuthors.length > 0,
+          },
+        });
+      }
+      toast.success(
+        `${wasAmending ? "Amended" : "Committed"} ${result.hash.slice(0, 7)}`,
+      );
+      // Amending rewrites an existing commit; only new commits fire
+      // on-commit automations.
+      if (!wasAmending) {
+        triggerAutomations({
+          kind: "commit",
+          repoPath,
+          hash: result.hash,
+          title: commitTitle,
+          branch: branchName ?? "",
+        });
+      }
+    } catch (e) {
+      // The commit failed — put the message back so it isn't lost (restores
+      // amending mode too).
+      restoreCommitDraft({ ...snapshot, amendingHash }, draftKey);
+      toastError(e);
+    }
   }
 
   return {

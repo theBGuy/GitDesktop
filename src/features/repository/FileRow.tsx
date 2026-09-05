@@ -1,27 +1,11 @@
 import { MinusIcon, PlusIcon } from "@phosphor-icons/react";
 import { memo } from "react";
 import { DiffStat } from "@/components/diff-stat";
-import { Button } from "@/components/ui/button";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { KIND_BADGE } from "@/lib/git/change-kind-badge";
+import { reservedDeviceName } from "@/lib/git/reserved-device-name";
 import type { ChangeKind, DiffStatEntry, FileEntry } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
-
-const KIND_BADGE: Record<
-  ChangeKind,
-  { letter: string; label: string; className: string }
-> = {
-  added: { letter: "A", label: "Added", className: "text-success" },
-  untracked: { letter: "U", label: "Untracked", className: "text-success" },
-  modified: { letter: "M", label: "Modified", className: "text-warning" },
-  typechange: { letter: "T", label: "Type changed", className: "text-warning" },
-  deleted: { letter: "D", label: "Deleted", className: "text-destructive" },
-  renamed: { letter: "R", label: "Renamed", className: "text-info" },
-  copied: { letter: "C", label: "Copied", className: "text-info" },
-  conflicted: {
-    letter: "!",
-    label: "Conflicted",
-    className: "text-destructive",
-  },
-};
 
 /**
  * A single changed-file row. Deliberately light: it carries no context menu or
@@ -63,6 +47,9 @@ export const FileRow = memo(function FileRow({
   const label = entry.origPath
     ? `${entry.origPath} → ${entry.path}`
     : entry.path;
+  // Staging is the only direction that reads the working-tree file, so only it
+  // hits the device; unstaging works on such a path as on any other.
+  const reservedName = staged ? null : reservedDeviceName(entry.path);
 
   return (
     <div
@@ -113,7 +100,7 @@ export const FileRow = memo(function FileRow({
           className="text-[11px]"
         />
       ) : null}
-      <Button
+      <DisabledReasonButton
         variant="ghost"
         size="icon-xs"
         className={cn(
@@ -124,14 +111,18 @@ export const FileRow = memo(function FileRow({
           (active || selected) && "opacity-100",
         )}
         aria-label={staged ? `Unstage ${entry.path}` : `Stage ${entry.path}`}
-        disabled={disabled}
+        disabled={disabled || reservedName !== null}
+        reason={
+          reservedName &&
+          `"${reservedName}" is a Windows-reserved device name — git can't stage it`
+        }
         onClick={(e) => {
           e.stopPropagation();
           onToggle(entry, staged);
         }}
       >
         {staged ? <MinusIcon /> : <PlusIcon />}
-      </Button>
+      </DisabledReasonButton>
     </div>
   );
 });

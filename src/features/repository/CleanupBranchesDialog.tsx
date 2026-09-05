@@ -139,23 +139,24 @@ const EMPTY_MERGED_CLAUSE: Record<PrCheckState, string> = {
   unavailable: " and nothing is idle for ",
 };
 
-/** What the candidate list is waiting on, per outstanding read. The two settle
+/** What the candidate list is waiting on, per outstanding read. They settle
  *  independently, so the line names the one actually running rather than
  *  whichever came first. */
-const CHECKING_COPY: Record<"merged" | "worktrees", string> = {
+const CHECKING_COPY: Record<"merged" | "worktrees" | "rules", string> = {
   merged: "Checking which branches are merged…",
   worktrees: "Checking which branches are checked out in another worktree…",
+  rules: "Checking branch protection rules…",
 };
 
 /** The one-line status above the candidate list while a check it depends on
  *  runs. A parked check has no progress to report, so it names what it's waiting
  *  on rather than implying the read is underway — and only the pull-request half
- *  can park, since both git reads work on local objects. */
+ *  can park, since the other reads work on local data. */
 function CheckingLine({
   what,
   paused,
 }: {
-  what: "merged" | "worktrees";
+  what: "merged" | "worktrees" | "rules";
   paused: boolean;
 }) {
   return (
@@ -238,6 +239,7 @@ export function CleanupBranchesDialog({
   isInWorktree,
   isWorktreeRemoving,
   worktreeCheckState,
+  rulesSettling,
   prMergedByBranch,
   prCheckState,
   prCheckPaused,
@@ -267,6 +269,13 @@ export function CleanupBranchesDialog({
    *  neither paints nor pre-selects. (`useEffectiveBranchRulesSettling` carries
    *  the same contract for the branch rules behind `isProtected`.) */
   worktreeCheckState: WorktreeCheckState;
+  /** Whether {@link isProtected} has an answer yet — the branch-rules half of
+   *  that same contract, from `useEffectiveBranchRulesSettling`. While true the
+   *  effective rules stand in as empty, so the predicate excludes nothing and
+   *  the list neither paints nor pre-selects. A FAILED rules read is
+   *  deliberately not held on: it falls open inside that hook, since nothing
+   *  would ever arrive to lift the hold. */
+  rulesSettling: boolean;
   /** Branch name → the label of the merged pull request it maps to ("#123").
    *  Name-keyed and limited to the PRs the app has fetched, so it labels rows,
    *  never selects them. */
@@ -374,6 +383,11 @@ export function CleanupBranchesDialog({
   // candidate below is provisional — the list stays behind the skeleton and the
   // selection stays unseeded rather than offering a row the answer would remove.
   const checkingWorktrees = worktreeCheckState === "pending";
+  // Settling rules hold exactly as a pending worktree read does — `isProtected`
+  // excludes nothing until they land. Held in BOTH modes: rules settle within
+  // moments of opening the repo while this dialog opens later, and the mode can
+  // flip while it is open, so a delete-only hold buys nothing and can miss.
+  const holdingReads = checkingWorktrees || rulesSettling;
 
   // Re-check every candidate whenever the set itself changes — opening, switching
   // mode, adjusting the window, or divergence resolving to reveal merged branches.
@@ -401,11 +415,11 @@ export function CleanupBranchesDialog({
   useEffect(() => {
     if (running) return; // don't clobber a batch mid-flight
     // Nothing may be pre-selected off a stand-in exclusion: the seed re-runs
-    // once the worktree read lands and the excluded rows are really gone.
-    if (checkingWorktrees) return;
+    // once those reads land and the excluded rows are really gone.
+    if (holdingReads) return;
     setSelected(new Set(autoSelectKey ? autoSelectKey.split("\n") : []));
     setActiveName(null);
-  }, [autoSelectKey, running, checkingWorktrees]);
+  }, [autoSelectKey, running, holdingReads]);
 
   // First load: a merged signal still in flight and nothing has surfaced yet.
   // Age-based candidates already show instantly (branch data is cached), so this
@@ -421,7 +435,7 @@ export function CleanupBranchesDialog({
   // Which of the status region's lines are DRAWN — it announces more than it
   // shows: the check line stays sr-only on the empty first paint (the skeleton
   // is the visual signal there).
-  const stillChecking = checkingMerged || checkingWorktrees;
+  const stillChecking = checkingMerged || holdingReads;
   const showCheckLine =
     stillChecking && (pausedMergedCheck || candidates.length > 0);
   const showPrFailedLine = prCheckState === "failed" && candidates.length > 0;
@@ -429,10 +443,10 @@ export function CleanupBranchesDialog({
   // failed read leaves the exclusion vacuous, which the empty state's own copy
   // would otherwise assert as real.
   const worktreeCheckFailed = worktreeCheckState === "failed";
-  // A provisional list is no list: the skeleton covers the whole worktree wait,
+  // A provisional list is no list: the skeleton covers the whole exclusion wait,
   // not just the empty first paint the merged check gates.
   const showSkeleton =
-    checkingWorktrees || (checkingMerged && candidates.length === 0);
+    holdingReads || (checkingMerged && candidates.length === 0);
 
   const selectedCount = candidateNames.filter((n) => selected.has(n)).length;
   const allChecked =
@@ -490,6 +504,11 @@ export function CleanupBranchesDialog({
       try {
         if (mode === "archive") {
           await api.gitSetBranchArchived(repoPath, name, true);
+        } else if (isProtected(name)) {
+          // Re-checked with the rules as of batch start, not only when the list
+          // was built: a rule can change while the dialog sits open, and a
+          // protected branch belongs in the failure rows rather than deleted.
+          fails.set(name, "protected by a branch rule");
         } else {
           await api.gitDeleteBranch(repoPath, name);
         }
@@ -627,9 +646,9 @@ export function CleanupBranchesDialog({
 
           {/* Select-all header — a tri-state indicator (the vendored Checkbox
               has no indeterminate visual, and components/ui/ is off-limits).
-              Withheld while the list is provisional — it would count rows the
-              worktree read may still remove. */}
-          {candidates.length > 0 && !checkingWorktrees && (
+              Withheld while the list is provisional — it would count rows an
+              outstanding exclusion read may still remove. */}
+          {candidates.length > 0 && !holdingReads && (
             <button
               type="button"
               disabled={running}
@@ -684,7 +703,13 @@ export function CleanupBranchesDialog({
                   honestly repeat on every mode and window change. */}
               {stillChecking ? (
                 <CheckingLine
-                  what={checkingMerged ? "merged" : "worktrees"}
+                  what={
+                    checkingMerged
+                      ? "merged"
+                      : checkingWorktrees
+                        ? "worktrees"
+                        : "rules"
+                  }
                   paused={pausedMergedCheck}
                 />
               ) : (
@@ -718,10 +743,11 @@ export function CleanupBranchesDialog({
 
             {/* List / skeleton / empty */}
             {showSkeleton ? (
-              // A running local worktree read is real activity, so it earns the
-              // skeleton even while the pull-request fetch sits parked.
+              // A running local read (worktrees, branch rules) is real activity,
+              // so it earns the skeleton even while the pull-request fetch sits
+              // parked.
               <CheckingPlaceholder
-                paused={pausedMergedCheck && !checkingWorktrees}
+                paused={pausedMergedCheck && !holdingReads}
               />
             ) : candidates.length === 0 ? (
               <p className="py-6 text-center text-xs text-muted-foreground">
@@ -802,7 +828,7 @@ export function CleanupBranchesDialog({
             <Button
               type="button"
               variant={mode === "delete" ? "destructive" : "default"}
-              disabled={selectedCount === 0 || running || checkingWorktrees}
+              disabled={selectedCount === 0 || running || holdingReads}
               onClick={onPrimary}
             >
               {primaryLabel}
