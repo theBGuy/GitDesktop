@@ -4,7 +4,14 @@ import type { ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiSettings, ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
-import type { ThemeSetting } from "@/lib/theme";
+import {
+  DEFAULT_ACCENT_HUE,
+  DEFAULT_UI_FONT,
+  sanitizeAccentHue,
+  sanitizeUiFont,
+  type ThemeSetting,
+  type UiFont,
+} from "@/lib/theme";
 
 export interface RecentRepo {
   path: string;
@@ -285,6 +292,11 @@ export interface AppSettings {
    *  softer dark variant that lifts surfaces off pure black to reduce eye strain. Applied
    *  outside the bulk settings form (apply-on-change), like diffViewMode. */
   theme: ThemeSetting;
+  /** Accent hue in degrees (OKLCH). Default 175 is brand mint. Overlay on the
+   *  active theme — lightness/chroma stay per-theme. Apply-on-change. */
+  accentHue: number;
+  /** Chrome typeface. Code, diffs, and the in-app terminal stay JetBrains Mono. Apply-on-change. */
+  uiFont: UiFont;
   diffViewMode: "unified" | "split";
   /** Which conversation-list sections the user collapsed, keyed `"<feature>:<kind>"`
    *  (`pulls:local`, `issues:remote`, …); a missing key = expanded. Global and
@@ -366,6 +378,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   mcpServers: [],
   recentRepos: [],
   theme: "system",
+  accentHue: DEFAULT_ACCENT_HUE,
+  uiFont: DEFAULT_UI_FONT,
   diffViewMode: "unified",
   collapsedConversationSections: [],
   commentComposerCollapsed: false,
@@ -426,6 +440,8 @@ export async function loadSettings(): Promise<AppSettings> {
       ...DEFAULT_SETTINGS.notifications,
       ...saved?.notifications,
     },
+    accentHue: sanitizeAccentHue(saved?.accentHue),
+    uiFont: sanitizeUiFont(saved?.uiFont),
   };
 }
 

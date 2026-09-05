@@ -57,7 +57,11 @@ A few things worth knowing up front:
   read and act on pull requests and Pipelines. (See **Bitbucket repositories** below.)
 - **Make it yours.** Pick a theme — **System**, **Light**, **Dark**, or a softer
   **Slate** that's easier on the eyes — in **Settings → Appearance**, or cycle
-  themes anytime from the command palette ({{kbd:command-palette}}).
+  themes anytime from the command palette ({{kbd:command-palette}}). The same
+  page has an **accent colour** (a hue that tints buttons, focus rings, and
+  highlights) and a **UI font** (**JetBrains Mono**, **Inter**, or your system
+  UI font). Code, diffs, and the terminal stay on JetBrains Mono.
+  **Reset accent & font** restores those two to defaults.
 {{ai}}- **AI is optional.** Commit messages, PR descriptions, reviews, CI debugging, and
   agent sessions can use Anthropic, OpenAI, Google AI Studio, OpenRouter, Ollama
   (local or cloud), an OpenAI-compatible endpoint, or the Claude Code / Codex /
@@ -2514,7 +2518,11 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   the destination alone), and privacy options.
 - **Appearance** — pick a theme: **System** (follows your OS's light/dark setting),
   **Light**, **Dark**, or **Slate** (a softer, blue-gray dark). Applies as you pick it,
-  and *Cycle theme* in the command palette steps through them.
+  and *Cycle theme* in the command palette steps through them. **Accent colour** tints
+  buttons, focus rings, and highlights on top of that theme (status colours stay put).
+  **UI font** switches chrome, headings, and body copy between **JetBrains Mono**,
+  **Inter**, and your system UI font; code, diffs, and the terminal stay on JetBrains
+  Mono. **Reset accent & font** restores those two to defaults.
 {{ai}}- **AI** — providers, models, keys, instructions, and agent-session defaults: the
   default agent, isolation (worktree / container), and the container image.
 - **Slash commands** — manage built-in and custom agent commands.

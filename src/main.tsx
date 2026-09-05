@@ -13,7 +13,7 @@ import { initAnalytics, trackCaughtError } from "@/lib/analytics";
 import { calmTransition } from "@/lib/motion";
 import { queryClient } from "@/lib/query-client";
 import { loadSettings } from "@/lib/settings/api";
-import { commitTheme, initTheme } from "@/lib/theme";
+import { commitAppearance, initTheme } from "@/lib/theme";
 import App from "./App.tsx";
 import "./App.css";
 // Position is load-bearing: the vendored diff-view CSS must be imported plain
@@ -24,8 +24,8 @@ import "./App.css";
 // at build time instead (see vite.config.ts), so no layering is needed.
 import "@git-diff-view/react/styles/diff-view.css";
 
-// Apply the saved theme (System / Light / Dark / Slate) before first paint,
-// reading a localStorage mirror synchronously so a saved override doesn't flash
+// Apply the saved theme / accent / font before first paint, reading a
+// localStorage mirror synchronously so a saved override doesn't flash
 // through the OS default; the authoritative store value reconciles below.
 initTheme();
 
@@ -34,7 +34,7 @@ initTheme();
 loadSettings()
   .then((s) => {
     // Reconcile the flash-mirror against the authoritative persisted value.
-    commitTheme(s.theme);
+    commitAppearance(s);
     initAnalytics(s.analyticsEnabled, s.recordReplay);
   })
   .catch(() => {

@@ -9,6 +9,8 @@ import {
   ptyResize,
   ptyWrite,
 } from "@/lib/pty";
+import { MONO_FONT_STACK } from "@/lib/theme";
+import { cn } from "@/lib/utils";
 
 /** Decode a base64 PTY chunk to bytes for `term.write` (xterm reassembles any
  *  partial UTF-8 across chunks itself). */
@@ -63,8 +65,9 @@ export function Terminal({
     if (!host) return;
 
     const term = new XTerm({
-      fontFamily:
-        'ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace',
+      // Match `--font-mono` (JetBrains Mono Variable). xterm paints its own
+      // canvas, so it cannot inherit the host's CSS font-family.
+      fontFamily: MONO_FONT_STACK,
       fontSize: 12,
       cursorBlink: true,
       // A terminal stays dark regardless of app theme (conventional + readable).
@@ -129,5 +132,5 @@ export function Terminal({
     };
   }, []);
 
-  return <div ref={hostRef} className={className} />;
+  return <div ref={hostRef} className={cn("font-mono", className)} />;
 }

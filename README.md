@@ -910,7 +910,10 @@ review via its subscription login. The full list is under
   or key), and arrow-key navigation everywhere.
 - **Themes**: System, Light, Dark, and a softer **Slate** (a cool, lifted
   blue-gray) that eases eye strain; switch in **Settings → Appearance** or
-  cycle from the command palette.
+  cycle from the command palette. The same page has an **accent colour**
+  (hue that tints buttons, focus rings, and highlights) and a **UI font**
+  (JetBrains Mono, Inter, or your system UI font). Code, diffs, and the
+  terminal stay on JetBrains Mono.
 - **Privacy-first**: API keys live in the OS keychain (never in app files),
   local models keep code on your machine, AI-ignore patterns keep sensitive
   files out of context unless you opt into repo-aware review, and a single

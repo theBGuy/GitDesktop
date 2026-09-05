@@ -2,11 +2,13 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/jetbrains-mono";
+@import "@fontsource-variable/inter";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-heading: var(--font-mono);
+  --font-heading: var(--gd-ui-font);
+  --font-sans: var(--gd-ui-font);
   --font-mono: "JetBrains Mono Variable", monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
@@ -61,23 +63,30 @@
      follow `color-scheme`, so driving it from the theme class — not the OS —
      keeps them in sync when the user forces a theme against their OS setting. */
   color-scheme: light;
+  /* Chrome typeface. Defaults to JetBrains Mono so a first paint before
+     theme.ts runs matches today's look; Settings overlays `--gd-ui-font`.
+     `--font-mono` stays JetBrains for code. */
+  --gd-ui-font: "JetBrains Mono Variable", monospace;
+  /* Brand hue. Lightness/chroma stay per-theme so a custom hue keeps the
+     same contrast the mint tokens were tuned for. */
+  --accent-hue: 175;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  /* Brand mint accent. Light mode uses a deeper teal (same hue ~175) so it
+  /* Brand mint accent (hue 175). Light mode uses a deeper teal so it
      stays legible as text/icon color on white AND as a button bg with white
      text; dark mode (below) uses the bright marketing mint. */
-  --primary: oklch(0.48 0.1 175);
+  --primary: oklch(0.48 0.1 var(--accent-hue));
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
   --muted-foreground: oklch(0.516 0 0);
-  /* Selection/hover surfaces carry a whisper of mint instead of pure gray. */
-  --accent: oklch(0.93 0.035 175);
+  /* Selection/hover surfaces carry a whisper of the brand hue instead of pure gray. */
+  --accent: oklch(0.93 0.035 var(--accent-hue));
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
   --success: oklch(0.55 0.13 150);
@@ -86,7 +95,7 @@
   --merged: oklch(0.53 0.2 300);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.55 0.11 175);
+  --ring: oklch(0.55 0.11 var(--accent-hue));
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
@@ -95,12 +104,12 @@
   --radius: 0.625rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.48 0.1 175);
+  --sidebar-primary: oklch(0.48 0.1 var(--accent-hue));
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.93 0.035 175);
+  --sidebar-accent: oklch(0.93 0.035 var(--accent-hue));
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.55 0.11 175);
+  --sidebar-ring: oklch(0.55 0.11 var(--accent-hue));
 }
 
 .dark {
@@ -111,15 +120,15 @@
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.205 0 0);
   --popover-foreground: oklch(0.985 0 0);
-  /* Bright marketing mint (#4FE0C4) reads well as text on the dark surface
-     and as a button bg with dark text. */
-  --primary: oklch(0.82 0.11 175);
+  /* Bright marketing mint (#4FE0C4 at hue 175) reads well as text on the dark
+     surface and as a button bg with dark text. */
+  --primary: oklch(0.82 0.11 var(--accent-hue));
   --primary-foreground: oklch(0.205 0 0);
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.269 0 0);
   --muted-foreground: oklch(0.715 0 0);
-  --accent: oklch(0.32 0.04 175);
+  --accent: oklch(0.32 0.04 var(--accent-hue));
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
   --success: oklch(0.8 0.17 150);
@@ -128,7 +137,7 @@
   --merged: oklch(0.75 0.16 305);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.82 0.11 175);
+  --ring: oklch(0.82 0.11 var(--accent-hue));
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
@@ -136,12 +145,12 @@
   --chart-5: oklch(0.269 0 0);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.82 0.11 175);
+  --sidebar-primary: oklch(0.82 0.11 var(--accent-hue));
   --sidebar-primary-foreground: oklch(0.205 0 0);
-  --sidebar-accent: oklch(0.32 0.04 175);
+  --sidebar-accent: oklch(0.32 0.04 var(--accent-hue));
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.82 0.11 175);
+  --sidebar-ring: oklch(0.82 0.11 var(--accent-hue));
 }
 
 /* "Slate" — a softer dark theme (Settings → Appearance) in the style of GitHub's
@@ -174,11 +183,11 @@
   /* Selection / hover surfaces pick up the same cool tint. */
   --accent: oklch(0.34 0.025 255);
   --sidebar-accent: oklch(0.34 0.025 255);
-  /* Brand mint + focus ring, gently desaturated for the softer field. */
-  --primary: oklch(0.8 0.095 175);
-  --sidebar-primary: oklch(0.8 0.095 175);
-  --ring: oklch(0.8 0.095 175);
-  --sidebar-ring: oklch(0.8 0.095 175);
+  /* Brand hue + focus ring, gently desaturated for the softer field. */
+  --primary: oklch(0.8 0.095 var(--accent-hue));
+  --sidebar-primary: oklch(0.8 0.095 var(--accent-hue));
+  --ring: oklch(0.8 0.095 var(--accent-hue));
+  --sidebar-ring: oklch(0.8 0.095 var(--accent-hue));
   /* Semantic state colors, desaturated so they don't glow on the lighter field. */
   --success: oklch(0.78 0.13 150);
   --warning: oklch(0.8 0.12 75);
@@ -229,7 +238,7 @@
     @apply bg-background text-foreground;
   }
   html {
-    @apply font-mono;
+    @apply font-sans;
   }
 }
 
@@ -290,4 +299,66 @@
 .diff-tailwindcss-wrapper .diff-widget-tooltip::before,
 .diff-tailwindcss-wrapper .diff-widget-tooltip::after {
   display: none !important;
+}
+
+/* Accent hue slider (Settings → Appearance). Native range so arrows work
+   without a vendored Slider; the track is a hue wheel at the token chroma. */
+.gd-hue-slider {
+  appearance: none;
+  height: 0.5rem;
+  border-radius: 0;
+  background: linear-gradient(
+    to right in oklch,
+    oklch(0.7 0.14 0),
+    oklch(0.7 0.14 60),
+    oklch(0.7 0.14 120),
+    oklch(0.7 0.14 180),
+    oklch(0.7 0.14 240),
+    oklch(0.7 0.14 300),
+    oklch(0.7 0.14 360)
+  );
+}
+.gd-hue-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 0;
+  background: oklch(0.65 0.14 var(--accent-hue));
+  border: 1px solid var(--border);
+  box-shadow: 0 0 0 1px var(--background);
+}
+.gd-hue-slider::-moz-range-thumb {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 0;
+  background: oklch(0.65 0.14 var(--accent-hue));
+  border: 1px solid var(--border);
+  box-shadow: 0 0 0 1px var(--background);
+}
+.gd-hue-slider::-moz-range-track {
+  height: 0.5rem;
+  border-radius: 0;
+  background: linear-gradient(
+    to right in oklch,
+    oklch(0.7 0.14 0),
+    oklch(0.7 0.14 60),
+    oklch(0.7 0.14 120),
+    oklch(0.7 0.14 180),
+    oklch(0.7 0.14 240),
+    oklch(0.7 0.14 300),
+    oklch(0.7 0.14 360)
+  );
+}
+.gd-hue-slider:focus-visible {
+  outline: none;
+}
+.gd-hue-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 3px var(--ring);
+}
+.gd-hue-slider:focus-visible::-moz-range-thumb {
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 3px var(--ring);
 }

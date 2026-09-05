@@ -495,11 +495,14 @@ export function ConversationListPanel<L, R, J = never, LN = never>(props: {
                 )}
               </div>
               {linear.pending ? (
-                <div className="space-y-2 p-3">
-                  {Array.from({ length: linear.skeletonRows }, (_, i) => (
-                    <Skeleton key={i} className="h-9 w-full" />
-                  ))}
-                </div>
+                // Same three-line, chip-led rows as Jira (status · title ·
+                // identifier/updated), so the placeholder matches the real row.
+                <ListRowSkeletons
+                  rows={linear.skeletonRows}
+                  lines={3}
+                  name="Linear issues"
+                  indent={false}
+                />
               ) : linear.isError ? (
                 (linear.errorSlot ?? (
                   <p className="px-3 py-4 text-xs text-muted-foreground">

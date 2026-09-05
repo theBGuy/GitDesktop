@@ -4,7 +4,13 @@ import { PROVIDERS_REQUIRING_KEY } from "@/lib/ai/providers";
 import type { AiProviderId } from "@/lib/ai/types";
 import { getSecret } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
-import { commitTheme, type ThemeSetting } from "@/lib/theme";
+import {
+  commitAppearance,
+  sanitizeAccentHue,
+  sanitizeUiFont,
+  type ThemeSetting,
+  type UiFont,
+} from "@/lib/theme";
 import {
   type AppSettings,
   addRecentRepo,
@@ -117,37 +123,82 @@ export function useSaveSettings() {
 }
 
 /**
- * Apply a theme change from any entry point — the Appearance picker and the
- * `cycle-theme` command both go through this, so the two paths can't drift. It
- * optimistically patches the settings cache (so a bound `<Select>` reflects the
- * choice immediately, not a refetch later), persists it, applies the DOM class,
- * and rolls all three back if the store write throws. `useSaveSettings`'s
- * success-invalidate reconciles the cache on the happy path.
+ * Apply an appearance change from any entry point — the Appearance pickers
+ * and the `cycle-theme` command all go through this, so the paths can't drift.
+ * It optimistically patches the settings cache (so a bound `<Select>` or
+ * slider reflects the choice immediately), persists it, applies the DOM, and
+ * rolls back if the store write throws. `useSaveSettings`'s success-invalidate
+ * reconciles the cache on the happy path.
  */
-export function useApplyTheme() {
+export type AppearancePatch = {
+  theme?: ThemeSetting;
+  accentHue?: number;
+  uiFont?: UiFont;
+};
+
+export function useApplyAppearance() {
   const queryClient = useQueryClient();
   const saveSettings = useSaveSettings();
+
   return useCallback(
-    (current: AppSettings, next: ThemeSetting) => {
-      if (next === current.theme) return;
-      const updated = { ...current, theme: next };
+    (current: AppSettings, patch: AppearancePatch) => {
+      // Merge onto the cache, not the caller's snapshot: a hue drag writes the
+      // cache on every tick, and a theme/font persist in the same gesture must
+      // keep that hue rather than the pre-drag snapshot.
+      const base =
+        queryClient.getQueryData<AppSettings>(settingsKeys.settings) ?? current;
+      const updated: AppSettings = {
+        ...base,
+        ...patch,
+        accentHue:
+          patch.accentHue !== undefined
+            ? sanitizeAccentHue(patch.accentHue)
+            : base.accentHue,
+        uiFont:
+          patch.uiFont !== undefined
+            ? sanitizeUiFont(patch.uiFont)
+            : base.uiFont,
+      };
+      if (
+        updated.theme === base.theme &&
+        updated.accentHue === base.accentHue &&
+        updated.uiFont === base.uiFont
+      ) {
+        return;
+      }
       queryClient.setQueryData(settingsKeys.settings, updated);
-      commitTheme(next);
+      commitAppearance(updated);
       saveSettings.mutate(updated, {
         onError: () => {
           // Only roll back if this call's change is still the latest: otherwise a
-          // late-failing earlier write would stomp a newer successful one (two
-          // fast cycles where the first write rejects after the second lands).
+          // late-failing earlier write would stomp a newer successful one.
           const latest = queryClient.getQueryData<AppSettings>(
             settingsKeys.settings,
           );
-          if (latest?.theme !== next) return;
-          queryClient.setQueryData(settingsKeys.settings, current);
-          commitTheme(current.theme);
+          if (
+            latest?.theme !== updated.theme ||
+            latest?.accentHue !== updated.accentHue ||
+            latest?.uiFont !== updated.uiFont
+          ) {
+            return;
+          }
+          queryClient.setQueryData(settingsKeys.settings, base);
+          commitAppearance(base);
         },
       });
     },
     [queryClient, saveSettings],
+  );
+}
+
+/** Theme-only wrapper so Cycle-theme and the theme picker stay one-liners. */
+export function useApplyTheme() {
+  const apply = useApplyAppearance();
+  return useCallback(
+    (current: AppSettings, next: ThemeSetting) => {
+      apply(current, { theme: next });
+    },
+    [apply],
   );
 }
 
