@@ -12,6 +12,10 @@ mod git;
 mod github;
 mod health;
 mod hooks;
+// Dev-only, like the cold-start mode it serves: gated so release builds carry no
+// unused reader (and no dead_code warning for it).
+#[cfg(debug_assertions)]
+mod instance_id;
 mod instructions;
 mod jira_field_maps;
 mod jira_links;
@@ -54,6 +58,18 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
         tray::show_main_window(app);
     }));
+    // Interpolating the id straight into JS source is safe only because
+    // `instance_id::read` enforces `[a-z0-9-]{1,32}`. The leading newline keeps us
+    // off the upstream invoke script's trailing newline for statement separation.
+    // This script runs before any page script, so the frontend reads the global
+    // synchronously at module scope.
+    #[cfg(debug_assertions)]
+    let builder = match instance_id::read() {
+        Some(id) => builder.append_invoke_initialization_script(format!(
+            "\nwindow.__GD_INSTANCE_ID__ = \"{id}\";"
+        )),
+        None => builder,
+    };
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())

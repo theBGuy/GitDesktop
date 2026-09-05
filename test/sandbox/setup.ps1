@@ -2,7 +2,7 @@
   Runs inside Windows Sandbox at logon (invoked by onboarding.wsb).
 
   Installs GitDesktop into a genuinely bare Windows: no git, no gh, no keychain
-  entries, no app data — the real cold start a brand-new user gets. The NSIS
+  entries, no app data: the real cold start a brand-new user gets. The NSIS
   installer pulls in the WebView2 runtime if it's missing (the sandbox has
   internet by default).
 
@@ -40,7 +40,7 @@ if ($git) {
   Write-Host "Installing $($git.Name) (silent)..." -ForegroundColor Green
   Start-Process -FilePath $git.FullName -ArgumentList "/VERYSILENT","/NORESTART" -Wait
 } else {
-  Write-Host "No git installer in C:\Setup\tools — you'll see the 'Git is not installed' screen (that's the first onboarding surface)." -ForegroundColor Yellow
+  Write-Host "No git installer in C:\Setup\tools; you'll see the 'Git is not installed' screen (that's the first onboarding surface)." -ForegroundColor Yellow
 }
 
 Write-Host ""

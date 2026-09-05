@@ -50,6 +50,7 @@ import {
   resetReview,
 } from "@/lib/stores/reviews";
 import { errorMessage, invoke } from "@/lib/tauri/invoke";
+import { COLD_START_AUTOMATIONS_OFF } from "@/lib/test-mode";
 import {
   clearDismissedHead,
   getDismissedHeadMap,
@@ -233,7 +234,7 @@ export function triggerAutomations(event: AutomationEvent): void {
 
 /** What a {@link run} pass did, so a re-run can tell outcomes apart:
  *  - `matched`: rules that exist AND apply (past the `only` + branch gates). 0 = the rule
- *    no longer applies, or automations are paused (Hide AI).
+ *    no longer applies, or automations are paused (Hide AI, or cold start without opt-in).
  *  - `attempted`: runs actually started. `matched > 0 && attempted === 0` means a claim or
  *    an already-covered head blocked it — retryable. */
 interface RunOutcome {
@@ -242,18 +243,23 @@ interface RunOutcome {
 }
 
 /**
- * Runs the automation rules matching `event`, unless AI features are hidden — that
- * pauses automations, so it returns immediately with a zero outcome. `only` scopes a
- * re-run to a single mode. `replacesKey` is the stopped row a re-run replaces — removed
- * the instant its replacement registers, so the stopped row survives whenever nothing
- * registers. Returns a {@link RunOutcome} so a re-run can tell "rule gone" from
- * "blocked" from "started".
+ * Runs the automation rules matching `event`, unless AI features are hidden or this is
+ * a cold-start instance without the automations opt-in — either pauses automations, so
+ * it returns immediately with a zero outcome. `only` scopes a re-run to a single mode.
+ * `replacesKey` is the stopped row a re-run replaces — removed the instant its
+ * replacement registers, so the stopped row survives whenever nothing registers.
+ * Returns a {@link RunOutcome} so a re-run can tell "rule gone" from "blocked" from
+ * "started".
  */
 async function run(
   event: AutomationEvent,
   only?: ReviewMode,
   replacesKey?: string,
 ): Promise<RunOutcome> {
+  // Cold-start instances share the automation-claims dir with the real instance, so an
+  // armed cold instance can win a claim meant for the real run and suppress it. First
+  // gate of all, so a gated tick reads no store at all and takes no claim.
+  if (COLD_START_AUTOMATIONS_OFF) return { matched: 0, attempted: 0 };
   // Hiding AI features PAUSES automations: no NEW run starts while `hideAi` is set
   // (an in-flight run still completes and delivers — deliberate). Rules are kept and
   // resume when AI is shown again.
@@ -679,8 +685,9 @@ async function run(
  * cancelled run wrote one, and the pr-sync `sameSha(dismissedHead, headSha)` gate would
  * otherwise make the re-run a silent no-op. The run then flows through the normal pipeline
  * scoped to `only`. If the rule was disabled since, nothing matches and we toast rather
- * than leave a dead button. While AI features are hidden it stops before the clear —
- * a paused re-run must not consume the watermark.
+ * than leave a dead button. While AI features are hidden — or in a cold-start instance
+ * that never opted automations in — it stops before the clear: a paused re-run must not
+ * consume the watermark.
  */
 export function rerunAutomation(
   event: AutomationEvent,
@@ -691,8 +698,13 @@ export function rerunAutomation(
   const noun = event.kind === "commit" ? "commit" : "pull request";
   void (async () => {
     try {
-      // The dismissal clear below mutates BEFORE run()'s own pause gate, so a paused
-      // re-run has to stop here — clearing nothing and running nothing.
+      // The dismissal clear below mutates BEFORE run()'s own pause gates, so a paused
+      // re-run has to stop here — clearing nothing and running nothing. The cold-start
+      // gate comes first, like run()'s: a gated cold instance reads no store at all.
+      if (COLD_START_AUTOMATIONS_OFF) {
+        toast.info("Automations are off in cold-start test mode.");
+        return;
+      }
       if ((await loadSettings()).hideAi) {
         toast.info("Automations are paused while AI features are hidden.");
         return;

@@ -7,6 +7,7 @@ import { forgeFeatureReady } from "@/lib/git/queries";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { loadSettings } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
+import { COLD_START_AUTOMATIONS_OFF } from "@/lib/test-mode";
 
 /**
  * Always-mounted background poller that keeps pr-sync automations (auto
@@ -48,6 +49,9 @@ export function useBackgroundPrSync(): void {
     staleTime: 55_000,
     retry: false,
     queryFn: async () => {
+      // A cold-start instance runs no automations unless opted in, so this poller
+      // makes no forge calls — and, gating first, no store reads either.
+      if (COLD_START_AUTOMATIONS_OFF) return { polled: 0 };
       const settings = await loadSettings();
       // Hiding AI features pauses automations, so a paused tick makes no forge call.
       // Settings are read per tick, so flipping it takes effect on the next one.
