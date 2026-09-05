@@ -2,6 +2,7 @@ import { PlusIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { Button } from "@/components/ui/button";
 import {
@@ -480,41 +481,44 @@ export function TaskDialog({
             </p>
           </div>
         ) : (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <Label>Script</Label>
-              {aiEnabled &&
-                !aiConfigured &&
-                (scriptGen.generating ? null : (
+          <LabeledGroup
+            label="Script"
+            className="space-y-1.5"
+            actions={
+              <>
+                {aiEnabled &&
+                  !aiConfigured &&
+                  (scriptGen.generating ? null : (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      className="text-muted-foreground"
+                      title="Connect an AI provider to generate scripts"
+                      onClick={() => {
+                        onOpenChange(false);
+                        openSettings("ai");
+                      }}
+                    >
+                      <SparkleIcon data-icon="inline-start" />
+                      Set up AI to generate
+                    </Button>
+                  ))}
+                {aiEnabled && aiConfigured && scriptGen.generating && (
                   <Button
                     type="button"
                     variant="ghost"
                     size="xs"
                     className="text-muted-foreground"
-                    title="Connect an AI provider to generate scripts"
-                    onClick={() => {
-                      onOpenChange(false);
-                      openSettings("ai");
-                    }}
+                    onClick={scriptGen.cancel}
                   >
-                    <SparkleIcon data-icon="inline-start" />
-                    Set up AI to generate
+                    <Spinner data-icon="inline-start" />
+                    Generating…
                   </Button>
-                ))}
-              {aiEnabled && aiConfigured && scriptGen.generating && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  className="text-muted-foreground"
-                  onClick={scriptGen.cancel}
-                >
-                  <Spinner data-icon="inline-start" />
-                  Generating…
-                </Button>
-              )}
-            </div>
-
+                )}
+              </>
+            }
+          >
             {aiEnabled && aiConfigured && !scriptGen.generating && (
               <div className="flex gap-2">
                 <Input
@@ -567,7 +571,7 @@ export function TaskDialog({
               The script's contents, run by the selected interpreter — shell
               commands for PowerShell or bash, JavaScript for Node, and so on.
             </p>
-          </div>
+          </LabeledGroup>
         )}
 
         <div className="space-y-1.5">

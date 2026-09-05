@@ -688,6 +688,27 @@ export function RemotePrView({
     !details.isPlaceholderData,
   );
   const shownIsDraft = settledEntityKey === entityKey ? retainedIsDraft : null;
+  // Awaited, not per-call callbacks: an `<Activity>` hide (or a host unmount) tears
+  // this observer's subscription down, and react-query drops per-call callbacks once
+  // an observer has no listeners — the toast and the ready-review automation would
+  // never run for a write the forge had already taken.
+  async function markReadyForReview() {
+    try {
+      await setDraft.mutateAsync({ number, draft: false });
+      toast.success("Marked ready for review");
+      void fireReadyReview();
+    } catch (e) {
+      onError(e);
+    }
+  }
+  async function convertToDraft() {
+    try {
+      await setDraft.mutateAsync({ number, draft: true });
+      toast.success("Converted to draft");
+    } catch (e) {
+      onError(e);
+    }
+  }
   // Palette twins of the footer's draft controls — same `setDraft` mutation, same
   // frozen identity, and Ready also fires the ready-review automation. Registration
   // is effect-synced, so an `enabled` term alone still leaves the keypress a frame
@@ -696,16 +717,7 @@ export function RemotePrView({
     "pr-ready-for-review",
     () => {
       if (shownIsDraft !== true) return;
-      setDraft.mutate(
-        { number, draft: false },
-        {
-          onSuccess: () => {
-            toast.success("Marked ready for review");
-            void fireReadyReview();
-          },
-          onError,
-        },
-      );
+      void markReadyForReview();
     },
     isSelectedPr && draftPairVisible && shownIsDraft === true && !busy,
   );
@@ -713,13 +725,7 @@ export function RemotePrView({
     "pr-convert-to-draft",
     () => {
       if (shownIsDraft !== false) return;
-      setDraft.mutate(
-        { number, draft: true },
-        {
-          onSuccess: () => toast.success("Converted to draft"),
-          onError,
-        },
-      );
+      void convertToDraft();
     },
     isSelectedPr &&
       draftPairVisible &&
@@ -828,31 +834,36 @@ export function RemotePrView({
     }
   })();
 
-  function confirmStackOffer() {
+  async function confirmStackOffer() {
     // `offerEnabled` withholds the offer entirely until details are the selected
     // PR's, so the placeholder arm here is insurance against a looser gate later.
     if (!stackOffer || details.isPlaceholderData) return;
     if (stackOffer.kind === "create") {
-      stackCreate.mutate(stackOffer.members, {
-        onSuccess: (outcome) =>
-          toast.success(
-            `Stack created — ${outcome.members.length} pull requests`,
-          ),
-      });
+      try {
+        const outcome = await stackCreate.mutateAsync(stackOffer.members);
+        toast.success(
+          `Stack created — ${outcome.members.length} pull requests`,
+        );
+      } catch {
+        // A failed stack write renders inline beside the offer off the mutation's
+        // own `error`, so this path deliberately says nothing.
+      }
       return;
     }
     const { stackNumber } = stackOffer;
-    stackAdd.mutate(
-      { stackNumber, pullRequests: stackOffer.members },
-      {
-        // The response lists the stack's members AFTER the append, so its length
-        // is the new total — not just what this write added.
-        onSuccess: (outcome) =>
-          toast.success(
-            `Added to stack #${stackNumber} — ${outcome.members.length} pull requests`,
-          ),
-      },
-    );
+    try {
+      const outcome = await stackAdd.mutateAsync({
+        stackNumber,
+        pullRequests: stackOffer.members,
+      });
+      // The response lists the stack's members AFTER the append, so its length
+      // is the new total — not just what this write added.
+      toast.success(
+        `Added to stack #${stackNumber} — ${outcome.members.length} pull requests`,
+      );
+    } catch {
+      // Same inline-error contract as the create arm.
+    }
   }
 
   // A failed write's message belongs beside the affordance, not in a toast — so
@@ -905,10 +916,12 @@ export function RemotePrView({
       confirmVariant: "destructive",
     });
     if (!ok) return;
-    stackDissolve.mutate(dissolveStackNumber, {
-      onSuccess: () => toast.success(`Dissolved stack #${info.id}`),
-      onError,
-    });
+    try {
+      await stackDissolve.mutateAsync(dissolveStackNumber);
+      toast.success(`Dissolved stack #${info.id}`);
+    } catch (e) {
+      onError(e);
+    }
   }
 
   useHotkeyAction(
@@ -1217,16 +1230,15 @@ export function RemotePrView({
     const target = resolve ?? findResolve.data;
     if (!target) return;
     if (!(await useConfirm.getState().ask(DISCARD_RESOLVE_CONFIRM))) return;
-    abortRemotePrResolve.mutate(
-      { worktreePath: target.worktreePath },
-      {
-        onSuccess: () => {
-          setResolve(null);
-          toast.success("Resolution discarded");
-        },
-        onError,
-      },
-    );
+    try {
+      await abortRemotePrResolve.mutateAsync({
+        worktreePath: target.worktreePath,
+      });
+      setResolve(null);
+      toast.success("Resolution discarded");
+    } catch (e) {
+      onError(e);
+    }
   }
 
   // Also fires on the resume arm — a leftover worktree is resumable even once the
@@ -1274,21 +1286,18 @@ export function RemotePrView({
       });
       if (!ok) return;
     }
-    updateBranch.mutate(
-      { number, rebase, lens },
-      {
-        // GitHub only ACCEPTED the job here, so the word goes to the poll: the strip
-        // holds the updating line and `settleUpdate` speaks once a read has seen the
-        // head catch up (or the ladder concede). Arming only follows a ladder that
-        // actually took the request — a refused one would leave the ref waiting for a
-        // poll that never runs, and fire its toast on some later visit to this PR.
-        onSuccess: () => {
-          if (divergence.awaitUpdate())
-            awaitedUpdate.current = { identity: divergenceIdentity, base };
-        },
-        onError,
-      },
-    );
+    try {
+      await updateBranch.mutateAsync({ number, rebase, lens });
+      // GitHub only ACCEPTED the job here, so the word goes to the poll: the strip
+      // holds the updating line and `settleUpdate` speaks once a read has seen the
+      // head catch up (or the ladder concede). Arming only follows a ladder that
+      // actually took the request — a refused one would leave the ref waiting for a
+      // poll that never runs, and fire its toast on some later visit to this PR.
+      if (divergence.awaitUpdate())
+        awaitedUpdate.current = { identity: divergenceIdentity, base };
+    } catch (e) {
+      onError(e);
+    }
   }
 
   useHotkeyAction(
@@ -1461,16 +1470,13 @@ export function RemotePrView({
         viewerRequestedChanges: approved ? prev.viewerRequestedChanges : false,
       });
     }
-    action.mutate(number, {
-      onSuccess: () =>
-        toast.success(
-          approved ? "Approval revoked" : `Approved this ${prNoun}`,
-        ),
-      onError: (e) => {
-        if (prev) queryClient.setQueryData(key, prev);
-        onError(e);
-      },
-    });
+    try {
+      await action.mutateAsync(number);
+      toast.success(approved ? "Approval revoked" : `Approved this ${prNoun}`);
+    } catch (e) {
+      if (prev) queryClient.setQueryData(key, prev);
+      onError(e);
+    }
   }
 
   // Request changes — a true toggle on Bitbucket (revoke works on every plan);
@@ -1504,32 +1510,30 @@ export function RemotePrView({
       });
     }
     if (requested) {
-      unrequestChangesPr.mutate(number, {
-        onSuccess: () => toast.success("Change request revoked"),
-        onError: (e) => {
-          if (prev) queryClient.setQueryData(key, prev);
-          onError(e);
-        },
-      });
+      try {
+        await unrequestChangesPr.mutateAsync(number);
+        toast.success("Change request revoked");
+      } catch (e) {
+        if (prev) queryClient.setQueryData(key, prev);
+        onError(e);
+      }
       return;
     }
     const submittedFor = entityKey;
-    requestChangesPr.mutate(
-      { number, body: compose.value.trim() },
-      {
-        onSuccess: () => {
-          toast.success("Requested changes");
-          compose.clearFor(submittedFor);
-        },
-        onError: (e) => {
-          if (prev) queryClient.setQueryData(key, prev);
-          onError(e);
-        },
-      },
-    );
+    try {
+      await requestChangesPr.mutateAsync({
+        number,
+        body: compose.value.trim(),
+      });
+      toast.success("Requested changes");
+      compose.clearFor(submittedFor);
+    } catch (e) {
+      if (prev) queryClient.setQueryData(key, prev);
+      onError(e);
+    }
   }
 
-  function submitComment() {
+  async function submitComment() {
     const body = compose.value.trim();
     if (!body || details.isPlaceholderData) return;
     // Clear the draft immediately (the perceived-speed win) and append the
@@ -1537,16 +1541,17 @@ export function RemotePrView({
     // that PR's composer is still empty so we never clobber newly-typed text.
     const submittedFor = entityKey;
     compose.set("");
-    comment.mutate(
-      { number, body, author: forge.data?.login ?? "You" },
-      {
-        onSuccess: () => toast.success("Comment added"),
-        onError: (e) => {
-          compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
-          onError(e);
-        },
-      },
-    );
+    try {
+      await comment.mutateAsync({
+        number,
+        body,
+        author: forge.data?.login ?? "You",
+      });
+      toast.success("Comment added");
+    } catch (e) {
+      compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
+      onError(e);
+    }
   }
 
   // A typed draft rides Close/Reopen rather than being discarded by them. Gated
@@ -1594,48 +1599,47 @@ export function RemotePrView({
     });
     if (!ok) return;
     if (!(await postRidingDraft())) return;
-    closePr.mutate(number, {
-      // The riding comment posts through `mutateAsync`, which skips the
-      // "Comment added" toast the ordinary submit gets, so the confirmation
-      // here has to account for both writes.
-      onSuccess: () =>
-        toast.success(
-          withComment
-            ? `Closed #${number} and posted your comment`
-            : `Closed #${number}`,
-        ),
-      onError: (e) =>
+    try {
+      await closePr.mutateAsync(number);
+      // The riding comment posts without the "Comment added" toast the ordinary
+      // submit gets, so the confirmation here has to account for both writes.
+      toast.success(
         withComment
-          ? toastErrorWithNote(
-              e,
-              "Your comment was posted, but closing failed — try Close again.",
-            )
-          : onError(e),
-    });
+          ? `Closed #${number} and posted your comment`
+          : `Closed #${number}`,
+      );
+    } catch (e) {
+      if (withComment)
+        toastErrorWithNote(
+          e,
+          "Your comment was posted, but closing failed — try Close again.",
+        );
+      else onError(e);
+    }
   }
 
   async function doReopen() {
     if (busy || triageBlocked) return;
     const withComment = draftRidesStateChange;
     if (!(await postRidingDraft())) return;
-    reopenPr.mutate(number, {
-      onSuccess: () =>
-        toast.success(
-          withComment
-            ? `Reopened #${number} and posted your comment`
-            : `Reopened #${number}`,
-        ),
-      onError: (e) =>
+    try {
+      await reopenPr.mutateAsync(number);
+      toast.success(
         withComment
-          ? toastErrorWithNote(
-              e,
-              "Your comment was posted, but reopening failed — try Reopen again.",
-            )
-          : onError(e),
-    });
+          ? `Reopened #${number} and posted your comment`
+          : `Reopened #${number}`,
+      );
+    } catch (e) {
+      if (withComment)
+        toastErrorWithNote(
+          e,
+          "Your comment was posted, but reopening failed — try Reopen again.",
+        );
+      else onError(e);
+    }
   }
 
-  function confirmMerge() {
+  async function confirmMerge() {
     // GitLab stale-view guard: the head sha the user is looking at (the same oid
     // the AI-review path uses). GitLab 409s if the head moved; GitHub ignores it.
     const sha = pr?.commits.at(-1)?.oid;
@@ -1644,75 +1648,66 @@ export function RemotePrView({
     const deleteHead = deleteBranch && !headIsDefault && !headDeletionBlocked;
     if (mergeAuto) {
       // Arm merge-when-pipeline-succeeds instead of merging now (GitLab-only).
-      armAutoMerge.mutate(
-        { number, strategy: mergeStrategy, deleteBranch: deleteHead, sha },
-        {
-          onSuccess: () => {
-            setMergeOpen(false);
-            toast.success(
-              "Auto-merge enabled — merges when the pipeline passes",
-            );
-          },
-          onError: (e) => {
-            onError(e);
-            setMergeOpen(false);
-          },
-        },
-      );
+      try {
+        await armAutoMerge.mutateAsync({
+          number,
+          strategy: mergeStrategy,
+          deleteBranch: deleteHead,
+          sha,
+        });
+        setMergeOpen(false);
+        toast.success("Auto-merge enabled — merges when the pipeline passes");
+      } catch (e) {
+        onError(e);
+        setMergeOpen(false);
+      }
       return;
     }
-    mergePr.mutate(
-      {
+    try {
+      const outcome = await mergePr.mutateAsync({
         number,
         strategy: mergeStrategy,
         deleteBranch: deleteHead,
         sha,
-      },
-      {
-        onSuccess: (outcome) => {
-          // A queued merge was accepted but hasn't landed, so announce the state
-          // once — mirroring the auto-merge arm — instead of a "Merged" success
-          // that the queue detail would immediately contradict.
-          if (outcome.queued) {
-            toast.success(
-              outcome.cleanupWarning ?? `Merge queued for #${number}`,
-            );
-            // The toast is gone in seconds and nothing fetchable carries queue
-            // state, so record it: the chip below is the only lasting sign the
-            // merge is waiting rather than done.
-            markMergeQueued(queuedKey);
-            setQueuedWarning(
-              outcome.cleanupWarning
-                ? { key: queuedKey, text: outcome.cleanupWarning }
-                : null,
-            );
-          } else {
-            toast.success(`Merged #${number}`);
-            // Merged for real; a cleanupWarning here means only the post-merge
-            // remote head-branch deletion failed. Surface it as a (non-error)
-            // warning so the successful merge isn't dressed up as a failure.
-            if (outcome.cleanupWarning) {
-              toast.warning(outcome.cleanupWarning, { duration: 10000 });
-            }
-          }
-          setMergeOpen(false);
-        },
-        onError: (e) => {
-          // Where the rules are the known reason, say which requirement is unmet
-          // alongside the refusal — the same line the strip is already showing, and
-          // on GitLab the only place the reason is worded at all (the backend's
-          // message deliberately doesn't duplicate this table).
-          if (bannerArm === "blocked")
-            toastErrorWithNote(
-              e,
-              gitlabBlockedNote ??
-                blockedMergeLine(blockedRequirements, blockedApprovals),
-            );
-          else onError(e);
-          setMergeOpen(false);
-        },
-      },
-    );
+      });
+      // A queued merge was accepted but hasn't landed, so announce the state
+      // once — mirroring the auto-merge arm — instead of a "Merged" success
+      // that the queue detail would immediately contradict.
+      if (outcome.queued) {
+        toast.success(outcome.cleanupWarning ?? `Merge queued for #${number}`);
+        // The toast is gone in seconds and nothing fetchable carries queue
+        // state, so record it: the chip below is the only lasting sign the
+        // merge is waiting rather than done.
+        markMergeQueued(queuedKey);
+        setQueuedWarning(
+          outcome.cleanupWarning
+            ? { key: queuedKey, text: outcome.cleanupWarning }
+            : null,
+        );
+      } else {
+        toast.success(`Merged #${number}`);
+        // Merged for real; a cleanupWarning here means only the post-merge
+        // remote head-branch deletion failed. Surface it as a (non-error)
+        // warning so the successful merge isn't dressed up as a failure.
+        if (outcome.cleanupWarning) {
+          toast.warning(outcome.cleanupWarning, { duration: 10000 });
+        }
+      }
+      setMergeOpen(false);
+    } catch (e) {
+      // Where the rules are the known reason, say which requirement is unmet
+      // alongside the refusal — the same line the strip is already showing, and
+      // on GitLab the only place the reason is worded at all (the backend's
+      // message deliberately doesn't duplicate this table).
+      if (bannerArm === "blocked")
+        toastErrorWithNote(
+          e,
+          gitlabBlockedNote ??
+            blockedMergeLine(blockedRequirements, blockedApprovals),
+        );
+      else onError(e);
+      setMergeOpen(false);
+    }
   }
 
   const pr = details.data;
@@ -2181,57 +2176,134 @@ export function RemotePrView({
   // list filters these out to avoid a duplicate pending+completed chip. GitHub never
   // overlaps (its completed reviewers have already left `pr.reviewers`).
   const completedLogins = new Set(completedReviewers.map((c) => c.login));
-  function saveCommentEdit(commentId: string, body: string) {
+  async function saveCommentEdit(commentId: string, body: string) {
     // The comment id is the rendered PR's while the write addresses `number` —
     // GitLab routes by both, so a mismatched pair edits nothing it showed.
     if (detailsStale) return;
-    editComment.mutate(
-      { number, commentId, body },
-      {
-        onSuccess: () => toast.success("Comment updated"),
-        onError,
-      },
-    );
+    try {
+      await editComment.mutateAsync({ number, commentId, body });
+      toast.success("Comment updated");
+    } catch (e) {
+      onError(e);
+    }
   }
 
-  function saveThreadCommentEdit(commentId: string, body: string) {
+  async function saveThreadCommentEdit(commentId: string, body: string) {
     // Same pairing as saveCommentEdit, on the review-thread side.
     if (detailsStale) return;
-    editReviewComment.mutate(
-      { number, commentId, body },
-      {
-        onSuccess: () => toast.success("Comment updated"),
-        onError,
-      },
-    );
+    try {
+      await editReviewComment.mutateAsync({ number, commentId, body });
+      toast.success("Comment updated");
+    } catch (e) {
+      onError(e);
+    }
   }
 
-  function toggleReaction(subjectId: string, content: string, active: boolean) {
+  async function toggleReaction(
+    subjectId: string,
+    content: string,
+    active: boolean,
+  ) {
     // The subject is the rendered PR's body or one of its comments, while the
     // write and its optimistic patch address `number` — GitLab routes by both, so
     // a mismatched pair awards the wrong note or 404s. The bars disable on the
     // same flag; this arm is the belt-and-braces behind them.
     if (detailsStale) return;
-    toggleReactionMutation.mutate({ subjectId, content, active }, { onError });
+    try {
+      await toggleReactionMutation.mutateAsync({ subjectId, content, active });
+    } catch (e) {
+      onError(e);
+    }
   }
 
   // Both take a comment id off the RENDERED pr, which through a switch is the
   // previous one, so either would hide a comment on the PR the viewer just left.
   // The menu items disable on the same wait; these arms back them up.
-  function hideComment(commentId: string, classifier: MinimizeReason) {
+  async function hideComment(commentId: string, classifier: MinimizeReason) {
     if (detailsStale) return;
-    minimizeComment.mutate(
-      { commentId, classifier },
-      { onSuccess: () => toast.success("Comment hidden"), onError },
-    );
+    try {
+      await minimizeComment.mutateAsync({ commentId, classifier });
+      toast.success("Comment hidden");
+    } catch (e) {
+      onError(e);
+    }
   }
 
-  function unhideComment(commentId: string) {
+  async function unhideComment(commentId: string) {
     if (detailsStale) return;
-    unminimizeComment.mutate(commentId, {
-      onSuccess: () => toast.success("Comment shown"),
-      onError,
-    });
+    try {
+      await unminimizeComment.mutateAsync(commentId);
+      toast.success("Comment shown");
+    } catch (e) {
+      onError(e);
+    }
+  }
+
+  async function saveAssignees(next: ForgeUserRef[]) {
+    try {
+      await setAssignees.mutateAsync({ number, assignees: next });
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function saveReviewers(next: ForgeUserRef[]) {
+    try {
+      await setReviewers.mutateAsync({ number, reviewers: next });
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function checkoutHead(headRefName: string) {
+    try {
+      await checkout.mutateAsync(number);
+      toast.success(`Checked out ${headRefName}`);
+    } catch (e) {
+      onError(e);
+    }
+  }
+
+  async function doCancelAutoMerge() {
+    try {
+      await cancelAutoMerge.mutateAsync(number);
+      toast.success("Auto-merge canceled");
+    } catch (e) {
+      onError(e);
+    }
+  }
+
+  async function deleteConversationComment(commentId: string) {
+    try {
+      await deleteComment.mutateAsync({ number, commentId });
+      toast.success("Comment deleted");
+      setDeletingCommentId(null);
+    } catch (e) {
+      onError(e);
+      setDeletingCommentId(null);
+    }
+  }
+
+  async function deleteThreadComment(commentId: string) {
+    try {
+      await deleteReviewComment.mutateAsync({ number, commentId });
+      toast.success("Comment deleted");
+      setDeletingThreadCommentId(null);
+    } catch (e) {
+      onError(e);
+      setDeletingThreadCommentId(null);
+    }
+  }
+
+  async function discardPendingReview() {
+    try {
+      await clearDrafts.mutateAsync(undefined);
+      setDiscardConfirmOpen(false);
+    } catch {
+      // `useClearReviewDrafts` toasts its own failure here (no `silent` opt-out),
+      // and react-query fires that mutation-level handler for a rejected
+      // `mutateAsync` too — a catch-toast would double-report.
+    }
   }
 
   // A conflict resolution in flight takes over the whole PR view: the merge lives in
@@ -2352,12 +2424,7 @@ export function RemotePrView({
         commitOnClose
         lens={lens}
         disabledReason={pickerReason}
-        onChange={(next) =>
-          setAssignees.mutate(
-            { number, assignees: next },
-            { onError: toastError },
-          )
-        }
+        onChange={(next) => void saveAssignees(next)}
       />,
     );
   } else if (pr.assignees.length > 0) {
@@ -2405,12 +2472,7 @@ export function RemotePrView({
         value={humanReviewers}
         lens={lens}
         disabledReason={pickerReason}
-        onChange={(next) =>
-          setReviewers.mutate(
-            { number, reviewers: next },
-            { onError: toastError },
-          )
-        }
+        onChange={(next) => void saveReviewers(next)}
       >
         {botReviewers.map((user) => (
           <BotReviewerChip key={user.id} user={user} ghHost={ghHost} />
@@ -2491,13 +2553,7 @@ export function RemotePrView({
                 variant="outline"
                 size="xs"
                 disabled={checkout.isPending}
-                onClick={() =>
-                  checkout.mutate(number, {
-                    onSuccess: () =>
-                      toast.success(`Checked out ${pr.headRefName}`),
-                    onError,
-                  })
-                }
+                onClick={() => void checkoutHead(pr.headRefName)}
                 title={`Check out ${pr.headRefName} locally`}
               >
                 {checkout.isPending ? (
@@ -3230,18 +3286,7 @@ export function RemotePrView({
               size="sm"
               disabled={busy || writeBlocked}
               reason={writeReason ?? staleReason}
-              onClick={() =>
-                setDraft.mutate(
-                  { number, draft: false },
-                  {
-                    onSuccess: () => {
-                      toast.success("Marked ready for review");
-                      void fireReadyReview();
-                    },
-                    onError,
-                  },
-                )
-              }
+              onClick={() => void markReadyForReview()}
             >
               Ready for review
             </DisabledReasonButton>
@@ -3253,15 +3298,7 @@ export function RemotePrView({
               disabled={busy || writeBlocked}
               reason={writeReason ?? staleReason}
               title="Turn this pull request back into a draft"
-              onClick={() =>
-                setDraft.mutate(
-                  { number, draft: true },
-                  {
-                    onSuccess: () => toast.success("Converted to draft"),
-                    onError,
-                  },
-                )
-              }
+              onClick={() => void convertToDraft()}
             >
               Convert to draft
             </DisabledReasonButton>
@@ -3304,12 +3341,7 @@ export function RemotePrView({
                 size="sm"
                 disabled={busy || writeBlocked}
                 reason={writeReason ?? staleReason}
-                onClick={() =>
-                  cancelAutoMerge.mutate(number, {
-                    onSuccess: () => toast.success("Auto-merge canceled"),
-                    onError,
-                  })
-                }
+                onClick={() => void doCancelAutoMerge()}
               >
                 Cancel auto-merge
               </DisabledReasonButton>
@@ -3543,21 +3575,7 @@ export function RemotePrView({
         onClose={() => setDeletingCommentId(null)}
         pending={deleteComment.isPending}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
-        onConfirm={(commentId) =>
-          deleteComment.mutate(
-            { number, commentId },
-            {
-              onSuccess: () => {
-                toast.success("Comment deleted");
-                setDeletingCommentId(null);
-              },
-              onError: (e) => {
-                onError(e);
-                setDeletingCommentId(null);
-              },
-            },
-          )
-        }
+        onConfirm={(commentId) => void deleteConversationComment(commentId)}
       />
 
       <DeleteCommentDialog
@@ -3565,21 +3583,7 @@ export function RemotePrView({
         onClose={() => setDeletingThreadCommentId(null)}
         pending={deleteReviewComment.isPending}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
-        onConfirm={(commentId) =>
-          deleteReviewComment.mutate(
-            { number, commentId },
-            {
-              onSuccess: () => {
-                toast.success("Comment deleted");
-                setDeletingThreadCommentId(null);
-              },
-              onError: (e) => {
-                onError(e);
-                setDeletingThreadCommentId(null);
-              },
-            },
-          )
-        }
+        onConfirm={(commentId) => void deleteThreadComment(commentId)}
       />
 
       {/* The batch submit-review dialog (Review control, pending-review bar, palette
@@ -3611,11 +3615,7 @@ export function RemotePrView({
         confirmLabel="Discard review"
         confirmVariant="destructive"
         pending={clearDrafts.isPending}
-        onConfirm={() =>
-          clearDrafts.mutate(undefined, {
-            onSuccess: () => setDiscardConfirmOpen(false),
-          })
-        }
+        onConfirm={() => void discardPendingReview()}
       />
     </div>
   );

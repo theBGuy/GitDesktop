@@ -244,6 +244,19 @@ const SELECT_ITEM_BLOCK_TRUNCATE_RE = new RegExp(
   `<SelectItem\\b(?:(?!</SelectItem\\b)[\\s\\S]){0,${PAIR_GAP}}?\\bblock truncate\\b`,
   "g",
 );
+// The flex sibling of that dead span: a `min-w-0 flex-1 truncate` child, equally
+// inert unless the item ALSO carries a first-child shrink override — a pairing no
+// static pattern can see, so a legal site takes an allowlist entry. The window
+// doubles PAIR_GAP for headroom: that override plus the item's own props already
+// put the one live site 150 normalized chars from its tag, and a site drifting
+// past 160 would turn its allowlist entry stale rather than report. Reach stays
+// bounded by the tempered `(?!</SelectItem\b)` step, which holds only while no
+// SelectItem in src/ is self-closing (grep-verified: 67 tags, 67 closers).
+const SELECT_ITEM_FLEX_TRUNCATE_RE = new RegExp(
+  `<SelectItem\\b(?:(?!</SelectItem\\b)[\\s\\S]){0,${PAIR_GAP * 2}}?` +
+    `\\bmin-w-0 flex-1 truncate\\b`,
+  "g",
+);
 
 // A `.mutate(` call in any spelling — the token, not the callbacks object it
 // may carry. Matching the object instead would have to recognize every way one
@@ -460,10 +473,16 @@ export const CHECKS = [
     scan: anyOf([
       perFile(SELECT_ITEM_CLIP_TITLE_RE),
       perFile(SELECT_ITEM_BLOCK_TRUNCATE_RE),
+      perFile(SELECT_ITEM_FLEX_TRUNCATE_RE),
     ]),
-    allowlist: [],
+    allowlist: [
+      // SelectControl's rich rows: the item-level first-child override lets the
+      // ItemText wrapper (a div under Base UI 1.7.0) shrink, which is what keeps
+      // the label's truncate live — a pairing the pattern cannot see.
+      "src/components/form/fields.tsx",
+    ],
     message:
-      "Select popup rows route their clip affordance through SelectClipText (src/components/select-clip-text.tsx) — an item-level clipTitle handler is dead once the row span self-bounds, and a bare `block truncate` child never engages under the shrink-refusing ItemText; if the pairing is a false positive (a self-bounded clip span inside a rich row — its own max-w keeps the handler live), add an allowlist entry with rationale",
+      "Select popup rows route their clip affordance through SelectClipText (src/components/select-clip-text.tsx) — an item-level clipTitle handler is dead once the row span self-bounds, and a bare `block truncate` or `min-w-0 flex-1 truncate` child never engages under the shrink-refusing ItemText; if the pairing is a false positive (a self-bounded clip span inside a rich row, or a row whose item overrides ItemText's shrink refusal), add an allowlist entry with rationale",
   },
   {
     name: "setQueryData-noop",
@@ -491,19 +510,40 @@ export const CHECKS = [
     // Scoped to the trees that are fully converted, so the check can only ever
     // see a NEW site: the settings dialog's own sections (which unmount on BOTH
     // dialog close and every rail section switch — the keyed crossfade), Explore,
-    // whose detail pane is keyed per repo, and Actions, whose run detail is keyed
-    // per run and whose dispatch dialog unmounts with the repo view. The wider app
-    // is a separate tier: pulls/ and repository/ still carry per-call callback
-    // sites in bulk, so scanning them would report a backlog rather than a
+    // whose detail pane is keyed per repo, Actions, whose run detail is keyed per
+    // run and whose dispatch dialog unmounts with the repo view, and pulls, whose
+    // surfaces go through an `<Activity>` tab hide on every repo-tab switch. The
+    // wider app is a separate tier: repository/ still carries per-call callback
+    // sites in bulk, so scanning it would report a backlog rather than a
     // regression. Each tree joins this check on the change that converts it.
     appliesTo: (file) =>
       file.startsWith("src/features/repo-settings/") ||
       file.startsWith("src/features/explore/") ||
-      file.startsWith("src/features/actions/"),
+      file.startsWith("src/features/actions/") ||
+      file.startsWith("src/features/pulls/"),
     scan: anyOf([perLine(MUTATE_CALL_RE), perFile(DESTRUCTURED_MUTATE_RE)]),
-    allowlist: [],
+    // Every pulls entry is a call carrying NO per-call callbacks object, so
+    // there is nothing an unmount can drop; the token match is the ratchet, and
+    // an exemption is an entry here rather than a hole in the pattern.
+    allowlist: [
+      // Archive/unarchive, single-arg `update.mutate(vars)` — the deselect it
+      // pairs with is synchronous.
+      "src/features/pulls/LocalPrContextMenu.tsx",
+      // The local-conversation write-through and the approve toggle, both
+      // single-arg `update.mutate(vars)`.
+      "src/features/pulls/LocalPrView.tsx",
+      // The palette's archive action, single-arg `updateLocalPr.mutate(vars)`.
+      "src/features/pulls/PullRequestsPanel.tsx",
+      // GitLab time tracking's set-estimate and add-spent, both single-arg.
+      "src/features/pulls/RemotePrViewParts.tsx",
+      // Deleting one stored review, single-arg `del.mutate(id)`.
+      "src/features/pulls/ReviewHistory.tsx",
+      // Reconciles merged/deleted heads from an effect: the destructured
+      // `mutate` is called single-arg on both arms.
+      "src/features/pulls/useReconcileLocalPrs.ts",
+    ],
     message:
-      "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close, a rail section switch, or a keyed pane remount mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
+      "react-query gates per-call mutation callbacks on the observer still having listeners, so a dialog close, a rail section switch, an <Activity> tab hide, or a keyed pane remount mid-flight drops the toast, teardown, and navigation that lived in them — every mutation here awaits mutateAsync and puts its outcome in the continuation, so a bare .mutate( (or a `const { mutate }` destructure that reaches one) needs an allowlist entry with rationale",
   },
   {
     name: "context-menu-suppression",
@@ -606,18 +646,9 @@ export const CHECKS = [
     name: "bare-group-label",
     appliesTo: notVendoredUi,
     scan: perFile(UNASSOCIATED_LABEL_RE),
-    // Keyed per FILE, not per site, for both kinds of entry below: a coarser key
-    // means an unrelated edit to one of these files can't turn the entry stale
-    // mid-flight. The gate blocks NEW unassociated captions; the deferred group
-    // is not a to-do list.
+    // Keyed per FILE, not per site: a coarser key means an unrelated edit to one
+    // of these files can't turn the entry stale mid-flight.
     allowlist: [
-      // Deferred captions — same class, converted in their own change.
-      // Two "Linked issues" captions over the linked-issue chip rows.
-      "src/features/pulls/LinkedIssuesField.tsx",
-      // "Target" over the tag/commitish picker, "Release notes" over the editor.
-      "src/features/tags/CreateReleaseDialog.tsx",
-      // "Script" over the interpreter + path row.
-      "src/features/scripts/TaskDialog.tsx",
       // WRAPPING labels around a `<Checkbox>`, associated at RUNTIME: Base UI's
       // Root renders a `<span role="checkbox">` and routes a caller `id` to its
       // aria-hidden proxy input, so an `htmlFor` could not reach the interactive

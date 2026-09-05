@@ -1,9 +1,9 @@
 import { Popover } from "@base-ui/react/popover";
 import { LinkIcon, SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { type KeyboardEvent, useRef, useState } from "react";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import { IssuePicker, StateIcon } from "@/features/issues/IssueRelations";
 import type { RemoteLens } from "@/lib/git/types";
 import type { JiraLink } from "@/lib/jira/store";
@@ -142,10 +142,10 @@ function NativeLinkedIssuesField({
   }
 
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-center gap-2">
-        <Label>Linked issues</Label>
-        <span className="flex-1" />
+    <LabeledGroup
+      label="Linked issues"
+      className="space-y-1.5"
+      actions={
         <Popover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
           <Popover.Trigger
             render={
@@ -181,15 +181,11 @@ function NativeLinkedIssuesField({
             </Popover.Positioner>
           </Popover.Portal>
         </Popover.Root>
-      </div>
-
+      }
+    >
       {ordered.length > 0 && (
         <>
-          <div
-            role="group"
-            aria-label="Linked issues"
-            className="flex flex-wrap items-center gap-1.5"
-          >
+          <div className="flex flex-wrap items-center gap-1.5">
             {ordered.map((chip, index) => {
               const keywordLabel =
                 chip.keyword === "closes" ? "Closes" : "Relates to";
@@ -257,7 +253,7 @@ function NativeLinkedIssuesField({
           </p>
         </>
       )}
-    </div>
+    </LabeledGroup>
   );
 }
 
@@ -324,10 +320,10 @@ function JiraMentionsField({
   }
 
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-center gap-2">
-        <Label>Linked issues</Label>
-        <span className="flex-1" />
+    <LabeledGroup
+      label="Linked issues"
+      className="space-y-1.5"
+      actions={
         <Popover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
           <Popover.Trigger
             render={
@@ -363,15 +359,11 @@ function JiraMentionsField({
             </Popover.Positioner>
           </Popover.Portal>
         </Popover.Root>
-      </div>
-
+      }
+    >
       {ordered.length > 0 && (
         <>
-          <div
-            role="group"
-            aria-label="Linked issues"
-            className="flex flex-wrap items-center gap-1.5"
-          >
+          <div className="flex flex-wrap items-center gap-1.5">
             {ordered.map((chip, index) => {
               // State word omitted while unresolved (a just-picked issue seeds
               // statusCategory "" until the probe resolves) — no wrong "Open" and
@@ -427,6 +419,6 @@ function JiraMentionsField({
           </p>
         </>
       )}
-    </div>
+    </LabeledGroup>
   );
 }

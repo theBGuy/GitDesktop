@@ -28,7 +28,9 @@ export function LabeledGroup({
       className={cn("space-y-2", className)}
     >
       {actions ? (
-        <div className="flex items-center justify-between">
+        // `gap-2` is a collision floor under justify-between: invisible until a
+        // narrow host would butt the caption against the actions.
+        <div className="flex items-center justify-between gap-2">
           {caption}
           {actions}
         </div>

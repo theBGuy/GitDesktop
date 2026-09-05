@@ -352,7 +352,11 @@ export function CommitComments({
     }
   })();
 
-  function submit() {
+  // These continuations ride the awaited promise, never per-call mutate
+  // callbacks: an `<Activity>` tab hide tears this observer's subscription down
+  // mid-write, and react-query drops per-call callbacks once an observer has no
+  // listeners — the toast and the draft restore would silently never run.
+  async function submit() {
     const text = draft.value.trim();
     if (!text || stale) return;
     // Clear the draft immediately (perceived-speed win); the hook appends the
@@ -360,29 +364,36 @@ export function CommitComments({
     // that commit's composer is still empty so newly-typed text is never clobbered.
     const submittedFor = commitIdentity;
     draft.set("");
-    createComment.mutate(
-      { sha, body: text },
-      {
-        onSuccess: () => toast.success("Comment added"),
-        onError: (e) => {
-          draft.setFor(submittedFor, (prev) => (prev.trim() ? prev : text));
-          toastError(e);
-        },
-      },
-    );
+    try {
+      await createComment.mutateAsync({ sha, body: text });
+      toast.success("Comment added");
+    } catch (e) {
+      draft.setFor(submittedFor, (prev) => (prev.trim() ? prev : text));
+      toastError(e);
+    }
   }
 
-  function saveEdit(commentId: string, next: string) {
+  async function saveEdit(commentId: string, next: string) {
     // The comment id is the previous commit's while the write addresses `sha`,
     // so a mismatched pair would edit against a commit that never showed it.
     if (stale) return;
-    editComment.mutate(
-      { sha, commentId, body: next },
-      {
-        onSuccess: () => toast.success("Comment updated"),
-        onError: (e) => toastError(e),
-      },
-    );
+    try {
+      await editComment.mutateAsync({ sha, commentId, body: next });
+      toast.success("Comment updated");
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  async function confirmDelete(commentId: string) {
+    try {
+      await deleteComment.mutateAsync({ sha, commentId });
+      toast.success("Comment deleted");
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   // After every hook: an unsupported commit renders nothing, but the mounted
@@ -404,7 +415,7 @@ export function CommitComments({
                 thread={toThread(c)}
                 onSaveEdit={
                   c.viewerDidAuthor && !stale
-                    ? (next) => saveEdit(c.id, next)
+                    ? (next) => void saveEdit(c.id, next)
                     : undefined
                 }
                 // Withholding the handler only drops the menu entry; an editor
@@ -486,7 +497,7 @@ export function CommitComments({
                         thread={toThread(c)}
                         onSaveEdit={
                           c.viewerDidAuthor && !stale
-                            ? (next) => saveEdit(c.id, next)
+                            ? (next) => void saveEdit(c.id, next)
                             : undefined
                         }
                         editHeld={stale}
@@ -518,7 +529,7 @@ export function CommitComments({
           placeholder="Leave a comment…"
           value={draft.value}
           onChange={draft.set}
-          onSubmit={submit}
+          onSubmit={() => void submit()}
           submitLabel="Comment"
           mentions={mentions}
           busy={busy}
@@ -531,21 +542,7 @@ export function CommitComments({
         onClose={() => setDeletingId(null)}
         pending={deleteComment.isPending}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
-        onConfirm={(commentId) =>
-          deleteComment.mutate(
-            { sha, commentId },
-            {
-              onSuccess: () => {
-                toast.success("Comment deleted");
-                setDeletingId(null);
-              },
-              onError: (e) => {
-                toastError(e);
-                setDeletingId(null);
-              },
-            },
-          )
-        }
+        onConfirm={(commentId) => void confirmDelete(commentId)}
       />
     </div>
   );
@@ -626,8 +623,11 @@ export function CommitLineComposer({
     const text = body.trim();
     if (!text || !canPost) return;
     // Optimistic: the hook appends the synthetic comment, so close right away.
-    createComment.mutate(
-      {
+    // The outcome rides the promise (detached, so the close still happens on this
+    // tick): closing unmounts this composer, and react-query drops per-call mutate
+    // callbacks with the observer.
+    void createComment
+      .mutateAsync({
         sha,
         body: text,
         path,
@@ -636,12 +636,9 @@ export function CommitLineComposer({
         // real GitLab range. GitHub/Bitbucket stay end-anchored (single-line).
         ...(provider === "gitlab" && isRange ? { startLine: rangeFrom } : {}),
         ...(position !== null ? { position } : {}),
-      },
-      {
-        onSuccess: () => toast.success("Comment added"),
-        onError: (e) => toastError(e),
-      },
-    );
+      })
+      .then(() => toast.success("Comment added"))
+      .catch((e) => toastError(e));
     onClose();
   }
 

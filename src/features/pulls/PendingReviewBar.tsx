@@ -54,12 +54,28 @@ export function DraftCommentCard({
   const next = body.trim();
   const canSave = next.length > 0 && next !== draft.body.trim();
 
-  function saveEdit() {
+  // Awaited rather than per-call mutate callbacks: these cards unmount on a tab
+  // switch away from Files, and react-query drops per-call callbacks once an
+  // observer has no listeners. The catches do nothing because both draft hooks
+  // toast failures at mutation level, which fires for `mutateAsync` rejections
+  // too, so a catch of our own would double-report.
+  async function saveEdit() {
     if (!canSave) return;
-    updateDraft.mutate(
-      { id: draft.id, body: next },
-      { onSuccess: () => setEditing(false) },
-    );
+    try {
+      await updateDraft.mutateAsync({ id: draft.id, body: next });
+      setEditing(false);
+    } catch {
+      // Reported at hook level (see above).
+    }
+  }
+
+  async function deleteDraft() {
+    try {
+      await removeDraft.mutateAsync(draft.id);
+      setConfirmDelete(false);
+    } catch {
+      // Reported at hook level (see above).
+    }
   }
 
   return (
@@ -100,7 +116,7 @@ export function DraftCommentCard({
         <CommentEditor
           value={body}
           onChange={setBody}
-          onSubmit={saveEdit}
+          onSubmit={() => void saveEdit()}
           onCancel={() => setEditing(false)}
           canSubmit={canSave}
           pending={updateDraft.isPending}
@@ -118,11 +134,7 @@ export function DraftCommentCard({
         confirmLabel="Delete"
         confirmVariant="destructive"
         pending={removeDraft.isPending}
-        onConfirm={() =>
-          removeDraft.mutate(draft.id, {
-            onSuccess: () => setConfirmDelete(false),
-          })
-        }
+        onConfirm={() => void deleteDraft()}
       />
     </div>
   );
@@ -153,6 +165,15 @@ export function PendingReviewBar({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const count = drafts.data?.length ?? 0;
 
+  async function discard() {
+    try {
+      await clearDrafts.mutateAsync(undefined);
+      setConfirmDiscard(false);
+    } catch {
+      // Awaited with a do-nothing catch: see DraftCommentCard.
+    }
+  }
+
   if (count === 0) return null;
 
   return (
@@ -180,11 +201,7 @@ export function PendingReviewBar({
         confirmLabel="Discard review"
         confirmVariant="destructive"
         pending={clearDrafts.isPending}
-        onConfirm={() =>
-          clearDrafts.mutate(undefined, {
-            onSuccess: () => setConfirmDiscard(false),
-          })
-        }
+        onConfirm={() => void discard()}
       />
     </div>
   );

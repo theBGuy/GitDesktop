@@ -10,6 +10,7 @@ import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
@@ -358,8 +359,7 @@ export function CreateReleaseDialog({
                 )}
               </div>
               {showTarget && (
-                <div className="space-y-1.5">
-                  <Label>Target</Label>
+                <LabeledGroup label="Target" className="space-y-1.5">
                   <TargetPicker
                     // Agent-session branches are app-internal — never a release
                     // target (same rule as BranchSwitcher).
@@ -370,7 +370,7 @@ export function CreateReleaseDialog({
                     value={target}
                     onChange={(v) => form.setFieldValue("target", v)}
                   />
-                </div>
+                </LabeledGroup>
               )}
             </div>
 
@@ -383,10 +383,14 @@ export function CreateReleaseDialog({
               )}
             </form.AppField>
 
-            <div className="flex flex-1 flex-col gap-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <Label>Release notes</Label>
-                {existingTags.length > 0 && (
+            {/* `space-y-0` cancels LabeledGroup's default child margin, which
+                would ADD to this group's own `gap-1.5` (tailwind-merge doesn't
+                dedupe space-y against gap). */}
+            <LabeledGroup
+              label="Release notes"
+              className="flex flex-1 flex-col gap-1.5 space-y-0"
+              actions={
+                existingTags.length > 0 && (
                   <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                     <span className="shrink-0">Previous tag</span>
                     <Combobox
@@ -422,8 +426,9 @@ export function CreateReleaseDialog({
                       </ComboboxContent>
                     </Combobox>
                   </div>
-                )}
-              </div>
+                )
+              }
+            >
               <MarkdownEditor
                 ref={notesEditorRef}
                 aria-label="Release notes"
@@ -486,7 +491,7 @@ export function CreateReleaseDialog({
                   )
                 }
               />
-            </div>
+            </LabeledGroup>
 
             {/* GitLab computes "latest" itself and has no pre-release/draft. */}
             {!isGitLab && (

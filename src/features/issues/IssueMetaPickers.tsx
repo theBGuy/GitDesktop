@@ -6,10 +6,10 @@ import {
   UserPlusIcon,
 } from "@phosphor-icons/react";
 import { type ComponentProps, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { MetaValueCell, UserChip } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
-import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
@@ -141,24 +141,20 @@ export function AssigneesPopover({
 
   const trigger = (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
-      {/* A natively disabled button swallows `title`, so the reason rides a
-          wrapping span. */}
-      <span
-        title={disabledReason}
-        className={
-          disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+      <Popover.Trigger
+        render={
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            aria-label="Edit assignees"
+            disabled={!!disabledReason}
+            reason={disabledReason}
+          />
         }
       >
-        <Popover.Trigger
-          disabled={!!disabledReason}
-          render={
-            <Button variant="ghost" size="xs" aria-label="Edit assignees" />
-          }
-        >
-          <UserPlusIcon data-icon="inline-start" />
-          Assignees
-        </Popover.Trigger>
-      </span>
+        <UserPlusIcon data-icon="inline-start" />
+        Assignees
+      </Popover.Trigger>
       <Popover.Portal container={portalContainer}>
         <Popover.Positioner
           align="start"
@@ -252,25 +248,21 @@ export function MilestoneMenu({
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <DropdownMenu>
-        {/* A natively disabled button swallows `title`, so the reason rides a
-            wrapping span. */}
-        <span
-          title={disabledReason}
-          className={
-            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+        <DropdownMenuTrigger
+          render={
+            <DisabledReasonButton
+              variant="ghost"
+              size="xs"
+              aria-label="Set milestone"
+              disabled={!!disabledReason}
+              reason={disabledReason}
+            />
           }
         >
-          <DropdownMenuTrigger
-            disabled={!!disabledReason}
-            render={
-              <Button variant="ghost" size="xs" aria-label="Set milestone" />
-            }
-          >
-            <FlagIcon data-icon="inline-start" />
-            {display}
-            <CaretDownIcon data-icon="inline-end" />
-          </DropdownMenuTrigger>
-        </span>
+          <FlagIcon data-icon="inline-start" />
+          {display}
+          <CaretDownIcon data-icon="inline-end" />
+        </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-52">
           <DropdownMenuItem
             onClick={() => onChange(null, null)}
@@ -333,29 +325,25 @@ export function IssueTypeMenu({
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <DropdownMenu>
-        {/* A natively disabled button swallows `title`, so the reason rides a
-            wrapping span. */}
-        <span
-          title={disabledReason}
-          className={
-            disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+        <DropdownMenuTrigger
+          render={
+            <DisabledReasonButton
+              variant="ghost"
+              size="xs"
+              aria-label="Set issue type"
+              disabled={!!disabledReason}
+              reason={disabledReason}
+            />
           }
         >
-          <DropdownMenuTrigger
-            disabled={!!disabledReason}
-            render={
-              <Button variant="ghost" size="xs" aria-label="Set issue type" />
-            }
-          >
-            {value ? (
-              <TypeDot color={value.color} data-icon="inline-start" />
-            ) : (
-              <ShapesIcon data-icon="inline-start" />
-            )}
-            {value?.name ?? "Type"}
-            <CaretDownIcon data-icon="inline-end" />
-          </DropdownMenuTrigger>
-        </span>
+          {value ? (
+            <TypeDot color={value.color} data-icon="inline-start" />
+          ) : (
+            <ShapesIcon data-icon="inline-start" />
+          )}
+          {value?.name ?? "Type"}
+          <CaretDownIcon data-icon="inline-end" />
+        </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-52">
           <DropdownMenuItem
             onClick={() => onChange(null)}

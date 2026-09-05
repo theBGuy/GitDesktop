@@ -279,32 +279,23 @@ export function IssueSubIssues({
           <span className="flex-1" />
           {mode === null && (
             <DropdownMenu>
-              {/* A natively disabled button swallows `title`, so the reason
-                  rides a wrapping span. Every item in this menu is a write, so
-                  the gate sits on the trigger rather than on each item. */}
-              <span
-                title={disabledReason}
-                className={
-                  disabledReason
-                    ? "inline-flex cursor-not-allowed"
-                    : "inline-flex"
+              {/* Every item in this menu is a write, so the gate sits on the
+                  trigger rather than on each item. */}
+              <DropdownMenuTrigger
+                render={
+                  <DisabledReasonButton
+                    variant="ghost"
+                    size="xs"
+                    aria-label="Add a sub-issue"
+                    disabled={!!disabledReason}
+                    reason={disabledReason}
+                  />
                 }
               >
-                <DropdownMenuTrigger
-                  disabled={!!disabledReason}
-                  render={
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      aria-label="Add a sub-issue"
-                    />
-                  }
-                >
-                  <PlusIcon data-icon="inline-start" />
-                  Add sub-issue
-                  <CaretDownIcon data-icon="inline-end" />
-                </DropdownMenuTrigger>
-              </span>
+                <PlusIcon data-icon="inline-start" />
+                Add sub-issue
+                <CaretDownIcon data-icon="inline-end" />
+              </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-52">
                 <DropdownMenuItem onClick={() => setCreateOpen(true)}>
                   Create new sub-issue…
@@ -423,32 +414,23 @@ export function IssueRelationships({
         <span className="flex-1" />
         {addRelation === null && (
           <DropdownMenu>
-            {/* A natively disabled button swallows `title`, so the reason rides
-                a wrapping span. Every item in this menu is a write, so the gate
-                sits on the trigger rather than on each item. */}
-            <span
-              title={disabledReason}
-              className={
-                disabledReason
-                  ? "inline-flex cursor-not-allowed"
-                  : "inline-flex"
+            {/* Every item in this menu is a write, so the gate sits on the
+                trigger rather than on each item. */}
+            <DropdownMenuTrigger
+              render={
+                <DisabledReasonButton
+                  variant="ghost"
+                  size="xs"
+                  aria-label="Add a relationship"
+                  disabled={!!disabledReason}
+                  reason={disabledReason}
+                />
               }
             >
-              <DropdownMenuTrigger
-                disabled={!!disabledReason}
-                render={
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    aria-label="Add a relationship"
-                  />
-                }
-              >
-                <PlusIcon data-icon="inline-start" />
-                Add
-                <CaretDownIcon data-icon="inline-end" />
-              </DropdownMenuTrigger>
-            </span>
+              <PlusIcon data-icon="inline-start" />
+              Add
+              <CaretDownIcon data-icon="inline-end" />
+            </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-44">
               <DropdownMenuItem onClick={() => setAddRelation("blocked_by")}>
                 Blocked by…

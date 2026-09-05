@@ -109,10 +109,12 @@ export function ReviewComposer({
     setPending(true);
     // Posting is optimistic (the thread lands in the cache immediately), so close
     // right away — the synthetic thread renders under the line without waiting.
-    createThread.mutate(
-      { number, path, line, side, startLine, body: body.trim() },
-      { onError: (e) => toastError(e) },
-    );
+    // The failure rides the promise (detached, so the close still happens on this
+    // tick): closing unmounts this composer, and react-query drops per-call mutate
+    // callbacks once an observer has no listeners.
+    void createThread
+      .mutateAsync({ number, path, line, side, startLine, body: body.trim() })
+      .catch((e) => toastError(e));
     onClose();
   }
 

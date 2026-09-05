@@ -291,13 +291,18 @@ export function PrTasksSection({
   if (!tasks && !tasksQuery.isError) return null;
 
   const list = tasks ?? [];
+  // Every continuation below rides the awaited promise, never per-call mutate
+  // callbacks: an `<Activity>` tab hide tears this observer's subscription down
+  // mid-write, and react-query drops per-call callbacks once an observer has no
+  // listeners — the rollback, the field clear, and the dialog close would silently
+  // never run.
   const total = list.length;
   const resolvedCount = total - unresolved(list);
 
   // Resolve toggle is optimistic: patch the one task's state in the cache, then
   // mutate with rollback on error (mirrors RemotePrView's toggleApproval). The
   // mutation's onSettled invalidation reconciles the real state.
-  function toggle(task: PrTask) {
+  async function toggle(task: PrTask) {
     const key = prTasksKey(repoPath, number);
     const prev = queryClient.getQueryData<PrTask[]>(key);
     const nextResolved = task.state !== "RESOLVED";
@@ -311,15 +316,16 @@ export function PrTasksSection({
         ),
       );
     }
-    setState.mutate(
-      { number, taskId: task.id, resolved: nextResolved },
-      {
-        onError: (e) => {
-          if (prev) queryClient.setQueryData(key, prev);
-          onError(e);
-        },
-      },
-    );
+    try {
+      await setState.mutateAsync({
+        number,
+        taskId: task.id,
+        resolved: nextResolved,
+      });
+    } catch (e) {
+      if (prev) queryClient.setQueryData(key, prev);
+      onError(e);
+    }
   }
 
   function openAdd() {
@@ -327,15 +333,14 @@ export function PrTasksSection({
     setAdding(true);
   }
 
-  function submitAdd(text: string) {
-    createTask.mutate(
-      { number, text },
-      {
-        // Clear the controlled field but keep the row open for rapid entry.
-        onSuccess: () => setAddText(""),
-        onError,
-      },
-    );
+  async function submitAdd(text: string) {
+    try {
+      await createTask.mutateAsync({ number, text });
+      // Clear the controlled field but keep the row open for rapid entry.
+      setAddText("");
+    } catch (e) {
+      onError(e);
+    }
   }
 
   function startEdit(task: PrTask) {
@@ -343,11 +348,23 @@ export function PrTasksSection({
     setEditingId(task.id);
   }
 
-  function submitEdit(taskId: string, text: string) {
-    editTask.mutate(
-      { number, taskId, text },
-      { onSuccess: () => setEditingId(null), onError },
-    );
+  async function submitEdit(taskId: string, text: string) {
+    try {
+      await editTask.mutateAsync({ number, taskId, text });
+      setEditingId(null);
+    } catch (e) {
+      onError(e);
+    }
+  }
+
+  async function confirmDelete(taskId: string) {
+    try {
+      await deleteTask.mutateAsync({ number, taskId });
+    } catch (e) {
+      onError(e);
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   // Arrow keys walk the task rows (the helper moves DOM focus via rowKey);
@@ -408,7 +425,7 @@ export function PrTasksSection({
                 placeholder="Task text…"
                 submitLabel="Save"
                 pending={editTask.isPending}
-                onSubmit={(text) => submitEdit(task.id, text)}
+                onSubmit={(text) => void submitEdit(task.id, text)}
                 onCancel={() => setEditingId(null)}
               />
             ) : (
@@ -416,7 +433,7 @@ export function PrTasksSection({
                 key={task.id}
                 task={task}
                 editable={editable}
-                onToggle={() => toggle(task)}
+                onToggle={() => void toggle(task)}
                 onStartEdit={() => startEdit(task)}
                 onDelete={() => setDeletingId(task.id)}
                 onFocus={() => setFocusedId(task.id)}
@@ -439,7 +456,7 @@ export function PrTasksSection({
               placeholder="Add a task…"
               submitLabel="Add"
               pending={createTask.isPending}
-              onSubmit={submitAdd}
+              onSubmit={(text) => void submitAdd(text)}
               onCancel={() => setAdding(false)}
             />
           )}
@@ -452,18 +469,7 @@ export function PrTasksSection({
         pending={deleteTask.isPending}
         title="Delete task?"
         description="This permanently deletes the task on Bitbucket. This cannot be undone."
-        onConfirm={(taskId) =>
-          deleteTask.mutate(
-            { number, taskId },
-            {
-              onSuccess: () => setDeletingId(null),
-              onError: (e) => {
-                onError(e);
-                setDeletingId(null);
-              },
-            },
-          )
-        }
+        onConfirm={(taskId) => void confirmDelete(taskId)}
       />
     </div>
   );

@@ -204,6 +204,20 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     selectedLocalPr !== undefined,
   );
 
+  // Awaited rather than per-call mutate callbacks: an `<Activity>` tab hide tears
+  // this observer's subscription down mid-delete, and react-query drops per-call
+  // callbacks once an observer has no listeners — the confirm dialog would stay
+  // open over a PR that was already gone.
+  async function deleteSelectedLocalPr(id: string) {
+    try {
+      await deleteLocalPr.mutateAsync(id);
+      setConfirmDeleteSelected(false);
+      selectPr(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   // Opened from the command palette / New menu via requestCreate (any tab).
   // Re-check the gate: the requester's own gate can lag this panel's (e.g. a
   // provider flip mid-flight) — never open a create dialog that can't submit.
@@ -507,13 +521,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           pending={deleteLocalPr.isPending}
           onConfirm={() => {
             if (!selectedLocalPr) return;
-            deleteLocalPr.mutate(selectedLocalPr.id, {
-              onSuccess: () => {
-                setConfirmDeleteSelected(false);
-                selectPr(null);
-              },
-              onError: toastError,
-            });
+            void deleteSelectedLocalPr(selectedLocalPr.id);
           }}
         />
       </ConversationListPanel>

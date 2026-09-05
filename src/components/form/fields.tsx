@@ -1,5 +1,6 @@
 import { type ComponentProps, type ReactNode, useEffect, useId } from "react";
 import { MarkdownEditor } from "@/components/markdown-editor";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useFieldContext } from "@/lib/form-context";
 
 /**
@@ -259,7 +261,7 @@ export function SelectControl({
         disabled={disabled}
       >
         <SelectTrigger id={id} className="w-full">
-          <SelectValue />
+          <SelectValue onMouseEnter={clipTitleFromText} />
         </SelectTrigger>
         <SelectContent
           {...(sizeToContent
@@ -277,8 +279,20 @@ export function SelectControl({
                 key={optionValue}
                 value={optionValue}
                 disabled={disabledItems?.has(optionValue)}
+                // The vendored ItemText wrapper is `flex-1 shrink-0` and its
+                // intrinsic floor grows with its nowrap content, so a `truncate`
+                // child never clips; letting the item's first child shrink is
+                // what ellipsizes the label while the popup still sizes to its
+                // widest option. Tag-agnostic on purpose: the element type is
+                // Base UI's to change, only the first-child position is ours.
+                className="*:first:min-w-0 *:first:shrink"
               >
-                <span className="min-w-0 flex-1 truncate">{display}</span>
+                <span
+                  className="min-w-0 flex-1 truncate"
+                  onMouseEnter={clipTitleFromText}
+                >
+                  {display}
+                </span>
                 {annotations?.[optionValue]}
               </SelectItem>
             ) : (
@@ -287,7 +301,7 @@ export function SelectControl({
                 value={optionValue}
                 disabled={disabledItems?.has(optionValue)}
               >
-                {display}
+                <SelectClipText>{display}</SelectClipText>
               </SelectItem>
             ),
           )}

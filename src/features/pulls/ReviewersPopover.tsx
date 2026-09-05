@@ -1,10 +1,10 @@
 import { Popover } from "@base-ui/react/popover";
 import { UserCheckIcon } from "@phosphor-icons/react";
 import { Children, type ReactNode, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { MetaValueCell, UserChip } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
-import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useForgeGhHost } from "@/lib/git/host";
 import { useReviewerCandidates } from "@/lib/git/queries";
@@ -126,24 +126,22 @@ export function ReviewersPopover({
 
   const trigger = (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
-      {/* A natively disabled button swallows `title`, so the reason rides a
-          wrapping span. */}
-      <span
-        title={disabledReason}
-        className={
-          disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+      {/* Disabled on the BUTTON, never the Trigger: a disabled Trigger leaves the
+          tab order, so its reason would reach hover only. */}
+      <Popover.Trigger
+        render={
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            aria-label="Edit reviewers"
+            disabled={!!disabledReason}
+            reason={disabledReason}
+          />
         }
       >
-        <Popover.Trigger
-          disabled={!!disabledReason}
-          render={
-            <Button variant="ghost" size="xs" aria-label="Edit reviewers" />
-          }
-        >
-          <UserCheckIcon data-icon="inline-start" />
-          Reviewers
-        </Popover.Trigger>
-      </span>
+        <UserCheckIcon data-icon="inline-start" />
+        Reviewers
+      </Popover.Trigger>
       <Popover.Portal container={portalContainer}>
         <Popover.Positioner
           align="start"

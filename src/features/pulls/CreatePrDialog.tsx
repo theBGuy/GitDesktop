@@ -143,19 +143,23 @@ export function CreatePrDialog({
     forkRecord?.isFork === true &&
     forkParent !== null;
   const addRemote = useAddRemote(repoPath);
-  function addUpstreamRemote() {
+  // Awaited rather than per-call callbacks: this dialog can close (Esc, ✕,
+  // backdrop) mid-write, and react-query drops those once the observer has no
+  // listeners. On success the broad invalidation refreshes remotes →
+  // `useLensGate` flips true → the "Create in" picker appears (default Parent).
+  async function addUpstreamRemote() {
     if (!forkParent) return;
     // Derive the host — on GitHub Enterprise `isGithub` still holds, and a
     // hardcoded github.com would add a wrong-host remote that fails later.
     const ghHost = forge.data?.host || "github.com";
-    addRemote.mutate(
-      { name: "upstream", url: `https://${ghHost}/${forkParent}.git` },
-      {
-        // On success the broad invalidation refreshes remotes → `useLensGate` flips
-        // true → the "Create in" picker appears (default Parent).
-        onError: (e) => toastError(e),
-      },
-    );
+    try {
+      await addRemote.mutateAsync({
+        name: "upstream",
+        url: `https://${ghHost}/${forkParent}.git`,
+      });
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   // Create-TIME reviewers stay Bitbucket-only: `forge_pr_create` rejects a reviewer
@@ -797,7 +801,7 @@ export function CreatePrDialog({
                   variant="outline"
                   size="xs"
                   disabled={addRemote.isPending}
-                  onClick={addUpstreamRemote}
+                  onClick={() => void addUpstreamRemote()}
                 >
                   {addRemote.isPending
                     ? "Adding upstream remote…"

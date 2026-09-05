@@ -1,9 +1,9 @@
 import { Popover } from "@base-ui/react/popover";
 import { TagIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MetaValueCell } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
-import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import { useEditPrLabels, useRepoLabels } from "@/lib/git/queries";
@@ -94,30 +94,29 @@ export function LabelsPopover({
     }
   }
 
-  // Trigger first, so it never shifts as chips come and go. A natively disabled
-  // button swallows `title`, so the reason rides a wrapping span.
+  // Trigger first, so it never shifts as chips come and go.
   const trigger = (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
-      <span
-        title={disabledReason}
-        className={
-          disabledReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+      <Popover.Trigger
+        render={
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            aria-label="Edit labels"
+            disabled={!!disabledReason}
+            reason={disabledReason}
+          />
         }
       >
-        <Popover.Trigger
-          disabled={!!disabledReason}
-          render={<Button variant="ghost" size="xs" aria-label="Edit labels" />}
-        >
-          {/* size-3 explicitly: the Button's own icon rule skips a sized
-              element, and a 16px swap would widen the label column mid-write. */}
-          {editLabels.isPending ? (
-            <Spinner className="size-3" data-icon="inline-start" />
-          ) : (
-            <TagIcon data-icon="inline-start" />
-          )}
-          Labels
-        </Popover.Trigger>
-      </span>
+        {/* size-3 explicitly: the Button's own icon rule skips a sized
+            element, and a 16px swap would widen the label column mid-write. */}
+        {editLabels.isPending ? (
+          <Spinner className="size-3" data-icon="inline-start" />
+        ) : (
+          <TagIcon data-icon="inline-start" />
+        )}
+        Labels
+      </Popover.Trigger>
       <Popover.Portal container={portalContainer}>
         <Popover.Positioner
           align="start"

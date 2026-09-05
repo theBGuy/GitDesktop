@@ -61,6 +61,20 @@ export function LocalPrContextMenu({
     }
   }
 
+  // Awaited rather than per-call mutate callbacks: confirming can unmount this row
+  // (the deleted PR leaves the list) and an `<Activity>` tab hide tears the observer
+  // down mid-write — react-query drops per-call callbacks once an observer has no
+  // listeners, stranding the confirm dialog open.
+  async function deletePr() {
+    try {
+      await del.mutateAsync(pr.id);
+      setConfirmDelete(false);
+      if (isSelected()) selectPr(null);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   return (
     <>
       <ContextMenu>
@@ -107,15 +121,7 @@ export function LocalPrContextMenu({
         confirmLabel="Delete"
         confirmVariant="destructive"
         pending={del.isPending}
-        onConfirm={() =>
-          del.mutate(pr.id, {
-            onSuccess: () => {
-              setConfirmDelete(false);
-              if (isSelected()) selectPr(null);
-            },
-            onError: toastError,
-          })
-        }
+        onConfirm={() => void deletePr()}
       />
     </>
   );

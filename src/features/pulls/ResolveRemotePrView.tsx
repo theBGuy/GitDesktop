@@ -134,40 +134,41 @@ export function ResolveRemotePrView({
   const canResolveWithAi = aiEnabled && reviewConfigured && remaining > 0;
   const busy = finish.isPending || abort.isPending;
 
-  function onFinish() {
-    finish.mutate(
-      { head, worktreePath, worktreeId },
-      {
-        onSuccess: (outcome) => {
-          if (outcome.status === "pushed") {
-            toast.success(`Conflicts resolved — pushed ${head}`);
-            onDone();
-            return;
-          }
-          // Unreachable by contract: finish either pushes or errors — it never hands
-          // back conflicts (that shape belongs to the local sibling's rebase path).
-          // Surfaced rather than swallowed, so a contract drift can't pass silently.
-          toastError(
-            new Error("The resolve finished with an unexpected result."),
-          );
-        },
-        onError: toastError,
-      },
-    );
+  // Both continuations ride the awaited promise, never per-call mutate callbacks:
+  // finishing or discarding leaves this takeover, and an `<Activity>` tab hide tears
+  // the observer down mid-write — react-query drops per-call callbacks once an
+  // observer has no listeners, so `onDone()` would never fire and the surface would
+  // sit over a worktree the backend had already consumed.
+  async function onFinish() {
+    try {
+      const outcome = await finish.mutateAsync({
+        head,
+        worktreePath,
+        worktreeId,
+      });
+      if (outcome.status === "pushed") {
+        toast.success(`Conflicts resolved — pushed ${head}`);
+        onDone();
+        return;
+      }
+      // Unreachable by contract: finish either pushes or errors — it never hands
+      // back conflicts (that shape belongs to the local sibling's rebase path).
+      // Surfaced rather than swallowed, so a contract drift can't pass silently.
+      toastError(new Error("The resolve finished with an unexpected result."));
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   async function onAbort() {
     if (!(await useConfirm.getState().ask(DISCARD_RESOLVE_CONFIRM))) return;
-    abort.mutate(
-      { worktreePath },
-      {
-        onSuccess: () => {
-          toast.success("Resolution discarded");
-          onDone();
-        },
-        onError: toastError,
-      },
-    );
+    try {
+      await abort.mutateAsync({ worktreePath });
+      toast.success("Resolution discarded");
+      onDone();
+    } catch (e) {
+      toastError(e);
+    }
   }
 
   const activeIndex = selectedPath ? conflictedPaths.indexOf(selectedPath) : -1;
@@ -217,7 +218,7 @@ export function ResolveRemotePrView({
             size="xs"
             disabled={busy || remaining > 0}
             reason={remaining > 0 ? "Resolve every conflict first" : undefined}
-            onClick={onFinish}
+            onClick={() => void onFinish()}
           >
             {finish.isPending && <Spinner data-icon="inline-start" />}
             Finish &amp; push

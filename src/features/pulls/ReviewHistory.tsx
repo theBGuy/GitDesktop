@@ -88,8 +88,28 @@ export function ReviewHistory({
     setDraft(text);
   }
 
-  function saveEdit(id: string) {
-    update.mutate({ id, text: draft }, { onSuccess: () => setEditingId(null) });
+  // Awaited rather than per-call mutate callbacks: an `<Activity>` tab hide tears
+  // this observer's subscription down mid-write, and react-query drops per-call
+  // callbacks once an observer has no listeners — the edit row would stay open and
+  // the confirm would stay armed. The catches do nothing: neither this surface nor
+  // the shared review-history mutation has a failure surface.
+  async function saveEdit(id: string) {
+    try {
+      await update.mutateAsync({ id, text: draft });
+      setEditingId(null);
+    } catch {
+      // No failure surface (see above).
+    }
+  }
+
+  async function clearHistory() {
+    try {
+      await clear.mutateAsync(undefined);
+    } catch {
+      // No failure surface (see above).
+    } finally {
+      setConfirmingClear(false);
+    }
   }
 
   const onKeyDown = listKeyboardNav({
@@ -131,11 +151,7 @@ export function ReviewHistory({
                 size="xs"
                 className="text-destructive"
                 disabled={clear.isPending}
-                onClick={() =>
-                  clear.mutate(undefined, {
-                    onSettled: () => setConfirmingClear(false),
-                  })
-                }
+                onClick={() => void clearHistory()}
               >
                 Yes
               </Button>
@@ -259,7 +275,7 @@ export function ReviewHistory({
                           <Button
                             size="xs"
                             disabled={update.isPending}
-                            onClick={() => saveEdit(r.id)}
+                            onClick={() => void saveEdit(r.id)}
                           >
                             Save
                           </Button>

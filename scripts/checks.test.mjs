@@ -280,6 +280,51 @@ test("select-item-clip-title exempts vendored ui only", () => {
   assert.equal(appliesTo("src/features/history/HistoryDialogs.tsx"), true);
 });
 
+test("select-item-clip-title flags the flex clip span across the override", () => {
+  // The flex spelling of the dead span: `flex-1` alone never wins against
+  // ItemText's nowrap intrinsic floor, so the truncate cannot engage.
+  const bare = [
+    "<SelectItem key={b} value={b}>",
+    '  <span className="min-w-0 flex-1 truncate">{b}</span>',
+    "</SelectItem>",
+  ].join("\n");
+  assert.deepEqual(selectItemClipTitle(bare), [1]);
+  // SelectControl's real row, minus its clipTitleFromText prop so only this arm
+  // can fire: the item-level override that revives the truncate sits between the
+  // tag and the child, which is why the window doubles PAIR_GAP — the live site
+  // measures 150 normalized chars, and a site drifting past 160 would go missed
+  // with its allowlist entry reading stale.
+  const overridden = [
+    "<SelectItem",
+    "  key={optionValue}",
+    "  value={optionValue}",
+    "  disabled={disabledItems?.has(optionValue)}",
+    '  className="*:first:min-w-0 *:first:shrink"',
+    ">",
+    '  <span className="min-w-0 flex-1 truncate">{display}</span>',
+    "</SelectItem>",
+  ].join("\n");
+  assert.deepEqual(selectItemClipTitle(overridden), [1]);
+});
+
+test("select-item-clip-title allowlists the flex spelling per file", () => {
+  const check = CHECKS.find((c) => c.name === "select-item-clip-title");
+  const row = [
+    "<SelectItem key={v} value={v}>",
+    '  <span className="min-w-0 flex-1 truncate">{d}</span>',
+    "</SelectItem>",
+  ].join("\n");
+  const files = [
+    "src/components/form/fields.tsx",
+    "src/features/pulls/SomeNewPicker.tsx",
+  ];
+  const views = new Map(files.map((f) => [f, view(row)]));
+  // The shared control's entry suppresses only its own file; the same markup in
+  // a fresh picker (which carries no override) still reports.
+  const { violations } = runCheck(check, files, views);
+  assert.deepEqual(violations, ["src/features/pulls/SomeNewPicker.tsx:1"]);
+});
+
 test("setQueryData-noop catches a call wrapped across lines", () => {
   const source = [
     "queryClient.setQueryData(",
@@ -527,13 +572,12 @@ test("bare-mutate-in-converted-trees applies to the converted trees only", () =>
     "src/features/repo-settings/RulesetsSection.tsx",
     "src/features/explore/ExploreDetail.tsx",
     "src/features/actions/RunDetailView.tsx",
+    "src/features/pulls/RemotePrView.tsx",
+    "src/features/pulls/useReconcileLocalPrs.ts",
   ]) {
     assert.equal(appliesTo(file), true, `should scan ${file}`);
   }
-  for (const file of [
-    "src/features/pulls/LocalPrView.tsx",
-    "src/features/repository/ChangesPanel.tsx",
-  ]) {
+  for (const file of ["src/features/repository/ChangesPanel.tsx"]) {
     assert.equal(appliesTo(file), false, `should not scan ${file}`);
   }
 });
@@ -808,21 +852,15 @@ test("bare-group-label allowlists whole files, and exempts vendored ui", () => {
     check.appliesTo("src/features/repo-settings/PagesSection.tsx"),
     true,
   );
-  // Both kinds of entry are keyed per file: a deferred file's two captions are
-  // suppressed by its single entry, a WRAPPING label (implicit association, which
-  // neither htmlFor nor id can express) is suppressed by its own, and an unlisted
-  // file still reports.
+  // Entries are keyed per file: a WRAPPING label (implicit association, which
+  // neither htmlFor nor id can express) is suppressed by its file's entry, and an
+  // unlisted file still reports.
   const files = [
-    "src/features/pulls/LinkedIssuesField.tsx",
     "src/features/repo-settings/GitLabVariablesSection.tsx",
     "src/features/repo-settings/GitLabWebhooksSection.tsx",
     "src/features/repo-settings/PagesSection.tsx",
   ];
   const views = new Map([
-    [
-      "src/features/pulls/LinkedIssuesField.tsx",
-      view("<Label>Linked issues</Label>\n<Label>Linked issues</Label>"),
-    ],
     [
       "src/features/repo-settings/GitLabVariablesSection.tsx",
       view(
