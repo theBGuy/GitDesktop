@@ -11,8 +11,8 @@ import { isHostAllowed, normalizeHost } from "@/lib/ai/allowed-hosts";
  *
  * `consequence` is the clause after "isn't an allowed host yet — " and states
  * what follows in this context: on the AI provider fields the request is blocked
- * (the default), while in the MCP dialog it's advisory (the agent CLI connects
- * anyway, outside the AI allowlist), so the caller passes its own wording.
+ * (the default), while the MCP registration seams block saving/importing/adding
+ * the server until the host is allowed, so each caller passes its own wording.
  */
 export function HostAllowNote({
   url,

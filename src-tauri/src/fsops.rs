@@ -68,9 +68,10 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
 }
 
 /// True when `name`'s stem (everything before the first dot) is a reserved DOS
-/// device name. Windows resolves such a FINAL path component to the DEVICE in
-/// whatever directory the file sits, extension or not, so `nul.txt` and
-/// `src/nul` are as unopenable as `nul` (callers pass `file_name()`). Win32 also
+/// device name. Windows resolves such a path component to the DEVICE in
+/// whatever directory it sits, extension or not, so `nul.txt` and
+/// `src/nul` are as unopenable as `nul` (callers pass ONE component;
+/// [`path_has_reserved_component`] walks a whole path). Win32 also
 /// strips trailing dots and SPACES off the final component, which makes `nul `
 /// the device too (measured); the first-dot split covers the dots, the trim
 /// covers the spaces. Only a single COM/LPT ordinal 1–9 is a device, written
@@ -100,6 +101,27 @@ fn is_reserved_device_name(name: &str) -> bool {
     }
 }
 
+/// Every reserved DOS device name, lowercase — the enumerable form of
+/// [`is_reserved_device_name`], for the one caller that has to NAME them rather
+/// than test them (git takes pathspec patterns, not a predicate). The matcher
+/// stays the authority; the drift-pin test keeps this array in step with it.
+pub(crate) const RESERVED_DEVICE_NAMES: [&str; 28] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "com\u{b9}",
+    "com\u{b2}", "com\u{b3}", "lpt\u{b9}", "lpt\u{b2}", "lpt\u{b3}",
+];
+
+/// True when ANY component of `path` is a reserved device name. A reserved
+/// DIRECTORY name makes everything beneath it plain-path-unreachable too, so
+/// `con/x.txt` needs the same verbatim handling as `nul.txt`. A non-UTF-8
+/// component is never reserved — every device name is ASCII or Latin-1.
+pub(crate) fn path_has_reserved_component(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        std::path::Component::Normal(name) => name.to_str().is_some_and(is_reserved_device_name),
+        _ => false,
+    })
+}
+
 /// Rewrites an absolute path into its `\\?\` verbatim form, which the Win32 layer
 /// passes to the filesystem without the DOS-name resolution that turns `nul` into
 /// a device. Returns `None` for a relative path — resolving one against the
@@ -125,17 +147,16 @@ fn verbatim_path(path: &Path) -> Option<PathBuf> {
     }))
 }
 
-/// Permanently removes a reserved-device-named entry through its verbatim path.
-/// Returns whether it did; a non-reserved name is left for the caller to report.
+/// Permanently removes an entry whose path holds a reserved device name — in the
+/// file name or in any directory above it — through its verbatim path. Returns
+/// whether it did; a path with no reserved component is left for the caller to
+/// report. Unlinking `con/x.txt` leaves the empty `con` directory behind, which
+/// no plain-path caller can reach either; pruning it is not this function's job.
 #[cfg(windows)]
 fn permanent_delete_reserved(path: &Path) -> bool {
     use std::os::windows::fs::FileTypeExt;
 
-    let reserved = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(is_reserved_device_name);
-    if !reserved {
+    if !path_has_reserved_component(path) {
         return false;
     }
     let Some(verbatim) = verbatim_path(path) else {
@@ -1234,6 +1255,96 @@ mod tests {
         ] {
             assert!(!is_reserved_device_name(name), "{name:?} is an ordinary name");
         }
+    }
+
+    #[test]
+    fn path_has_reserved_component_walks_every_component() {
+        // A reserved name anywhere in the path — file, or a directory above it.
+        assert!(path_has_reserved_component(Path::new("con/x.txt")));
+        assert!(path_has_reserved_component(Path::new("a/nul.txt/deep.bin")));
+        assert!(path_has_reserved_component(Path::new("nul")));
+        assert!(path_has_reserved_component(Path::new("a/com\u{b9}/b/c.txt")));
+        // The matcher's near-misses stay ordinary at every depth.
+        assert!(!path_has_reserved_component(Path::new("console/x")));
+        assert!(!path_has_reserved_component(Path::new("com10/x")));
+        assert!(!path_has_reserved_component(Path::new("a/nulx")));
+        assert!(!path_has_reserved_component(Path::new("")));
+    }
+
+    /// The enumerable list is spelled to git as pathspec patterns, which take no
+    /// predicate — so a name the matcher accepts but this array omits would
+    /// silently stop being excluded. Pinned in both directions: every listed name
+    /// is reserved, and every reserved name a generated sweep of the whole
+    /// candidate space produces is listed.
+    #[test]
+    fn reserved_device_names_agrees_with_the_matcher_and_is_complete() {
+        for name in RESERVED_DEVICE_NAMES {
+            assert!(is_reserved_device_name(name), "{name:?} must be reserved");
+        }
+        // 4 singletons + COM/LPT ordinals 1-9 + the three superscript spellings each.
+        assert_eq!(RESERVED_DEVICE_NAMES.len(), 28);
+        // The families are enumerable only because the ordinal set is closed.
+        for name in ["com0", "com10", "lpt0", "com\u{2074}", "null", "console"] {
+            assert!(
+                !RESERVED_DEVICE_NAMES.contains(&name),
+                "{name:?} must not be listed"
+            );
+            assert!(!is_reserved_device_name(name), "{name:?} is an ordinary name");
+        }
+
+        // Matcher → array: a future matcher extension that skips this array goes
+        // red here rather than silently narrowing the force-add exclusions.
+        let mut stems: Vec<String> = ["CON", "PRN", "AUX", "NUL"].map(String::from).to_vec();
+        for family in ["com", "lpt"] {
+            for ordinal in [
+                "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "\u{b9}", "\u{b2}",
+                "\u{b3}", "\u{2074}",
+            ] {
+                stems.push(format!("{family}{ordinal}"));
+            }
+        }
+        for stem in &stems {
+            for name in [stem.clone(), format!("{stem}.txt")] {
+                if !is_reserved_device_name(&name) {
+                    continue;
+                }
+                let listed = name.split('.').next().unwrap_or(&name).to_ascii_lowercase();
+                assert!(
+                    RESERVED_DEVICE_NAMES.contains(&listed.as_str()),
+                    "{name:?} is reserved but missing from RESERVED_DEVICE_NAMES"
+                );
+            }
+        }
+    }
+
+    /// A reserved DIRECTORY name makes its contents plain-path-unreachable too,
+    /// so trash refuses `con/x.txt` exactly as it refuses `nul` — only the
+    /// whole-path gate routes it to the verbatim unlink.
+    #[cfg(windows)]
+    #[test]
+    fn trash_delete_removes_a_file_inside_a_reserved_named_directory() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let plain_dir = tmp.path().join("con");
+        let dir = verbatim_path(&plain_dir).expect("a temp path is absolute");
+        std::fs::create_dir(&dir).expect("the verbatim path creates the directory");
+        let plain = plain_dir.join("x.txt");
+        let verbatim = verbatim_path(&plain).expect("a temp path is absolute");
+        std::fs::write(&verbatim, b"x").expect("the verbatim path creates the file");
+
+        assert!(
+            trash::delete(&plain).is_err(),
+            "the plain path resolves through the device, so trash cannot take it"
+        );
+        trash_delete(&plain).expect("the verbatim fallback removes it");
+        assert!(
+            std::fs::metadata(&verbatim).is_err(),
+            "con/x.txt is gone from disk"
+        );
+        // The now-empty reserved directory is left behind by design; remove it
+        // verbatim so the fixture doesn't outlive the temp dir (whose own cleanup
+        // walks plain paths and would skip it).
+        assert!(std::fs::metadata(&dir).is_ok(), "the con directory remains");
+        std::fs::remove_dir(&dir).expect("the verbatim path removes the directory");
     }
 
     /// Pins the premise the Windows fallback exists for: a file named after a

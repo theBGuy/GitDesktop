@@ -1001,6 +1001,17 @@ pub async fn git_discard_all(state: State<'_, AppState>, repo_path: String) -> A
 pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) -> AppResult<()> {
     use crate::git::runner::{run_git, run_git_raw};
 
+    // Snapshot, trash and reset under ONE hold, so nothing can be staged between
+    // the untracked sweep and the reset that would then be destroyed with no
+    // recycle-bin copy. That means the lock-free `run_git` for the reset —
+    // `run_git_mutating` re-acquires this non-reentrant lock and deadlocks —
+    // trading away its one-shot index.lock retry (as the stash compound does). The
+    // hold spans the whole trash loop deliberately: a huge untracked set can queue
+    // other work for minutes behind the labeled Busy, which is the price of
+    // point-of-acquisition semantics.
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a discard").await?;
+
     let status_out = run_git(
         Some(&repo_path),
         &[
@@ -1042,8 +1053,12 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
     .code
         == 0;
     if head_exists {
-        run_git_mutating(state, &repo_path, &["reset", "--hard", "HEAD"], DEFAULT_TIMEOUT)
-            .await?;
+        run_git(
+            Some(&repo_path),
+            &["reset", "--hard", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1062,12 +1077,56 @@ pub(crate) async fn git_stash_all_core(state: &AppState, repo_path: String) -> A
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a stash operation").await?;
     refuse_mid_op(&repo_path).await?;
 
-    run_git(
-        Some(&repo_path),
-        &["stash", "push", "--include-untracked"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+    // Windows-only: an untracked path holding a reserved device name is
+    // plain-path-unreachable, and `stash push --include-untracked` writes the entry
+    // and THEN fails removing it (exit 1) — leaving a stash plus an unchanged tree
+    // (measured, git 2.51.1). Excluding those paths stashes everything else; an
+    // exclude-only pathspec means "everything else" to git.
+    let excludes: Vec<String> = if cfg!(windows) {
+        let status_out = run_git(
+            Some(&repo_path),
+            &["status", "--porcelain=v2", "--untracked-files=all", "-z"],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        let status = crate::git::status::parse_status_v2(&status_out.stdout_lossy());
+        let reserved: Vec<&str> = status
+            .entries
+            .iter()
+            .filter(|e| {
+                e.unstaged == Some(crate::git::types::ChangeKind::Untracked)
+                    && crate::fsops::path_has_reserved_component(Path::new(&e.path))
+            })
+            .map(|e| e.path.as_str())
+            .collect();
+        // Excluding every change leaves git with nothing to stash, which it reports
+        // as success — say why instead of silently doing nothing.
+        if !reserved.is_empty() && reserved.len() == status.entries.len() {
+            return Err(AppError::InvalidArgument(
+                "Can't stash — the only changes are Windows-reserved filenames (nul, con, com1, …), which Git can't put in a stash.".to_string(),
+            ));
+        }
+        reserved
+            .iter()
+            .map(|p| format!(":(exclude,literal){p}"))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // The common path keeps the exact argv it always had, on every platform.
+    if excludes.is_empty() {
+        run_git(
+            Some(&repo_path),
+            &["stash", "push", "--include-untracked"],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+    } else {
+        let mut args: Vec<&str> = vec!["stash", "push", "--include-untracked", "--"];
+        args.extend(excludes.iter().map(String::as_str));
+        run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
+    }
     Ok(())
 }
 
@@ -1462,6 +1521,14 @@ pub async fn git_force_add(
     repo_path: String,
     pathspecs: Vec<String>,
 ) -> AppResult<()> {
+    git_force_add_core(&state, repo_path, pathspecs).await
+}
+
+pub(crate) async fn git_force_add_core(
+    state: &AppState,
+    repo_path: String,
+    pathspecs: Vec<String>,
+) -> AppResult<()> {
     let specs: Vec<&str> = pathspecs
         .iter()
         .map(|s| s.trim())
@@ -1470,9 +1537,31 @@ pub async fn git_force_add(
     if specs.is_empty() {
         return Ok(());
     }
+    // Windows-only: a reserved-device FILE under a force-added directory aborts the
+    // WHOLE add ("unable to index file", measured, git 2.51.1) and the user never
+    // saw it — `git_ignored_files` collapses a fully-ignored directory to one entry.
+    // Exclude all four shapes `path_has_reserved_component` calls reserved: the bare
+    // name, any extension, and either spelled as a directory (unreadable by plain
+    // path, so git only warns there). A leading `**/` matches at the repo root too.
+    let reserved_excludes: Vec<String> = if cfg!(windows) {
+        crate::fsops::RESERVED_DEVICE_NAMES
+            .iter()
+            .flat_map(|name| {
+                [
+                    format!(":(exclude,glob,icase)**/{name}"),
+                    format!(":(exclude,glob,icase)**/{name}.*"),
+                    format!(":(exclude,glob,icase)**/{name}/**"),
+                    format!(":(exclude,glob,icase)**/{name}.*/**"),
+                ]
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut args: Vec<&str> = vec!["add", "--force", "--"];
     args.extend(specs);
-    run_git_mutating(&state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    args.extend(reserved_excludes.iter().map(String::as_str));
+    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -9240,6 +9329,16 @@ detached
         );
     }
 
+    /// Creating and probing a reserved device name is only possible through the
+    /// verbatim path — the plain one answers for the device, not the file.
+    #[cfg(windows)]
+    fn verbatim(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!(
+            r"\\?\{}",
+            dir.join(name).to_string_lossy().replace('/', "\\")
+        ))
+    }
+
     /// Both discard cores remove an untracked file named after a reserved DOS
     /// device. Such a file enumerates normally but resolves to the DEVICE for
     /// every open/stat/unlink by its plain path, so the recycle bin refuses it
@@ -9247,15 +9346,6 @@ detached
     #[cfg(windows)]
     #[tokio::test]
     async fn discard_removes_reserved_device_named_files() {
-        // Creating and probing these names is only possible through the verbatim
-        // path — the plain one answers for the device, not the file.
-        fn verbatim(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-            std::path::PathBuf::from(format!(
-                r"\\?\{}",
-                dir.join(name).to_string_lossy().replace('/', "\\")
-            ))
-        }
-
         let (dir, repo) = setup_repo("discard-reserved").await;
         let root = dir.path().to_path_buf();
         for name in ["nul", "nul.txt"] {
@@ -9290,6 +9380,49 @@ detached
             );
             assert!(!listed.contains(&name.to_string()), "{name} is not listed");
         }
+    }
+
+    /// Discard-all is one compound: the untracked sweep must run INSIDE the hold,
+    /// not before it, or work staged while the recycle-bin pass grinds through a
+    /// large tree is destroyed by the reset with no copy anywhere. Multi-threaded
+    /// flavor so the spawned discard genuinely races the hold. Windows-gated like
+    /// every other test that reaches `trash_delete` — the OS trash is not a
+    /// dependable fixture on the Linux/macOS CI legs.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discard_all_holds_the_repo_across_the_untracked_sweep() {
+        let (dir, repo) = setup_repo("discard-hold").await;
+        commit_file(&repo, dir.path(), "tracked.txt", "v0\n", "add tracked").await;
+        std::fs::write(dir.path().join("tracked.txt"), "dirty\n").unwrap();
+        std::fs::write(dir.path().join("untracked.txt"), "u\n").unwrap();
+
+        let state = std::sync::Arc::new(AppState::default());
+        let domain = state.working_tree_lock(&repo).await;
+        let guard = acquire_repo_lock_unbounded(&domain, "a commit").await;
+
+        let discard = {
+            let state = state.clone();
+            let repo = repo.clone();
+            tokio::spawn(async move { git_discard_all_core(&state, repo).await })
+        };
+        // Lock-free, the sweep trashes the file within milliseconds — this window
+        // is what the hold has to keep shut.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            dir.path().join("untracked.txt").exists(),
+            "the untracked sweep must wait for the lock, not run ahead of it"
+        );
+
+        drop(guard);
+        discard
+            .await
+            .expect("discard task panicked")
+            .expect("the discard succeeds once the hold releases");
+        assert!(!dir.path().join("untracked.txt").exists());
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap()),
+            "v0\n"
+        );
     }
 
     // --- git_stash_paths_core: selective stash must not leak unselected staged files ---
@@ -9823,6 +9956,104 @@ detached
             "a0\n"
         );
         assert!(!dir.path().join("U").exists(), "untracked work was stashed");
+    }
+
+    /// An untracked reserved-device name makes `stash push --include-untracked`
+    /// write the entry and then fail removing it, leaving a stash AND the tree
+    /// untouched. Excluding it puts the rest of the work away and leaves the
+    /// unreachable file alone.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stash_all_works_around_a_reserved_device_named_file() {
+        let (dir, repo) = setup_repo("stash-reserved").await;
+        commit_file(&repo, dir.path(), "A", "a0\n", "add A").await;
+        std::fs::write(dir.path().join("A"), "a1\n").unwrap();
+        std::fs::write(verbatim(dir.path(), "nul"), b"x\n").expect("verbatim write");
+
+        let state = AppState::default();
+        git_stash_all_core(&state, repo.clone()).await.unwrap();
+
+        assert_eq!(stash_count(&repo).await, 1);
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("A")).unwrap()),
+            "a0\n",
+            "the tracked change is stashed, not merely recorded"
+        );
+        assert!(
+            std::fs::metadata(verbatim(dir.path(), "nul")).is_ok(),
+            "the reserved-name file stays put"
+        );
+    }
+
+    /// Excluding every change would leave git nothing to stash, which it reports
+    /// as success — the refusal is what tells the user why nothing happened.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stash_all_refuses_when_only_a_reserved_device_name_changed() {
+        let (dir, repo) = setup_repo("stash-reserved-only").await;
+        std::fs::write(verbatim(dir.path(), "nul"), b"x\n").expect("verbatim write");
+
+        let state = AppState::default();
+        let err = git_stash_all_core(&state, repo.clone()).await.unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(_)), "got {err:?}");
+        assert_eq!(stash_count(&repo).await, 0);
+        assert!(std::fs::metadata(verbatim(dir.path(), "nul")).is_ok());
+    }
+
+    /// Off Windows `nul` is an ordinary file name, so the exclusion must not fire
+    /// — this pins the `cfg!(windows)` gate rather than the exclusion itself.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn stash_all_stashes_a_file_named_nul_off_windows() {
+        let (dir, repo) = setup_repo("stash-nul-unix").await;
+        std::fs::write(dir.path().join("nul"), "u\n").unwrap();
+
+        let state = AppState::default();
+        git_stash_all_core(&state, repo.clone()).await.unwrap();
+
+        assert_eq!(stash_count(&repo).await, 1);
+        assert!(!dir.path().join("nul").exists(), "it stashes like any file");
+    }
+
+    /// A reserved-device FILE inside a collapsed ignored directory aborts the whole
+    /// force-add, and the user cannot see it to deselect it. Excluding those names
+    /// tracks the rest of the directory. The `nul.d/` arm covers the reserved
+    /// DIRECTORY shape (which git can only warn about, never index) and the `com10`
+    /// arm is the over-match control.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn force_add_skips_reserved_names_inside_an_ignored_directory() {
+        let (dir, repo) = setup_repo("force-add-reserved").await;
+        commit_file(&repo, dir.path(), ".gitignore", "junk/\n", "ignore junk").await;
+        let junk = dir.path().join("junk");
+        std::fs::create_dir(&junk).unwrap();
+        std::fs::write(junk.join("keep.txt"), "k\n").unwrap();
+        std::fs::write(junk.join("com10.txt"), "c\n").unwrap();
+        std::fs::write(verbatim(&junk, "nul.txt"), b"n\n").expect("verbatim write");
+        let nul_dir = verbatim(&junk, "nul.d");
+        std::fs::create_dir(&nul_dir).expect("verbatim mkdir");
+        std::fs::write(nul_dir.join("inner.txt"), b"i\n").expect("verbatim write");
+
+        let state = AppState::default();
+        // The literal spelling the ignored-files dialog actually sends.
+        git_force_add_core(&state, repo.clone(), vec![crate::git::pathspec::literal("junk/")])
+            .await
+            .expect("the reserved name is skipped instead of aborting the add");
+
+        let tracked = git(&repo, &["ls-files"]).await;
+        let names: Vec<&str> = tracked.lines().collect();
+        assert!(names.contains(&"junk/keep.txt"), "{names:?}");
+        assert!(
+            names.contains(&"junk/com10.txt"),
+            "com10 is an ordinary name and must still be tracked: {names:?}"
+        );
+        assert!(!names.contains(&"junk/nul.txt"), "{names:?}");
+        assert!(!names.contains(&"junk/nul.d/inner.txt"), "{names:?}");
+
+        // The temp dir's own cleanup walks plain paths and cannot reach either.
+        std::fs::remove_file(nul_dir.join("inner.txt")).expect("verbatim unlink");
+        std::fs::remove_dir(&nul_dir).expect("verbatim rmdir");
+        std::fs::remove_file(verbatim(&junk, "nul.txt")).expect("verbatim unlink");
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ mod git;
 mod github;
 mod health;
 mod hooks;
+mod image_sniff;
 // Dev-only, like the cold-start mode it serves: gated so release builds carry no
 // unused reader (and no dead_code warning for it).
 #[cfg(debug_assertions)]

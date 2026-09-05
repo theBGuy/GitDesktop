@@ -145,9 +145,14 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
           const rev = ref ?? ctx.headSha;
           if (!rev)
             return "Error: no PR head available — pass an explicit ref to read at.";
-          const b64 = await gitFileBase64(ctx.repoPath, rev, path);
-          if (b64 === null) return `File does not exist at ${rev}: ${path}`;
-          if (b64.length > READ_FILE_BASE64_MAX)
+          const payload = await gitFileBase64(ctx.repoPath, rev, path);
+          if (payload === null) return `File does not exist at ${rev}: ${path}`;
+          const b64 = payload.base64;
+          if (
+            payload.tooLarge ||
+            b64 === null ||
+            b64.length > READ_FILE_BASE64_MAX
+          )
             return `Error: ${path} is too large for review reads (over ~1 MB) — use grep or diff_refs to inspect it instead.`;
           let text: string;
           try {

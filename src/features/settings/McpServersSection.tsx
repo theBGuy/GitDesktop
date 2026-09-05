@@ -39,9 +39,10 @@ export const McpServersSection = withForm({
   ...settingsFormOpts,
   render: function McpServersSectionRender({ form }) {
     const servers = useSelector(form.store, (s) => s.values.mcpServers);
-    // The draft AI allow list, shared with the AI provider screen. An http MCP
-    // URL the CLI will connect to outside this allowlist gets an advisory badge
-    // (row) / note (dialog) — never a block, exactly like the AI URL fields.
+    // The draft AI allow list, shared with the AI provider screen. Rows already
+    // in the registry keep a warn-only "host not allowed" badge and go on
+    // working; the three REGISTRATION seams (add/edit dialog, import, browse)
+    // block an http server until its host is on this list.
     const allowedHosts = useSelector(
       form.store,
       (s) => s.values.aiAllowedHosts,
@@ -118,7 +119,7 @@ export const McpServersSection = withForm({
     }
 
     /** Add a URL's host to the draft allow list — the one-click fix behind the
-     *  dialog's advisory host note. Mutates the shared settings draft, committed
+     *  host note in each registration seam. Mutates the shared settings draft, committed
      *  by the screen's Save bar, exactly like the AI URL fields. Dedups via
      *  `isHostAllowed` (not a bare `includes`), so a host already covered by a
      *  built-in/local entry or a no-port entry isn't added redundantly. */
@@ -419,6 +420,8 @@ export const McpServersSection = withForm({
           <ImportMcpDialog
             repoPath={repoPath}
             existing={list}
+            allowedHosts={allowedHosts}
+            onAllowHost={allowHost}
             onImport={addServers}
             onClose={() => setImportOpen(false)}
           />
@@ -427,6 +430,8 @@ export const McpServersSection = withForm({
         {browseOpen && (
           <BrowseRegistryDialog
             existing={list}
+            allowedHosts={allowedHosts}
+            onAllowHost={allowHost}
             onAdd={appendServer}
             onClose={() => setBrowseOpen(false)}
           />

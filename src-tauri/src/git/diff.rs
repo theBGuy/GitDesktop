@@ -3,10 +3,24 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::runner::{run_git, run_git_mutating_input, run_git_raw, DEFAULT_TIMEOUT};
 use crate::git::types::{DiffStatEntry, FileDiff, StagedDiff};
+use crate::image_sniff::{dimensions_within_caps, sniff_image};
 use crate::state::AppState;
 
 /// Cap on file bytes shipped for image previews.
 const IMAGE_MAX_BYTES: usize = 20_000_000;
+
+/// One file's bytes for the webview, or the reason they are being withheld. A refusal
+/// is a STATE rather than an error: the diff view has a pane to show for it.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBytes {
+    /// Base64 of the file bytes; `None` when the preview is refused.
+    pub base64: Option<String>,
+    /// Sniffed raster media type; `None` when the bytes are not one of the
+    /// four sniffable formats (SVG, BMP, ICO, text, …).
+    pub mime: Option<String>,
+    pub too_large: bool,
+}
 
 /// Raw file bytes (base64) at a revision, or from the working tree when
 /// `rev` is None. `None` result = the file doesn't exist there (e.g. the
@@ -16,7 +30,7 @@ pub async fn git_file_base64(
     repo_path: String,
     rev: Option<String>,
     file_path: String,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<FileBytes>> {
     use base64::Engine;
     let bytes: Option<Vec<u8>> = match rev {
         Some(rev) => {
@@ -32,14 +46,38 @@ pub async fn git_file_base64(
             .await
             .ok(),
     };
-    if let Some(b) = &bytes {
-        if b.len() > IMAGE_MAX_BYTES {
-            return Err(AppError::InvalidArgument(
-                "file too large to preview".into(),
-            ));
+    let Some(bytes) = bytes else { return Ok(None) };
+    if bytes.len() > IMAGE_MAX_BYTES {
+        return Ok(Some(FileBytes {
+            base64: None,
+            mime: None,
+            too_large: true,
+        }));
+    }
+    // The byte cap bounds the compressed copy and says nothing about the decode the
+    // webview performs, so a sniffable raster is gated on the size its header DECLARES:
+    // a few KB of PNG can otherwise ask the renderer for gigabytes. The type comes from
+    // the bytes rather than the extension, which any commit can spell freely.
+    let sniffed = sniff_image(&bytes);
+    if let Some((media_type, width, height)) = sniffed {
+        if !dimensions_within_caps(width, height) {
+            return Ok(Some(FileBytes {
+                base64: None,
+                mime: Some(media_type.into()),
+                too_large: true,
+            }));
         }
     }
-    Ok(bytes.map(|b| base64::engine::general_purpose::STANDARD.encode(b)))
+    // Bytes with no declared raster to gate ship under the byte cap alone. SVG is kept
+    // deliberately: in an `<img>` it is a non-scripting document — no script runs and
+    // external references are blocked — so unlike the link-preview gate, which carries
+    // third-party bytes into a hover card, this surface can render a repository's own
+    // SVGs. BMP and ICO have no reader here either and are likewise byte-bound.
+    Ok(Some(FileBytes {
+        base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+        mime: sniffed.map(|(media_type, _, _)| media_type.to_string()),
+        too_large: false,
+    }))
 }
 
 /// Applies a patch — typically a single hunk cut out of a working-tree diff.
@@ -583,6 +621,7 @@ pub(crate) fn parse_numstat_z_rows(text: &str) -> Vec<DiffStatRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image_sniff::{jpeg_fixture, png_fixture};
 
     #[test]
     fn parses_numstat_with_rename_and_binary() {
@@ -1238,5 +1277,130 @@ mod tests {
             .unwrap();
         assert!(added.text.contains("+hello new file"), "{}", added.text);
         assert!(added.text.contains("new.txt"), "{}", added.text);
+    }
+
+    /// A repo whose committed files are inert header fixtures — headers only, nothing
+    /// a decoder would act on. `core.autocrlf` is pinned so the byte-exact fixtures
+    /// come back out of `git show` unchanged.
+    async fn init_preview_repo() -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let (tmp, dir, repo) = init_line_stats_repo("gd-file-bytes-test-").await;
+        // Named `.png` regardless of what the bytes are: the extension is what the
+        // sniffed type has to beat.
+        std::fs::write(dir.join("bomb.png"), png_fixture(9000, 9000)).unwrap();
+        std::fs::write(dir.join("area.png"), png_fixture(7000, 7000)).unwrap();
+        std::fs::write(dir.join("ok.png"), png_fixture(1200, 630)).unwrap();
+        std::fs::write(dir.join("lying.png"), jpeg_fixture(0xc0, &[], 40, 30)).unwrap();
+        std::fs::write(
+            dir.join("icon.svg"),
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"9000\" height=\"9000\"/>",
+        )
+        .unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(Some(&repo), &["commit", "-qm", "fixtures"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        (tmp, dir, repo)
+    }
+
+    /// The decode gate: a few bytes of PNG declaring a raster past either cap comes back
+    /// as a refusal rather than as bytes. Both read paths are exercised because the rev
+    /// arm and the working-tree arm are separate reads that meet at the same gate.
+    #[tokio::test]
+    async fn a_declared_raster_past_the_caps_is_refused_on_both_read_paths() {
+        let (_tmp, _dir, repo) = init_preview_repo().await;
+        // 9000 is over the per-axis cap; 7000x7000 = 49 MP clears both axes and is
+        // refused by the area cap alone.
+        for name in ["bomb.png", "area.png"] {
+            for rev in [None, Some("HEAD".to_string())] {
+                let got = git_file_base64(repo.clone(), rev.clone(), name.into())
+                    .await
+                    .unwrap()
+                    .expect("the file exists on both paths");
+                assert!(got.too_large, "{name} at {rev:?} must be refused");
+                assert_eq!(got.base64, None, "{name} must not ship its bytes");
+                assert_eq!(got.mime.as_deref(), Some("image/png"));
+            }
+        }
+    }
+
+    /// The type on the data URI comes from the bytes: a JPEG named `.png` ships as a
+    /// JPEG, and bytes with no reader here ship typeless under the byte cap alone.
+    #[tokio::test]
+    async fn the_sniffed_type_wins_over_the_file_extension() {
+        let (_tmp, _dir, repo) = init_preview_repo().await;
+        for rev in [None, Some("HEAD".to_string())] {
+            let ok = git_file_base64(repo.clone(), rev.clone(), "ok.png".into())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!ok.too_large);
+            assert_eq!(ok.mime.as_deref(), Some("image/png"));
+            assert!(ok.base64.is_some());
+
+            let lying = git_file_base64(repo.clone(), rev.clone(), "lying.png".into())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(lying.mime.as_deref(), Some("image/jpeg"));
+            assert!(lying.base64.is_some());
+
+            // SVG has no header raster to gate, so its declared 9000x9000 is not a
+            // decode the caps can bound — it ships, byte-bound, and typeless.
+            let svg = git_file_base64(repo.clone(), rev.clone(), "icon.svg".into())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(svg.mime, None);
+            assert!(!svg.too_large);
+            assert!(svg.base64.is_some());
+        }
+    }
+
+    /// The byte cap is a refusal STATE now, not an error, and an absent file is still
+    /// the `None` every caller reads as "no version here".
+    #[tokio::test]
+    async fn the_byte_cap_refuses_and_a_missing_file_is_still_none() {
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        std::fs::write(dir.join("huge.bin"), vec![0u8; IMAGE_MAX_BYTES + 1]).unwrap();
+        let huge = git_file_base64(repo.clone(), None, "huge.bin".into())
+            .await
+            .unwrap()
+            .expect("an over-cap file is a refusal, not an absence");
+        assert!(huge.too_large);
+        assert_eq!(huge.base64, None);
+        assert_eq!(huge.mime, None);
+
+        for rev in [None, Some("HEAD".to_string())] {
+            assert!(git_file_base64(repo.clone(), rev, "nope.png".into())
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    /// The frontend reads `base64`/`mime`/`tooLarge` off this record — `rename_all` is a
+    /// rename trap the repo has been bitten by, so the wire shape is pinned.
+    #[test]
+    fn file_bytes_serializes_to_the_pinned_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(FileBytes {
+                base64: Some("AAAA".into()),
+                mime: Some("image/png".into()),
+                too_large: false,
+            })
+            .unwrap(),
+            serde_json::json!({ "base64": "AAAA", "mime": "image/png", "tooLarge": false })
+        );
+        assert_eq!(
+            serde_json::to_value(FileBytes {
+                base64: None,
+                mime: None,
+                too_large: true,
+            })
+            .unwrap(),
+            serde_json::json!({ "base64": null, "mime": null, "tooLarge": true })
+        );
     }
 }

@@ -1,3 +1,8 @@
+import {
+  hostLabel,
+  isHostAllowed,
+  normalizeHost,
+} from "@/lib/ai/allowed-hosts";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { McpKeyValue, McpServer } from "./api";
 
@@ -194,6 +199,23 @@ export function mcpSecretRef(serverId: string, entryKey: string): string {
   return `mcp-server/${serverId}/${entryKey}`;
 }
 
+/** Registration-time host gate for http servers: the reason a server can't be
+ *  saved/imported/added yet, or null. Rows already IN the registry are never
+ *  gated by this (they keep the warn-only badge) — only the three registration
+ *  seams call it. An empty or unparseable URL returns null: emptiness and URL
+ *  validity are validateMcpServer's own checks, and a URL-less stub is gated
+ *  later, when the edit dialog saves the URL the user fills in. */
+export function mcpHostGateReason(
+  server: McpServer,
+  allowedHosts: readonly string[],
+): string | null {
+  if (server.transport !== "http") return null;
+  const url = server.url.trim();
+  if (!url || !normalizeHost(url)) return null;
+  if (isHostAllowed(url, allowedHosts)) return null;
+  return `${hostLabel(url)} isn't in your AI allowed hosts.`;
+}
+
 /**
  * Validate one server against the rest of the registry. Returns the first
  * problem as a human message, or null when it's valid. Drives the dialog's
@@ -202,6 +224,7 @@ export function mcpSecretRef(serverId: string, entryKey: string): string {
 export function validateMcpServer(
   server: McpServer,
   others: McpServer[],
+  allowedHosts: readonly string[],
 ): string | null {
   const name = server.name.trim();
   if (!name) return "Give the server a name.";
@@ -233,6 +256,8 @@ export function validateMcpServer(
     }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
       return "URL must be http(s).";
+    const gate = mcpHostGateReason(server, allowedHosts);
+    if (gate) return gate;
   }
 
   const entries = entriesFor(server);
