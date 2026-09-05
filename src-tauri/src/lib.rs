@@ -12,6 +12,7 @@ mod git;
 mod github;
 mod health;
 mod hooks;
+mod instance_id;
 mod instructions;
 mod jira_field_maps;
 mod jira_links;
@@ -54,6 +55,15 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
         tray::show_main_window(app);
     }));
+    // Interpolating the id straight into JS source is safe only because
+    // `instance_id::read` enforces `[A-Za-z0-9-]{1,32}`. This script runs before any
+    // page script, so the frontend reads the global synchronously at module scope.
+    let builder = match instance_id::read() {
+        Some(id) => builder.append_invoke_initialization_script(format!(
+            "window.__GD_INSTANCE_ID__ = \"{id}\";"
+        )),
+        None => builder,
+    };
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())

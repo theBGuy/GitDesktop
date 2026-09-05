@@ -12,13 +12,19 @@
   Run a fresh repo (e.g. `git init` in a temp folder) inside it to see the
   unborn-repo "Make your first commit" state. Use -NoGit / -NoGh to exercise the
   GitMissingScreen and GitHub-not-connected empty states without uninstalling
-  anything.
+  anything. Automations are off by default in cold-start mode; -Automations
+  re-enables them.
 
 .PARAMETER NoGit
   Force the "Git is not installed" screen.
 
 .PARAMETER NoGh
   Force the "GitHub CLI not connected" empty states (Pull Requests / Actions).
+
+.PARAMETER Automations
+  Run automations in the cold instance. They are OFF by default in cold-start mode:
+  the automation claims are shared with your real instance, so an armed cold instance
+  can win a claim and suppress the real run's review. Pass this to re-enable them.
 
 .PARAMETER Reset
   Delete the throwaway cold-start store files, then exit (does not launch).
@@ -27,12 +33,14 @@
   ./scripts/cold-start.ps1
   ./scripts/cold-start.ps1 -NoGit
   ./scripts/cold-start.ps1 -NoGh
+  ./scripts/cold-start.ps1 -Automations
   ./scripts/cold-start.ps1 -Reset
 #>
 [CmdletBinding()]
 param(
   [switch]$NoGit,
   [switch]$NoGh,
+  [switch]$Automations,
   [switch]$Reset
 )
 
@@ -59,9 +67,11 @@ if ($NoGit) { $env:VITE_COLD_START_NO_GIT = "1" }
 else { Remove-Item Env:\VITE_COLD_START_NO_GIT -ErrorAction SilentlyContinue }
 if ($NoGh) { $env:VITE_COLD_START_NO_GH = "1" }
 else { Remove-Item Env:\VITE_COLD_START_NO_GH -ErrorAction SilentlyContinue }
+if ($Automations) { $env:VITE_COLD_START_AUTOMATIONS = "1" }
+else { Remove-Item Env:\VITE_COLD_START_AUTOMATIONS -ErrorAction SilentlyContinue }
 
 Write-Host "Launching GitDesktop in COLD-START test mode" -ForegroundColor Cyan
-Write-Host "  NoGit = $NoGit   NoGh = $NoGh" -ForegroundColor Cyan
+Write-Host "  NoGit = $NoGit   NoGh = $NoGh   Automations = $Automations" -ForegroundColor Cyan
 Write-Host "  Real settings / local PRs / API keys are untouched." -ForegroundColor DarkGray
 
 Set-Location $repoRoot

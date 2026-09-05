@@ -50,6 +50,7 @@ import {
   resetReview,
 } from "@/lib/stores/reviews";
 import { errorMessage, invoke } from "@/lib/tauri/invoke";
+import { COLD_START, COLD_START_AUTOMATIONS } from "@/lib/test-mode";
 import {
   clearDismissedHead,
   getDismissedHeadMap,
@@ -233,7 +234,7 @@ export function triggerAutomations(event: AutomationEvent): void {
 
 /** What a {@link run} pass did, so a re-run can tell outcomes apart:
  *  - `matched`: rules that exist AND apply (past the `only` + branch gates). 0 = the rule
- *    no longer applies, or automations are paused (Hide AI).
+ *    no longer applies, or automations are paused (Hide AI, or cold start without opt-in).
  *  - `attempted`: runs actually started. `matched > 0 && attempted === 0` means a claim or
  *    an already-covered head blocked it — retryable. */
 interface RunOutcome {
@@ -259,6 +260,11 @@ async function run(
   // resume when AI is shown again.
   const settings = await loadSettings();
   if (settings.hideAi) return { matched: 0, attempted: 0 };
+  // Cold-start instances share the automation-claims dir with the real instance, so an
+  // armed cold instance can win a claim meant for the real run and suppress it. Gate
+  // before loadAutomations() so a gated tick reads no config and takes no claim.
+  if (COLD_START && !COLD_START_AUTOMATIONS)
+    return { matched: 0, attempted: 0 };
   const config = await loadAutomations();
   const repo = await repoAutomationsFor(config, event.repoPath);
   const actions = effectiveActions(config, repo, event.kind);
@@ -695,6 +701,12 @@ export function rerunAutomation(
       // re-run has to stop here — clearing nothing and running nothing.
       if ((await loadSettings()).hideAi) {
         toast.info("Automations are paused while AI features are hidden.");
+        return;
+      }
+      // Same reason: the clear below runs before run()'s cold-start gate, so an
+      // automations-off cold instance stops here rather than consuming the watermark.
+      if (COLD_START && !COLD_START_AUTOMATIONS) {
+        toast.info("Automations are off in cold-start test mode.");
         return;
       }
       // Best-effort ONLY here: a cleared-dismissal failure must not block the

@@ -24,10 +24,35 @@ export const COLD_START = env.VITE_COLD_START === "1";
 export const COLD_START_NO_GIT =
   COLD_START && env.VITE_COLD_START_NO_GIT === "1";
 export const COLD_START_NO_GH = COLD_START && env.VITE_COLD_START_NO_GH === "1";
+// Polarity is deliberately inverted vs the NO_* flags above: automations are OFF
+// by default under cold start and this OPTS THEM BACK IN, because a cold instance
+// shares the automation-claims dir with the real one and could steal its claims.
+export const COLD_START_AUTOMATIONS =
+  COLD_START && env.VITE_COLD_START_AUTOMATIONS === "1";
 
-/** Tauri store filename, redirected to a throwaway file under cold start. */
+// Per-instance namespace for parallel cold instances, set by
+// `scripts/cold-start-instance.ps1` → GD_INSTANCE_ID → a Tauri initialization
+// script (src-tauri/src/instance_id.rs). That script runs before any page script,
+// so the global is readable here at module scope, before any store is named.
+const rawInstanceId = COLD_START
+  ? (window as { __GD_INSTANCE_ID__?: unknown }).__GD_INSTANCE_ID__
+  : undefined;
+// Re-checked against the Rust validator's charset because the id is interpolated
+// into store FILENAMES. A stale binary — the old exe still running while the Rust
+// watcher rebuilds — simply never set the global, which reads as "no id".
+const coldInstanceId =
+  typeof rawInstanceId === "string" &&
+  /^[A-Za-z0-9-]{1,32}$/.test(rawInstanceId)
+    ? rawInstanceId
+    : null;
+
+/** Tauri store filename, redirected to a throwaway file under cold start. An
+ *  instance id namespaces it further (`coldstart-<id>-<name>`); without one the
+ *  name stays EXACTLY `coldstart-<name>`, so a lone cold instance keeps reading
+ *  the store files it wrote before ids existed. */
 export function storeName(name: string): string {
-  return COLD_START ? `coldstart-${name}` : name;
+  if (!COLD_START) return name;
+  return `coldstart-${coldInstanceId ? `${coldInstanceId}-` : ""}${name}`;
 }
 
 // Cold-start API keys live in sessionStorage, never the OS keychain — fresh
