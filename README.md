@@ -954,14 +954,15 @@ review via its subscription login. The full list is under
   any executable, or set a full custom command with a `{path}` placeholder),
   and tunable OS notifications for PR activity, checks, and CI runs.
 - **My work**: a cross-repo inbox of every open **GitHub** pull request and
-  issue that involves you (authored, assigned, mentioned, or awaiting your
-  review), newest first, so what's waiting on you is one screen away instead
-  of one repository at a time. Open it from the welcome screen or the command
-  palette (*My work*), narrow it with **All / Pull requests / Issues** tabs and
-  a filter box that takes arrow keys and Enter, and press Enter on a row: an
-  item from a repository you've added to GitDesktop opens right in the app, and
-  the rest open on GitHub (marked with a ↗). Read-only, with a **Refresh** in
-  the header and a right-click menu for *Open on GitHub* / *Copy link*.
+  issue that involves you (authored, assigned, mentioned, commented on, or
+  awaiting your review), newest first, so what's waiting on you is one screen
+  away instead of one repository at a time. Open it from the welcome screen or
+  the command palette (*My work*), narrow it with **All / Pull requests /
+  Issues** tabs and a filter box that takes arrow keys and Enter, and press
+  Enter on a row: an item from a repository you've added to GitDesktop usually
+  opens right in the app, and the ↗ marks the rows that will open on GitHub
+  instead. Read-only, with a **Refresh** in the header and a right-click menu
+  for *Open on GitHub* / *Copy link*.
 - **Activity and notifications**: a persistent bell in the header collects
   terminal events (a finished review, checks passing/failing, a PR
   approved/commented/merged, a review requested from you, a completed CI

@@ -5,6 +5,7 @@ import {
   CircleDashedIcon,
   GitPullRequestIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -33,6 +34,7 @@ import { suppressContextMenu } from "@/lib/context-menu";
 import { useMyWork } from "@/lib/git/queries";
 import type { MyWorkItem } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { applyRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -75,6 +77,7 @@ export function MyWorkScreen() {
   const work = useMyWork("github", true);
   const settings = useSettings();
   const recents = settings.data?.recentRepos ?? NO_RECENTS;
+  const queryClient = useQueryClient();
 
   const items = sortMyWork(work.data ?? []);
   const prCount = items.filter((i) => i.isPullRequest).length;
@@ -105,6 +108,14 @@ export function MyWorkScreen() {
       openUrl(item.url);
       return;
     }
+    // matchLocalRepo matched the ORIGIN slug, so land under the origin lens — a
+    // fork sitting on "upstream" resolves this number against the parent repo.
+    // Session-only (navigation isn't a lens choice); the call selects the item.
+    const applyLens = () =>
+      applyRepoLens(queryClient, match.path, "origin", {
+        clearSelections: false,
+        persist: false,
+      });
     if (item.isPullRequest) {
       openPr({
         kind: "remote",
@@ -112,12 +123,17 @@ export function MyWorkScreen() {
         repoName: match.name,
         ref: String(item.number),
         section: null,
+        // Inside the navigator's view-transition callback, so the lens and the
+        // selection reach the same commit; applied here it would land a render
+        // early and fetch the new lens against the OLD number.
+        beforeSelect: applyLens,
       });
     } else {
       openIssue({
         repoPath: match.path,
         repoName: match.name,
         number: item.number,
+        beforeSelect: applyLens,
       });
     }
   }
@@ -249,22 +265,31 @@ function MyWorkBody({
       </QuietLine>
     );
   }
+  // A heuristic, not a count: the backend drops unaddressable hits, so a
+  // truncated page that lost one arrives short and reads as uncapped. It errs
+  // only toward staying quiet, which is why the note states the constraint
+  // rather than a number. Shown under the filtered-empty branch too — filtering
+  // to nothing is when an off-page item matters most.
+  const capped = items.length >= MY_WORK_LIMIT;
   if (visible.length === 0) {
-    return <QuietLine>No items match.</QuietLine>;
+    return (
+      <>
+        <QuietLine>No items match.</QuietLine>
+        {capped && <CapNote />}
+      </>
+    );
   }
   return (
-    <MyWorkList
-      items={visible}
-      activeIndex={activeIndex}
-      recents={recents}
-      onSelect={onSelect}
-      onOpen={onOpen}
-      // A heuristic, not a count: the backend drops unaddressable hits, so a
-      // truncated page that lost one arrives short and reads as uncapped. It
-      // errs only toward staying quiet, which is why the note states the
-      // constraint rather than a number.
-      capped={items.length >= MY_WORK_LIMIT}
-    />
+    <>
+      <MyWorkList
+        items={visible}
+        activeIndex={activeIndex}
+        recents={recents}
+        onSelect={onSelect}
+        onOpen={onOpen}
+      />
+      {capped && <CapNote />}
+    </>
   );
 }
 
@@ -276,14 +301,12 @@ function MyWorkList({
   recents,
   onSelect,
   onOpen,
-  capped,
 }: {
   items: MyWorkItem[];
   activeIndex: number;
   recents: readonly RecentRepo[];
   onSelect: (url: string) => void;
   onOpen: (item: MyWorkItem) => void;
-  capped: boolean;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [menuItem, setMenuItem] = useState<MyWorkItem | null>(null);
@@ -392,12 +415,17 @@ function MyWorkList({
           )}
         </ContextMenuContent>
       </ContextMenu>
-      {capped && (
-        <p className="px-3 py-2 text-center text-[11px] text-muted-foreground">
-          This view fetches one page of results. Filter to narrow the list.
-        </p>
-      )}
     </div>
+  );
+}
+
+/** The one-page-of-results note. Rendered by the body, not the list, so it
+ *  survives a filter that matches nothing. */
+function CapNote() {
+  return (
+    <p className="px-3 py-2 text-center text-[11px] text-muted-foreground">
+      This view fetches one page of results. Filter to narrow the list.
+    </p>
   );
 }
 

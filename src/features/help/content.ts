@@ -257,12 +257,13 @@ From here:
 **My work** is a cross-repo inbox: every open pull request and issue on GitHub that
 involves you, newest first, without opening a repository to go looking. Open it from
 the **My work** button on the welcome screen, or from the command palette (*My work*).
-**Back** in the header, or Esc, returns you to whatever you were on.
+**Back** in the header, or Esc, closes the inbox and returns you to the screen
+underneath.
 
-*Involves you* is GitHub's own lens: anything you **authored**, are **assigned** to,
-were **mentioned** in, or have had a **review requested** on. The search covers every
-repository your GitHub account can see, so items from repos you've never cloned sit
-alongside the ones you have. GitHub only for now.
+It gathers anything you **authored**, are **assigned** to, were **mentioned** in, or
+**commented on**, together with anything **awaiting your review**. The search covers
+every repository your GitHub account can see, so items from repos you've never cloned
+sit alongside the ones you have. GitHub only for now.
 
 ## Reading the list
 
@@ -270,9 +271,11 @@ Each row is a single line: a pull-request or issue glyph, the item's number, its
 title, the repository it lives in, and when it last changed. The number beside the
 title in the header is how many items came back, and each tab carries its own count.
 
-Rows are ordered by **most recently updated**. The view fetches one page of up to
-**200** items; when it comes back that full, a note at the bottom reminds you the
-feed may not be the whole picture.
+Rows are ordered by **most recently updated**. The search fetches a single page of
+results, so a big inbox won't arrive whole. When the page comes back full, a note
+says so at the bottom: *This view fetches one page of results. Filter to narrow the
+list.* You'll see it under the rows, and under **No items match** as well, since a
+filter that finds nothing is when an item off the page matters most.
 
 ## Narrowing and opening
 
@@ -285,12 +288,15 @@ The keyboard flow lives in that box: **↑ / ↓** move the highlight through th
 rows and **Enter** opens the highlighted one, so you can type, arrow, and open without
 leaving it. Clicking a row does the same thing.
 
-Where a row opens depends on whether you have its repository. An item from a
-repository you've added to GitDesktop opens **in the app**: GitDesktop switches to
-that repository and lands on the pull request or issue. Everything else opens **on
-GitHub in your browser**, and those rows carry a **↗** so you can tell which is which
-before you press Enter. The inbox itself changes nothing — it finds the item and
-hands you to the place where you can act on it.
+Where a row opens depends on whether GitDesktop recognizes its repository as one of
+yours. An item from a repository you've added usually opens **in the app**: GitDesktop
+switches to that repository and lands on the pull request or issue. Everything else
+opens **on GitHub in your browser**. The match reads each repo's resolved owner and
+host, so one you added moments ago, or cloned into a folder named something else, can
+still go to the browser. The **↗** on a row is the signal to trust: it marks every row
+that opens on GitHub, so you know which you're getting before you press Enter. The
+inbox itself changes nothing: it finds the item and hands you to the place where you
+can act on it.
 
 **Right-click** a row for **Open on GitHub** and **Copy link**.
 
@@ -298,9 +304,9 @@ hands you to the place where you can act on it.
 
 **Refresh** in the header re-runs the search and spins while the fetch is in flight.
 
-GitHub features here ride the GitHub CLI (\`gh\`), so if it isn't installed or signed
-in, the screen says which and points at \`gh auth login\`, with **Retry** once it is.
-See *Getting started* for the sign-in options.`,
+GitHub features here ride the GitHub CLI (\`gh\`). When it's missing, the screen names
+that and points at \`gh auth login\`; anything else that goes wrong shows the underlying
+error. Either way there's a **Retry**. See *Getting started* for the sign-in options.`,
   },
   {
     id: "repo-settings",

@@ -4,8 +4,11 @@ import type { RecentRepo } from "@/lib/settings/api";
 /** Which slice of the inbox the tab strip is showing. */
 export type MyWorkTab = "all" | "prs" | "issues";
 
-/** The backend's `gh search issues --limit`; a full page means the feed is
- *  truncated, which the list says out loud rather than implying more. */
+/** The backend's page cap (each search leg's `--limit` and the merged page's
+ *  truncation). A full page is the signal the feed MAY be truncated, never a
+ *  count of what exists: unaddressable hits are dropped server-side, so a
+ *  truncated page can arrive short and read as complete — which is why the
+ *  note states the constraint, not a number. */
 export const MY_WORK_LIMIT = 200;
 
 export const MY_WORK_LISTBOX_ID = "my-work-listbox";
