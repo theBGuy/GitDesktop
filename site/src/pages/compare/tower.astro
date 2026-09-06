@@ -6,7 +6,8 @@
 // pages define the PR verb set), and the pricing and feature pages. Tower's
 // Mac and Windows apps are separate release streams — never quote one as
 // "Tower's version"; several rows are per-platform. When a row changes
-// upstream, update the stamps (VERIFIED_ON / TOWER_*) in the same edit — a
+// upstream, update the stamps (verifiedOn.tower in src/lib/compare.ts, the
+// TOWER_* constants, and the meta description's month) in the same edit — a
 // stale comparison is worse than none.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
@@ -301,7 +302,7 @@ const faqs = [
   },
   {
     q: "Is Tower the same app on Windows and on a Mac?",
-    a: "They are separate products on separate release tracks: as of the date above, Tower for Mac is at version 17.1.1 while Tower for Windows is at 13.2. AI commit messages (Tower 16) and pull-request-based merge detection in branch cleanup (Tower 17) exist only in the Mac app. GitDesktop ships from one codebase, so releases land on Windows, macOS, and Linux at once.",
+    a: `They are separate products on separate release tracks: as of the date above, Tower for Mac is at version ${TOWER_MAC_VERSION} while Tower for Windows is at ${TOWER_WIN_VERSION}. AI commit messages (Tower 16) and pull-request-based merge detection in branch cleanup (Tower 17) exist only in the Mac app. GitDesktop ships from one codebase, so releases land on Windows, macOS, and Linux at once.`,
   },
 ];
 ---
@@ -457,9 +458,9 @@ const faqs = [
           Create, comment, merge, close, inspect — and that's the list
         </h2>
         <p data-reveal class="mt-5 leading-relaxed text-body">
-          Tower's feature page and help center put the pull-request verbs at
-          exactly that, on both platforms, with comments forming one
-          conversation on the whole PR.
+          That five-verb list is Tower's own feature-page copy, and the
+          per-platform help pages match it (the Mac app adds a check-out
+          action), with comments forming one conversation on the whole PR.
           Approval, request-changes, and line-anchored review comments aren't
           among them; a review still means the browser. In GitDesktop the whole
           review lives next to your staging and history: comments on exact

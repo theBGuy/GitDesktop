@@ -5,8 +5,10 @@
 // lines; rows say which platform a fact applies to when they differ.
 // Re-grounded 2026-08-11 against Windows 3.4.31 (2026-06-09) and Mac 4.2.19
 // (2026-07-30) via primary Atlassian sources (release notes, support KBs,
-// jira.atlassian.com tickets). When a row changes upstream, update the stamp
-// in the same edit — a stale comparison is worse than none.
+// jira.atlassian.com tickets). When a row changes upstream, update
+// verifiedOn.sourcetree in src/lib/compare.ts (plus the ST_* constants and
+// the meta description's month) in the same edit — a stale comparison is
+// worse than none.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
 import CompareTable from "../../components/CompareTable.astro";

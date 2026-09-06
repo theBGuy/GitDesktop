@@ -3,6 +3,9 @@
 // competitor with the page's last-verified date read from lib/compare.ts
 // (the same map each page's hero stamp reads, so the dates can't drift).
 // The hub routes; the pages argue — keep it quieter than its children.
+// entries is a Record over CompareSlug so a new comparison page fails the
+// build until it gets a hub row; ogDescription's vendor list is the one
+// enumeration left to update by hand.
 import SiteLayout from "../../layouts/SiteLayout.astro";
 import { type CompareSlug, verifiedOn } from "../../lib/compare";
 
@@ -10,33 +13,33 @@ const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
-const entries: { slug: CompareSlug; name: string; hook: string }[] = [
-  {
-    slug: "github-desktop",
+const entries: Record<CompareSlug, { name: string; hook: string }> = {
+  "github-desktop": {
     name: "GitHub Desktop",
     hook: "The familiar baseline. Where the daily loop matches, and what GitDesktop keeps in the app that GitHub Desktop sends to the browser: the pull-request loop, CI, and issues.",
   },
-  {
-    slug: "sourcetree",
+  sourcetree: {
     name: "Sourcetree",
     hook: "The free Atlassian client, against the free client that runs on Linux too, needs no vendor account, and keeps review and CI out of the browser.",
   },
-  {
-    slug: "gitkraken",
+  gitkraken: {
     name: "GitKraken",
     hook: "The private-repo boundary. What GitKraken's free plan locks out, what its paid plans meter, and where its commit graph still wins.",
   },
-  {
-    slug: "tower",
+  tower: {
     name: "Tower",
     hook: "Subscription against free. The pull-request verbs Tower stops at, one feature set across three platforms, and where Tower's undo still leads.",
   },
-];
+};
+const entryList = Object.entries(entries) as [
+  CompareSlug,
+  (typeof entries)[CompareSlug],
+][];
 ---
 
 <SiteLayout
   title="Compare GitDesktop with other Git clients"
-  description="Four verified, dated comparisons: GitDesktop vs GitHub Desktop, Sourcetree, GitKraken, and Tower, each checked against the vendor's own docs, with the rows they win counted too."
+  description="Verified, dated comparisons: GitDesktop vs GitHub Desktop, Sourcetree, GitKraken, and Tower, each checked against the vendor's own docs, with the rows they win counted too."
   ogTitle="Compare GitDesktop"
   ogDescription="GitHub Desktop, Sourcetree, GitKraken & Tower — verified, dated comparisons."
   breadcrumbs={[{ name: "Compare", path: "/compare/" }]}
@@ -57,9 +60,9 @@ const entries: { slug: CompareSlug; name: string; hook: string }[] = [
         style="transition-delay:120ms"
         class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
       >
-        Four comparisons against the client you may be using now. Each is
-        verified and dated: every competitor cell checked against that vendor's
-        own release notes, help center, and pricing pages, with the rows where
+        Comparisons against the client you may be using now. Each is verified
+        and dated: every competitor cell checked against that vendor's own
+        release notes and documentation, with the rows where
         <span class="text-ink">they</span> win counted too.
       </p>
     </div>
@@ -69,10 +72,10 @@ const entries: { slug: CompareSlug; name: string; hook: string }[] = [
     <div class="mx-auto max-w-6xl px-5">
       <ul class="divide-y divide-line">
         {
-          entries.map((e, i) => (
+          entryList.map(([slug, e], i) => (
             <li>
               <a
-                href={`${base}compare/${e.slug}/`}
+                href={`${base}compare/${slug}/`}
                 data-reveal
                 style={`transition-delay:${i * 60}ms`}
                 class="group block py-9 md:py-10"
@@ -82,7 +85,7 @@ const entries: { slug: CompareSlug; name: string; hook: string }[] = [
                 </h2>
                 <p class="mt-3 max-w-[70ch] leading-relaxed text-body">{e.hook}</p>
                 <p class="mt-3 text-sm text-muted">
-                  Verified {verifiedOn[e.slug]}
+                  Verified {verifiedOn[slug]}
                   <span class="mx-2 select-none text-faint" aria-hidden="true">·</span>
                   <span class="text-mint underline-offset-4 group-hover:underline">
                     Read the comparison <span aria-hidden="true">→</span>

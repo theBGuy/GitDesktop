@@ -7,8 +7,9 @@
 // help.gitkraken.com release notes and integration pages plus the
 // gitkraken.com/pricing plan matrix. That page's dollar figures don't render
 // to a fetcher, so this page cites the free-tier boundary and never prices.
-// When a row changes upstream, update the stamps (VERIFIED_ON / GK_VERSION /
-// GK_RELEASED) in the same edit — a stale comparison is worse than none.
+// When a row changes upstream, update the stamps (verifiedOn.gitkraken in
+// src/lib/compare.ts, GK_VERSION / GK_RELEASED, and the meta description's
+// month) in the same edit — a stale comparison is worse than none.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
 import CompareTable from "../../components/CompareTable.astro";

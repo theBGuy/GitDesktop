@@ -6,8 +6,9 @@
 // 2026-08-20 against GitHub Desktop stable 3.6.4 (released 2026-08-13 —
 // dependency bumps only; its stable channel is feature-free since 3.6.0).
 // The verified-on stamp is rendered on the page; when a row changes upstream,
-// update the stamp in the same edit. A stale comparison is worse than none —
-// it's the first thing an HN thread checks.
+// update verifiedOn["github-desktop"] in src/lib/compare.ts (and the meta
+// description's month) in the same edit. A stale comparison is worse than
+// none — it's the first thing an HN thread checks.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
 import CompareTable from "../../components/CompareTable.astro";

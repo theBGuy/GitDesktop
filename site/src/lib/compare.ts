@@ -35,6 +35,8 @@ export const stateClass: Record<State, string> = {
 
 // One last-verified date per comparison, read by BOTH the page's hero stamp
 // and the /compare/ hub — a re-verify updates it here so the two can't drift.
+// Each page's meta description also hand-carries a "verified <Month> <Year>"
+// phrase that is NOT derived from this map — update it in the same pass.
 export const verifiedOn = {
   "github-desktop": "August 20, 2026",
   sourcetree: "August 24, 2026",
