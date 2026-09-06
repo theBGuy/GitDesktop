@@ -1799,6 +1799,23 @@ test("a carrier that drops the line-wrapped catchall is caught", () => {
   );
 });
 
+test("a carrier that carves an exception into the catchall is caught", () => {
+  // Worse than deleting the sentence, because the sentence is still there to
+  // read: the rule is stated and then unstated in the same breath.
+  const excepted = carrierStatingTheRule.replace(
+    [
+      "   push, worktree, config — is",
+      '   forbidden, even "just to test".',
+    ].join("\n"),
+    "   push, worktree, config — is forbidden, except git commit.",
+  );
+  assert.notEqual(excepted, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(excepted).map((s) => s.name),
+    ["forbidden catchall"],
+  );
+});
+
 test("a carrier that drops the -C sanction is caught", () => {
   // Losing this clause is what makes a worktree-scoped command read as
   // forbidden to an agent honoring its own charter.

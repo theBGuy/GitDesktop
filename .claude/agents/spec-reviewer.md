@@ -93,9 +93,10 @@ from the main checkout green-lights code you never reviewed. A worktree carries
 its own `node_modules`, and if that tree has none, the typecheck and lint simply
 cannot run from this role — say so in the what-this-review-cannot-see list.
 Never run `pnpm install` yourself: it creates files, which this charter bans,
-and worktree setup is the orchestrator's job (delegate SKILL.md's Environment
-notes). For a codex package the prompt also names the codex `-o` report file,
-which stands in for the agent report.
+and worktree setup is not this role's — the orchestrator arranges it with the
+user (delegate SKILL.md's Phase 3 codex rules and Environment notes). For a
+codex package the prompt also names the codex `-o` report file, which stands
+in for the agent report.
 
 1. **Correctness first.** Trace the changed code paths against concrete
    inputs: boundaries, first/last/empty, error paths, concurrent or mid-flight

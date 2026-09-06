@@ -50,7 +50,8 @@ machine, proceed without it).
 - **Do the work yourself.** Never spawn subagents or re-delegate from inside a
   package; the orchestration layer above you owns decomposition.
 - **No scratch files in the repo.** Temporary experiments go in the session
-  scratchpad or `C:/temp`.
+  scratchpad or `C:/temp`. (One exception: the LF-copy gate's `__cigate__<name>`
+  sibling, deleted after the check.)
 
 ## Working style
 

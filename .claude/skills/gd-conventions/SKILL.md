@@ -20,8 +20,10 @@ Where this file and generic best practice disagree, this file wins.
    past subagent's stray commit wiped `.gitignore` and broke the app.
 2. **No stray files.** Create only what your task calls for. Scratch files go
    in the session scratchpad or `C:/temp`, never the repo; destructive
-   experiments happen in a throwaway repo under `C:/temp`. (One exception: the
-   LF-copy gate's `__cigate__<name>` sibling, deleted after the check.)
+   experiments happen in a throwaway repo under `C:/temp`. (One exception, for
+   runs that may create files: the LF-copy gate's `__cigate__<name>` sibling,
+   deleted after the check — reviewers never create it, per the `--write` rule
+   below.)
 3. **Don't edit `src/components/ui/`** — vendored shadcn/Base UI primitives.
    Fix at the feature/call-site level. That folder's `README.md` inventories
    the sanctioned local modifications (a re-vendor silently reverts them);
@@ -436,7 +438,7 @@ mentions when a feature ships.
   it is restated — the always-loaded excerpt `.claude/rules/git-safety.md`, the
   repo `AGENTS.md`, the agent definitions, and any carrier added later;
   `scripts/check-rule-mirrors.mjs` holds the current list for the git
-  whitelist and fails when one drifts.
+  whitelist and fails when a carrier drops the rule's core.
 
 ## Definition of done
 

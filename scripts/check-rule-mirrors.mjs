@@ -52,8 +52,11 @@ export const SENTINELS = [
   },
   {
     name: "forbidden catchall",
+    // The lookahead is the point: a carrier that keeps the sentence and then
+    // carves an exception out of it ("is forbidden, except …") has lost the
+    // rule as surely as one that deleted it.
     pattern:
-      /(everything else|every other git invocation|every state-mutating git command)[\s\S]{0,300}?is forbidden/i,
+      /(everything else|every other git invocation|every state-mutating git command)[\s\S]{0,300}?is forbidden(?!\s*(?:,|;|—|-)?\s*(?:except|but|unless)\b)/i,
     fix: "keep the catchall sentence that forbids every other git invocation",
   },
   {
