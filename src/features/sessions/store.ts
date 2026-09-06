@@ -21,7 +21,7 @@ import {
   squashWorktree,
 } from "@/lib/git/worktree";
 import { notify } from "@/lib/notify";
-import { loadSettings } from "@/lib/settings/api";
+import { asMcpServerArray, loadSettings } from "@/lib/settings/api";
 import {
   isServerAvailable,
   mcpServerUsableBy,
@@ -315,7 +315,9 @@ async function runTurn(
       )
     : [];
   const mcpServers = mcpIds.length
-    ? ((await loadSettings().catch(() => null))?.mcpServers ?? []).filter(
+    ? asMcpServerArray(
+        (await loadSettings().catch(() => null))?.mcpServers,
+      ).filter(
         (srv) =>
           mcpIds.includes(srv.id) &&
           isServerAvailable(srv, repoKeys) &&

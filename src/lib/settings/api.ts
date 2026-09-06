@@ -510,6 +510,18 @@ function healMcpServer(server: unknown): McpServer {
   return healed;
 }
 
+/** The settings' MCP registry as a real array. `loadSettings` deliberately passes a
+ *  corrupt (non-array) container through instead of substituting one, so no background
+ *  write destroys the definitions it holds (see {@link healEnumerated}); every READER
+ *  goes through this instead, seeing an empty list rather than throwing on `.filter`.
+ *
+ *  The settings DRAFT keeps the raw stored value, so saving an unrelated setting
+ *  round-trips a corrupt container untouched. Only the MCP section repairs it: it
+ *  renders from this guarded view and builds every write from it, so a deliberate
+ *  add/edit/remove is what replaces the corrupt value with a real array. */
+export const asMcpServerArray = (value: unknown): McpServer[] =>
+  Array.isArray(value) ? value : [];
+
 /**
  * Coerces every statically-enumerable field to its default when the stored value is
  * off-list. settings.json is hand-editable and no writer validates membership, so an

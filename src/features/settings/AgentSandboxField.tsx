@@ -30,7 +30,7 @@ import {
 import { useContainerStatus } from "@/lib/ai/sandbox-queries";
 import {
   type AGENT_ISOLATIONS,
-  type IMAGE_AGENT_IDS,
+  IMAGE_AGENT_IDS,
   NODE_VERSIONS,
 } from "@/lib/settings/api";
 import { toastError } from "@/lib/toast";
@@ -50,13 +50,15 @@ const NODE_VERSION_ITEMS: Record<NodeVersion, string> = {
   "22": "22",
   "20": "20",
 };
-/** Container-capable agents installed into the managed image. */
-const IMAGE_AGENTS: { id: AgentId; label: string }[] = [
-  { id: "claude", label: "Claude Code" },
-  { id: "codex", label: "Codex" },
-  { id: "opencode", label: "opencode" },
-  { id: "copilot", label: "GitHub Copilot" },
-];
+/** Container-capable agents installed into the managed image. Record-typed against
+ *  IMAGE_AGENT_IDS, which the checkbox row renders from, so a new agent can't reach
+ *  the settings type without a label here. */
+const IMAGE_AGENT_LABELS: Record<AgentId, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  opencode: "opencode",
+  copilot: "GitHub Copilot",
+};
 
 /**
  * Opt-in control for running agent sessions inside a Docker/Podman container
@@ -158,20 +160,20 @@ export function AgentSandboxField({
             </label>
             <div className="flex items-center gap-3">
               <span className="text-muted-foreground">Agents</span>
-              {IMAGE_AGENTS.map((a) => {
-                const on = providers.includes(a.id);
+              {IMAGE_AGENT_IDS.map((id) => {
+                const on = providers.includes(id);
                 return (
                   <label
-                    key={a.id}
+                    key={id}
                     className="flex cursor-pointer items-center gap-1.5"
                   >
                     <Checkbox
                       checked={on}
                       // Can't uncheck the last remaining agent.
                       disabled={on && providers.length === 1}
-                      onCheckedChange={(c) => toggleProvider(a.id, c === true)}
+                      onCheckedChange={(c) => toggleProvider(id, c === true)}
                     />
-                    {a.label}
+                    {IMAGE_AGENT_LABELS[id]}
                   </label>
                 );
               })}

@@ -16,7 +16,7 @@ import { withForm } from "@/lib/form";
 import { deleteMcpSecret } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import type { McpServer } from "@/lib/settings/api";
+import { asMcpServerArray, type McpServer } from "@/lib/settings/api";
 import {
   effectiveMcpState,
   foldServerScopeKeys,
@@ -39,7 +39,13 @@ import { settingsFormOpts } from "./settings-form";
 export const McpServersSection = withForm({
   ...settingsFormOpts,
   render: function McpServersSectionRender({ form }) {
-    const servers = useSelector(form.store, (s) => s.values.mcpServers);
+    // The registry as an array whatever the stored container is: `loadSettings`
+    // preserves a corrupt non-array rather than destroying it, so this section
+    // renders empty and every edit below BUILDS FROM this guarded view — writing a
+    // real array back is the repair, and it only ever happens on a deliberate edit.
+    const list = useSelector(form.store, (s) =>
+      asMcpServerArray(s.values.mcpServers),
+    );
     // The draft AI allow list, shared with the AI provider screen. Rows already
     // in the registry keep a warn-only "host not allowed" badge and go on
     // working. On REGISTRATION the seams explain the block in place and the
@@ -68,8 +74,6 @@ export const McpServersSection = withForm({
     // palette can deep-link to it (see openMcpBrowse).
     const browseOpen = useUiStore((s) => s.mcpBrowseOpen);
     const setBrowseOpen = useUiStore((s) => s.setMcpBrowseOpen);
-
-    const list = servers ?? [];
 
     function setServers(next: McpServer[]) {
       form.setFieldValue("mcpServers", next);
@@ -100,7 +104,10 @@ export const McpServersSection = withForm({
     // open for adding several. Functional update so back-to-back adds compose.
     function appendServer(server: McpServer) {
       if (admitServers([server]).length === 0) return;
-      form.setFieldValue("mcpServers", (prev) => [...(prev ?? []), server]);
+      form.setFieldValue("mcpServers", (prev) => [
+        ...asMcpServerArray(prev),
+        server,
+      ]);
     }
 
     async function saveServer(server: McpServer) {
@@ -121,7 +128,7 @@ export const McpServersSection = withForm({
       // Re-read via the functional setter so this async write composes with any
       // interleaving edit instead of clobbering it.
       form.setFieldValue("mcpServers", (prev) => {
-        const cur = prev ?? [];
+        const cur = asMcpServerArray(prev);
         return cur.some((s) => s.id === folded.id)
           ? cur.map((s) => (s.id === folded.id ? folded : s))
           : [...cur, folded];
@@ -171,7 +178,7 @@ export const McpServersSection = withForm({
       // Re-read `list` via the functional setter so this async write composes with
       // any interleaving edit rather than clobbering it.
       form.setFieldValue("mcpServers", (prev) =>
-        (prev ?? []).map((s) => (s.id === server.id ? next : s)),
+        asMcpServerArray(prev).map((s) => (s.id === server.id ? next : s)),
       );
     }
 

@@ -1,2 +1,3 @@
-- Invalid picker-backed values in `settings.json` now reset to valid
-  choices, so settings pickers show the value that is in effect.
+- Settings whose value comes from a fixed list of choices now recover
+  when `settings.json` holds an unrecognized value, so each picker shows
+  the choice that's in effect.

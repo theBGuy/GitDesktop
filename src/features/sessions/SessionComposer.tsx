@@ -25,6 +25,7 @@ import {
 } from "@/lib/ai/slash";
 import { useAgentCommands, useTrackedFiles } from "@/lib/git/queries";
 import { quickTransition } from "@/lib/motion";
+import { asMcpServerArray } from "@/lib/settings/api";
 import {
   isServerAvailable,
   isServerDefaultOn,
@@ -398,7 +399,7 @@ export function SessionComposer({
   // `mcpSupportedFor`; the picker self-hides when empty.
   const mcpRegistry = useMemo(
     () =>
-      (settings.data?.mcpServers ?? []).filter((s) =>
+      asMcpServerArray(settings.data?.mcpServers).filter((s) =>
         isServerAvailable(s, repoKeys),
       ),
     [settings.data?.mcpServers, repoKeys],
