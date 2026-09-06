@@ -16,8 +16,10 @@
 // read as a missing rule.
 //
 // Run: node scripts/check-rule-mirrors.mjs
-// Test seam: GD_RULE_MIRROR_ROOT points the check at a copy of the tree (used
-// for the negative control — a mutated copy must go red).
+// GD_RULE_MIRROR_ROOT points the check at a copy of the tree, for an ad-hoc
+// negative control by hand: copy the carriers, mutate one, watch it go red.
+// The committed controls live in scripts/checks.test.mjs and drive
+// `missingSentinels` in memory, touching no disk.
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

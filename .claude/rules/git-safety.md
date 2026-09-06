@@ -13,7 +13,8 @@
    config — is forbidden, even "just to test". The user commits their own work,
    possibly in parallel with your session.
 2. **No stray files.** Create only what your task calls for. Scratch files go in the
-   session scratchpad or `C:/temp`, never the repo.
+   session scratchpad or `C:/temp`, never the repo. (One exception: the LF-copy
+   gate's `__cigate__<name>` sibling, deleted after the check.)
 3. **Don't edit `src/components/ui/`** — vendored primitives; fix at the call site. That
    folder's `README.md` inventories sanctioned local modifications.
 4. **Never repo-wide `cargo fmt`** in `src-tauri`. New files only: `rustfmt <that file>`.

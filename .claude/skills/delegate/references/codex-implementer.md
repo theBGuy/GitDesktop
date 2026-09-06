@@ -211,7 +211,9 @@ anything.
   placement, minor idiom) pick a reasonable option and note it in the report;
   you do not need permission for work the spec already authorizes.
 - Make the smallest change that satisfies the acceptance criteria.
-- No scratch or temp files inside the repo.
+- No scratch or temp files inside the repo. The one exception is the LF-copy
+  biome ci gate: its __cigate__<name> sibling is sanctioned for the length of
+  the check, and you delete it afterwards.
 - Git mutations are forbidden; the sandbox additionally blocks the git-dir
   writers. Read-only git only (diff / status / log / show, branch --list).
 - A Permission-denied on a path outside the workspace is an environment limit:

@@ -53,8 +53,8 @@ fetch, merge, rebase, tag, branch create/delete, worktree, remote, and config.
 Allowed:
 
 ```sh
-# <worktree> = the tree your dispatch prompt names; omit the cd when reviewing
-# the main checkout.
+# <worktree> = the tree your dispatch prompt names. Reviewing the main
+# checkout, drop the cd and the <worktree>/ prefix on --manifest-path.
 cd <worktree> && pnpm exec tsc -b            # typecheck, no source mutation
 cd <worktree> && pnpm exec biome check <the package's own files>
 cargo test --manifest-path <worktree>/src-tauri/Cargo.toml
@@ -88,11 +88,14 @@ unrelated WIP as findings.
 Your dispatch prompt names the tree to review; run the read-only git commands
 against it (`git -C <worktree> --no-pager diff`) and every verification command
 from that tree too — `cd <worktree>` before `pnpm exec tsc -b` or the scoped
-`biome check`, and point cargo at `<worktree>/src-tauri/Cargo.toml`. A worktree
-carries its own `node_modules` and needs its own `pnpm install` (delegate
-SKILL.md's Environment notes); a check run from the main checkout green-lights
-code you never reviewed. For a codex package the prompt also names the codex
-`-o` report file, which stands in for the agent report.
+`biome check`, and point cargo at `<worktree>/src-tauri/Cargo.toml`; a check run
+from the main checkout green-lights code you never reviewed. A worktree carries
+its own `node_modules`, and if that tree has none, the typecheck and lint simply
+cannot run from this role — say so in the what-this-review-cannot-see list.
+Never run `pnpm install` yourself: it creates files, which this charter bans,
+and worktree setup is the orchestrator's job (delegate SKILL.md's Environment
+notes). For a codex package the prompt also names the codex `-o` report file,
+which stands in for the agent report.
 
 1. **Correctness first.** Trace the changed code paths against concrete
    inputs: boundaries, first/last/empty, error paths, concurrent or mid-flight

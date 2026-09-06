@@ -20,7 +20,8 @@ Where this file and generic best practice disagree, this file wins.
    past subagent's stray commit wiped `.gitignore` and broke the app.
 2. **No stray files.** Create only what your task calls for. Scratch files go
    in the session scratchpad or `C:/temp`, never the repo; destructive
-   experiments happen in a throwaway repo under `C:/temp`.
+   experiments happen in a throwaway repo under `C:/temp`. (One exception: the
+   LF-copy gate's `__cigate__<name>` sibling, deleted after the check.)
 3. **Don't edit `src/components/ui/`** — vendored shadcn/Base UI primitives.
    Fix at the feature/call-site level. That folder's `README.md` inventories
    the sanctioned local modifications (a re-vendor silently reverts them);

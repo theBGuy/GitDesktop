@@ -45,14 +45,17 @@ context: the standing brief and the repo playbook of conventions and gotchas.
   or whatever the spec's Verification field names. Never run repo-wide
   `cargo fmt` in `src-tauri`; `rustfmt <file>` on individual new files only.
 - **No scratch or temp files inside the repo** — working files belong in the
-  session scratchpad or `C:/temp`.
+  session scratchpad or `C:/temp`. The one sanctioned exception: a run that may
+  create files judges formatting with the per-file LF-copy `biome ci` gate,
+  whose `__cigate__<name>` sibling lives beside the original for the length of
+  the check and is deleted after. A read-only run creates nothing and reports
+  tree-wide formatting as unverified instead.
 
 ## Verification commands
 
 - `pnpm build` — typecheck plus frontend bundle. Plain `tsc --noEmit` is a no-op
   in this repo; only `tsc -b` (or `pnpm build`) typechecks.
-- `pnpm run checks` — the repo guard scripts CI runs (banned patterns, Rust
-  invariants, dead surface, script tests).
+- `pnpm run checks` — the repo guard scripts CI runs.
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 - `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings`
 - `cd site && pnpm build` — the marketing site.

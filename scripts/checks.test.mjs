@@ -9,7 +9,10 @@
 // Node's stdlib test runner and node: imports only, no dev dependency, so the
 // CI `guards` job runs `node --test "scripts/*.test.mjs"` with no install step.
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   CHECKS,
@@ -22,7 +25,7 @@ import {
   parseRegistered,
   staleAllowlistEntries as staleCommandEntries,
 } from "./check-dead-surface.mjs";
-import { missingSentinels } from "./check-rule-mirrors.mjs";
+import { CARRIERS, missingSentinels } from "./check-rule-mirrors.mjs";
 import {
   checkCompareEndpoints,
   checkRefspecTemplates,
@@ -1794,4 +1797,58 @@ test("a carrier that drops the line-wrapped catchall is caught", () => {
     missingSentinels(softened).map((s) => s.name),
     ["forbidden catchall"],
   );
+});
+
+test("a carrier that drops the -C sanction is caught", () => {
+  // Losing this clause is what makes a worktree-scoped command read as
+  // forbidden to an agent honoring its own charter.
+  const unscoped = carrierStatingTheRule.replace(
+    [
+      "   show` and `git branch --list`, each optionally prefixed with `-C <path>`",
+      "   to address a task worktree. Everything else",
+    ].join("\n"),
+    "   show` and `git branch --list`. Everything else",
+  );
+  assert.notEqual(unscoped, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(unscoped).map((s) => s.name),
+    ["-C worktree sanction"],
+  );
+});
+
+test("a carrier that drops the branch --list allowance is caught", () => {
+  const withoutBranch = carrierStatingTheRule.replace(
+    "` and `git branch --list`,",
+    "`,",
+  );
+  assert.notEqual(withoutBranch, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(withoutBranch).map((s) => s.name),
+    ["branch --list allowance"],
+  );
+});
+
+test("a carrier that drops the read-only forms list is caught", () => {
+  const withoutForms = carrierStatingTheRule.replace(
+    [
+      "1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log /",
+      "   show`",
+    ].join("\n"),
+    "1. **Git is a whitelist.** Permitted: the read-only inspection forms",
+  );
+  assert.notEqual(withoutForms, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(withoutForms).map((s) => s.name),
+    ["read-only git forms"],
+  );
+});
+
+test("every carrier path the gate checks exists on disk", () => {
+  // The sentinels only fire on a file the gate can read: a carrier renamed or
+  // moved without updating CARRIERS would otherwise fail as "cannot read" in
+  // CI long after the rename landed.
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  for (const carrier of CARRIERS) {
+    assert.ok(existsSync(join(root, carrier)), `missing carrier: ${carrier}`);
+  }
 });

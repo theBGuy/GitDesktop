@@ -135,6 +135,12 @@ it is a design-time question.
 Routing a package to codex? Follow `references/codex-implementer.md` — recipe,
 measured sandbox behavior, and the spec preamble live there. The hard rules:
 
+- **The worktree is a prerequisite, and only the user can create it.** Codex
+  routing needs a linked task worktree with `pnpm install` already run (the
+  sandbox has no network, so a run cannot install anything). `git worktree` is
+  off every agent whitelist, so ASK the user to create it before you dispatch,
+  and take the Phase 0 baseline in it once it exists.
+
 - **Linked task worktrees only** — the sandbox git-block does not exist in the
   main checkout, where `.git` sits inside the workspace root.
 - **Never pass `--add-dir` pointing at the main repo** — one way to defeat the
