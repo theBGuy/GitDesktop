@@ -31,7 +31,7 @@ import * as api from "@/lib/git/api";
 import {
   forgeFeatureReady,
   useAddRemote,
-  useCompareBranches,
+  useBranchAhead,
   useCreatePr,
   useDefaultBranch,
   useForgeStatus,
@@ -554,8 +554,8 @@ export function CreatePrDialog({
           ? `upstream/${base}`
           : base
         : null;
-  const comparison = useCompareBranches(repoPath, compareBaseRef, head || null);
-  const ahead = comparison.data?.ahead ?? [];
+  const comparison = useBranchAhead(repoPath, compareBaseRef, head || null);
+  const ahead = comparison.data ?? [];
   // A head equal to the parent's base name is still a distinct ref (local branch
   // vs. `upstream/<name>`), so only treat identical refs as "same branch".
   const sameBranch = compareBaseRef !== null && compareBaseRef === head;

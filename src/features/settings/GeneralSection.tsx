@@ -7,9 +7,15 @@ import { PRIVACY_POLICY_URL, resetAnalyticsId } from "@/lib/analytics";
 import { useAutomations } from "@/lib/automations/queries";
 import { anyAutomationEnabled } from "@/lib/automations/types";
 import { withForm } from "@/lib/form";
+import type { AUTO_FETCH_INTERVALS } from "@/lib/settings/api";
 import { settingsFormOpts } from "./settings-form";
 
-const FETCH_INTERVAL_OPTIONS: Record<string, string> = {
+/** Record-typed against AUTO_FETCH_INTERVALS, which `loadSettings` also heals
+ *  against, so an added cadence can't reach one without the other. */
+const FETCH_INTERVAL_OPTIONS: Record<
+  (typeof AUTO_FETCH_INTERVALS)[number],
+  string
+> = {
   "5": "Every 5 minutes",
   "10": "Every 10 minutes",
   "15": "Every 15 minutes",

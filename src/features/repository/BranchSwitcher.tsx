@@ -43,13 +43,13 @@ import { normPath } from "@/lib/git/path";
 import {
   branchRewriteStatusOptions,
   forgeFeatureReady,
+  useBranchAhead,
   useBranchDivergence,
   useBranches,
   useBranchResetToUpstream,
   useBranchRewriteStatus,
   useCheckoutBranch,
   useCheckoutRemoteBranch,
-  useCompareBranches,
   useDefaultBranch,
   useDeleteBranch,
   useDeleteRemoteBranch,
@@ -627,12 +627,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   ]);
   // Commits the named ref has that the default doesn't. A null base leaves the
   // query disabled (both dialogs closed, or no resolvable default).
-  const committedCompare = useCompareBranches(
-    repoPath,
-    committedBase,
-    namedRef,
-  );
-  // Mirrors `useCompareBranches`' own enabled condition — a query that never
+  const committedCompare = useBranchAhead(repoPath, committedBase, namedRef);
+  // Mirrors `useBranchAhead`'s own enabled condition — a query that never
   // runs (base === compare: naming the local default with no `origin/<default>`)
   // must not read as "still loading" forever.
   const comparing =
@@ -652,7 +648,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         ? "error"
         : "ready";
   const committedFallback = useMemo(() => {
-    const ahead = committedCompare.data?.ahead ?? [];
+    const ahead = committedCompare.data ?? [];
     if (!committedBase || !namedRef || ahead.length === 0) return null;
     // `ahead` is newest-first (plain `git log base..<ref>`); cap the subjects.
     return {

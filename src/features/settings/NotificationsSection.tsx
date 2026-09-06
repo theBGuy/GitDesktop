@@ -1,8 +1,11 @@
 import { withForm } from "@/lib/form";
+import type { PR_CHECK_SCOPES } from "@/lib/settings/api";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { settingsFormOpts } from "./settings-form";
 
-const CHECK_OPTIONS: Record<string, string> = {
+/** Record-typed against PR_CHECK_SCOPES, which `loadSettings` also heals against,
+ *  so an added scope can't reach one without the other. */
+const CHECK_OPTIONS: Record<(typeof PR_CHECK_SCOPES)[number], string> = {
   off: "Off",
   mine: "My pull requests only",
   all: "All open pull requests",

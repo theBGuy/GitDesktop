@@ -146,6 +146,10 @@ export const repoKeys = {
     ["repo", repo, "commit", hash, "diff", file] as const,
   compare: (repo: string, base: string, compare: string) =>
     ["repo", repo, "compare", base, compare] as const,
+  branchAhead: (repo: string, base: string, compare: string) =>
+    ["repo", repo, "compare", base, compare, "ahead"] as const,
+  branchAheadCount: (repo: string, base: string, compare: string) =>
+    ["repo", repo, "compare", base, compare, "ahead-count"] as const,
   branchDiffFiles: (repo: string, base: string, compare: string) =>
     ["repo", repo, "compare", base, compare, "files"] as const,
   branchFileDiff: (repo: string, base: string, compare: string, file: string) =>
@@ -868,6 +872,34 @@ export function useCompareBranches(
   return useQuery({
     queryKey: repoKeys.compare(repo, base ?? "", compare ?? ""),
     queryFn: () => api.gitCompareBranches(repo, base ?? "", compare ?? ""),
+    enabled: base !== null && compare !== null && base !== compare,
+  });
+}
+
+/** `base..compare` only, for the callers that never read `behind` — one log
+ *  walk instead of two. Same enabled gate as {@link useCompareBranches}. */
+export function useBranchAhead(
+  repo: string,
+  base: string | null,
+  compare: string | null,
+) {
+  return useQuery({
+    queryKey: repoKeys.branchAhead(repo, base ?? "", compare ?? ""),
+    queryFn: () => api.gitBranchAhead(repo, base ?? "", compare ?? ""),
+    enabled: base !== null && compare !== null && base !== compare,
+  });
+}
+
+/** Just how many commits `base..compare` holds, for callers that render only
+ *  the number. Same enabled gate as {@link useCompareBranches}. */
+export function useBranchAheadCount(
+  repo: string,
+  base: string | null,
+  compare: string | null,
+) {
+  return useQuery({
+    queryKey: repoKeys.branchAheadCount(repo, base ?? "", compare ?? ""),
+    queryFn: () => api.gitBranchAheadCount(repo, base ?? "", compare ?? ""),
     enabled: base !== null && compare !== null && base !== compare,
   });
 }

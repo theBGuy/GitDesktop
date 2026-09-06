@@ -1,11 +1,6 @@
 import { guardedFetch } from "./guarded-fetch";
+import type { ReviewContextSize } from "./review-context-size";
 import type { AiProviderId, AiSettings } from "./types";
-
-/** How much diff + prior-discussion context an AI review sends, scaled to the
- *  reviewing model's context window. `"auto"` probes the window (live for
- *  Ollama, a per-provider fallback tier otherwise); the others force a fixed
- *  multiplier of the default budget profile. */
-export type ReviewContextSize = "auto" | "small" | "medium" | "large";
 
 /** The set of character caps that shape a review prompt. Each field is scaled
  *  from {@link DEFAULT_BUDGET_PROFILE} by a per-model multiplier at review time;

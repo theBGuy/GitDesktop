@@ -28,26 +28,37 @@ import {
   scaffoldCustomDockerfile,
 } from "@/lib/ai/sandbox";
 import { useContainerStatus } from "@/lib/ai/sandbox-queries";
+import {
+  type AGENT_ISOLATIONS,
+  IMAGE_AGENT_IDS,
+  NODE_VERSIONS,
+} from "@/lib/settings/api";
 import { toastError } from "@/lib/toast";
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-type AgentId = "claude" | "codex" | "opencode" | "copilot";
+type AgentId = (typeof IMAGE_AGENT_IDS)[number];
+type NodeVersion = (typeof NODE_VERSIONS)[number];
+type AgentIsolation = (typeof AGENT_ISOLATIONS)[number];
 
-/** Node base-image versions offered (current LTS first). */
-const NODE_VERSIONS = ["24", "22", "20"];
 /** Trigger labels — without them Base UI shows the raw version, dropping the
- *  "(LTS)" note the popup carries. */
-const NODE_VERSION_ITEMS: Record<string, string> = Object.fromEntries(
-  NODE_VERSIONS.map((v) => [v, v === "24" ? `${v} (LTS)` : v]),
-);
-/** Container-capable agents installed into the managed image. */
-const IMAGE_AGENTS: { id: AgentId; label: string }[] = [
-  { id: "claude", label: "Claude Code" },
-  { id: "codex", label: "Codex" },
-  { id: "opencode", label: "opencode" },
-  { id: "copilot", label: "GitHub Copilot" },
-];
+ *  "(LTS)" note the popup carries. Record-typed against NODE_VERSIONS, which
+ *  `loadSettings` also heals against, so an added version can't reach one
+ *  without the other. */
+const NODE_VERSION_ITEMS: Record<NodeVersion, string> = {
+  "24": "24 (LTS)",
+  "22": "22",
+  "20": "20",
+};
+/** Container-capable agents installed into the managed image. Record-typed against
+ *  IMAGE_AGENT_IDS, which the checkbox row renders from, so a new agent can't reach
+ *  the settings type without a label here. */
+const IMAGE_AGENT_LABELS: Record<AgentId, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  opencode: "opencode",
+  copilot: "GitHub Copilot",
+};
 
 /**
  * Opt-in control for running agent sessions inside a Docker/Podman container
@@ -66,10 +77,10 @@ export function AgentSandboxField({
   onProviders,
   repoPath,
 }: {
-  value: "worktree" | "container";
-  onChange: (value: "worktree" | "container") => void;
-  nodeVersion: string;
-  onNodeVersion: (v: string) => void;
+  value: AgentIsolation;
+  onChange: (value: AgentIsolation) => void;
+  nodeVersion: NodeVersion;
+  onNodeVersion: (v: NodeVersion) => void;
   providers: AgentId[];
   onProviders: (v: AgentId[]) => void;
   /** The open repo, for the per-repo custom-image row (null = no repo open). */
@@ -129,7 +140,7 @@ export function AgentSandboxField({
               <Select
                 items={NODE_VERSION_ITEMS}
                 value={nodeVersion}
-                onValueChange={(v) => v && onNodeVersion(v)}
+                onValueChange={(v) => v && onNodeVersion(v as NodeVersion)}
               >
                 <SelectTrigger
                   size="sm"
@@ -149,20 +160,20 @@ export function AgentSandboxField({
             </label>
             <div className="flex items-center gap-3">
               <span className="text-muted-foreground">Agents</span>
-              {IMAGE_AGENTS.map((a) => {
-                const on = providers.includes(a.id);
+              {IMAGE_AGENT_IDS.map((id) => {
+                const on = providers.includes(id);
                 return (
                   <label
-                    key={a.id}
+                    key={id}
                     className="flex cursor-pointer items-center gap-1.5"
                   >
                     <Checkbox
                       checked={on}
                       // Can't uncheck the last remaining agent.
                       disabled={on && providers.length === 1}
-                      onCheckedChange={(c) => toggleProvider(a.id, c === true)}
+                      onCheckedChange={(c) => toggleProvider(id, c === true)}
                     />
-                    {a.label}
+                    {IMAGE_AGENT_LABELS[id]}
                   </label>
                 );
               })}

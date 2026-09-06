@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { clipTitleFromText } from "@/lib/clip-title";
-import { useCompareBranches } from "@/lib/git/queries";
+import { useBranchAhead } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
@@ -83,12 +83,12 @@ export function RebaseOntoDialog({
   // against the literal `HEAD` ref (what the rebase itself operates on, so the
   // preview and the action can never disagree), gated on the dialog being open
   // so it doesn't fetch in the background.
-  const comparison = useCompareBranches(
+  const comparison = useBranchAhead(
     repoPath,
     open && oldBase && !sameBranch ? oldBase : null,
     open ? "HEAD" : null,
   );
-  const moving = comparison.data?.ahead ?? [];
+  const moving = comparison.data ?? [];
   const movingCount = moving.length;
   // No clean-tree term: uncommitted changes are handled by the caller's stash →
   // rebase → reapply offer, not by blocking the run.

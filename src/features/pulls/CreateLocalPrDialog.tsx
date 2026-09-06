@@ -17,7 +17,7 @@ import { triggerAutomations } from "@/lib/automations/runner";
 import { required, useAppForm } from "@/lib/form";
 import {
   forgeFeatureReady,
-  useCompareBranches,
+  useBranchAhead,
   useDefaultBranch,
   useForgeStatus,
   useRepoStatus,
@@ -205,8 +205,8 @@ export function CreateLocalPrDialog({
   const base = useSelector(form.store, (s) => s.values.base);
   // Live notes feed the AI-description prompt and the ReviewerNotesField seeding.
   const notes = useSelector(form.store, (s) => s.values.notes);
-  const comparison = useCompareBranches(repoPath, base || null, head || null);
-  const ahead = comparison.data?.ahead ?? [];
+  const comparison = useBranchAhead(repoPath, base || null, head || null);
+  const ahead = comparison.data ?? [];
   const sameBranch = base === head;
 
   // Shared chip state machine — enabled while the dialog is open and the tracker
