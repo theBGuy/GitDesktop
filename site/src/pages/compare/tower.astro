@@ -1,0 +1,530 @@
+---
+// GitDesktop vs Tower — the priciest client in the set and the sharpest
+// terms contrast: subscription-only ($69–149/user/yr) vs free, and no Linux
+// build. Re-grounded against Tower for Mac/Windows (versions in the stamps)
+// via git-tower.com release notes, the help center (the working-with-prs
+// pages define the PR verb set), and the pricing and feature pages. Tower's
+// Mac and Windows apps are separate release streams — never quote one as
+// "Tower's version"; several rows are per-platform. When a row changes
+// upstream, update the stamps (verifiedOn.tower in src/lib/compare.ts, the
+// TOWER_* constants, and the meta description's month) in the same edit — a
+// stale comparison is worse than none.
+import { Image } from "astro:assets";
+import appGithubPr from "../../assets/app-github-pr.png";
+import CompareTable from "../../components/CompareTable.astro";
+import SiteLayout from "../../layouts/SiteLayout.astro";
+import { type Group, verifiedOn } from "../../lib/compare";
+
+const base = import.meta.env.BASE_URL;
+const repo = "https://github.com/theBGuy/GitDesktop";
+const download = `${base}download/`;
+
+const VERIFIED_ON = verifiedOn.tower;
+const TOWER_MAC_VERSION = "17.1.1";
+const TOWER_MAC_RELEASED = "August 11, 2026";
+const TOWER_WIN_VERSION = "13.2";
+const TOWER_WIN_RELEASED = "August 18, 2026";
+const TOWER_MAC_MAJOR = TOWER_MAC_VERSION.split(".")[0];
+const TOWER_WIN_MAJOR = TOWER_WIN_VERSION.split(".")[0];
+
+const groups: Group[] = [
+  {
+    title: "Where you can use it",
+    rows: [
+      {
+        label: "Free to use",
+        them: {
+          state: "no",
+          note: "subscription tiers from $69 to $149 per user per year; free for students, educators & non-profits",
+        },
+        gd: {
+          state: "yes",
+          note: "free & open source (Apache-2.0); there is no paid plan",
+        },
+      },
+      {
+        label: "Works after the subscription ends",
+        them: {
+          state: "no",
+          note: "its pricing page: access ends with the last paid period",
+        },
+        gd: { state: "yes", note: "nothing to license or renew" },
+      },
+      {
+        label: "Linux",
+        them: { state: "no", note: "macOS & Windows only" },
+        gd: { state: "yes", note: "Windows, macOS & Linux" },
+      },
+      {
+        label: "Same features on every platform",
+        them: {
+          state: "no",
+          note: `separate apps on separate tracks — Mac sits at v${TOWER_MAC_MAJOR}, Windows at v${TOWER_WIN_MAJOR}; several features are Mac-only`,
+        },
+        gd: {
+          state: "yes",
+          note: "one codebase, one release cycle across all three platforms",
+        },
+      },
+      {
+        label: "Hosting services",
+        them: {
+          state: "yes",
+          note: "GitHub, GitLab, Bitbucket, Azure DevOps, Beanstalk & Perforce GitSwarm",
+        },
+        gd: {
+          state: "yes",
+          note: "GitHub (+ Enterprise), GitLab (+ self-managed) & Bitbucket — Bitbucket issues via linked Jira",
+        },
+      },
+    ],
+  },
+  {
+    title: "Pull requests",
+    rows: [
+      {
+        label: "Approve or request changes in-app",
+        them: {
+          state: "no",
+          note: "its PR actions are comment, merge, close & inspect (Mac adds check out)",
+        },
+        gd: {
+          state: "yes",
+          note: "on all three forges; thread resolution on GitHub & GitLab",
+        },
+      },
+      {
+        label: "Line-anchored review comments",
+        them: { state: "no", note: "one flat conversation per pull request" },
+        gd: {
+          state: "yes",
+          note: "single lines or dragged ranges; drafts batch and survive a restart",
+        },
+      },
+      {
+        label: "Apply a reviewer's suggestion locally",
+        them: { state: "no" },
+        gd: { state: "yes", note: "straight to your working tree" },
+      },
+      {
+        label: "Create, comment & merge in-app",
+        them: {
+          state: "yes",
+          note: "on GitHub, GitLab, Bitbucket & Azure DevOps",
+        },
+        gd: {
+          state: "yes",
+          note: "merge & squash on all three; rebase (GitHub), fast-forward (Bitbucket)",
+        },
+      },
+      {
+        label: "Stacked branches, locally",
+        them: {
+          state: "yes",
+          note: "parent-child dependencies stored in Git config; a Pro line item on its pricing page",
+        },
+        gd: {
+          state: "no",
+          note: "local chains are rebased by hand; stacks live on the forge instead",
+        },
+      },
+      {
+        label: "Stacked PRs on the forge",
+        them: {
+          state: "partial",
+          note: "through the Graphite integration — Pro tier, plus a Graphite account & CLI, built on GitHub",
+        },
+        gd: {
+          state: "yes",
+          note: "native: create, extend & dissolve stacks (GitHub); MR chains detected (GitLab)",
+        },
+      },
+      {
+        label: "Local PRs with no remote at all",
+        them: { state: "no" },
+        gd: { state: "yes", note: "review & merge offline, promote later" },
+      },
+    ],
+  },
+  {
+    title: "CI, releases & findings",
+    rows: [
+      {
+        label: "See & control CI runs",
+        them: { state: "no", note: "no CI surface" },
+        gd: {
+          state: "yes",
+          note: "runs, jobs & logs; re-run, cancel & dispatch (GitHub, GitLab & Bitbucket)",
+        },
+      },
+      {
+        label: "Debug a failed CI run with AI",
+        them: { state: "no" },
+        gd: { state: "yes", note: "the failing step's log, explained in-app" },
+      },
+      {
+        label: "Publish releases",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "create, edit & upload assets (GitHub & GitLab)",
+        },
+      },
+      {
+        label: "Security findings in-app",
+        them: {
+          state: "no",
+          note: "a pre-commit secret-scan hook in its hooks library; no forge findings surface",
+        },
+        gd: {
+          state: "yes",
+          note: "Dependabot alerts, advisories, code & secret scanning (GitHub); SAST, secrets & code quality (GitLab)",
+        },
+      },
+    ],
+  },
+  {
+    title: "Issues & trackers",
+    rows: [
+      {
+        label: "Work with issues in-app",
+        them: {
+          state: "no",
+          note: "issue numbers in commit messages become links out to your tracker",
+        },
+        gd: {
+          state: "yes",
+          note: "GitHub & GitLab issues (sub-issues on GitHub, related issues on GitLab), plus private local issues",
+        },
+      },
+      {
+        label: "Jira",
+        them: { state: "no", note: "referenced keys link out" },
+        gd: {
+          state: "yes",
+          note: "browse, create, comment, transition & log work on a linked Jira Cloud project",
+        },
+      },
+      {
+        label: "GitHub Discussions",
+        them: { state: "no" },
+        gd: { state: "yes", note: "read, comment, mark answers" },
+      },
+    ],
+  },
+  {
+    title: "History & safety",
+    rows: [
+      {
+        label: "Undo the last operation with one keystroke",
+        them: {
+          state: "yes",
+          note: "⌘Z / Ctrl+Z across commits, merges, rebases, branch operations & stashes",
+        },
+        gd: {
+          state: "partial",
+          note: "the last commit, one click; riskier operations are journaled for recovery, not one-key undone",
+        },
+      },
+      {
+        label: "Clean up squash-merged branches",
+        them: {
+          state: "partial",
+          note: "on Mac (Tower 17), by matching merged PRs; not in Tower for Windows",
+        },
+        gd: {
+          state: "yes",
+          note: "PR-aware on every platform, so squash & rebase merges count",
+        },
+      },
+    ],
+  },
+  {
+    title: "AI — one feature or the whole loop",
+    rows: [
+      {
+        label: "AI commit messages",
+        them: {
+          state: "partial",
+          note: "Mac only, via a locally installed Claude Code or Codex CLI, with prompt presets",
+        },
+        gd: {
+          state: "yes",
+          note: "every platform — your own keys (Anthropic, OpenAI, Google, OpenRouter), local Ollama, or the same keyless CLIs",
+        },
+      },
+      {
+        label: "AI past the commit message",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "PR & issue descriptions, conflict help & CI debugging",
+        },
+      },
+      {
+        label: "AI code review & security audit",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "agentic & read-only; postable as a PR comment",
+        },
+      },
+      {
+        label: "Delegate whole tasks to coding agents",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "Claude Code, Codex, Copilot & opencode in parallel worktrees; optional container sandbox",
+        },
+      },
+      {
+        label: "Use it from an AI assistant (MCP)",
+        them: { state: "no" },
+        gd: {
+          state: "yes",
+          note: "GitDesktop doubles as an MCP server — read-only by default",
+        },
+      },
+    ],
+  },
+];
+
+const faqs = [
+  {
+    q: "Is GitDesktop a free Tower alternative?",
+    a: "For the daily Git loop and the forge loop, yes. GitDesktop is free and open source (Apache-2.0), runs on Windows, macOS, and Linux, and keeps pull-request review, CI, and issues in the app across GitHub, GitLab, and Bitbucket (on Bitbucket, issues go through a linked Jira project), with releases on GitHub and GitLab. It does not have Tower's one-keystroke undo for every operation, its local branch dependencies, or its Azure DevOps and Beanstalk support — the sections above count both directions.",
+  },
+  {
+    q: "Can Tower approve pull requests?",
+    a: "No. Tower's help pages for both platforms document the pull-request actions as adding a comment, merging, closing, and inspecting (the Mac app adds check out), and comments form a single conversation on the whole PR. There is no approve or request-changes action and no line-anchored commenting. GitDesktop submits real reviews on GitHub, GitLab, and Bitbucket: line-anchored threads, suggestions applied locally, and a verdict.",
+  },
+  {
+    q: "Does Tower run on Linux?",
+    a: "No. Tower ships for macOS and Windows only, and one subscription covers both. GitDesktop ships the same free app on Windows, macOS, and Linux.",
+  },
+  {
+    q: "Is Tower the same app on Windows and on a Mac?",
+    a: `They are separate products on separate release tracks: as of the date above, Tower for Mac is at version ${TOWER_MAC_VERSION} while Tower for Windows is at ${TOWER_WIN_VERSION}. AI commit messages (Tower 16) and pull-request-based merge detection in branch cleanup (Tower 17) exist only in the Mac app. GitDesktop ships from one codebase, so releases land on Windows, macOS, and Linux at once.`,
+  },
+];
+---
+
+<SiteLayout
+  title="GitDesktop vs Tower — a verified comparison"
+  description="GitDesktop vs Tower, verified September 2026: free vs subscription, Linux support, PR review with approval in-app, CI, issues, releases & unmetered AI — plus what Tower still does better."
+  ogTitle="GitDesktop vs Tower"
+  ogDescription="Free on three platforms, review in-app, no subscription — a verified, dated comparison."
+  breadcrumbs={[
+    { name: "Compare", path: "/compare/" },
+    { name: "GitDesktop vs Tower", path: "/compare/tower/" },
+  ]}
+  active="compare"
+>
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <p data-reveal class="text-sm text-faint"><span class="text-add" aria-hidden="true">//</span> compare</p>
+      <h1
+        data-reveal
+        style="transition-delay:60ms"
+        class="mt-5 max-w-[24ch] text-[clamp(1.9rem,4.5vw,3rem)] font-semibold tracking-tight"
+      >
+        GitDesktop vs Tower
+      </h1>
+      {/* Answer-first: the paragraph a search snippet or answer engine lifts. */}
+      <p
+        data-reveal
+        style="transition-delay:120ms"
+        class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
+      >
+        GitDesktop is a free, open-source Tower alternative: the same daily Git
+        craft, plus the parts Tower leaves to the browser. Pull-request review
+        with approval, CI, and issues stay in one window across
+        <span class="text-ink">GitHub, GitLab, and Bitbucket</span> (on
+        Bitbucket, issues go through a linked Jira project), with releases on
+        GitHub and GitLab. It ships from one codebase to
+        <span class="text-ink">Windows, macOS, and Linux</span>, costs nothing,
+        and runs AI on your own keys or local CLI agents, or not at all.
+      </p>
+      <p data-reveal style="transition-delay:180ms" class="mt-5 max-w-[66ch] text-sm text-muted">
+        Verified against Tower for Mac {TOWER_MAC_VERSION} (dated
+        {TOWER_MAC_RELEASED}) and Tower for Windows {TOWER_WIN_VERSION} (dated
+        {TOWER_WIN_RELEASED}), plus Tower's help center, release notes, and
+        pricing pages, on {VERIFIED_ON}. Something stale?
+        <a href={`${repo}/issues`} class="text-mint underline-offset-4 hover:underline"
+          >Open an issue</a
+        >.
+      </p>
+    </div>
+  </section>
+
+  <!-- Fairness first: the honest column is what makes the table credible. -->
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Where Tower still wins
+      </h2>
+      <ul data-reveal style="transition-delay:80ms" class="mt-8 max-w-[70ch] space-y-4">
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Undo, everywhere.</span> ⌘Z on a Mac, Ctrl+Z
+            on Windows, across commits, merges, rebases, branch operations, and
+            stashes. GitDesktop journals risky operations, restores dropped
+            stashes, and undoes the last commit; it has no one-keystroke undo
+            for every operation.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Branch dependencies.</span> Tower stores
+            parent-child branch relationships in Git config as part of its
+            Custom Workflows. GitDesktop stacks pull requests on the forge
+            instead; local chains are yours to rebase.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Hosting-service breadth.</span> Azure DevOps
+            and its Server variant, Beanstalk, and Perforce GitSwarm, alongside
+            the big three. GitDesktop stops at GitHub, GitLab, and Bitbucket,
+            with Jira Cloud for issues.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Years of polish on the Git craft.</span>
+            The drag-and-drop interactive rebase and the conflict wizard are
+            the product's spine, and user reviews consistently credit Tower
+            with making complex operations approachable.
+          </span>
+        </li>
+        <li class="flex items-start gap-2.5 leading-relaxed text-body">
+          <span class="mt-px select-none text-add" aria-hidden="true">+</span>
+          <span>
+            <span class="text-ink">Free for students, educators, and
+            non-profits.</span> With an academic or non-profit affiliation, the
+            subscription drops to zero. GitDesktop is free for everyone either
+            way.
+          </span>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Feature by feature
+      </h2>
+      <p data-reveal class="mt-5 max-w-[66ch] leading-relaxed text-body">
+        Both clients cover the fundamentals: clone, stage by file, hunk, or
+        line, commit, branch, stash, sync, resolve conflicts, rebase
+        interactively, manage worktrees and submodules. The table keeps to
+        where they diverge, in both directions.
+      </p>
+
+      <CompareTable competitor="Tower" groups={groups} />
+
+      <p class="mt-6 max-w-[66ch] text-sm leading-relaxed text-muted">
+        Every Tower cell was checked against Tower's own release notes, help
+        center, and pricing pages on the date above, per platform. Rows where
+        both clients are simply fine were left out on purpose. Also compared:
+        <a
+          href={`${base}compare/github-desktop/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >GitDesktop vs GitHub Desktop</a
+        >, <a
+          href={`${base}compare/sourcetree/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >GitDesktop vs Sourcetree</a
+        >, and <a
+          href={`${base}compare/gitkraken/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >GitDesktop vs GitKraken</a
+        > — or see <a
+          href={`${base}compare/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >all comparisons</a
+        >.
+      </p>
+    </div>
+  </section>
+
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <div class="max-w-2xl">
+        <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+          Create, comment, merge, close, inspect — and that's the list
+        </h2>
+        <p data-reveal class="mt-5 leading-relaxed text-body">
+          That list is Tower's own feature-page copy; its per-platform help
+          pages document commenting, merging, closing, and inspecting
+          (check out joins them on the Mac app), with comments forming one
+          conversation on the whole PR.
+          Approval, request-changes, and line-anchored review comments aren't
+          among them; a review still means the browser. In GitDesktop the whole
+          review lives next to your staging and history: comments on exact
+          lines or dragged ranges, suggestions applied to your working tree,
+          approve or request changes, and the merge, on GitHub, GitLab, and
+          Bitbucket.
+        </p>
+      </div>
+      <figure data-reveal style="transition-delay:120ms" class="window mt-10">
+        <Image
+          src={appGithubPr}
+          alt="A pull request in GitDesktop: CI checks with per-job status, an automated review, and the merge action — the review loop Tower sends to the browser"
+          widths={[720, 1080, 1440]}
+          sizes="(min-width: 1024px) 1100px, 94vw"
+          format="webp"
+          quality={82}
+          loading="lazy"
+        />
+      </figure>
+    </div>
+  </section>
+
+  <!-- Visible Q&A — extraction-shaped HTML on purpose (no FAQPage JSON-LD:
+       Google removed FAQ rich results sitewide in May 2026; retrieval reads
+       the visible text). -->
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        Common questions
+      </h2>
+      <div data-reveal style="transition-delay:80ms" class="mt-8 grid gap-x-12 gap-y-10 lg:grid-cols-2">
+        {
+          faqs.map((f) => (
+            <div class="min-w-0">
+              <h3 class="text-lg text-ink">{f.q}</h3>
+              <p class="mt-3 max-w-[58ch] text-[15px] leading-relaxed text-body">{f.a}</p>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="relative overflow-hidden">
+    <div class="grid-bg pointer-events-none absolute inset-0 opacity-60"></div>
+    <div class="relative mx-auto max-w-6xl px-5 py-16 text-center md:py-20">
+      <h2 data-reveal class="text-balance text-2xl tracking-tight sm:text-3xl">
+        Try the whole loop.
+      </h2>
+      <p data-reveal style="transition-delay:80ms" class="mx-auto mt-5 max-w-[48ch] leading-relaxed text-body">
+        Free, open source, and nothing to sign up for. Keep Tower installed;
+        GitDesktop needs no migration, no account, and no seat.
+      </p>
+      <div data-reveal style="transition-delay:140ms" class="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <a href={download} class="rounded-lg bg-mint px-6 py-3 font-medium text-mint-ink transition-opacity hover:opacity-90">
+          Download GitDesktop
+        </a>
+        <a href={`${base}features/`} class="rounded-lg border border-line-2 px-6 py-3 font-medium text-ink transition-colors hover:bg-surface">
+          See every feature
+        </a>
+      </div>
+    </div>
+  </section>
+</SiteLayout>

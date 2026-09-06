@@ -1,0 +1,145 @@
+---
+// The /compare/ hub: a directory for the comparison series, one row per
+// competitor with the page's last-verified date read from lib/compare.ts
+// (the same map each page's hero stamp reads, so the dates can't drift).
+// The hub routes; the pages argue — keep it quieter than its children.
+// entries is a Record over CompareSlug (editor-time exhaustiveness), and
+// entryList throws at build time if a verifiedOn slug has no hub row — astro
+// build does not type-check, so the throw is the real gate. Row order follows
+// verifiedOn's key order in src/lib/compare.ts. The meta description and
+// ogDescription vendor lists are the two enumerations left to update by hand.
+import SiteLayout from "../../layouts/SiteLayout.astro";
+import { type CompareSlug, verifiedOn } from "../../lib/compare";
+
+const base = import.meta.env.BASE_URL;
+const repo = "https://github.com/theBGuy/GitDesktop";
+const download = `${base}download/`;
+
+const entries: Record<CompareSlug, { name: string; hook: string }> = {
+  "github-desktop": {
+    name: "GitHub Desktop",
+    hook: "The familiar baseline. Where the daily loop matches, and what GitDesktop keeps in the app that GitHub Desktop sends to the browser: the pull-request loop, CI, and issues.",
+  },
+  sourcetree: {
+    name: "Sourcetree",
+    hook: "The free Atlassian client, against the free client that runs on Linux too, needs no vendor account, and keeps review and CI out of the browser.",
+  },
+  gitkraken: {
+    name: "GitKraken",
+    hook: "The private-repo boundary. What GitKraken's free plan locks out, what its paid plans meter, and where its commit graph still wins.",
+  },
+  tower: {
+    name: "Tower",
+    hook: "Subscription against free. The pull-request verbs Tower stops at, one feature set across three platforms, and where Tower's undo still leads.",
+  },
+};
+const entryList = (Object.keys(verifiedOn) as CompareSlug[]).map((slug) => {
+  const entry = entries[slug];
+  if (!entry) throw new Error(`/compare/ hub: no row for "${slug}"`);
+  return [slug, entry] as const;
+});
+---
+
+<SiteLayout
+  title="Compare GitDesktop with other Git clients"
+  description="Verified, dated comparisons: GitDesktop vs GitHub Desktop, Sourcetree, GitKraken, and Tower, each checked against the vendor's own docs, with the rows they win counted too."
+  ogTitle="Compare GitDesktop"
+  ogDescription="GitHub Desktop, Sourcetree, GitKraken & Tower — verified, dated comparisons."
+  breadcrumbs={[{ name: "Compare", path: "/compare/" }]}
+  active="compare"
+>
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
+      <p data-reveal class="text-sm text-faint"><span class="text-add" aria-hidden="true">//</span> compare</p>
+      <h1
+        data-reveal
+        style="transition-delay:60ms"
+        class="mt-5 max-w-[24ch] text-[clamp(1.9rem,4.5vw,3rem)] font-semibold tracking-tight"
+      >
+        GitDesktop, compared
+      </h1>
+      <p
+        data-reveal
+        style="transition-delay:120ms"
+        class="mt-6 max-w-[62ch] text-base leading-relaxed text-body sm:text-lg"
+      >
+        Comparisons against the client you may be using now. Each is verified
+        and dated: every competitor cell checked against that vendor's own
+        release notes and documentation, with the rows where
+        <span class="text-ink">they</span> win counted too.
+      </p>
+    </div>
+  </section>
+
+  <section class="border-b border-line">
+    <div class="mx-auto max-w-6xl px-5">
+      <ul class="divide-y divide-line">
+        {
+          entryList.map(([slug, e], i) => (
+            <li>
+              <a
+                href={`${base}compare/${slug}/`}
+                data-reveal
+                style={`transition-delay:${i * 60}ms`}
+                class="group block py-9 md:py-10"
+              >
+                <h2 class="text-xl tracking-tight text-ink sm:text-2xl">
+                  GitDesktop vs {e.name}
+                </h2>
+                <p class="mt-3 max-w-[70ch] leading-relaxed text-body">{e.hook}</p>
+                <p class="mt-3 text-sm text-muted">
+                  Verified {verifiedOn[slug]}
+                  <span class="mx-2 select-none text-faint" aria-hidden="true">·</span>
+                  <span class="text-mint underline-offset-4 group-hover:underline">
+                    Read the comparison <span aria-hidden="true">→</span>
+                  </span>
+                </p>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  <section class="border-b border-line bg-surface/30">
+    <div class="mx-auto max-w-6xl px-5 py-14 md:py-16">
+      <h2 data-reveal class="text-balance text-2xl tracking-[-0.02em] sm:text-3xl">
+        How these pages are made
+      </h2>
+      <p data-reveal style="transition-delay:80ms" class="mt-5 max-w-[70ch] leading-relaxed text-body">
+        Aggregator listicles routinely credit Git clients with features they
+        don't have. These pages are built the other way around: claims come
+        from the vendor's own release notes, documentation, and pricing pages
+        where those exist, checked per platform when the Mac and Windows apps
+        differ, and each page carries the date it was last verified. Rows where both clients
+        are simply fine are left out on purpose. Spot something stale?
+        <a href={`${repo}/issues`} class="text-mint underline-offset-4 hover:underline"
+          >Open an issue</a
+        >.
+      </p>
+    </div>
+  </section>
+
+  <section class="relative overflow-hidden">
+    <div class="grid-bg pointer-events-none absolute inset-0 opacity-60"></div>
+    <div class="relative mx-auto max-w-6xl px-5 py-16 text-center md:py-20">
+      <h2 data-reveal class="text-balance text-2xl tracking-tight sm:text-3xl">
+        Or skip the reading.
+      </h2>
+      <p data-reveal style="transition-delay:80ms" class="mx-auto mt-5 max-w-[48ch] leading-relaxed text-body">
+        Free, open source, and nothing to sign up for. Keep your current
+        client installed; GitDesktop needs no migration, no account, and no
+        seat.
+      </p>
+      <div data-reveal style="transition-delay:140ms" class="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <a href={download} class="rounded-lg bg-mint px-6 py-3 font-medium text-mint-ink transition-opacity hover:opacity-90">
+          Download GitDesktop
+        </a>
+        <a href={`${base}features/`} class="rounded-lg border border-line-2 px-6 py-3 font-medium text-ink transition-colors hover:bg-surface">
+          See every feature
+        </a>
+      </div>
+    </div>
+  </section>
+</SiteLayout>

@@ -28,7 +28,7 @@ interface Props {
   /** Person JSON-LD node for the page's subject — forwarded to Head. */
   person?: { name: string; sameAs?: string[] };
   /** Highlights the matching spoke link. */
-  active?: "integrations" | "ai" | "features" | "blog";
+  active?: "integrations" | "ai" | "features" | "compare" | "blog";
   /** Posts hide the view toggle — see the comment above the toggle markup. */
   showViewToggle?: boolean;
 }
@@ -67,6 +67,7 @@ const spokes = [
   },
   { id: "ai", label: "AI", href: `${base}ai/`, ai: true },
   { id: "features", label: "Features", href: `${base}features/`, ai: false },
+  { id: "compare", label: "Compare", href: `${base}compare/`, ai: false },
   { id: "blog", label: "Blog", href: `${base}blog/`, ai: false },
 ];
 
@@ -281,6 +282,7 @@ const toggleScript = `
           <a href={`${base}integrations/`} class="transition-colors hover:text-ink">Integrations</a>
           <a data-view="ai" href={`${base}ai/`} class="transition-colors hover:text-ink">AI</a>
           <a href={`${base}features/`} class="transition-colors hover:text-ink">Features</a>
+          <a href={`${base}compare/`} class="transition-colors hover:text-ink">Compare</a>
           <a href={`${base}blog/`} class="transition-colors hover:text-ink">Blog</a>
           <a href={repo} class="transition-colors hover:text-ink">GitHub</a>
           <a href={`${base}changelog/`} class="transition-colors hover:text-ink">Changelog</a>

@@ -6,19 +6,20 @@
 // 2026-08-20 against GitHub Desktop stable 3.6.4 (released 2026-08-13 —
 // dependency bumps only; its stable channel is feature-free since 3.6.0).
 // The verified-on stamp is rendered on the page; when a row changes upstream,
-// update the stamp in the same edit. A stale comparison is worse than none —
-// it's the first thing an HN thread checks.
+// update verifiedOn["github-desktop"] in src/lib/compare.ts (and the meta
+// description's month) in the same edit. A stale comparison is worse than
+// none — it's the first thing an HN thread checks.
 import { Image } from "astro:assets";
 import appGithubPr from "../../assets/app-github-pr.png";
 import CompareTable from "../../components/CompareTable.astro";
 import SiteLayout from "../../layouts/SiteLayout.astro";
-import type { Group } from "../../lib/compare";
+import { type Group, verifiedOn } from "../../lib/compare";
 
 const base = import.meta.env.BASE_URL;
 const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
-const VERIFIED_ON = "August 20, 2026";
+const VERIFIED_ON = verifiedOn["github-desktop"];
 const GHD_VERSION = "3.6.4";
 
 // Distilled to the rows where the two clients genuinely diverge (plus a few
@@ -264,7 +265,11 @@ const faqs = [
   description="GitDesktop vs GitHub Desktop, verified August 2026: forges, the PR loop, CI, issues, recovery, and optional AI — plus what GitHub Desktop still does better."
   ogTitle="GitDesktop vs GitHub Desktop"
   ogDescription="Forges, the PR loop, CI, issues, recovery tooling, and optional AI — a verified, dated comparison."
-  breadcrumbs={[{ name: "GitDesktop vs GitHub Desktop", path: "/compare/github-desktop/" }]}
+  breadcrumbs={[
+    { name: "Compare", path: "/compare/" },
+    { name: "GitDesktop vs GitHub Desktop", path: "/compare/github-desktop/" },
+  ]}
+  active="compare"
 >
   <section class="border-b border-line">
     <div class="mx-auto max-w-6xl px-5 py-16 md:py-20">
@@ -365,10 +370,18 @@ const faqs = [
           href={`${base}compare/sourcetree/`}
           class="text-mint underline-offset-4 hover:underline"
           >GitDesktop vs Sourcetree</a
-        > and <a
+        >, <a
           href={`${base}compare/gitkraken/`}
           class="text-mint underline-offset-4 hover:underline"
           >GitDesktop vs GitKraken</a
+        >, and <a
+          href={`${base}compare/tower/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >GitDesktop vs Tower</a
+        > — or see <a
+          href={`${base}compare/`}
+          class="text-mint underline-offset-4 hover:underline"
+          >all comparisons</a
         >.
       </p>
     </div>
