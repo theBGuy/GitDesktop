@@ -35,6 +35,10 @@ export interface PlanDraft {
 
 /** Prefill for the plan composer — a free-form goal and/or an existing issue. */
 export interface PlanSeed {
+  /** The repo this seed was raised in. The Agent tab lives under `<Activity>`, so
+   *  an unconsumed seed outlives a repo switch — the consumer matches on this
+   *  rather than prefilling another repo's composer. */
+  repoPath: string;
   goal?: string;
   issueTitle?: string | null;
   issueBody?: string | null;
@@ -48,8 +52,11 @@ export interface PlanSeed {
   contextPack?: ContextPack;
 }
 
+/** A seed as recorded on its run — `repoPath` is absent on runs persisted before
+ *  the repo axis existed, so readers of a rehydrated seed must handle its absence. */
+export type StoredPlanSeed = Omit<PlanSeed, "repoPath"> & { repoPath?: string };
+
 export interface GenerateArgs extends PlanSeed {
-  repoPath: string;
   /** Planning needs repo-aware reads, which only the CLI agents have. */
   agent: AgentKind;
   model: string;
@@ -83,7 +90,7 @@ export interface PlanRun {
   /** The original prompt, for the sidebar row + the result header. */
   origin: { goal: string; issueTitle: string | null } | null;
   /** The seed this run was started from, so "Re-plan" can reopen the composer. */
-  seed: PlanSeed | null;
+  seed: StoredPlanSeed | null;
   generating: boolean;
   /** The user stopped this run mid-turn (Stop). Idle but restartable; tells the
    *  result view to offer Restart instead of treating partial output as a draft. */
@@ -430,6 +437,7 @@ export const usePlanStore = create<PlanState>((set, get) => {
         nativeSessionId: null,
         origin: args.origin ?? { goal, issueTitle: issueTitle ?? null },
         seed: {
+          repoPath: args.repoPath,
           goal: args.goal,
           issueTitle: args.issueTitle,
           issueBody: args.issueBody,

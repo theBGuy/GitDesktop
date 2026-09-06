@@ -285,7 +285,11 @@ function PlanResult({ run, repoPath }: { run: PlanRun; repoPath: string }) {
   // Reopen the composer seeded from this plan to tweak the goal and try again —
   // dropping this result (the new attempt is its own run).
   const replan = () => {
-    setPendingPlanSeed(run.seed ?? { goal: run.origin?.goal ?? "" });
+    // repoPath last: a run persisted before the seed carried one has none.
+    setPendingPlanSeed({
+      ...(run.seed ?? { goal: run.origin?.goal ?? "" }),
+      repoPath,
+    });
     remove(run.id);
   };
 

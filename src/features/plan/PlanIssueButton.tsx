@@ -28,9 +28,14 @@ export function PlanIssueButton({
       size="xs"
       title="Plan an implementation for this issue with a read-only agent"
       onClick={() => {
+        // The seed is keyed to the repo it was raised in, so read the live one
+        // rather than take it as a prop (this button renders deep inside issue
+        // views). No repo open = no Agent surface to seed.
+        const repoPath = useUiStore.getState().repoPath;
+        if (!repoPath) return;
         // Show the activation Plan composer, seeded from this issue.
         clearAgentSelection();
-        setPendingPlanSeed({ issueTitle: title, issueBody: body });
+        setPendingPlanSeed({ repoPath, issueTitle: title, issueBody: body });
         setRepoTab("agent");
       }}
     >

@@ -8,12 +8,19 @@ import { cn } from "@/lib/utils";
  * `indent` (the default) lines after the first sit where icon-led rows put
  * their meta lines (≈ their `pl-4`/`pl-5`); lists whose lines share one left
  * edge (avatar-column or chip-led) pass `indent={false}`.
- * `lines` must match the real row's line count (2 = issue / commit / tag /
- * finding rows, 3 = PR / workflow-run / Jira / discussion rows).
+ * `lines` must match the real row's line count (1 = single-line rows such as the
+ * work inbox, 2 = issue / commit / tag / finding rows, 3 = PR / workflow-run /
+ * Jira / discussion rows); `indent` is moot at 1, which has no later lines.
  * Callers render `ListRowSkeletons` instead — it wraps this one with the busy
  * announcement a loading region owes readers.
  */
-function ListRowSkeleton({ lines, indent }: { lines: 2 | 3; indent: boolean }) {
+function ListRowSkeleton({
+  lines,
+  indent,
+}: {
+  lines: 1 | 2 | 3;
+  indent: boolean;
+}) {
   return (
     <div className="border-b px-3 py-2">
       {/* Index key: a fixed static list that never reorders. */}
@@ -38,7 +45,7 @@ export function ListRowSkeletons({
   indent = true,
 }: {
   rows: number;
-  lines: 2 | 3;
+  lines: 1 | 2 | 3;
   name: string;
   indent?: boolean;
 }) {

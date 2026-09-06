@@ -66,12 +66,21 @@ export interface ResearchHistoryTurn {
  *  hotkey). Going deeper on a brainstorm happens by switching the persona
  *  mid-session in the follow-up composer, not by seeding a separate run. */
 export interface ResearchSeed {
+  /** The repo this seed was raised in. The Agent tab lives under `<Activity>`, so
+   *  an unconsumed seed outlives a repo switch — the consumer matches on this
+   *  rather than prefilling another repo's composer. */
+  repoPath: string;
   topic?: string;
   depth?: ResearchDepth;
 }
 
+/** A seed as recorded on its run — `repoPath` is absent on runs persisted before
+ *  the repo axis existed, so readers of a rehydrated seed must handle its absence. */
+export type StoredResearchSeed = Omit<ResearchSeed, "repoPath"> & {
+  repoPath?: string;
+};
+
 export interface ResearchGenerateArgs extends ResearchSeed {
-  repoPath: string;
   /** Which CLI runs the research — each uses its own native web tools. */
   agent: AgentKind;
   model: string;
@@ -101,7 +110,7 @@ export interface ResearchRun {
   /** The original topic + persona, for the sidebar row + canvas header. */
   origin: { topic: string; depth: ResearchDepth } | null;
   /** The seed this run was started from, so a re-run can reopen the composer. */
-  seed: ResearchSeed | null;
+  seed: StoredResearchSeed | null;
   /** Completed earlier turns, oldest first — shown above the current turn so the
    *  whole research session stays visible (the current turn is the fields below). */
   history?: ResearchHistoryTurn[];
@@ -502,7 +511,7 @@ export const useResearchStore = create<ResearchState>((set, get) => {
         sessionId: crypto.randomUUID(),
         nativeSessionId: null,
         origin: { topic: args.topic, depth: args.depth },
-        seed: { topic: args.topic, depth: args.depth },
+        seed: { repoPath: args.repoPath, topic: args.topic, depth: args.depth },
         history: [],
         currentPrompt: "",
         generating: true,

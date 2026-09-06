@@ -7,6 +7,7 @@ pub mod insights;
 pub mod issue;
 pub mod lifecycle;
 pub mod mcp_search;
+pub mod my_work;
 pub mod pages;
 pub mod pr;
 pub mod project;

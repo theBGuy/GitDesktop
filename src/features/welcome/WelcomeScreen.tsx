@@ -6,6 +6,7 @@ import {
   GearIcon,
   GitForkIcon,
   QuestionIcon,
+  TrayIcon,
 } from "@phosphor-icons/react";
 import { BrandMark } from "@/components/BrandMark";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,7 @@ export function WelcomeScreen() {
   const openSettings = useUiStore((s) => s.openSettings);
   const openHelp = useUiStore((s) => s.openHelp);
   const openExplore = useUiStore((s) => s.openExplore);
+  const openMyWork = useUiStore((s) => s.openMyWork);
   const settings = useSettings();
   const saveSettings = useSaveSettings();
   const aiEnabled = useAiEnabled();
@@ -78,6 +80,13 @@ export function WelcomeScreen() {
       icon: CompassIcon,
       variant: "outline",
       onClick: openExplore,
+    },
+    {
+      id: "open-my-work",
+      label: "My work",
+      icon: TrayIcon,
+      variant: "outline",
+      onClick: openMyWork,
     },
   ];
 

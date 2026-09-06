@@ -3,7 +3,13 @@ import type { CommitAuthor, RemoteLens, RepoInfo } from "@/lib/git/types";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import { startViewTransition } from "@/lib/view-transition";
 
-export type AppView = "welcome" | "repo" | "settings" | "help" | "explore";
+export type AppView =
+  | "welcome"
+  | "repo"
+  | "settings"
+  | "help"
+  | "explore"
+  | "mywork";
 export type RepoTab =
   | "changes"
   | "history"
@@ -155,6 +161,7 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   selectedIssue: null,
   selectedDiscussion: null,
   pendingIssueDraft: null,
+  pendingCreate: null,
   selectedRunId: null,
   selectedFinding: null,
   findingsLimits: DEFAULT_FINDINGS_LIMITS,
@@ -217,8 +224,9 @@ function isEmptyDraft(d: CommitDraft): boolean {
 
 interface UiState {
   view: AppView;
-  /** Underlying view to return to when an overlay (settings, help, explore) closes. */
-  previousView: Exclude<AppView, "settings" | "help" | "explore">;
+  /** Underlying view to return to when an overlay (settings, help, explore, my
+   *  work) closes. */
+  previousView: Exclude<AppView, "settings" | "help" | "explore" | "mywork">;
   /** Settings section to jump to when opening Settings; null = leave as-is.
    *  Consumed (and cleared) by SettingsScreen once applied. */
   settingsTarget: SettingsTarget | null;
@@ -275,7 +283,7 @@ interface UiState {
   } | null;
   /** A create dialog requested from the palette / a New menu; the owning panel
    *  opens its dialog when this matches its kind, then clears it. Survives the
-   *  tab switch requestCreate performs. */
+   *  tab switch requestCreate performs, but not a repo switch (CROSS_REPO_RESET). */
   pendingCreate: CreateKind | null;
   /** The hoisted "create local PR" dialog: null = closed; an object = open, with
    *  optional branch seeds. Lives at RepositoryView level (outside the tab
@@ -354,6 +362,19 @@ interface UiState {
      *  fetching a pair the user never selected. */
     beforeSelect?: () => void;
   }) => void;
+  /** Open a repo (if not already open) and select one of its issues — the
+   *  cross-repo path the work inbox navigates by. ONE atomic update: a repo
+   *  switch landing apart from its selection pairs the new repo with the old
+   *  selection, and fetches an issue the user never picked. */
+  openIssue: (target: {
+    repoPath: string;
+    repoName: string;
+    number: number;
+    /** Store-external state this navigation depends on, run inside the SAME
+     *  view-transition callback as the selection (openPr's field of the same
+     *  name carries the full rationale). */
+    beforeSelect?: () => void;
+  }) => void;
   /** Open a repo (if not already) and land on a workflow run in the Actions tab —
    *  used by a notification's click-through. Atomic, like openPr. */
   openRun: (target: {
@@ -388,6 +409,8 @@ interface UiState {
   closeHelp: () => void;
   openExplore: () => void;
   closeExplore: () => void;
+  openMyWork: () => void;
+  closeMyWork: () => void;
   setRepoTab: (tab: RepoTab) => void;
   setCompareBranch: (branch: string | null) => void;
   selectPr: (pr: SelectedPr | null) => void;
@@ -588,6 +611,23 @@ export const useUiStore = create<UiState>()((set, get) => {
           pendingReviewId: target.reviewId ?? null,
         });
       }),
+    openIssue: (target) =>
+      startViewTransition(() => {
+        target.beforeSelect?.();
+        const switchingRepo = get().repoPath !== target.repoPath;
+        set({
+          view: "repo",
+          previousView: "repo",
+          repoPath: target.repoPath,
+          repoName: target.repoName,
+          repoTab: "issues",
+          // Switching repos clears the rest the way openRepo does; the issue
+          // comes AFTER the spread so the reset can't null the very selection
+          // this navigation is landing on.
+          ...(switchingRepo ? CROSS_REPO_RESET : {}),
+          selectedIssue: { kind: "remote", id: String(target.number) },
+        });
+      }),
     openRun: (target) =>
       startViewTransition(() => {
         const switchingRepo = get().repoPath !== target.repoPath;
@@ -652,7 +692,10 @@ export const useUiStore = create<UiState>()((set, get) => {
           settingsTarget: target ?? null,
           // Keep the underlying view when opening from another overlay.
           previousView:
-            view === "settings" || view === "help" || view === "explore"
+            view === "settings" ||
+            view === "help" ||
+            view === "explore" ||
+            view === "mywork"
               ? get().previousView
               : view,
         });
@@ -668,7 +711,10 @@ export const useUiStore = create<UiState>()((set, get) => {
           settingsTarget: "mcp-servers",
           mcpBrowseOpen: true,
           previousView:
-            view === "settings" || view === "help" || view === "explore"
+            view === "settings" ||
+            view === "help" ||
+            view === "explore" ||
+            view === "mywork"
               ? get().previousView
               : view,
         });
@@ -698,7 +744,10 @@ export const useUiStore = create<UiState>()((set, get) => {
         set({
           view: "help",
           previousView:
-            view === "settings" || view === "help" || view === "explore"
+            view === "settings" ||
+            view === "help" ||
+            view === "explore" ||
+            view === "mywork"
               ? get().previousView
               : view,
         });
@@ -713,12 +762,33 @@ export const useUiStore = create<UiState>()((set, get) => {
           // Keep the underlying view when opening Explore from another overlay,
           // so closing Explore returns to what was really underneath.
           previousView:
-            view === "settings" || view === "help" || view === "explore"
+            view === "settings" ||
+            view === "help" ||
+            view === "explore" ||
+            view === "mywork"
               ? get().previousView
               : view,
         });
       }),
     closeExplore: () =>
+      startViewTransition(() => set({ view: get().previousView })),
+    openMyWork: () =>
+      startViewTransition(() => {
+        const { view } = get();
+        set({
+          view: "mywork",
+          // Keep the underlying view when opening My work from another overlay,
+          // so closing it returns to what was really underneath.
+          previousView:
+            view === "settings" ||
+            view === "help" ||
+            view === "explore" ||
+            view === "mywork"
+              ? get().previousView
+              : view,
+        });
+      }),
+    closeMyWork: () =>
       startViewTransition(() => set({ view: get().previousView })),
     selectFile: (file) => set({ selectedFile: file }),
     setCommitDraft: (title, body) =>

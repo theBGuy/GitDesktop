@@ -95,6 +95,7 @@ import type {
   IssueType,
   MergePreview,
   Milestone,
+  MyWorkItem,
   OpLogEntry,
   OrphanedStash,
   PagesInfo,
@@ -1502,6 +1503,12 @@ export const forgeListRepos = (provider: ForgeProvider) =>
  *  list. */
 export const forgeOwnedNamespaces = (provider: ForgeProvider) =>
   invoke<string[]>("forge_owned_namespaces", { provider });
+
+/** The viewer's work items across every repository on a provider — the cross-repo
+ *  inbox's one fetch. Provider-scoped rather than repo-scoped: each row names the
+ *  repository it came from. */
+export const forgeMyWork = (provider: ForgeProvider) =>
+  invoke<MyWorkItem[]>("forge_my_work", { provider });
 
 // ── Explore: search / browse / fork / star / README ──────────────────────────
 //

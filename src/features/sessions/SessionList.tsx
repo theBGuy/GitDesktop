@@ -284,6 +284,7 @@ function ResearchMenuItems({
     // leave their view alone; the pending seed still lands and is consumed later.
     if (agentSelectionUnchanged(selectionAtClick)) clearAgentSelection();
     usePlanStore.getState().setPendingPlanSeed({
+      repoPath: cur.repoPath,
       issueTitle: cur.report.title,
       issueBody: brief ?? assembleSessionReport(cur),
       originResearchId: run.id,
@@ -544,11 +545,11 @@ export function SessionList({ repoPath }: { repoPath: string }) {
   const newSession = () => clearAgentSelection();
   const openPlanComposer = () => {
     clearAgentSelection();
-    setPendingPlanSeed({});
+    setPendingPlanSeed({ repoPath });
   };
   const openResearchComposer = () => {
     clearAgentSelection();
-    setPendingResearchSeed({});
+    setPendingResearchSeed({ repoPath });
   };
   useHotkeyAction("agent-new-session", newSession);
   useHotkeyAction("agent-plan", openPlanComposer);
