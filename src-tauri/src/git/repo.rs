@@ -24,12 +24,17 @@ pub struct RepoOwner {
     /// there's no host or it's unrecognized (the UI labels those GitHub,
     /// matching the backend's gh-authoritative routing).
     pub provider: Option<String>,
+    /// The repo name as the `origin` remote spells it (e.g. "GitDesktop") — the
+    /// REMOTE identity, unlike `RepoInfo.name`, which is the checkout's folder
+    /// basename and can differ (a renamed clone, a worktree directory). `None`
+    /// when there's no origin remote or its URL doesn't parse.
+    pub repo_name: Option<String>,
 }
 
-/// Owner segment + host of a git remote URL — handles
+/// Owner segment + host + repo name of a git remote URL — handles
 /// `https://host/owner/repo(.git)` and scp-style `git@host:owner/repo(.git)`.
-/// None if it can't be parsed.
-fn parse_owner_host(url: &str) -> (Option<String>, Option<String>) {
+/// None per component if it can't be parsed.
+fn parse_owner_host(url: &str) -> (Option<String>, Option<String>, Option<String>) {
     let url = url.trim().trim_end_matches('/');
     let url = url.strip_suffix(".git").unwrap_or(url);
     // Split into host and the `owner/repo` path (scheme or scp form).
@@ -37,7 +42,7 @@ fn parse_owner_host(url: &str) -> (Option<String>, Option<String>) {
         let rest = &url[idx + 3..];
         match rest.split_once('/') {
             Some((h, p)) => (h, p),
-            None => return (None, None),
+            None => return (None, None, None),
         }
     } else if let Some(colon) = url.rfind(':') {
         // A Windows drive-path remote (`C:\path\to\repo`, `C:/path/to/repo`)
@@ -46,12 +51,12 @@ fn parse_owner_host(url: &str) -> (Option<String>, Option<String>) {
         // persist a bogus host ("c") + owner ("to") onto RecentRepo.
         let head = &url[..colon];
         if head.len() == 1 && head.as_bytes()[0].is_ascii_alphabetic() {
-            return (None, None);
+            return (None, None, None);
         }
         let host = head.rsplit('@').next().unwrap_or(head);
         (host, &url[colon + 1..])
     } else {
-        return (None, None);
+        return (None, None, None);
     };
     // Strip credentials and a port from the host.
     let host = host.rsplit('@').next().unwrap_or(host);
@@ -69,10 +74,12 @@ fn parse_owner_host(url: &str) -> (Option<String>, Option<String>) {
     };
     let host = host.to_ascii_lowercase();
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    // owner is the segment immediately before the repo name.
+    // owner is the segment immediately before the repo name; a single-segment
+    // path carries neither, so both take the same guard.
     let owner = (segs.len() >= 2).then(|| segs[segs.len() - 2].to_string());
+    let repo_name = (segs.len() >= 2).then(|| segs[segs.len() - 1].to_string());
     let host = (!host.is_empty()).then_some(host);
-    (owner, host)
+    (owner, host, repo_name)
 }
 
 /// Resolves the owner + host + provider for each repo path (from its `origin`
@@ -83,7 +90,7 @@ pub async fn git_repo_owners(repo_paths: Vec<String>) -> AppResult<Vec<RepoOwner
     let glab_hosts = crate::forge::glab::known_hosts().await;
     let mut out = Vec::with_capacity(repo_paths.len());
     for path in repo_paths {
-        let (owner, host) = match run_git_raw(
+        let (owner, host, repo_name) = match run_git_raw(
             Some(&path),
             &["remote", "get-url", "origin"],
             DEFAULT_TIMEOUT,
@@ -91,7 +98,7 @@ pub async fn git_repo_owners(repo_paths: Vec<String>) -> AppResult<Vec<RepoOwner
         .await
         {
             Ok(res) if res.code == 0 => parse_owner_host(res.stdout_lossy().trim()),
-            _ => (None, None),
+            _ => (None, None, None),
         };
         let provider = host
             .as_deref()
@@ -102,6 +109,7 @@ pub async fn git_repo_owners(repo_paths: Vec<String>) -> AppResult<Vec<RepoOwner
             owner,
             host,
             provider,
+            repo_name,
         });
     }
     Ok(out)
@@ -463,29 +471,68 @@ mod clone_dir_tests {
 
 #[cfg(test)]
 mod owner_tests {
-    use super::parse_owner_host;
+    use super::{parse_owner_host, RepoOwner};
 
     #[test]
-    fn parses_owner_and_host_from_common_remote_forms() {
+    fn parses_owner_host_and_repo_name_from_common_remote_forms() {
         assert_eq!(
             parse_owner_host("https://github.com/octocat/repo.git"),
-            (Some("octocat".into()), Some("github.com".into()))
+            (
+                Some("octocat".into()),
+                Some("github.com".into()),
+                Some("repo".into())
+            )
+        );
+        // Without the `.git` suffix, and with a trailing slash — both trimmed
+        // before the segments are cut, so the name never carries either.
+        assert_eq!(
+            parse_owner_host("https://github.com/octocat/repo"),
+            (
+                Some("octocat".into()),
+                Some("github.com".into()),
+                Some("repo".into())
+            )
+        );
+        assert_eq!(
+            parse_owner_host("https://github.com/octocat/repo.git/"),
+            (
+                Some("octocat".into()),
+                Some("github.com".into()),
+                Some("repo".into())
+            )
         );
         assert_eq!(
             parse_owner_host("git@gitlab.com:group/repo.git"),
-            (Some("group".into()), Some("gitlab.com".into()))
+            (
+                Some("group".into()),
+                Some("gitlab.com".into()),
+                Some("repo".into())
+            )
         );
         // Subgroups: the owner is the segment before the repo name.
         assert_eq!(
             parse_owner_host("https://gitlab.com/group/sub/repo"),
-            (Some("sub".into()), Some("gitlab.com".into()))
+            (
+                Some("sub".into()),
+                Some("gitlab.com".into()),
+                Some("repo".into())
+            )
         );
         // Credentials + port strip from the host.
         assert_eq!(
             parse_owner_host("https://user@gitlab.acme.com:8443/g/r.git"),
-            (Some("g".into()), Some("gitlab.acme.com".into()))
+            (
+                Some("g".into()),
+                Some("gitlab.acme.com".into()),
+                Some("r".into())
+            )
         );
-        assert_eq!(parse_owner_host("not-a-url"), (None, None));
+        assert_eq!(parse_owner_host("not-a-url"), (None, None, None));
+        // A single-segment path addresses no repo: neither owner nor name.
+        assert_eq!(
+            parse_owner_host("https://github.com/repo.git"),
+            (None, Some("github.com".into()), None)
+        );
     }
 
     #[test]
@@ -494,31 +541,62 @@ mod owner_tests {
         // provider routing compares two different strings for the same instance.
         assert_eq!(
             parse_owner_host("https://[2001:DB8::1]:8443/owner/repo.git"),
-            (Some("owner".into()), Some("[2001:db8::1]".into()))
+            (
+                Some("owner".into()),
+                Some("[2001:db8::1]".into()),
+                Some("repo".into())
+            )
         );
         // scp form: `rfind(':')` lands past the address, on the path separator.
         assert_eq!(
             parse_owner_host("git@[2001:db8::1]:owner/repo.git"),
-            (Some("owner".into()), Some("[2001:db8::1]".into()))
+            (
+                Some("owner".into()),
+                Some("[2001:db8::1]".into()),
+                Some("repo".into())
+            )
         );
         // A malformed bracket is no host at all — the path still parses.
         assert_eq!(
             parse_owner_host("https://[2001:db8::1/owner/repo"),
-            (Some("owner".into()), None)
+            (Some("owner".into()), None, Some("repo".into()))
         );
         // Nor is a span followed by something that isn't a port.
         assert_eq!(
             parse_owner_host("https://[2001:db8::1]junk/owner/repo"),
-            (Some("owner".into()), None)
+            (Some("owner".into()), None, Some("repo".into()))
         );
     }
 
     #[test]
-    fn windows_drive_path_remotes_have_no_owner_or_host() {
+    fn windows_drive_path_remotes_have_no_owner_host_or_repo_name() {
         // A local-path origin (backslash or forward-slash form) must not be
         // misparsed as scp-style `host:owner/repo`.
-        assert_eq!(parse_owner_host(r"C:\path\to\repo"), (None, None));
-        assert_eq!(parse_owner_host("C:/path/to/repo"), (None, None));
-        assert_eq!(parse_owner_host("c:/x/y"), (None, None));
+        assert_eq!(parse_owner_host(r"C:\path\to\repo"), (None, None, None));
+        assert_eq!(parse_owner_host("C:/path/to/repo"), (None, None, None));
+        assert_eq!(parse_owner_host("c:/x/y"), (None, None, None));
+    }
+
+    /// The frontend matches inbox rows to local clones on `repoName`, so the
+    /// wire key set is pinned here rather than trusted to `rename_all`.
+    #[test]
+    fn repo_owner_serializes_to_the_camel_case_wire_shape() {
+        let wire = serde_json::to_value(RepoOwner {
+            path: "C:/repos/GitDesktop".into(),
+            owner: Some("theBGuy".into()),
+            host: Some("github.com".into()),
+            provider: Some("github".into()),
+            repo_name: Some("GitDesktop".into()),
+        })
+        .unwrap();
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["host", "owner", "path", "provider", "repoName"]);
+        assert_eq!(wire.get("repoName").and_then(|v| v.as_str()), Some("GitDesktop"));
     }
 }

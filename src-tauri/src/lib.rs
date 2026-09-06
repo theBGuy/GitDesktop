@@ -543,6 +543,7 @@ pub fn run() {
             github::pr::gh_pr_minimize_comment,
             github::pr::gh_pr_unminimize_comment,
             github::pr::gh_pr_discard_pending_review,
+            github::pr::gh_pr_head_ref,
             github::pr::gh_pr_update_branch,
             github::pr::gh_pr_base_divergence,
             github::pr::gh_pr_checkout,

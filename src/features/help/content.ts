@@ -255,8 +255,9 @@ From here:
     body: `# My work
 
 **My work** is a cross-repo inbox: your open pull requests and issues on GitHub,
-newest first, without opening a repository to go looking. Open it from the **My work**
-button on the welcome screen, or from the command palette (*My work*).
+newest first, without opening a repository to go looking. Open it with
+{{kbd:open-my-work}}, from the **My work** button on the welcome screen, or from the
+command palette (*My work*).
 **Back** in the header, or Esc, closes the inbox and returns you to the screen
 underneath.
 
@@ -272,9 +273,9 @@ title, the repository it lives in, and when it last changed. The number beside t
 title in the header is how many items came back, and each tab carries its own count.
 
 Rows are ordered by **most recently updated**. The search fetches a single page of
-results, so a big inbox won't arrive whole. When the page comes back full, a note
-says so at the bottom: *This view fetches one page of results. Filter to narrow the
-list.* You'll see it under the rows, and under **No items match** as well, since a
+results, so a big inbox won't arrive whole. When there may be more than the page holds,
+a note says so at the bottom: *This view fetches one page of results. Filter to narrow
+the list.* You'll see it under the rows, and under **No items match** as well, since a
 filter that finds nothing is when an item off the page matters most.
 
 ## Narrowing and opening
@@ -291,14 +292,28 @@ leaving it. Clicking a row does the same thing.
 Where a row opens depends on whether GitDesktop recognizes its repository as one of
 yours. An item from a repository you've added usually opens **in the app**: GitDesktop
 switches to that repository and lands on the pull request or issue. Everything else
-opens **on GitHub in your browser**. The match reads each repo's resolved owner and
-host, so one you added moments ago, or cloned into a folder named something else, can
-still go to the browser. The **↗** on a row is the signal to trust: it marks every row
-that opens on GitHub, so you know which you're getting before you press Enter. The
-inbox itself changes nothing: it finds the item and hands you to the place where you
-can act on it.
+opens **on GitHub in your browser**. The match reads each repo's resolved owner, host,
+and the name its remote spells, so a clone sitting in a folder you renamed still counts
+as yours once GitDesktop has looked at it; one you added moments ago, before any of that
+is resolved, can still go to the browser. The **↗** on a row is the signal to trust: it
+marks every row that opens on GitHub, so you know which you're getting before you press
+Enter. The inbox itself changes nothing: it finds the item and hands you to the place
+where you can act on it.
 
-**Right-click** a row for **Open on GitHub** and **Copy link**.
+A pull request usually lands where its branch already is. When one of the repository's
+worktrees has that pull request's head branch checked out, GitDesktop opens it there
+rather than in the main workspace, so you arrive in the checkout the work lives in.
+Confirming the branch really belongs to that pull request takes a quick background
+check, and whatever it can't confirm opens the main workspace instead: a pull
+request from a fork, a branch that isn't checked out anywhere, a slow network. A row
+shows a small spinner while GitDesktop works out where to open it. Issues skip the
+branch check and open in the main workspace.
+
+{{Secondaryclick}} a row for **Open on GitHub** and **Copy link**; on a pull request
+from a repository you've added, **Open in main workspace** heads the menu and skips
+the worktree for that one open. The menu opens from the keyboard too, with
+{{key:shift+f10}} or the Menu key on the highlighted row. {{key:shift+enter}} opens
+the main workspace directly, Shift-click from the pointer.
 
 ## Keeping it current
 

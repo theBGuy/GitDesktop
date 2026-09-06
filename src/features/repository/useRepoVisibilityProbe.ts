@@ -11,9 +11,10 @@ import { settingsKeys } from "@/lib/settings/queries";
 /**
  * Probe a repo's hosted visibility + fork provenance and persist it, returning the
  * fresh probe — or `null` when no provider resolves (remote removed/absent), which
- * clears every derived field so a stale badge clears. Owner/host/provider are
- * persisted here too, so a fresh clone shows its provider label, host, and fork
- * badge on the FIRST open, without a RepoList render backfilling them.
+ * clears every derived field so a stale badge clears. Owner/host/provider plus the
+ * remote's repo name are persisted here too, so a fresh clone shows its provider
+ * label, host, and fork badge on the FIRST open, without a RepoList render
+ * backfilling them.
  *
  * Shared by the ambient open-time probe below and the Danger zone's "Re-check fork
  * status", which therefore also heals the provider label after the user re-points
@@ -29,7 +30,7 @@ export async function probeAndPersistVisibility(
   const [owner] = await gitRepoOwners([repoPath]);
   if (!owner?.provider) {
     // Clearing the provider also clears visibility/isFork/forkParent (they can't
-    // outlive it) — all six derived fields in one write. `owner` is undefined when
+    // outlive it) — all seven derived fields in one write. `owner` is undefined when
     // gitRepoOwners returns no entry (no remote at all); the null-filled entry
     // still targets this path, so the clear lands.
     await persistRepoOwners([
@@ -38,6 +39,7 @@ export async function probeAndPersistVisibility(
         owner: owner?.owner ?? null,
         host: owner?.host ?? null,
         provider: null,
+        repoName: owner?.repoName ?? null,
       },
     ]);
     return null;

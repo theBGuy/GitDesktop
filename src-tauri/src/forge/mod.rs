@@ -933,7 +933,7 @@ pub async fn forge_owned_namespaces(provider: Provider) -> AppResult<Vec<String>
 #[tauri::command]
 pub async fn forge_my_work(
     provider: Provider,
-) -> AppResult<Vec<crate::github::my_work::MyWorkItem>> {
+) -> AppResult<crate::github::my_work::MyWorkPage> {
     match provider {
         Provider::GitHub => crate::github::my_work::my_work().await,
         Provider::GitLab => Err(AppError::InvalidArgument(

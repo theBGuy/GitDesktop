@@ -4,14 +4,6 @@ import type { RecentRepo } from "@/lib/settings/api";
 /** Which slice of the inbox the tab strip is showing. */
 export type MyWorkTab = "all" | "prs" | "issues";
 
-/** The backend's page cap (each search leg's `--limit` and the merged page's
- *  truncation) — mirrors `MY_WORK_LIMIT` in `src-tauri/src/github/my_work.rs`;
- *  the two must change together. A full page is the signal the feed MAY be
- *  truncated, never a count of what exists: unaddressable hits are dropped
- *  server-side, so a truncated page can arrive short and read as complete —
- *  which is why the note states the constraint, not a number. */
-export const MY_WORK_LIMIT = 200;
-
 export const MY_WORK_LISTBOX_ID = "my-work-listbox";
 
 /** Stable DOM id per row, so the filter input's aria-activedescendant can point
@@ -20,13 +12,15 @@ export const myWorkOptionId = (url: string) =>
   `my-work-${url.replace(/[^\w-]/g, "_")}`;
 
 /**
- * A recent repository that looks like this item's, or null. `RecentRepo.name`
- * is the checkout's FOLDER basename, not the remote's repo name, so this is a
- * heuristic in both directions: a clone in a renamed folder (or a worktree)
- * never matches and opens in the browser, and a folder that happens to be named
- * after a different repo of the same owner can match wrongly. `owner`/`host`
- * resolve in the background, so a recent missing either never matches, as does
- * an item whose URL had no parseable authority (empty host).
+ * A recent repository that looks like this item's, or null. Matches on
+ * `RecentRepo.repoName` — the name the record's origin URL spells — so a clone
+ * in a renamed folder resolves exactly. Rows the owner probe hasn't touched yet
+ * carry no `repoName` and fall back to `name`, the FOLDER basename, which stays
+ * a heuristic in both directions: a renamed clone never matches and opens in the
+ * browser, and a folder named after a different repo of the same owner can match
+ * wrongly. `owner`/`host` resolve in the background, so a recent missing either
+ * never matches, as does an item whose URL had no parseable authority (empty
+ * host).
  */
 export function matchLocalRepo(
   item: MyWorkItem,
@@ -43,7 +37,7 @@ export function matchLocalRepo(
         !!r.owner &&
         r.host.toLowerCase() === host &&
         r.owner.toLowerCase() === owner &&
-        r.name.toLowerCase() === name,
+        (r.repoName ?? r.name).toLowerCase() === name,
     ) ?? null
   );
 }

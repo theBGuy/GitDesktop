@@ -86,9 +86,9 @@ struct GhSearchItem {
 const MY_WORK_FIELDS: &str = "number,title,isPullRequest,repository,updatedAt,url,author";
 
 /// The whole page this surface fetches, per leg and after the merge. There is no
-/// pagination, so this is also the point where the inbox silently truncates.
-/// `MY_WORK_LIMIT` in `src/features/mywork/mywork-utils.ts` hand-mirrors this
-/// number to decide when to show the cap note, so the two must change together.
+/// pagination, so this is also the point where the inbox truncates — the wire
+/// envelope's `truncated` flag reports that to the frontend, so the number
+/// itself is not mirrored there and can change on its own.
 const MY_WORK_LIMIT: usize = 200;
 
 /// Leg 1. GitHub's `involves:` is author OR assignee OR mentions OR commenter —
@@ -171,39 +171,75 @@ fn item_from_intake(raw: GhSearchItem, default_is_pull_request: bool) -> Option<
     })
 }
 
+/// One leg's parsed result: its wire items, plus how many elements gh actually
+/// returned. The raw count is the leg's own truncation signal and cannot be
+/// recovered from `items` — dropped hits ([`item_from_intake`]) already shrank
+/// that.
+struct MyWorkLeg {
+    items: Vec<MyWorkItem>,
+    raw_len: usize,
+}
+
 /// Parse one leg's `gh search … --json` stdout into wire items. Per-hit
 /// tolerance: each element is deserialized on its own so one malformed hit is
 /// skipped rather than sinking the batch. A top-level parse failure IS an error —
 /// an empty inbox and unreadable output must not look alike to the caller.
-fn parse_my_work(stdout: &str, default_is_pull_request: bool) -> AppResult<Vec<MyWorkItem>> {
+fn parse_my_work(stdout: &str, default_is_pull_request: bool) -> AppResult<MyWorkLeg> {
     let raw: Vec<Value> = serde_json::from_str(stdout)
         .map_err(|e| AppError::Gh(format!("could not parse your GitHub work items: {e}")))?;
-    Ok(raw
-        .into_iter()
-        .filter_map(|v| serde_json::from_value::<GhSearchItem>(v).ok())
-        .filter_map(|raw| item_from_intake(raw, default_is_pull_request))
-        .collect())
+    let raw_len = raw.len();
+    Ok(MyWorkLeg {
+        items: raw
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<GhSearchItem>(v).ok())
+            .filter_map(|raw| item_from_intake(raw, default_is_pull_request))
+            .collect(),
+        raw_len,
+    })
+}
+
+/// One page of the inbox, and whether anything was left off it: `truncated` is
+/// true when either search leg hit its own server-side cap or the merged union
+/// overshot the page — so it can be true on a page that arrives short.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyWorkPage {
+    pub items: Vec<MyWorkItem>,
+    pub truncated: bool,
 }
 
 /// Merge the two legs into one page: dedupe by URL (a PR can be both involving
 /// and review-requested), newest first, truncated to [`MY_WORK_LIMIT`] so the
 /// wire contract stays one page however much the union overshoots.
 ///
+/// A leg that came back with as many elements as it ASKED for is itself a
+/// truncation: gh may have had more, and the page can still land short of the
+/// limit once dedupe and dropped hits take their cut, so the union's length
+/// alone can't see it. The reverse error — a leg holding exactly the limit with
+/// nothing more on the server — reports a cap that isn't there, and that is the
+/// safe direction: an inbox that hides items must never look complete.
+///
 /// The sort is a plain string compare because gh emits `updatedAt` as
 /// Z-suffixed RFC 3339 — fixed width, one offset, so lexical order IS
 /// chronological order. An item with no timestamp sorts last rather than
 /// claiming to be the newest.
-fn merge_my_work(involves: Vec<MyWorkItem>, review_requested: Vec<MyWorkItem>) -> Vec<MyWorkItem> {
+fn merge_my_work(involves: MyWorkLeg, review_requested: MyWorkLeg) -> MyWorkPage {
+    let leg_capped =
+        involves.raw_len >= MY_WORK_LIMIT || review_requested.raw_len >= MY_WORK_LIMIT;
     let mut seen: HashSet<String> = HashSet::new();
     let mut merged: Vec<MyWorkItem> = Vec::new();
-    for item in involves.into_iter().chain(review_requested) {
+    for item in involves.items.into_iter().chain(review_requested.items) {
         if seen.insert(item.url.clone()) {
             merged.push(item);
         }
     }
     merged.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let truncated = leg_capped || merged.len() > MY_WORK_LIMIT;
     merged.truncate(MY_WORK_LIMIT);
-    merged
+    MyWorkPage {
+        items: merged,
+        truncated,
+    }
 }
 
 /// Every open pull request and issue involving the signed-in GitHub user,
@@ -212,7 +248,7 @@ fn merge_my_work(involves: Vec<MyWorkItem>, review_requested: Vec<MyWorkItem>) -
 /// Sequential rather than concurrent: two `gh` spawns keep the failure mode
 /// simple, and either leg failing fails the call rather than half-filling the
 /// inbox.
-pub async fn my_work() -> AppResult<Vec<MyWorkItem>> {
+pub async fn my_work() -> AppResult<MyWorkPage> {
     let involves = run_gh(None, INVOLVES_ARGS, GH_NETWORK_TIMEOUT).await?;
     let involves = parse_my_work(&involves.stdout_lossy(), false)?;
     let review_requested = run_gh(None, REVIEW_REQUESTED_ARGS, GH_NETWORK_TIMEOUT).await?;
@@ -224,8 +260,8 @@ pub async fn my_work() -> AppResult<Vec<MyWorkItem>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_my_work, parse_my_work, INVOLVES_ARGS, MY_WORK_FIELDS, MY_WORK_LIMIT,
-        REVIEW_REQUESTED_ARGS,
+        merge_my_work, parse_my_work, MyWorkItem, MyWorkLeg, MyWorkPage, INVOLVES_ARGS,
+        MY_WORK_FIELDS, MY_WORK_LIMIT, REVIEW_REQUESTED_ARGS,
     };
     use serde_json::{json, Value};
 
@@ -275,7 +311,7 @@ mod tests {
     /// key set is pinned here rather than trusted to the `rename_all` attribute.
     #[test]
     fn fixture_serializes_to_the_camel_case_wire_shape() {
-        let items = parse_my_work(GH_FIXTURE, false).unwrap();
+        let items = parse_my_work(GH_FIXTURE, false).unwrap().items;
         assert_eq!(items.len(), 3);
 
         let wire = serde_json::to_value(&items[0]).unwrap();
@@ -317,6 +353,24 @@ mod tests {
         // through unchanged.
         assert!(!items[2].is_pull_request);
         assert_eq!(items[1].author_login.as_deref(), Some("dependabot[bot]"));
+
+        // The items ride inside the page envelope, whose own two keys the
+        // frontend reads by name.
+        let page = serde_json::to_value(MyWorkPage {
+            items,
+            truncated: true,
+        })
+        .unwrap();
+        let mut page_keys: Vec<&str> = page
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        page_keys.sort_unstable();
+        assert_eq!(page_keys, ["items", "truncated"]);
+        assert_eq!(page.get("truncated").and_then(Value::as_bool), Some(true));
+        assert_eq!(page.pointer("/items/0"), Some(&wire));
     }
 
     #[test]
@@ -338,7 +392,7 @@ mod tests {
             },
         ])
         .to_string();
-        let items = parse_my_work(&raw, false).unwrap();
+        let items = parse_my_work(&raw, false).unwrap().items;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].repo_owner, "my.org");
         assert_eq!(items[0].repo_name, "repo");
@@ -376,7 +430,7 @@ mod tests {
 
         for drop in &drops {
             let batch = Value::Array(vec![drop.clone(), good.clone()]);
-            let items = parse_my_work(&batch.to_string(), false).unwrap();
+            let items = parse_my_work(&batch.to_string(), false).unwrap().items;
             assert_eq!(items.len(), 1, "should have dropped only {drop}");
             assert_eq!(items[0].number, 7);
         }
@@ -393,7 +447,7 @@ mod tests {
             "author": null
         }])
         .to_string();
-        let items = parse_my_work(&raw, false).unwrap();
+        let items = parse_my_work(&raw, false).unwrap().items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].author_login, None);
         // Absent, not a fabricated timestamp.
@@ -402,7 +456,9 @@ mod tests {
 
     #[test]
     fn my_work_distinguishes_an_empty_inbox_from_unreadable_output() {
-        assert!(parse_my_work("[]", false).unwrap().is_empty());
+        let empty = parse_my_work("[]", false).unwrap();
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.raw_len, 0);
         assert!(parse_my_work("not json", false).is_err());
         assert!(parse_my_work("{\"items\":[]}", false).is_err());
     }
@@ -426,7 +482,7 @@ mod tests {
         ])
         .to_string();
 
-        let review_leg = parse_my_work(&raw, true).unwrap();
+        let review_leg = parse_my_work(&raw, true).unwrap().items;
         assert!(
             review_leg.iter().all(|i| i.is_pull_request),
             "{review_leg:?}"
@@ -434,7 +490,7 @@ mod tests {
 
         // The involves leg keeps the opposite default: there an omitted flag
         // really can mean an issue.
-        let involves_leg = parse_my_work(&raw, false).unwrap();
+        let involves_leg = parse_my_work(&raw, false).unwrap().items;
         assert!(involves_leg[0].is_pull_request);
         assert!(!involves_leg[1].is_pull_request);
     }
@@ -448,7 +504,7 @@ mod tests {
                 "url": url, "updatedAt": updated
             }])
             .to_string();
-            parse_my_work(&raw, true).unwrap().pop().unwrap()
+            parse_my_work(&raw, true).unwrap().items.pop().unwrap()
         };
 
         let shared = "https://github.com/octo/repo/pull/300";
@@ -472,14 +528,21 @@ mod tests {
             ),
         ];
 
-        let merged = merge_my_work(involves, review_requested);
-        assert_eq!(merged.len(), 3, "the shared URL should appear once");
+        // Neither leg came near its cap, so nothing here is truncation.
+        let leg = |items: Vec<MyWorkItem>| MyWorkLeg {
+            raw_len: items.len(),
+            items,
+        };
+        let page = merge_my_work(leg(involves), leg(review_requested));
+        assert_eq!(page.items.len(), 3, "the shared URL should appear once");
         assert_eq!(
-            merged.iter().map(|i| i.number).collect::<Vec<_>>(),
+            page.items.iter().map(|i| i.number).collect::<Vec<_>>(),
             [2, 309, 300],
             "merged page must be newest-first ACROSS both legs",
         );
-        assert_eq!(merged.iter().filter(|i| i.url == shared).count(), 1);
+        assert_eq!(page.items.iter().filter(|i| i.url == shared).count(), 1);
+        // A union well under the cap is the whole inbox.
+        assert!(!page.truncated);
     }
 
     /// The union can overshoot the per-leg limit, so the merge is where the wire
@@ -500,20 +563,72 @@ mod tests {
                 .collect();
             parse_my_work(&Value::Array(raw).to_string(), true).unwrap()
         };
+        let empty = || parse_my_work("[]", true).unwrap();
 
-        let merged = merge_my_work(leg("a", MY_WORK_LIMIT, 9), leg("b", MY_WORK_LIMIT, 1));
+        let page = merge_my_work(leg("a", MY_WORK_LIMIT, 9), leg("b", MY_WORK_LIMIT, 1));
         assert_eq!(
-            merged.len(),
+            page.items.len(),
             MY_WORK_LIMIT,
             "400 distinct hits must cap at 200"
         );
+        assert!(page.truncated, "an over-limit union must report truncation");
         // Truncation keeps the NEWEST page, not the first leg wholesale.
         assert!(
-            merged
+            page.items
                 .windows(2)
                 .all(|w| w[0].updated_at >= w[1].updated_at),
             "truncated page must still be newest-first",
         );
-        assert_eq!(merged[0].updated_at, "2026-09-01T00:59:00Z");
+        assert_eq!(page.items[0].updated_at, "2026-09-01T00:59:00Z");
+
+        // A leg that filled its own `--limit` IS the truncation event, even
+        // though the page lands exactly on the cap and never overshoots it —
+        // gh had no way to tell us what it left behind.
+        let at_limit = merge_my_work(leg("a", MY_WORK_LIMIT, 9), empty());
+        assert_eq!(at_limit.items.len(), MY_WORK_LIMIT);
+        assert!(
+            at_limit.truncated,
+            "a leg that came back full may have had more"
+        );
+
+        // The review-requested leg's cap is its own truncation event — the
+        // disjunction's second arm must hold without the first.
+        let b_capped = merge_my_work(empty(), leg("b", MY_WORK_LIMIT, 1));
+        assert!(b_capped.truncated, "either leg's full page reports the cap");
+
+        // One short of the cap, gh returned everything it had.
+        let under = merge_my_work(leg("a", MY_WORK_LIMIT - 1, 9), empty());
+        assert_eq!(under.items.len(), MY_WORK_LIMIT - 1);
+        assert!(!under.truncated);
+    }
+
+    /// The reachable arm the union's length can never see: a leg fills its cap,
+    /// dropped hits shrink it below the limit, and the merged page arrives short
+    /// while items are still missing from the server.
+    #[test]
+    fn merge_reports_a_capped_leg_whose_page_arrives_short() {
+        let mut raw: Vec<Value> = (0..MY_WORK_LIMIT - 5)
+            .map(|i| {
+                json!({
+                    "number": i + 1, "title": "t", "isPullRequest": true,
+                    "repository": {"nameWithOwner": "octo/repo"},
+                    "url": format!("https://github.com/octo/repo/pull/{i}"),
+                    "updatedAt": "2026-09-01T00:00:00Z",
+                })
+            })
+            .collect();
+        // Five unaddressable hits: gh still counted them against the limit.
+        raw.extend((0..5).map(|_| json!({"number": 1, "title": "t"})));
+        assert_eq!(raw.len(), MY_WORK_LIMIT);
+
+        let capped = parse_my_work(&Value::Array(raw).to_string(), true).unwrap();
+        assert_eq!(capped.items.len(), MY_WORK_LIMIT - 5, "five hits dropped");
+
+        let page = merge_my_work(capped, parse_my_work("[]", true).unwrap());
+        assert_eq!(page.items.len(), MY_WORK_LIMIT - 5);
+        assert!(
+            page.truncated,
+            "a short page from a capped leg still hides items"
+        );
     }
 }

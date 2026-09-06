@@ -182,10 +182,18 @@ export function ExploreScreen() {
           aria-label="Search repositories"
           role="combobox"
           aria-expanded={flatRepos.length > 0}
-          aria-controls={EXPLORE_LISTBOX_ID}
+          // Same predicate as aria-expanded: the listbox only mounts in the
+          // results branch, so pointing at its id from the loading / error /
+          // empty states would reference a node that isn't there.
+          aria-controls={flatRepos.length > 0 ? EXPLORE_LISTBOX_ID : undefined}
           aria-autocomplete="list"
+          // The id has to exist in the mounted list: `selected` outlives a query
+          // / mode / sort change (it resets only on a provider switch), so gate
+          // on membership instead of pointing at a row that is no longer there.
           aria-activedescendant={
-            selected ? exploreOptionId(selected.fullName) : undefined
+            selected && flatRepos.some((r) => r.fullName === selected.fullName)
+              ? exploreOptionId(selected.fullName)
+              : undefined
           }
           className="h-8 min-w-40 flex-1"
         />
@@ -460,9 +468,6 @@ function ResultsList({
         role="listbox"
         id={EXPLORE_LISTBOX_ID}
         aria-label="Search results"
-        aria-activedescendant={
-          selected ? exploreOptionId(selected.fullName) : undefined
-        }
       >
         <div
           className="relative w-full"

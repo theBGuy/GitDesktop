@@ -171,6 +171,7 @@ export function usePersistRepoOwners() {
         owner: string | null;
         host: string | null;
         provider: string | null;
+        repoName: string | null;
       }[],
     ) => persistRepoOwners(owners),
     onSuccess: () =>

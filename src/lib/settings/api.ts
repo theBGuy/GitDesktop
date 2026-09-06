@@ -20,6 +20,11 @@ export interface RecentRepo {
   /** The origin remote's host (e.g. "gitlab.com"), stored alongside `owner` so
    *  the context menu names the right provider from the first frame. */
   host?: string;
+  /** Repo name as the origin URL spells it, as opposed to `name` — the
+   *  checkout's FOLDER basename, which a renamed clone spells differently.
+   *  Backfilled by the owner probe like `owner`/`host`, so it is absent until a
+   *  probe has touched the row, and an empty remote clears it. */
+  repoName?: string;
   /** The provider that host routes to ("github"/"gitlab"/"bitbucket") — resolved
    *  backend-side (it knows glab's self-managed hosts) and stored so labels are right from
    *  the first frame. Absent until first resolved. */
@@ -495,10 +500,10 @@ export function addRecentRepo(repo: {
 }
 
 /**
- * Stores resolved repo owners (+ hosts) onto the matching recent-repo records so the repo
- * list groups synchronously and the context menu names the right provider from the first
- * frame. Touches only records whose stored values changed (an empty remote clears them) —
- * a no-op write would loop with its own settings refetch.
+ * Stores resolved repo owners (+ hosts + remote repo names) onto the matching recent-repo
+ * records so the repo list groups synchronously and the context menu names the right
+ * provider from the first frame. Touches only records whose stored values changed (an empty
+ * remote clears them) — a no-op write would loop with its own settings refetch.
  *
  * Matched by worktree-stable identity ({@link repoIdentity}, git common dir), not raw
  * checkout path, so a probe from one checkout updates EVERY row for the same underlying
@@ -510,6 +515,7 @@ export function persistRepoOwners(
     owner: string | null;
     host: string | null;
     provider: string | null;
+    repoName: string | null;
   }[],
 ): Promise<void> {
   if (owners.length === 0) return Promise.resolve();
@@ -533,6 +539,7 @@ export function persistRepoOwners(
       const owner = resolved.owner || undefined;
       const host = resolved.host || undefined;
       const provider = resolved.provider || undefined;
+      const repoName = resolved.repoName || undefined;
       // Visibility and fork provenance come from the provider; when the provider is being
       // cleared (remote removed) they can't outlive it — drop them so no stale badge
       // lingers on a now-local-only repo.
@@ -543,13 +550,23 @@ export function persistRepoOwners(
         owner === r.owner &&
         host === r.host &&
         provider === r.provider &&
+        repoName === r.repoName &&
         visibility === r.visibility &&
         isFork === r.isFork &&
         forkParent === r.forkParent
       )
         return r;
       changed = true;
-      return { ...r, owner, host, provider, visibility, isFork, forkParent };
+      return {
+        ...r,
+        owner,
+        host,
+        provider,
+        repoName,
+        visibility,
+        isFork,
+        forkParent,
+      };
     });
     if (!changed) return;
     await saveSettings({ ...settings, recentRepos });

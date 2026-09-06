@@ -95,13 +95,14 @@ import type {
   IssueType,
   MergePreview,
   Milestone,
-  MyWorkItem,
+  MyWorkPage,
   OpLogEntry,
   OrphanedStash,
   PagesInfo,
   PrBaseDivergence,
   PrCiStatus,
   PrDetails,
+  PrHeadRef,
   PrInfo,
   PrMergeability,
   PrMergeabilityState,
@@ -1510,7 +1511,7 @@ export const forgeOwnedNamespaces = (provider: ForgeProvider) =>
  *  inbox's one fetch. Provider-scoped rather than repo-scoped: each row names the
  *  repository it came from. */
 export const forgeMyWork = (provider: ForgeProvider) =>
-  invoke<MyWorkItem[]>("forge_my_work", { provider });
+  invoke<MyWorkPage>("forge_my_work", { provider });
 
 // ── Explore: search / browse / fork / star / README ──────────────────────────
 //
@@ -2809,6 +2810,11 @@ export const ghPrBaseDivergence = (
   lens: RemoteLens,
 ) =>
   invoke<PrBaseDivergence>("gh_pr_base_divergence", { repoPath, number, lens });
+
+/** Where one PR's head branch lives, by number. Targeted rather than a scan of
+ *  the poll list, so it answers for a PR outside the poll's window. */
+export const ghPrHeadRef = (repoPath: string, number: number) =>
+  invoke<PrHeadRef>("gh_pr_head_ref", { repoPath, number });
 
 /** The open fork PR whose head `branch` already contains, or null. Advisory —
  *  a forge outage answers null rather than failing. */
