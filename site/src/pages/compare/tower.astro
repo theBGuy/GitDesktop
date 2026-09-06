@@ -24,6 +24,8 @@ const TOWER_MAC_VERSION = "17.1.1";
 const TOWER_MAC_RELEASED = "August 11, 2026";
 const TOWER_WIN_VERSION = "13.2";
 const TOWER_WIN_RELEASED = "August 18, 2026";
+const TOWER_MAC_MAJOR = TOWER_MAC_VERSION.split(".")[0];
+const TOWER_WIN_MAJOR = TOWER_WIN_VERSION.split(".")[0];
 
 const groups: Group[] = [
   {
@@ -57,7 +59,7 @@ const groups: Group[] = [
         label: "Same features on every platform",
         them: {
           state: "no",
-          note: "separate apps on separate tracks — Mac sits at v17, Windows at v13; several features are Mac-only",
+          note: `separate apps on separate tracks — Mac sits at v${TOWER_MAC_MAJOR}, Windows at v${TOWER_WIN_MAJOR}; several features are Mac-only`,
         },
         gd: {
           state: "yes",
@@ -458,9 +460,10 @@ const faqs = [
           Create, comment, merge, close, inspect — and that's the list
         </h2>
         <p data-reveal class="mt-5 leading-relaxed text-body">
-          That five-verb list is Tower's own feature-page copy, and the
-          per-platform help pages match it (the Mac app adds a check-out
-          action), with comments forming one conversation on the whole PR.
+          That list is Tower's own feature-page copy; its per-platform help
+          pages document commenting, merging, closing, and inspecting (check
+          out joins them on the Mac app), with comments forming one
+          conversation on the whole PR.
           Approval, request-changes, and line-anchored review comments aren't
           among them; a review still means the browser. In GitDesktop the whole
           review lives next to your staging and history: comments on exact
