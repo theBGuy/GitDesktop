@@ -233,7 +233,7 @@ export function ImportMcpDialog({
                         <p className="text-[10px] text-warning">
                           {gateReason}
                           {allowFixable &&
-                            " The agent CLI connects outside GitDesktop's AI allowlist."}
+                            " The agent CLI connects outside GitDesktop's AI allowlist, so allow it before importing."}
                         </p>
                       )}
                     </div>

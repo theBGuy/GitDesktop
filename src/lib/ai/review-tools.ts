@@ -153,7 +153,7 @@ export function buildReviewTools(ctx: ReviewToolContext): ToolSet {
           // container with an unreadable header — so its refusal cannot borrow the
           // length cap's wording: a crafted image is tiny.
           if (payload.tooLarge || b64 === null)
-            return `Error: ${path} can't be read here — the preview gate refused it (too large, binary, or unsafe to decode); use grep or diff_refs to inspect it.`;
+            return `Error: ${path} can't be read here — the preview gate refused it (too large, or unsafe to decode); use grep or diff_refs to inspect it.`;
           if (b64.length > READ_FILE_BASE64_MAX)
             return `Error: ${path} is too large for review reads (over ~1 MB) — use grep or diff_refs to inspect it instead.`;
           let text: string;

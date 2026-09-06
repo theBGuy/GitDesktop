@@ -335,24 +335,35 @@ export function BrowseRegistryDialog({
                   !disabled && mcpHostAllowFixable(c.server, allowedHosts);
                 // Why Add is held, plus where the one-click fix lives — pointed
                 // at the row's detail only when a fix actually waits there.
-                const addReason = !gateReason
-                  ? null
-                  : allowFixable
-                    ? `${gateReason} Expand the row to allow it.`
-                    : gateReason;
+                const addReason = ((): string | null => {
+                  switch (true) {
+                    case !gateReason:
+                      return null;
+                    case allowFixable:
+                      return `${gateReason} Expand the row to allow it.`;
+                    default:
+                      return gateReason;
+                  }
+                })();
+                // What the row announces after its title and transport, ranked:
+                // what it already is, then why Add is held, then the affordance.
+                const rowStatus = ((): string => {
+                  switch (true) {
+                    case isAdded:
+                      return ", added";
+                    case inRegistry:
+                      return ", already in your registry";
+                    case !!addReason:
+                      return `. ${addReason}`;
+                    default:
+                      return ". Press Enter to add.";
+                  }
+                })();
                 return (
                   <div
                     key={c.registryName}
                     data-registry-row={c.registryName}
-                    aria-label={`${c.title}, ${c.server.transport}${
-                      disabled
-                        ? isAdded
-                          ? ", added"
-                          : ", already in your registry"
-                        : addReason
-                          ? `. ${addReason}`
-                          : ". Press Enter to add."
-                    }`}
+                    aria-label={`${c.title}, ${c.server.transport}${rowStatus}`}
                     tabIndex={
                       i === safeActive || (safeActive === -1 && i === 0)
                         ? 0

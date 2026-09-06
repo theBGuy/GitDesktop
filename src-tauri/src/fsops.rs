@@ -69,16 +69,17 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> AppResult<()> {
 
 /// True when `name`'s stem (everything before the first dot) is a reserved DOS
 /// device name. Windows resolves such a path component to the DEVICE in
-/// whatever directory it sits, extension or not, so `nul.txt` and
-/// `src/nul` are as unopenable as `nul` (callers pass ONE component;
-/// [`path_has_reserved_component`] walks a whole path). Win32 also
-/// strips trailing dots and SPACES off each component it resolves this way, which
-/// makes `nul ` the device too (measured); the first-dot split covers the dots, the trim
-/// covers the spaces. Only a single COM/LPT ordinal 1–9 is a device, written
-/// either as an ASCII digit or as a Latin-1 superscript (`com¹`, `com²`,
-/// `com³`); `com0`, `com10`, `com⁴` (U+2074, outside Latin-1) and `console` are
-/// ordinary names. Mirrored by `src/lib/git/reserved-device-name.ts` — a change
-/// here moves there in the same change.
+/// whatever directory it sits, extension or not, so `nul.txt` and `src/nul`
+/// are as unopenable as `nul` (callers pass ONE component;
+/// [`path_has_reserved_component`] walks a whole path). Win32 also strips
+/// trailing dots and SPACES off each component it resolves this way, which
+/// makes `nul ` the device too (measured); the first-dot split covers the
+/// dots, the trim covers the spaces. Only a single COM/LPT ordinal 1–9 is a
+/// device, written either as an ASCII digit or as a Latin-1 superscript
+/// (`com¹`, `com²`, `com³`); `com0`, `com10`, `com⁴` (U+2074, outside
+/// Latin-1) and `console` are ordinary names. Mirrored by
+/// `src/lib/git/reserved-device-name.ts` — a change here moves there in the
+/// same change.
 fn is_reserved_device_name(name: &str) -> bool {
     let stem = name
         .split('.')
