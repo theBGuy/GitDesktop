@@ -336,9 +336,10 @@ export function DiscussionView({
   const draftSuffix =
     staleSuffix || (draftRidesStateChange ? " — posts your draft" : "");
 
-  // Every write below awaits `mutateAsync`: react-query drops per-call callbacks
-  // once the observer loses its listeners, so a tab hide or unmount mid-flight
-  // would land the mutation and silently lose the toast, draft clear, or close.
+  // Every write below awaits `mutateAsync` (or detaches with a `.catch`):
+  // react-query drops per-call callbacks once the observer loses its listeners,
+  // so a tab hide or unmount mid-flight would land the mutation and silently
+  // lose the toast, draft clear, or close.
   async function submitComment() {
     if (!d || detailsStale || !compose.value.trim()) return;
     const submittedFor = discussionIdentity;

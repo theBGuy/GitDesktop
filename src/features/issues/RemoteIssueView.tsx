@@ -5,6 +5,7 @@ import {
   DotsThreeIcon,
   PencilSimpleIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
@@ -78,9 +79,9 @@ import {
   WRITE_ACCESS_ITEM_REASON,
   writeAccessReason,
 } from "@/lib/git/queries";
-import { providerLabel } from "@/lib/git/types";
+import { providerLabel, type RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import { useRepoLens } from "@/lib/repo-lens/queries";
+import { lensKey, useRepoLens } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
@@ -138,11 +139,7 @@ export function RemoteIssueView({
   // The single lens-resolution point for this surface (package B2): every issue
   // read/write below targets the fork (origin) or its parent (upstream).
   const lens = useRepoLens(repoPath);
-  // Live lens for post-await guards: `selectedIssue` carries no lens, so a
-  // continuation fired on one side of a fork pair must not clear a
-  // same-numbered selection made on the other.
-  const lensRef = useRef(lens);
-  lensRef.current = lens;
+  const queryClient = useQueryClient();
   // The viewer's permission on the lens repo — a PERMISSION axis the per-action
   // flags below don't cover, so it never hides a control: it only disables one,
   // and only on an explicit denial. Triage is its own, LOWER tier: labels,
@@ -559,15 +556,22 @@ export function RemoteIssueView({
 
   /** Clear the selection only while it still points at this issue — the write
    *  can settle after the user has selected another one. */
-  function deselectIfStillHere() {
+  // `selectedIssue` carries no lens, so a continuation fired on one side of a
+  // fork pair must not clear a same-numbered selection made on the other. The
+  // lens is read from the query cache, which outlives this instance (the lens
+  // switcher unmounts it); an undefined read is a cold cache, not "origin".
+  function deselectIfStillHere(firedUnder: RemoteLens | undefined) {
+    const liveLens = queryClient.getQueryData<RemoteLens>(lensKey(repoPath));
+    if (firedUnder !== undefined && liveLens !== firedUnder) return;
     const { selectedIssue: sel, repoPath: liveRepo } = useUiStore.getState();
-    if (liveRepo !== repoPath || lensRef.current !== lens) return;
+    if (liveRepo !== repoPath) return;
     if (sel?.kind === "remote" && sel.id === String(number)) selectIssue(null);
   }
 
   async function submitTransfer() {
     const destination = transferDest.trim();
     if (!destination) return;
+    const firedUnder = queryClient.getQueryData<RemoteLens>(lensKey(repoPath));
     let url: string;
     try {
       url = await transferIssue.mutateAsync({ number, destination });
@@ -586,10 +590,11 @@ export function RemoteIssueView({
     );
     setTransferOpen(false);
     // The issue no longer lives in this repo; clear the now-stale view.
-    deselectIfStillHere();
+    deselectIfStillHere(firedUnder);
   }
 
   async function confirmDelete() {
+    const firedUnder = queryClient.getQueryData<RemoteLens>(lensKey(repoPath));
     try {
       await deleteIssue.mutateAsync(number);
     } catch (e) {
@@ -599,7 +604,7 @@ export function RemoteIssueView({
     }
     toast.success(`Deleted #${number}`);
     setDeleteOpen(false);
-    deselectIfStillHere();
+    deselectIfStillHere(firedUnder);
   }
 
   /** `wasPinned` comes from the render the click landed on: the refetch that
