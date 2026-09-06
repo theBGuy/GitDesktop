@@ -589,7 +589,7 @@ function MyWorkBody({
     return capped ? (
       <QuietLine>
         GitHub returned results this view can't display. There may be more than
-        one page holds.
+        this page holds.
       </QuietLine>
     ) : (
       <QuietLine>
