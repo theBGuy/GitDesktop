@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
+import { validateRepo } from "@/lib/git/api";
 import { useMyWork } from "@/lib/git/queries";
 import type { MyWorkItem } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
@@ -102,18 +104,29 @@ export function MyWorkScreen() {
   // Every navigation goes through an atomic navigator: an openRepo followed by a
   // select would pair the new repo with the old selection, because the
   // view-transition callback that carries the selection is deferred.
-  function openItem(item: MyWorkItem) {
+  async function openItem(item: MyWorkItem) {
     const match = matchLocalRepo(item, recents);
     if (!match) {
       openUrl(item.url);
       return;
     }
-    // matchLocalRepo matched the ORIGIN slug, so land under the origin lens — a
-    // fork sitting on "upstream" resolves this number against the parent repo.
-    // Session-only (navigation isn't a lens choice); the call selects the item.
+    // Recents rows outlive deleted and moved clones, so prove the path is still
+    // a repo before navigating; the browser fallback keeps the row a working
+    // link while the toast names the stale path (repair lives in the repo list).
+    try {
+      await validateRepo(match.path);
+    } catch {
+      openUrl(item.url);
+      toast.error(`${match.path} is no longer a git repository.`);
+      return;
+    }
+    // Land under the origin lens (matchLocalRepo matched the ORIGIN slug): a fork
+    // sitting on "upstream" resolves this number against the parent repo. The lens
+    // write is session-only. Clears are safe: an unchanged lens short-circuits
+    // before them, and a real flip drops old-lens siblings before the landing set.
     const applyLens = () =>
       applyRepoLens(queryClient, match.path, "origin", {
-        clearSelections: false,
+        clearSelections: true,
         persist: false,
       });
     if (item.isPullRequest) {
@@ -151,7 +164,7 @@ export function MyWorkScreen() {
       const item = visible[activeIndex];
       if (!item) return;
       e.preventDefault();
-      openItem(item);
+      void openItem(item);
       return;
     }
     onInputArrow(e);
@@ -212,7 +225,10 @@ export function MyWorkScreen() {
           aria-label="Filter your work"
           role="combobox"
           aria-expanded={visible.length > 0}
-          aria-controls={MY_WORK_LISTBOX_ID}
+          // Same predicate as aria-expanded: the listbox only mounts in the list
+          // branch, so pointing at its id from any other state would reference a
+          // node that isn't there.
+          aria-controls={visible.length > 0 ? MY_WORK_LISTBOX_ID : undefined}
           aria-autocomplete="list"
           aria-activedescendant={activeId}
           className="h-8 min-w-40 flex-1"
@@ -226,7 +242,7 @@ export function MyWorkScreen() {
         activeIndex={activeIndex}
         recents={recents}
         onSelect={setActiveUrl}
-        onOpen={openItem}
+        onOpen={(item) => void openItem(item)}
       />
     </div>
   );

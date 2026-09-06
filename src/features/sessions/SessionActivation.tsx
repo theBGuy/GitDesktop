@@ -31,6 +31,17 @@ export function SessionActivation({ repoPath }: { repoPath: string }) {
   // its fields from the new seed.
   const [seedNonce, setSeedNonce] = useState(0);
 
+  // Repo switches don't remount this surface (RepositoryView + SessionActivation
+  // both mount unkeyed), so a consumed seed's snapshot would submit repo A's
+  // content under repo B. Reset in render — an effect paints A's fields first.
+  const [prevRepoPath, setPrevRepoPath] = useState(repoPath);
+  if (prevRepoPath !== repoPath) {
+    setPrevRepoPath(repoPath);
+    setPlanSeed(null);
+    setResearchSeed(null);
+    setSeedNonce((n) => n + 1);
+  }
+
   const pendingTask = useSessionsStore((s) => s.pendingTask);
   const pendingPlanSeed = usePlanStore((s) => s.pendingPlanSeed);
   const setPendingPlanSeed = usePlanStore((s) => s.setPendingPlanSeed);

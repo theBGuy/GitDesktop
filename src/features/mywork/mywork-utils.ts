@@ -5,7 +5,8 @@ import type { RecentRepo } from "@/lib/settings/api";
 export type MyWorkTab = "all" | "prs" | "issues";
 
 /** The backend's page cap (each search leg's `--limit` and the merged page's
- *  truncation). A full page is the signal the feed MAY be truncated, never a
+ *  truncation) — mirrors `MY_WORK_LIMIT` in `src-tauri/src/github/my_work.rs`;
+ *  the two must change together. A full page is the signal the feed MAY be truncated, never a
  *  count of what exists: unaddressable hits are dropped server-side, so a
  *  truncated page can arrive short and read as complete — which is why the
  *  note states the constraint, not a number. */

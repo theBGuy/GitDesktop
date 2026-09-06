@@ -254,9 +254,9 @@ From here:
     label: "My work",
     body: `# My work
 
-**My work** is a cross-repo inbox: every open pull request and issue on GitHub that
-involves you, newest first, without opening a repository to go looking. Open it from
-the **My work** button on the welcome screen, or from the command palette (*My work*).
+**My work** is a cross-repo inbox: your open pull requests and issues on GitHub,
+newest first, without opening a repository to go looking. Open it from the **My work**
+button on the welcome screen, or from the command palette (*My work*).
 **Back** in the header, or Esc, closes the inbox and returns you to the screen
 underneath.
 

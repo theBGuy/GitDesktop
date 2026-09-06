@@ -87,6 +87,8 @@ const MY_WORK_FIELDS: &str = "number,title,isPullRequest,repository,updatedAt,ur
 
 /// The whole page this surface fetches, per leg and after the merge. There is no
 /// pagination, so this is also the point where the inbox silently truncates.
+/// `MY_WORK_LIMIT` in `src/features/mywork/mywork-utils.ts` hand-mirrors this
+/// number to decide when to show the cap note, so the two must change together.
 const MY_WORK_LIMIT: usize = 200;
 
 /// Leg 1. GitHub's `involves:` is author OR assignee OR mentions OR commenter —

@@ -372,7 +372,7 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "My work — every open GitHub PR and issue involving you, across every repo, newest first",
+      "My work — your open GitHub PRs and issues, across every repo, newest first",
     ai: false,
     highlight: true,
   },

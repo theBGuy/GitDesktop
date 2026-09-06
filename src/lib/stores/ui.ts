@@ -10,6 +10,23 @@ export type AppView =
   | "help"
   | "explore"
   | "mywork";
+/** The views that can sit UNDER an overlay — where closing one returns to. */
+type NonOverlayView = "welcome" | "repo";
+/** Views that overlay a real screen. Derived from {@link AppView}, and
+ *  `OVERLAY_VIEWS` below is exhaustive over it, so a new AppView member stops
+ *  compiling until it is classified as one or the other. */
+type OverlayView = Exclude<AppView, NonOverlayView>;
+const OVERLAY_VIEWS: Record<OverlayView, true> = {
+  settings: true,
+  help: true,
+  explore: true,
+  mywork: true,
+};
+/** A type predicate rather than a boolean: the else branch has to narrow to
+ *  {@link NonOverlayView} for the `previousView` writes to type-check at all. */
+function isOverlayView(v: AppView): v is OverlayView {
+  return v in OVERLAY_VIEWS;
+}
 export type RepoTab =
   | "changes"
   | "history"
@@ -226,7 +243,7 @@ interface UiState {
   view: AppView;
   /** Underlying view to return to when an overlay (settings, help, explore, my
    *  work) closes. */
-  previousView: Exclude<AppView, "settings" | "help" | "explore" | "mywork">;
+  previousView: NonOverlayView;
   /** Settings section to jump to when opening Settings; null = leave as-is.
    *  Consumed (and cleared) by SettingsScreen once applied. */
   settingsTarget: SettingsTarget | null;
@@ -690,14 +707,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         set({
           view: "settings",
           settingsTarget: target ?? null,
-          // Keep the underlying view when opening from another overlay.
-          previousView:
-            view === "settings" ||
-            view === "help" ||
-            view === "explore" ||
-            view === "mywork"
-              ? get().previousView
-              : view,
+          previousView: isOverlayView(view) ? get().previousView : view,
         });
       }),
     clearSettingsTarget: () => set({ settingsTarget: null }),
@@ -710,13 +720,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           view: "settings",
           settingsTarget: "mcp-servers",
           mcpBrowseOpen: true,
-          previousView:
-            view === "settings" ||
-            view === "help" ||
-            view === "explore" ||
-            view === "mywork"
-              ? get().previousView
-              : view,
+          previousView: isOverlayView(view) ? get().previousView : view,
         });
       }),
     setMcpBrowseOpen: (open) => set({ mcpBrowseOpen: open }),
@@ -743,13 +747,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         const { view } = get();
         set({
           view: "help",
-          previousView:
-            view === "settings" ||
-            view === "help" ||
-            view === "explore" ||
-            view === "mywork"
-              ? get().previousView
-              : view,
+          previousView: isOverlayView(view) ? get().previousView : view,
         });
       }),
     closeHelp: () =>
@@ -759,15 +757,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         const { view } = get();
         set({
           view: "explore",
-          // Keep the underlying view when opening Explore from another overlay,
-          // so closing Explore returns to what was really underneath.
-          previousView:
-            view === "settings" ||
-            view === "help" ||
-            view === "explore" ||
-            view === "mywork"
-              ? get().previousView
-              : view,
+          previousView: isOverlayView(view) ? get().previousView : view,
         });
       }),
     closeExplore: () =>
@@ -777,15 +767,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         const { view } = get();
         set({
           view: "mywork",
-          // Keep the underlying view when opening My work from another overlay,
-          // so closing it returns to what was really underneath.
-          previousView:
-            view === "settings" ||
-            view === "help" ||
-            view === "explore" ||
-            view === "mywork"
-              ? get().previousView
-              : view,
+          previousView: isOverlayView(view) ? get().previousView : view,
         });
       }),
     closeMyWork: () =>
