@@ -581,18 +581,21 @@ function MyWorkBody({
   }
   // Set server-side when a search leg hit its cap or the merged union overshot
   // the page — leg caps count raw hits before unaddressable ones drop, so it
-  // stays true on a page that arrives short. Shown under the empty branches
-  // too: a page whose every hit was dropped must not read as "nothing exists".
+  // stays true on a page that arrives short. A capped EMPTY page carries its
+  // own sentence rather than CapNote: the note's filter advice has nothing to
+  // narrow, but the page must not read as "nothing exists".
   const capped = work.data?.truncated ?? false;
   if (items.length === 0) {
-    return (
-      <>
-        <QuietLine>
-          Nothing on GitHub involves you right now. This searches every repo
-          you're involved in, not just local ones.
-        </QuietLine>
-        {capped && <CapNote />}
-      </>
+    return capped ? (
+      <QuietLine>
+        GitHub returned results this view can't display. There may be more than
+        one page holds.
+      </QuietLine>
+    ) : (
+      <QuietLine>
+        Nothing on GitHub involves you right now. This searches every repo
+        you're involved in, not just local ones.
+      </QuietLine>
     );
   }
   if (visible.length === 0) {
