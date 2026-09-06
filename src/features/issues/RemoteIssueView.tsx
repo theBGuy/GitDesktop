@@ -554,12 +554,11 @@ export function RemoteIssueView({
     selectIssue({ kind: "remote", id: String(refNumber) });
   }
 
-  /** Clear the selection only while it still points at this issue — the write
-   *  can settle after the user has selected another one. */
-  // `selectedIssue` carries no lens, so a continuation fired on one side of a
-  // fork pair must not clear a same-numbered selection made on the other. The
-  // lens is read from the query cache, which outlives this instance (the lens
-  // switcher unmounts it); an undefined read is a cold cache, not "origin".
+  /** Clear the selection only while it still points at this issue under the
+   *  lens the write fired on (`firedUnder`, a pre-await read of the lens
+   *  cache) — the write can settle after the user selected another issue or
+   *  flipped the fork/upstream switcher, which unmounts this view; the cache
+   *  outlives it. An undefined read is a cold cache, not "origin". */
   function deselectIfStillHere(firedUnder: RemoteLens | undefined) {
     const liveLens = queryClient.getQueryData<RemoteLens>(lensKey(repoPath));
     if (firedUnder !== undefined && liveLens !== firedUnder) return;
