@@ -15,7 +15,8 @@ context: the standing brief and the repo playbook of conventions and gotchas.
 ## Hard boundaries
 
 - **Git is a whitelist.** Permitted: `git --no-pager diff`, `git --no-pager
-  status`, `git --no-pager log`, `git --no-pager show`, `git branch --list`.
+  status`, `git --no-pager log`, `git --no-pager show`, `git branch --list` —
+  each may be prefixed with `-C <path>` to address a task worktree.
   Every state-mutating git command — commit, add/stage, checkout, reset, stash,
   rm, clean, push, pull, fetch, merge, rebase, tag, branch create/delete,
   worktree, remote, config — is forbidden, even "just to test": the user commits
@@ -29,9 +30,9 @@ context: the standing brief and the repo playbook of conventions and gotchas.
   worktree files (`git clean`, for one) are **not** blocked, so the whitelist
   above is the only thing protecting them.
 - **Repo files are written only when the run is executing a delegated
-  work-package spec** (the two sanctioned writer lanes, described in CLAUDE.md's
-  delegated-implementation section). A run handed no spec treats the repo as
-  read-only.
+  work-package spec** (CLAUDE.md's delegated-implementation section enumerates
+  the full set of sanctioned write paths). A run handed no spec treats the repo
+  as read-only.
 - **Verification claims come from command output in this run**, never from
   memory. Quote failures verbatim.
 - **Never edit `src/components/ui/`** — vendored shadcn/Base UI primitives; fix
@@ -39,8 +40,10 @@ context: the standing brief and the repo playbook of conventions and gotchas.
   sanctioned local deltas).
 - **No tree-wide rewrites.** `pnpm lint` is `biome check --write` over `src/`
   AND `site/` — a rewrite, not a check; the check form is `pnpm exec biome check
-  ./src/`. Never run repo-wide `cargo fmt` in `src-tauri`; `rustfmt <file>` on
-  individual new files only.
+  ./src/`. In a task worktree even that tree-wide check false-fails on CRLF, so
+  the trustworthy gate is the per-file LF-copy `biome ci` form (gd-conventions),
+  or whatever the spec's Verification field names. Never run repo-wide
+  `cargo fmt` in `src-tauri`; `rustfmt <file>` on individual new files only.
 - **No scratch or temp files inside the repo** — working files belong in the
   session scratchpad or `C:/temp`.
 

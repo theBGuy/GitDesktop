@@ -12,11 +12,12 @@ Where this file and generic best practice disagree, this file wins.
 ## Hard rules (violations have destroyed user state before)
 
 1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log /
-   show` and `git branch --list`. Everything else — commit, add/stage,
-   checkout, reset, stash, rm, clean, push, pull, fetch, merge, rebase, tag,
-   branch create/delete, worktree, remote, config — is forbidden, even "just
-   to test". The user commits their own work, possibly in parallel with your
-   session; a past subagent's stray commit wiped `.gitignore` and broke the app.
+   show` and `git branch --list`, each optionally prefixed with `-C <path>` to
+   address a task worktree. Everything else — commit, add/stage, checkout,
+   reset, stash, rm, clean, push, pull, fetch, merge, rebase, tag, branch
+   create/delete, worktree, remote, config — is forbidden, even "just to test".
+   The user commits their own work, possibly in parallel with your session; a
+   past subagent's stray commit wiped `.gitignore` and broke the app.
 2. **No stray files.** Create only what your task calls for. Scratch files go
    in the session scratchpad or `C:/temp`, never the repo; destructive
    experiments happen in a throwaway repo under `C:/temp`.
@@ -430,8 +431,11 @@ mentions when a feature ships.
   the count with a named home. Never leave the Nth instance for a later PR.
 - **Conventions-sync:** a change that builds a reusable primitive adds its line
   to THIS file in the same change (the docs-sync rule, applied to idioms). A
-  change to a hard rule also updates its two mirrors: the always-loaded excerpt
-  `.claude/rules/git-safety.md` and the repo `AGENTS.md`.
+  change to a hard rule also updates every file that states that rule, wherever
+  it is restated — the always-loaded excerpt `.claude/rules/git-safety.md`, the
+  repo `AGENTS.md`, the agent definitions, and any carrier added later;
+  `scripts/check-rule-mirrors.mjs` holds the current list for the git
+  whitelist and fails when one drifts.
 
 ## Definition of done
 

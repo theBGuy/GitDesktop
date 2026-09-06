@@ -1,4 +1,4 @@
-// Negative controls for the three guard scanners. Their worst failure mode is
+// Negative controls for the four guard scanners. Their worst failure mode is
 // silent fail-open — a pattern that stops matching still prints "OK" — so every
 // predicate keeps a fixture that MUST hit and a fixture that must not. The
 // scripts export their predicates and gate their CLI body on a main-module path
@@ -22,6 +22,7 @@ import {
   parseRegistered,
   staleAllowlistEntries as staleCommandEntries,
 } from "./check-dead-surface.mjs";
+import { missingSentinels } from "./check-rule-mirrors.mjs";
 import {
   checkCompareEndpoints,
   checkRefspecTemplates,
@@ -1759,4 +1760,38 @@ test("invoke matching survives nested generics and wrapped calls", () => {
     "git_branch_tips",
     "git_status",
   ]);
+});
+
+// ----------------------------------------------------------- check-rule-mirrors
+
+// Both fixtures wrap their sentences the way the real carriers do — the `-C`
+// clause and the `is / forbidden` catchall each straddle a line break. That is
+// deliberate: if the whitespace normalization ever came out, the passing
+// fixture would read as a carrier missing two sentinels, so these cases pin the
+// normalization as much as the patterns.
+const carrierStatingTheRule = [
+  "1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log /",
+  "   show` and `git branch --list`, each optionally prefixed with `-C <path>`",
+  "   to address a task worktree. Everything else — commit, add/stage, stash,",
+  "   push, worktree, config — is",
+  '   forbidden, even "just to test". The user commits their own work.',
+].join("\n");
+
+test("a carrier that still states the whole rule satisfies every sentinel", () => {
+  assert.deepEqual(missingSentinels(carrierStatingTheRule), []);
+});
+
+test("a carrier that drops the line-wrapped catchall is caught", () => {
+  // The dangerous direction: the whitelist forms are still listed, so the file
+  // LOOKS like it carries the rule — only the sentence forbidding everything
+  // else is gone, which is exactly the drift a reader would not notice.
+  const softened = carrierStatingTheRule.replace(
+    ["   push, worktree, config — is", "   forbidden, even"].join("\n"),
+    "   push, worktree, config — are discouraged, except",
+  );
+  assert.notEqual(softened, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(softened).map((s) => s.name),
+    ["forbidden catchall"],
+  );
 });

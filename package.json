@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "biome check --write ./src/ ./site/",
-    "checks": "node scripts/check-banned-patterns.mjs && node scripts/check-rust-invariants.mjs && node scripts/check-dead-surface.mjs && node --test \"scripts/*.test.mjs\"",
+    "checks": "node scripts/check-banned-patterns.mjs && node scripts/check-rust-invariants.mjs && node scripts/check-dead-surface.mjs && node scripts/check-rule-mirrors.mjs && node --test \"scripts/*.test.mjs\"",
     "preview": "vite preview",
     "changelog": "node scripts/changelog-draft.mjs",
     "changelog:preview": "node scripts/changelog-draft.mjs --preview",

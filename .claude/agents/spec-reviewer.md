@@ -41,26 +41,36 @@ redirection into any path, no piping into files, no in-place editors.
 the review — fresh-eyes verification by one agent is the point of this role,
 and fan-out from inside it multiplies cost without adding coverage.
 
-**Git is a whitelist:** the ONLY git commands you may run are
-`git --no-pager diff`, `git --no-pager status`, `git --no-pager log`,
-`git --no-pager show`, `git branch --list`. Every other git invocation is
-forbidden — anything that writes state, including commit, add/stage, checkout,
-reset, stash, rm, clean, push, pull, fetch, merge, rebase, tag, branch
-create/delete, worktree, remote, and config.
+**Git is a whitelist:** the ONLY git commands you may run are `git --no-pager
+diff`, `git --no-pager status`, `git --no-pager log`, `git --no-pager show`,
+`git branch --list` — each may be prefixed with `-C <path>` to address a task
+worktree. Every other git invocation is forbidden — anything that writes state,
+including commit, add/stage, checkout, reset, stash, rm, clean, push, pull,
+fetch, merge, rebase, tag, branch create/delete, worktree, remote, and config.
 
 **Verification commands — check-only forms only.** `pnpm lint` runs
 `biome check --write ./src/ ./site/` and REWRITES source files; never run it.
 Allowed:
 
 ```sh
-pnpm exec tsc -b                       # typecheck, no source mutation
-pnpm exec biome check ./src/           # lint/format check WITHOUT --write
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+# <worktree> = the tree your dispatch prompt names; omit the cd when reviewing
+# the main checkout.
+cd <worktree> && pnpm exec tsc -b            # typecheck, no source mutation
+cd <worktree> && pnpm exec biome check <the package's own files>
+cargo test --manifest-path <worktree>/src-tauri/Cargo.toml
+cargo clippy --manifest-path <worktree>/src-tauri/Cargo.toml -- -D warnings
 ```
 
 (These may emit gitignored build artifacts like `target/` — that is the one
 tolerated form of file creation. Nothing else.)
+
+**Formatting in a fresh worktree is unverifiable from here, and that is the
+finding.** A checkout lands CRLF, so a tree-wide `biome check` false-fails on
+files nobody touched — scope the check to the package's own files instead. The
+trustworthy gate is the per-file LF-copy `biome ci` form, and building an LF
+copy is file creation, which this role bans absolutely. Say in your report that
+tree-wide formatting went unverified and why; never create the copy, never run
+any `--write` form.
 
 ## Review protocol
 
@@ -76,8 +86,13 @@ implementation agent's (related area, same feature) — do not report the user's
 unrelated WIP as findings.
 
 Your dispatch prompt names the tree to review; run the read-only git commands
-against it (`git -C <worktree> --no-pager diff`). For a codex package it also
-names the codex `-o` report file, which stands in for the agent report.
+against it (`git -C <worktree> --no-pager diff`) and every verification command
+from that tree too — `cd <worktree>` before `pnpm exec tsc -b` or the scoped
+`biome check`, and point cargo at `<worktree>/src-tauri/Cargo.toml`. A worktree
+carries its own `node_modules` and needs its own `pnpm install` (delegate
+SKILL.md's Environment notes); a check run from the main checkout green-lights
+code you never reviewed. For a codex package the prompt also names the codex
+`-o` report file, which stands in for the agent report.
 
 1. **Correctness first.** Trace the changed code paths against concrete
    inputs: boundaries, first/last/empty, error paths, concurrent or mid-flight

@@ -44,7 +44,8 @@ to linked task worktrees (see `references/codex-implementer.md`). The
   (if the user is researching or thinking out loud, produce plans instead —
   standing feedback).
 - `git --no-pager status` — record the baseline. **Never skip this**; the
-  Phase 5 footprint sweep depends on it.
+  Phase 5 footprint sweep depends on it. (Codex or colocated worktree packages:
+  take the baseline in the task worktree — Phase 3.)
 - If the task shapes or polishes UI, run the `impeccable` skill BEFORE
   decomposing — its confirmed brief becomes part of the spec (standing
   feedback; an AskUserQuestion round is not a substitute).
@@ -56,7 +57,8 @@ Review is never skipped; **who reviews scales.** Each avoided agent session is
 
 - **Lite mode** — single package, few files: ONE implementer + your own
   orchestrator-review of the diff + one integration build. No Explore
-  grounding when you already know the area; no separate reviewer.
+  grounding when you already know the area; no separate reviewer. (Codex
+  packages are never lite-mode — Phase 4 item 6.)
 - **Full mode** — genuinely multi-file, parallelizable work: packages +
   spec-reviewer(s), everything below.
 - Threshold is conservative: orchestrator self-review loses the fresh-eyes
@@ -70,8 +72,9 @@ questions, `Plan` for competing strategies, Workflow for bigger read-only
 sweeps (see Workflows below). Every research/review agent prompt must state:
 **strictly read-only — no file writes, no git mutations, no test files.** The
 two sanctioned writers (the `implementer` agent and the codex implementer arm)
-are the only exceptions to the *file-write* rule, each only when executing a
-spec; the no-git-mutation rule has no exceptions, for any agent, ever.
+are the only agent-side exceptions to the *file-write* rule, each only when
+executing a spec — you keep the Phase 4 trivial-fix carve-out. The
+no-git-mutation rule has no exceptions, for any agent, ever.
 
 Then write one **work-package spec** per package. Keep specs tight — they are
 replayed into both the implementer's and reviewer's contexts — but never
@@ -81,7 +84,7 @@ skill's `references/orchestrator.md` — its spec-shaping checklist and Sonnet
 stage-prompt scaffolding compensate for the dispatched models' documented
 failure modes.
 
-```
+```text
 ## Package: <name>
 Objective: <one paragraph — what and why>
 Files in scope: <explicit list; the implementer must not touch others>
@@ -134,17 +137,29 @@ measured sandbox behavior, and the spec preamble live there. The hard rules:
 
 - **Linked task worktrees only** — the sandbox git-block does not exist in the
   main checkout, where `.git` sits inside the workspace root.
-- **Never pass `--add-dir` pointing at the main repo** — that is the one way to
-  defeat the confinement from an otherwise correct dispatch.
+- **Never pass `--add-dir` pointing at the main repo** — one way to defeat the
+  confinement from an otherwise correct dispatch; a resume that drops `-s` is
+  the other.
 - Feed the preamble + spec through **stdin** (heredoc), never argv.
 - Set `-c model_reasoning_effort` explicitly; the default is `none`.
 - Capture the `session id:` line from the run header.
-- Fix rounds go through `codex exec resume (session-id)`, not a fresh dispatch.
-- Network is off under `workspace-write`: dependencies must already be
-  installed when the worktree is set up.
+- Fix rounds go through `codex exec resume (session-id)` from inside the
+  worktree (`cd <worktree> && codex exec resume …` — `resume` has no `--cd`),
+  not a fresh dispatch.
+- **Repeat every flag the dispatch form carries on each resume** — `-m`, `-o`,
+  `-s workspace-write`, `-c model_reasoning_effort`, and the network pin
+  `-c sandbox_workspace_write.network_access=false`. Unspecified flags fall
+  back to the machine config (measured: a dropped `-m` resumed as the config
+  default), so a dropped `-s` can silently change the sandbox — read the run
+  header's sandbox line before trusting it.
+- Network is off under `workspace-write` by default AND pinned off by
+  `-c sandbox_workspace_write.network_access=false` on every invocation, since
+  a machine profile can enable it; dependencies must already be installed when
+  the worktree is set up.
 - The Phase 0 baseline and the Phase 5 footprint sweep run **in the task
-  worktree** (`git -C <worktree> status`). A feature split across Opus and codex
-  packages colocates in ONE worktree so the sweep sees every package's files.
+  worktree** (`git -C <worktree> --no-pager status`). A feature split across
+  Opus and codex packages colocates in ONE worktree so the sweep sees every
+  package's files.
 
 ## Phase 4 — Verify (never skip; never trust the report alone)
 
@@ -160,10 +175,13 @@ measured sandbox behavior, and the spec preamble live there. The hard rules:
    green doesn't guarantee the merged working tree is green.
 3. UI work: dogfood live via the `drive-ui` skill — edge cases (first/last/
    empty, boundaries) and visual polish, before declaring done.
-4. **Batch fix rounds:** collect ALL findings for a package into ONE
-   SendMessage to the owning implementer (every extra round replays the
-   agent's whole context — ~100k tokens even for a one-line diff). Re-review
-   = the delta + prior findings only, not the full protocol again.
+4. **Batch fix rounds:** collect ALL findings for a package into ONE message
+   to the owning agent (every extra round replays its whole context — ~100k
+   tokens even for a one-line diff). Re-review = the delta + prior findings
+   only, not the full protocol again. The delivery path follows the dispatch
+   path: an Opus package takes one SendMessage; a codex package takes one
+   stdin message via `cd (worktree) && codex exec resume (session-id)` with
+   the flags repeated — SendMessage reaches Agent-tool dispatches only.
 5. **Trivial-fix exception (user-authorized 2026-07-02):** the orchestrator
    may apply a trivial fix directly instead of a fix round — ≤ ~3 lines,
    confirmed by the spec-reviewer or by live validation, and changing no
@@ -181,6 +199,7 @@ measured sandbox behavior, and the spec preamble live there. The hard rules:
 - Footprint sweep: `git --no-pager status` against the Phase 0 baseline —
   every difference is accounted for by a package or the user's own parallel
   work; nothing stray, nothing staged, no probe/scratch files left behind.
+  (Codex or colocated worktree packages: sweep the task worktree — Phase 3.)
 - Report to the user: outcome first, then per-package summary, verification
   results verbatim, and open concerns. **Never commit — the user commits.**
 

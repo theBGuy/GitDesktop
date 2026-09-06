@@ -38,10 +38,10 @@ keeping it.
   and non-vague —
   "A short, accurate AGENTS.md is more useful than a long file full of vague rules".
   Audit wording changes to either file with that in mind.
-- **Reasoning effort** runs low / medium / high / xhigh: low for well-scoped
-  mechanical packages, high as the implementer-package default, xhigh for long
-  reasoning-heavy ones — the routing shape /delegate already uses for Opus
-  effort.
+- **Reasoning effort** runs none (the default — never leave it) / low / medium /
+  high / xhigh: low for well-scoped mechanical packages, high as the
+  implementer-package default, xhigh for long reasoning-heavy ones — the routing
+  shape /delegate already uses for Opus effort.
 - **Default output is verbose and markdown-heavy**, hence the plain-prose report
   line in the preamble.
 - **Reader-facing copy:** OpenAI's guidance discourages contrastive framing and
@@ -70,6 +70,7 @@ Then, one command (continuations are for the page width):
 ```sh
 codex exec --cd (task-worktree-path) -m gpt-6-astra -s workspace-write \
   -c model_reasoning_effort="high" \
+  -c sandbox_workspace_write.network_access=false \
   -o (scratchpad)/(package)-report.md - <<'EOF'
 ... preamble + spec ...
 EOF
@@ -94,30 +95,40 @@ The message goes in over stdin exactly like the dispatch, for the same
 argv-cap reason — batched findings are long:
 
 ```sh
-codex exec resume (session-id) -m gpt-6-astra -s workspace-write \
+cd (task-worktree-path) && codex exec resume (session-id) \
+  -m gpt-6-astra -s workspace-write \
   -c model_reasoning_effort="high" \
+  -c sandbox_workspace_write.network_access=false \
   -o (scratchpad)/(package)-fix1-report.md - <<'EOF'
 ... batched findings ...
 EOF
 ```
 
-**Repeat `-m`, `-c model_reasoning_effort`, `-s`, and `-o` on every resume** —
-flags do not reliably carry over. Measured: a session dispatched without `-m`
-resumed as the config's default model at its configured effort, so a resume can
-silently run a different model than the dispatch did. Resume prints the full run
-header (model, effort, sandbox, session id); read it as the truth for what the
-run actually used.
+**`resume` has no `--cd` flag** — it roots at the shell's cwd, so every resume
+runs from inside the worktree in one Bash-tool command, as above. Read the
+resume header's workdir line as the per-run check that it rooted where you
+meant.
+
+**Repeat every flag the dispatch form carries on each resume** — the pin
+`-c sandbox_workspace_write.network_access=false` included, alongside `-m`,
+`-o`, `-s`, and `-c model_reasoning_effort`. Flags do not reliably carry over.
+Measured: a session dispatched without `-m` resumed as the config's default
+model at its configured effort, so a resume can silently run a different model
+than the dispatch did. Resume prints the full run header (model, effort,
+sandbox, session id); read it as the truth for what the run actually used.
 
 `--last` is safe only while a single codex session is in flight; with more than
-one, resume by id. Measured: a resumed session retained knowledge of files it
-had created earlier without re-reading them, and the AGENTS.md instruction
-persisted across the resume.
+one, resume by id. The session listing is cwd-filtered by default (`--all`
+disables the filter), so a `--last` issued from the right worktree cwd already
+scopes to that worktree's sessions — one more reason the `cd` matters. Measured:
+a resumed session retained knowledge of files it had created earlier without
+re-reading them, and the AGENTS.md instruction persisted across the resume.
 
 Resume re-runs the trust / git-repo check rather than inheriting
 `--skip-git-repo-check` from the original invocation, so resuming outside a git
 repo fails with:
 
-```
+```text
 Not inside a trusted directory and --skip-git-repo-check was not specified.
 ```
 
@@ -132,7 +143,7 @@ broken session while smoke-testing in a scratch directory.
   `git commit`, `git checkout -- (file)`, `git rm --cached (file)`, and
   `git stash push`, each on the out-of-workspace index lock:
 
-  ```
+  ```text
   fatal: Unable to create '(main-repo)/.git/worktrees/(wt)/index.lock': Permission denied
   ```
 
@@ -148,9 +159,11 @@ broken session while smoke-testing in a scratch directory.
   enforced rather than merely stated for the git-dir-writing subset; every other
   mutation — `git clean` being the measured counterexample — rests on the policy
   alone. For the same reason, never pass `--add-dir` pointing at the main repo.
-- **Network is off** under `workspace-write`: `pnpm install` fails, so
-  dependencies must be pre-installed when the worktree is set up (already the
-  /delegate pattern).
+- **Network is off** under `workspace-write` by default, and pinned off
+  explicitly by the forms above — a machine profile can turn it on
+  (`sandbox_workspace_write.network_access=true`), which is why the flag rides
+  every invocation. With it off, `pnpm install` fails, so dependencies must be
+  pre-installed when the worktree is set up (already the /delegate pattern).
 - The sandbox may emit benign Permission-denied warnings while reading
   out-of-workspace config (measured on `~/.config/git/ignore`). Not findings.
 - `AGENTS.md` at the workspace root is auto-read by codex (measured with a
@@ -165,8 +178,9 @@ broken session while smoke-testing in a scratch directory.
 ## Run lifecycle
 
 - **A killed or timed-out run leaves partial edits.** Diagnose with
-  `git -C (worktree) status` and `git -C (worktree) diff` before resuming or
-  redispatching; a half-applied package looks like a fresh one to the next run.
+  `git -C (worktree) --no-pager status` and `git -C (worktree) --no-pager diff`
+  before resuming or redispatching; a half-applied package looks like a fresh
+  one to the next run.
 - **Windows kills don't tree-kill.** Kill the codex node process and verify it
   is gone before treating the worktree as free.
 - **One codex session per worktree at a time** — concurrent sessions share the
@@ -185,7 +199,7 @@ broken session while smoke-testing in a scratch directory.
 
 ## Preamble — paste above every codex spec
 
-```
+```text
 You are executing one work-package spec in a linked task worktree of
 GitDesktop. Binding context, in order: AGENTS.md (auto-loaded), CLAUDE.md, and
 .claude/skills/gd-conventions/SKILL.md — read the latter two before writing
@@ -198,8 +212,8 @@ anything.
   you do not need permission for work the spec already authorizes.
 - Make the smallest change that satisfies the acceptance criteria.
 - No scratch or temp files inside the repo.
-- Git mutations are forbidden and sandbox-blocked; read-only git only
-  (diff / status / log / show, branch --list).
+- Git mutations are forbidden; the sandbox additionally blocks the git-dir
+  writers. Read-only git only (diff / status / log / show, branch --list).
 - A Permission-denied on a path outside the workspace is an environment limit:
   report it and continue.
 - Lint-fix only the files you touched, using the command the spec's
