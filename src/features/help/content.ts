@@ -1013,8 +1013,8 @@ in view, a link written relative to that repository opens on **GitHub**,
 **GitLab**, or **Bitbucket** in your browser, with its card naming the path and
 the forge. Anywhere a link can't be opened (one leading outside the repository,
 say), it stays put, and its card tells you where it leads and why nothing
-happens. In any rendered body, a link to a section of that same text scrolls
-straight to it.
+happens. A link to a section scrolls straight to it when the body marks that
+section with an anchor of its own.
 
 Images in a rendered body open fullscreen too. Click a screenshot in a description,
 comment, or discussion (or Tab to it and press Enter) and it fills the window over a
