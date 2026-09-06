@@ -4,7 +4,7 @@ import { useAiStream } from "@/features/conversations/useAiStream";
 import { buildReleaseNotesPrompt } from "@/lib/ai/prompt";
 import {
   ghReleaseGenerateNotes,
-  gitCompareBranches,
+  gitBranchAhead,
   gitRecentCommits,
   readRepoInstructions,
 } from "@/lib/git/api";
@@ -48,12 +48,12 @@ async function gatherReleaseSource(
   if (!changelog.trim()) {
     try {
       if (opts.previousTag && opts.target) {
-        const cmp = await gitCompareBranches(
+        const ahead = await gitBranchAhead(
           repoPath,
           opts.previousTag,
           opts.target,
         );
-        subjects = cmp.ahead.map((c) => c.subject);
+        subjects = ahead.map((c) => c.subject);
       }
     } catch {
       // Range failed (e.g. unrelated refs) — fall back to recent commits.

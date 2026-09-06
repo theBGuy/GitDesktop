@@ -1,5 +1,11 @@
 import { darkQuery } from "@/lib/use-is-dark";
 
+/** Order the "Cycle theme" command steps through, and the picker's render order.
+ *  `loadSettings` heals a stored theme against this list, so it is the single
+ *  source: a theme reachable in the UI but missing here would be silently reset
+ *  to "system" on load. */
+export const THEME_ORDER = ["system", "light", "dark", "slate"] as const;
+
 /**
  * The user's theme preference (Settings → Appearance). `"system"` follows the OS
  * color scheme; `"light"` / `"dark"` force it; `"slate"` is a softer dark variant
@@ -9,7 +15,7 @@ import { darkQuery } from "@/lib/use-is-dark";
  * very first paint on a cold boot reflects a saved override with no flash before
  * the async settings store resolves.
  */
-export type ThemeSetting = "system" | "light" | "dark" | "slate";
+export type ThemeSetting = (typeof THEME_ORDER)[number];
 
 /** Human labels for the picker (also the source for the palette `items` map). */
 export const THEME_LABELS: Record<ThemeSetting, string> = {
@@ -18,9 +24,6 @@ export const THEME_LABELS: Record<ThemeSetting, string> = {
   dark: "Dark",
   slate: "Slate",
 };
-
-/** Order the "Cycle theme" command steps through. */
-export const THEME_ORDER: ThemeSetting[] = ["system", "light", "dark", "slate"];
 
 /** The theme one step after `current` in {@link THEME_ORDER} (wraps around). */
 export function nextTheme(current: ThemeSetting): ThemeSetting {

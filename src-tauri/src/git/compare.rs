@@ -56,6 +56,43 @@ pub async fn git_compare_branches(
     Ok(BranchComparison { ahead, behind })
 }
 
+/// The `ahead` half of [`git_compare_branches`] alone. Most callers discard
+/// `behind`, and its log walk is pure cost on always-mounted surfaces that
+/// refetch whenever a fetch lands.
+#[tauri::command]
+pub async fn git_branch_ahead(
+    repo_path: String,
+    base: String,
+    compare: String,
+) -> AppResult<Vec<CommitSummary>> {
+    validate_ref(&base)?;
+    validate_ref(&compare)?;
+    log_range(&repo_path, &format!("{base}..{compare}")).await
+}
+
+/// How many commits `base..compare` holds, for callers that render only the
+/// number: `rev-list --count` skips formatting and parsing every commit.
+#[tauri::command]
+pub async fn git_branch_ahead_count(
+    repo_path: String,
+    base: String,
+    compare: String,
+) -> AppResult<u32> {
+    validate_ref(&base)?;
+    validate_ref(&compare)?;
+    let out = run_git(
+        Some(&repo_path),
+        &["rev-list", "--count", &format!("{base}..{compare}")],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let text = out.stdout_lossy();
+    let count = text.trim();
+    count
+        .parse()
+        .map_err(|_| AppError::Command(format!("unexpected rev-list --count output: {count}")))
+}
+
 /// Files that differ between the merge base of `base`/`compare` and `compare`
 /// — i.e. the net change `compare` introduces relative to `base` (the
 /// three-dot diff, the same set a PR would show).
@@ -1191,6 +1228,89 @@ mod tests {
             cmp.ahead[0].tags.is_empty(),
             "an untagged commit reports no tags"
         );
+    }
+
+    /// The ahead-only commands must stay interchangeable with the halves of
+    /// `git_compare_branches` they replace: same commits, same newest-first order,
+    /// and a count equal to that list's length. The fixture puts a commit on the
+    /// base side too, so an ahead-only walk is provably not the whole range.
+    #[tokio::test]
+    async fn branch_ahead_matches_the_compare_ahead_half() {
+        let (_base, repo) = seed_repo("branch-ahead").await;
+        let root = std::path::Path::new(&repo);
+
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "seed"]).await;
+        // `git init` picks the default branch name from the host's config.
+        let base_branch = run(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        run(&repo, &["checkout", "-qb", "feature"]).await;
+        for n in ["first", "second"] {
+            std::fs::write(root.join(format!("{n}.txt")), format!("{n}\n")).unwrap();
+            run(&repo, &["add", "-A"]).await;
+            run(&repo, &["commit", "-qm", &format!("feature {n}")]).await;
+        }
+
+        run(&repo, &["checkout", "-q", &base_branch]).await;
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "base work"]).await;
+
+        let cmp = git_compare_branches(repo.clone(), base_branch.clone(), "feature".into())
+            .await
+            .unwrap();
+        let ahead = git_branch_ahead(repo.clone(), base_branch.clone(), "feature".into())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ahead.iter().map(|c| &c.hash).collect::<Vec<_>>(),
+            cmp.ahead.iter().map(|c| &c.hash).collect::<Vec<_>>(),
+            "same commits in the same order as the compare command's ahead half"
+        );
+        assert_eq!(
+            ahead.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(),
+            vec!["feature second", "feature first"],
+            "newest-first, and the base-side commit is absent"
+        );
+        assert_eq!(cmp.behind.len(), 1, "the fixture has a base-only commit");
+
+        let count = git_branch_ahead_count(repo, base_branch, "feature".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            count as usize,
+            ahead.len(),
+            "the count equals the ahead list's length"
+        );
+    }
+
+    /// Both ahead-only commands share `git_compare_branches`' guard: an
+    /// option-shaped ref is rejected before any git runs, on either side.
+    #[tokio::test]
+    async fn branch_ahead_rejects_option_like_refs() {
+        let (_base, repo) = seed_repo("branch-ahead-badref").await;
+
+        for (base, compare) in [("-oops", "HEAD"), ("HEAD", "-oops")] {
+            let err = git_branch_ahead(repo.clone(), base.into(), compare.into())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidArgument(_)),
+                "git_branch_ahead rejects a leading-dash ref ({base}..{compare})"
+            );
+            let err = git_branch_ahead_count(repo.clone(), base.into(), compare.into())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidArgument(_)),
+                "git_branch_ahead_count rejects a leading-dash ref ({base}..{compare})"
+            );
+        }
     }
 
     /// `exclude` hides matching files from BOTH the diff text and the file list, and

@@ -1,6 +1,6 @@
 import { hostLabel, isHostAllowed } from "@/lib/ai/allowed-hosts";
 import { repoIdentity } from "@/lib/git/repo-identity";
-import type { McpKeyValue, McpServer } from "./api";
+import type { MCP_REPO_STATES, McpKeyValue, McpServer } from "./api";
 
 /** Server name = the key in the generated MCP config: letters/digits/`-`/`_`,
  *  must start with a letter or digit, no spaces. */
@@ -56,7 +56,7 @@ export function isServerInScope(
  *  A global server can be overridden per repo (`repoOverrides`, keyed by identity
  *  or a legacy raw path); otherwise — and always for repo-scoped servers — it
  *  follows `enabled` (on / optional). */
-export type McpRepoState = "on" | "optional" | "off";
+export type McpRepoState = (typeof MCP_REPO_STATES)[number];
 export function effectiveMcpState(
   server: McpServer,
   repoKeys: RepoKeys,

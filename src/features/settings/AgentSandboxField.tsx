@@ -28,19 +28,24 @@ import {
   scaffoldCustomDockerfile,
 } from "@/lib/ai/sandbox";
 import { useContainerStatus } from "@/lib/ai/sandbox-queries";
+import { AGENT_ISOLATIONS, NODE_VERSIONS } from "@/lib/settings/api";
 import { toastError } from "@/lib/toast";
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 type AgentId = "claude" | "codex" | "opencode" | "copilot";
+type NodeVersion = (typeof NODE_VERSIONS)[number];
+type AgentIsolation = (typeof AGENT_ISOLATIONS)[number];
 
-/** Node base-image versions offered (current LTS first). */
-const NODE_VERSIONS = ["24", "22", "20"];
 /** Trigger labels — without them Base UI shows the raw version, dropping the
- *  "(LTS)" note the popup carries. */
-const NODE_VERSION_ITEMS: Record<string, string> = Object.fromEntries(
-  NODE_VERSIONS.map((v) => [v, v === "24" ? `${v} (LTS)` : v]),
-);
+ *  "(LTS)" note the popup carries. Record-typed against NODE_VERSIONS, which
+ *  `loadSettings` also heals against, so an added version can't reach one
+ *  without the other. */
+const NODE_VERSION_ITEMS: Record<NodeVersion, string> = {
+  "24": "24 (LTS)",
+  "22": "22",
+  "20": "20",
+};
 /** Container-capable agents installed into the managed image. */
 const IMAGE_AGENTS: { id: AgentId; label: string }[] = [
   { id: "claude", label: "Claude Code" },
@@ -66,10 +71,10 @@ export function AgentSandboxField({
   onProviders,
   repoPath,
 }: {
-  value: "worktree" | "container";
-  onChange: (value: "worktree" | "container") => void;
-  nodeVersion: string;
-  onNodeVersion: (v: string) => void;
+  value: AgentIsolation;
+  onChange: (value: AgentIsolation) => void;
+  nodeVersion: NodeVersion;
+  onNodeVersion: (v: NodeVersion) => void;
   providers: AgentId[];
   onProviders: (v: AgentId[]) => void;
   /** The open repo, for the per-repo custom-image row (null = no repo open). */
@@ -129,7 +134,7 @@ export function AgentSandboxField({
               <Select
                 items={NODE_VERSION_ITEMS}
                 value={nodeVersion}
-                onValueChange={(v) => v && onNodeVersion(v)}
+                onValueChange={(v) => v && onNodeVersion(v as NodeVersion)}
               >
                 <SelectTrigger
                   size="sm"

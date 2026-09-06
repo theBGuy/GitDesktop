@@ -1381,6 +1381,18 @@ export const gitCompareBranches = (
 ) =>
   invoke<BranchComparison>("git_compare_branches", { repoPath, base, compare });
 
+export const gitBranchAhead = (
+  repoPath: string,
+  base: string,
+  compare: string,
+) => invoke<CommitSummary[]>("git_branch_ahead", { repoPath, base, compare });
+
+export const gitBranchAheadCount = (
+  repoPath: string,
+  base: string,
+  compare: string,
+) => invoke<number>("git_branch_ahead_count", { repoPath, base, compare });
+
 export const gitBranchDiffFiles = (
   repoPath: string,
   base: string,

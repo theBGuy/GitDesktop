@@ -39,7 +39,7 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { type AgentKind, detectAgentCli, providerKind } from "@/lib/ai/agent";
+import { detectAgentCli, providerKind } from "@/lib/ai/agent";
 import {
   entryMatchesUrl,
   isHostAllowed,
@@ -47,7 +47,6 @@ import {
 } from "@/lib/ai/allowed-hosts";
 import { LOGIN_COMMAND } from "@/lib/ai/cli-client";
 import { createAiClient } from "@/lib/ai/client";
-import type { ReviewContextSize } from "@/lib/ai/context-budget";
 import { modelPickerEmptyText, useAvailableModels } from "@/lib/ai/models";
 import {
   ALL_PROVIDER_IDS,
@@ -60,6 +59,10 @@ import {
   PROVIDERS_REQUIRING_KEY,
 } from "@/lib/ai/providers";
 import {
+  REVIEW_CONTEXT_SIZES,
+  type ReviewContextSize,
+} from "@/lib/ai/review-context-size";
+import {
   REVIEW_EFFORTS,
   type ReviewEffort,
   reviewEffortCapable,
@@ -68,6 +71,7 @@ import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiProviderId, AiSettings } from "@/lib/ai/types";
 import { required, useAppForm, withForm } from "@/lib/form";
 import { deleteSecret, setSecret } from "@/lib/git/api";
+import type { DEFAULT_AGENT_IDS } from "@/lib/settings/api";
 import { settingsKeys, useSecretPreview } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
@@ -365,9 +369,14 @@ const REVIEW_EFFORT_ITEMS: Record<ReviewEffort, string> = {
   xhigh: "Max",
 };
 
+type DefaultAgentId = (typeof DEFAULT_AGENT_IDS)[number];
+type DefaultAgentChoice = "auto" | DefaultAgentId;
+
 /** Default-agent labels — same `items` contract as the maps above. "auto" is the
- *  UI stand-in for an absent `defaultAgent` (follow the AI provider). */
-const DEFAULT_AGENT_ITEMS: Record<"auto" | AgentKind, string> = {
+ *  UI stand-in for an absent `defaultAgent` (follow the AI provider), so it is a
+ *  key here but not a member of DEFAULT_AGENT_IDS, which `loadSettings` heals
+ *  against. */
+const DEFAULT_AGENT_ITEMS: Record<DefaultAgentChoice, string> = {
   auto: "Auto — follow the AI provider",
   claude: "Claude",
   codex: "Codex",
@@ -690,13 +699,10 @@ export const AiProviderSection = withForm({
       form.store,
       (s) => s.values.reviewTimeout ?? "auto",
     );
-    // Render-coerce junk from a hand-edited settings.json to "auto" so the
-    // trigger shows what the run will actually do (reviewEffortLevel treats
-    // unknown values as ""); the stored value heals on the next pick.
-    const reviewEffort = useSelector(form.store, (s) => {
-      const v = s.values.reviewEffort;
-      return v && REVIEW_EFFORTS.includes(v) ? v : "auto";
-    });
+    const reviewEffort = useSelector(
+      form.store,
+      (s) => s.values.reviewEffort ?? "auto",
+    );
     // `undefined` = Auto (no explicit default; new runs follow `ai.provider`).
     const defaultAgent = useSelector(form.store, (s) => s.values.defaultAgent);
     const agentIsolation = useSelector(
@@ -1111,13 +1117,11 @@ export const AiProviderSection = withForm({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {(Object.keys(REVIEW_CONTEXT_ITEMS) as ReviewContextSize[]).map(
-                  (id) => (
-                    <SelectItem key={id} value={id}>
-                      {REVIEW_CONTEXT_ITEMS[id]}
-                    </SelectItem>
-                  ),
-                )}
+                {REVIEW_CONTEXT_SIZES.map((id) => (
+                  <SelectItem key={id} value={id}>
+                    {REVIEW_CONTEXT_ITEMS[id]}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
@@ -1219,7 +1223,7 @@ export const AiProviderSection = withForm({
                 // truly absent and the resolver falls through to the provider.
                 form.setFieldValue(
                   "defaultAgent",
-                  v === "auto" ? undefined : (v as AgentKind),
+                  v === "auto" ? undefined : (v as DefaultAgentId),
                 );
               }}
             >
@@ -1227,13 +1231,13 @@ export const AiProviderSection = withForm({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {(
-                  Object.keys(DEFAULT_AGENT_ITEMS) as ("auto" | AgentKind)[]
-                ).map((id) => (
-                  <SelectItem key={id} value={id}>
-                    {DEFAULT_AGENT_ITEMS[id]}
-                  </SelectItem>
-                ))}
+                {(Object.keys(DEFAULT_AGENT_ITEMS) as DefaultAgentChoice[]).map(
+                  (id) => (
+                    <SelectItem key={id} value={id}>
+                      {DEFAULT_AGENT_ITEMS[id]}
+                    </SelectItem>
+                  ),
+                )}
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">

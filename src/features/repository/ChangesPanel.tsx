@@ -38,7 +38,7 @@ import {
 import {
   useAppendRepoAiIgnore,
   useAppendToGitignore,
-  useCompareBranches,
+  useBranchAheadCount,
   useDefaultBranch,
   useDiscardAll,
   useDiscardPaths,
@@ -255,14 +255,12 @@ export function ChangesPanel({
     currentName !== null &&
     defaultName !== null &&
     currentName !== defaultName;
-  const aheadOfDefault = useCompareBranches(
+  const aheadOfDefault = useBranchAheadCount(
     repoPath,
     canCompareDefault ? defaultName : null,
     canCompareDefault ? currentName : null,
   );
-  const proposeCount = canCompareDefault
-    ? (aheadOfDefault.data?.ahead.length ?? 0)
-    : 0;
+  const proposeCount = canCompareDefault ? (aheadOfDefault.data ?? 0) : 0;
 
   const text = filterText.trim().toLowerCase();
   function visible(entry: FileEntry): boolean {

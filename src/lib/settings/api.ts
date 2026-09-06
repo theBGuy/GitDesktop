@@ -1,11 +1,15 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
-import type { ReviewContextSize } from "@/lib/ai/context-budget";
-import type { ReviewEffort } from "@/lib/ai/review-effort";
-import type { ReviewTimeout } from "@/lib/ai/review-timeout";
+import { ALL_PROVIDER_IDS } from "@/lib/ai/providers";
+import {
+  REVIEW_CONTEXT_SIZES,
+  type ReviewContextSize,
+} from "@/lib/ai/review-context-size";
+import { REVIEW_EFFORTS, type ReviewEffort } from "@/lib/ai/review-effort";
+import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiSettings, ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
-import type { ThemeSetting } from "@/lib/theme";
+import { THEME_ORDER, type ThemeSetting } from "@/lib/theme";
 
 export interface RecentRepo {
   path: string;
@@ -94,6 +98,11 @@ export interface CustomCommand {
   prompt: string;
 }
 
+/** A global server's per-repo states. Declared here rather than beside
+ *  {@link McpRepoState} in ./mcp so `loadSettings` can heal against it without
+ *  importing that module — "default" is key ABSENCE, so it is not a member. */
+export const MCP_REPO_STATES = ["on", "optional", "off"] as const;
+
 /** One ordered environment variable / request header entry in an MCP server
  *  definition. Secret-bearing entries keep their `value` empty here (the real
  *  value lives in the OS keychain — see `McpServer.secretKeys`). */
@@ -130,7 +139,7 @@ export interface McpServer {
   /** Per-repo overrides of a GLOBAL server's state, keyed by the repo's worktree-stable
    *  identity (legacy raw-path keys honored on read, folded on write): "on" / "optional" /
    *  "off". Absent for a repo = inherit `enabled`. Meaningless for repo-scoped servers. */
-  repoOverrides?: Record<string, "on" | "optional" | "off">;
+  repoOverrides?: Record<string, (typeof MCP_REPO_STATES)[number]>;
   /** "stdio" = a local subprocess; "http" = a remote streamable-HTTP server. */
   transport: "stdio" | "http";
   /** Executable to launch (stdio only), e.g. `npx`. */
@@ -147,9 +156,15 @@ export interface McpServer {
   secretKeys: string[];
 }
 
+/** The background-fetch cadences offered in Settings, in render order. */
+export const AUTO_FETCH_INTERVALS = ["5", "10", "15", "30", "60"] as const;
+
 /** Background-fetch cadence, in minutes (stored as a string so it binds to the
  *  settings Select directly). */
-export type AutoFetchInterval = "5" | "10" | "15" | "30" | "60";
+export type AutoFetchInterval = (typeof AUTO_FETCH_INTERVALS)[number];
+
+/** The CI-check notification scopes offered in Settings, in render order. */
+export const PR_CHECK_SCOPES = ["off", "mine", "all"] as const;
 
 export interface NotificationSettings {
   /** Automation results (review posted / ready / failed). */
@@ -157,7 +172,7 @@ export interface NotificationSettings {
   /** An AI code review or security audit you started finishing in the background. */
   reviews: boolean;
   /** CI check completion on open PRs. */
-  prChecks: "off" | "mine" | "all";
+  prChecks: (typeof PR_CHECK_SCOPES)[number];
   /** PRs opened / merged / closed in the current repo. */
   prActivity: boolean;
   /** Review decisions on PRs you authored. */
@@ -165,6 +180,26 @@ export interface NotificationSettings {
   /** Workflow runs finishing (success/failure) on the current branch. */
   actionRuns: boolean;
 }
+
+/** The agent CLIs offerable as the Default agent, in render order. Spelled out
+ *  here rather than imported from lib/ai (which mirrors the same list as
+ *  `AgentKind`) to keep settings free of an ai import cycle, even a type-only one. */
+export const DEFAULT_AGENT_IDS = [
+  "claude",
+  "codex",
+  "copilot",
+  "opencode",
+] as const;
+
+/** The agent-session isolation modes offered in Settings. */
+export const AGENT_ISOLATIONS = ["worktree", "container"] as const;
+
+/** Node base-image majors offered for the agent container image (current LTS
+ *  first). The Settings picker renders this list; `loadSettings` heals against it. */
+export const NODE_VERSIONS = ["24", "22", "20"] as const;
+
+/** The diff layouts offered in the diff surface's view toggle. */
+export const DIFF_VIEW_MODES = ["unified", "split"] as const;
 
 export interface AppSettings {
   ai: AiSettings;
@@ -201,15 +236,15 @@ export interface AppSettings {
    *  main AI provider when that's an agent CLI, else Claude. Inline union (the
    *  sessions store does the same) to avoid a settings↔ai import cycle, even a
    *  type-only one. */
-  defaultAgent?: "claude" | "codex" | "copilot" | "opencode";
+  defaultAgent?: (typeof DEFAULT_AGENT_IDS)[number];
   /** How write-capable agent sessions are isolated. "worktree" = the throwaway
    *  git worktree only (host, full-auto); "container" = also run inside an
    *  ephemeral Docker/Podman container for kernel-enforced filesystem
    *  confinement (opt-in; needs Docker/Podman installed). */
-  agentIsolation: "worktree" | "container";
+  agentIsolation: (typeof AGENT_ISOLATIONS)[number];
   /** Node base-image major version for the agent container image (digits, e.g.
    *  "24"). */
-  agentImageNodeVersion: string;
+  agentImageNodeVersion: (typeof NODE_VERSIONS)[number];
   /** Which container-capable agents to bake into the image. */
   agentImageProviders: ("claude" | "codex" | "opencode" | "copilot")[];
   globalInstructions: string;
@@ -295,7 +330,7 @@ export interface AppSettings {
    *  softer dark variant that lifts surfaces off pure black to reduce eye strain. Applied
    *  outside the bulk settings form (apply-on-change), like diffViewMode. */
   theme: ThemeSetting;
-  diffViewMode: "unified" | "split";
+  diffViewMode: (typeof DIFF_VIEW_MODES)[number];
   /** Which conversation-list sections the user collapsed, keyed `"<feature>:<kind>"`
    *  (`pulls:local`, `issues:remote`, …); a missing key = expanded. Global and
    *  feature-scoped, so the remote key collapses that section across every repo. */
@@ -411,13 +446,133 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
+/** The stored value when it is one of `allowed`, else `fallback`. */
+const pick = <T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+): T => (allowed.includes(value as T) ? (value as T) : fallback);
+
+/** Drops per-repo override entries whose value isn't a real state — absence IS the
+ *  "Default" choice, so a junk entry heals by disappearing rather than by picking a
+ *  state the user never made. Returns the server untouched when nothing was junk,
+ *  and passes through anything that isn't a server object at all: the heal's whole
+ *  premise is that settings.json lies, so it must not assume shape either. */
+function healMcpServer(server: McpServer): McpServer {
+  if (typeof server !== "object" || server === null) return server;
+  const overrides = server.repoOverrides;
+  if (typeof overrides !== "object" || overrides === null) return server;
+  const kept = Object.entries(overrides).filter(([, state]) =>
+    (MCP_REPO_STATES as readonly string[]).includes(state),
+  );
+  if (kept.length === Object.keys(overrides).length) return server;
+  return { ...server, repoOverrides: Object.fromEntries(kept) };
+}
+
+/**
+ * Coerces every statically-enumerable field to its default when the stored value is
+ * off-list. settings.json is hand-editable and no writer validates membership, so an
+ * unrecognized string otherwise reaches a `Select` with no matching item — an empty
+ * trigger whose next Save persists the junk. Silent and deterministic, so a healed
+ * value simply rides the next natural settings write.
+ *
+ * Fields whose membership is only known at runtime are deliberately absent: terminal
+ * / terminalPath / externalEditor (their own custom sentinels), syntaxMap (user-defined
+ * language ids), hotkeys, and MCP server scopes (repo identities).
+ */
+function healEnumerated(settings: AppSettings): AppSettings {
+  // Destructured out because an off-list agent must heal to ABSENT — that absence is
+  // the meaningful "Auto" state, so a stand-in string would silently pin an agent.
+  const { defaultAgent, ...rest } = settings;
+  return {
+    ...rest,
+    ...(defaultAgent && DEFAULT_AGENT_IDS.includes(defaultAgent)
+      ? { defaultAgent }
+      : {}),
+    // Provider ids heal against the FULL list, never a per-surface filtered subset:
+    // a valid provider that some picker hides must survive the load untouched.
+    ai: {
+      ...settings.ai,
+      provider: pick(
+        settings.ai.provider,
+        ALL_PROVIDER_IDS,
+        DEFAULT_SETTINGS.ai.provider,
+      ),
+    },
+    reviewAi: {
+      ...settings.reviewAi,
+      provider: pick(
+        settings.reviewAi.provider,
+        ALL_PROVIDER_IDS,
+        DEFAULT_SETTINGS.reviewAi.provider,
+      ),
+    },
+    ...(settings.securityReviewAi
+      ? {
+          securityReviewAi: {
+            ...settings.securityReviewAi,
+            provider: pick(
+              settings.securityReviewAi.provider,
+              ALL_PROVIDER_IDS,
+              DEFAULT_SETTINGS.reviewAi.provider,
+            ),
+          },
+        }
+      : {}),
+    reviewContextSize: pick(
+      settings.reviewContextSize,
+      REVIEW_CONTEXT_SIZES,
+      "auto",
+    ),
+    reviewTimeout: pick(settings.reviewTimeout, REVIEW_TIMEOUTS, "auto"),
+    reviewEffort: pick(settings.reviewEffort, REVIEW_EFFORTS, "auto"),
+    notifications: {
+      ...settings.notifications,
+      prChecks: pick(
+        settings.notifications.prChecks,
+        PR_CHECK_SCOPES,
+        DEFAULT_SETTINGS.notifications.prChecks,
+      ),
+    },
+    agentIsolation: pick(
+      settings.agentIsolation,
+      AGENT_ISOLATIONS,
+      DEFAULT_SETTINGS.agentIsolation,
+    ),
+    agentImageNodeVersion: pick(
+      settings.agentImageNodeVersion,
+      NODE_VERSIONS,
+      DEFAULT_SETTINGS.agentImageNodeVersion,
+    ),
+    autoFetchInterval: pick(
+      settings.autoFetchInterval,
+      AUTO_FETCH_INTERVALS,
+      DEFAULT_SETTINGS.autoFetchInterval,
+    ),
+    theme: pick(settings.theme, THEME_ORDER, DEFAULT_SETTINGS.theme),
+    diffViewMode: pick(
+      settings.diffViewMode,
+      DIFF_VIEW_MODES,
+      DEFAULT_SETTINGS.diffViewMode,
+    ),
+    // A non-array here would throw, and every writer in the serialized RMW chain
+    // re-reads through loadSettings — so the throw would lock the user out of
+    // repairing the file from inside the app.
+    mcpServers: Array.isArray(settings.mcpServers)
+      ? settings.mcpServers.map(healMcpServer)
+      : DEFAULT_SETTINGS.mcpServers,
+  };
+}
+
 /** Loads settings, healing an older or partial saved object against DEFAULT_SETTINGS:
  *  any field absent (stored before that field shipped) reads as its default. Nested
- *  ai/reviewAi/notifications objects are merged, not replaced. */
+ *  ai/reviewAi/notifications objects are merged, not replaced. Enumerated fields are
+ *  then membership-checked by {@link healEnumerated}, so every caller — the settings
+ *  form, the pre-React theme apply, and the RMW writers below — sees a valid object. */
 export async function loadSettings(): Promise<AppSettings> {
   const store = await getStore();
   const saved = await store.get<Partial<AppSettings>>("settings");
-  return {
+  return healEnumerated({
     ...DEFAULT_SETTINGS,
     ...saved,
     ai: { ...DEFAULT_SETTINGS.ai, ...saved?.ai },
@@ -437,7 +592,7 @@ export async function loadSettings(): Promise<AppSettings> {
       ...DEFAULT_SETTINGS.notifications,
       ...saved?.notifications,
     },
-  };
+  });
 }
 
 /**

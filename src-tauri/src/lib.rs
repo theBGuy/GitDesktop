@@ -305,6 +305,8 @@ pub fn run() {
             git::stats::git_code_frequency,
             git::stats::git_punch_card,
             git::compare::git_compare_branches,
+            git::compare::git_branch_ahead,
+            git::compare::git_branch_ahead_count,
             git::compare::git_branch_diff_files,
             git::compare::git_branch_file_diff,
             git::compare::git_branch_diff,
