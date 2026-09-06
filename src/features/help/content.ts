@@ -402,9 +402,10 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
   file is detected wrong (or turn highlighting off). A narrow pane drops the override's
   button from the toolbar; *Change diff language…* in the command palette (palette-only
   by default — bind a key in **Settings → Keyboard**) still opens the picker.
-- **Image diffs** render side by side. Click a side, or Tab to it and press Enter, to
-  open it fullscreen: the image over a dimmed backdrop, its label and pixel dimensions
-  along the bottom, and a **Fit** / **100%** toggle. In **Fit** view ← and → move
+- **Image diffs** render side by side; a file too large to decode safely shows a
+  **Too large to preview** pane instead. Click a rendered side, or Tab to it and press
+  Enter, to open it fullscreen: the image over a dimmed backdrop, its label and pixel
+  dimensions along the bottom, and a **Fit** / **100%** toggle. In **Fit** view ← and → move
   between the old and new sides; at **100%** the arrow keys pan the zoomed image, and
   Esc closes either way. The **SVG** preview above a text diff and the image diffs
   inside the stashes dialog open the same viewer.
@@ -455,7 +456,10 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 > it isn't deleted outright. The exception is a name Windows reserves for a device
 > (\`nul\`, \`con\`, \`com3\`): the recycle bin can't take one, so those are removed
 > permanently. On Windows git can't stage such a file at all, so its **Stage**
-> control explains that rather than failing, and **Stage all** stages everything else.`,
+> control explains that rather than failing, and **Stage all** stages everything else.
+> **Stash all** works around them too: everything else is stashed and the reserved-named
+> file stays put; if they're the only changes, Stash all explains why nothing can be
+> stashed.`,
   },
   {
     id: "history",
@@ -2122,18 +2126,19 @@ Register **Model Context Protocol** servers under **Settings → MCP servers** �
 the ones you choose from the composer's **MCP** picker. **Claude**, **Copilot**, and
 **opencode** run MCP servers on the **host** *or* in a **container**; **Codex** runs them
 in a **container** only (local/\`stdio\` servers — host Codex can't approve MCP tool calls,
-so it needs the container's sandbox). A **remote (HTTP)** server whose host isn't on your
-**AI allowed hosts** list is flagged with a **host not allowed** badge (and an advisory note
-in its editor with a one-click **Allow host**) — a reminder that the CLI connects to that
-host outside GitDesktop's AI host allowlist. It's advisory only: nothing is blocked, and the
-server keeps working. In a container the servers run *inside* the sandbox,
-sharing an npm cache so an \`npx\` server is downloaded only once. A Claude run is **strict** —
-it gets *only* the servers you picked and never inherits others on your machine — while
-Copilot and opencode layer your picks onto their own config. The composer's **MCP** picker
-shows for every agent and tells you when a pick needs a container session — with Codex it
-points you at the **Isolation** control in the same **Options** popover. You can also change the
-selection **mid-session** — the picker appears in a running session's reply box too, and a
-new choice applies from your next turn.
+so it needs the container's sandbox). **Remote (HTTP)** servers are checked against your
+**AI allowed hosts** list: a server already in your registry keeps working and carries a
+**host not allowed** badge as a reminder, while adding a new server, importing one, or
+saving an edit needs its host on the list first. Each route offers a one-click
+**Allow host** that adds it; the registry browser keeps it in the row's expanded
+detail. In a container the servers run *inside* the sandbox, sharing an npm cache so an
+\`npx\` server is downloaded only once. A Claude run is **strict** — it gets *only* the
+servers you picked and never inherits others on your machine — while Copilot and opencode
+layer your picks onto their own config. The composer's **MCP** picker shows for every agent
+and tells you when a pick needs a container session — with Codex it points you at the
+**Isolation** control in the same **Options** popover. You can also change the selection
+**mid-session** — the picker appears in a running session's reply box too, and a new choice
+applies from your next turn.
 
 **The other direction — GitDesktop *as* a server.** At the bottom of the panel, **Use
 GitDesktop as an MCP server** lets any external MCP client — Claude Desktop, Cursor, Claude

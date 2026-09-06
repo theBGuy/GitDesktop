@@ -20,13 +20,13 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { isHostAllowed, normalizeHost } from "@/lib/ai/allowed-hosts";
 import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";
 import type { McpServer } from "@/lib/settings/api";
 import {
   emptyMcpServer,
   entriesFor,
   MCP_SCOPE_GLOBAL,
+  mcpHostAllowFixable,
   scopeRepoPath,
   serverScope,
   validateMcpServer,
@@ -67,11 +67,11 @@ export function McpServerDialog({
   /** The repo open behind Settings (for the "This repo" scope option). */
   repoPath: string | null;
   repoName: string | null;
-  /** The draft AI allow list (the settings form both screens share), so an http
-   *  URL pointing at a not-yet-allowed host can surface the advisory note. */
+  /** The draft AI allow list (the settings form both screens share). An http URL
+   *  pointing at a host that isn't on it blocks Save until the host is added. */
   allowedHosts: string[];
   /** Add a URL's host to the draft allow list — the one-click fix behind the
-   *  advisory note. Mutates the draft settings, not persisted settings. */
+   *  host note. Mutates the draft settings, not persisted settings. */
   onAllowHost: (url: string) => void;
   onSave: (server: McpServer) => void;
   onClose: () => void;
@@ -153,7 +153,7 @@ export function McpServerDialog({
     };
   }
 
-  const validationError = validateMcpServer(candidate(), others);
+  const validationError = validateMcpServer(candidate(), others, allowedHosts);
 
   async function save() {
     if (validationError) {
@@ -326,25 +326,22 @@ export function McpServerDialog({
                 className="font-mono"
                 spellCheck={false}
               />
-              {/* The CLI connects to this URL outside GitDesktop's AI host
-                  allowlist. Advisory only — never feeds validationError or
-                  disables Save. Gated on a PARSEABLE host (so a half-typed
-                  "http://" shows nothing, not an empty note) that isn't already
-                  allowed; empty/allowlisted/local URLs show nothing. */}
-              {/* The outer guard duplicates HostAllowNote's internal checks ON
-                  PURPOSE: with `defaultNote={null}` the component's all-clear
-                  branch would render an empty <p>, so it must never mount for a
-                  parseable-and-allowed (or unparseable mid-typing) URL. */}
-              {normalizeHost(draft.url) &&
-                !isHostAllowed(draft.url, allowedHosts) && (
-                  <HostAllowNote
-                    url={draft.url}
-                    allowedHosts={allowedHosts}
-                    onAllowHost={onAllowHost}
-                    defaultNote={null}
-                    consequence="the agent CLI will still connect to it — it sits outside GitDesktop's AI host allowlist."
-                  />
-                )}
+              {/* The guided fix for the registration gate: Save stays blocked
+                  (validateMcpServer carries the same host check) until this host
+                  is on the draft allow list, and allowing it here clears both.
+                  Mounted only where Allow host actually clears the block — with
+                  `defaultNote={null}` the all-clear branch renders an empty <p>,
+                  and a malformed or non-http(s) URL is refused for a reason no
+                  host can fix. */}
+              {mcpHostAllowFixable(draft, allowedHosts) && (
+                <HostAllowNote
+                  url={draft.url}
+                  allowedHosts={allowedHosts}
+                  onAllowHost={onAllowHost}
+                  defaultNote={null}
+                  consequence="the agent CLI connects outside GitDesktop's AI allowlist, so allow it before saving."
+                />
+              )}
             </div>
           )}
 

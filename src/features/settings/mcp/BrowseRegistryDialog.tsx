@@ -11,6 +11,7 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,7 +27,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { McpServer } from "@/lib/settings/api";
-import { entriesFor } from "@/lib/settings/mcp";
+import {
+  entriesFor,
+  mcpHostAllowFixable,
+  mcpHostGateReason,
+} from "@/lib/settings/mcp";
 import {
   ghRepoStats,
   npmWeeklyDownloadsBatch,
@@ -40,6 +45,7 @@ import {
 import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { HostAllowNote } from "../HostAllowNote";
 
 /** Compact number for stars/installs (87729 → "87.7K"). */
 const compactNumber = new Intl.NumberFormat(undefined, {
@@ -64,10 +70,18 @@ function runSummary(server: McpServer): string {
  */
 export function BrowseRegistryDialog({
   existing,
+  allowedHosts,
+  onAllowHost,
   onAdd,
   onClose,
 }: {
   existing: McpServer[];
+  /** The draft AI allow list. An http candidate whose host isn't on it can't be
+   *  added until the host is allowed (the registration gate). */
+  allowedHosts: string[];
+  /** Add a URL's host to the draft allow list — the one-click fix in a gated
+   *  row's expanded detail. Mutates the draft settings, not persisted ones. */
+  onAllowHost: (url: string) => void;
   onAdd: (server: McpServer) => void;
   onClose: () => void;
 }) {
@@ -177,6 +191,9 @@ export function BrowseRegistryDialog({
   useEffect(() => setActiveIndex(-1), [debounced, source]);
 
   function add(c: RegistryCandidate) {
+    // Fire-time re-check of the registration gate — the row's Add is already
+    // held, and Enter on the row routes here too.
+    if (mcpHostGateReason(c.server, allowedHosts)) return;
     const taken = new Set(
       existingRef.current.map((s) => s.name.trim().toLowerCase()),
     );
@@ -308,17 +325,45 @@ export function BrowseRegistryDialog({
                 const isOpen = expanded.has(c.registryName);
                 const entries = entriesFor(c.server);
                 const secretSet = new Set(c.server.secretKeys);
+                // Gate UI belongs only to rows still offering Add: an added or
+                // already-registered row has no action to hold, and the registry
+                // list's own warn-only badge is what covers those.
+                const gateReason = disabled
+                  ? null
+                  : mcpHostGateReason(c.server, allowedHosts);
+                const allowFixable =
+                  !disabled && mcpHostAllowFixable(c.server, allowedHosts);
+                // Why Add is held, plus where the one-click fix lives — pointed
+                // at the row's detail only when a fix actually waits there.
+                const addReason = ((): string | null => {
+                  switch (true) {
+                    case !gateReason:
+                      return null;
+                    case allowFixable:
+                      return `${gateReason} Expand the row to allow it.`;
+                    default:
+                      return gateReason;
+                  }
+                })();
+                // What the row announces after its title and transport, ranked:
+                // what it already is, then why Add is held, then the affordance.
+                const rowStatus = ((): string => {
+                  switch (true) {
+                    case isAdded:
+                      return ", added";
+                    case inRegistry:
+                      return ", already in your registry";
+                    case !!addReason:
+                      return `. ${addReason}`;
+                    default:
+                      return ". Press Enter to add.";
+                  }
+                })();
                 return (
                   <div
                     key={c.registryName}
                     data-registry-row={c.registryName}
-                    aria-label={`${c.title}, ${c.server.transport}${
-                      disabled
-                        ? isAdded
-                          ? ", added"
-                          : ", already in your registry"
-                        : ". Press Enter to add."
-                    }`}
+                    aria-label={`${c.title}, ${c.server.transport}${rowStatus}`}
                     tabIndex={
                       i === safeActive || (safeActive === -1 && i === 0)
                         ? 0
@@ -330,7 +375,8 @@ export function BrowseRegistryDialog({
                       if (
                         e.key === "Enter" &&
                         e.target === e.currentTarget &&
-                        !disabled
+                        !disabled &&
+                        !addReason
                       ) {
                         e.preventDefault();
                         add(c);
@@ -482,6 +528,15 @@ export function BrowseRegistryDialog({
                               <ArrowSquareOutIcon />
                             </button>
                           )}
+                          {allowFixable ? (
+                            <HostAllowNote
+                              url={c.server.url}
+                              allowedHosts={allowedHosts}
+                              onAllowHost={onAllowHost}
+                              defaultNote={null}
+                              consequence="the agent CLI connects outside GitDesktop's AI allowlist, so allow it before adding."
+                            />
+                          ) : null}
                         </div>
                       )}
                     </div>
@@ -495,14 +550,16 @@ export function BrowseRegistryDialog({
                         In registry
                       </span>
                     ) : (
-                      <Button
+                      <DisabledReasonButton
                         variant="outline"
                         size="sm"
                         className="shrink-0"
+                        disabled={!!addReason}
+                        reason={addReason}
                         onClick={() => add(c)}
                       >
                         <PlusIcon data-icon="inline-start" /> Add
-                      </Button>
+                      </DisabledReasonButton>
                     )}
                   </div>
                 );

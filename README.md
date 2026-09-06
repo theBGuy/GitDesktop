@@ -1009,8 +1009,8 @@ review via its subscription login. The full list is under
 - **Custom and LAN servers**: point Ollama or an OpenAI-compatible endpoint
   at a box on your network, not just `localhost`. Non-built-in hosts must be
   added to the **Allowed hosts** list (Settings → AI; one-click *Allow
-  host* on the URL field), which GitDesktop enforces before every AI
-  request.
+  host* on the URL field). GitDesktop enforces the list before every AI
+  request, and new MCP server registrations are checked against it.
 - **Custom instructions**, included in every generation and every AI review:
   - **Global**: Settings → AI instructions (e.g. "Follow Conventional
     Commits").

@@ -3,6 +3,7 @@ import {
   ImageLightbox,
   type LightboxImage,
 } from "@/components/ui/image-lightbox";
+import type { FileBytes } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
 
 const IMAGE_MIME: Record<string, string> = {
@@ -39,7 +40,8 @@ type PaneKey = "old" | "new";
 interface Pane {
   key: PaneKey;
   label: string;
-  src: string;
+  /** null = the backend refused these bytes; the side renders a refusal box. */
+  src: string | null;
 }
 
 function ImageSide({
@@ -99,6 +101,22 @@ function ImageSide({
   );
 }
 
+/** A side whose bytes the backend withheld — an oversized file, or a raster whose
+ *  header declares more than the webview's decoder should be handed. Visible, so a
+ *  refusal never reads as a blank pane. */
+function RefusedSide({ label }: { label: string }) {
+  return (
+    <figure className="min-w-0 max-w-[45%] space-y-1.5 text-center">
+      <figcaption className="text-xs font-medium text-muted-foreground">
+        {label}
+      </figcaption>
+      <div className="flex h-40 w-56 max-w-full items-center justify-center border px-4">
+        <p className="text-xs text-muted-foreground">Too large to preview</p>
+      </div>
+    </figure>
+  );
+}
+
 /** Measured sides and the open viewer, scoped to the pair they belong to. */
 interface PanesState {
   id: string;
@@ -120,7 +138,6 @@ export function ImagePanes({
   filePath: string;
   revs: ImageRevs;
 }) {
-  const mime = imageMime(filePath) ?? "application/octet-stream";
   const oldFile = useFileAtRev(repoPath, revs.old, filePath, true);
   const newFile = useFileAtRev(repoPath, revs.new, filePath, true);
   // Keyed by the pair being shown, so a switch to another file drops the
@@ -128,8 +145,8 @@ export function ImagePanes({
   const [state, setState] = useState<PanesState>({ id: "" });
 
   const pending = oldFile.isPending || newFile.isPending;
-  const oldB64 = oldFile.data ?? null;
-  const newB64 = newFile.data ?? null;
+  const oldSide = oldFile.data ?? null;
+  const newSide = newFile.data ?? null;
 
   if (pending) {
     return null;
@@ -142,23 +159,35 @@ export function ImagePanes({
       prev.id === id ? { ...prev, ...next } : { id, ...next },
     );
 
+  // The sniffed type wins over the extension, which any commit spells freely;
+  // it's per-side because the two revisions can hold different formats.
+  const paneSrc = (side: FileBytes) =>
+    side.base64 === null
+      ? null
+      : `data:${side.mime ?? imageMime(filePath) ?? "application/octet-stream"};base64,${side.base64}`;
+
   const panes: Pane[] = [];
-  if (oldB64 !== null) {
+  if (oldSide !== null) {
     panes.push({
       key: "old",
-      label: newB64 === null ? "Deleted" : "Old",
-      src: `data:${mime};base64,${oldB64}`,
+      label: newSide === null ? "Deleted" : "Old",
+      src: paneSrc(oldSide),
     });
   }
-  if (newB64 !== null) {
+  if (newSide !== null) {
     panes.push({
       key: "new",
-      label: oldB64 === null ? "Added" : "New",
-      src: `data:${mime};base64,${newB64}`,
+      label: oldSide === null ? "Added" : "New",
+      src: paneSrc(newSide),
     });
   }
 
-  const images: LightboxImage[] = panes.map((pane) => ({
+  // A refused side has nothing to show fullscreen, so the viewer indexes only
+  // the sides that rendered an image.
+  const shown = panes.filter(
+    (pane): pane is Pane & { src: string } => pane.src !== null,
+  );
+  const images: LightboxImage[] = shown.map((pane) => ({
     src: pane.src,
     alt: pane.label,
     label: pane.label,
@@ -169,18 +198,24 @@ export function ImagePanes({
 
   return (
     <div className="flex items-start justify-center gap-8 p-6">
-      {panes.map((pane, i) => (
-        <ImageSide
-          // Keyed by the pair as well as the slot: an `<img>` kept across a file
-          // switch paints the previous file until the new src decodes.
-          key={`${id}|${pane.key}`}
-          label={pane.label}
-          onMeasure={(size) => patch({ [pane.key]: size })}
-          onOpen={() => patch({ viewing: i })}
-          size={current?.[pane.key]}
-          src={pane.src}
-        />
-      ))}
+      {panes.map((pane) =>
+        pane.src === null ? (
+          <RefusedSide key={`${id}|${pane.key}`} label={pane.label} />
+        ) : (
+          <ImageSide
+            // Keyed by the pair as well as the slot: an `<img>` kept across a
+            // file switch paints the previous file until the new src decodes.
+            key={`${id}|${pane.key}`}
+            label={pane.label}
+            onMeasure={(size) => patch({ [pane.key]: size })}
+            onOpen={() =>
+              patch({ viewing: shown.findIndex((s) => s.key === pane.key) })
+            }
+            size={current?.[pane.key]}
+            src={pane.src}
+          />
+        ),
+      )}
       {panes.length === 0 && (
         <p className="py-8 text-xs text-muted-foreground">
           Could not load this image.

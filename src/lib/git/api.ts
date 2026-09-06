@@ -341,12 +341,24 @@ export const gitOpAbort = (repoPath: string, op: RepoOp) =>
 export const gitOpContinue = (repoPath: string, op: RepoOp) =>
   invoke<boolean>("git_op_continue", { repoPath, op });
 
-/** Base64 file content at a rev (null rev = working tree; null result = absent). */
+/** One file's bytes for the webview, or the reason they're withheld. */
+export interface FileBytes {
+  /** Base64 of the file bytes; null when the preview is refused. */
+  base64: string | null;
+  /** Media type sniffed from the bytes, not the extension — one of PNG, GIF,
+   *  JPEG, WebP. null for anything else (SVG, BMP, ICO, text, …). */
+  mime: string | null;
+  /** Past the byte cap, or a raster whose header declares more than the
+   *  webview's decoder should be handed. */
+  tooLarge: boolean;
+}
+
+/** File content at a rev (null rev = working tree; null result = absent). */
 export const gitFileBase64 = (
   repoPath: string,
   rev: string | null,
   filePath: string,
-) => invoke<string | null>("git_file_base64", { repoPath, rev, filePath });
+) => invoke<FileBytes | null>("git_file_base64", { repoPath, rev, filePath });
 
 /** Decode base64 file bytes (from git_file_base64) to a UTF-8 string. */
 export function decodeBase64Utf8(b64: string): string {

@@ -102,13 +102,15 @@ export function MarkdownDocPreview({
   const showOld = hasOld && (!hasNew || newAbsent);
   const oldQ = useFileAtRev(repoPath, revs.oldRev ?? null, filePath, showOld);
   const activeQ = showOld ? oldQ : newQ;
-  const b64 = activeQ.data;
-  // The backend caps reads at 20MB — far past the preview cap — so a clearly
-  // oversized file is rejected on its base64 length instead of being decoded
-  // first: UTF-8 yields at least one UTF-16 unit per 3 bytes, so past 4× the
-  // cap in base64 (3× in bytes) the decoded length cannot come in under it.
+  const b64 = activeQ.data?.base64 ?? null;
+  // The backend's own refusal (its 20MB cap, far past the preview cap) ships
+  // without bytes. Under it, a clearly oversized file is rejected on its base64
+  // length instead of being decoded first: UTF-8 yields at least one UTF-16 unit
+  // per 3 bytes, so past 4× the cap in base64 (3× in bytes) the decoded length
+  // cannot come in under it.
   const tooLarge =
-    typeof b64 === "string" && b64.length > PREVIEW_MAX_CHARS * 4;
+    activeQ.data?.tooLarge === true ||
+    (typeof b64 === "string" && b64.length > PREVIEW_MAX_CHARS * 4);
   const text = useMemo(
     () => (typeof b64 === "string" && !tooLarge ? decodeBase64Utf8(b64) : null),
     [b64, tooLarge],

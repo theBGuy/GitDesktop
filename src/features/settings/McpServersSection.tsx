@@ -23,6 +23,7 @@ import {
   isServerInScope,
   MCP_SCOPE_GLOBAL,
   type McpRepoState,
+  mcpHostGateReason,
   serverScope,
 } from "@/lib/settings/mcp";
 import { useRepoKeys } from "@/lib/settings/queries";
@@ -39,9 +40,11 @@ export const McpServersSection = withForm({
   ...settingsFormOpts,
   render: function McpServersSectionRender({ form }) {
     const servers = useSelector(form.store, (s) => s.values.mcpServers);
-    // The draft AI allow list, shared with the AI provider screen. An http MCP
-    // URL the CLI will connect to outside this allowlist gets an advisory badge
-    // (row) / note (dialog) — never a block, exactly like the AI URL fields.
+    // The draft AI allow list, shared with the AI provider screen. Rows already
+    // in the registry keep a warn-only "host not allowed" badge and go on
+    // working. On REGISTRATION the seams explain the block in place and the
+    // write funnel (admitServers) enforces it, so a route that skips a seam
+    // still can't append an unchecked http server.
     const allowedHosts = useSelector(
       form.store,
       (s) => s.values.aiAllowedHosts,
@@ -72,18 +75,38 @@ export const McpServersSection = withForm({
       form.setFieldValue("mcpServers", next);
     }
 
+    /** The host gate at the WRITE funnel, applied the moment a server would land
+     *  in the registry. Every seam already explains and blocks its own case, so
+     *  this never fires today; it exists so a new registration route can't append
+     *  an unchecked http server silently. Returns the servers that may be written,
+     *  naming the host in a refusal toast for any it drops. */
+    function admitServers(incoming: McpServer[]): McpServer[] {
+      const admitted: McpServer[] = [];
+      for (const s of incoming) {
+        const reason = mcpHostGateReason(s, allowedHosts);
+        if (reason) toast.error(`"${s.name}" wasn't registered — ${reason}`);
+        else admitted.push(s);
+      }
+      return admitted;
+    }
+
     function addServers(added: McpServer[]) {
-      if (added.length) setServers([...list, ...added]);
+      const admitted = admitServers(added);
+      if (admitted.length) setServers([...list, ...admitted]);
       setImportOpen(false);
     }
 
     // Append one server (registry browser), without closing — the dialog stays
     // open for adding several. Functional update so back-to-back adds compose.
     function appendServer(server: McpServer) {
+      if (admitServers([server]).length === 0) return;
       form.setFieldValue("mcpServers", (prev) => [...(prev ?? []), server]);
     }
 
     async function saveServer(server: McpServer) {
+      // Refuse before the optimistic close, so a rejected draft stays on screen
+      // for the user to fix rather than vanishing with its edits.
+      if (admitServers([server]).length === 0) return;
       // Close optimistically FIRST: foldServerScopeKeys' cold repoIdentity IPC
       // call would otherwise visibly delay the dialog closing. It never rejects,
       // and the write below composes via the functional setter, so closing before
@@ -118,7 +141,7 @@ export const McpServersSection = withForm({
     }
 
     /** Add a URL's host to the draft allow list — the one-click fix behind the
-     *  dialog's advisory host note. Mutates the shared settings draft, committed
+     *  host note in each registration seam. Mutates the shared settings draft, committed
      *  by the screen's Save bar, exactly like the AI URL fields. Dedups via
      *  `isHostAllowed` (not a bare `includes`), so a host already covered by a
      *  built-in/local entry or a no-port entry isn't added redundantly. */
@@ -419,6 +442,8 @@ export const McpServersSection = withForm({
           <ImportMcpDialog
             repoPath={repoPath}
             existing={list}
+            allowedHosts={allowedHosts}
+            onAllowHost={allowHost}
             onImport={addServers}
             onClose={() => setImportOpen(false)}
           />
@@ -427,6 +452,8 @@ export const McpServersSection = withForm({
         {browseOpen && (
           <BrowseRegistryDialog
             existing={list}
+            allowedHosts={allowedHosts}
+            onAllowHost={allowHost}
             onAdd={appendServer}
             onClose={() => setBrowseOpen(false)}
           />

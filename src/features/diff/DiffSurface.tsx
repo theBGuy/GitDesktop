@@ -438,16 +438,17 @@ export function useFileContent(
   // An omitted side (undefined rev) has no version there → "" — gated on the
   // rev, not just the data, because a disabled `null` read shares the worktree
   // query key and would otherwise cache-hit the *other* side's content. A null
-  // read with a defined rev = the file is absent there (added/deleted) → "".
+  // read with a defined rev = the file is absent there (added/deleted) → "",
+  // and so does a refused one, whose payload carries no base64.
+  const oldB64 = oldQ.data?.base64 ?? null;
+  const newB64 = newQ.data?.base64 ?? null;
   const oldText = useMemo(
-    () =>
-      oldRev !== undefined && oldQ.data ? decodeBase64Utf8(oldQ.data) : "",
-    [oldRev, oldQ.data],
+    () => (oldRev !== undefined && oldB64 ? decodeBase64Utf8(oldB64) : ""),
+    [oldRev, oldB64],
   );
   const newText = useMemo(
-    () =>
-      newRev !== undefined && newQ.data ? decodeBase64Utf8(newQ.data) : "",
-    [newRev, newQ.data],
+    () => (newRev !== undefined && newB64 ? decodeBase64Utf8(newB64) : ""),
+    [newRev, newB64],
   );
   // Usable once the enabled side-reads settle and both files fit the highlight
   // budget (a 1-line change in a huge file stays hunk-only, no whole-file walk).
