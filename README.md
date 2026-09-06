@@ -956,8 +956,9 @@ review via its subscription login. The full list is under
 - **My work**: a cross-repo inbox of your open **GitHub** pull requests and
   issues (authored, assigned, mentioned, commented on, or awaiting your
   review), newest first, so what's waiting on you is one screen away instead
-  of one repository at a time. Open it from the welcome screen or the command
-  palette (*My work*), narrow it with **All / Pull requests / Issues** tabs and
+  of one repository at a time. Open it with `Ctrl`/`⌘`+`Shift`+`M`, from the
+  welcome screen, or from the command palette (*My work*), narrow it with
+  **All / Pull requests / Issues** tabs and
   a filter box that takes arrow keys and Enter, and press Enter on a row: an
   item from a repository you've added to GitDesktop usually opens right in the
   app, and the ↗ marks the rows that will open on GitHub instead. A pull

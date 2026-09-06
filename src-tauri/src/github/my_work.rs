@@ -591,6 +591,11 @@ mod tests {
             "a leg that came back full may have had more"
         );
 
+        // The review-requested leg's cap is its own truncation event — the
+        // disjunction's second arm must hold without the first.
+        let b_capped = merge_my_work(empty(), leg("b", MY_WORK_LIMIT, 1));
+        assert!(b_capped.truncated, "either leg's full page reports the cap");
+
         // One short of the cap, gh returned everything it had.
         let under = merge_my_work(leg("a", MY_WORK_LIMIT - 1, 9), empty());
         assert_eq!(under.items.len(), MY_WORK_LIMIT - 1);

@@ -8,5 +8,5 @@
   instead. A pull request usually lands in the worktree its head branch is
   checked out in, so you arrive in the checkout the work lives in, and
   *Open in main workspace* on the row's right-click menu skips that. Reach it
-  with its shortcut, from the welcome screen, or from the command palette
-  (*My work*).
+  with `Ctrl`/`⌘`+`Shift`+`M`, from the welcome screen, or from the command
+  palette (*My work*).

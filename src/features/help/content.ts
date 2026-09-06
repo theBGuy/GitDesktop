@@ -306,13 +306,14 @@ rather than in the main workspace, so you arrive in the checkout the work lives 
 Confirming the branch really belongs to that pull request takes a quick background
 check, and whatever it can't confirm opens the main workspace instead: a pull
 request from a fork, a branch that isn't checked out anywhere, a slow network. A row
-shows a small spinner while that check is still running. Issues skip the branch
-check and open in the main workspace.
+shows a small spinner while GitDesktop works out where to open it. Issues skip the
+branch check and open in the main workspace.
 
 {{Secondaryclick}} a row for **Open on GitHub** and **Copy link**; on a pull request
 from a repository you've added, **Open in main workspace** heads the menu and skips
-the worktree for that one open. {{key:shift+enter}} does the same from the keyboard,
-Shift-click from the pointer.
+the worktree for that one open. The menu opens from the keyboard too, with
+{{key:shift+f10}} or the Menu key on the highlighted row. {{key:shift+enter}} opens
+the main workspace directly, Shift-click from the pointer.
 
 ## Keeping it current
 

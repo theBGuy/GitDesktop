@@ -438,8 +438,7 @@ export function MyWorkScreen() {
   // Arrow keys from the filter input move the selection through the visible
   // rows and Enter opens it, so a keyboard user goes type → arrows → Enter
   // without ever leaving the input. Shift+Enter is the keyboard route to the
-  // main workspace — focus never leaves the input, so the context menu that
-  // also offers it is unreachable without a pointer.
+  // main workspace.
   const onInputArrow = listKeyboardNav({
     items: visible,
     activeIndex,
@@ -459,7 +458,14 @@ export function MyWorkScreen() {
     // this one. Targets the active row, which the menu already acts on.
     if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
       const item = visible[activeIndex];
-      if (item && openRowContextMenu(item.url)) e.preventDefault();
+      // Swallowed whenever a row is active, even if it scrolled out of the
+      // virtualizer and couldn't be found: the input's own edit menu is the
+      // wrong answer to a row-menu request. With no active row there is no row
+      // menu to ask for, so that menu stays reachable.
+      if (item) {
+        e.preventDefault();
+        openRowContextMenu(item.url);
+      }
       return;
     }
     onInputArrow(e);
