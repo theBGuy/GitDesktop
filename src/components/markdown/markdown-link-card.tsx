@@ -90,7 +90,7 @@ const INERT_REASON: Record<
 > = {
   empty: "This link has no address.",
   fragment: "Points to a section of this page.",
-  repoNoForge: "No connected forge to open this file.",
+  repoNoForge: "GitDesktop can't open repository files from this view.",
 };
 
 /** The off-repo host a `//host/path` addresses, for the external reason. The

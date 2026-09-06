@@ -710,9 +710,11 @@ export const openInTerminal = (
     command: command || null,
   });
 
-/** The repo's web URL on its provider (GitHub or GitLab). */
-export const forgeRepoUrl = (repoPath: string) =>
-  invoke<string>("forge_repo_url", { repoPath });
+/** The repo's web URL on its provider (GitHub or GitLab). `lens` picks which
+ *  remote answers on a GitHub fork — omitted (the default) is the fork itself,
+ *  `"upstream"` the parent. GitLab and Bitbucket have one repo and ignore it. */
+export const forgeRepoUrl = (repoPath: string, lens?: RemoteLens) =>
+  invoke<string>("forge_repo_url", { repoPath, lens });
 
 /** A repo's visibility probe: visibility (lowercase "public" | "private" | "internal")
  *  plus fork provenance, in one round-trip. `isFork` is set only on positive API

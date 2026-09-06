@@ -65,8 +65,8 @@ export type MarkdownForgeTarget = Exclude<
 >;
 
 /** The other half: what an anchor resolves to on its href alone, with no
- *  reference grammar involved — the three the click acts on (external opens, and
- *  the click-inert kinds that only ever get a card). One classifier answers with
+ *  reference grammar involved — `external` and `repoFile`, which the click
+ *  opens, plus `inert`, which only ever gets a card. One classifier answers with
  *  this, and the click dispatch and the card both obey that answer. */
 export type MarkdownLinkTarget = Extract<
   MarkdownRefTarget,
@@ -74,9 +74,10 @@ export type MarkdownLinkTarget = Extract<
 >;
 
 /** Which half of the union a target sits in — a forge reference the card
- *  resolves, versus a link kind it describes without a fetch. Every gate on the
- *  resolve reads this one answer, so a new link kind can't be admitted to the
- *  resolve by a test that only knew about the previous ones. */
+ *  resolves, versus a link kind it describes without a fetch. Named by
+ *  EXCLUSION, so a kind added to the union defaults into the resolve: the list
+ *  below is the thing to extend when one is, and it is the single place every
+ *  resolve gate reads rather than three separate tests drifting apart. */
 function isForgeTarget(
   target: MarkdownRefTarget,
 ): target is MarkdownForgeTarget {
@@ -309,7 +310,8 @@ function RefCardBody({
   item,
 }: {
   /** Absent on bodies rendered with no forge context (the help screen, AI
-   *  output) — only external targets can arise there. */
+   *  output), where only the two context-free link kinds arise: `external` and
+   *  `inert`. Both render above the guard that needs this. */
   refs: MarkdownRefs | undefined;
   target: MarkdownRefTarget | null;
   /** `undefined` while the reference is still resolving, `null` once it failed. */

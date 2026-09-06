@@ -1008,10 +1008,11 @@ them. That lookup is **Fetch link previews** under **Settings → General**, on 
 default; turn it off and the cards show the destination alone. Pages on private or
 local network addresses are never fetched.
 
-A link written relative to the repository opens on **GitHub**, **GitLab**, or
-**Bitbucket** in your browser, with its card naming the path and the forge. A
-link GitDesktop can't open (one that points outside the repository, or has no
-destination) stays put, and its card tells you where it leads and why nothing
+In a description, comment, or other body GitDesktop renders with its repository
+in view, a link written relative to that repository opens on **GitHub**,
+**GitLab**, or **Bitbucket** in your browser, with its card naming the path and
+the forge. Anywhere a link can't be opened (one leading outside the repository,
+say), it stays put, and its card tells you where it leads and why nothing
 happens.
 
 Images in a rendered body open fullscreen too. Click a screenshot in a description,

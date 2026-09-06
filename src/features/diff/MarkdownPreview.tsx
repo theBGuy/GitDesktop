@@ -145,10 +145,7 @@ export function MarkdownDocPreview({
     return <DiffPlaceholder message="Nothing to preview" />;
   }
   return (
-    // Repo docs routinely carry repository-relative hrefs (LICENSE, docs/…).
-    // This surface passes the renderer no forge context, so its dispatch has
-    // nothing to resolve them against and leaves them inert.
-    <div>
+    <>
       {showOld && (
         <PreviewNote>
           File deleted — previewing the previous version.
@@ -162,8 +159,11 @@ export function MarkdownDocPreview({
       )}
       {/* Same reading measure as the in-app guide's rendered pages. */}
       <div className="mx-auto w-full max-w-2xl p-6">
+        {/* No forge context: repo docs routinely carry repository-relative
+            hrefs (LICENSE, docs/…), and with nothing to resolve them against
+            the renderer leaves them inert with an explanatory card. */}
         <Markdown>{cleaned}</Markdown>
       </div>
-    </div>
+    </>
   );
 }

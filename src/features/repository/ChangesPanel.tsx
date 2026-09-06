@@ -983,13 +983,12 @@ export function ChangesPanel({
             )}
 
           <ContextMenu>
-            {/* Keyed on repoPath so a repo switch mints a FRESH virtualizer
-                instance (offset 0), the only cure for the strand where a deep
-                scroll then a switch to a viewport-fitting repo leaves the
-                persisted instance's internal offset stale — the browser clamps
-                scrollTop with no event and scrollToOffset(0) can't re-fire one,
-                so the range omits index 0 (the Staged header). Within a repo the
-                key is stable, so staging churn keeps the same instance. */}
+            {/* Keyed on repoPath so a repo switch mints a fresh virtualizer at
+                offset 0, exactly like a fresh open. A persisted instance carries
+                its offset across element swaps: virtual-core writes scrollOffset
+                from the scroll listener, never on re-observe, and derives the
+                range from it unclamped. An uncached switch already remounts this
+                via the empty-state transit; the key covers the cached one. */}
             <VirtualizedChangeList
               key={repoPath}
               flatRows={flatRows}
@@ -1120,14 +1119,13 @@ export function ChangesPanel({
   );
 }
 
-/** The virtualized changes list, isolated so ChangesPanel keys it on `repoPath`:
- *  a repo switch remounts it, minting a fresh virtualizer whose internal scroll
- *  offset starts at 0. The persisted instance couldn't be reset any other way —
- *  a shrunk list clamps scrollTop with no scroll event, and scrollToOffset(0)
- *  fires none when the list already can't scroll, stranding a deep-scroll offset
- *  that drops index 0 (the Staged header) from the range. Owning `useVirtualizer`
- *  here also keeps ChangesPanel out of the React Compiler bailout the hook
- *  triggers (the HistoryPanel/CommitList split). */
+/** The virtualized changes list, isolated so ChangesPanel can key it on
+ *  `repoPath`: only a fresh instance starts at scroll offset 0. virtual-core
+ *  writes `scrollOffset` from the scroll listener, never when it re-observes a
+ *  new element, so a persisted instance carries a deep offset onto a brand-new
+ *  scroll div and derives its range from that unclamped, dropping index 0 (the
+ *  Staged header). Owning `useVirtualizer` here also confines the React Compiler
+ *  bailout it triggers to this leaf (the HistoryPanel/CommitList split). */
 function VirtualizedChangeList({
   flatRows,
   hasStaged,

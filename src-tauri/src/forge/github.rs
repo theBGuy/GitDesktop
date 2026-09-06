@@ -595,8 +595,8 @@ pub async fn milestones(
 // GitLab forks via a web link-out), and the admin/branch-rule sub-surfaces stay on
 // their own gh_* commands.
 
-pub async fn repo_url(repo_path: &str) -> AppResult<String> {
-    crate::github::pr::gh_repo_url(repo_path.to_string()).await
+pub async fn repo_url(repo_path: &str, lens: Option<String>) -> AppResult<String> {
+    crate::github::pr::gh_repo_url(repo_path.to_string(), lens).await
 }
 
 pub async fn repo_star_status(repo_path: &str) -> AppResult<bool> {

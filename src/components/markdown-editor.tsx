@@ -510,6 +510,8 @@ export function MarkdownEditor({
           {value.trim() ? (
             // No refs: in-app navigation from inside an open editor closes the
             // host dialog via the identity-change reset and discards the draft.
+            // Repository-relative links stay inert here for the same reason —
+            // this preview is for reading your own draft, not for navigating.
             <Markdown>{value}</Markdown>
           ) : (
             <p className="text-xs text-muted-foreground">Nothing to preview</p>

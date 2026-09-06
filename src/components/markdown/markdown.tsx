@@ -150,6 +150,10 @@ const AUTHORITY_PREFIX = /^[\\/]{2}/;
 /** Tab, LF, and CR — the URL parser removes these from ANYWHERE in an href. */
 const URL_REMOVED = /[\t\n\r]/g;
 
+/** The single leading separator of a root-relative href, dropped so it resolves
+ *  against the repository root rather than the forge's site root. */
+const LEADING_SEPARATOR = /^[\\/]/;
+
 /** An href as the URL parser will read it: those three gone, then the
  *  leading/trailing C0-and-space run stripped (`String.trim` misses C0).
  *  DOMPurify only edge-trims attribute values, so both shapes reach the DOM, and
@@ -300,6 +304,12 @@ export function Markdown({
   refs?: MarkdownRefs;
 }) {
   const queryClient = useQueryClient();
+  // Whether this body has forge context, as a primitive: every consumer of the
+  // classifier reads THIS rather than re-testing `refs`, so the card, the click,
+  // and the cursor walk can't disagree about it — and the walk effect gets a
+  // dependency that changes when context arrives. Truthiness, matching the
+  // `!refs` guards elsewhere in the file rather than an `undefined` test.
+  const hasRefs = !!refs;
   // Cold list caches are the norm on local surfaces, so the resolve fetch can be
   // the only gap between click and navigation. The fetch is cache-first, so the
   // cursor plus aria-busy is the whole affordance: a spinner or a toast would be
@@ -457,12 +467,16 @@ export function Markdown({
     if (!root) return;
     const offs: (() => void)[] = [];
     // A link that won't open shows the help cursor (its card IS how you learn
-    // why), so it can't read as a normal pointer link. Marked on the node the
-    // same way images are, keyed by the one classifier the click and card obey;
-    // anchors are fresh per parse, so a stale mark can't outlive its href.
+    // why), so it can't read as a normal pointer link. Keyed on `anyTarget`, not
+    // `linkTarget`: a rendered `#123`/`@user` carries `href="#"`, which the
+    // classifier alone reads as a fragment — the reference arm has to win here
+    // exactly as it does for the card and the click.
+    // Marking is two-directional because forge context arrives async: a body
+    // with no reference syntax re-parses to an IDENTICAL html string, so these
+    // same nodes persist and a mark set while `hasRefs` was false must come off.
     for (const a of root.querySelectorAll("a")) {
-      if (linkTarget(a, refs !== undefined)?.kind === "inert")
-        a.dataset.inertLink = "";
+      if (anyTarget(a)?.kind === "inert") a.dataset.inertLink = "";
+      else delete a.dataset.inertLink;
     }
     for (const img of root.querySelectorAll("img")) {
       const onLoad = () => markLightboxImage(img);
@@ -481,7 +495,7 @@ export function Markdown({
     return () => {
       for (const off of offs) off();
     };
-  }, [html]);
+  }, [html, hasRefs]);
 
   /** Open the viewer on `img`, with every other qualifying image in the body
    *  behind its prev/next. Any hover intent in flight is dropped: a card opening
@@ -639,7 +653,7 @@ export function Markdown({
    *  describes the item, not the URL. Every hover and focus route reads this
    *  one answer, so the card opens on the same set of anchors either way. */
   function anyTarget(anchor: HTMLAnchorElement): MarkdownRefTarget | null {
-    return refTarget(anchor) ?? linkTarget(anchor, refs !== undefined);
+    return refTarget(anchor) ?? linkTarget(anchor, hasRefs);
   }
 
   /** Navigate to whatever a validated reference target points at. */
@@ -739,15 +753,21 @@ export function Markdown({
    *  equal. */
   async function openRepoFile(href: string) {
     if (!refs) return;
-    const { repoPath, provider } = refs;
+    const { repoPath, provider, lens } = refs;
     setResolving(true);
     try {
-      const repoUrl = (await forgeRepoUrl(repoPath)).replace(
+      // Through the body's OWN lens: a fork's body rendered under `upstream`
+      // names paths that live in the parent, not in the fork.
+      const repoUrl = (await forgeRepoUrl(repoPath, lens)).replace(
         TRAILING_SLASH,
         "",
       );
       const base = `${repoUrl}/${BLOB_PATH[provider]}`;
-      const resolved = new URL(href, base);
+      // A root-relative href addresses the REPOSITORY root, which is how both
+      // GitHub and GitLab render one in a repo document — so the leading
+      // separator comes off and it resolves under the blob base like any other
+      // path. Only one: the classifier already refused two (an authority).
+      const resolved = new URL(href.replace(LEADING_SEPARATOR, ""), base);
       if (
         (resolved.protocol === "http:" || resolved.protocol === "https:") &&
         resolved.origin === new URL(base).origin
@@ -792,7 +812,7 @@ export function Markdown({
     // webview can never navigate while one is in flight.
     if (anchor.getAttribute("href") === null) return;
     e.preventDefault();
-    const link = linkTarget(anchor, refs !== undefined);
+    const link = linkTarget(anchor, hasRefs);
     // An inert link is claimed (the preventDefault above) but opens nothing —
     // its card is the whole affordance. Everything the classifier admits to a
     // destination opens; the rest stays put with an explanation.
