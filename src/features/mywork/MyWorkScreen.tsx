@@ -108,6 +108,13 @@ export function MyWorkScreen() {
   // select would pair the new repo with the old selection, because the
   // view-transition callback that carries the selection is deferred.
   async function openItem(item: MyWorkItem) {
+    // Claim the generation before any early return, so EVERY open — including
+    // the browser arm, which never awaits — supersedes a pending one; a stale
+    // continuation must strand rather than stomp the newer action or yank the
+    // user back. View is read live: the ref dies with the screen, the risk doesn't.
+    const gen = ++openGenRef.current;
+    const superseded = () =>
+      gen !== openGenRef.current || useUiStore.getState().view !== "mywork";
     const match = matchLocalRepo(item, recents);
     if (!match) {
       openUrl(item.url);
@@ -116,12 +123,6 @@ export function MyWorkScreen() {
     // Recents rows outlive deleted and moved clones, so prove the path is still
     // a repo before navigating; the browser fallback keeps the row a working
     // link while the toast names the stale path (repair lives in the repo list).
-    // This await makes both continuations stale-able: a superseding open or a
-    // view change must strand them, or a late navigation stomps the newer action
-    // or yanks the user back. View is read live — the ref dies with the screen.
-    const gen = ++openGenRef.current;
-    const superseded = () =>
-      gen !== openGenRef.current || useUiStore.getState().view !== "mywork";
     try {
       await validateRepo(match.path);
     } catch (e) {
