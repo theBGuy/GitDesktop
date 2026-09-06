@@ -3234,7 +3234,7 @@ export function useForgeOwnedNamespaces(
 /** The viewer's work items across every repository on a provider, for the
  *  cross-repo inbox. The key carries no host/account axis, same as
  *  `["forge-repos", provider]` — one ambient account per provider today. */
-export function useMyWork(provider: ForgeProvider, enabled: boolean) {
+export function useForgeMyWork(provider: ForgeProvider, enabled: boolean) {
   return useQuery({
     queryKey: ["forge-my-work", provider] as const,
     queryFn: () => api.forgeMyWork(provider),

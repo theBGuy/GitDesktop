@@ -81,11 +81,14 @@ export function useRepoLens(repo: string): RemoteLens {
  * ["repo", …] subtree, so no repo mutation's invalidation can refetch it back
  * to the stored value.
  *
- * `clearSelections` is false for a navigation that selects its own PR right
- * after (clearing would fight it) and true for the switcher, whose whole point
- * is to drop a selection minted under the old lens. It rides the cache
- * short-circuit: a re-select of the lens already showing must not drop the
- * user's selection.
+ * `clearSelections` drops any REMOTE PR/issue selection, and only when the
+ * lens actually flips — it rides the cache short-circuit, so re-applying the
+ * lens already showing never touches the user's selection. Pass true whenever
+ * a sibling selection minted under the old lens would outlive the flip: the
+ * switcher, and any navigation whose own selection lands after this call
+ * (openPr/openIssue run `beforeSelect` inside the navigator's transition
+ * callback, before its set(), so the clear can't fight the landing). False
+ * only where nothing re-selects afterwards.
  */
 export function applyRepoLens(
   queryClient: QueryClient,

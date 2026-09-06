@@ -33,7 +33,7 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { validateRepo } from "@/lib/git/api";
-import { useMyWork } from "@/lib/git/queries";
+import { useForgeMyWork } from "@/lib/git/queries";
 import type { MyWorkItem } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
@@ -42,6 +42,7 @@ import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage, isAppError } from "@/lib/tauri/invoke";
 import { parseableDate } from "@/lib/time";
+import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
   filterMyWork,
@@ -76,10 +77,12 @@ export function MyWorkScreen() {
 
   // GitHub-only in this slice: the backend refuses the other providers outright,
   // so there is no provider axis to offer.
-  const work = useMyWork("github", true);
+  const work = useForgeMyWork("github", true);
   const settings = useSettings();
   const recents = settings.data?.recentRepos ?? NO_RECENTS;
   const queryClient = useQueryClient();
+  // Generation counter for openItem's validate await — see its guard below.
+  const openGenRef = useRef(0);
 
   const items = sortMyWork(work.data ?? []);
   const prCount = items.filter((i) => i.isPullRequest).length;
@@ -113,13 +116,27 @@ export function MyWorkScreen() {
     // Recents rows outlive deleted and moved clones, so prove the path is still
     // a repo before navigating; the browser fallback keeps the row a working
     // link while the toast names the stale path (repair lives in the repo list).
+    // This await makes both continuations stale-able: a superseding open or a
+    // view change must strand them, or a late navigation stomps the newer action
+    // or yanks the user back. View is read live — the ref dies with the screen.
+    const gen = ++openGenRef.current;
+    const superseded = () =>
+      gen !== openGenRef.current || useUiStore.getState().view !== "mywork";
     try {
       await validateRepo(match.path);
-    } catch {
+    } catch (e) {
+      if (superseded()) return;
       openUrl(item.url);
-      toast.error(`${match.path} is no longer a git repository.`);
+      // Only a real notARepo earns the stale-path sentence — a missing CLI or an
+      // IPC failure would be misdescribed by it, so it takes the generic toast.
+      if (isAppError(e) && e.kind === "notARepo") {
+        toast.error(`${match.path} is no longer a git repository.`);
+      } else {
+        toastError(e);
+      }
       return;
     }
+    if (superseded()) return;
     // Land under the origin lens (matchLocalRepo matched the ORIGIN slug): a fork
     // sitting on "upstream" resolves this number against the parent repo. The lens
     // write is session-only. Clears are safe: an unchanged lens short-circuits
@@ -259,7 +276,7 @@ function MyWorkBody({
   onSelect,
   onOpen,
 }: {
-  work: ReturnType<typeof useMyWork>;
+  work: ReturnType<typeof useForgeMyWork>;
   items: MyWorkItem[];
   visible: MyWorkItem[];
   activeIndex: number;
