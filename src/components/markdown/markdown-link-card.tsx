@@ -90,6 +90,7 @@ const INERT_REASON: Record<
 > = {
   empty: "This link has no address.",
   fragment: "Points to a section of this page.",
+  notRepoPath: "Doesn't point to a file in this repository.",
   repoNoForge: "GitDesktop can't open repository files from this view.",
 };
 

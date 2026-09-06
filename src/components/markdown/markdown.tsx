@@ -150,8 +150,10 @@ const AUTHORITY_PREFIX = /^[\\/]{2}/;
 /** Tab, LF, and CR — the URL parser removes these from ANYWHERE in an href. */
 const URL_REMOVED = /[\t\n\r]/g;
 
-/** The single leading separator of a root-relative href, dropped so it resolves
- *  against the repository root rather than the forge's site root. */
+/** A single leading separator. Dropped from a root-relative href so it resolves
+ *  against the repository root rather than the forge's site root, and tested
+ *  again afterwards: one still there means the href carried two, which addresses
+ *  something other than a file in this repo. */
 const LEADING_SEPARATOR = /^[\\/]/;
 
 /** An href as the URL parser will read it: those three gone, then the
@@ -212,13 +214,27 @@ function linkTarget(
   const href = normalizeHref(raw);
   if (href === "") return { kind: "inert", variant: "empty", href };
   if (EXTERNAL_HREF.test(href)) return { kind: "external", href };
-  // A fragment addresses nothing: marked emits no heading ids.
+  // marked's own headings carry no ids, so a fragment usually addresses nothing.
+  // The dispatch still checks the body for a raw-HTML id before giving up.
   if (href.startsWith("#")) return { kind: "inert", variant: "fragment", href };
   if (ANY_SCHEME.test(href)) return { kind: "inert", variant: "scheme", href };
   if (AUTHORITY_PREFIX.test(href))
     return { kind: "inert", variant: "external", href };
   if (!hasRefs) return { kind: "inert", variant: "repoNoForge", href };
-  return { kind: "repoFile", href };
+  // The string the click will actually resolve, computed HERE so the card and
+  // the resolver judge the same one: a root-relative href addresses the
+  // REPOSITORY root, so one leading separator comes off, and the result is
+  // re-normalized because the strip can expose whitespace the URL parser drops.
+  // Anything still reading as an authority, a scheme, or a site-root escape is
+  // refused now rather than promised and then dropped by the origin gate.
+  const path = normalizeHref(href.replace(LEADING_SEPARATOR, ""));
+  if (
+    AUTHORITY_PREFIX.test(path) ||
+    ANY_SCHEME.test(path) ||
+    LEADING_SEPARATOR.test(path)
+  )
+    return { kind: "inert", variant: "notRepoPath", href };
+  return { kind: "repoFile", href, path };
 }
 
 /** Natural-size floor, both axes, for an image the viewer will open: it clears
@@ -474,8 +490,14 @@ export function Markdown({
     // Marking is two-directional because forge context arrives async: a body
     // with no reference syntax re-parses to an IDENTICAL html string, so these
     // same nodes persist and a mark set while `hasRefs` was false must come off.
+    // A fragment whose section exists is NOT dead — the walk refines that
+    // verdict with document knowledge the classifier has no access to, by the
+    // same test the dispatch runs at click time, so the cursor agrees with what
+    // clicking does.
     for (const a of root.querySelectorAll("a")) {
-      if (anyTarget(a)?.kind === "inert") a.dataset.inertLink = "";
+      const target = anyTarget(a);
+      if (target?.kind === "inert" && !fragmentSection(target))
+        a.dataset.inertLink = "";
       else delete a.dataset.inertLink;
     }
     for (const img of root.querySelectorAll("img")) {
@@ -656,6 +678,26 @@ export function Markdown({
     return refTarget(anchor) ?? linkTarget(anchor, hasRefs);
   }
 
+  /** The element a fragment target actually addresses in THIS body, or null. The
+   *  one refinement the classifier can't make: it never sees the document, and a
+   *  body's own raw HTML can carry `<h2 id="x">` (DOMPurify keeps the id). The
+   *  cursor walk and the click dispatch both ask HERE, so a fragment that
+   *  scrolls can never render as a dead link. */
+  function fragmentSection(target: MarkdownRefTarget | null): Element | null {
+    if (target?.kind !== "inert" || target.variant !== "fragment") return null;
+    let id = target.href.slice(1);
+    if (!id) return null;
+    try {
+      // Native fragment navigation matches ids percent-DECODED, so `#caf%C3%A9`
+      // has to find `id="café"`. A malformed escape isn't an encoding at all
+      // (`id="50%"` is a legal id), so it stays literal.
+      id = decodeURIComponent(id);
+    } catch {
+      // Left as written.
+    }
+    return bodyRef.current?.querySelector(`#${CSS.escape(id)}`) ?? null;
+  }
+
   /** Navigate to whatever a validated reference target points at. */
   async function openRef(target: MarkdownForgeTarget) {
     if (!refs) return;
@@ -751,7 +793,7 @@ export function Markdown({
    *  the classifier, not a duplicate: only a URL still on the repo's own host is
    *  opened, and the scheme test rides with it because opaque origins compare
    *  equal. */
-  async function openRepoFile(href: string) {
+  async function openRepoFile(path: string) {
     if (!refs) return;
     const { repoPath, provider, lens } = refs;
     setResolving(true);
@@ -763,11 +805,9 @@ export function Markdown({
         "",
       );
       const base = `${repoUrl}/${BLOB_PATH[provider]}`;
-      // A root-relative href addresses the REPOSITORY root, which is how both
-      // GitHub and GitLab render one in a repo document — so the leading
-      // separator comes off and it resolves under the blob base like any other
-      // path. Only one: the classifier already refused two (an authority).
-      const resolved = new URL(href.replace(LEADING_SEPARATOR, ""), base);
+      // `path` arrives already stripped and normalized by the classifier — the
+      // one string both it and this resolver judge.
+      const resolved = new URL(path, base);
       if (
         (resolved.protocol === "http:" || resolved.protocol === "https:") &&
         resolved.origin === new URL(base).origin
@@ -813,10 +853,20 @@ export function Markdown({
     if (anchor.getAttribute("href") === null) return;
     e.preventDefault();
     const link = linkTarget(anchor, hasRefs);
+    if (!link) return;
+    // A fragment that resolves in this body scrolls to its section; one that
+    // names nothing (marked's own headings carry no ids) falls through to the
+    // inert card, whose "Points to a section of this page" reads true either
+    // way. Never on the aux route, which suppresses rather than activates.
+    const section = aux ? null : fragmentSection(link);
+    if (section) {
+      section.scrollIntoView({ block: "start" });
+      return;
+    }
     // An inert link is claimed (the preventDefault above) but opens nothing —
     // its card is the whole affordance. Everything the classifier admits to a
     // destination opens; the rest stays put with an explanation.
-    if (!link || link.kind === "inert") return;
+    if (link.kind === "inert") return;
     // The system browser takes focus from here, so a card that is open (or one
     // frame from opening) would hang over an app the user has left.
     closeCardNow();
@@ -824,7 +874,7 @@ export function Markdown({
     // classifies external and the Rust side rejects it, which would otherwise
     // reach only the global unhandled-rejection handler.
     if (link.kind === "external") void openUrl(link.href).catch(toastError);
-    else void openRepoFile(link.href);
+    else void openRepoFile(link.path);
   }
 
   // Event delegation over the rendered body: anchors first, then an unlinked

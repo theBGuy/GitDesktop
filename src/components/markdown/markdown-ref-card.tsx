@@ -42,6 +42,7 @@ export type InertVariant =
   | "fragment"
   | "scheme"
   | "external"
+  | "notRepoPath"
   | "repoNoForge";
 
 /** What an anchor in a rendered body opens a card for: a forge reference that
@@ -54,7 +55,10 @@ export type MarkdownRefTarget =
   | { kind: "user"; user: string }
   | { kind: Exclude<MarkdownRefKind, "user">; number: number }
   | { kind: "external"; href: string }
-  | { kind: "repoFile"; href: string }
+  /** `href` is what the body wrote (what the card shows); `path` is the string
+   *  the click resolves against the blob base. The classifier computes both, so
+   *  the card can never promise an open the resolver then refuses. */
+  | { kind: "repoFile"; href: string; path: string }
   | { kind: "inert"; variant: InertVariant; href: string };
 
 /** The forge-reference half of that union: what the click dispatch navigates
