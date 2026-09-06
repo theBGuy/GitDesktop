@@ -2943,11 +2943,13 @@ pub async fn forge_issue_create(
 
 /// The repo's web URL for "View on GitHub/GitLab", behind the abstraction.
 #[tauri::command]
-pub async fn forge_repo_url(repo_path: String) -> AppResult<String> {
+pub async fn forge_repo_url(repo_path: String, lens: Option<String>) -> AppResult<String> {
     match detect_non_github(&repo_path).await {
+        // The remote lens is GitHub-fork-only in this app's model, so the other
+        // two providers answer for their single repo whatever it says.
         Some((Provider::GitLab, _)) => gitlab::repo_url(&repo_path).await,
         Some((Provider::Bitbucket, _)) => bitbucket::repo_url(&repo_path).await,
-        _ => github::repo_url(&repo_path).await,
+        _ => github::repo_url(&repo_path, lens).await,
     }
 }
 

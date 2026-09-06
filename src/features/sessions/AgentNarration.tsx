@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from "react";
-import { Markdown } from "@/components/ui/markdown";
+import { Markdown } from "@/components/markdown/markdown";
 import { useOpenFile } from "./useOpenFile";
 
 // Extensions we treat as file references when they appear in an inline-code

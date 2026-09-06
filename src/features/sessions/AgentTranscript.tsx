@@ -12,7 +12,7 @@ import {
 } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { type ComponentType, useState } from "react";
-import { Markdown } from "@/components/ui/markdown";
+import { Markdown } from "@/components/markdown/markdown";
 import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import type { AgentToolKind, TranscriptSegment } from "@/lib/ai/agent";

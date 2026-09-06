@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import type { MarkdownRefs } from "@/components/ui/markdown-refs";
+import type { MarkdownRefs } from "@/components/markdown/markdown-refs";
 import { useForgeGhHost } from "@/lib/git/host";
 import { type MentionTrigger, TRIGGERS } from "@/lib/git/mention-triggers";
 import { useAssignableUsers, useIssueList, usePrList } from "@/lib/git/queries";

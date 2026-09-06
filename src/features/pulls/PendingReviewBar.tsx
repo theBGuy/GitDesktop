@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { Markdown } from "@/components/markdown/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Markdown } from "@/components/ui/markdown";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
 import { useForgeStatus } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";

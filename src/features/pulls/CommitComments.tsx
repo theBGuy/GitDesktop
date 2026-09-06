@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { Markdown } from "@/components/markdown/markdown";
+import type { MarkdownRefs } from "@/components/markdown/markdown-refs";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
-import { Markdown } from "@/components/ui/markdown";
-import type { MarkdownRefs } from "@/components/ui/markdown-refs";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import { Thread } from "@/features/conversations/Thread";

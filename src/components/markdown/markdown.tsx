@@ -23,7 +23,7 @@ import {
 import { diffLang } from "@/features/diff/diff-lang";
 import { forgeRepoUrl } from "@/lib/git/api";
 import { issueDetailsOptions } from "@/lib/git/queries";
-import type { RemoteLens } from "@/lib/git/types";
+import type { ForgeProvider, RemoteLens } from "@/lib/git/types";
 import { createCardLatch } from "@/lib/hover-card-latch";
 import {
   CARD_CLOSE_DELAY,
@@ -41,6 +41,7 @@ import {
   cachedRefKind,
   isPullRefUrl,
   type MarkdownForgeTarget,
+  type MarkdownLinkTarget,
   MarkdownRefCard,
   type MarkdownRefTarget,
 } from "./markdown-ref-card";
@@ -114,15 +115,61 @@ md.use({ extensions: [forgeRefExtension] });
 const CARD_POPUP_SELECTOR =
   '[data-slot="hover-card-content"],[data-slot="hover-card-portal"]';
 
-/** The schemes a rendered link leaves the app for. One constant, because the
- *  click dispatch and the preview card have to admit exactly the same set — a
- *  link the card describes but the click doesn't open (or the reverse) is a
- *  disagreement the user sees.
+/** The schemes a rendered link opens directly in the system browser.
  *  Case-insensitive because schemes are: marked emits `HTTPS://…` verbatim and
- *  DOMPurify's own allowlist keeps it, so a case-sensitive test would hand the
- *  click back to the webview — navigating the app away, with no card on the
- *  deceptive-looking links this most needs to expose. */
+ *  DOMPurify's own allowlist keeps it, so a case-sensitive test would drop the
+ *  href through to the any-scheme rule below and leave a perfectly good link
+ *  inert, with no card on the deceptive-looking URLs this most needs to expose. */
 const EXTERNAL_HREF = /^(https?:|mailto:)/i;
+
+/** Where each forge serves a file from the repo's default branch, appended to
+ *  the repo's own web URL. A body's href resolves against this base, so `./`,
+ *  `../`, and percent-escapes are the URL parser's job rather than ours. */
+const BLOB_PATH: Record<ForgeProvider, string> = {
+  github: "blob/HEAD/",
+  gitlab: "-/blob/HEAD/",
+  bitbucket: "src/HEAD/",
+};
+
+/** The repo URL's own trailing slash, dropped before the blob path is appended:
+ *  a doubled slash mid-path is a segment the forge doesn't serve. */
+const TRAILING_SLASH = /\/+$/;
+
+/** Any scheme at all, in RFC 3986's shape. DOMPurify's default allowlist admits
+ *  far more than the two above (`tel:`, `ftp:`, `sms:`, `cid:`, `xmpp:` …), and
+ *  a scheme-bearing href is not a repository path, so it never becomes one. */
+const ANY_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+/** Two leading slashes, in either slash. `new URL` reads both `//host/x` and
+ *  `\\host\x` against an https base as an AUTHORITY, resolving to that host — so
+ *  an href in either shape would otherwise wear a repo-file card naming the
+ *  forge while opening somewhere else entirely. Backslashes reach the DOM only
+ *  through a body's raw HTML; marked percent-encodes them in its own syntax. */
+const AUTHORITY_PREFIX = /^[\\/]{2}/;
+
+/** Tab, LF, and CR — the URL parser removes these from ANYWHERE in an href. */
+const URL_REMOVED = /[\t\n\r]/g;
+
+/** A single leading separator. Dropped from a root-relative href so it resolves
+ *  against the repository root rather than the forge's site root, and tested
+ *  again afterwards: one still there means the href carried two, which addresses
+ *  something other than a file in this repo. */
+const LEADING_SEPARATOR = /^[\\/]/;
+
+/** An href as the URL parser will read it: those three gone, then the
+ *  leading/trailing C0-and-space run stripped (`String.trim` misses C0).
+ *  DOMPurify only edge-trims attribute values, so both shapes reach the DOM, and
+ *  judging the raw text would judge a different string than the one that
+ *  resolves: `/<tab>/evil.com` reads as a path and resolves to an authority.
+ *  The edge walk is by code point; a control-character regex class fails lint. */
+function normalizeHref(raw: string): string {
+  const s = raw.replace(URL_REMOVED, "");
+  let start = 0;
+  let end = s.length;
+  while (start < end && s.charCodeAt(start) <= 0x20) start++;
+  while (end > start && s.charCodeAt(end - 1) <= 0x20) end--;
+  return s.slice(start, end);
+}
 
 /** A body's handle on its own card — every field stable for the body's life, so
  *  the object doubles as that body's identity in the latch below. */
@@ -150,12 +197,44 @@ function resetCard(owner: CardOwner) {
 const { claim: claimCard, release: releaseCard } =
   createCardLatch<CardOwner>(resetCard);
 
-/** The external link this anchor addresses, or null when it isn't one. Read off
- *  the RAW href attribute, exactly as the click dispatch does, rather than the
- *  resolved `anchor.href` — so the card names the URL the click will open. */
-function linkTarget(anchor: HTMLAnchorElement): MarkdownRefTarget | null {
-  const href = anchor.getAttribute("href");
-  return href && EXTERNAL_HREF.test(href) ? { kind: "external", href } : null;
+/** THE rulebook for what a non-reference anchor opens: the click dispatch and
+ *  the preview card read this one verdict, so the set that opens and the set
+ *  that previews are the same set by construction. Null means "opens nothing" —
+ *  the dispatch still claims the click, and no card is offered. Judged on the
+ *  normalized RAW attribute rather than the resolved `anchor.href`, so the card
+ *  names exactly what the click will act on. */
+function linkTarget(
+  anchor: HTMLAnchorElement,
+  hasRefs: boolean,
+): MarkdownLinkTarget | null {
+  const raw = anchor.getAttribute("href");
+  // No href attribute is the ONE not-a-link case — every other shape gets a
+  // card explaining why it won't open, even though the click stays inert.
+  if (raw === null) return null;
+  const href = normalizeHref(raw);
+  if (href === "") return { kind: "inert", variant: "empty", href };
+  if (EXTERNAL_HREF.test(href)) return { kind: "external", href };
+  // marked's own headings carry no ids, so a fragment usually addresses nothing.
+  // The dispatch still checks the body for a raw-HTML id before giving up.
+  if (href.startsWith("#")) return { kind: "inert", variant: "fragment", href };
+  if (ANY_SCHEME.test(href)) return { kind: "inert", variant: "scheme", href };
+  if (AUTHORITY_PREFIX.test(href))
+    return { kind: "inert", variant: "external", href };
+  if (!hasRefs) return { kind: "inert", variant: "repoNoForge", href };
+  // The string the click will actually resolve, computed HERE so the card and
+  // the resolver judge the same one: a root-relative href addresses the
+  // REPOSITORY root, so one leading separator comes off, and the result is
+  // re-normalized because the strip can expose whitespace the URL parser drops.
+  // Anything still reading as an authority, a scheme, or a site-root escape is
+  // refused now rather than promised and then dropped by the origin gate.
+  const path = normalizeHref(href.replace(LEADING_SEPARATOR, ""));
+  if (
+    AUTHORITY_PREFIX.test(path) ||
+    ANY_SCHEME.test(path) ||
+    LEADING_SEPARATOR.test(path)
+  )
+    return { kind: "inert", variant: "notRepoPath", href };
+  return { kind: "repoFile", href, path };
 }
 
 /** Natural-size floor, both axes, for an image the viewer will open: it clears
@@ -224,7 +303,9 @@ const NO_IMAGES: LightboxImage[] = [];
  * (markdown → HTML) and sanitize with DOMPurify before injecting. Fenced code
  * blocks are syntax-highlighted with highlight.js (see `md` above).
  *
- * Links open in the system browser instead of navigating the webview.
+ * No link navigates the webview: web and mail links open in the system browser,
+ * a repository-relative one opens the file on the forge, and an href this body
+ * can't place is inert.
  */
 export function Markdown({
   children,
@@ -239,6 +320,12 @@ export function Markdown({
   refs?: MarkdownRefs;
 }) {
   const queryClient = useQueryClient();
+  // Whether this body has forge context, as a primitive: every consumer of the
+  // classifier reads THIS rather than re-testing `refs`, so the card, the click,
+  // and the cursor walk can't disagree about it — and the walk effect gets a
+  // dependency that changes when context arrives. Truthiness, matching the
+  // `!refs` guards elsewhere in the file rather than an `undefined` test.
+  const hasRefs = !!refs;
   // Cold list caches are the norm on local surfaces, so the resolve fetch can be
   // the only gap between click and navigation. The fetch is cache-first, so the
   // cursor plus aria-busy is the whole affordance: a spinner or a toast would be
@@ -263,7 +350,11 @@ export function Markdown({
     setActiveMarkdownRefs(refs ?? null);
     try {
       const raw = md.parse(children, { async: false }) as string;
-      return DOMPurify.sanitize(raw);
+      // A form submit and an image-map area click are both top-level
+      // navigation with no anchor for the dispatch below to claim, and the
+      // webview ships no CSP to fall back on — so the tags that carry them
+      // don't survive sanitization at all.
+      return DOMPurify.sanitize(raw, { FORBID_TAGS: ["form", "area", "map"] });
     } finally {
       setActiveMarkdownRefs(null);
     }
@@ -391,6 +482,24 @@ export function Markdown({
     const root = bodyRef.current;
     if (!root) return;
     const offs: (() => void)[] = [];
+    // A link that won't open shows the help cursor (its card IS how you learn
+    // why), so it can't read as a normal pointer link. Keyed on `anyTarget`, not
+    // `linkTarget`: a rendered `#123`/`@user` carries `href="#"`, which the
+    // classifier alone reads as a fragment — the reference arm has to win here
+    // exactly as it does for the card and the click.
+    // Marking is two-directional because forge context arrives async: a body
+    // with no reference syntax re-parses to an IDENTICAL html string, so these
+    // same nodes persist and a mark set while `hasRefs` was false must come off.
+    // A fragment whose section exists is NOT dead — the walk refines that
+    // verdict with document knowledge the classifier has no access to, by the
+    // same test the dispatch runs at click time, so the cursor agrees with what
+    // clicking does.
+    for (const a of root.querySelectorAll("a")) {
+      const target = anyTarget(a);
+      if (target?.kind === "inert" && !fragmentSection(target))
+        a.dataset.inertLink = "";
+      else delete a.dataset.inertLink;
+    }
     for (const img of root.querySelectorAll("img")) {
       const onLoad = () => markLightboxImage(img);
       img.addEventListener("load", onLoad);
@@ -408,7 +517,7 @@ export function Markdown({
     return () => {
       for (const off of offs) off();
     };
-  }, [html]);
+  }, [html, hasRefs]);
 
   /** Open the viewer on `img`, with every other qualifying image in the body
    *  behind its prev/next. Any hover intent in flight is dropped: a card opening
@@ -566,7 +675,36 @@ export function Markdown({
    *  describes the item, not the URL. Every hover and focus route reads this
    *  one answer, so the card opens on the same set of anchors either way. */
   function anyTarget(anchor: HTMLAnchorElement): MarkdownRefTarget | null {
-    return refTarget(anchor) ?? linkTarget(anchor);
+    return refTarget(anchor) ?? linkTarget(anchor, hasRefs);
+  }
+
+  /** The element a fragment target actually addresses in THIS body, or null. The
+   *  one refinement the classifier can't make: it never sees the document, and a
+   *  body's own raw HTML can carry `<h2 id="x">` (DOMPurify keeps the id). The
+   *  cursor walk and the click dispatch both ask HERE, so a fragment that
+   *  scrolls can never render as a dead link. */
+  function fragmentSection(
+    target: MarkdownRefTarget | null,
+  ): HTMLElement | null {
+    if (target?.kind !== "inert" || target.variant !== "fragment") return null;
+    const root = bodyRef.current;
+    const raw = target.href.slice(1);
+    if (!root || !raw) return null;
+    // Native fragment navigation tries the id exactly as written FIRST, then
+    // percent-decoded (measured against a real browser, both ids present and
+    // each alone) — so `#caf%C3%A9` finds `id="caf%C3%A9"` before `id="café"`.
+    const asWritten = root.querySelector<HTMLElement>(`#${CSS.escape(raw)}`);
+    if (asWritten) return asWritten;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {
+      // Not an encoding at all (`id="50%"` is a legal id) — nothing to fall back to.
+      return null;
+    }
+    return decoded === raw
+      ? null
+      : root.querySelector<HTMLElement>(`#${CSS.escape(decoded)}`);
   }
 
   /** Navigate to whatever a validated reference target points at. */
@@ -658,35 +796,111 @@ export function Markdown({
     }
   }
 
-  // Event delegation over the rendered body, most specific target first: a forge
-  // reference navigates in-app, then any external link opens in the system browser
-  // rather than navigating the embedded webview, and an unlinked image big enough
-  // to be worth seeing opens fullscreen. The anchor branches claim the event only
-  // for a target that fully validates, so a `data-ref` this renderer didn't emit
-  // keeps whatever behavior its href already gives it — and an image under an
+  /** Open a repository-relative href on the forge. The base is built at click
+   *  time off the repo's server-truth web URL, so GitHub Enterprise and a
+   *  self-managed GitLab need no host table. The origin gate is a backstop under
+   *  the classifier, not a duplicate: only a URL still on the repo's own host is
+   *  opened, and the scheme test rides with it because opaque origins compare
+   *  equal. */
+  async function openRepoFile(path: string) {
+    if (!refs) return;
+    const { repoPath, provider, lens } = refs;
+    setResolving(true);
+    try {
+      // Through the body's OWN lens: a fork's body rendered under `upstream`
+      // names paths that live in the parent, not in the fork.
+      const repoUrl = (await forgeRepoUrl(repoPath, lens)).replace(
+        TRAILING_SLASH,
+        "",
+      );
+      const base = `${repoUrl}/${BLOB_PATH[provider]}`;
+      // `path` arrives already stripped and normalized by the classifier — the
+      // one string both it and this resolver judge.
+      const resolved = new URL(path, base);
+      if (
+        (resolved.protocol === "http:" || resolved.protocol === "https:") &&
+        resolved.origin === new URL(base).origin
+      ) {
+        await openUrl(resolved);
+      }
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setResolving(false);
+    }
+  }
+
+  /** Every anchor branch of the dispatch: a forge reference navigates in-app,
+   *  and every other anchor obeys `linkTarget` — the same verdict the card
+   *  opens on, so the two can't admit different sets. The reference branch
+   *  claims the event only for a target that fully validates, so a `data-ref`
+   *  this renderer didn't emit falls through to its href like any other link. */
+  function dispatchAnchor(
+    e: React.MouseEvent,
+    anchor: HTMLAnchorElement,
+    /** True on the middle-click route, which suppresses rather than activates:
+     *  a reference's in-app navigation is a primary action, and firing it from
+     *  the third button would move the view the user meant to leave alone. */
+    aux: boolean,
+  ) {
+    const target = refTarget(anchor);
+    if (target) {
+      e.preventDefault();
+      if (aux) return;
+      // Same reason as the link branches below: `@user` and the cross-lens
+      // number path both hand off to the system browser, and the in-app ones
+      // switch the view out from under the card either way.
+      closeCardNow();
+      void openRef(target);
+      return;
+    }
+    // No href at all is not a link and keeps whatever the anchor already did.
+    // Every real href is claimed, `href=""` included — marked emits that for
+    // `[a]()`, and its default navigation reloads the app's own document.
+    // Claimed BEFORE the classifier and the async resolve behind it, so the
+    // webview can never navigate while one is in flight.
+    if (anchor.getAttribute("href") === null) return;
+    e.preventDefault();
+    const link = linkTarget(anchor, hasRefs);
+    if (!link) return;
+    // A fragment that resolves in this body scrolls to its section; one that
+    // names nothing (marked's own headings carry no ids) falls through to the
+    // inert card, whose "Points to a section of this page" reads true either
+    // way. Never on the aux route, which suppresses rather than activates.
+    const section = aux ? null : fragmentSection(link);
+    if (section) {
+      section.scrollIntoView({ block: "start" });
+      // Native fragment navigation moves the sequential-focus start to the
+      // target, so Tab continues from the section, not from the link. Only a
+      // non-focusable one is made programmatically focusable (assigning to an
+      // element already in the tab order would take it out), and preventScroll
+      // keeps focus from re-doing the scroll just performed.
+      if (section.tabIndex < 0) section.tabIndex = -1;
+      section.focus({ preventScroll: true });
+      return;
+    }
+    // An inert link is claimed (the preventDefault above) but opens nothing —
+    // its card is the whole affordance. Everything the classifier admits to a
+    // destination opens; the rest stays put with an explanation.
+    if (link.kind === "inert") return;
+    // The system browser takes focus from here, so a card that is open (or one
+    // frame from opening) would hang over an app the user has left.
+    closeCardNow();
+    // Both branches surface their own failure: a scheme-only href like `https:`
+    // classifies external and the Rust side rejects it, which would otherwise
+    // reach only the global unhandled-rejection handler.
+    if (link.kind === "external") void openUrl(link.href).catch(toastError);
+    else void openRepoFile(link.path);
+  }
+
+  // Event delegation over the rendered body: anchors first, then an unlinked
+  // image big enough to be worth seeing opens fullscreen. An image under an
   // anchor stays that anchor's, which is what makes the image branch last.
   function onClick(e: React.MouseEvent) {
     const el = e.target as HTMLElement;
     const anchor = el.closest("a");
     if (anchor) {
-      const target = refTarget(anchor);
-      if (target) {
-        e.preventDefault();
-        // Same reason as the external branch below: `@user` and the cross-lens
-        // number path both hand off to the system browser, and the in-app ones
-        // switch the view out from under the card either way.
-        closeCardNow();
-        void openRef(target);
-        return;
-      }
-      const href = anchor.getAttribute("href");
-      if (href && EXTERNAL_HREF.test(href)) {
-        e.preventDefault();
-        // The system browser takes focus from here, so a card that is open (or
-        // one frame from opening) would hang over an app the user has left.
-        closeCardNow();
-        openUrl(href);
-      }
+      dispatchAnchor(e, anchor, false);
       return;
     }
     const img = el.closest("img");
@@ -694,6 +908,16 @@ export function Markdown({
       e.preventDefault();
       openLightbox(img);
     }
+  }
+
+  /** A middle click's default open rides `auxclick`, which never fires `click` —
+   *  so the anchor dispatch has to be reachable from here too, or every branch
+   *  it claims would navigate the webview on the third button. The image branch
+   *  has no middle-click behavior to displace. */
+  function onAuxClick(e: React.MouseEvent) {
+    if (e.button !== 1) return;
+    const anchor = (e.target as HTMLElement).closest("a");
+    if (anchor) dispatchAnchor(e, anchor, true);
   }
 
   /** The image branch's keyboard twin — the anchors above are real links and
@@ -712,6 +936,7 @@ export function Markdown({
       <div
         ref={bodyRef}
         onClick={onClick}
+        onAuxClick={onAuxClick}
         onKeyDown={onKeyDown}
         onPointerOver={onPointerOver}
         onPointerOut={onPointerOut}
@@ -740,6 +965,11 @@ export function Markdown({
           // `[&_a]:cursor-*` classes, so listing this first leaves the anchor on
           // cursor-pointer and the busy state invisible where the pointer actually is.
           resolving && "cursor-progress [&_a]:cursor-progress",
+          // A link that won't open shows the help cursor, since hovering is how
+          // its card explains why. After the anchor block, matching the image
+          // affordance below: `a[data-inert-link]` outranks the bare `[&_a]`
+          // cursor by specificity, so this wins wherever the walk marked it.
+          "[&_a[data-inert-link]]:cursor-help",
           "[&_code]:rounded-none [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em]",
           "[&_pre]:my-2.5 [&_pre]:overflow-x-auto [&_pre]:border [&_pre]:border-border [&_pre]:bg-muted [&_pre]:p-3 [&_pre]:text-[0.85em] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-[1em]",
           "[&_blockquote]:my-2.5 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",

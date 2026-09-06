@@ -414,7 +414,8 @@ pub async fn gh_publish_repo(
     }
 
     // gh's create output is human-prose on stderr; read back the canonical URL.
-    gh_repo_url(repo_path).await
+    // Origin: this is the repo just published, never an upstream.
+    gh_repo_url(repo_path, None).await
 }
 
 /// Owners the viewer can publish a new repository under: their own account plus
@@ -514,11 +515,15 @@ pub async fn gh_publish_owners() -> AppResult<GithubPublishOwners> {
 
 /// The repository's web URL (works for github.com and GitHub Enterprise).
 /// Append paths like `/issues/new` for specific pages.
-pub async fn gh_repo_url(repo_path: String) -> AppResult<String> {
-    // Pin the origin slug positionally (`gh repo view <slug>` — the `repo` family
-    // has no `-R` flag): a bare `gh repo view` on a fork with an `upstream` remote
-    // auto-resolves to the PARENT, so "View on GitHub" would open the upstream.
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+///
+/// `lens` picks WHICH remote's repo answers: `None`/`Some("origin")` is the fork
+/// itself, `Some("upstream")` the parent. A body rendered under the upstream lens
+/// resolves its relative links against the parent, where those paths actually live.
+pub async fn gh_repo_url(repo_path: String, lens: Option<String>) -> AppResult<String> {
+    // Pin the slug positionally (`gh repo view <slug>` — the `repo` family has no
+    // `-R` flag): a bare `gh repo view` on a fork with an `upstream` remote
+    // auto-resolves to the PARENT, so the lens would never be what decides.
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let out = run_gh(
         Some(&repo_path),
         &["repo", "view", &slug, "--json", "url", "-q", ".url"],

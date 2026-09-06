@@ -26,24 +26,71 @@ import type { IssueDetails, PrDetails, RemoteLens } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
-import { MarkdownLinkCard } from "./markdown-link-card";
+import {
+  MarkdownInertLinkCard,
+  MarkdownLinkCard,
+  MarkdownRepoFileCard,
+} from "./markdown-link-card";
 import type { MarkdownRefKind, MarkdownRefs } from "./markdown-refs";
+
+/** Why an anchor won't open, which is also which one-line reason its card
+ *  shows: no address at all, a same-page fragment, a scheme the app doesn't
+ *  hand off, a destination outside the repository (`//host`), or a
+ *  repository-relative path on a body with no forge to resolve it against. */
+export type InertVariant =
+  | "empty"
+  | "fragment"
+  | "scheme"
+  | "external"
+  | "notRepoPath"
+  | "repoNoForge";
 
 /** What an anchor in a rendered body opens a card for: a forge reference that
  *  fully validated against the emitting renderer's grammar (what the click
- *  dispatch routes on), or any link leaving the app — `mailto:` included, which
- *  the card tells apart by scheme. */
+ *  dispatch routes on), a link leaving the app — `mailto:` included, which the
+ *  card tells apart by scheme — a repository-relative path the click resolves to
+ *  a file on the forge, or a link that won't open at all, whose card names where
+ *  it points (where it points anywhere) and why the click does nothing. */
 export type MarkdownRefTarget =
   | { kind: "user"; user: string }
   | { kind: Exclude<MarkdownRefKind, "user">; number: number }
-  | { kind: "external"; href: string };
+  | { kind: "external"; href: string }
+  /** `href` is what the body wrote (what the card shows); `path` is the string
+   *  the click resolves against the blob base. The classifier computes both, so
+   *  the card can never promise an open the resolver then refuses. */
+  | { kind: "repoFile"; href: string; path: string }
+  | { kind: "inert"; variant: InertVariant; href: string };
 
 /** The forge-reference half of that union: what the click dispatch navigates
- *  in-app and what the card's resolve runs for. An external link is neither. */
+ *  in-app and what the card's resolve runs for. No link kind is one. */
 export type MarkdownForgeTarget = Exclude<
   MarkdownRefTarget,
-  { kind: "external" }
+  { kind: "external" | "repoFile" | "inert" }
 >;
+
+/** The other half: what an anchor resolves to on its href alone, with no
+ *  reference grammar involved — `external` and `repoFile`, which the click
+ *  opens, plus `inert`, which only ever gets a card. One classifier answers with
+ *  this, and the click dispatch and the card both obey that answer. */
+export type MarkdownLinkTarget = Extract<
+  MarkdownRefTarget,
+  { kind: "external" | "repoFile" | "inert" }
+>;
+
+/** Which half of the union a target sits in — a forge reference the card
+ *  resolves, versus a link kind it describes without a fetch. Named by
+ *  EXCLUSION, so a kind added to the union defaults into the resolve: the list
+ *  below is the thing to extend when one is, and it is the single place every
+ *  resolve gate reads rather than three separate tests drifting apart. */
+function isForgeTarget(
+  target: MarkdownRefTarget,
+): target is MarkdownForgeTarget {
+  return (
+    target.kind !== "external" &&
+    target.kind !== "repoFile" &&
+    target.kind !== "inert"
+  );
+}
 
 /** What a reference IS, independent of the object carrying it — the dispatch
  *  mints a fresh target per pointer event, so resolved content is matched on
@@ -267,7 +314,8 @@ function RefCardBody({
   item,
 }: {
   /** Absent on bodies rendered with no forge context (the help screen, AI
-   *  output) — only external targets can arise there. */
+   *  output), where only the two context-free link kinds arise: `external` and
+   *  `inert`. Both render above the guard that needs this. */
   refs: MarkdownRefs | undefined;
   target: MarkdownRefTarget | null;
   /** `undefined` while the reference is still resolving, `null` once it failed. */
@@ -276,10 +324,19 @@ function RefCardBody({
   if (!target) return null;
   if (target.kind === "external")
     return <MarkdownLinkCard href={target.href} />;
+  // Inert links arise on ANY body, forge or not (an empty href, a `//host` in
+  // an AI-output body) — so this branch sits before the `!refs` guard below.
+  if (target.kind === "inert")
+    return (
+      <MarkdownInertLinkCard variant={target.variant} href={target.href} />
+    );
   // A forge reference only exists because the context that linkified it does,
-  // so this is unreachable rather than a state to render.
+  // and a repository-relative path is only claimed where that same context can
+  // resolve it — so this is unreachable rather than a state to render.
   if (!refs) return null;
   const { repoPath, lens } = refs;
+  if (target.kind === "repoFile")
+    return <MarkdownRepoFileCard href={target.href} provider={refs.provider} />;
   if (target.kind === "user") {
     return <RefUserCard repoPath={repoPath} lens={lens} login={target.user} />;
   }
@@ -374,10 +431,10 @@ export function MarkdownRefCard({
   // The live target gates `open`; the retained one drives the content, so the
   // close animation doesn't play over an emptied card.
   const shown = useRetained(target);
-  // Null for anything the resolve never runs for — an external link, or a
+  // Null for anything the resolve never runs for — either link kind, or a
   // reference on a body with no forge context.
   const shownKey =
-    shown && shown.kind !== "external" && repoPath && lens
+    shown && isForgeTarget(shown) && repoPath && lens
       ? refKey(repoPath, lens, shown)
       : null;
   const item =
@@ -385,7 +442,7 @@ export function MarkdownRefCard({
 
   useEffect(() => {
     if (!repoPath || !lens) return;
-    if (!target || target.kind === "user" || target.kind === "external") return;
+    if (!target || !isForgeTarget(target) || target.kind === "user") return;
     const key = refKey(repoPath, lens, target);
     let cancelled = false;
     resolveRefItem(queryClient, repoPath, lens, target)
@@ -451,14 +508,14 @@ export function MarkdownRefCard({
         // is the skeleton's twin for the same reader, and holds the announcement
         // until the swap is done.
         role="status"
-        // External links are never busy: the site and URL are on screen the
-        // frame the card opens, and only the og section below them is still
+        // Link cards are never busy: what they say is on screen the frame the
+        // card opens, and only an external link's og section below it is still
         // arriving. Holding the announcement for that would silence the part
         // that always lands.
         aria-busy={
           shown !== null &&
+          isForgeTarget(shown) &&
           shown.kind !== "user" &&
-          shown.kind !== "external" &&
           item === undefined
         }
         onPointerEnter={onPointerEnter}

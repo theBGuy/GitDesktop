@@ -1,6 +1,6 @@
 import { CaretDownIcon, CaretRightIcon } from "@phosphor-icons/react";
 import { useState } from "react";
-import { Markdown } from "@/components/ui/markdown";
+import { Markdown } from "@/components/markdown/markdown";
 
 /**
  * A collapsed-by-default "Thought process" disclosure for an agentic review's

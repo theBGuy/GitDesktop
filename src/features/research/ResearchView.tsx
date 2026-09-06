@@ -9,8 +9,8 @@ import {
   WarningIcon,
 } from "@phosphor-icons/react";
 import { useLayoutEffect, useRef, useState } from "react";
+import { Markdown } from "@/components/markdown/markdown";
 import { Button } from "@/components/ui/button";
-import { Markdown } from "@/components/ui/markdown";
 import {
   Select,
   SelectContent,

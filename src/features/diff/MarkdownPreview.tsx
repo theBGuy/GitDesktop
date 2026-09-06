@@ -1,8 +1,8 @@
 import { InfoIcon } from "@phosphor-icons/react";
 import { type ReactNode, useMemo } from "react";
+import { Markdown } from "@/components/markdown/markdown";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
-import { Markdown } from "@/components/ui/markdown";
 import { decodeBase64Utf8 } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
 import { DiffPlaceholder } from "./DiffPlaceholder";
@@ -144,19 +144,8 @@ export function MarkdownDocPreview({
   if (cleaned.trim() === "") {
     return <DiffPlaceholder message="Nothing to preview" />;
   }
-  // Repo docs routinely carry repository-relative hrefs (LICENSE, docs/…).
-  // The shared renderer's dispatch opens only http(s)/mailto externally and
-  // leaves every other anchor its default navigation — which in the webview
-  // walks the SPA away to the app's own origin. Capture-phase, and on BOTH
-  // click and auxclick: a middle-click's default open rides auxclick, which
-  // never fires click. Mirrors markdown.tsx's module-private EXTERNAL_HREF
-  // set, kept in sync by hand.
-  const guardLinkClick = (e: React.MouseEvent) => {
-    const href = (e.target as HTMLElement).closest("a")?.getAttribute("href");
-    if (href && !/^(https?:|mailto:)/i.test(href)) e.preventDefault();
-  };
   return (
-    <div onClickCapture={guardLinkClick} onAuxClickCapture={guardLinkClick}>
+    <>
       {showOld && (
         <PreviewNote>
           File deleted — previewing the previous version.
@@ -170,8 +159,11 @@ export function MarkdownDocPreview({
       )}
       {/* Same reading measure as the in-app guide's rendered pages. */}
       <div className="mx-auto w-full max-w-2xl p-6">
+        {/* No forge context: repo docs routinely carry repository-relative
+            hrefs (LICENSE, docs/…), and with nothing to resolve them against
+            the renderer leaves them inert with an explanatory card. */}
         <Markdown>{cleaned}</Markdown>
       </div>
-    </div>
+    </>
   );
 }

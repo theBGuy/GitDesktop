@@ -1,8 +1,8 @@
 import { ArrowLeftIcon } from "@phosphor-icons/react";
 import { useEffect, useEffectEvent, useMemo, useState } from "react";
+import { Markdown } from "@/components/markdown/markdown";
 import { NavRail } from "@/components/NavRail";
 import { Button } from "@/components/ui/button";
-import { Markdown } from "@/components/ui/markdown";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { formatBinding, secondaryClickLabel } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
