@@ -964,7 +964,8 @@ review via its subscription login. The full list is under
   request usually lands in the **worktree** its head branch is checked out in,
   so you arrive in the checkout the work lives in. Read-only, with a
   **Refresh** in the header and a right-click menu for *Open in main workspace*
-  (on a local pull request) / *Open on GitHub* / *Copy link*.
+  (on a pull request from a repository you've added) / *Open on GitHub* /
+  *Copy link*.
 - **Activity and notifications**: a persistent bell in the header collects
   terminal events (a finished review, checks passing/failing, a PR
   approved/commented/merged, a review requested from you, a completed CI

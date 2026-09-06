@@ -2453,8 +2453,14 @@ fn parse_pr_url_repo(url: &str) -> AppResult<(String, String, String)> {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     };
     // The host reaches `--hostname <host>` argv at both callers, so it takes the
-    // same flag-injection guard as the path segments.
-    if sep != "pull" || host.starts_with('-') || !valid_seg(owner) || !valid_seg(name) {
+    // shared authority gate (charset — `remote_host` lets `=`/`;`/`$`/spaces
+    // through) plus the `-`-prefix arm the gate's charset admits.
+    if sep != "pull"
+        || !crate::forge::is_safe_authority(&host)
+        || host.starts_with('-')
+        || !valid_seg(owner)
+        || !valid_seg(name)
+    {
         return Err(AppError::InvalidArgument(format!(
             "could not parse owner/repo from PR url: {url}"
         )));
@@ -7436,8 +7442,10 @@ mod tests {
             parse_pr_url_repo("https://GitHub.COM/biomejs/biome/pull/1").unwrap();
         assert_eq!(host, "github.com");
 
-        // A `-`-led host would ride the `--hostname` argv slot → Err.
+        // A `-`-led host would ride the `--hostname` argv slot → Err, and a host
+        // outside the authority charset (which `remote_host` passes through) → Err.
         assert!(parse_pr_url_repo("-evil.com/biomejs/biome/pull/1").is_err());
+        assert!(parse_pr_url_repo("https://evil;host.com/biomejs/biome/pull/1").is_err());
 
         // Malformed / non-PR urls → Err.
         assert!(parse_pr_url_repo("https://github.com/biomejs/biome/issues/1").is_err());

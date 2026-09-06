@@ -74,19 +74,21 @@ export function WelcomeScreen() {
       variant: "outline",
       onClick: () => dispatchAction("new-repository"),
     },
-    {
-      id: "open-explore",
-      label: "Explore repositories",
-      icon: CompassIcon,
-      variant: "outline",
-      onClick: openExplore,
-    },
+    // My work sits with the shortcut-bearing actions above it; Explore, the
+    // least-frequent (discovery) action, anchors the bottom.
     {
       id: "open-my-work",
       label: "My work",
       icon: TrayIcon,
       variant: "outline",
       onClick: openMyWork,
+    },
+    {
+      id: "open-explore",
+      label: "Explore repositories",
+      icon: CompassIcon,
+      variant: "outline",
+      onClick: openExplore,
     },
   ];
 

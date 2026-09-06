@@ -38,6 +38,9 @@ export function ExploreResultRow({
       // Selection rides aria-activedescendant on the search input, which keeps
       // focus; a row in the tab order would be a second way to reach the list.
       tabIndex={-1}
+      // tabIndex alone doesn't stop a click from focusing the row, which would
+      // strand the input's arrow/Enter navigation; click activation still fires.
+      onMouseDown={(e) => e.preventDefault()}
       onClick={() => onSelect(repo)}
       className={cn(
         "flex w-full flex-col gap-0.5 px-3 py-2 text-left text-xs",

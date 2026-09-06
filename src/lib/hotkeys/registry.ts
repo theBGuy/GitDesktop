@@ -62,7 +62,10 @@ export const ACTIONS = [
     id: "open-my-work",
     label: "My work",
     category: "Application",
-    defaultBinding: null,
+    // mod+m would shadow macOS's native minimize (the listener preventDefaults
+    // registered chords), so the surface takes the shift layer with its opener
+    // siblings.
+    defaultBinding: "mod+shift+m",
   },
   {
     id: "open-mcp-servers-settings",

@@ -255,8 +255,9 @@ From here:
     body: `# My work
 
 **My work** is a cross-repo inbox: your open pull requests and issues on GitHub,
-newest first, without opening a repository to go looking. Open it from the **My work**
-button on the welcome screen, or from the command palette (*My work*).
+newest first, without opening a repository to go looking. Open it with
+{{kbd:open-my-work}}, from the **My work** button on the welcome screen, or from the
+command palette (*My work*).
 **Back** in the header, or Esc, closes the inbox and returns you to the screen
 underneath.
 
@@ -303,10 +304,10 @@ A pull request usually lands where its branch already is. When one of the reposi
 worktrees has that pull request's head branch checked out, GitDesktop opens it there
 rather than in the main workspace, so you arrive in the checkout the work lives in.
 Confirming the branch really belongs to that pull request takes a quick background
-check, and whatever it can't confirm opens the repository as before: a pull
+check, and whatever it can't confirm opens the main workspace instead: a pull
 request from a fork, a branch that isn't checked out anywhere, a slow network. A row
-shows a small spinner while that check is still running. Issues skip the check
-entirely and open in the repository as before.
+shows a small spinner while that check is still running. Issues skip the branch
+check and open in the main workspace.
 
 {{Secondaryclick}} a row for **Open on GitHub** and **Copy link**; on a pull request
 from a repository you've added, **Open in main workspace** heads the menu and skips

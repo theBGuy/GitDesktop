@@ -37,7 +37,7 @@ import { ghPrHeadRef, validateRepo } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import { useForgeMyWork } from "@/lib/git/queries";
 import type { MyWorkItem, PrHeadRef, RepoInfo } from "@/lib/git/types";
-import { listUserWorktrees } from "@/lib/git/worktree";
+import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
@@ -123,45 +123,34 @@ async function resolveTarget(
 /**
  * The repo's main worktree when `repoPath` is itself a linked one, else null.
  * A worktree opened through the folder picker lands in recents like any other
- * checkout, so the escape hatch can't assume its match is the main workspace.
+ * checkout, so a matched row can't be assumed to be the main workspace.
  */
-async function resolveMainWorktree(
+function mainWorktreeOf(
+  worktrees: UserWorktree[],
   repoPath: string,
-  deadline: number,
-): Promise<string | null> {
-  const worktrees = await withDeadline(
-    listUserWorktrees(repoPath),
-    deadline,
-    [],
-  );
+): string | null {
   const main = worktrees.find((w) => w.isMain);
+  // normPath for comparison only — git spells worktree paths with forward
+  // slashes where validate_repo hands back Windows separators.
   if (!main || normPath(main.path) === normPath(repoPath)) return null;
   return main.path;
 }
 
 /**
- * The checkout to open a PR in: a user worktree whose checked-out branch is
- * provably this PR's head, else null for the repo's main checkout. Every
- * unknown — a slow or failed leg, an unproven head, no matching branch — is a
- * null, and the caller's deadline bounds every awaited leg.
+ * The worktree whose checked-out branch is provably this PR's head, else null.
+ * Every unknown — a slow or failed head-ref read, an unproven head, no branch
+ * match — is a null, and the caller's deadline bounds the read. Candidates are
+ * not filtered against `repoPath`: a head branch checked out in the matched
+ * checkout itself is still the proven answer, and returning it is what keeps
+ * the main-workspace preference from pulling the user off their own branch.
  */
-async function resolveWorktreeTarget(
+async function branchWorktreeOf(
   item: MyWorkItem,
+  worktrees: UserWorktree[],
   repoPath: string,
   deadline: number,
-  superseded: () => boolean,
 ): Promise<string | null> {
-  const worktrees = await withDeadline(
-    listUserWorktrees(repoPath),
-    deadline,
-    [],
-  );
-  if (superseded()) return null;
-  // normPath for comparison only — git spells worktree paths with forward
-  // slashes where validate_repo hands back Windows separators.
-  const candidates = worktrees.filter(
-    (w) => w.branch !== "" && normPath(w.path) !== normPath(repoPath),
-  );
+  const candidates = worktrees.filter((w) => w.branch !== "");
   if (candidates.length === 0) return null;
   // A spent budget would race gh against a zero-length timeout and discard the
   // result — don't spawn the process at all.
@@ -171,11 +160,10 @@ async function resolveWorktreeTarget(
     deadline,
     null,
   );
-  if (superseded()) return null;
   // A fork PR's head branch lives in a different repository, where that branch
   // name routinely also exists locally — only a head slug matching this item's
   // repo proves a local branch IS the PR's, so an empty or foreign slug falls
-  // back to the main checkout.
+  // back to whatever the caller had chosen.
   if (
     !head ||
     head.headRefName === "" ||
@@ -185,6 +173,35 @@ async function resolveWorktreeTarget(
   }
   // Exact compare: git branch names are case-sensitive.
   return candidates.find((w) => w.branch === head.headRefName)?.path ?? null;
+}
+
+/** Inset from the row's leading edge for a keyboard-opened menu's anchor, so the
+ *  popup hangs beside the row rather than off the viewport edge. */
+const MENU_KEY_ANCHOR_INSET_PX = 12;
+
+/**
+ * Opens a row's context menu from the keyboard, reporting whether it could.
+ *
+ * A real `contextmenu` event on the row is the only route: Base UI takes the
+ * popup's anchor solely from such an event's coordinates (its trigger's handler
+ * is what calls `setAnchor`, and the public actions ref exposes only
+ * close/unmount), and the list's own capture handler reads the row out of the
+ * event target. Dispatching one drives both, exactly as a right-click does.
+ */
+function openRowContextMenu(url: string): boolean {
+  const row = document.getElementById(myWorkOptionId(url));
+  if (!row) return false;
+  const rect = row.getBoundingClientRect();
+  row.dispatchEvent(
+    new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: Math.round(rect.left + MENU_KEY_ANCHOR_INSET_PX),
+      clientY: Math.round(rect.top + rect.height / 2),
+    }),
+  );
+  return true;
 }
 
 /**
@@ -291,14 +308,13 @@ export function MyWorkScreen() {
       return;
     }
     if (superseded()) return;
-    // A PR's work lives wherever its head branch is checked out, so land there
-    // rather than in the main checkout the recents row names; the escape hatch
-    // resolves the other way, since the matched row can itself BE a worktree.
-    // Every unknown falls back to match.path, silently: nothing broke for the user.
+    // Where a local landing goes, in one rule: a matched row that is itself a
+    // linked worktree prefers its repo's main workspace, and a PROVEN PR head
+    // branch outranks that toward the worktree holding it. Every unknown stays
+    // on match.path, silently — nothing broke for the user.
     let targetPath = match.path;
     let targetName = match.name;
-    if (item.isPullRequest) {
-      const preferWorktree = opts?.preferWorktree ?? true;
+    {
       // Armed before the first await, not before the network leg: listing
       // worktrees runs a prune that can block for seconds, and a freeze the row
       // doesn't acknowledge reads as a dropped keypress. Held locally as well as
@@ -316,19 +332,65 @@ export function MyWorkScreen() {
       // One budget for the whole resolution, however many legs it takes.
       const deadline = Date.now() + WORKTREE_RESOLVE_BUDGET_MS;
       try {
-        const checkout = preferWorktree
-          ? await resolveWorktreeTarget(item, match.path, deadline, superseded)
-          : await resolveMainWorktree(match.path, deadline);
+        // Listed once and shared: both preferences read the same snapshot, and
+        // this is the leg that can block.
+        const worktrees = await withDeadline(
+          listUserWorktrees(match.path),
+          deadline,
+          [],
+        );
         if (superseded()) return;
-        if (checkout) {
+        // The fallback is resolved AND validated first, before the optional
+        // network leg can spend the budget on it: the semantics promise the main
+        // workspace whenever the branch is unconfirmed, so that promise must not
+        // depend on how slow the head-ref read turns out to be. Costs one local
+        // git call even when the branch goes on to win.
+        // Null when the matched row already IS the main workspace, so the
+        // ordinary main-clone open never re-validates or re-spells its path.
+        const mainPath = mainWorktreeOf(worktrees, match.path);
+        // Where the open lands if the branch is never looked up. Proving a head
+        // can only matter when some branch-bearing checkout sits somewhere ELSE
+        // than that: a single-checkout clone has nowhere to be redirected to, and
+        // the common open must stay keypress-instant rather than wait on a forge
+        // call whose every outcome is the path it already has.
+        const fallbackPath = mainPath ?? match.path;
+        const lookupCanMove = worktrees.some(
+          (w) => w.branch !== "" && normPath(w.path) !== normPath(fallbackPath),
+        );
+        let landing: { path: string; name: string } | null = null;
+        if (mainPath) {
           // git skips its prune while another process holds the worktree-admin
           // lock, so a checkout deleted out-of-band can still be listed.
-          const target = await resolveTarget(checkout, deadline);
+          landing = await resolveTarget(mainPath, deadline);
           if (superseded()) return;
-          if (target) {
-            targetPath = target.path;
-            targetName = target.name;
+        }
+        if (
+          lookupCanMove &&
+          item.isPullRequest &&
+          (opts?.preferWorktree ?? true)
+        ) {
+          const branch = await branchWorktreeOf(
+            item,
+            worktrees,
+            match.path,
+            deadline,
+          );
+          if (superseded()) return;
+          if (branch && normPath(branch) === normPath(match.path)) {
+            // The proven head is the matched checkout itself — stay on the
+            // user's own branch rather than moving them to the main workspace.
+            landing = null;
+          } else if (branch) {
+            const branchTarget = await resolveTarget(branch, deadline);
+            if (superseded()) return;
+            // A branch that won't validate keeps the main-workspace fallback
+            // rather than dropping back to the matched worktree.
+            if (branchTarget) landing = branchTarget;
           }
+        }
+        if (landing) {
+          targetPath = landing.path;
+          targetName = landing.name;
         }
       } finally {
         clearTimeout(timer);
@@ -365,8 +427,8 @@ export function MyWorkScreen() {
       });
     } else {
       openIssue({
-        repoPath: match.path,
-        repoName: match.name,
+        repoPath: targetPath,
+        repoName: targetName,
         number: item.number,
         beforeSelect: applyLens,
       });
@@ -389,6 +451,15 @@ export function MyWorkScreen() {
       if (!item) return;
       e.preventDefault();
       void openItem(item, { preferWorktree: !e.shiftKey });
+      return;
+    }
+    // The menu keys reach the row's context menu from here because focus never
+    // leaves this input: pressed on the input they would target it instead, and
+    // it sits outside the list's menu trigger, so the rows' only menu route is
+    // this one. Targets the active row, which the menu already acts on.
+    if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+      const item = visible[activeIndex];
+      if (item && openRowContextMenu(item.url)) e.preventDefault();
       return;
     }
     onInputArrow(e);
@@ -731,6 +802,10 @@ function MyWorkRow({
       // The combobox input owns focus and drives the selection, so an option
       // must not also be a Tab stop.
       tabIndex={-1}
+      // tabIndex alone doesn't stop a CLICK from focusing the button, which
+      // would move focus off the combobox input and kill arrow/Enter nav;
+      // suppressing mousedown's default keeps focus without affecting activation.
+      onMouseDown={(e) => e.preventDefault()}
       onClick={(e) => {
         onSelect(item.url);
         // Shift-click mirrors Shift+Enter: open the main workspace instead of
