@@ -1,5 +1,6 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { useEffect, useRef, useState } from "react";
+import { Markdown } from "@/components/markdown/markdown";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -8,7 +9,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Markdown } from "@/components/ui/markdown";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import changelogRaw from "../../../CHANGELOG.md?raw";
 

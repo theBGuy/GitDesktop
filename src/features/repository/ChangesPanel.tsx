@@ -6,7 +6,15 @@ import {
   StackIcon,
 } from "@phosphor-icons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { type MouseEvent, useEffect, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -132,6 +140,19 @@ type FlatRow =
   | { type: "header"; section: "staged" | "unstaged"; count: number }
   | { type: "file"; entry: FileEntry; staged: boolean };
 
+/** A row's identity, shared by React's key and the virtualizer's `getItemKey`
+ *  so the two can't drift. A measured height only follows its row while
+ *  `getItemKey`'s identity is re-minted per sequence: the key alone never
+ *  invalidates the virtualizer's index-ordered measurement projection. */
+function keyOf(path: string, staged: boolean): string {
+  return `${staged ? "staged" : "unstaged"}:${path}`;
+}
+function rowKeyOf(row: FlatRow): string {
+  return row.type === "header"
+    ? `header:${row.section}`
+    : keyOf(row.entry.path, row.staged);
+}
+
 export function ChangesPanel({
   repoPath,
   active,
@@ -182,10 +203,6 @@ export function ChangesPanel({
   // The one shared context menu acts on whatever was right-clicked.
   const [menuTarget, setMenuTarget] = useState<MenuTarget>(null);
   const filterRef = useRef<HTMLInputElement>(null);
-  // State-backed (not a plain ref) so the virtualizer observes the scroll
-  // element the instant it mounts — the list area is only rendered once there
-  // are changes, and a plain ref would leave the first paint blank.
-  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
 
   const entries = status.data?.entries ?? [];
   const conflictedPaths = entries
@@ -273,8 +290,6 @@ export function ChangesPanel({
     ...stagedEntries.map((entry) => ({ entry, staged: true })),
     ...unstagedEntries.map((entry) => ({ entry, staged: false })),
   ];
-  const keyOf = (path: string, staged: boolean) =>
-    `${staged ? "staged" : "unstaged"}:${path}`;
   const activeKey = selectedFile
     ? keyOf(selectedFile.path, selectedFile.staged)
     : null;
@@ -314,26 +329,6 @@ export function ChangesPanel({
     for (const entry of unstagedEntries)
       flatRows.push({ type: "file", entry, staged: false });
   }
-  const rowVirtualizer = useVirtualizer({
-    count: flatRows.length,
-    getScrollElement: () => scrollEl,
-    estimateSize: (i) => {
-      const r = flatRows[i];
-      if (r.type === "file") return 28;
-      // The "Changes" header carries a top gap only when it follows the staged
-      // section; bake that into the estimate so the first paint never overlaps.
-      return r.section === "unstaged" && stagedEntries.length > 0 ? 40 : 32;
-    },
-    overscan: 16,
-  });
-  // Flat index of the active file row, so we can keep it scrolled into view
-  // under virtualization (its own DOM node may not be mounted).
-  const activeFlatIndex = activeKey
-    ? flatRows.findIndex(
-        (r) => r.type === "file" && keyOf(r.entry.path, r.staged) === activeKey,
-      )
-    : -1;
-
   // Arrow keys walk the rows across both sections; Shift extends from the
   // anchor, a plain arrow collapses to the single active row.
   const rowKey = (r: { entry: FileEntry; staged: boolean }) =>
@@ -384,18 +379,6 @@ export function ChangesPanel({
       return next.size === prev.size ? prev : next;
     });
   }, [status.data]);
-  // Keep the active row scrolled into view as the selection moves — under
-  // virtualization its DOM node may not be mounted, so scroll by index.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on active change
-  useEffect(() => {
-    if (activeFlatIndex >= 0)
-      rowVirtualizer.scrollToIndex(activeFlatIndex, { align: "auto" });
-  }, [activeFlatIndex]);
-  // Jump back to the top whenever the filter changes the visible set.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset on filter change
-  useEffect(() => {
-    rowVirtualizer.scrollToOffset(0);
-  }, [text, activeKinds]);
   const mutating = stage.isPending || unstage.isPending;
   const onError = (e: unknown) => toastError(e);
 
@@ -827,6 +810,62 @@ export function ChangesPanel({
         ? `${stashOne.path} is saved to the stash and removed from your working tree. "Pop latest stash" restores it.`
         : `${stashFiles.length} selected files are saved to the stash and removed from your working tree. "Pop latest stash" restores them.`;
 
+  // One row's inner content, closing over the panel's selection/mutation state.
+  // Passed to the virtualized list so all that state stays here and only the
+  // virtualizer instance lives in the keyed leaf.
+  const renderRow = (row: FlatRow): ReactNode =>
+    row.type === "header" ? (
+      <div
+        data-section-header
+        className={cn(
+          "flex items-center justify-between pr-1 pl-2",
+          // Gap only between the staged and unstaged sections, never at the
+          // very top of the list.
+          row.section === "unstaged" && stagedEntries.length > 0 && "pt-2",
+        )}
+      >
+        <h3 className="py-1 text-xs font-medium text-muted-foreground">
+          {row.section === "staged"
+            ? `Staged (${row.count})`
+            : `Changes (${row.count})`}
+        </h3>
+        <DisabledReasonButton
+          variant="ghost"
+          size="xs"
+          className="text-muted-foreground"
+          disabled={
+            mutating ||
+            (row.section === "unstaged" && stageableUnstaged.length === 0)
+          }
+          reason={
+            row.section === "unstaged" && stageableUnstaged.length === 0
+              ? "Git can't stage Windows-reserved device names, and every file here has one"
+              : null
+          }
+          onClick={row.section === "staged" ? unstageAll : stageAll}
+        >
+          {row.section === "staged" ? "Unstage all" : "Stage all"}
+        </DisabledReasonButton>
+      </div>
+    ) : (
+      <FileRow
+        entry={row.entry}
+        kind={
+          (row.staged ? row.entry.staged : row.entry.unstaged) ?? "modified"
+        }
+        staged={row.staged}
+        disabled={mutating}
+        stat={statFor(row.entry, row.staged)}
+        selected={selectedKeys.has(keyOf(row.entry.path, row.staged))}
+        active={
+          selectedFile?.path === row.entry.path &&
+          selectedFile.staged === row.staged
+        }
+        onSelect={handleSelect}
+        onToggle={handleToggle}
+      />
+    );
+
   return (
     // Calm fade as data replaces the loading skeleton (runs once on mount; a
     // one-shot opacity fade is the existing tw-animate-css idiom, lighter than
@@ -944,125 +983,30 @@ export function ChangesPanel({
             )}
 
           <ContextMenu>
-            <ContextMenuTrigger
-              render={
-                // The whole list is one right-click target + one virtualizer,
-                // so thousands of changed files no longer mount thousands of
-                // menus/rows. `handleContextMenu` (capture phase, so it runs
-                // before the menu opens) records which row/header was hit.
-                <div
-                  ref={setScrollEl}
-                  className="min-h-0 flex-1 overflow-y-auto"
-                  onKeyDown={onListKeyDown}
-                  onContextMenuCapture={handleContextMenu}
-                  role="listbox"
-                  aria-label="Changed files"
-                  aria-multiselectable="true"
-                />
-              }
-            >
-              {nothingMatches ? (
-                <div className="px-2 py-8 text-center text-xs text-muted-foreground">
-                  <p>No files match the filter</p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFilterText("");
-                      setActiveKinds(new Set());
-                    }}
-                    className="mt-1 cursor-pointer font-medium underline underline-offset-2 hover:no-underline"
-                  >
-                    Clear filter
-                  </button>
-                </div>
-              ) : (
-                <div
-                  className="relative w-full"
-                  style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
-                >
-                  {rowVirtualizer.getVirtualItems().map((vi) => {
-                    const row = flatRows[vi.index];
-                    return (
-                      <div
-                        key={
-                          row.type === "header"
-                            ? `header:${row.section}`
-                            : keyOf(row.entry.path, row.staged)
-                        }
-                        data-index={vi.index}
-                        ref={rowVirtualizer.measureElement}
-                        className="absolute top-0 left-0 w-full"
-                        style={{ transform: `translateY(${vi.start}px)` }}
-                      >
-                        {row.type === "header" ? (
-                          <div
-                            data-section-header
-                            className={cn(
-                              "flex items-center justify-between pr-1 pl-2",
-                              // Gap only between the staged and unstaged sections,
-                              // never at the very top of the list.
-                              row.section === "unstaged" &&
-                                stagedEntries.length > 0 &&
-                                "pt-2",
-                            )}
-                          >
-                            <h3 className="py-1 text-xs font-medium text-muted-foreground">
-                              {row.section === "staged"
-                                ? `Staged (${row.count})`
-                                : `Changes (${row.count})`}
-                            </h3>
-                            <DisabledReasonButton
-                              variant="ghost"
-                              size="xs"
-                              className="text-muted-foreground"
-                              disabled={
-                                mutating ||
-                                (row.section === "unstaged" &&
-                                  stageableUnstaged.length === 0)
-                              }
-                              reason={
-                                row.section === "unstaged" &&
-                                stageableUnstaged.length === 0
-                                  ? "Git can't stage Windows-reserved device names, and every file here has one"
-                                  : null
-                              }
-                              onClick={
-                                row.section === "staged" ? unstageAll : stageAll
-                              }
-                            >
-                              {row.section === "staged"
-                                ? "Unstage all"
-                                : "Stage all"}
-                            </DisabledReasonButton>
-                          </div>
-                        ) : (
-                          <FileRow
-                            entry={row.entry}
-                            kind={
-                              (row.staged
-                                ? row.entry.staged
-                                : row.entry.unstaged) ?? "modified"
-                            }
-                            staged={row.staged}
-                            disabled={mutating}
-                            stat={statFor(row.entry, row.staged)}
-                            selected={selectedKeys.has(
-                              keyOf(row.entry.path, row.staged),
-                            )}
-                            active={
-                              selectedFile?.path === row.entry.path &&
-                              selectedFile.staged === row.staged
-                            }
-                            onSelect={handleSelect}
-                            onToggle={handleToggle}
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </ContextMenuTrigger>
+            {/* Keyed on repoPath so a repo switch mints a FRESH virtualizer
+                instance (offset 0), the only cure for the strand where a deep
+                scroll then a switch to a viewport-fitting repo leaves the
+                persisted instance's internal offset stale — the browser clamps
+                scrollTop with no event and scrollToOffset(0) can't re-fire one,
+                so the range omits index 0 (the Staged header). Within a repo the
+                key is stable, so staging churn keeps the same instance. */}
+            <VirtualizedChangeList
+              key={repoPath}
+              flatRows={flatRows}
+              hasStaged={stagedEntries.length > 0}
+              entries={status.data?.entries}
+              text={text}
+              activeKinds={activeKinds}
+              activeKey={activeKey}
+              nothingMatches={nothingMatches}
+              onClearFilter={() => {
+                setFilterText("");
+                setActiveKinds(new Set());
+              }}
+              onListKeyDown={onListKeyDown}
+              onContextMenu={handleContextMenu}
+              renderRow={renderRow}
+            />
             <ContextMenuContent className="min-w-64">
               <ChangesContextMenuItems
                 target={menuTarget}
@@ -1173,5 +1117,154 @@ export function ChangesPanel({
         onConfirm={() => void confirmStash()}
       />
     </div>
+  );
+}
+
+/** The virtualized changes list, isolated so ChangesPanel keys it on `repoPath`:
+ *  a repo switch remounts it, minting a fresh virtualizer whose internal scroll
+ *  offset starts at 0. The persisted instance couldn't be reset any other way —
+ *  a shrunk list clamps scrollTop with no scroll event, and scrollToOffset(0)
+ *  fires none when the list already can't scroll, stranding a deep-scroll offset
+ *  that drops index 0 (the Staged header) from the range. Owning `useVirtualizer`
+ *  here also keeps ChangesPanel out of the React Compiler bailout the hook
+ *  triggers (the HistoryPanel/CommitList split). */
+function VirtualizedChangeList({
+  flatRows,
+  hasStaged,
+  entries,
+  text,
+  activeKinds,
+  activeKey,
+  nothingMatches,
+  onClearFilter,
+  onListKeyDown,
+  onContextMenu,
+  renderRow,
+}: {
+  flatRows: FlatRow[];
+  hasStaged: boolean;
+  /** `status.data?.entries` — a `getItemKey` identity input, not read directly. */
+  entries: FileEntry[] | undefined;
+  text: string;
+  activeKinds: Set<FilterKind>;
+  activeKey: string | null;
+  nothingMatches: boolean;
+  onClearFilter: () => void;
+  onListKeyDown: (e: KeyboardEvent) => void;
+  onContextMenu: (e: MouseEvent) => void;
+  renderRow: (row: FlatRow) => ReactNode;
+}) {
+  // State-backed (not a plain ref) so the virtualizer observes the scroll
+  // element the instant it mounts — a plain ref would leave the first paint blank.
+  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  // The virtualizer keys its measurement projection on `getItemKey`'s IDENTITY,
+  // so this is re-minted per row sequence rather than per render: a fresh closure
+  // every render rebuilds all rows (1.7ms vs 0.019ms at 20k rows, measured on
+  // virtual-core 3.17.8), while never re-minting leaves a pure permutation —
+  // stage one file, count unchanged — painting each header into the previous
+  // occupant's slot. These deps are the sequence's only inputs.
+  const flatRowsRef = useRef(flatRows);
+  flatRowsRef.current = flatRows;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deps re-mint the identity; the ref supplies the rows
+  const getItemKey = useCallback(
+    (index: number) => {
+      const row = flatRowsRef.current[index];
+      return row ? rowKeyOf(row) : index;
+    },
+    [entries, text, activeKinds],
+  );
+  const rowVirtualizer = useVirtualizer({
+    count: flatRows.length,
+    getScrollElement: () => scrollEl,
+    estimateSize: (i) => {
+      const r = flatRows[i];
+      if (r.type === "file") return 28;
+      // The "Changes" header carries a top gap only when it follows the staged
+      // section; bake that into the estimate so the first paint never overlaps.
+      return r.section === "unstaged" && hasStaged ? 40 : 32;
+    },
+    // Key by row identity, not index: staging and working-tree churn shift rows
+    // between indexes, and an index key hands a section header the height
+    // measured for whatever row sat there before, so the next row overlaps it.
+    getItemKey,
+    overscan: 16,
+  });
+  // Flat index of the active file row, so we can keep it scrolled into view
+  // under virtualization (its own DOM node may not be mounted).
+  const activeFlatIndex = activeKey
+    ? flatRows.findIndex(
+        (r) => r.type === "file" && keyOf(r.entry.path, r.staged) === activeKey,
+      )
+    : -1;
+  // Keep the active row scrolled into view as the selection moves — under
+  // virtualization its DOM node may not be mounted, so scroll by index.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on active change
+  useEffect(() => {
+    if (activeFlatIndex >= 0)
+      rowVirtualizer.scrollToIndex(activeFlatIndex, { align: "auto" });
+  }, [activeFlatIndex]);
+  // Jump back to the top whenever the filter changes the visible set. Gated on
+  // the filter actually changing: <Activity> replays effects on every tab show,
+  // and an unguarded reset would drop the scroll position it preserves.
+  const prevFilter = useRef({ text, activeKinds });
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset on filter change
+  useEffect(() => {
+    const prev = prevFilter.current;
+    if (prev.text === text && prev.activeKinds === activeKinds) return;
+    prevFilter.current = { text, activeKinds };
+    rowVirtualizer.scrollToOffset(0);
+  }, [text, activeKinds]);
+
+  return (
+    <ContextMenuTrigger
+      render={
+        // The whole list is one right-click target + one virtualizer, so
+        // thousands of changed files no longer mount thousands of menus/rows.
+        // `onContextMenu` (capture phase, so it runs before the menu opens)
+        // records which row/header was hit.
+        <div
+          ref={setScrollEl}
+          className="min-h-0 flex-1 overflow-y-auto"
+          onKeyDown={onListKeyDown}
+          onContextMenuCapture={onContextMenu}
+          role="listbox"
+          aria-label="Changed files"
+          aria-multiselectable="true"
+        />
+      }
+    >
+      {nothingMatches ? (
+        <div className="px-2 py-8 text-center text-xs text-muted-foreground">
+          <p>No files match the filter</p>
+          <button
+            type="button"
+            onClick={onClearFilter}
+            className="mt-1 cursor-pointer font-medium underline underline-offset-2 hover:no-underline"
+          >
+            Clear filter
+          </button>
+        </div>
+      ) : (
+        <div
+          className="relative w-full"
+          style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+        >
+          {rowVirtualizer.getVirtualItems().map((vi) => {
+            const row = flatRows[vi.index];
+            return (
+              <div
+                key={rowKeyOf(row)}
+                data-index={vi.index}
+                ref={rowVirtualizer.measureElement}
+                className="absolute top-0 left-0 w-full"
+                style={{ transform: `translateY(${vi.start}px)` }}
+              >
+                {renderRow(row)}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </ContextMenuTrigger>
   );
 }

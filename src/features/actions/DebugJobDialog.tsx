@@ -5,6 +5,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { Markdown } from "@/components/markdown/markdown";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,7 +14,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Markdown } from "@/components/ui/markdown";
 import { Spinner } from "@/components/ui/spinner";
 import { buildDebugPrompt, extractAgentPrompt } from "@/lib/ai/prompt";
 import { PROVIDER_LABELS } from "@/lib/ai/providers";

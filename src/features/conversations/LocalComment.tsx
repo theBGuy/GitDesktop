@@ -1,5 +1,6 @@
 import { DotsThreeIcon, RobotIcon } from "@phosphor-icons/react";
 import { useState } from "react";
+import { Markdown } from "@/components/markdown/markdown";
 import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -9,7 +10,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Markdown } from "@/components/ui/markdown";
 import { copyText } from "@/lib/clipboard";
 import { CommentEditor } from "./CommentEditor";
 import type { MentionSource } from "./useMentionCandidates";

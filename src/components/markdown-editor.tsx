@@ -21,9 +21,9 @@ import {
   useRef,
   useState,
 } from "react";
+import { Markdown } from "@/components/markdown/markdown";
 import { useMentionAutocomplete } from "@/components/mention-autocomplete";
 import { Button } from "@/components/ui/button";
-import { Markdown } from "@/components/ui/markdown";
 import { Textarea } from "@/components/ui/textarea";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import { formatBinding } from "@/lib/hotkeys/binding";

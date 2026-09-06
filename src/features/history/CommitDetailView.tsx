@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
+import type { MarkdownRefs } from "@/components/markdown/markdown-refs";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,7 +14,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { MarkdownRefs } from "@/components/ui/markdown-refs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
