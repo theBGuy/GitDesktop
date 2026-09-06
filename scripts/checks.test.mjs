@@ -1,4 +1,4 @@
-// Negative controls for the three guard scanners. Their worst failure mode is
+// Negative controls for the four guard scanners. Their worst failure mode is
 // silent fail-open — a pattern that stops matching still prints "OK" — so every
 // predicate keeps a fixture that MUST hit and a fixture that must not. The
 // scripts export their predicates and gate their CLI body on a main-module path
@@ -9,7 +9,10 @@
 // Node's stdlib test runner and node: imports only, no dev dependency, so the
 // CI `guards` job runs `node --test "scripts/*.test.mjs"` with no install step.
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   CHECKS,
@@ -22,6 +25,7 @@ import {
   parseRegistered,
   staleAllowlistEntries as staleCommandEntries,
 } from "./check-dead-surface.mjs";
+import { CARRIERS, missingSentinels } from "./check-rule-mirrors.mjs";
 import {
   checkCompareEndpoints,
   checkRefspecTemplates,
@@ -1759,4 +1763,109 @@ test("invoke matching survives nested generics and wrapped calls", () => {
     "git_branch_tips",
     "git_status",
   ]);
+});
+
+// ----------------------------------------------------------- check-rule-mirrors
+
+// Both fixtures wrap their sentences the way the real carriers do — the `-C`
+// clause and the `is / forbidden` catchall each straddle a line break. That is
+// deliberate: if the whitespace normalization ever came out, the passing
+// fixture would read as a carrier missing two sentinels, so these cases pin the
+// normalization as much as the patterns.
+const carrierStatingTheRule = [
+  "1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log /",
+  "   show` and `git branch --list`, each optionally prefixed with `-C <path>`",
+  "   to address a task worktree. Everything else — commit, add/stage, stash,",
+  "   push, worktree, config — is",
+  '   forbidden, even "just to test". The user commits their own work.',
+].join("\n");
+
+test("a carrier that still states the whole rule satisfies every sentinel", () => {
+  assert.deepEqual(missingSentinels(carrierStatingTheRule), []);
+});
+
+test("a carrier that drops the line-wrapped catchall is caught", () => {
+  // The dangerous direction: the whitelist forms are still listed, so the file
+  // LOOKS like it carries the rule — only the sentence forbidding everything
+  // else is gone, which is exactly the drift a reader would not notice.
+  const softened = carrierStatingTheRule.replace(
+    ["   push, worktree, config — is", "   forbidden, even"].join("\n"),
+    "   push, worktree, config — are discouraged, except",
+  );
+  assert.notEqual(softened, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(softened).map((s) => s.name),
+    ["forbidden catchall"],
+  );
+});
+
+test("a carrier that carves an exception into the catchall is caught", () => {
+  // Worse than deleting the sentence, because the sentence is still there to
+  // read: the rule is stated and then unstated in the same breath.
+  const excepted = carrierStatingTheRule.replace(
+    [
+      "   push, worktree, config — is",
+      '   forbidden, even "just to test".',
+    ].join("\n"),
+    "   push, worktree, config — is forbidden, except git commit.",
+  );
+  assert.notEqual(excepted, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(excepted).map((s) => s.name),
+    ["forbidden catchall"],
+  );
+});
+
+test("a carrier that drops the -C sanction is caught", () => {
+  // Losing this clause is what makes a worktree-scoped command read as
+  // forbidden to an agent honoring its own charter.
+  const unscoped = carrierStatingTheRule.replace(
+    [
+      "   show` and `git branch --list`, each optionally prefixed with `-C <path>`",
+      "   to address a task worktree. Everything else",
+    ].join("\n"),
+    "   show` and `git branch --list`. Everything else",
+  );
+  assert.notEqual(unscoped, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(unscoped).map((s) => s.name),
+    ["-C worktree sanction"],
+  );
+});
+
+test("a carrier that drops the branch --list allowance is caught", () => {
+  const withoutBranch = carrierStatingTheRule.replace(
+    "` and `git branch --list`,",
+    "`,",
+  );
+  assert.notEqual(withoutBranch, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(withoutBranch).map((s) => s.name),
+    ["branch --list allowance"],
+  );
+});
+
+test("a carrier that drops the read-only forms list is caught", () => {
+  const withoutForms = carrierStatingTheRule.replace(
+    [
+      "1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log /",
+      "   show`",
+    ].join("\n"),
+    "1. **Git is a whitelist.** Permitted: the read-only inspection forms",
+  );
+  assert.notEqual(withoutForms, carrierStatingTheRule);
+  assert.deepEqual(
+    missingSentinels(withoutForms).map((s) => s.name),
+    ["read-only git forms"],
+  );
+});
+
+test("every carrier path the gate checks exists on disk", () => {
+  // The sentinels only fire on a file the gate can read: a carrier renamed or
+  // moved without updating CARRIERS would otherwise fail as "cannot read" in
+  // CI long after the rename landed.
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  for (const carrier of CARRIERS) {
+    assert.ok(existsSync(join(root, carrier)), `missing carrier: ${carrier}`);
+  }
 });

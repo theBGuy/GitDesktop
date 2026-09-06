@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 jobs:
-  # BLOCKING. The three scripts are Node-stdlib-only by design, so this job
+  # BLOCKING. The four scripts are Node-stdlib-only by design, so this job
   # needs no install step and stays a seconds-long gate on every PR.
   guards:
     runs-on: ubuntu-latest
@@ -45,7 +45,7 @@ jobs:
           node-version: 24
 
       # One step per script so a failure names its own check in the UI. The same
-      # three scripts plus the self-tests below run locally via package.json's
+      # four scripts plus the self-tests below run locally via package.json's
       # `checks` alias — a new guard is added in BOTH places.
       - name: Banned frontend patterns
         run: node scripts/check-banned-patterns.mjs
@@ -55,6 +55,9 @@ jobs:
 
       - name: IPC surface drift
         run: node scripts/check-dead-surface.mjs
+
+      - name: Rule-mirror drift
+        run: node scripts/check-rule-mirrors.mjs
 
       # Negative controls for the scanners themselves — their worst failure is a
       # silent fail-open, so the fixtures that prove each predicate still fires
