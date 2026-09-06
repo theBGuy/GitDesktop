@@ -310,7 +310,8 @@ entirely and open in the repository as before.
 
 **Right-click** a row for **Open on GitHub** and **Copy link**; on a pull request from a
 repository you've added, **Open in main workspace** heads the menu and skips the
-worktree for that one open.
+worktree for that one open. **Shift + Enter** (or Shift-click) does the same from
+the keyboard.
 
 ## Keeping it current
 

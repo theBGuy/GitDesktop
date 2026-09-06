@@ -2452,7 +2452,9 @@ fn parse_pr_url_repo(url: &str) -> AppResult<(String, String, String)> {
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     };
-    if sep != "pull" || !valid_seg(owner) || !valid_seg(name) {
+    // The host reaches `--hostname <host>` argv at both callers, so it takes the
+    // same flag-injection guard as the path segments.
+    if sep != "pull" || host.starts_with('-') || !valid_seg(owner) || !valid_seg(name) {
         return Err(AppError::InvalidArgument(format!(
             "could not parse owner/repo from PR url: {url}"
         )));
@@ -7433,6 +7435,9 @@ mod tests {
         let (host, _, _) =
             parse_pr_url_repo("https://GitHub.COM/biomejs/biome/pull/1").unwrap();
         assert_eq!(host, "github.com");
+
+        // A `-`-led host would ride the `--hostname` argv slot → Err.
+        assert!(parse_pr_url_repo("-evil.com/biomejs/biome/pull/1").is_err());
 
         // Malformed / non-PR urls → Err.
         assert!(parse_pr_url_repo("https://github.com/biomejs/biome/issues/1").is_err());
