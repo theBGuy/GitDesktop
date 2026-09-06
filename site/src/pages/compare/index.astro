@@ -3,9 +3,11 @@
 // competitor with the page's last-verified date read from lib/compare.ts
 // (the same map each page's hero stamp reads, so the dates can't drift).
 // The hub routes; the pages argue — keep it quieter than its children.
-// entries is a Record over CompareSlug so a new comparison page fails the
-// build until it gets a hub row; the meta description and ogDescription
-// vendor lists are the two enumerations left to update by hand.
+// entries is a Record over CompareSlug (editor-time exhaustiveness), and
+// entryList throws at build time if a verifiedOn slug has no hub row — astro
+// build does not type-check, so the throw is the real gate. Row order follows
+// verifiedOn's key order in src/lib/compare.ts. The meta description and
+// ogDescription vendor lists are the two enumerations left to update by hand.
 import SiteLayout from "../../layouts/SiteLayout.astro";
 import { type CompareSlug, verifiedOn } from "../../lib/compare";
 
@@ -31,10 +33,11 @@ const entries: Record<CompareSlug, { name: string; hook: string }> = {
     hook: "Subscription against free. The pull-request verbs Tower stops at, one feature set across three platforms, and where Tower's undo still leads.",
   },
 };
-const entryList = Object.entries(entries) as [
-  CompareSlug,
-  (typeof entries)[CompareSlug],
-][];
+const entryList = (Object.keys(verifiedOn) as CompareSlug[]).map((slug) => {
+  const entry = entries[slug];
+  if (!entry) throw new Error(`/compare/ hub: no row for "${slug}"`);
+  return [slug, entry] as const;
+});
 ---
 
 <SiteLayout
