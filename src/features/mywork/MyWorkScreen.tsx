@@ -109,6 +109,9 @@ async function resolveTarget(
   path: string,
   deadline: number,
 ): Promise<{ path: string; name: string } | null> {
+  // A spent budget would race git against a zero-length timeout and discard the
+  // result — don't spawn the process at all.
+  if (Date.now() >= deadline) return null;
   const info = await withDeadline<RepoInfo | null>(
     validateRepo(path),
     deadline,
@@ -562,11 +565,20 @@ function MyWorkList({
     overscan: 12,
   });
 
+  // Armed by a right-click, consumed by the very next run of the align effect:
+  // the menu opens anchored to the cursor, so aligning the row it selected would
+  // slide the list out from under it.
+  const skipAlignRef = useRef(false);
+
   // Keep the keyboard-selected row in view. Keyed on the selection alone: a
   // re-scroll on any list change would fight the user's own scrolling on every
   // unrelated re-render (the shared clock ticks these rows every 30s).
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll when the selection moves
   useEffect(() => {
+    if (skipAlignRef.current) {
+      skipAlignRef.current = false;
+      return;
+    }
     if (activeIndex >= 0) {
       virtualizer.scrollToIndex(activeIndex, { align: "auto" });
     }
@@ -582,7 +594,10 @@ function MyWorkList({
     if (item) {
       setMenuItem(item);
       // Move the highlight with the menu, so it can't act on a row other than
-      // the one aria-activedescendant is pointing at.
+      // the one aria-activedescendant is pointing at — but arm the skip only
+      // when the index will actually change, or the flag would outlive this
+      // click and swallow the next keyboard scroll.
+      if (item.url !== items[activeIndex]?.url) skipAlignRef.current = true;
       onSelect(item.url);
     } else {
       setMenuItem(null);

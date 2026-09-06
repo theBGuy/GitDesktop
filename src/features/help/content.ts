@@ -303,15 +303,15 @@ A pull request usually lands where its branch already is. When one of the reposi
 worktrees has that pull request's head branch checked out, GitDesktop opens it there
 rather than in the main workspace, so you arrive in the checkout the work lives in.
 Confirming the branch really belongs to that pull request takes a quick background
-check, and whatever it can't confirm opens the main workspace as before: a pull
+check, and whatever it can't confirm opens the repository as before: a pull
 request from a fork, a branch that isn't checked out anywhere, a slow network. A row
 shows a small spinner while that check is still running. Issues skip the check
 entirely and open in the repository as before.
 
-**Right-click** a row for **Open on GitHub** and **Copy link**; on a pull request from a
-repository you've added, **Open in main workspace** heads the menu and skips the
-worktree for that one open. **Shift + Enter** (or Shift-click) does the same from
-the keyboard.
+{{Secondaryclick}} a row for **Open on GitHub** and **Copy link**; on a pull request
+from a repository you've added, **Open in main workspace** heads the menu and skips
+the worktree for that one open. {{key:shift+enter}} does the same from the keyboard,
+Shift-click from the pointer.
 
 ## Keeping it current
 

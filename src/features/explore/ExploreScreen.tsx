@@ -187,8 +187,13 @@ export function ExploreScreen() {
           // empty states would reference a node that isn't there.
           aria-controls={flatRepos.length > 0 ? EXPLORE_LISTBOX_ID : undefined}
           aria-autocomplete="list"
+          // The id has to exist in the mounted list: `selected` outlives a query
+          // / mode / sort change (it resets only on a provider switch), so gate
+          // on membership instead of pointing at a row that is no longer there.
           aria-activedescendant={
-            selected ? exploreOptionId(selected.fullName) : undefined
+            selected && flatRepos.some((r) => r.fullName === selected.fullName)
+              ? exploreOptionId(selected.fullName)
+              : undefined
           }
           className="h-8 min-w-40 flex-1"
         />
