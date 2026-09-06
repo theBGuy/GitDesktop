@@ -510,9 +510,10 @@ function healMcpServer(server: unknown): McpServer {
   return healed;
 }
 
-/** The settings' MCP registry as a real array of real objects — a corrupt container
- *  OR element reads as absent, never throws, and is never substituted in the stored
- *  value (see {@link healEnumerated}; the repair path lives in `McpServersSection`). */
+/** The settings' MCP registry as a real array of objects — a corrupt container, or
+ *  an element that isn't an object at all, reads as absent and is never substituted
+ *  in the stored value (see {@link healEnumerated}; the repair path lives in
+ *  `McpServersSection`). */
 export const asMcpServerArray = (value: unknown): McpServer[] =>
   Array.isArray(value)
     ? value.filter(
