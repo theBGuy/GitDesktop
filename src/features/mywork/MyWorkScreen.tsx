@@ -180,7 +180,7 @@ async function branchWorktreeOf(
 const MENU_KEY_ANCHOR_INSET_PX = 12;
 
 /**
- * Opens a row's context menu from the keyboard, reporting whether it could.
+ * Opens a row's context menu from the keyboard.
  *
  * A real `contextmenu` event on the row is the only route: Base UI takes the
  * popup's anchor solely from such an event's coordinates (its trigger's handler
@@ -188,9 +188,9 @@ const MENU_KEY_ANCHOR_INSET_PX = 12;
  * close/unmount), and the list's own capture handler reads the row out of the
  * event target. Dispatching one drives both, exactly as a right-click does.
  */
-function openRowContextMenu(url: string): boolean {
+function openRowContextMenu(url: string): void {
   const row = document.getElementById(myWorkOptionId(url));
-  if (!row) return false;
+  if (!row) return;
   const rect = row.getBoundingClientRect();
   row.dispatchEvent(
     new MouseEvent("contextmenu", {
@@ -201,7 +201,6 @@ function openRowContextMenu(url: string): boolean {
       clientY: Math.round(rect.top + rect.height / 2),
     }),
   );
-  return true;
 }
 
 /**
@@ -580,19 +579,22 @@ function MyWorkBody({
   if (work.isError) {
     return <MyWorkError error={work.error} onRetry={() => work.refetch()} />;
   }
-  if (items.length === 0) {
-    return (
-      <QuietLine>
-        Nothing on GitHub involves you right now. This searches every repo
-        you're involved in, not just local ones.
-      </QuietLine>
-    );
-  }
   // Set server-side when a search leg hit its cap or the merged union overshot
   // the page — leg caps count raw hits before unaddressable ones drop, so it
-  // stays true on a page that arrives short. Shown under the filtered-empty
-  // branch too: filtering to nothing is when an off-page item matters most.
+  // stays true on a page that arrives short. Shown under the empty branches
+  // too: a page whose every hit was dropped must not read as "nothing exists".
   const capped = work.data?.truncated ?? false;
+  if (items.length === 0) {
+    return (
+      <>
+        <QuietLine>
+          Nothing on GitHub involves you right now. This searches every repo
+          you're involved in, not just local ones.
+        </QuietLine>
+        {capped && <CapNote />}
+      </>
+    );
+  }
   if (visible.length === 0) {
     return (
       <>
