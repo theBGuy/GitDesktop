@@ -19,7 +19,8 @@
    check — reviewers never create it; see rule 7.)
 3. **Don't edit `src/components/ui/`** — vendored primitives; fix at the call site. That
    folder's `README.md` inventories sanctioned local modifications.
-4. **Never repo-wide `cargo fmt`** in `src-tauri`. New files only: `rustfmt <that file>`.
+4. **Never repo-wide `cargo fmt`** in `src-tauri`. New files only: `rustfmt <that file>` —
+   and never on a `mod.rs` (rustfmt follows `mod` declarations into every child file).
 5. **Report from evidence** — verification claims come from command output in this
    session, never memory. Quote failures verbatim.
 6. **`gd/session/*` branches are filtered from every branch surface** and never deleted —

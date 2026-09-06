@@ -28,7 +28,10 @@ Where this file and generic best practice disagree, this file wins.
    the sanctioned local modifications (a re-vendor silently reverts them);
    any future sanctioned edit updates it in the same change.
 4. **Never repo-wide `cargo fmt`** in `src-tauri` (~35 files of collateral).
-   New files only: `rustfmt <that file>`.
+   New files only: `rustfmt <that file>` — and never on a `mod.rs`: rustfmt
+   follows its `mod` declarations into every child file (measured: 6-file
+   collateral). Verify an edit's formatting with `rustfmt --check
+   --config skip_children=true` and compare flagged hunks to your lines.
 5. **Report from evidence.** Verification claims come from command output in
    this session, never memory. Quote failures verbatim.
 
