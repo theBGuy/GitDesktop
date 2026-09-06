@@ -21,7 +21,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";
-import type { McpServer } from "@/lib/settings/api";
+import { MCP_TRANSPORTS, type McpServer } from "@/lib/settings/api";
 import {
   emptyMcpServer,
   entriesFor,
@@ -218,7 +218,7 @@ export function McpServerDialog({
             </div>
             <LabeledGroup label="Transport">
               <div className="flex gap-1">
-                {(["stdio", "http"] as const).map((t) => (
+                {MCP_TRANSPORTS.map((t) => (
                   <Button
                     key={t}
                     type="button"

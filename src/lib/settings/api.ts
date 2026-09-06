@@ -103,6 +103,10 @@ export interface CustomCommand {
  *  importing that module — "default" is key ABSENCE, so it is not a member. */
 export const MCP_REPO_STATES = ["on", "optional", "off"] as const;
 
+/** How a server is reached. The Add/Edit dialog's transport toggle renders from
+ *  this list and `loadSettings` heals against it, so the two can't drift. */
+export const MCP_TRANSPORTS = ["stdio", "http"] as const;
+
 /** One ordered environment variable / request header entry in an MCP server
  *  definition. Secret-bearing entries keep their `value` empty here (the real
  *  value lives in the OS keychain — see `McpServer.secretKeys`). */
@@ -141,7 +145,7 @@ export interface McpServer {
    *  "off". Absent for a repo = inherit `enabled`. Meaningless for repo-scoped servers. */
   repoOverrides?: Record<string, (typeof MCP_REPO_STATES)[number]>;
   /** "stdio" = a local subprocess; "http" = a remote streamable-HTTP server. */
-  transport: "stdio" | "http";
+  transport: (typeof MCP_TRANSPORTS)[number];
   /** Executable to launch (stdio only), e.g. `npx`. */
   command: string;
   /** Arguments passed to `command` (stdio only). */
@@ -453,20 +457,28 @@ const pick = <T extends string>(
   fallback: T,
 ): T => (allowed.includes(value as T) ? (value as T) : fallback);
 
-/** Drops per-repo override entries whose value isn't a real state — absence IS the
- *  "Default" choice, so a junk entry heals by disappearing rather than by picking a
- *  state the user never made. Returns the server untouched when nothing was junk,
- *  and passes through anything that isn't a server object at all: the heal's whole
- *  premise is that settings.json lies, so it must not assume shape either. */
+/** Heals one server's enumerated fields: an off-list `transport` falls back to the
+ *  empty-draft default, and per-repo override entries whose value isn't a real state
+ *  are dropped — absence IS the "Default" choice there, so a junk entry heals by
+ *  disappearing rather than by picking a state the user never made. Returns the same
+ *  object when nothing was junk, and passes through anything that isn't a server
+ *  object at all: the heal's premise is that settings.json lies, so it must not
+ *  assume shape either. */
 function healMcpServer(server: McpServer): McpServer {
   if (typeof server !== "object" || server === null) return server;
+  let healed = server;
+  const transport = pick(server.transport, MCP_TRANSPORTS, "stdio");
+  if (transport !== server.transport) healed = { ...healed, transport };
   const overrides = server.repoOverrides;
-  if (typeof overrides !== "object" || overrides === null) return server;
-  const kept = Object.entries(overrides).filter(([, state]) =>
-    (MCP_REPO_STATES as readonly string[]).includes(state),
-  );
-  if (kept.length === Object.keys(overrides).length) return server;
-  return { ...server, repoOverrides: Object.fromEntries(kept) };
+  if (typeof overrides === "object" && overrides !== null) {
+    const kept = Object.entries(overrides).filter(([, state]) =>
+      (MCP_REPO_STATES as readonly string[]).includes(state),
+    );
+    if (kept.length !== Object.keys(overrides).length) {
+      healed = { ...healed, repoOverrides: Object.fromEntries(kept) };
+    }
+  }
+  return healed;
 }
 
 /**
@@ -476,9 +488,12 @@ function healMcpServer(server: McpServer): McpServer {
  * trigger whose next Save persists the junk. Silent and deterministic, so a healed
  * value simply rides the next natural settings write.
  *
- * Fields whose membership is only known at runtime are deliberately absent: terminal
- * / terminalPath / externalEditor (their own custom sentinels), syntaxMap (user-defined
- * language ids), hotkeys, and MCP server scopes (repo identities).
+ * Deliberately not healed: terminal / terminalPath / externalEditor (their own custom
+ * sentinels), syntaxMap (user-defined language ids), hotkeys, and MCP server scopes,
+ * whose membership is only known at runtime; plus agentImageProviders, which is
+ * statically enumerable but validated where it is consumed (render_dockerfile refuses
+ * an agent it has no package for) and rendered by no picker, so a stray entry sits
+ * inert in the file.
  */
 function healEnumerated(settings: AppSettings): AppSettings {
   // Destructured out because an off-list agent must heal to ABSENT — that absence is
@@ -555,12 +570,16 @@ function healEnumerated(settings: AppSettings): AppSettings {
       DIFF_VIEW_MODES,
       DEFAULT_SETTINGS.diffViewMode,
     ),
-    // A non-array here would throw, and every writer in the serialized RMW chain
-    // re-reads through loadSettings — so the throw would lock the user out of
-    // repairing the file from inside the app.
+    // A corrupt container is passed through, never substituted: every writer in the
+    // serialized RMW chain re-reads through loadSettings, so a stand-in [] would
+    // persist on the next unrelated write and destroy whatever definitions the shape
+    // held. Untouched, the MCP surfaces degrade exactly as they did before this heal
+    // existed and the file stays repairable. null/undefined resets — nothing to lose.
     mcpServers: Array.isArray(settings.mcpServers)
       ? settings.mcpServers.map(healMcpServer)
-      : DEFAULT_SETTINGS.mcpServers,
+      : settings.mcpServers == null
+        ? []
+        : settings.mcpServers,
   };
 }
 

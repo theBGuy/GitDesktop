@@ -33,12 +33,13 @@ export function nextTheme(current: ThemeSetting): ThemeSetting {
 
 const LS_KEY = "gd-theme";
 
+/** Membership derived from {@link THEME_ORDER}, not re-enumerated: this gates the
+ *  pre-paint boot read, the one theme path no type-check covers, so a hand-listed
+ *  copy would reject a newly added theme and flash "system" until the store loads. */
 function isTheme(value: unknown): value is ThemeSetting {
   return (
-    value === "system" ||
-    value === "light" ||
-    value === "dark" ||
-    value === "slate"
+    typeof value === "string" &&
+    (THEME_ORDER as readonly string[]).includes(value)
   );
 }
 

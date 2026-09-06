@@ -57,8 +57,8 @@ pub async fn git_compare_branches(
 }
 
 /// The `ahead` half of [`git_compare_branches`] alone. Most callers discard
-/// `behind`, and its log walk is pure cost on always-mounted surfaces that
-/// refetch whenever a fetch lands.
+/// `behind`, so its log walk is pure cost — the ahead-only form halves the
+/// spawns for the dialog and generation callers that propose or preview.
 #[tauri::command]
 pub async fn git_branch_ahead(
     repo_path: String,
