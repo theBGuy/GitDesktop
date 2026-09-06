@@ -3,21 +3,23 @@ name: delegate
 description: >-
   Orchestrate delegated implementation in GitDesktop — the main model (Fable
   or Opus) architects, plans, and integrates; Opus subagents implement and
-  review. Gated to Fable/Opus orchestrators (Sonnet and smaller work inline
-  instead). Use whenever the user asks to delegate, fan out, or
-  parallelize implementation work, says "have opus build/implement X", or hands
-  over a well-scoped multi-file feature that should be built by subagents
-  rather than inline. Also applies when resuming a partially delegated feature.
+  review, with an experimental codex implementer lane alongside. Gated to
+  Fable/Opus orchestrators (Sonnet and smaller work inline instead). Use
+  whenever the user asks to delegate, fan out, or parallelize implementation
+  work, says "have opus build/implement X", or hands over a well-scoped
+  multi-file feature that should be built by subagents rather than inline.
+  Also applies when resuming a partially delegated feature.
 argument-hint: "[task description]"
 ---
 
-# /delegate — Fable or Opus orchestrates, Opus implements
+# /delegate — Fable or Opus orchestrates, Opus (or the codex arm) implements
 
 The division of labor: **you** (the main conversation) own architecture,
 decomposition, dispatch, integration, and everything the user sees. The
-**`implementer`** agent (Opus) turns written work-package specs into code; it and
-the experimental **codex implementer arm** (`gpt-6-astra` via `codex exec` — see
-`references/codex-implementer.md`) are the two sanctioned writers in this repo. The
+**`implementer`** agent (Opus) turns written work-package specs into code; it
+and the experimental **codex implementer arm** (`gpt-6-astra` via `codex exec`)
+are the two sanctioned writers in this repo — the codex arm is sandbox-confined
+to linked task worktrees (see `references/codex-implementer.md`). The
 **`spec-reviewer`** agent (Opus, read-only) adversarially checks the result.
 
 ## Phase 0 — Gate & ground
@@ -67,9 +69,9 @@ Research with read-only fan-outs when needed: `Explore` for codebase
 questions, `Plan` for competing strategies, Workflow for bigger read-only
 sweeps (see Workflows below). Every research/review agent prompt must state:
 **strictly read-only — no file writes, no git mutations, no test files.** The
-`implementer` agent is the sole exception to the *file-write* rule, and only
-when executing a spec; the no-git-mutation rule has no exceptions, for any
-agent, ever.
+two sanctioned writers (the `implementer` agent and the codex implementer arm)
+are the only exceptions to the *file-write* rule, each only when executing a
+spec; the no-git-mutation rule has no exceptions, for any agent, ever.
 
 Then write one **work-package spec** per package. Keep specs tight — they are
 replayed into both the implementer's and reviewer's contexts — but never
@@ -132,10 +134,17 @@ measured sandbox behavior, and the spec preamble live there. The hard rules:
 
 - **Linked task worktrees only** — the sandbox git-block does not exist in the
   main checkout, where `.git` sits inside the workspace root.
+- **Never pass `--add-dir` pointing at the main repo** — that is the one way to
+  defeat the confinement from an otherwise correct dispatch.
 - Feed the preamble + spec through **stdin** (heredoc), never argv.
 - Set `-c model_reasoning_effort` explicitly; the default is `none`.
 - Capture the `session id:` line from the run header.
 - Fix rounds go through `codex exec resume (session-id)`, not a fresh dispatch.
+- Network is off under `workspace-write`: dependencies must already be
+  installed when the worktree is set up.
+- The Phase 0 baseline and the Phase 5 footprint sweep run **in the task
+  worktree** (`git -C <worktree> status`). A feature split across Opus and codex
+  packages colocates in ONE worktree so the sweep sees every package's files.
 
 ## Phase 4 — Verify (never skip; never trust the report alone)
 
@@ -161,8 +170,9 @@ measured sandbox behavior, and the spec preamble live there. The hard rules:
    contract, API, or design. Disclose every such fix in the report and re-run
    the package's verification. Anything beyond trivial still round-trips to
    the owning implementer; this never loosens the no-git-mutation rule.
-6. **Codex packages get the identical treatment** — spec-reviewer or
-   orchestrator review, plus the integration checks in the main loop; its `-o`
+6. **Codex packages always get a `spec-reviewer` pass** while the arm is
+   experimental (lite-mode orchestrator self-review stays available for Opus
+   packages only), plus the integration checks in the main loop. Its `-o`
    report file is the analogue of an agent report and earns the same skepticism.
 
 ## Phase 5 — Close out

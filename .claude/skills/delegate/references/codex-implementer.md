@@ -56,17 +56,28 @@ Sources:
 ## Dispatch recipe
 
 Prompt goes in over **stdin**, never argv: argv is capped near 32 KB and the
-`.cmd` shim mangles newline-containing arguments. `cd` into the task worktree
-first, then (one command; continuations are for the page width):
+`.cmd` shim mangles newline-containing arguments. The heredoc forms on this page
+are POSIX shell — on this Windows machine run them through the Bash tool, never
+PowerShell.
+
+**Assert the workspace root before dispatching:**
+`(task-worktree-path)/.git` must be a **file** (the `gitdir:` pointer that marks
+a linked worktree). A `.git` **directory** means the root is main-checkout
+shaped — abort the dispatch rather than fix the flags.
+
+Then, one command (continuations are for the page width):
 
 ```sh
-codex exec --cd . -m gpt-6-astra -s workspace-write \
+codex exec --cd (task-worktree-path) -m gpt-6-astra -s workspace-write \
   -c model_reasoning_effort="high" \
   -o (scratchpad)/(package)-report.md - <<'EOF'
 ... preamble + spec ...
 EOF
 ```
 
+- **`--cd` takes an absolute path.** A relative `--cd` resolves against the
+  shell's cwd, and a run rooted at the main checkout has `.git` inside its
+  workspace, where the sandbox permits git mutations.
 - `(scratchpad)` is the session scratchpad directory and `(package)` the package
   name — the report file never lands in the repo.
 - **Set `-c model_reasoning_effort` on every dispatch.** The default prints
@@ -83,10 +94,19 @@ The message goes in over stdin exactly like the dispatch, for the same
 argv-cap reason — batched findings are long:
 
 ```sh
-codex exec resume (session-id) - <<'EOF'
+codex exec resume (session-id) -m gpt-6-astra -s workspace-write \
+  -c model_reasoning_effort="high" \
+  -o (scratchpad)/(package)-fix1-report.md - <<'EOF'
 ... batched findings ...
 EOF
 ```
+
+**Repeat `-m`, `-c model_reasoning_effort`, `-s`, and `-o` on every resume** —
+flags do not reliably carry over. Measured: a session dispatched without `-m`
+resumed as the config's default model at its configured effort, so a resume can
+silently run a different model than the dispatch did. Resume prints the full run
+header (model, effort, sandbox, session id); read it as the truth for what the
+run actually used.
 
 `--last` is safe only while a single codex session is in flight; with more than
 one, resume by id. Measured: a resumed session retained knowledge of files it
@@ -108,7 +128,9 @@ broken session while smoke-testing in a scratch directory.
 
 - File writes inside the worktree **succeed**. Git **reads** (`status`, `log`,
   `diff`) work.
-- `git add` and `git commit` are **denied**, with:
+- **Commands that write the git dir are denied.** Measured blocked: `git add`,
+  `git commit`, `git checkout -- (file)`, `git rm --cached (file)`, and
+  `git stash push`, each on the out-of-workspace index lock:
 
   ```
   fatal: Unable to create '(main-repo)/.git/worktrees/(wt)/index.lock': Permission denied
@@ -116,11 +138,16 @@ broken session while smoke-testing in a scratch directory.
 
   A linked worktree's real git dir lives outside the workspace root, so the
   sandbox blocks the write the index lock needs.
+- **Commands that touch only worktree files are not denied.** Measured
+  permitted: `git clean -n` and `git clean -fd` — the `-fd` run deleted the
+  probe's untracked file, with only benign config-read warnings. So the sandbox
+  is no guard for untracked WIP; the no-git-mutation policy is.
 - **HARD RULE: dispatch codex only in linked task worktrees, never in the main
-  checkout.** There `.git` sits inside the workspace root and git mutations
-  would be permitted — the block above is what keeps the no-git-mutation rule
-  enforced rather than merely stated. For the same reason, never pass
-  `--add-dir` pointing at the main repo.
+  checkout.** There `.git` sits inside the workspace root and even the git-dir
+  writes would be permitted. That block is what keeps the no-git-mutation rule
+  enforced rather than merely stated for the git-dir-writing subset; every other
+  mutation — `git clean` being the measured counterexample — rests on the policy
+  alone. For the same reason, never pass `--add-dir` pointing at the main repo.
 - **Network is off** under `workspace-write`: `pnpm install` fails, so
   dependencies must be pre-installed when the worktree is set up (already the
   /delegate pattern).
@@ -128,18 +155,30 @@ broken session while smoke-testing in a scratch directory.
   out-of-workspace config (measured on `~/.config/git/ignore`). Not findings.
 - `AGENTS.md` at the workspace root is auto-read by codex (measured with a
   marker token), which is why the repo ships one.
-- The machine may layer a global `~/.codex/AGENTS.md` under the repo one: codex
+- A machine may layer a global `~/.codex/AGENTS.md` under the repo one: codex
   loads both, and the more specific file takes precedence — the repo `AGENTS.md`
-  wins any conflict, the global one only fills machine-wide gaps. This machine's
-  exposes the owner's scoped rules as pointers into `C:\Users\Evan\.claude\rules\`,
-  and the sandbox permits reading those files (both probed 2026-09-06), so the
-  repo file need not duplicate machine-global rules.
+  wins any conflict, the global one only fills machine-wide gaps. The owner's
+  machine has one, exposing user-global rule files as pointers, and the
+  sandbox permits reading them (both probed 2026-09-06), so the repo file need
+  not duplicate machine-global rules.
 
-## Operational dependency and watch items
+## Run lifecycle
 
+- **A killed or timed-out run leaves partial edits.** Diagnose with
+  `git -C (worktree) status` and `git -C (worktree) diff` before resuming or
+  redispatching; a half-applied package looks like a fresh one to the next run.
+- **Windows kills don't tree-kill.** Kill the codex node process and verify it
+  is gone before treating the worktree as free.
+- **One codex session per worktree at a time** — concurrent sessions share the
+  working tree and overwrite each other's edits.
+- Resume by the captured session id. `--last` is only safe while a single
+  session is in flight.
 - Runs consume the owner's ChatGPT subscription. A run that dies on expired auth
   must be **flagged for `codex login`**, never silently skipped or retried into
   the void.
+
+## Watch items
+
 - Implementer-length runs are untested against plan limits — the free tier once
   died mid-review on a 26-file diff. Watch for truncated or missing reports on
   long packages and report the suspicion.
@@ -163,8 +202,11 @@ anything.
   (diff / status / log / show, branch --list).
 - A Permission-denied on a path outside the workspace is an environment limit:
   report it and continue.
-- Lint only your own files: pnpm exec biome check --write (files). NEVER
-  pnpm lint — it rewrites all of src/ and site/.
+- Lint-fix only the files you touched, using the command the spec's
+  Verification field names. NEVER pnpm lint — it rewrites all of src/ and
+  site/. In a fresh worktree, never judge formatting from a tree-wide check:
+  the CRLF checkout false-fails files you never edited. The trustworthy form is
+  the LF-copy biome ci gate the spec names for each ts/tsx you edit.
 - Run exactly the spec's Verification commands and quote any failure verbatim.
   Do not invent broader test scaffolding for small, reversible changes.
 - Your final message is the report: Outcome (one sentence) / Changes (per file)

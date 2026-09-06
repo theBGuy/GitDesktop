@@ -1,7 +1,8 @@
 # Hard safety rules (always loaded — violations have destroyed user state before)
 
 > Excerpted from `.claude/skills/gd-conventions/SKILL.md` (the canonical playbook — the
-> conventions-sync rule updates BOTH). Consult that skill before writing any code here.
+> conventions-sync rule updates all THREE copies: the playbook, this excerpt, and the
+> repo `AGENTS.md`). Consult that skill before writing any code here.
 
 1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log / show` and
    `git branch --list`. Everything else — commit, add/stage, checkout, reset, stash, rm,

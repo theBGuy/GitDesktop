@@ -429,7 +429,9 @@ mentions when a feature ships.
   grep its class immediately — fix every sibling in the same batch, or record
   the count with a named home. Never leave the Nth instance for a later PR.
 - **Conventions-sync:** a change that builds a reusable primitive adds its line
-  to THIS file in the same change (the docs-sync rule, applied to idioms).
+  to THIS file in the same change (the docs-sync rule, applied to idioms). A
+  change to a hard rule also updates its two mirrors: the always-loaded excerpt
+  `.claude/rules/git-safety.md` and the repo `AGENTS.md`.
 
 ## Definition of done
 
