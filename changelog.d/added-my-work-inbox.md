@@ -5,4 +5,7 @@
   issues, or type to narrow by title, repository, or number.
   Press Enter on a row and an item from a repository you've added to GitDesktop
   usually opens in the app; the ↗ marks the rows that will open on GitHub
-  instead. Reach it from the welcome screen or the command palette (*My work*).
+  instead. A pull request usually lands in the worktree its head branch is
+  checked out in, so you arrive in the checkout the work lives in, and
+  *Open in main workspace* on the row's right-click menu skips that. Reach it
+  from the welcome screen or the command palette (*My work*).

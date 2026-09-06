@@ -3232,8 +3232,10 @@ export function useForgeOwnedNamespaces(
 }
 
 /** The viewer's work items across every repository on a provider, for the
- *  cross-repo inbox. The key carries no host/account axis, same as
- *  `["forge-repos", provider]` — one ambient account per provider today. */
+ *  cross-repo inbox. Resolves the whole `MyWorkPage` envelope, not a bare array,
+ *  so consumers can read its `truncated` flag. The key carries no host/account
+ *  axis, same as `["forge-repos", provider]` — one ambient account per provider
+ *  today. */
 export function useForgeMyWork(provider: ForgeProvider, enabled: boolean) {
   return useQuery({
     queryKey: ["forge-my-work", provider] as const,

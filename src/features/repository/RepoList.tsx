@@ -162,8 +162,9 @@ export function RepoList({
   const providerOf = (r: RecentRepo): ForgeProvider | null =>
     resolveProvider(r, providerByPath, hostByPath);
 
-  // Backfill resolved owners + hosts + providers onto the recent records so the
-  // NEXT open groups (and labels its context menu) synchronously. Fires once
+  // Backfill resolved owners + hosts + providers + remote repo names onto the
+  // recent records so the NEXT open groups (and labels its context menu)
+  // synchronously, and remote-name matching works cold. Fires once
   // whenever a record's stored value is stale; the helper no-ops when nothing
   // changed, so its settings refetch doesn't loop.
   // biome-ignore lint/correctness/useExhaustiveDependencies: mutateAsync() is stable; rerun only on resolved owners / records
@@ -175,7 +176,8 @@ export function RepoList({
       return (
         (o.owner || undefined) !== r?.owner ||
         (o.host || undefined) !== r?.host ||
-        (o.provider || undefined) !== r?.provider
+        (o.provider || undefined) !== r?.provider ||
+        (o.repoName || undefined) !== r?.repoName
       );
     });
     if (stale) void persistOwners.mutateAsync(resolved).catch(() => undefined);

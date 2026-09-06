@@ -960,9 +960,11 @@ review via its subscription login. The full list is under
   palette (*My work*), narrow it with **All / Pull requests / Issues** tabs and
   a filter box that takes arrow keys and Enter, and press Enter on a row: an
   item from a repository you've added to GitDesktop usually opens right in the
-  app, and the ↗ marks the rows that will open on GitHub instead. Read-only,
-  with a **Refresh** in the header and a right-click menu for *Open on GitHub* /
-  *Copy link*.
+  app, and the ↗ marks the rows that will open on GitHub instead. A pull
+  request usually lands in the **worktree** its head branch is checked out in,
+  so you arrive in the checkout the work lives in. Read-only, with a
+  **Refresh** in the header and a right-click menu for *Open in main workspace*
+  (on a local pull request) / *Open on GitHub* / *Copy link*.
 - **Activity and notifications**: a persistent bell in the header collects
   terminal events (a finished review, checks passing/failing, a PR
   approved/commented/merged, a review requested from you, a completed CI

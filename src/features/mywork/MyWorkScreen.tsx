@@ -3,6 +3,7 @@ import {
   ArrowSquareOutIcon,
   ArrowsClockwiseIcon,
   CircleDashedIcon,
+  CircleNotchIcon,
   GitPullRequestIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -32,9 +33,11 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
-import { validateRepo } from "@/lib/git/api";
+import { ghPrHeadRef, validateRepo } from "@/lib/git/api";
+import { normPath } from "@/lib/git/path";
 import { useForgeMyWork } from "@/lib/git/queries";
-import type { MyWorkItem } from "@/lib/git/types";
+import type { MyWorkItem, PrHeadRef } from "@/lib/git/types";
+import { listUserWorktrees } from "@/lib/git/worktree";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
@@ -46,7 +49,6 @@ import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
   filterMyWork,
-  MY_WORK_LIMIT,
   MY_WORK_LISTBOX_ID,
   type MyWorkTab,
   matchLocalRepo,
@@ -57,6 +59,85 @@ import {
 /** Stable empty default, so a settings read that hasn't landed doesn't hand a
  *  fresh array to every render. */
 const NO_RECENTS: RecentRepo[] = [];
+
+/** Total budget for resolving where to open a PR, across BOTH of its awaited
+ *  legs. Opening must stay a keypress-fast action, and the worktree list alone
+ *  can block for seconds behind git's prune. */
+const WORKTREE_RESOLVE_BUDGET_MS = 1500;
+
+/** Grace period before a resolving open lights its row, so a resolution that
+ *  answers quickly never flashes a spinner. */
+const PENDING_AFFORDANCE_MS = 300;
+
+/** Open generation. Module-scoped because MyWorkScreen unmounts on every view
+ *  change: against a component ref, a continuation from a previous mount would
+ *  compare with a fresh counter, pass its own supersede check, and navigate the
+ *  app by itself. Read only from handlers and continuations, never in render. */
+let openGen = 0;
+
+/** Resolves `work` against what's left of `deadline`, answering `fallback` on
+ *  both rejection and expiry — the caller treats slow and broken alike. */
+function withDeadline<T>(
+  work: Promise<T>,
+  deadline: number,
+  fallback: T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    work.catch(() => fallback),
+    new Promise<T>((resolve) => {
+      timer = setTimeout(
+        () => resolve(fallback),
+        Math.max(0, deadline - Date.now()),
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The checkout to open a PR in: a user worktree whose checked-out branch is
+ * provably this PR's head, else null for the repo's main checkout. Every
+ * unknown — a slow or failed leg, an unproven head, no matching branch — is a
+ * null, and one shared deadline bounds both awaited legs.
+ */
+async function resolveWorktreeTarget(
+  item: MyWorkItem,
+  repoPath: string,
+  superseded: () => boolean,
+): Promise<string | null> {
+  const deadline = Date.now() + WORKTREE_RESOLVE_BUDGET_MS;
+  const worktrees = await withDeadline(
+    listUserWorktrees(repoPath),
+    deadline,
+    [],
+  );
+  if (superseded()) return null;
+  // normPath for comparison only — git spells worktree paths with forward
+  // slashes where validate_repo hands back Windows separators.
+  const candidates = worktrees.filter(
+    (w) => w.branch !== "" && normPath(w.path) !== normPath(repoPath),
+  );
+  if (candidates.length === 0) return null;
+  const head = await withDeadline<PrHeadRef | null>(
+    ghPrHeadRef(repoPath, item.number),
+    deadline,
+    null,
+  );
+  if (superseded()) return null;
+  // A fork PR's head branch lives in a different repository, where that branch
+  // name routinely also exists locally — only a head slug matching this item's
+  // repo proves a local branch IS the PR's, so an empty or foreign slug falls
+  // back to the main checkout.
+  if (
+    !head ||
+    head.headRefName === "" ||
+    head.headRepoFullName.toLowerCase() !== item.repoFullName.toLowerCase()
+  ) {
+    return null;
+  }
+  // Exact compare: git branch names are case-sensitive.
+  return candidates.find((w) => w.branch === head.headRefName)?.path ?? null;
+}
 
 /**
  * The cross-repo work inbox — every open GitHub pull request and issue
@@ -74,6 +155,8 @@ export function MyWorkScreen() {
   // The active row is tracked by URL (unique per item) rather than by index, so
   // a filter change can't silently retarget the selection to a different item.
   const [activeUrl, setActiveUrl] = useState<string | null>(null);
+  // The row whose open is still resolving where to land, or null.
+  const [pendingOpenUrl, setPendingOpenUrl] = useState<string | null>(null);
 
   // GitHub-only in this slice: the backend refuses the other providers outright,
   // so there is no provider axis to offer.
@@ -81,10 +164,12 @@ export function MyWorkScreen() {
   const settings = useSettings();
   const recents = settings.data?.recentRepos ?? NO_RECENTS;
   const queryClient = useQueryClient();
-  // Generation counter for openItem's validate await — see its guard below.
-  const openGenRef = useRef(0);
+  const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Which open generation lit the pending row, so an older open finishing late
+  // can't darken an affordance a newer one owns.
+  const pendingGenRef = useRef(0);
 
-  const items = sortMyWork(work.data ?? []);
+  const items = sortMyWork(work.data?.items ?? []);
   const prCount = items.filter((i) => i.isPullRequest).length;
   const visible = filterMyWork(items, tab, filter);
   // Derived, never stored: a row the filter has hidden simply stops being
@@ -104,17 +189,36 @@ export function MyWorkScreen() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // openItem clears its own timer on every exit path; this catches an unmount
+  // while one is still armed — and retires the mount's continuations: a quick
+  // reopen restores view === "mywork", so the view guard alone can't see it.
+  useEffect(() => {
+    return () => {
+      openGen += 1;
+      if (pendingTimerRef.current !== null) {
+        clearTimeout(pendingTimerRef.current);
+      }
+    };
+  }, []);
+
   // Every navigation goes through an atomic navigator: an openRepo followed by a
   // select would pair the new repo with the old selection, because the
   // view-transition callback that carries the selection is deferred.
-  async function openItem(item: MyWorkItem) {
+  // `preferWorktree: false` is the context menu's escape hatch back to the main
+  // checkout; everything else lands where the branch actually is.
+  async function openItem(
+    item: MyWorkItem,
+    opts?: { preferWorktree?: boolean },
+  ) {
     // Claim the generation before any early return, so EVERY open — including
     // the browser arm, which never awaits — supersedes a pending one; a stale
     // continuation must strand rather than stomp the newer action or yank the
-    // user back. View is read live: the ref dies with the screen, the risk doesn't.
-    const gen = ++openGenRef.current;
+    // user back. The counter outlives the screen (this one unmounts on every
+    // view change), so a continuation from a previous mount stays superseded;
+    // the view is read live because the screen can be gone entirely.
+    const gen = ++openGen;
     const superseded = () =>
-      gen !== openGenRef.current || useUiStore.getState().view !== "mywork";
+      gen !== openGen || useUiStore.getState().view !== "mywork";
     const match = matchLocalRepo(item, recents);
     if (!match) {
       openUrl(item.url);
@@ -138,20 +242,68 @@ export function MyWorkScreen() {
       return;
     }
     if (superseded()) return;
+    // A PR's work lives wherever its head branch is checked out, so land there
+    // rather than in the main checkout the recents row names. Every unknown
+    // falls back to match.path, silently: nothing broke for the user.
+    let targetPath = match.path;
+    let targetName = match.name;
+    if (item.isPullRequest && (opts?.preferWorktree ?? true)) {
+      // Armed before the first await, not before the network leg: listing
+      // worktrees runs a prune that can block for seconds, and a freeze the row
+      // doesn't acknowledge reads as a dropped keypress. Held locally as well as
+      // on the ref — the ref is what an unmount can reach, but only this
+      // generation may clear its own timer out of it.
+      const timer = setTimeout(() => {
+        if (superseded()) return;
+        setPendingOpenUrl(item.url);
+      }, PENDING_AFFORDANCE_MS);
+      pendingTimerRef.current = timer;
+      // Ownership is claimed at ARM time, not fire time: a successor open must
+      // own the affordance from its first instant, or the superseded open's
+      // cleanup darkens a row the successor is still resolving.
+      pendingGenRef.current = gen;
+      try {
+        const worktreePath = await resolveWorktreeTarget(
+          item,
+          match.path,
+          superseded,
+        );
+        if (worktreePath) {
+          // git skips its prune while another process holds the worktree-admin
+          // lock, so a checkout deleted out-of-band can still be listed.
+          const info = await validateRepo(worktreePath);
+          if (superseded()) return;
+          targetPath = worktreePath;
+          targetName = info.name;
+        }
+      } catch {
+        // The worktree no longer validates — the main checkout still opens.
+      } finally {
+        clearTimeout(timer);
+        if (pendingTimerRef.current === timer) pendingTimerRef.current = null;
+        // Only the generation that owns the affordance may darken it.
+        if (pendingGenRef.current === gen) {
+          pendingGenRef.current = 0;
+          setPendingOpenUrl(null);
+        }
+      }
+      if (superseded()) return;
+    }
     // Land under the origin lens (matchLocalRepo matched the ORIGIN slug): a fork
-    // sitting on "upstream" resolves this number against the parent repo. The lens
-    // write is session-only. Clears are safe: an unchanged lens short-circuits
+    // sitting on "upstream" resolves this number against the parent repo. Keyed on
+    // the path actually navigated to, since a worktree carries its own lens. The
+    // lens write is session-only. Clears are safe: an unchanged lens short-circuits
     // before them, and a real flip drops old-lens siblings before the landing set.
     const applyLens = () =>
-      applyRepoLens(queryClient, match.path, "origin", {
+      applyRepoLens(queryClient, targetPath, "origin", {
         clearSelections: true,
         persist: false,
       });
     if (item.isPullRequest) {
       openPr({
         kind: "remote",
-        repoPath: match.path,
-        repoName: match.name,
+        repoPath: targetPath,
+        repoName: targetName,
         ref: String(item.number),
         section: null,
         // Inside the navigator's view-transition callback, so the lens and the
@@ -259,12 +411,16 @@ export function MyWorkScreen() {
         visible={visible}
         activeIndex={activeIndex}
         recents={recents}
+        pendingOpenUrl={pendingOpenUrl}
         onSelect={setActiveUrl}
-        onOpen={(item) => void openItem(item)}
+        onOpen={(item, opts) => void openItem(item, opts)}
       />
     </div>
   );
 }
+
+/** Opens an item, optionally overriding the worktree preference. */
+type OpenItem = (item: MyWorkItem, opts?: { preferWorktree?: boolean }) => void;
 
 /** The body's state machine: loading → error → empty → filtered-empty → list.
  *  Split from the shell so the virtualizer below only ever mounts with rows. */
@@ -274,6 +430,7 @@ function MyWorkBody({
   visible,
   activeIndex,
   recents,
+  pendingOpenUrl,
   onSelect,
   onOpen,
 }: {
@@ -282,8 +439,9 @@ function MyWorkBody({
   visible: MyWorkItem[];
   activeIndex: number;
   recents: readonly RecentRepo[];
+  pendingOpenUrl: string | null;
   onSelect: (url: string) => void;
-  onOpen: (item: MyWorkItem) => void;
+  onOpen: OpenItem;
 }) {
   if (work.isPending) {
     return <ListRowSkeletons rows={8} lines={1} name="your work" />;
@@ -299,12 +457,11 @@ function MyWorkBody({
       </QuietLine>
     );
   }
-  // A heuristic, not a count: the backend drops unaddressable hits, so a
-  // truncated page that lost one arrives short and reads as uncapped. It errs
-  // only toward staying quiet, which is why the note states the constraint
-  // rather than a number. Shown under the filtered-empty branch too — filtering
-  // to nothing is when an off-page item matters most.
-  const capped = items.length >= MY_WORK_LIMIT;
+  // Set server-side when a search leg hit its cap or the merged union overshot
+  // the page — leg caps count raw hits before unaddressable ones drop, so it
+  // stays true on a page that arrives short. Shown under the filtered-empty
+  // branch too: filtering to nothing is when an off-page item matters most.
+  const capped = work.data?.truncated ?? false;
   if (visible.length === 0) {
     return (
       <>
@@ -319,6 +476,7 @@ function MyWorkBody({
         items={visible}
         activeIndex={activeIndex}
         recents={recents}
+        pendingOpenUrl={pendingOpenUrl}
         onSelect={onSelect}
         onOpen={onOpen}
       />
@@ -333,14 +491,16 @@ function MyWorkList({
   items,
   activeIndex,
   recents,
+  pendingOpenUrl,
   onSelect,
   onOpen,
 }: {
   items: MyWorkItem[];
   activeIndex: number;
   recents: readonly RecentRepo[];
+  pendingOpenUrl: string | null;
   onSelect: (url: string) => void;
-  onOpen: (item: MyWorkItem) => void;
+  onOpen: OpenItem;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [menuItem, setMenuItem] = useState<MyWorkItem | null>(null);
@@ -376,8 +536,6 @@ function MyWorkList({
     }
   }
 
-  const activeUrl = activeIndex >= 0 ? items[activeIndex].url : undefined;
-
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <ContextMenu>
@@ -393,16 +551,15 @@ function MyWorkList({
           }
         >
           {/* Arrow-key navigation lives on the filter Input (combobox pattern),
-              so the listbox itself is not a Tab stop — a pure a11y container. */}
+              so the listbox itself is neither a Tab stop nor the owner of
+              aria-activedescendant — focus never leaves the input, and a second
+              copy here would be inert. A pure a11y container. */}
           <div
             ref={parentRef}
             className="min-h-0 flex-1 overflow-y-auto"
             role="listbox"
             id={MY_WORK_LISTBOX_ID}
             aria-label="Your work"
-            aria-activedescendant={
-              activeUrl ? myWorkOptionId(activeUrl) : undefined
-            }
           >
             <div
               className="relative w-full"
@@ -425,6 +582,7 @@ function MyWorkList({
                       item={item}
                       local={matchLocalRepo(item, recents) !== null}
                       active={v.index === activeIndex}
+                      pending={item.url === pendingOpenUrl}
                       onSelect={onSelect}
                       onOpen={onOpen}
                     />
@@ -437,6 +595,16 @@ function MyWorkList({
         <ContextMenuContent className="min-w-44">
           {menuItem && (
             <>
+              {/* The escape hatch from the worktree-aware default: only ever
+                  offered for a PR that resolves to a local repo at all. */}
+              {menuItem.isPullRequest &&
+                matchLocalRepo(menuItem, recents) !== null && (
+                  <ContextMenuItem
+                    onClick={() => onOpen(menuItem, { preferWorktree: false })}
+                  >
+                    Open in main workspace
+                  </ContextMenuItem>
+                )}
               <ContextMenuItem onClick={() => openUrl(menuItem.url)}>
                 Open on GitHub
               </ContextMenuItem>
@@ -469,14 +637,16 @@ function MyWorkRow({
   item,
   local,
   active,
+  pending,
   onSelect,
   onOpen,
 }: {
   item: MyWorkItem;
   local: boolean;
   active: boolean;
+  pending: boolean;
   onSelect: (url: string) => void;
-  onOpen: (item: MyWorkItem) => void;
+  onOpen: OpenItem;
 }) {
   const Icon = item.isPullRequest ? GitPullRequestIcon : CircleDashedIcon;
   const typeLabel = item.isPullRequest ? "Pull request" : "Issue";
@@ -488,6 +658,10 @@ function MyWorkRow({
       data-my-work-url={item.url}
       role="option"
       aria-selected={active}
+      aria-busy={pending}
+      // The combobox input owns focus and drives the selection, so an option
+      // must not also be a Tab stop.
+      tabIndex={-1}
       onClick={() => {
         onSelect(item.url);
         onOpen(item);
@@ -530,6 +704,14 @@ function MyWorkRow({
           className="flex shrink-0 items-center text-muted-foreground"
         >
           <ArrowSquareOutIcon className="size-3" aria-hidden />
+        </span>
+      )}
+      {pending && (
+        <span
+          className="flex shrink-0 items-center text-muted-foreground"
+          aria-hidden
+        >
+          <CircleNotchIcon className="size-3.5 animate-spin" />
         </span>
       )}
       {parseableDate(item.updatedAt) && (

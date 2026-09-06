@@ -127,6 +127,9 @@ export interface RepoOwner {
    *  including self-managed GitLab hosts glab is signed in to. Null when
    *  unrecognized — the UI labels those GitHub (gh stays authoritative). */
   provider: string | null;
+  /** Repo name as the origin URL spells it, which a renamed clone's folder
+   *  basename doesn't. Null when no remote resolves. */
+  repoName: string | null;
 }
 
 /** A git submodule and its state vs. the commit the parent records. */
@@ -562,6 +565,16 @@ export interface PrPollInfo {
   createdAt: string;
 }
 
+/** Where one PR's head branch lives — the targeted read behind opening a PR in
+ *  the worktree that has it checked out. Both fields are "" when unknown (a
+ *  deleted fork answers "" rather than failing), and a resolver must require
+ *  `headRepoFullName` to match the PR's own repo before trusting `headRefName`:
+ *  branch names collide freely across forks. */
+export interface PrHeadRef {
+  headRefName: string;
+  headRepoFullName: string;
+}
+
 export interface GhRepo {
   nameWithOwner: string;
   owner: string;
@@ -669,6 +682,15 @@ export interface MyWorkItem {
   url: string;
   updatedAt: string;
   authorLogin?: string | null;
+}
+
+/** One page of the work inbox. `truncated` is true when either search leg hit
+ *  its own server-side cap or the merged union overshot the page, so it can be
+ *  true on a page that arrives short — a leg's raw count is measured before
+ *  unaddressable hits are dropped. */
+export interface MyWorkPage {
+  items: MyWorkItem[];
+  truncated: boolean;
 }
 
 export interface GhAccount {

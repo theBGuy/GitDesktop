@@ -35,6 +35,9 @@ export function ExploreResultRow({
       id={exploreOptionId(repo.fullName)}
       role="option"
       aria-selected={active}
+      // Selection rides aria-activedescendant on the search input, which keeps
+      // focus; a row in the tab order would be a second way to reach the list.
+      tabIndex={-1}
       onClick={() => onSelect(repo)}
       className={cn(
         "flex w-full flex-col gap-0.5 px-3 py-2 text-left text-xs",

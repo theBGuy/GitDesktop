@@ -39,25 +39,15 @@ struct RepoView {
 }
 
 /// The host of a repo URL like `https://github.acme.com/owner/repo` →
-/// `github.acme.com`. None when it isn't an http(s)-style URL. Tolerates an
-/// optional `user@` prefix and `:port` suffix. A bracketed IPv6 literal keeps its
-/// brackets, matching `remote_host`'s spelling; a malformed bracket is no host.
+/// `github.acme.com`, lowercased. `None` when there's no parseable host.
+///
+/// Delegates to [`crate::forge::remote_host`] so this module's host spelling can't
+/// drift from the one the rest of the app persists, gates and routes on — both
+/// callers compare the result (against `gh auth status` hosts, and against the
+/// `github.com` default that decides whether `--hostname` is passed), and two
+/// spellings of one host compare unequal.
 fn host_from_url(url: &str) -> Option<String> {
-    let after = url.split_once("://").map(|(_, rest)| rest)?;
-    let authority = after.split('/').next().unwrap_or("");
-    let host = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if host.starts_with('[') {
-        let (span, suffix) = crate::forge::bracketed_split(host)?;
-        // A `:`-led suffix rides the port slot and is dropped, like the bare arm drops
-        // it; any other suffix is no host.
-        if !suffix.is_empty() && !suffix.starts_with(':') {
-            return None;
-        }
-        span
-    } else {
-        host.split(':').next().unwrap_or(host)
-    };
-    (!host.is_empty()).then(|| host.to_string())
+    crate::forge::remote_host(url)
 }
 
 /// Probes the GitHub CLI: present on PATH, logged in, and pointing at a
@@ -2438,8 +2428,11 @@ fn rollup_state_to_ci(state: Option<&str>) -> String {
 /// Parse `(host, owner, name)` from a PR html url. The url is the empirical truth
 /// for which repo the PR numbers belong to — on a fork the PR list resolves to the
 /// PARENT while origin is the fork, so the repo must NOT be re-derived from the
-/// checkout. Strict: two valid segments immediately followed by `/pull/`, and a
-/// `-`-prefixed segment is rejected (flag-injection guard).
+/// checkout. Strict on the PATH: two valid segments immediately followed by
+/// `/pull/`, and a `-`-prefixed segment is rejected (flag-injection guard). The
+/// HOST is only as strict as [`host_from_url`]'s shared parser, which takes
+/// scheme-less and scp-form input, so the `/pull/` check is what actually admits
+/// a url here.
 fn parse_pr_url_repo(url: &str) -> AppResult<(String, String, String)> {
     let host = host_from_url(url)
         .ok_or_else(|| AppError::InvalidArgument(format!("not a PR url: {url}")))?;
@@ -2899,6 +2892,74 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
         })
         .filter(|p| p.number > 0)
         .collect())
+}
+
+/// Where one PR's head branch lives.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrHeadRef {
+    pub head_ref_name: String,
+    /// "owner/name" of the PR's HEAD repository — lets a consumer tell a
+    /// same-repo branch from a fork's identically-named branch. `""` when the
+    /// provider can't supply it (GitHub nulls `headRepository` once the head
+    /// fork is deleted).
+    pub head_repo_full_name: String,
+}
+
+/// One PR's head projection, addressed BY NUMBER rather than read out of
+/// [`pr_poll_query`]'s 30-PR window — a PR older than that window is invisible
+/// to the poll, and this answer has to hold for any PR the user can name.
+/// Separate from its caller so a test can assert what it asks for.
+fn pr_head_ref_query(owner: &str, name: &str, number: u64) -> String {
+    // `number` is a u64 — digits only, so it embeds without a validator; the
+    // owner/name embeds are validated by the caller.
+    format!(
+        r#"query{{ repository(owner:"{owner}", name:"{name}"){{ pullRequest(number:{number}){{ headRefName headRepository{{ nameWithOwner }} }} }} }}"#
+    )
+}
+
+/// Read the head projection out of the GraphQL envelope. Every absence — a null
+/// `headRepository`, a PR GitHub didn't return at all — maps to `""` rather than
+/// an error: the caller's question is "which repo is this branch on", and
+/// "unknown" is a usable answer where a failed call is not.
+fn pr_head_ref_from_value(value: &serde_json::Value) -> PrHeadRef {
+    let str_at = |p: &str| {
+        value
+            .pointer(p)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    PrHeadRef {
+        head_ref_name: str_at("/data/repository/pullRequest/headRefName"),
+        head_repo_full_name: str_at("/data/repository/pullRequest/headRepository/nameWithOwner"),
+    }
+}
+
+/// The head branch of ONE pull request, plus the repo that branch lives in.
+///
+/// Pins the origin slug like [`gh_pr_poll`]: an unpinned `gh repo view` on a fork
+/// with an `upstream` remote auto-resolves to the PARENT, which would answer for
+/// the upstream's PR of the same number.
+#[tauri::command]
+pub async fn gh_pr_head_ref(repo_path: String, number: u64) -> AppResult<PrHeadRef> {
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let Some((owner, name)) = slug.split_once('/') else {
+        return Err(AppError::Gh("could not determine the repository owner".into()));
+    };
+    validate_graphql_embed(owner, "repository owner")?;
+    validate_graphql_embed(name, "repository name")?;
+
+    let query = pr_head_ref_query(owner, name, number);
+    let out = run_gh(
+        Some(&repo_path),
+        &["api", "graphql", "-f", &format!("query={query}")],
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Gh(format!("could not parse the PR head ref: {e}")))?;
+    Ok(pr_head_ref_from_value(&value))
 }
 
 /// Adds/removes labels on a PR via GraphQL mutations. `labelable_id` is the
@@ -5964,7 +6025,8 @@ mod tests {
         flatten_slurped_pages, fork_head_identity, gh_api_error_message,
         gh_pr_discard_pending_review, host_from_url,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
-        parse_auth_accounts, parse_pr_url_repo, parse_publish_owners, pr_edit_args, pr_poll_query,
+        parse_auth_accounts, parse_pr_url_repo, parse_publish_owners, pr_edit_args,
+        pr_head_ref_from_value, pr_head_ref_query, pr_poll_query,
         pull_stack_ref,
         real_check_time,
         real_time_or_empty, reconstruct_pr_diff, reject_upstream_create_metadata,
@@ -7027,6 +7089,73 @@ mod tests {
         );
     }
 
+    /// Both fields are the whole point of the call — a dropped `headRepository`
+    /// leaves a fork's PR indistinguishable from a same-repo one sharing the
+    /// branch name, and reads as "unknown" rather than as an error.
+    #[test]
+    fn head_ref_query_selects_the_branch_and_its_repo() {
+        let q = pr_head_ref_query("owner", "repo", 42);
+        // Addressed by number, not by a recently-updated window.
+        assert!(q.contains("pullRequest(number:42)"), "got: {q}");
+        assert!(q.contains(" headRefName "), "got: {q}");
+        assert!(q.contains("headRepository{ nameWithOwner }"), "got: {q}");
+        assert!(q.contains(r#"repository(owner:"owner", name:"repo")"#), "got: {q}");
+    }
+
+    #[test]
+    fn head_ref_maps_a_null_head_repository_to_empty() {
+        let full = serde_json::json!({"data": {"repository": {"pullRequest": {
+            "headRefName": "feat/x",
+            "headRepository": {"nameWithOwner": "contrib/proj"}
+        }}}});
+        let head = pr_head_ref_from_value(&full);
+        assert_eq!(head.head_ref_name, "feat/x");
+        assert_eq!(head.head_repo_full_name, "contrib/proj");
+
+        // A deleted head fork nulls `headRepository` — "" (unknown), not an error.
+        let deleted_fork = serde_json::json!({"data": {"repository": {"pullRequest": {
+            "headRefName": "feat/x", "headRepository": serde_json::Value::Null
+        }}}});
+        let head = pr_head_ref_from_value(&deleted_fork);
+        assert_eq!(head.head_ref_name, "feat/x");
+        assert_eq!(head.head_repo_full_name, "");
+
+        // A PR GitHub didn't return at all degrades the same way, both fields.
+        let missing = serde_json::json!({"data": {"repository": {"pullRequest": serde_json::Value::Null}}});
+        let head = pr_head_ref_from_value(&missing);
+        assert_eq!(head.head_ref_name, "");
+        assert_eq!(head.head_repo_full_name, "");
+
+        // And so does an envelope carrying only errors.
+        let errors = serde_json::json!({"errors": [{"message": "Could not resolve to a Repository"}]});
+        let head = pr_head_ref_from_value(&errors);
+        assert_eq!(head.head_ref_name, "");
+        assert_eq!(head.head_repo_full_name, "");
+    }
+
+    /// The command's payload is read key-by-key in TypeScript, where a rename
+    /// reads as `undefined` and silently disables the resolution it feeds.
+    #[test]
+    fn head_ref_serializes_camel_case_wire_names() {
+        let v = serde_json::to_value(pr_head_ref_from_value(&serde_json::json!({
+            "data": {"repository": {"pullRequest": {
+                "headRefName": "topic", "headRepository": {"nameWithOwner": "contrib/repo"}
+            }}}
+        })))
+        .expect("PrHeadRef serializes");
+        assert_eq!(
+            v.get("headRefName").and_then(|x| x.as_str()),
+            Some("topic")
+        );
+        assert_eq!(
+            v.get("headRepoFullName").and_then(|x| x.as_str()),
+            Some("contrib/repo")
+        );
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["headRefName", "headRepoFullName"]);
+    }
+
     /// The poll payload is read field-by-field in TypeScript, where a renamed or
     /// dropped key reads as `undefined` and silently disables a notification
     /// branch. Pin the wire names the frontend keys on; the struct literal makes a
@@ -7299,10 +7428,20 @@ mod tests {
         assert_eq!(owner, "biomejs");
         assert_eq!(name, "biome");
 
+        // A mixed-case host folds down, so the `github.com` default check (which
+        // decides whether `--hostname` is passed to gh) recognizes it.
+        let (host, _, _) =
+            parse_pr_url_repo("https://GitHub.COM/biomejs/biome/pull/1").unwrap();
+        assert_eq!(host, "github.com");
+
         // Malformed / non-PR urls → Err.
         assert!(parse_pr_url_repo("https://github.com/biomejs/biome/issues/1").is_err());
         assert!(parse_pr_url_repo("https://github.com/onlyowner/pull/1").is_err());
         assert!(parse_pr_url_repo("not a url").is_err());
+        // The shared host parser accepts scp form, but this one still won't: the
+        // `/pull/` segment check is what makes a url a PR url.
+        assert!(parse_pr_url_repo("git@github.com:owner/repo.git").is_err());
+        assert!(parse_pr_url_repo("git@github.com:owner/repo/pull/1").is_err());
         // Empty string → Err (no host, no segments).
         assert!(parse_pr_url_repo("").is_err());
         // A `-`-prefixed segment (flag-injection guard) → Err.
@@ -7531,8 +7670,19 @@ mod tests {
             host_from_url("https://user@github.acme.com:8443/owner/repo").as_deref(),
             Some("github.acme.com")
         );
-        // Not an http(s)-style URL → no host.
-        assert_eq!(host_from_url("git@github.com:owner/repo.git"), None);
+        // Case folds, so a host read off a URL compares equal to the same host
+        // spelled by `gh auth status` or by the `github.com` default check.
+        assert_eq!(
+            host_from_url("https://GitHub.Acme.COM/owner/repo").as_deref(),
+            Some("github.acme.com")
+        );
+        // scp form yields the bare host — that `:` is a path separator. The
+        // shared parser accepts it; `parse_pr_url_repo` still rejects such a URL
+        // on its own `/pull/` check.
+        assert_eq!(
+            host_from_url("git@github.com:owner/repo.git").as_deref(),
+            Some("github.com")
+        );
         // A bracketed IPv6 literal survives whole, with or without a port.
         assert_eq!(
             host_from_url("https://[2001:db8::1]:8443/o/r").as_deref(),
