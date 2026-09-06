@@ -683,19 +683,28 @@ export function Markdown({
    *  body's own raw HTML can carry `<h2 id="x">` (DOMPurify keeps the id). The
    *  cursor walk and the click dispatch both ask HERE, so a fragment that
    *  scrolls can never render as a dead link. */
-  function fragmentSection(target: MarkdownRefTarget | null): Element | null {
+  function fragmentSection(
+    target: MarkdownRefTarget | null,
+  ): HTMLElement | null {
     if (target?.kind !== "inert" || target.variant !== "fragment") return null;
-    let id = target.href.slice(1);
-    if (!id) return null;
+    const root = bodyRef.current;
+    const raw = target.href.slice(1);
+    if (!root || !raw) return null;
+    // Native fragment navigation tries the id exactly as written FIRST, then
+    // percent-decoded (measured against a real browser, both ids present and
+    // each alone) — so `#caf%C3%A9` finds `id="caf%C3%A9"` before `id="café"`.
+    const asWritten = root.querySelector<HTMLElement>(`#${CSS.escape(raw)}`);
+    if (asWritten) return asWritten;
+    let decoded: string;
     try {
-      // Native fragment navigation matches ids percent-DECODED, so `#caf%C3%A9`
-      // has to find `id="café"`. A malformed escape isn't an encoding at all
-      // (`id="50%"` is a legal id), so it stays literal.
-      id = decodeURIComponent(id);
+      decoded = decodeURIComponent(raw);
     } catch {
-      // Left as written.
+      // Not an encoding at all (`id="50%"` is a legal id) — nothing to fall back to.
+      return null;
     }
-    return bodyRef.current?.querySelector(`#${CSS.escape(id)}`) ?? null;
+    return decoded === raw
+      ? null
+      : root.querySelector<HTMLElement>(`#${CSS.escape(decoded)}`);
   }
 
   /** Navigate to whatever a validated reference target points at. */
@@ -861,6 +870,13 @@ export function Markdown({
     const section = aux ? null : fragmentSection(link);
     if (section) {
       section.scrollIntoView({ block: "start" });
+      // Native fragment navigation moves the sequential-focus start to the
+      // target, so Tab continues from the section, not from the link. Only a
+      // non-focusable one is made programmatically focusable (assigning to an
+      // element already in the tab order would take it out), and preventScroll
+      // keeps focus from re-doing the scroll just performed.
+      if (section.tabIndex < 0) section.tabIndex = -1;
+      section.focus({ preventScroll: true });
       return;
     }
     // An inert link is claimed (the preventDefault above) but opens nothing —

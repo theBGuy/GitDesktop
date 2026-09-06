@@ -1003,7 +1003,7 @@ export function ChangesPanel({
                 setActiveKinds(new Set());
               }}
               onListKeyDown={onListKeyDown}
-              onContextMenu={handleContextMenu}
+              onContextMenuCapture={handleContextMenu}
               renderRow={renderRow}
             />
             <ContextMenuContent className="min-w-64">
@@ -1136,7 +1136,7 @@ function VirtualizedChangeList({
   nothingMatches,
   onClearFilter,
   onListKeyDown,
-  onContextMenu,
+  onContextMenuCapture,
   renderRow,
 }: {
   flatRows: FlatRow[];
@@ -1149,7 +1149,7 @@ function VirtualizedChangeList({
   nothingMatches: boolean;
   onClearFilter: () => void;
   onListKeyDown: (e: KeyboardEvent) => void;
-  onContextMenu: (e: MouseEvent) => void;
+  onContextMenuCapture: (e: MouseEvent) => void;
   renderRow: (row: FlatRow) => ReactNode;
 }) {
   // State-backed (not a plain ref) so the virtualizer observes the scroll
@@ -1218,13 +1218,13 @@ function VirtualizedChangeList({
       render={
         // The whole list is one right-click target + one virtualizer, so
         // thousands of changed files no longer mount thousands of menus/rows.
-        // `onContextMenu` (capture phase, so it runs before the menu opens)
-        // records which row/header was hit.
+        // `onContextMenuCapture` (capture phase, so it runs before the menu
+        // opens) records which row/header was hit.
         <div
           ref={setScrollEl}
           className="min-h-0 flex-1 overflow-y-auto"
           onKeyDown={onListKeyDown}
-          onContextMenuCapture={onContextMenu}
+          onContextMenuCapture={onContextMenuCapture}
           role="listbox"
           aria-label="Changed files"
           aria-multiselectable="true"
