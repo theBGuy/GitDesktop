@@ -15,8 +15,9 @@ argument-hint: "[task description]"
 
 The division of labor: **you** (the main conversation) own architecture,
 decomposition, dispatch, integration, and everything the user sees. The
-**`implementer`** agent (Opus) turns written work-package specs into code —
-it is the only agent sanctioned to write files in this repo. The
+**`implementer`** agent (Opus) turns written work-package specs into code; it and
+the experimental **codex implementer arm** (`gpt-6-astra` via `codex exec` — see
+`references/codex-implementer.md`) are the two sanctioned writers in this repo. The
 **`spec-reviewer`** agent (Opus, read-only) adversarially checks the result.
 
 ## Phase 0 — Gate & ground
@@ -124,6 +125,18 @@ it is a design-time question.
 - Iterate with the SAME agent via SendMessage (it keeps its context) — don't
   spawn a fresh implementer to fix its own package.
 
+### Codex implementer arm (experimental)
+
+Routing a package to codex? Follow `references/codex-implementer.md` — recipe,
+measured sandbox behavior, and the spec preamble live there. The hard rules:
+
+- **Linked task worktrees only** — the sandbox git-block does not exist in the
+  main checkout, where `.git` sits inside the workspace root.
+- Feed the preamble + spec through **stdin** (heredoc), never argv.
+- Set `-c model_reasoning_effort` explicitly; the default is `none`.
+- Capture the `session id:` line from the run header.
+- Fix rounds go through `codex exec resume (session-id)`, not a fresh dispatch.
+
 ## Phase 4 — Verify (never skip; never trust the report alone)
 
 1. **Full mode:** one whole-feature `spec-reviewer` given ALL the specs +
@@ -148,6 +161,9 @@ it is a design-time question.
    contract, API, or design. Disclose every such fix in the report and re-run
    the package's verification. Anything beyond trivial still round-trips to
    the owning implementer; this never loosens the no-git-mutation rule.
+6. **Codex packages get the identical treatment** — spec-reviewer or
+   orchestrator review, plus the integration checks in the main loop; its `-o`
+   report file is the analogue of an agent report and earns the same skepticism.
 
 ## Phase 5 — Close out
 

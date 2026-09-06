@@ -1,0 +1,173 @@
+# Codex implementer arm (experimental)
+
+**Status:** experimental, owner-ratified 2026-09-06. The codex CLI
+(`codex-cli` 0.153.3) driving **`gpt-6-astra`** is a second sanctioned writer in
+this repo alongside the Opus `implementer` agent — nothing else about /delegate
+changes. Codex packages get the same work-package spec, the same
+`spec-reviewer` (Opus) pass, and the same orchestrator integration gates as
+Opus packages. The arm exists because the codex reviewer-lane pilot showed
+classes astra finds well; treat every dispatch as evidence for or against
+keeping it.
+
+## Routing — which packages go to codex
+
+- Astra's proven niche from the reviewer-lane pilot: **platform/encoding/parser
+  and reachability-regime classes on fresh surfaces.** Start it on
+  self-contained packages — pure-logic Rust, wire/serde shapes, scripts, test
+  fixtures, CI plumbing.
+- **Opus keeps idiom-dense React/UI packages.** The repo-idiom playbooks
+  (`gd-conventions`, the frontend rules) are preloaded into the Opus agents and
+  reach codex only through cold file reads, so idiom drift is the expected
+  failure mode there.
+- **The first codex dispatch of any adoption phase doubles as the smoke test** —
+  smallest package first, before anything depends on the lane working.
+
+## Astra behavior notes (OpenAI model guidance, fetched 2026-09-06)
+
+- **Asks for clarification more readily than prior GPT models.** Headless `exec`
+  has nobody to answer, which is why the preamble grants authorization up front
+  and says to decide and note. OpenAI's recommended counter-phrasing: "You don't
+  need user permission for reversible tasks, read-only actions, reviews or
+  fixes, or anything for which authorization is provided earlier in the
+  session."
+- **Over-verifies small changes.** The official calibration line:
+  "Do not write tests for reversible, low-impact changes that mirror the implementation".
+  The spec's Verification field is authoritative — run exactly that list.
+- **More sensitive to instruction files** (`AGENTS.md`, skill files) than prior
+  models: every rule it reads gets enforced hard, so rules stay short, accurate,
+  and non-vague —
+  "A short, accurate AGENTS.md is more useful than a long file full of vague rules".
+  Audit wording changes to either file with that in mind.
+- **Reasoning effort** runs low / medium / high / xhigh: low for well-scoped
+  mechanical packages, high as the implementer-package default, xhigh for long
+  reasoning-heavy ones — the routing shape /delegate already uses for Opus
+  effort.
+- **Default output is verbose and markdown-heavy**, hence the plain-prose report
+  line in the preamble.
+- **Reader-facing copy:** OpenAI's guidance discourages contrastive framing and
+  stock phrases, converging with this repo's reader-facing-prose rules in
+  `CLAUDE.md`. The repo rules still govern and still get swept.
+
+Sources:
+
+- https://developers.openai.com/api/docs/guides/latest-model
+- https://learn.chatgpt.com/guides/best-practices
+
+## Dispatch recipe
+
+Prompt goes in over **stdin**, never argv: argv is capped near 32 KB and the
+`.cmd` shim mangles newline-containing arguments. `cd` into the task worktree
+first, then (one command; continuations are for the page width):
+
+```sh
+codex exec --cd . -m gpt-6-astra -s workspace-write \
+  -c model_reasoning_effort="high" \
+  -o (scratchpad)/(package)-report.md - <<'EOF'
+... preamble + spec ...
+EOF
+```
+
+- `(scratchpad)` is the session scratchpad directory and `(package)` the package
+  name — the report file never lands in the repo.
+- **Set `-c model_reasoning_effort` on every dispatch.** The default prints
+  `none` in the run header.
+- The run header also prints a **`session id:`** line. Capture it — it is the
+  only handle on the session.
+- `--output-schema (file)` exists for typed reports. Available, **not yet
+  validated here**; the markdown report via `-o` is the current path.
+
+## Fix rounds
+
+Batch all findings for a package into one message and resume the same session.
+The message goes in over stdin exactly like the dispatch, for the same
+argv-cap reason — batched findings are long:
+
+```sh
+codex exec resume (session-id) - <<'EOF'
+... batched findings ...
+EOF
+```
+
+`--last` is safe only while a single codex session is in flight; with more than
+one, resume by id. Measured: a resumed session retained knowledge of files it
+had created earlier without re-reading them, and the AGENTS.md instruction
+persisted across the resume.
+
+Resume re-runs the trust / git-repo check rather than inheriting
+`--skip-git-repo-check` from the original invocation, so resuming outside a git
+repo fails with:
+
+```
+Not inside a trusted directory and --skip-git-repo-check was not specified.
+```
+
+Irrelevant for task worktrees, which are git repos — but don't misread it as a
+broken session while smoke-testing in a scratch directory.
+
+## Measured sandbox behavior (2026-09-05, linked worktree)
+
+- File writes inside the worktree **succeed**. Git **reads** (`status`, `log`,
+  `diff`) work.
+- `git add` and `git commit` are **denied**, with:
+
+  ```
+  fatal: Unable to create '(main-repo)/.git/worktrees/(wt)/index.lock': Permission denied
+  ```
+
+  A linked worktree's real git dir lives outside the workspace root, so the
+  sandbox blocks the write the index lock needs.
+- **HARD RULE: dispatch codex only in linked task worktrees, never in the main
+  checkout.** There `.git` sits inside the workspace root and git mutations
+  would be permitted — the block above is what keeps the no-git-mutation rule
+  enforced rather than merely stated. For the same reason, never pass
+  `--add-dir` pointing at the main repo.
+- **Network is off** under `workspace-write`: `pnpm install` fails, so
+  dependencies must be pre-installed when the worktree is set up (already the
+  /delegate pattern).
+- The sandbox may emit benign Permission-denied warnings while reading
+  out-of-workspace config (measured on `~/.config/git/ignore`). Not findings.
+- `AGENTS.md` at the workspace root is auto-read by codex (measured with a
+  marker token), which is why the repo ships one.
+- The machine may layer a global `~/.codex/AGENTS.md` under the repo one: codex
+  loads both, and the more specific file takes precedence — the repo `AGENTS.md`
+  wins any conflict, the global one only fills machine-wide gaps. This machine's
+  exposes the owner's scoped rules as pointers into `C:\Users\Evan\.claude\rules\`,
+  and the sandbox permits reading those files (both probed 2026-09-06), so the
+  repo file need not duplicate machine-global rules.
+
+## Operational dependency and watch items
+
+- Runs consume the owner's ChatGPT subscription. A run that dies on expired auth
+  must be **flagged for `codex login`**, never silently skipped or retried into
+  the void.
+- Implementer-length runs are untested against plan limits — the free tier once
+  died mid-review on a 26-file diff. Watch for truncated or missing reports on
+  long packages and report the suspicion.
+
+## Preamble — paste above every codex spec
+
+```
+You are executing one work-package spec in a linked task worktree of
+GitDesktop. Binding context, in order: AGENTS.md (auto-loaded), CLAUDE.md, and
+.claude/skills/gd-conventions/SKILL.md — read the latter two before writing
+anything.
+
+- Stay strictly inside the spec's "Files in scope". A spec conflict, or a fix
+  that needs another file, is reported back — never improvised around. Nobody
+  can answer questions mid-run, so for in-scope implementation choices (naming,
+  placement, minor idiom) pick a reasonable option and note it in the report;
+  you do not need permission for work the spec already authorizes.
+- Make the smallest change that satisfies the acceptance criteria.
+- No scratch or temp files inside the repo.
+- Git mutations are forbidden and sandbox-blocked; read-only git only
+  (diff / status / log / show, branch --list).
+- A Permission-denied on a path outside the workspace is an environment limit:
+  report it and continue.
+- Lint only your own files: pnpm exec biome check --write (files). NEVER
+  pnpm lint — it rewrites all of src/ and site/.
+- Run exactly the spec's Verification commands and quote any failure verbatim.
+  Do not invent broader test scaffolding for small, reversible changes.
+- Your final message is the report: Outcome (one sentence) / Changes (per file)
+  / Verification (each command with its actual result) / Deviations & concerns.
+  Write it in plain prose sentences — no tables, no decorative formatting.
+```
