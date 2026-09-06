@@ -655,6 +655,22 @@ export interface ForgeProviderFeatures {
   implemented: ForgeImplemented;
 }
 
+/** One row of the cross-repo work inbox: the wire shape of `forge_my_work`.
+ *  Items come from the provider, not a local repo, so each carries its own
+ *  `host` + `repoFullName` — the only identity a row has to navigate by. */
+export interface MyWorkItem {
+  number: number;
+  title: string;
+  isPullRequest: boolean;
+  repoFullName: string;
+  repoOwner: string;
+  repoName: string;
+  host: string;
+  url: string;
+  updatedAt: string;
+  authorLogin?: string | null;
+}
+
 export interface GhAccount {
   /** The host this account is signed in to ("github.com" or an Enterprise
    *  server). Accounts are grouped by host and switched per host. */

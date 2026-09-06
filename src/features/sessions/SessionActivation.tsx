@@ -31,6 +31,17 @@ export function SessionActivation({ repoPath }: { repoPath: string }) {
   // its fields from the new seed.
   const [seedNonce, setSeedNonce] = useState(0);
 
+  // Repo switches don't remount this surface (RepositoryView + SessionActivation
+  // both mount unkeyed), so a consumed seed's snapshot would submit repo A's
+  // content under repo B. Reset in render — an effect paints A's fields first.
+  const [prevRepoPath, setPrevRepoPath] = useState(repoPath);
+  if (prevRepoPath !== repoPath) {
+    setPrevRepoPath(repoPath);
+    setPlanSeed(null);
+    setResearchSeed(null);
+    setSeedNonce((n) => n + 1);
+  }
+
   const pendingTask = useSessionsStore((s) => s.pendingTask);
   const pendingPlanSeed = usePlanStore((s) => s.pendingPlanSeed);
   const setPendingPlanSeed = usePlanStore((s) => s.setPendingPlanSeed);
@@ -48,21 +59,26 @@ export function SessionActivation({ repoPath }: { repoPath: string }) {
   // research run switches to (and seeds) the Plan composer. Snapshot the seed
   // locally so it survives clearing the store.
   useEffect(() => {
-    if (!pendingPlanSeed) return;
+    // A seed raised in another repo stays put, uncleared: this surface lives under
+    // <Activity>, so a seed set before a repo switch reaches us in the new repo and
+    // would prefill its composer with the old repo's work.
+    if (!pendingPlanSeed || pendingPlanSeed.repoPath !== repoPath) return;
     setMode("plan");
     setPlanSeed(pendingPlanSeed);
     setSeedNonce((n) => n + 1);
     setPendingPlanSeed(null);
-  }, [pendingPlanSeed, setPendingPlanSeed]);
+  }, [pendingPlanSeed, setPendingPlanSeed, repoPath]);
 
   // The agent-research hotkey switches to (and seeds) the Research composer.
   useEffect(() => {
-    if (!pendingResearchSeed) return;
+    // Repo-gated like the plan seed above.
+    if (!pendingResearchSeed || pendingResearchSeed.repoPath !== repoPath)
+      return;
     setMode("research");
     setResearchSeed(pendingResearchSeed);
     setSeedNonce((n) => n + 1);
     setPendingResearchSeed(null);
-  }, [pendingResearchSeed, setPendingResearchSeed]);
+  }, [pendingResearchSeed, setPendingResearchSeed, repoPath]);
 
   return (
     <div className="flex h-full flex-col">

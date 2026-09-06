@@ -430,6 +430,7 @@ function ResearchResult({ run }: { run: ResearchRun }) {
     // seed still lands and the activation surface consumes it whenever it next shows.
     if (agentSelectionUnchanged(selectionAtClick)) clearAgentSelection();
     setPendingPlanSeed({
+      repoPath: cur.repoPath,
       issueTitle: cur.report.title,
       // The distilled brief, or the raw whole-session assembly as a fallback.
       issueBody: brief ?? assembleSessionReport(cur),

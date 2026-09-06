@@ -59,6 +59,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "open-my-work",
+    label: "My work",
+    category: "Application",
+    defaultBinding: null,
+  },
+  {
     id: "open-mcp-servers-settings",
     label: "MCP server settings",
     category: "Application",

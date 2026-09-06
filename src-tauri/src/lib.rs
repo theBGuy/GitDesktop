@@ -355,6 +355,7 @@ pub fn run() {
             forge::jira_worklog_delete,
             forge::forge_list_repos,
             forge::forge_owned_namespaces,
+            forge::forge_my_work,
             forge::forge_clone,
             forge::forge_search_repos,
             forge::forge_fork_repo,

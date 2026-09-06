@@ -372,6 +372,13 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
+      "My work — your open GitHub PRs and issues, across every repo, newest first",
+    ai: false,
+    highlight: true,
+  },
+  {
+    group: "Repository & workspace",
+    label:
       "Update a fork from its upstream — fetch, then fast-forward or merge",
   },
   {

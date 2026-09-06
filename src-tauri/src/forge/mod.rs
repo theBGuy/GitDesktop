@@ -924,6 +924,27 @@ pub async fn forge_owned_namespaces(provider: Provider) -> AppResult<Vec<String>
     }
 }
 
+/// Every open pull request and issue involving the signed-in user, across all the
+/// repos they can see — the "My work" inbox's single cross-repo read. Account-scoped
+/// (no repo path), so it dispatches on an explicit `provider` like the clone browser.
+///
+/// GitHub only for now: the other arms error rather than returning an empty list, so
+/// a caller can't read "not wired up" as "you have no open work".
+#[tauri::command]
+pub async fn forge_my_work(
+    provider: Provider,
+) -> AppResult<Vec<crate::github::my_work::MyWorkItem>> {
+    match provider {
+        Provider::GitHub => crate::github::my_work::my_work().await,
+        Provider::GitLab => Err(AppError::InvalidArgument(
+            "My work isn't supported for GitLab yet.".into(),
+        )),
+        Provider::Bitbucket => Err(AppError::InvalidArgument(
+            "My work isn't supported for Bitbucket yet.".into(),
+        )),
+    }
+}
+
 // ── Explore: repo search / fork-by-name / star / README / provider features ────
 // Account-scoped (no repo path) — Explore browses arbitrary repos across a provider,
 // so each command dispatches on an explicit `provider` argument. The frontend
@@ -4665,6 +4686,19 @@ mod tests {
         let zero_page =
             forge_search_repos(Provider::GitHub, "rust".into(), "best".into(), 0).await;
         assert!(matches!(zero_page, Err(AppError::InvalidArgument(_))));
+    }
+
+    /// The unsupported arms must fail typed, before any CLI spawn — this test
+    /// would hang or shell out if either arm fell through to the gh path.
+    #[tokio::test]
+    async fn my_work_refuses_the_unimplemented_providers() {
+        for provider in [Provider::GitLab, Provider::Bitbucket] {
+            let refused = forge_my_work(provider).await;
+            assert!(
+                matches!(refused, Err(AppError::InvalidArgument(_))),
+                "{provider:?} should be refused, got {refused:?}",
+            );
+        }
     }
 
     #[test]

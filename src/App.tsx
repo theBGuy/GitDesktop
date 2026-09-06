@@ -11,6 +11,7 @@ import { useMacAppMenu } from "@/features/app-menu/useMacAppMenu";
 import { AutomationResultDialog } from "@/features/automations/AutomationResultDialog";
 import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
+import { MyWorkScreen } from "@/features/mywork/MyWorkScreen";
 import { RepositoryView } from "@/features/repository/RepositoryView";
 import { usePickAndOpenRepo } from "@/features/repository/useOpenRepoByPath";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
@@ -45,6 +46,7 @@ function App() {
   const openMcpBrowse = useUiStore((s) => s.openMcpBrowse);
   const openHelp = useUiStore((s) => s.openHelp);
   const openExplore = useUiStore((s) => s.openExplore);
+  const openMyWork = useUiStore((s) => s.openMyWork);
   const toggleActivity = useUiStore((s) => s.toggleActivity);
   const gitInstalled = useGitInstalled();
   const queryClient = useQueryClient();
@@ -188,6 +190,7 @@ function App() {
   useHotkeyAction("browse-mcp-registry", openMcpBrowse, !settings.data?.hideAi);
   useHotkeyAction("show-help", openHelp);
   useHotkeyAction("open-explore", openExplore);
+  useHotkeyAction("open-my-work", openMyWork);
   useHotkeyAction("toggle-notifications", toggleActivity);
   useHotkeyAction("show-shortcuts", () => setShortcutsOpen(true));
   useHotkeyAction("command-palette", () => setPaletteOpen(true));
@@ -245,6 +248,7 @@ function App() {
         {view === "settings" && <SettingsScreen />}
         {view === "help" && <HelpScreen />}
         {view === "explore" && <ExploreScreen />}
+        {view === "mywork" && <MyWorkScreen />}
         {/* A thin activity strip for the headerless screens (the repo view uses
             its in-header dock instead); only present while a review runs. */}
         <ActivityStrip />
