@@ -243,11 +243,14 @@ export function IssueSubIssues({
     selectIssue({ kind: "remote", id: String(n) });
   }
 
-  function pickExisting(n: number) {
-    addSub.mutate(
-      { parentId: issueId, subNumber: n },
-      { onSuccess: () => setMode(null), onError },
-    );
+  async function pickExisting(n: number) {
+    try {
+      await addSub.mutateAsync({ parentId: issueId, subNumber: n });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    setMode(null);
   }
 
   return (
@@ -323,7 +326,9 @@ export function IssueSubIssues({
             issue={s}
             onOpen={open}
             onRemove={() =>
-              removeSub.mutate({ parentId: issueId, subId: s.id }, { onError })
+              void removeSub
+                .mutateAsync({ parentId: issueId, subId: s.id })
+                .catch(onError)
             }
             pending={removeSub.isPending && removeSub.variables?.subId === s.id}
             removeDisabledReason={disabledReason}
@@ -343,7 +348,7 @@ export function IssueSubIssues({
                 repoPath={repoPath}
                 exclude={exclude}
                 pending={addSub.isPending}
-                onPick={pickExisting}
+                onPick={(n) => void pickExisting(n)}
                 lens={lens}
               />
             </div>
@@ -405,6 +410,22 @@ export function IssueRelationships({
     selectIssue({ kind: "remote", id: String(n) });
   }
 
+  function removeDependency(relation: IssueRelation, target: number) {
+    void setDep
+      .mutateAsync({ number, relation, target, add: false })
+      .catch(onError);
+  }
+
+  async function addDependency(relation: IssueRelation, target: number) {
+    try {
+      await setDep.mutateAsync({ number, relation, target, add: true });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    setAddRelation(null);
+  }
+
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
@@ -448,12 +469,7 @@ export function IssueRelationships({
           label="Blocked by"
           items={blockedBy}
           onOpen={open}
-          onRemove={(t) =>
-            setDep.mutate(
-              { number, relation: "blocked_by", target: t, add: false },
-              { onError },
-            )
-          }
+          onRemove={(t) => removeDependency("blocked_by", t)}
           isRemoving={(t) =>
             setDep.isPending &&
             setDep.variables?.add === false &&
@@ -468,12 +484,7 @@ export function IssueRelationships({
           label="Blocking"
           items={blocking}
           onOpen={open}
-          onRemove={(t) =>
-            setDep.mutate(
-              { number, relation: "blocking", target: t, add: false },
-              { onError },
-            )
-          }
+          onRemove={(t) => removeDependency("blocking", t)}
           isRemoving={(t) =>
             setDep.isPending &&
             setDep.variables?.add === false &&
@@ -507,12 +518,7 @@ export function IssueRelationships({
                     : excludeBlocking
                 }
                 pending={setDep.isPending}
-                onPick={(t) =>
-                  setDep.mutate(
-                    { number, relation: addRelation, target: t, add: true },
-                    { onSuccess: () => setAddRelation(null), onError },
-                  )
-                }
+                onPick={(t) => void addDependency(addRelation, t)}
                 lens={lens}
               />
             </div>

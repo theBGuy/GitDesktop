@@ -59,7 +59,7 @@ import {
   useRepoStatus,
   useTagList,
 } from "@/lib/git/queries";
-import type { CommitSummary } from "@/lib/git/types";
+import type { CommitSummary, GeneratedNotes } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useAiEnabled } from "@/lib/settings/queries";
@@ -163,7 +163,9 @@ export function CreateReleaseDialog({
           action: { label: "View", onClick: () => openUrl(url) },
         });
         onOpenChange(false);
-        selectTag({ tag });
+        // Adopt the new release's tag only while this repo is still on screen —
+        // the create can settle after a repo switch.
+        if (useUiStore.getState().repoPath === repoPath) selectTag({ tag });
       } catch (e) {
         toastError(e);
       }
@@ -221,25 +223,31 @@ export function CreateReleaseDialog({
 
   const busyGenerating = githubNotes.isPending || aiNotes.generating;
 
-  function generateFromGithub() {
+  // Awaited like the submit above: react-query drops per-call callbacks once the
+  // observer loses listeners, and this dialog's host panel hides with its tab
+  // while generation is still in flight.
+  async function generateFromGithub() {
     if (!tagTrimmed) return;
-    githubNotes.mutate(
-      {
-        tag: tagTrimmed,
+    const requestedFor = tagTrimmed;
+    let gen: GeneratedNotes;
+    try {
+      gen = await githubNotes.mutateAsync({
+        tag: requestedFor,
         target: showTarget ? target.trim() : "",
         previousTag: effectivePreviousTag,
-      },
-      {
-        onSuccess: (gen) => {
-          if (gen.body) form.setFieldValue("notes", gen.body);
-          if (gen.name && !form.getFieldValue("title").trim()) {
-            form.setFieldValue("title", gen.name);
-          }
-          notesEditorRef.current?.showPreview();
-        },
-        onError: toastError,
-      },
-    );
+      });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    // The response belongs to the tag it was requested for — a reseeded or
+    // retyped form is another release, and stale notes must not touch it.
+    if (form.getFieldValue("tag").trim() !== requestedFor) return;
+    if (gen.body) form.setFieldValue("notes", gen.body);
+    if (gen.name && !form.getFieldValue("title").trim()) {
+      form.setFieldValue("title", gen.name);
+    }
+    notesEditorRef.current?.showPreview();
   }
 
   function generateWithAi() {
@@ -475,7 +483,9 @@ export function CreateReleaseDialog({
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="min-w-56">
                         {!isGitLab && (
-                          <DropdownMenuItem onClick={generateFromGithub}>
+                          <DropdownMenuItem
+                            onClick={() => void generateFromGithub()}
+                          >
                             From GitHub (commits & PRs)
                           </DropdownMenuItem>
                         )}

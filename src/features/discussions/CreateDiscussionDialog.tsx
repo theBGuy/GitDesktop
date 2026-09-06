@@ -11,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { required, useAppForm } from "@/lib/form";
 import { useCreateDiscussion, useDiscussionMeta } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -47,7 +48,10 @@ export function CreateDiscussionDialog({
           action: { label: "View", onClick: () => openUrl(url) },
         });
         onOpenChange(false);
-        if (number > 0) selectDiscussion({ number });
+        // Adopt the new discussion only while this repo is still on screen —
+        // the create can settle after a repo switch.
+        if (number > 0 && useUiStore.getState().repoPath === repoPath)
+          selectDiscussion({ number });
       } catch (e) {
         toastError(e);
       }
@@ -96,6 +100,11 @@ export function CreateDiscussionDialog({
 
           {/* Fields scroll; header and submit footer stay pinned. */}
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            <ScopeRefreshHint
+              scope="write:discussion"
+              action="Creating a discussion"
+              coveredBy={["repo"]}
+            />
             <div className="min-w-0">
               <form.AppField name="categoryId">
                 {(field) => (

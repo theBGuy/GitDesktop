@@ -23,6 +23,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { required, withForm } from "@/lib/form";
+import type { CherryPickRangeResult } from "@/lib/git/api";
 import {
   useCherryPickOnto,
   useDeleteTag,
@@ -52,6 +53,18 @@ export function DeleteTagDialog({
 }) {
   const deleteTag = useDeleteTag(repoPath);
   const shownName = useRetained(name);
+  async function run() {
+    if (!name) return;
+    try {
+      await deleteTag.mutateAsync({ name, onRemote: remote });
+    } catch (e) {
+      onError(e);
+      onClose();
+      return;
+    }
+    toast.success(`Deleted tag ${name}${remote ? " (local and origin)" : ""}`);
+    onClose();
+  }
   return (
     <Dialog
       open={name !== null}
@@ -81,24 +94,7 @@ export function DeleteTagDialog({
           <Button
             variant="destructive"
             disabled={deleteTag.isPending}
-            onClick={() => {
-              if (!name) return;
-              deleteTag.mutate(
-                { name, onRemote: remote },
-                {
-                  onSuccess: () => {
-                    toast.success(
-                      `Deleted tag ${name}${remote ? " (local and origin)" : ""}`,
-                    );
-                    onClose();
-                  },
-                  onError: (e) => {
-                    onError(e);
-                    onClose();
-                  },
-                },
-              );
-            }}
+            onClick={() => void run()}
           >
             {deleteTag.isPending && <Spinner data-icon="inline-start" />}
             Delete tag
@@ -121,6 +117,18 @@ export function ResetCommitDialog({
 }) {
   const resetMutation = useResetToCommit(repoPath);
   const shownHash = useRetained(hash);
+  async function run() {
+    if (!hash) return;
+    try {
+      await resetMutation.mutateAsync(hash);
+    } catch (e) {
+      onError(e);
+      onClose();
+      return;
+    }
+    toast.success(`Reset to ${hash.slice(0, 7)}`);
+    onClose();
+  }
   return (
     <Dialog
       open={hash !== null}
@@ -145,19 +153,7 @@ export function ResetCommitDialog({
           <Button
             variant="destructive"
             disabled={resetMutation.isPending}
-            onClick={() => {
-              if (!hash) return;
-              resetMutation.mutate(hash, {
-                onSuccess: () => {
-                  toast.success(`Reset to ${hash.slice(0, 7)}`);
-                  onClose();
-                },
-                onError: (e) => {
-                  onError(e);
-                  onClose();
-                },
-              });
-            }}
+            onClick={() => void run()}
           >
             Reset
           </Button>
@@ -193,42 +189,43 @@ export function CherryPickOntoDialog({
   const destId = useId();
   const shownHashes = useRetained(hashes);
   const count = shownHashes?.length ?? 0;
-  function run() {
+  async function run() {
     if (!hashes || !branch) return;
     const target = branch;
-    cherryPickOnto.mutate(
-      { hashes, targetBranch: target },
-      {
-        onSuccess: ({ applied, skipped }) => {
-          if (applied === 0) {
-            toast.info(
-              `Nothing to copy onto ${target} — those changes are already there.`,
-            );
-          } else {
-            const note = skipped > 0 ? ` (${skipped} already present)` : "";
-            toast.success(
-              `Copied ${applied} commit${applied === 1 ? "" : "s"} onto ${target}${note}`,
-            );
-          }
-          onClose();
-          onDone();
-        },
-        onError: (e) => {
-          // A paused pick leaves you on the destination branch and closes this
-          // dialog, so the toast is the only place left that can say where you
-          // are; the generic summary names the operation, never the branch.
-          if (isAppError(e) && e.kind === "conflict") {
-            toastErrorWithNote(
-              e,
-              `You're now on ${target} — resolve the conflicts there, then continue the cherry-pick.`,
-            );
-          } else {
-            onError(e);
-          }
-          onClose();
-        },
-      },
-    );
+    let result: CherryPickRangeResult;
+    try {
+      result = await cherryPickOnto.mutateAsync({
+        hashes,
+        targetBranch: target,
+      });
+    } catch (e) {
+      // A paused pick leaves you on the destination branch and closes this
+      // dialog, so the toast is the only place left that can say where you
+      // are; the generic summary names the operation, never the branch.
+      if (isAppError(e) && e.kind === "conflict") {
+        toastErrorWithNote(
+          e,
+          `You're now on ${target} — resolve the conflicts there, then continue the cherry-pick.`,
+        );
+      } else {
+        onError(e);
+      }
+      onClose();
+      return;
+    }
+    const { applied, skipped } = result;
+    if (applied === 0) {
+      toast.info(
+        `Nothing to copy onto ${target} — those changes are already there.`,
+      );
+    } else {
+      const note = skipped > 0 ? ` (${skipped} already present)` : "";
+      toast.success(
+        `Copied ${applied} commit${applied === 1 ? "" : "s"} onto ${target}${note}`,
+      );
+    }
+    onClose();
+    onDone();
   }
   return (
     <Dialog
@@ -282,7 +279,10 @@ export function CherryPickOntoDialog({
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={run} disabled={!branch || cherryPickOnto.isPending}>
+          <Button
+            onClick={() => void run()}
+            disabled={!branch || cherryPickOnto.isPending}
+          >
             Cherry-pick
           </Button>
         </DialogFooter>

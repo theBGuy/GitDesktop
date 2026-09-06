@@ -578,10 +578,12 @@ pub async fn gh_discussion_view(
     })
 }
 
-const DISCUSSION_SCOPE_HINT: &str = "Writing discussions needs the write:discussion scope. Run:  gh auth refresh -s write:discussion";
+const DISCUSSION_SCOPE_HINT: &str = "Writing discussions needs the write:discussion scope.";
 
 /// Discussion mutations need the `write:discussion` OAuth scope, which a default
-/// `gh auth login` often lacks — turn that failure into an actionable hint.
+/// `gh auth login` often lacks — name that cause instead of the raw gh failure.
+/// The GUI discussions surfaces carry the reconnect path; other callers (MCP)
+/// get the cause alone, so this stays a sentence.
 fn map_scope_error(e: AppError) -> AppError {
     if let AppError::Gh(ref msg) = e {
         let lower = msg.to_lowercase();
@@ -978,4 +980,44 @@ pub async fn gh_discussion_delete(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_scope_becomes_the_scope_sentence() {
+        // A realistic GraphQL denial carries both substrings; the trailing two
+        // pin each arm of the match on its own.
+        for raw in [
+            "GraphQL: Your token has not been granted the required scopes to execute this query. \
+             The 'addDiscussionComment' field requires one of the following scopes: \
+             ['write:discussion']",
+            "error: the token is missing the write:discussion scope",
+            "GraphQL: Your token has not been granted the required scopes.",
+        ] {
+            let AppError::Gh(msg) = map_scope_error(AppError::Gh(raw.into())) else {
+                panic!("expected the Gh variant");
+            };
+            assert_eq!(msg, DISCUSSION_SCOPE_HINT);
+        }
+    }
+
+    #[test]
+    fn unrelated_failures_pass_through_untouched() {
+        let AppError::Gh(msg) = map_scope_error(AppError::Gh(
+            "GraphQL: Could not resolve to a Discussion with the number 999.".into(),
+        )) else {
+            panic!("expected the Gh variant");
+        };
+        assert_eq!(
+            msg,
+            "GraphQL: Could not resolve to a Discussion with the number 999."
+        );
+        assert!(matches!(
+            map_scope_error(AppError::InvalidArgument("write:discussion".into())),
+            AppError::InvalidArgument(_)
+        ));
+    }
 }

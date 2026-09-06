@@ -585,10 +585,19 @@ test("bare-mutate-in-converted-trees applies to the converted trees only", () =>
     // Joined when the repository/commit conversions landed:
     "src/features/repository/ChangesPanel.tsx",
     "src/features/commit/CommitBox.tsx",
+    // Joined when the issues/history/discussions/tags conversions landed:
+    "src/features/issues/RemoteIssueView.tsx",
+    "src/features/history/HistoryPanel.tsx",
+    "src/features/discussions/DiscussionView.tsx",
+    "src/features/tags/TagDetailView.tsx",
   ]) {
     assert.equal(appliesTo(file), true, `should scan ${file}`);
   }
-  for (const file of ["src/features/issues/RemoteIssueView.tsx"]) {
+  for (const file of [
+    "src/features/diff/DiffViewer.tsx",
+    "src/features/welcome/WelcomeScreen.tsx",
+    "src/lib/settings/queries.ts",
+  ]) {
     assert.equal(appliesTo(file), false, `should not scan ${file}`);
   }
 });

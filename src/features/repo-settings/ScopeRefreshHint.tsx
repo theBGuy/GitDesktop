@@ -11,22 +11,29 @@ import { useUiStore } from "@/lib/stores/ui";
 
 /**
  * Offers the in-app reconnect (and a copyable `gh auth refresh -s <scope>`) when
- * the active gh token is a classic OAuth/PAT token missing `scope`. Renders
- * nothing when the scope is present, or for a fine-grained/App token (those have
- * no readable scopes and can't be refreshed this way) — so it never nags about a
- * non-problem.
+ * the active gh token is a classic OAuth/PAT token missing `scope` and every
+ * scope in `coveredBy`. Renders nothing when any of them is present, or for a
+ * fine-grained/App token (those have no readable scopes and can't be refreshed
+ * this way) — so it never nags about a non-problem.
  */
 export function ScopeRefreshHint({
   scope,
   action,
+  coveredBy,
 }: {
   scope: string;
   action: string;
+  /** Additional scopes that each satisfy the need on their own (a broader
+   *  scope can cover the named one) — `scope` is always included. */
+  coveredBy?: string[];
 }) {
   const host = useActiveGhHost();
   const scopes = useGhScopes(host);
   const openReconnect = useUiStore((s) => s.openReconnect);
-  if (!scopes.data?.classic || scopes.data.scopes.includes(scope)) return null;
+  const satisfied = [scope, ...(coveredBy ?? [])].some((s) =>
+    scopes.data?.scopes.includes(s),
+  );
+  if (!scopes.data?.classic || satisfied) return null;
   // A host outside the reconnect grammar never reaches a copyable command string
   // (shell-syntax injection via a crafted remote) — only the command block is
   // suppressed: the explanation and the button stay, and the button's flow

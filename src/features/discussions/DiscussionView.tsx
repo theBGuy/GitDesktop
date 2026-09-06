@@ -48,6 +48,7 @@ import {
 } from "@/features/conversations/Thread";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
+import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { copyText } from "@/lib/clipboard";
 import type {
   DiscussionCloseReason,
@@ -335,29 +336,39 @@ export function DiscussionView({
   const draftSuffix =
     staleSuffix || (draftRidesStateChange ? " — posts your draft" : "");
 
-  function submitComment() {
+  // Every write below awaits `mutateAsync` (or detaches with a `.catch`):
+  // react-query drops per-call callbacks once the observer loses its listeners,
+  // so a tab hide or unmount mid-flight would land the mutation and silently
+  // lose the toast, draft clear, or close.
+  async function submitComment() {
     if (!d || detailsStale || !compose.value.trim()) return;
     const submittedFor = discussionIdentity;
-    addComment.mutate(
-      { discussionId: d.id, body: compose.value.trim() },
-      { onSuccess: () => compose.clearFor(submittedFor), onError },
-    );
+    try {
+      await addComment.mutateAsync({
+        discussionId: d.id,
+        body: compose.value.trim(),
+      });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    compose.clearFor(submittedFor);
   }
 
-  function submitReply(commentId: string) {
+  async function submitReply(commentId: string) {
     if (!d || detailsStale || !reply.value.body.trim()) return;
     const submittedFor = discussionIdentity;
-    addComment.mutate(
-      {
+    try {
+      await addComment.mutateAsync({
         discussionId: d.id,
         body: reply.value.body.trim(),
         replyToId: commentId,
-      },
-      {
-        onSuccess: () => reply.clearFor(submittedFor),
-        onError,
-      },
-    );
+      });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    reply.clearFor(submittedFor);
   }
 
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
@@ -373,40 +384,48 @@ export function DiscussionView({
   // Every comment id below comes off the rendered discussion, which mid-switch is
   // the previous one — so each write would land on the discussion the viewer just
   // left. The affordances withhold or disable too; these arms back them up.
-  function saveCommentEdit(commentId: string, body: string) {
+  async function saveCommentEdit(commentId: string, body: string) {
     if (detailsStale) return;
-    updateComment.mutate(
-      { commentId, body },
-      { onSuccess: () => toast.success("Comment updated"), onError },
-    );
+    try {
+      await updateComment.mutateAsync({ commentId, body });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Comment updated");
   }
 
-  function hideComment(commentId: string, classifier: MinimizeReason) {
+  async function hideComment(commentId: string, classifier: MinimizeReason) {
     if (detailsStale) return;
-    minimizeComment.mutate(
-      { commentId, classifier },
-      { onSuccess: () => toast.success("Comment hidden"), onError },
-    );
+    try {
+      await minimizeComment.mutateAsync({ commentId, classifier });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Comment hidden");
   }
 
-  function unhideComment(commentId: string) {
+  async function unhideComment(commentId: string) {
     if (detailsStale) return;
-    unminimizeComment.mutate(commentId, {
-      onSuccess: () => toast.success("Comment shown"),
-      onError,
-    });
+    try {
+      await unminimizeComment.mutateAsync(commentId);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Comment shown");
   }
 
-  function toggleAnswer(commentId: string, isAnswer: boolean) {
+  async function toggleAnswer(commentId: string, isAnswer: boolean) {
     if (detailsStale) return;
-    markAnswer.mutate(
-      { commentId, answer: !isAnswer },
-      {
-        onSuccess: () =>
-          toast.success(isAnswer ? "Answer unmarked" : "Marked as answer"),
-        onError,
-      },
-    );
+    try {
+      await markAnswer.mutateAsync({ commentId, answer: !isAnswer });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(isAnswer ? "Answer unmarked" : "Marked as answer");
   }
 
   // Both subjects come off the rendered discussion while the optimistic patch
@@ -414,12 +433,16 @@ export function DiscussionView({
   // controls disable too; these arms are the belt-and-braces behind them.
   function toggleUpvote(subjectId: string, upvoted: boolean) {
     if (detailsStale) return;
-    toggleUpvoteMutation.mutate({ subjectId, up: !upvoted }, { onError });
+    void toggleUpvoteMutation
+      .mutateAsync({ subjectId, up: !upvoted })
+      .catch(onError);
   }
 
   function toggleReaction(subjectId: string, content: string, active: boolean) {
     if (detailsStale) return;
-    toggleReactionMutation.mutate({ subjectId, content, active }, { onError });
+    void toggleReactionMutation
+      .mutateAsync({ subjectId, content, active })
+      .catch(onError);
   }
 
   function referenceInNewIssue() {
@@ -435,20 +458,26 @@ export function DiscussionView({
 
   // Each of these addresses the rendered discussion's id while the menu belongs to
   // the selected one; the items disable too, and these arms back them up.
-  function doLock(reason: DiscussionLockReason | null) {
+  async function doLock(reason: DiscussionLockReason | null) {
     if (!d || detailsStale) return;
-    lockDiscussion.mutate(
-      { discussionId: d.id, reason },
-      { onSuccess: () => toast.success("Conversation locked"), onError },
-    );
+    try {
+      await lockDiscussion.mutateAsync({ discussionId: d.id, reason });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Conversation locked");
   }
 
-  function doUnlock() {
+  async function doUnlock() {
     if (!d || detailsStale) return;
-    unlockDiscussion.mutate(d.id, {
-      onSuccess: () => toast.success("Conversation unlocked"),
-      onError,
-    });
+    try {
+      await unlockDiscussion.mutateAsync(d.id);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success("Conversation unlocked");
   }
 
   /** Posts the riding draft ahead of a state change. False means the comment
@@ -490,50 +519,71 @@ export function DiscussionView({
     });
     if (!ok) return;
     if (!(await postRidingDraft(d.id))) return;
-    closeDiscussion.mutate(
-      { discussionId: d.id, reason },
-      {
-        onSuccess: () => toast.success("Discussion closed"),
-        onError: (e) =>
-          withComment
-            ? toastErrorWithNote(
-                e,
-                "Your comment was posted, but closing failed — try Close again.",
-              )
-            : onError(e),
-      },
-    );
+    try {
+      await closeDiscussion.mutateAsync({ discussionId: d.id, reason });
+    } catch (e) {
+      if (withComment)
+        toastErrorWithNote(
+          e,
+          "Your comment was posted, but closing failed — try Close again.",
+        );
+      else onError(e);
+      return;
+    }
+    toast.success("Discussion closed");
   }
 
   async function doReopen() {
     if (!d || detailsStale || addComment.isPending) return;
     const withComment = draftRidesStateChange;
     if (!(await postRidingDraft(d.id))) return;
-    reopenDiscussion.mutate(d.id, {
-      onSuccess: () => toast.success("Discussion reopened"),
-      onError: (e) =>
-        withComment
-          ? toastErrorWithNote(
-              e,
-              "Your comment was posted, but reopening failed — try Reopen again.",
-            )
-          : onError(e),
-    });
+    try {
+      await reopenDiscussion.mutateAsync(d.id);
+    } catch (e) {
+      if (withComment)
+        toastErrorWithNote(
+          e,
+          "Your comment was posted, but reopening failed — try Reopen again.",
+        );
+      else onError(e);
+      return;
+    }
+    toast.success("Discussion reopened");
   }
 
-  function doDelete() {
+  async function doDelete() {
     if (!d || detailsStale) return;
-    deleteDiscussion.mutate(d.id, {
-      onSuccess: () => {
-        toast.success("Discussion deleted");
-        setDeletingDiscussion(false);
-        selectDiscussion(null);
-      },
-      onError: (e) => {
-        onError(e);
-        setDeletingDiscussion(false);
-      },
-    });
+    try {
+      await deleteDiscussion.mutateAsync(d.id);
+    } catch (e) {
+      onError(e);
+      setDeletingDiscussion(false);
+      return;
+    }
+    toast.success("Discussion deleted");
+    setDeletingDiscussion(false);
+    // `selectDiscussion` is a global store write that outlives this view, so a
+    // delete settling after the viewer moved on (another discussion, another
+    // repo) must not clear their live selection.
+    const live = useUiStore.getState();
+    if (
+      live.repoPath === repoPath &&
+      live.selectedDiscussion?.number === number
+    )
+      selectDiscussion(null);
+  }
+
+  /** Close-on-error is the dialog's documented contract, so both arms close it. */
+  async function doDeleteComment(commentId: string) {
+    try {
+      await deleteComment.mutateAsync(commentId);
+    } catch (e) {
+      onError(e);
+      setDeletingCommentId(null);
+      return;
+    }
+    toast.success("Comment deleted");
+    setDeletingCommentId(null);
   }
 
   return (
@@ -587,7 +637,7 @@ export function DiscussionView({
               {d.closed ? (
                 <DropdownMenuItem
                   disabled={reopenDiscussion.isPending || detailsStale}
-                  onClick={doReopen}
+                  onClick={() => void doReopen()}
                 >
                   Reopen discussion{draftSuffix}
                 </DropdownMenuItem>
@@ -606,7 +656,7 @@ export function DiscussionView({
                       <DropdownMenuItem
                         key={reason}
                         disabled={closeDiscussion.isPending || detailsStale}
-                        onClick={() => doClose(reason)}
+                        onClick={() => void doClose(reason)}
                       >
                         {label}
                       </DropdownMenuItem>
@@ -617,7 +667,7 @@ export function DiscussionView({
               {d.locked ? (
                 <DropdownMenuItem
                   disabled={unlockDiscussion.isPending || detailsStale}
-                  onClick={doUnlock}
+                  onClick={() => void doUnlock()}
                 >
                   Unlock conversation{staleSuffix}
                 </DropdownMenuItem>
@@ -634,7 +684,7 @@ export function DiscussionView({
                       <DropdownMenuItem
                         key={reason ?? "none"}
                         disabled={lockDiscussion.isPending || detailsStale}
-                        onClick={() => doLock(reason)}
+                        onClick={() => void doLock(reason)}
                       >
                         {label}
                       </DropdownMenuItem>
@@ -793,7 +843,7 @@ export function DiscussionView({
                   onQuote={detailsStale ? undefined : () => quoteReply(c.body)}
                   onSaveEdit={
                     c.viewerDidAuthor && !detailsStale
-                      ? (body) => saveCommentEdit(c.id, body)
+                      ? (body) => void saveCommentEdit(c.id, body)
                       : undefined
                   }
                   // Withholding the handler only drops the menu entry; an editor
@@ -807,10 +857,10 @@ export function DiscussionView({
                   onHide={
                     c.isMinimized
                       ? undefined
-                      : (classifier) => hideComment(c.id, classifier)
+                      : (classifier) => void hideComment(c.id, classifier)
                   }
                   onUnhide={
-                    c.isMinimized ? () => unhideComment(c.id) : undefined
+                    c.isMinimized ? () => void unhideComment(c.id) : undefined
                   }
                   // Hide/Unhide stay visible but disabled — the items carry their
                   // own reason, unlike the entries withheld above.
@@ -853,7 +903,7 @@ export function DiscussionView({
                     variant={c.isAnswer ? "secondary" : "outline"}
                     disabled={busy}
                     reason={busyReason}
-                    onClick={() => toggleAnswer(c.id, c.isAnswer)}
+                    onClick={() => void toggleAnswer(c.id, c.isAnswer)}
                   >
                     <CheckCircleIcon data-icon="inline-start" />
                     {c.isAnswer ? "Unmark answer" : "Mark as answer"}
@@ -871,7 +921,7 @@ export function DiscussionView({
                       }
                       onSaveEdit={
                         r.viewerDidAuthor && !detailsStale
-                          ? (body) => saveCommentEdit(r.id, body)
+                          ? (body) => void saveCommentEdit(r.id, body)
                           : undefined
                       }
                       editHeld={detailsStale}
@@ -883,10 +933,12 @@ export function DiscussionView({
                       onHide={
                         r.isMinimized
                           ? undefined
-                          : (classifier) => hideComment(r.id, classifier)
+                          : (classifier) => void hideComment(r.id, classifier)
                       }
                       onUnhide={
-                        r.isMinimized ? () => unhideComment(r.id) : undefined
+                        r.isMinimized
+                          ? () => void unhideComment(r.id)
+                          : undefined
                       }
                       disabledReason={staleReason}
                       reactions={reactions.data?.comments[r.id]}
@@ -916,7 +968,7 @@ export function DiscussionView({
                             // the global action.
                             e.preventDefault();
                             if (reply.value.body.trim() && !busy)
-                              submitReply(c.id);
+                              void submitReply(c.id);
                           }
                         }}
                         rows={2}
@@ -931,7 +983,7 @@ export function DiscussionView({
                           // An empty draft explains itself; only the `busy` hold
                           // needs words.
                           reason={busy ? busyReason : null}
-                          onClick={() => submitReply(c.id)}
+                          onClick={() => void submitReply(c.id)}
                           title={SUBMIT_HINT}
                         >
                           Reply
@@ -955,11 +1007,23 @@ export function DiscussionView({
           )}
         </div>
       </ScrollArea>
+      {/* empty:hidden: the hint self-gates to null (scopes covered, non-classic
+          token, or still loading), and the wrapper must then contribute no
+          border or padding of its own. */}
+      <div className="empty:hidden shrink-0 border-t p-2">
+        {/* GitHub's scope error names write:discussion, but `repo` covers
+            repository-discussion writes — warn only when neither is present. */}
+        <ScopeRefreshHint
+          scope="write:discussion"
+          action="Writing in discussions"
+          coveredBy={["repo"]}
+        />
+      </div>
       <CommentComposer
         ref={composerRef}
         value={compose.value}
         onChange={compose.set}
-        onSubmit={submitComment}
+        onSubmit={() => void submitComment()}
         onClear={() => compose.set("")}
         submitLabel="Comment"
         ariaLabel="Add to the discussion"
@@ -973,18 +1037,7 @@ export function DiscussionView({
         commentId={deletingCommentId}
         onClose={() => setDeletingCommentId(null)}
         pending={deleteComment.isPending}
-        onConfirm={(commentId) =>
-          deleteComment.mutate(commentId, {
-            onSuccess: () => {
-              toast.success("Comment deleted");
-              setDeletingCommentId(null);
-            },
-            onError: (e) => {
-              onError(e);
-              setDeletingCommentId(null);
-            },
-          })
-        }
+        onConfirm={(commentId) => void doDeleteComment(commentId)}
       />
 
       <Dialog open={deletingDiscussion} onOpenChange={setDeletingDiscussion}>
@@ -1007,7 +1060,7 @@ export function DiscussionView({
               variant="destructive"
               disabled={deleteDiscussion.isPending || detailsStale}
               reason={staleReason}
-              onClick={doDelete}
+              onClick={() => void doDelete()}
             >
               {deleteDiscussion.isPending && (
                 <Spinner data-icon="inline-start" />

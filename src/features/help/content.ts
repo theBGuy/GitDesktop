@@ -1704,7 +1704,10 @@ part in GitHub Discussions for the repo. (Discussions must be enabled on the rep
   everyone watching is notified, and reopening puts the discussion back but can't
   unsend that. The command palette's **Focus the comment box** works here too.
 - **Create a discussion**, or **create an issue from a discussion** when a thread turns
-  into actionable work (the new issue links back to it).`,
+  into actionable work (the new issue links back to it).
+- If GitDesktop can see that your GitHub sign-in can't write discussions, the
+  discussion list, the New discussion dialog, and the thread all say so up front and
+  offer an in-app reconnect (or a copyable refresh command) before a write fails.`,
   },
   {
     id: "releases",

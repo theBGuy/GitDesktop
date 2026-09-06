@@ -53,7 +53,11 @@ import {
   useUnpushedCount,
 } from "@/lib/git/queries";
 import { sanitizeRefName } from "@/lib/git/ref-name";
-import type { CommitSummary, RewriteStep } from "@/lib/git/types";
+import type {
+  CommitDetails,
+  CommitSummary,
+  RewriteStep,
+} from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -226,6 +230,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     ) {
       return;
     }
+    let details: CommitDetails;
     try {
       // The undo names no commit — it always unwinds whatever HEAD is at the
       // moment it runs — so re-read HEAD across the prompt's await. A commit
@@ -236,35 +241,41 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         toast.info("The latest commit changed — nothing was undone.");
         return;
       }
-      const details = await gitCommitDetails(repoPath, lastCommit.hash);
-      undoCommit.mutate(undefined, {
-        onSuccess: () => {
-          setCommitDraft(details.subject, details.body);
-          setRepoTab("changes");
-          toast.success(
-            `Undid ${lastCommit.hash.slice(0, 7)} — changes are staged again`,
-          );
-        },
-        onError,
-      });
+      // Read the message BEFORE the undo removes the commit it belongs to.
+      details = await gitCommitDetails(repoPath, lastCommit.hash);
+      await undoCommit.mutateAsync(undefined);
     } catch (e) {
       onError(e);
+      return;
     }
+    // The draft restore and tab flip write the LIVE repo's state — a repo
+    // switch mid-undo must not land this repo's message in another repo's
+    // draft. The toast stays: the undo itself happened regardless.
+    if (useUiStore.getState().repoPath === repoPath) {
+      setCommitDraft(details.subject, details.body);
+      setRepoTab("changes");
+    }
+    toast.success(
+      `Undid ${lastCommit.hash.slice(0, 7)} — changes are staged again`,
+    );
   }
 
   // The confirm sits here rather than on the menu items, so the search menu and
   // the single-commit menu can't diverge on whether they ask.
   async function doCheckoutCommit(hash: string) {
     if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
-    checkoutCommit.mutate(hash, {
-      onSuccess: () => toast.success(checkoutCommitSuccessToast(hash)),
-      onError,
-    });
+    try {
+      await checkoutCommit.mutateAsync(hash);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(checkoutCommitSuccessToast(hash));
   }
 
   async function doRevertCommit(hash: string) {
     if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
-    revertCommit.mutate(hash, { onError });
+    void revertCommit.mutateAsync(hash).catch(onError);
   }
 
   // `alreadyApplied` is the one thing the two menus word differently.
@@ -273,16 +284,28 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       .getState()
       .ask(cherryPickCommitConfirm(hash, currentBranch));
     if (!ok) return;
-    cherryPick.mutate(hash, {
-      onSuccess: (applied) => {
-        if (applied) {
-          toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
-        } else {
-          toast.info(alreadyApplied);
-        }
-      },
-      onError,
-    });
+    let applied: boolean;
+    try {
+      applied = await cherryPick.mutateAsync(hash);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    if (applied) {
+      toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
+    } else {
+      toast.info(alreadyApplied);
+    }
+  }
+
+  async function pushTagToOrigin(tag: string) {
+    try {
+      await pushTag.mutateAsync(tag);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(`Pushed tag ${tag} to origin`);
   }
 
   useHotkeyAction("undo-commit", undoLast, canUndo && !undoCommit.isPending);
@@ -711,12 +734,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         {commit.tags.map((tag) => (
           <ContextMenuItem
             key={`push:${tag}`}
-            onClick={() =>
-              pushTag.mutate(tag, {
-                onSuccess: () => toast.success(`Pushed tag ${tag} to origin`),
-                onError,
-              })
-            }
+            onClick={() => void pushTagToOrigin(tag)}
           >
             Push tag {tag} to origin
           </ContextMenuItem>
