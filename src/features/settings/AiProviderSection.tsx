@@ -39,7 +39,7 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { detectAgentCli, providerKind } from "@/lib/ai/agent";
+import { type AgentKind, detectAgentCli, providerKind } from "@/lib/ai/agent";
 import {
   entryMatchesUrl,
   isHostAllowed,
@@ -374,15 +374,16 @@ type DefaultAgentChoice = "auto" | DefaultAgentId;
 
 /** Default-agent labels — same `items` contract as the maps above. "auto" is the
  *  UI stand-in for an absent `defaultAgent` (follow the AI provider), so it is a
- *  key here but not a member of DEFAULT_AGENT_IDS, which `loadSettings` heals
- *  against. */
-const DEFAULT_AGENT_ITEMS: Record<DefaultAgentChoice, string> = {
+ *  key here but not a member of DEFAULT_AGENT_IDS. Tied to BOTH lists: `AgentKind`
+ *  is what the backend can actually run, DEFAULT_AGENT_IDS is what `loadSettings`
+ *  heals against, and a new agent must reach this picker through both. */
+const DEFAULT_AGENT_ITEMS: Record<"auto" | AgentKind, string> = {
   auto: "Auto — follow the AI provider",
   claude: "Claude",
   codex: "Codex",
   copilot: "GitHub Copilot",
   opencode: "opencode",
-};
+} satisfies Record<DefaultAgentChoice, string>;
 
 /** Ollama base-URL field — the URL the local/LAN Ollama server is reached at. */
 function OllamaConfig({

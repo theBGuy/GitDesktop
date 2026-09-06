@@ -185,9 +185,10 @@ export interface NotificationSettings {
   actionRuns: boolean;
 }
 
-/** The agent CLIs offerable as the Default agent, in render order. Spelled out
- *  here rather than imported from lib/ai (which mirrors the same list as
- *  `AgentKind`) to keep settings free of an ai import cycle, even a type-only one. */
+/** The agent CLIs offerable as the Default agent, in render order. Spelled out here
+ *  rather than reusing lib/ai's identical `AgentKind` list because `lib/ai/agent.ts`
+ *  imports this module, so importing back from it is the one edge that would close a
+ *  cycle. (Other lib/ai leaves are imported above — they import nothing of ours.) */
 export const DEFAULT_AGENT_IDS = [
   "claude",
   "codex",
@@ -197,6 +198,16 @@ export const DEFAULT_AGENT_IDS = [
 
 /** The agent-session isolation modes offered in Settings. */
 export const AGENT_ISOLATIONS = ["worktree", "container"] as const;
+
+/** The container-capable agents installable into the managed image. Typing only —
+ *  `loadSettings` deliberately does not heal `agentImageProviders` (see
+ *  {@link healEnumerated}). */
+export const IMAGE_AGENT_IDS = [
+  "claude",
+  "codex",
+  "opencode",
+  "copilot",
+] as const;
 
 /** Node base-image majors offered for the agent container image (current LTS
  *  first). The Settings picker renders this list; `loadSettings` heals against it. */
@@ -237,9 +248,9 @@ export interface AppSettings {
   closeToTray: boolean;
   /** Which agent CLI a new Session, Plan, or Research run starts on. Not in
    *  DEFAULT_SETTINGS — its absence is the meaningful "Auto" state: follow the
-   *  main AI provider when that's an agent CLI, else Claude. Inline union (the
-   *  sessions store does the same) to avoid a settings↔ai import cycle, even a
-   *  type-only one. */
+   *  main AI provider when that's an agent CLI, else Claude. Keyed to the local
+   *  DEFAULT_AGENT_IDS rather than lib/ai's `AgentKind` (the sessions store does the
+   *  same) because `lib/ai/agent.ts` imports this module — see that list. */
   defaultAgent?: (typeof DEFAULT_AGENT_IDS)[number];
   /** How write-capable agent sessions are isolated. "worktree" = the throwaway
    *  git worktree only (host, full-auto); "container" = also run inside an
@@ -250,7 +261,7 @@ export interface AppSettings {
    *  "24"). */
   agentImageNodeVersion: (typeof NODE_VERSIONS)[number];
   /** Which container-capable agents to bake into the image. */
-  agentImageProviders: ("claude" | "codex" | "opencode" | "copilot")[];
+  agentImageProviders: (typeof IMAGE_AGENT_IDS)[number][];
   globalInstructions: string;
   /** gitignore-style globs (one per line) excluded from AI context. */
   aiIgnorePatterns: string;
@@ -457,6 +468,16 @@ const pick = <T extends string>(
   fallback: T,
 ): T => (allowed.includes(value as T) ? (value as T) : fallback);
 
+/** Re-pairs a stored AI config whose provider is off-list. The model belongs to its
+ *  provider, so healing the provider alone would leave a pair the UI can never mint —
+ *  `switchProvider` always re-pairs via `defaultModelForProvider`. Membership is
+ *  checked against the FULL provider list, never a per-surface filtered subset: a
+ *  valid provider that some picker hides must survive the load untouched. */
+const healAi = (stored: AiSettings, fallback: AiSettings): AiSettings =>
+  ALL_PROVIDER_IDS.includes(stored.provider)
+    ? stored
+    : { ...stored, provider: fallback.provider, model: fallback.model };
+
 /** Heals one server's enumerated fields: an off-list `transport` falls back to the
  *  empty-draft default, and per-repo override entries whose value isn't a real state
  *  are dropped — absence IS the "Default" choice there, so a junk entry heals by
@@ -464,13 +485,21 @@ const pick = <T extends string>(
  *  object when nothing was junk, and passes through anything that isn't a server
  *  object at all: the heal's premise is that settings.json lies, so it must not
  *  assume shape either. */
-function healMcpServer(server: McpServer): McpServer {
-  if (typeof server !== "object" || server === null) return server;
-  let healed = server;
-  const transport = pick(server.transport, MCP_TRANSPORTS, "stdio");
-  if (transport !== server.transport) healed = { ...healed, transport };
-  const overrides = server.repoOverrides;
-  if (typeof overrides === "object" && overrides !== null) {
+function healMcpServer(server: unknown): McpServer {
+  // Arrays are excluded explicitly (`typeof [] === "object"`): spreading one would
+  // fabricate a phantom `{transport: "stdio"}` server that the next write persists.
+  if (typeof server !== "object" || server === null || Array.isArray(server))
+    return server as McpServer;
+  const stored = server as McpServer;
+  let healed = stored;
+  const transport = pick(stored.transport, MCP_TRANSPORTS, "stdio");
+  if (transport !== stored.transport) healed = { ...healed, transport };
+  const overrides = stored.repoOverrides;
+  if (
+    typeof overrides === "object" &&
+    overrides !== null &&
+    !Array.isArray(overrides)
+  ) {
     const kept = Object.entries(overrides).filter(([, state]) =>
       (MCP_REPO_STATES as readonly string[]).includes(state),
     );
@@ -504,34 +533,14 @@ function healEnumerated(settings: AppSettings): AppSettings {
     ...(defaultAgent && DEFAULT_AGENT_IDS.includes(defaultAgent)
       ? { defaultAgent }
       : {}),
-    // Provider ids heal against the FULL list, never a per-surface filtered subset:
-    // a valid provider that some picker hides must survive the load untouched.
-    ai: {
-      ...settings.ai,
-      provider: pick(
-        settings.ai.provider,
-        ALL_PROVIDER_IDS,
-        DEFAULT_SETTINGS.ai.provider,
-      ),
-    },
-    reviewAi: {
-      ...settings.reviewAi,
-      provider: pick(
-        settings.reviewAi.provider,
-        ALL_PROVIDER_IDS,
-        DEFAULT_SETTINGS.reviewAi.provider,
-      ),
-    },
+    ai: healAi(settings.ai, DEFAULT_SETTINGS.ai),
+    reviewAi: healAi(settings.reviewAi, DEFAULT_SETTINGS.reviewAi),
     ...(settings.securityReviewAi
       ? {
-          securityReviewAi: {
-            ...settings.securityReviewAi,
-            provider: pick(
-              settings.securityReviewAi.provider,
-              ALL_PROVIDER_IDS,
-              DEFAULT_SETTINGS.reviewAi.provider,
-            ),
-          },
+          securityReviewAi: healAi(
+            settings.securityReviewAi,
+            DEFAULT_SETTINGS.reviewAi,
+          ),
         }
       : {}),
     reviewContextSize: pick(

@@ -28,12 +28,16 @@ import {
   scaffoldCustomDockerfile,
 } from "@/lib/ai/sandbox";
 import { useContainerStatus } from "@/lib/ai/sandbox-queries";
-import { AGENT_ISOLATIONS, NODE_VERSIONS } from "@/lib/settings/api";
+import {
+  type AGENT_ISOLATIONS,
+  type IMAGE_AGENT_IDS,
+  NODE_VERSIONS,
+} from "@/lib/settings/api";
 import { toastError } from "@/lib/toast";
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-type AgentId = "claude" | "codex" | "opencode" | "copilot";
+type AgentId = (typeof IMAGE_AGENT_IDS)[number];
 type NodeVersion = (typeof NODE_VERSIONS)[number];
 type AgentIsolation = (typeof AGENT_ISOLATIONS)[number];
 
