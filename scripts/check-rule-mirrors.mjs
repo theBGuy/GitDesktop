@@ -5,6 +5,10 @@
 // that restate it as their own charter. Two review findings in one round came
 // from a rule changing in one carrier and not the others, so the class ships
 // its guard: each carrier must still state the whitelist's core.
+// A sixth statement — the codex spec preamble in
+// .claude/skills/delegate/references/codex-implementer.md — is deliberately
+// condensed for a prompt and is NOT sentinel-matchable, so it stays out of
+// CARRIERS and is kept in sync by hand; trimming it never trips this gate.
 //
 // PRESENCE, not equality: the copies word the rule differently on purpose (one
 // is a numbered hard rule, one a bullet, one prose for a different audience),
@@ -54,10 +58,13 @@ export const SENTINELS = [
     name: "forbidden catchall",
     // The lookahead is the point: a carrier that keeps the sentence and then
     // carves an exception out of it ("is forbidden, except …") has lost the
-    // rule as surely as one that deleted it.
+    // rule as surely as one that deleted it. Its scope is narrow, though — it
+    // sees an exception qualifier immediately following "is forbidden", so
+    // differently-phrased carve-outs ("with one exception:", "— save for")
+    // still pass.
     pattern:
       /(everything else|every other git invocation|every state-mutating git command)[\s\S]{0,300}?is forbidden(?!\s*(?:,|;|—|-)?\s*(?:except|but|unless)\b)/i,
-    fix: "keep the catchall sentence that forbids every other git invocation",
+    fix: "keep the catchall sentence forbidding every other git invocation, with no except/but/unless clause carved out of it",
   },
   {
     name: "-C worktree sanction",

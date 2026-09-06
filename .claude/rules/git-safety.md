@@ -3,8 +3,9 @@
 > Excerpted from `.claude/skills/gd-conventions/SKILL.md` (the canonical playbook — the
 > conventions-sync rule updates every file that states the changed rule, wherever it is
 > restated: this excerpt, the repo `AGENTS.md`, the agent definitions, and any carrier
-> added later). `scripts/check-rule-mirrors.mjs` holds the current list for the git
-> whitelist. Consult that skill before writing any code here.
+> added later). `scripts/check-rule-mirrors.mjs` holds the gated list for the git
+> whitelist (the codex spec preamble restates it condensed, synced by hand). Consult
+> that skill before writing any code here.
 
 1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log / show` and
    `git branch --list`, each optionally prefixed with `-C <path>` to address a task
