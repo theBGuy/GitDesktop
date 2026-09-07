@@ -817,11 +817,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // local branch by construction, so no worktree can hold it and the lookup
     // would only delay the checkout by a subprocess.
     let resolvedHere: UserWorktree | undefined;
+    // Only a NEGATIVE answer is distrusted: a hit is still a hit (removal is
+    // `refuseWhileLeaving`'s job), but a miss is worthless while the list is
+    // unanswered OR being refetched — react-query serves the previous data
+    // through a refetch, and every worktree mutation invalidates this key, so
+    // the miss right after one is exactly the wrong answer.
     if (
       remote === null &&
       !wtPath &&
-      userWorktrees.data === undefined &&
-      !userWorktrees.isError
+      !userWorktrees.isError &&
+      (userWorktrees.data === undefined || userWorktrees.isFetching)
     ) {
       try {
         const wts = await listUserWorktrees(repoPath);
