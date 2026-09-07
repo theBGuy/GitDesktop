@@ -72,6 +72,7 @@ import {
   useUnlockUserWorktree,
   useUpdateBranchFrom,
   useUserWorktrees,
+  worktreeKey,
 } from "@/lib/git/queries";
 import type { Branch, ForkPrMatch, RemoteBranch } from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
@@ -810,18 +811,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // path — the chip already says where the branch lives, and opening a folder
     // is not a destructive act.
     let wtPath = worktreeByBranch.get(name);
-    // The open-gated read hasn't answered yet, and an empty map would read as
-    // "not in a worktree" — ask git rather than acting on a missing answer. A
-    // failed lookup falls through to the ordinary checkout, where git refuses
-    // with its own message. Local rows only: a remote-only row's name has no
-    // local branch by construction, so no worktree can hold it and the lookup
-    // would only delay the checkout by a subprocess.
     let resolvedHere: UserWorktree | undefined;
-    // Only a NEGATIVE answer is distrusted: a hit is still a hit (removal is
-    // `refuseWhileLeaving`'s job), but a miss is worthless while the list is
-    // unanswered OR being refetched — react-query serves the previous data
-    // through a refetch, and every worktree mutation invalidates this key, so
-    // the miss right after one is exactly the wrong answer.
+    // The open-gated read hasn't answered yet, or is answering again — and only
+    // a NEGATIVE verdict is distrusted: a hit stays a hit (a listed worktree
+    // still exists, and mid-removal is `refuseWhileLeaving`'s job), but a miss
+    // is worthless from a list that is unanswered or in flight, because
+    // react-query serves the previous data through a refetch and every worktree
+    // mutation invalidates this key. Routed through `fetchQuery` on that same
+    // key so a click during the refetch JOINS it instead of racing it with a
+    // second `git worktree list`. A failed lookup falls through to the ordinary
+    // checkout, where git refuses with its own message. Local rows only: a
+    // remote-only row's name has no local branch by construction, so no
+    // worktree can hold it and the lookup would only add a subprocess.
     if (
       remote === null &&
       !wtPath &&
@@ -829,7 +830,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       (userWorktrees.data === undefined || userWorktrees.isFetching)
     ) {
       try {
-        const wts = await listUserWorktrees(repoPath);
+        const wts = await queryClient.fetchQuery({
+          queryKey: worktreeKey(repoPath),
+          queryFn: () => listUserWorktrees(repoPath),
+        });
         resolvedHere = wts.find(
           (w) => w.branch === name && normPath(w.path) !== activeNorm,
         );
