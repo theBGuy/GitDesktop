@@ -732,15 +732,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   });
   const stashes = stashCount.data ?? 0;
   const hasChanges = (status.data?.entries.length ?? 0) > 0;
-  // The live answer, readable AFTER an await — same pattern as `currentNameRef`.
-  // `switchTo` can resume on a worktree lookup that outlived the render it
-  // started in, and a tree that turned dirty meanwhile must still get the
-  // bring/stash choice instead of a silent checkout.
   // Which switch attempt is current. `switchTo` can suspend on the worktree
   // lookup, and the popover reopens long before a stalled `git worktree list`
   // returns — so a later attempt must be able to retire an earlier one rather
   // than both acting.
   const switchRequestRef = useRef(0);
+  // The live answer, readable AFTER an await — same pattern as `currentNameRef`.
+  // `switchTo` can resume on a worktree lookup that outlived the render it
+  // started in, and a tree that turned dirty meanwhile must still get the
+  // bring/stash choice instead of a silent checkout.
   const hasChangesRef = useRef(hasChanges);
   useEffect(() => {
     hasChangesRef.current = hasChanges;
@@ -858,12 +858,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       }
       // BELOW the try/catch, so every exit passes it — resolved, rejected, and
       // found-nothing alike. This await outlives its render and everything past
-      // here is a global write, so each pre-await read is re-taken: the repo
-      // (acting would target the one the user left), the attempt (the popover
-      // reopens while a stalled lookup is out, so a later pick already started
-      // its own switch), and amend mode (entered elsewhere meanwhile; a
-      // checkout would strand it). The rest already read live — `hasChangesRef`
-      // and the removal store below.
+      // here is a global write, so every read that GATES that write is re-taken:
+      // the repo (acting would target the one the user left), the attempt (the
+      // popover reopens while a stalled lookup is out, so a later pick already
+      // started its own switch), and amend mode (entered elsewhere meanwhile; a
+      // checkout would strand it) — plus `hasChangesRef` and the removal store
+      // below, which read live. The reapply default stays the click render's
+      // value on purpose: it only seeds a checkbox the user then sees.
       const live = useUiStore.getState();
       if (
         switchRequest !== switchRequestRef.current ||
@@ -892,7 +893,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       // (it toasts that itself) and when the user switched repos mid-validate
       // (silent by design) — a success toast over either would claim a
       // navigation that never happened.
-      const navigated = await openWorktree(wtPath);
+      // The attempt check rides INTO the open: `validateRepo` is a second await
+      // downstream of this function's guard, and a newer pick during it leaves
+      // the repo unchanged, so only the attempt identity can retire this one.
+      const navigated = await openWorktree(
+        wtPath,
+        () => switchRequest === switchRequestRef.current,
+      );
       // Only when this call resolved the worktree itself: that state is exactly
       // the one where the map was empty, so the row carried no chip and the whole
       // app just changed folders with no prior signal. Say so after the fact.

@@ -159,16 +159,22 @@ export function useOpenRepoByPath() {
 export function useOpenWorktree() {
   const openRepo = useUiStore((s) => s.openRepo);
   return useCallback(
-    async (path: string) => {
+    async (path: string, stillWanted?: () => boolean) => {
       // `openRepo` writes GLOBAL navigation state, so it may only fire while the
       // app is still on the repo this call started from — the user can switch
       // repositories while `validateRepo` runs, and an unguarded write would yank
       // them back into the previous repo's worktree. The toast stays
       // unconditional: the validation failed wherever they are now.
+      //
+      // `stillWanted` covers what the repo check can't: a caller sequencing
+      // several opens (the branch switcher) can have the user pick again while
+      // THIS validate runs, and the repo is unchanged in that case. A caller
+      // whose open stands alone passes nothing.
       const firedOn = useUiStore.getState().repoPath;
       try {
         const info = await validateRepo(path);
         if (useUiStore.getState().repoPath !== firedOn) return false;
+        if (stillWanted && !stillWanted()) return false;
         openRepo(info);
         return true;
       } catch (e) {
