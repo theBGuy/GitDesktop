@@ -148,16 +148,32 @@ export function useOpenRepoByPath() {
  * resolves it to the worktree root — so opening it Just Works. Unlike
  * {@link useOpenRepoByPath} this does NOT record the path in recents: worktrees
  * are child checkouts of a repo already in the switcher, not first-class repos.
+ *
+ * Resolves TRUE only once the app is actually in the worktree — false when the
+ * open failed (which toasts) or was abandoned because the user switched repos
+ * meanwhile (which is silent). A caller that reports the navigation to the user
+ * must await this and gate on it; callers that only navigate ignore the value,
+ * awaited or not. The guard reads the live repo when this is CALLED, so a caller
+ * that awaits something else FIRST needs its own check before calling.
  */
 export function useOpenWorktree() {
   const openRepo = useUiStore((s) => s.openRepo);
   return useCallback(
     async (path: string) => {
+      // `openRepo` writes GLOBAL navigation state, so it may only fire while the
+      // app is still on the repo this call started from — the user can switch
+      // repositories while `validateRepo` runs, and an unguarded write would yank
+      // them back into the previous repo's worktree. The toast stays
+      // unconditional: the validation failed wherever they are now.
+      const firedOn = useUiStore.getState().repoPath;
       try {
         const info = await validateRepo(path);
+        if (useUiStore.getState().repoPath !== firedOn) return false;
         openRepo(info);
+        return true;
       } catch (e) {
         toastError(e);
+        return false;
       }
     },
     [openRepo],

@@ -186,8 +186,8 @@ PR badge.
   row shows when that worktree was last active, so the ones you've finished
   with are easy to spot. One-click jumps to the main workspace sit right in
   the branch switcher, where selecting a branch that's checked out elsewhere
-  opens its worktree straight away, that branch's context menu carries every
-  worktree action, and a *Worktrees* row opens the full manager.
+  opens that folder straight away, that branch's context menu carries the
+  worktree actions, and a *Worktrees* row opens the full manager.
 - **Compare**: a tab with a three-dot diff, commits ahead/behind,
   merge/rebase, and jump-to-PR. Each ahead/behind commit shows its tag chips
   and carries a context menu — checkout, cherry-pick, create a branch or tag,

@@ -199,7 +199,7 @@ by its **Repair links** button.
 Two of its choices map straight onto the rules above. Switch to a
 branch that lives in another worktree and you don't get the
 `already used by worktree` error: the branch is badged, and choosing
-it opens that worktree instead. And **Promote to main workspace**
+it opens that folder instead. And **Promote to main workspace**
 collapses the sequence the one-checkout rule forces (remove the
 worktree first, then check its branch out in the main workspace)
 into one action, once the worktree is clean.

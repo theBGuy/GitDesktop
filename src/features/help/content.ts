@@ -616,7 +616,7 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 - **Create** a branch ({{kbd:new-branch}}), **rename** ({{kbd:rename-branch}}), **delete**
   ({{kbd:delete-branch}}), or **archive** it — archiving hides a branch without deleting
   it, collapsing it into an "Archived" section. The branch you're on, the default branch,
-  and a branch checked out in another worktree can't be archived (unless you're already
+  and a branch checked out in another folder can't be archived (unless you're already
   deleting that worktree); **Unarchive** has no such limit — it works even on the branch
   you're checked out on. When creating, the **Base it on** picker is a searchable list
   grouped into **Local** and **Remote** branches, so you can start from *any* branch — not
@@ -633,7 +633,7 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   calls merged, and idle ones, start **pre-checked**; a pull-request match goes by branch
   name, so it never pre-checks a row on its own — it badges one for you to confirm. Review
   the list, then **archive** them (reversible) or **delete** them together. The current
-  branch, the default branch, and branches checked out in another worktree are never
+  branch, the default branch, and branches checked out in another folder are never
   included (archiving still offers one whose worktree you're already deleting); deleting
   also skips protected branches.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
@@ -755,16 +755,17 @@ settings*.)
 
 **Worktrees…** manages linked worktrees — extra folders that each check out a different
 branch of the same repository, so you can build, test, or review several branches at once
-without stashing or switching. Open it from the ⋮ menu, the command palette, or
-**Worktrees (N)…** in the branch switcher, where *N* is how many linked worktrees you have.
+without stashing or switching. Open it from the ⋮ menu, the command palette, or the
+**Worktrees…** row in the branch switcher, which shows a count once you have some.
 Each row shows when git last did work in that worktree (hover the time for the exact date),
-so the ones you've finished with stand out; a worktree on a detached checkout appears here
-only, since no branch row can host it.
+so the ones you've finished with stand out. What the branch switcher can show doesn't limit
+this list: one on a detached checkout has no branch row at all, one on an archived branch
+sits in the collapsed "Archived" section, and filter text can hide the rest.
 
 - **Add** a worktree on a new branch (from any base) or an existing one; it's checked out
   into its own folder, defaulting to a sibling of the repository.
 - **Open** a worktree to make it the active repository — git commands then run in that
-  folder and the window title follows. Open the main worktree to switch back.
+  folder and the window title follows. Open the main workspace to switch back.
 - **Rename** a worktree to move its folder to a new name in place; its branch is unchanged.
 - **Lock** a worktree (with an optional reason) so it won't be pruned, renamed, or
   removed: renaming needs an unlock first, and deleting asks for a forced confirmation.
@@ -777,8 +778,8 @@ only, since no branch row can host it.
   close the dialog and carry on: the removal keeps a line at the top of the repository view
   until it finishes, its row here reads **Removing…**, and the actions held while it runs
   say *removal in progress*. It runs to completion once started, so there's nothing to
-  cancel. The main worktree, and whichever one you're currently in, can't be renamed or
-  deleted — switch away first. A locked worktree can't be renamed until you unlock it.
+  cancel. The main workspace, and whichever worktree you're currently in, can't be renamed
+  or deleted — switch away first. A locked worktree can't be renamed until you unlock it.
 - **Promote to main workspace** brings a worktree's branch into your main checkout: it
   removes the worktree (a branch can't be checked out in two at once) and checks that branch
   out in the main workspace. The worktree must be clean first; any uncommitted work in the
@@ -794,12 +795,15 @@ only, since no branch row can host it.
 
 A branch can only be checked out in one worktree at a time, so the list excludes branches
 already in use. The **branch switcher** knows this too, and every branch appears there
-exactly once: a branch that's checked out in another worktree is badged, and choosing it
-opens that worktree straight away. That badged row owns the worktree, so its context menu
-carries the worktree actions as their own group: **Open worktree**, **Copy path**,
-**Rename worktree…**, **Lock…**/**Unlock**, **Promote to main workspace…**, and
+exactly once: a branch that's checked out in another folder is badged with where it lives
+(another worktree, or your main workspace when you're working in a linked one), and
+choosing it opens that folder straight away. That badged row owns the checkout, so its
+context menu carries the worktree actions as their own group: **Open worktree**
+(**Open main workspace** on a main-workspace row), **Copy path**, **Rename worktree…**,
+**Lock…**/**Unlock**, **Promote to main workspace…**, and
 **Delete worktree…**. The ones a worktree doesn't support are hidden or disabled with the
-reason in the label — the main workspace can't be removed, a locked one has to be unlocked
+reason in the label — a main-workspace row drops **Lock…**/**Unlock** and **Promote to main
+workspace…** entirely and can't be renamed or removed, a locked worktree has to be unlocked
 before it can be renamed or promoted, and one whose removal is already running turns its
 actions away until it finishes.
 The branch's own items read **Rename branch…** and **Delete branch…**, so the two pairs
@@ -807,9 +811,8 @@ can't be confused; a deleted worktree leaves its branch behind, and **Delete bra
 un-disables once the worktree is gone. The dropdown's own action rows say why when one of
 them is unavailable. When you're in a linked worktree the switcher reminds you that a
 branch checkout lands *there* (not the main workspace) and offers a one-click
-**Open main workspace**.
-**Open main workspace** and **Promote this worktree to main workspace** are in the command
-palette too.
+**Open main workspace**. That action and **Promote this worktree to main workspace** are in
+the command palette too.
 
 A repository's local pull requests, issues, review history, and per-repo settings are shared
 across all its worktrees, so you see the same ones whichever folder you're working in.{{ai}}
