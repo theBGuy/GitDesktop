@@ -150,11 +150,17 @@ export function useOpenRepoByPath() {
  * are child checkouts of a repo already in the switcher, not first-class repos.
  *
  * Resolves TRUE only once the app is actually in the worktree — false when the
- * open failed (which toasts) or was abandoned because the user switched repos
- * meanwhile (which is silent). A caller that reports the navigation to the user
- * must await this and gate on it; callers that only navigate ignore the value,
- * awaited or not. The guard reads the live repo when this is CALLED, so a caller
- * that awaits something else FIRST needs its own check before calling.
+ * open failed (which toasts), when the user switched repos meanwhile, or when
+ * `stillWanted` retired it; the latter two are silent. A caller that reports the
+ * navigation to the user must await this and gate on it; callers that only
+ * navigate ignore the value, awaited or not. The guard reads the live repo when
+ * this is CALLED, so a caller that awaits something else FIRST needs its own
+ * check before calling.
+ *
+ * @param stillWanted Re-checked after `validateRepo`, for a caller that
+ * sequences several opens: a newer one can start while this validate runs, and
+ * the repo is unchanged in that case, so only the caller knows it is stale. A
+ * standalone open passes nothing.
  */
 export function useOpenWorktree() {
   const openRepo = useUiStore((s) => s.openRepo);
