@@ -1471,7 +1471,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     () => {
       // Target: the highlighted row when the list is open, else the current
       // branch. An open list with a highlight that resolves to no local branch
-      // (remote-only row / worktree path) is a real miss, not a fallback.
+      // (a remote-only row) is a real miss, not a fallback.
       let branch: Branch | undefined;
       if (open && activeBranch) {
         branch = branches.data?.find((b) => b.name === activeBranch);
@@ -1665,7 +1665,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         toast.info("Already in the main workspace.");
         return;
       }
-      openWorktree(main.path);
+      void openWorktree(main.path);
     } catch (e) {
       toastError(e);
     }
@@ -2173,7 +2173,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   if (refuseWhileLeaving(rowWorktree.path, rowWorktreeRemoving))
                     return;
                   setOpen(false);
-                  openWorktree(rowWorktree.path);
+                  void openWorktree(rowWorktree.path);
                 }}
               >
                 {wtLabel(rowCopy.open)}
@@ -2429,7 +2429,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       className="shrink-0 cursor-pointer font-medium text-primary hover:underline"
                       onClick={() => {
                         setOpen(false);
-                        openWorktree(mainWorktree.path);
+                        void openWorktree(mainWorktree.path);
                       }}
                     >
                       Open main workspace

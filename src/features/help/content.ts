@@ -806,6 +806,7 @@ reason in the label — a main-workspace row drops **Lock…**/**Unlock** and **
 workspace…** entirely and can't be renamed or removed, a locked worktree has to be unlocked
 before it can be renamed or promoted, and one whose removal is already running turns its
 actions away until it finishes.
+
 The branch's own items read **Rename branch…** and **Delete branch…**, so the two pairs
 can't be confused; a deleted worktree leaves its branch behind, and **Delete branch…**
 un-disables once the worktree is gone. The dropdown's own action rows say why when one of
