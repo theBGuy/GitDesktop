@@ -64,6 +64,7 @@ import {
   useRemoteBranches,
   useRemotes,
   useRepoStatus,
+  userWorktreesOptions,
   useSetBranchArchived,
   useStashAll,
   useStashCount,
@@ -72,7 +73,6 @@ import {
   useUnlockUserWorktree,
   useUpdateBranchFrom,
   useUserWorktrees,
-  worktreeKey,
 } from "@/lib/git/queries";
 import type { Branch, ForkPrMatch, RemoteBranch } from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
@@ -98,6 +98,7 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
 import {
   isWorktreePromoting,
+  useWorktreeRemovalStore,
   useWorktreeRemovals,
   WORKTREE_PROMOTING_MESSAGE,
 } from "@/lib/stores/worktree-removal";
@@ -830,9 +831,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       (userWorktrees.data === undefined || userWorktrees.isFetching)
     ) {
       try {
+        // Shared options, not a second spelling: this key's `networkMode:
+        // "always"` is what keeps an offline read from PARKING forever, and a
+        // parked fetch would hang this await with the popover already closed —
+        // no navigation, no checkout, no toast. `retry: false` drops the
+        // client's one retry plus backoff when this call STARTS the fetch; a
+        // call that joins one already in flight inherits that fetch's options.
         const wts = await queryClient.fetchQuery({
-          queryKey: worktreeKey(repoPath),
-          queryFn: () => listUserWorktrees(repoPath),
+          ...userWorktreesOptions(repoPath),
+          retry: false,
         });
         resolvedHere = wts.find(
           (w) => w.branch === name && normPath(w.path) !== activeNorm,
@@ -851,7 +858,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (wtPath) {
       // Its folder is on its way out — opening it would land the app in a
       // directory mid-deletion.
-      if (refuseWhileLeaving(wtPath, removingPaths.has(wtPath))) return;
+      // Read at FIRE time, not from the render's Set: this line can run after
+      // the lookup's await, and a removal that started meanwhile would be
+      // invisible to a pre-await snapshot. `refuseWhileLeaving` already reads
+      // the promote half live; this is its removal twin.
+      if (
+        refuseWhileLeaving(
+          wtPath,
+          Boolean(
+            useWorktreeRemovalStore.getState().byRepo[repoPath]?.[wtPath],
+          ),
+        )
+      )
+        return;
       // Awaited for its verdict: it resolves false both when the open failed
       // (it toasts that itself) and when the user switched repos mid-validate
       // (silent by design) — a success toast over either would claim a

@@ -97,9 +97,10 @@ export type WorktreeCheckState = "pending" | "failed" | "checked";
  *
  *  A PARKED read (react-query's offline mode) counts as failed rather than
  *  pending: nothing will resolve it on its own, so the list must paint with the
- *  caveat instead of waiting out the session. `useUserWorktrees` sets
- *  `networkMode: "always"` for its local git read, which should keep that arm
- *  unreachable — it is the net for a caller that doesn't.
+ *  caveat instead of waiting out the session. `userWorktreesOptions` sets
+ *  `networkMode: "always"` for that local git read — shared by the hook and by
+ *  the switcher's imperative `fetchQuery` — which should keep that arm
+ *  unreachable; this is the net for a caller that doesn't.
  *
  *  Placeholder data is a stand-in for another key's rows, never an answer about
  *  this repo, so it reads as pending. That query sets no placeholder today; this
