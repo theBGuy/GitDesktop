@@ -753,11 +753,13 @@ settings*.)
 
 ## Worktrees
 
-**Worktrees…** (in the ⋮ menu, or the command palette) manages linked worktrees — extra
-folders that each check out a different branch of the same repository, so you can build,
-test, or review several branches at once without stashing or switching. Each row
-shows when git last did work in that worktree (hover the time for the exact date),
-so the ones you've finished with stand out.
+**Worktrees…** manages linked worktrees — extra folders that each check out a different
+branch of the same repository, so you can build, test, or review several branches at once
+without stashing or switching. Open it from the ⋮ menu, the command palette, or
+**Worktrees (N)…** in the branch switcher, where *N* is how many linked worktrees you have.
+Each row shows when git last did work in that worktree (hover the time for the exact date),
+so the ones you've finished with stand out; a worktree on a detached checkout appears here
+only, since no branch row can host it.
 
 - **Add** a worktree on a new branch (from any base) or an existing one; it's checked out
   into its own folder, defaulting to a sibling of the repository.
@@ -791,21 +793,23 @@ so the ones you've finished with stand out.
   folder in your file manager, which otherwise breaks the path each worktree records.
 
 A branch can only be checked out in one worktree at a time, so the list excludes branches
-already in use. The **branch switcher** knows this too: a branch that's checked out in
-another worktree is badged, and choosing it offers to open that worktree instead of failing
-with a checkout error. You can also **Delete worktree…** straight from that badged branch's
-context menu (disabled when the badge points at the main workspace, which can't be
-removed, and while that worktree's removal is already running) — the branch stays, and
-its **Delete…** item un-disables once the worktree is gone. When you're in a linked
-worktree the switcher reminds you that a branch checkout lands *there* (not the
-main workspace) and offers a one-click **Open main workspace**, and its
-**Worktrees** section jumps you straight to any other worktree — no detour through a
-checked-out branch. Each of those rows carries the worktree management actions on its
-context menu — **Open worktree**, **Copy path**, **Rename…**, **Lock…**/**Unlock**,
-**Promote to main workspace…**, **Delete worktree…** — with the ones a row doesn't support
-(the main workspace, a detached checkout, a locked worktree, one being removed) hidden or
-disabled with the reason in the label. **Open main workspace** and
-**Promote this worktree to main workspace** are in the command palette too.
+already in use. The **branch switcher** knows this too, and every branch appears there
+exactly once: a branch that's checked out in another worktree is badged, and choosing it
+opens that worktree straight away. That badged row owns the worktree, so its context menu
+carries the worktree actions as their own group: **Open worktree**, **Copy path**,
+**Rename worktree…**, **Lock…**/**Unlock**, **Promote to main workspace…**, and
+**Delete worktree…**. The ones a worktree doesn't support are hidden or disabled with the
+reason in the label — the main workspace can't be removed, a locked one has to be unlocked
+before it can be renamed or promoted, and one whose removal is already running turns its
+actions away until it finishes.
+The branch's own items read **Rename branch…** and **Delete branch…**, so the two pairs
+can't be confused; a deleted worktree leaves its branch behind, and **Delete branch…**
+un-disables once the worktree is gone. The dropdown's own action rows say why when one of
+them is unavailable. When you're in a linked worktree the switcher reminds you that a
+branch checkout lands *there* (not the main workspace) and offers a one-click
+**Open main workspace**.
+**Open main workspace** and **Promote this worktree to main workspace** are in the command
+palette too.
 
 A repository's local pull requests, issues, review history, and per-repo settings are shared
 across all its worktrees, so you see the same ones whichever folder you're working in.{{ai}}

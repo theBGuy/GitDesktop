@@ -534,7 +534,7 @@ function RowTags({
 /** A disabled menu item can't carry a tooltip, so its blocking reason rides the
  *  label. A removal in progress outranks the other reasons — the worktree is on
  *  its way out, whatever else is true of it. Shared with the branch switcher's
- *  worktree rows and its badged-branch Delete item, not just this manager. */
+ *  badged-branch worktree items, not just this manager. */
 export function worktreeItemLabel(
   label: string,
   isRemoving: boolean,
