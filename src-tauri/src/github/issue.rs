@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::pr::{PrAuthor, PrListLabel, PrRef, PrThreadOut, RepoLabel};
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
@@ -186,7 +187,7 @@ pub async fn gh_issue_list(
         .await
         .map_err(map_issues_disabled)?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh issue list: {e}")))
+        .map_err(|e| gh_unreadable("issues", format!("could not parse gh issue list: {e}")))
 }
 
 #[derive(Deserialize)]
@@ -315,7 +316,7 @@ pub async fn gh_issue_view(
     // this read requests fields older gh builds don't have.
     let out = view_res.map_err(map_issues_disabled).map_err(map_gh_too_old)?;
     let raw: RawIssue = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh issue view: {e}")))?;
+        .map_err(|e| gh_unreadable("the issue", format!("could not parse gh issue view: {e}")))?;
     // Best-effort: a failed lock lookup just leaves the issue shown as unlocked.
     let lock: LockState = lock_res
         .ok()
@@ -427,8 +428,12 @@ pub async fn gh_issue_create(
     )
     .await
     .map_err(map_issues_disabled)?;
-    let created: CreatedIssue = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse created issue: {e}")))?;
+    let created: CreatedIssue = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the new issue",
+            format!("could not parse created issue: {e}"),
+        )
+    })?;
     Ok(PrRef {
         number: created.number,
         url: created.html_url,
@@ -449,8 +454,12 @@ pub async fn gh_assignable_users(
         GH_TIMEOUT,
     )
     .await?;
-    serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse assignable users: {e}")))
+    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the assignable users",
+            format!("could not parse assignable users: {e}"),
+        )
+    })
 }
 
 /// Open milestones for the milestone picker.
@@ -465,7 +474,7 @@ pub async fn gh_milestones(repo_path: String, lens: Option<String>) -> AppResult
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse milestones: {e}")))
+        .map_err(|e| gh_unreadable("the milestones", format!("could not parse milestones: {e}")))
 }
 
 /// Replaces an issue's assignees (REST PATCH sends the full desired set).
@@ -536,8 +545,12 @@ pub async fn gh_issue_types(repo_path: String, lens: Option<String>) -> AppResul
         GH_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse issue types: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the issue types",
+            format!("could not parse issue types: {e}"),
+        )
+    })?;
     let types = value
         .pointer("/data/repository/issueTypes/nodes")
         .and_then(|n| n.as_array())
@@ -787,7 +800,7 @@ pub async fn gh_issue_reactions(
     )
     .await?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse reactions: {e}")))?;
+        .map_err(|e| gh_unreadable("the reactions", format!("could not parse reactions: {e}")))?;
     let issue = value.pointer("/data/repository/issue");
 
     let body = map_reaction_groups(issue.and_then(|i| i.get("reactionGroups")));
@@ -973,8 +986,12 @@ pub async fn gh_issue_relations(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse relations: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the related issues",
+            format!("could not parse relations: {e}"),
+        )
+    })?;
     let issue = value.pointer("/data/repository/issue");
 
     // `parent` is nullable; only deserialize when present (see graphql nullable
@@ -985,13 +1002,18 @@ pub async fn gh_issue_relations(
         .cloned()
         .map(serde_json::from_value::<RelatedIssue>)
         .transpose()
-        .map_err(|e| AppError::Gh(format!("could not parse parent issue: {e}")))?;
+        .map_err(|e| {
+            gh_unreadable(
+                "the parent issue",
+                format!("could not parse parent issue: {e}"),
+            )
+        })?;
     let sub_issues: Vec<RelatedIssue> = issue
         .and_then(|i| i.pointer("/subIssues/nodes"))
         .cloned()
         .map(serde_json::from_value)
         .transpose()
-        .map_err(|e| AppError::Gh(format!("could not parse sub-issues: {e}")))?
+        .map_err(|e| gh_unreadable("the sub-issues", format!("could not parse sub-issues: {e}")))?
         .unwrap_or_default();
     let total = issue
         .and_then(|i| i.pointer("/subIssuesSummary/total"))
@@ -1114,8 +1136,12 @@ pub async fn gh_issue_dependencies(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse dependencies: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the issue's dependencies",
+            format!("could not parse dependencies: {e}"),
+        )
+    })?;
     let issue = value.pointer("/data/repository/issue");
     let parse = |key: &str| -> AppResult<Vec<RelatedIssue>> {
         Ok(issue
@@ -1123,7 +1149,12 @@ pub async fn gh_issue_dependencies(
             .cloned()
             .map(serde_json::from_value)
             .transpose()
-            .map_err(|e| AppError::Gh(format!("could not parse {key}: {e}")))?
+            .map_err(|e| {
+                gh_unreadable(
+                    "the issue's dependencies",
+                    format!("could not parse {key}: {e}"),
+                )
+            })?
             .unwrap_or_default())
     };
     Ok(IssueDependencies {
@@ -1211,8 +1242,12 @@ pub async fn gh_issue_timeline(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse issue timeline: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the issue timeline",
+            format!("could not parse issue timeline: {e}"),
+        )
+    })?;
     let nodes = value
         .pointer("/data/repository/issue/timelineItems/nodes")
         .and_then(serde_json::Value::as_array);
@@ -1261,15 +1296,24 @@ pub async fn gh_issue_development(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse development: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the issue's linked branches and pull requests",
+            format!("could not parse development: {e}"),
+        )
+    })?;
     let issue = value.pointer("/data/repository/issue");
     let prs: Vec<LinkedPr> = issue
         .and_then(|i| i.pointer("/closedByPullRequestsReferences/nodes"))
         .cloned()
         .map(serde_json::from_value)
         .transpose()
-        .map_err(|e| AppError::Gh(format!("could not parse linked PRs: {e}")))?
+        .map_err(|e| {
+            gh_unreadable(
+                "the linked pull requests",
+                format!("could not parse linked PRs: {e}"),
+            )
+        })?
         .unwrap_or_default();
     let branches = issue
         .and_then(|i| i.pointer("/linkedBranches/nodes"))
@@ -1322,8 +1366,13 @@ pub async fn gh_issue_create_linked_branch(
         GH_TIMEOUT,
     )
     .await?;
-    let oid_val: serde_json::Value = serde_json::from_str(&oid_out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not read the default branch: {e}")))?;
+    let oid_val: serde_json::Value =
+        serde_json::from_str(&oid_out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "the default branch",
+                format!("could not read the default branch: {e}"),
+            )
+        })?;
     let oid = oid_val
         .pointer("/data/repository/defaultBranchRef/target/oid")
         .and_then(|v| v.as_str())

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::runner::{
     run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
@@ -192,7 +193,10 @@ pub async fn gh_repo_visibility(repo_path: String) -> AppResult<crate::forge::Re
     .await?;
     let json = out.stdout_lossy();
     let parsed: GhRepoVisibilityJson = serde_json::from_str(json.trim()).map_err(|e| {
-        AppError::Gh(format!("could not read the repository's visibility: {e}"))
+        gh_unreadable(
+            "the repository's visibility",
+            format!("could not read the repository's visibility: {e}"),
+        )
     })?;
     if parsed.visibility.trim().is_empty() {
         return Err(AppError::Gh(
@@ -333,7 +337,7 @@ pub async fn gh_hooks_list(repo_path: String) -> AppResult<Vec<Webhook>> {
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse webhooks: {e}")))
+        .map_err(|e| gh_unreadable("the webhooks", format!("could not parse webhooks: {e}")))
 }
 
 #[tauri::command]
@@ -356,7 +360,7 @@ pub async fn gh_hook_create(repo_path: String, input: WebhookInput) -> AppResult
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the webhook: {e}")))
+        .map_err(|e| gh_unreadable("the webhook", format!("could not parse the webhook: {e}")))
 }
 
 #[tauri::command]
@@ -383,7 +387,7 @@ pub async fn gh_hook_update(
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the webhook: {e}")))
+        .map_err(|e| gh_unreadable("the webhook", format!("could not parse the webhook: {e}")))
 }
 
 #[tauri::command]
@@ -494,8 +498,12 @@ pub async fn gh_hook_deliveries(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse deliveries: {e}")))
+    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the webhook deliveries",
+            format!("could not parse deliveries: {e}"),
+        )
+    })
 }
 
 #[derive(Serialize)]
@@ -525,8 +533,12 @@ pub async fn gh_hook_delivery(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let v: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the delivery: {e}")))?;
+    let v: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the webhook delivery",
+            format!("could not parse the delivery: {e}"),
+        )
+    })?;
     // request.payload is a JSON object; response.payload is a body string.
     let render = |val: Option<&serde_json::Value>| match val {
         Some(serde_json::Value::String(s)) => s.clone(),
@@ -738,8 +750,12 @@ pub async fn gh_repo_settings_get(repo_path: String) -> AppResult<RepoSettings> 
     )
     .await?;
     let text = out.stdout_lossy();
-    let mut settings: RepoSettings = serde_json::from_str(&text)
-        .map_err(|e| AppError::Gh(format!("could not parse repo settings: {e}")))?;
+    let mut settings: RepoSettings = serde_json::from_str(&text).map_err(|e| {
+        gh_unreadable(
+            "the repository settings",
+            format!("could not parse repo settings: {e}"),
+        )
+    })?;
     settings.can_change_forking = can_change_forking(&text);
     settings.is_org = is_org(&text);
     Ok(settings)
@@ -800,8 +816,12 @@ pub async fn gh_repo_settings_update(
     )
     .await?;
     let text = out.stdout_lossy();
-    let mut settings: RepoSettings = serde_json::from_str(&text)
-        .map_err(|e| AppError::Gh(format!("could not parse repo settings: {e}")))?;
+    let mut settings: RepoSettings = serde_json::from_str(&text).map_err(|e| {
+        gh_unreadable(
+            "the repository settings",
+            format!("could not parse repo settings: {e}"),
+        )
+    })?;
     settings.can_change_forking = can_change_forking(&text);
     // `is_org` is `skip_deserializing`, so recompute it from the PATCH response too —
     // otherwise the onSuccess cache seed reports false. Mirrors the GET path.

@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
 /// gh emits `null` for absent strings (a draft's `publishedAt`, an empty body);
@@ -90,7 +91,7 @@ pub async fn gh_release_list(repo_path: String) -> AppResult<Vec<ReleaseInfo>> {
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh release list: {e}")))
+        .map_err(|e| gh_unreadable("releases", format!("could not parse gh release list: {e}")))
 }
 
 #[derive(Deserialize)]
@@ -160,8 +161,12 @@ pub async fn gh_release_view(
         GH_TIMEOUT,
     )
     .await?;
-    let raw: RawRelease = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh release view: {e}")))?;
+    let raw: RawRelease = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the release",
+            format!("could not parse gh release view: {e}"),
+        )
+    })?;
     Ok(ReleaseDetails {
         tag_name: raw.tag_name,
         name: raw.name,
@@ -334,8 +339,12 @@ pub async fn gh_release_generate_notes(
         args.push(&prev_arg);
     }
     let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
-    serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse generated notes: {e}")))
+    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the release notes",
+            format!("could not parse generated notes: {e}"),
+        )
+    })
 }
 
 /// Deletes a release. `cleanup_tag` also deletes the underlying git tag.
@@ -421,11 +430,15 @@ const UPDATER_MANIFEST: &str = "latest.json";
 /// doesn't carry the updater shape (string `version` + object `platforms`), so an
 /// unrelated asset that merely shares the name is never rewritten.
 fn patch_updater_notes(manifest: &str, notes: &str) -> AppResult<String> {
-    let mut value: serde_json::Value = serde_json::from_str(manifest)
-        .map_err(|e| AppError::Gh(format!("could not parse {UPDATER_MANIFEST}: {e}")))?;
-    let obj = value.as_object_mut().ok_or_else(|| {
-        AppError::Gh(format!("{UPDATER_MANIFEST} is not a JSON object"))
+    let mut value: serde_json::Value = serde_json::from_str(manifest).map_err(|e| {
+        gh_unreadable(
+            "the updater manifest",
+            format!("could not parse {UPDATER_MANIFEST}: {e}"),
+        )
     })?;
+    let obj = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::Gh(format!("{UPDATER_MANIFEST} is not a JSON object")))?;
     // Gate the shape here, before anything uploads: the re-upload clobbers, so
     // rewriting a same-named asset that isn't an updater manifest (a repo's own
     // version pointer, say) would destroy it. Failing on this path deletes nothing.

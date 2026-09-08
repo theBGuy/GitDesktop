@@ -12,7 +12,8 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
+use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh_raw, GH_NETWORK_TIMEOUT};
 
 /// Why a findings list may be empty. Serialized camelCase; the frontend branches
@@ -975,8 +976,12 @@ async fn fetch_paged(repo_path: &str, base_path: &str, limit: usize) -> AppResul
                 status: parse_status(headers),
             });
         }
-        let page: Vec<Value> = serde_json::from_str(body.trim())
-            .map_err(|e| AppError::Gh(format!("could not parse security findings: {e}")))?;
+        let page: Vec<Value> = serde_json::from_str(body.trim()).map_err(|e| {
+            gh_unreadable(
+                "the security findings",
+                format!("could not parse security findings: {e}"),
+            )
+        })?;
         let page_len = page.len();
         let next = parse_link_next(headers);
         items.extend(page);

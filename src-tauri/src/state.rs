@@ -87,16 +87,21 @@ struct SharedDomains {
 /// that checkout belongs to. Two keys because the domains split that way — see
 /// [`AppState::working_tree_lock`].
 ///
-/// Both are folded through [`normalize_wt_path`], the same transform git::worktree
-/// uses for cross-source path comparison: git prints forward slashes while the GUI
-/// passes native separators (`validate_repo` normalizes to backslashes), and Windows
-/// paths are case-insensitive, so one checkout is reachable under several spellings
-/// that must land on one mutex. Its lower-casing can only MERGE two case-distinct
-/// Unix paths onto one lock, which over-serializes — the safe direction.
+/// The two KEYS are folded through [`normalize_wt_path`], the same transform
+/// git::worktree uses for cross-source path comparison: git prints forward slashes
+/// while the GUI passes native separators (`validate_repo` normalizes to backslashes),
+/// and Windows paths are case-insensitive, so one checkout is reachable under several
+/// spellings that must land on one mutex. Its lower-casing can only MERGE two
+/// case-distinct Unix paths onto one lock, which over-serializes — the safe direction.
 #[derive(Clone)]
 struct LockKeys {
     checkout: String,
     shared: String,
+    /// `repo_identity`'s output EXACTLY as returned — never folded through
+    /// `normalize_wt_path`. Marker roots hash this spelling, and `repo_hash` does not
+    /// normalize separators, so a normalized copy would key a different root than the
+    /// stateless resolvers use.
+    identity: String,
 }
 
 pub struct AppState {
@@ -159,6 +164,7 @@ impl AppState {
         let keys = LockKeys {
             checkout: normalize_wt_path(toplevel.as_deref().unwrap_or(repo_path)),
             shared: normalize_wt_path(&identity),
+            identity,
         };
         if !resolved {
             return keys;
@@ -169,6 +175,13 @@ impl AppState {
             .entry(repo_path.to_string())
             .or_insert(keys)
             .clone()
+    }
+
+    /// The repository identity (`git::repo::repo_identity` output, un-normalized), served
+    /// from the lock-key cache once resolved. An unresolved spelling re-probes per call —
+    /// the same cost as the uncached path, never a wrong answer.
+    pub(crate) async fn repo_identity_cached(&self, repo_path: &str) -> String {
+        self.resolve_lock_keys(repo_path).await.identity
     }
 
     /// The two shared-identity domains for `repo_path`, created on first use.
@@ -528,6 +541,34 @@ mod lock_key_tests {
         assert!(same(&present.0, &via_sub.0), "working tree");
         assert!(same(&present.1, &via_sub.1), "worktree admin");
         assert!(same(&present.2, &via_sub.2), "network");
+    }
+
+    /// The identity is cached RAW: `update_marker`'s roots hash `repo_identity`'s own
+    /// spelling, and `repo_hash` lower-cases without touching separators, so caching a
+    /// `normalize_wt_path`ed copy would key a marker root no stateless resolver reads.
+    /// Both the resolve path and the cache-hit path are checked, since only the second
+    /// can hand back a transformed value.
+    #[tokio::test]
+    async fn the_cached_identity_is_the_raw_resolver_spelling() {
+        let (_dir, repo) = setup_repo("identity").await;
+        let expected = crate::git::repo::repo_identity(&repo).await;
+
+        let state = AppState::default();
+        let first = state.resolve_lock_keys(&repo).await;
+        let second = state.resolve_lock_keys(&repo).await;
+
+        assert_eq!(first.identity, expected, "the resolve path stores it raw");
+        assert_eq!(second.identity, expected, "and the cache hands it back raw");
+        assert_eq!(
+            second.shared,
+            normalize_wt_path(&expected),
+            "while the lock key keeps its normalization"
+        );
+        assert_eq!(
+            state.repo_identity_cached(&repo).await,
+            expected,
+            "the accessor is the same spelling"
+        );
     }
 
     /// Windows reaches one checkout under several spellings — git's forward slashes,

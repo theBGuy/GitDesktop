@@ -366,7 +366,7 @@ pub(crate) async fn git_delete_branch_core(
     // Two halves of one window: the marker covers an update that has minted but not yet
     // registered its checkout (the `worktree add` is the long part), the porcelain arm
     // below covers it once registered. Heal-free — the healing lives in the claim arm.
-    crate::git::update_marker::refuse_if_branch_updating_no_heal(&repo_path, &name).await?;
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(state, &repo_path, &name).await?;
     // Pre-mutation guard: git's own refusal for a branch checked out in a worktree
     // is terse. Detect the holding worktree here — shared by every caller, not just
     // the switcher's UI guard — and surface an actionable message.
@@ -1068,7 +1068,7 @@ pub(crate) async fn branch_reset_to_upstream(
     // Two halves of one window, as in `git_delete_branch_core`: the marker covers an
     // update that has minted but not yet registered its checkout, the porcelain arm
     // below covers it once registered. Heal-free — healing lives in the claim arm.
-    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, branch).await?;
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(state, repo_path, branch).await?;
     // Pre-mutation guards: git refuses both of these itself, but only after the
     // user has confirmed a destructive action, and its wording names neither
     // remedy. The linked-worktree probe excludes THIS checkout, so the current
@@ -1152,7 +1152,7 @@ pub(crate) async fn update_branch_from(
     // against a branch held by the first update's checkout. Heal-free deliberately —
     // this path's own `worktree add` takes the admin domain, and a detached sweep
     // fired here would win it first and time that bounded acquire out.
-    crate::git::update_marker::refuse_if_branch_updating_no_heal(repo_path, branch).await?;
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(state, repo_path, branch).await?;
     // Healing, in two tiers. THIS branch's provably-dead leftovers go first and
     // synchronously, so the first update after a crash clears its own predecessor
     // before the add rather than racing it; everything else waits for the age gate and

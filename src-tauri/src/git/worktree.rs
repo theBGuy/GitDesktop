@@ -279,7 +279,8 @@ pub async fn git_worktree_add_user(
         // update's hidden checkout, which git names by an app-data path. Heal-free:
         // the `worktree add` below takes the admin domain, and a sweep fired here
         // would win it first and turn a would-succeed add into a `Busy`.
-        crate::git::update_marker::refuse_if_branch_updating_no_heal(&repo_path, branch).await?;
+        crate::git::update_marker::refuse_if_branch_updating_no_heal(&state, &repo_path, branch)
+            .await?;
         args.extend_from_slice(&[path, branch]);
     }
     run_git_worktree_admin(&state, &repo_path, &args, WORKTREE_OP_TIMEOUT).await?;
@@ -876,6 +877,14 @@ mod tests {
     fn repo_hash_is_stable_and_case_insensitive() {
         assert_eq!(repo_hash("C:/Repos/App"), repo_hash("c:/repos/app"));
         assert_ne!(repo_hash("C:/Repos/App"), repo_hash("C:/Repos/Other"));
+    }
+
+    /// Separators are NOT normalized away, unlike case — which is why anything that
+    /// hashes a repo identity (the update-marker roots) must carry the resolver's own
+    /// spelling rather than a `normalize_wt_path`ed copy of it.
+    #[test]
+    fn repo_hash_distinguishes_separator_spellings() {
+        assert_ne!(repo_hash(r"C:\repos\x"), repo_hash("c:/repos/x"));
     }
 
     #[test]

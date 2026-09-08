@@ -1,0 +1,1 @@
+- Errors from GitHub reads now lead with what couldn't be loaded in plain language; the technical detail sits one click away under Details.

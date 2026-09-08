@@ -34,7 +34,6 @@ use tempfile::TempPath;
 use tokio::sync::OnceCell;
 
 use crate::error::{AppError, AppResult};
-use crate::git::diff::{parse_numstat_z_rows, DiffStatRow};
 use crate::git::runner::{run_git, run_git_raw, run_git_raw_input_bytes, DEFAULT_TIMEOUT};
 use crate::git::types::DiffStatEntry;
 
@@ -485,13 +484,79 @@ fn widened_glob_for_name(path: &str) -> String {
     out
 }
 
+/// One `--numstat -z` row with its names as the BYTES git printed — gitignore
+/// matching is byte-domain, so only a verdict-holder may spell a name as text.
+struct DiffStatRowBytes {
+    entry: DiffStatEntry,
+    names: Vec<Vec<u8>>,
+}
+
+/// [`crate::git::diff::parse_numstat_z_rows`] over raw bytes: `added\tdeleted\tpath\0`,
+/// a rename as `added\tdeleted\t\0old\0new\0`, `-` counts meaning binary.
+///
+/// Splitting on the NUL and TAB BYTES is what keeps the two parsers equivalent:
+/// neither byte can occur inside a multi-byte UTF-8 sequence, so a lossy decode
+/// cannot move a field boundary. `entry.path` is the lossy spelling of the
+/// reported (new) name — display only, since the verdict is taken on `names`.
+fn parse_numstat_z_rows_bytes(bytes: &[u8]) -> Vec<DiffStatRowBytes> {
+    let count = |field: &[u8]| {
+        std::str::from_utf8(field)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    };
+    let mut rows = Vec::new();
+    let mut tokens = bytes.split(|byte| *byte == 0);
+    while let Some(token) = tokens.next() {
+        if token.is_empty() {
+            continue;
+        }
+        let mut fields = token.splitn(3, |byte| *byte == b'\t');
+        let (Some(added), Some(deleted), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let is_binary = added == b"-";
+        let (added, deleted) = (count(added), count(deleted));
+        let (path, names) = if path.is_empty() {
+            // rename: old path, then new path — the entry reports the new one.
+            let old = tokens.next().unwrap_or(&[]);
+            match tokens.next() {
+                Some(new_path) if !new_path.is_empty() => (
+                    new_path.to_vec(),
+                    [old, new_path]
+                        .into_iter()
+                        .filter(|n| !n.is_empty())
+                        .map(<[u8]>::to_vec)
+                        .collect(),
+                ),
+                _ => continue,
+            }
+        } else {
+            (path.to_vec(), vec![path.to_vec()])
+        };
+        rows.push(DiffStatRowBytes {
+            entry: DiffStatEntry {
+                path: String::from_utf8_lossy(&path).into_owned(),
+                added,
+                deleted,
+                is_binary,
+            },
+            names,
+        });
+    }
+    rows
+}
+
 /// The `git diff` described by `content_args` with every AI-ignored file removed.
 ///
 /// Two passes, because git's gitignore engine takes path STRINGS while `git diff`
 /// takes pathspecs and has no `--pathspec-from-file`: name the changed files with
-/// `numstat_args`, get verdicts from [`filter_ignored`], then re-run the content
-/// diff excluding the concrete names it hid. A rename is hidden whole when either
-/// side matches, and an unreadable name is hidden unconditionally.
+/// `numstat_args`, get verdicts from [`filter_ignored_bytes`], then re-run the
+/// content diff excluding the concrete names it hid. A rename is hidden whole when
+/// either side matches, and a name that is not valid UTF-8 stays hidden whatever
+/// its verdict — the app cannot vouch for a spelling it cannot decode.
 ///
 /// Once there is anything to filter, every spawn runs at the working-tree
 /// TOPLEVEL, resolved here rather than trusted from `repo_path`: below the
@@ -524,19 +589,19 @@ pub async fn filtered_diff(
     // subdirectory). So these spawns stay byte-identical to the unfiltered
     // command, and the common case pays nothing.
     //
-    // The fast RETURN carries a second condition: every changed name decoded
-    // cleanly. An unreadable name is hidden with no pattern configured at all, so
+    // The fast RETURN carries a second condition: every changed name is valid
+    // UTF-8. A name that is not stays hidden with no pattern configured at all, so
     // one here falls through to the two-pass flow — which hides it on the same
-    // unconditional rule — rather than shipping its content under a `[]` verdict.
+    // rule — rather than shipping its content under a `[]` verdict.
     if !has_positive_pattern(exclude) {
         let (content, stat) = tokio::try_join!(
             run_git(Some(repo_path), content_args, DEFAULT_TIMEOUT),
             run_git(Some(repo_path), numstat_args, DEFAULT_TIMEOUT)
         )?;
-        let rows = parse_numstat_z_rows(&stat.stdout_lossy());
-        if !rows
+        let rows = parse_numstat_z_rows_bytes(&stat.stdout);
+        if rows
             .iter()
-            .any(|row| row.names.iter().any(|n| n.contains(REPLACEMENT)))
+            .all(|row| row.names.iter().all(|n| std::str::from_utf8(n).is_ok()))
         {
             return Ok(FilteredDiff {
                 text: content.stdout_lossy(),
@@ -555,16 +620,18 @@ pub async fn filtered_diff(
 
     for _ in 0..MAX_ATTEMPTS {
         let stat = run_git(Some(repo_path), numstat_args, DEFAULT_TIMEOUT).await?;
-        let rows = parse_numstat_z_rows(&stat.stdout_lossy());
+        let rows = parse_numstat_z_rows_bytes(&stat.stdout);
         let before = recheck.then(|| sorted_names(&rows));
 
-        // Only names we can vouch for byte-for-byte are worth asking about.
-        let readable: Vec<String> = rows
+        // Every name, as its real bytes: gitignore matching is byte-domain, so a
+        // name that lost bytes to a decode is a name no rule of the user's can
+        // reach. A verdict is still taken on the undecodable ones — it decides
+        // whether a hidden file is attributed to a pattern.
+        let names: Vec<Vec<u8>> = rows
             .iter()
-            .filter(|row| !row.names.iter().any(|n| n.contains(REPLACEMENT)))
             .flat_map(|row| row.names.iter().cloned())
             .collect();
-        let ignored: HashSet<String> = filter_ignored(repo_path, &readable, exclude)
+        let ignored: HashSet<Vec<u8>> = filter_ignored_bytes(repo_path, &names, exclude)
             .await?
             .into_iter()
             .collect();
@@ -573,16 +640,22 @@ pub async fn filtered_diff(
         let mut files: Vec<DiffStatEntry> = Vec::new();
         let mut excluded_files = 0u32;
         for row in rows {
+            // Fail-closed display: a name that is not valid UTF-8 is withheld
+            // whatever its verdict, since the app cannot vouch for a spelling it
+            // cannot decode.
             let hidden = row
                 .names
                 .iter()
-                .any(|n| n.contains(REPLACEMENT) || ignored.contains(n));
+                .any(|n| ignored.contains(n) || std::str::from_utf8(n).is_err());
             if !hidden {
                 files.push(row.entry);
                 continue;
             }
             excluded_files += 1;
+            // Terms are built from the LOSSY spelling — the only one a pathspec
+            // can carry — which is what [`widened_glob_for_name`] makes safe.
             for name in row.names {
+                let name = String::from_utf8_lossy(&name);
                 terms.push(if needs_widened_term(&name) {
                     format!(":(exclude,glob){}", widened_glob_for_name(&name))
                 } else {
@@ -617,7 +690,7 @@ pub async fn filtered_diff(
 
         if let Some(before) = before {
             let stat = run_git(Some(repo_path), numstat_args, DEFAULT_TIMEOUT).await?;
-            if sorted_names(&parse_numstat_z_rows(&stat.stdout_lossy())) != before {
+            if sorted_names(&parse_numstat_z_rows_bytes(&stat.stdout)) != before {
                 continue;
             }
         }
@@ -632,10 +705,11 @@ pub async fn filtered_diff(
     ))
 }
 
-/// Every path a numstat pass named, both rename sides included, in a
-/// comparable order.
-fn sorted_names(rows: &[DiffStatRow]) -> Vec<String> {
-    let mut names: Vec<String> = rows
+/// Every path a numstat pass named, both rename sides included, as the real
+/// bytes and in a comparable order — the recheck compares spellings that cannot
+/// collide, which a lossy decode's U+FFFD runs can.
+fn sorted_names(rows: &[DiffStatRowBytes]) -> Vec<Vec<u8>> {
+    let mut names: Vec<Vec<u8>> = rows
         .iter()
         .flat_map(|row| row.names.iter().cloned())
         .collect();
@@ -725,6 +799,55 @@ mod tests {
         assert!(needs_widened_term("caf\u{FFFD}.env"));
         assert!(!needs_widened_term("weird[1].txt"));
         assert!(!needs_widened_term("notes "));
+    }
+
+    /// The byte parser and the `String` one read the SAME grammar: 0x00 and 0x09
+    /// cannot occur inside a multi-byte UTF-8 sequence, so a lossy decode moves no
+    /// field boundary. Pinned over every row shape so the pair cannot drift.
+    #[test]
+    fn the_byte_numstat_parser_matches_the_string_one() {
+        let mut bytes: Vec<u8> = b"3\t1\tapp.js\0-\t-\tbinary.bin\0".to_vec();
+        bytes.extend_from_slice(b"0\t0\t\0util.js\0helpers.js\0");
+        // The two names only bytes tell apart: a lone `0xE9` (invalid UTF-8) and a
+        // REAL U+FFFD character, which decodes to the same spelling.
+        bytes.extend_from_slice(b"2\t0\tcaf\xE9.env\0");
+        bytes.extend_from_slice("5\t4\tx\u{FFFD}y.txt\0".as_bytes());
+        // A row short of its three fields is skipped by both.
+        bytes.extend_from_slice(b"nope\0");
+        // Malformed renames — an empty new side, then one truncated at end of
+        // input — skip in both parsers without desynchronizing the row between.
+        bytes.extend_from_slice(b"9\t9\t\0old-only\0\0");
+        bytes.extend_from_slice(b"7\t7\ttail.js\0");
+        bytes.extend_from_slice(b"1\t2\t\0trunc-old\0");
+
+        let by_bytes = parse_numstat_z_rows_bytes(&bytes);
+        let by_string = crate::git::diff::parse_numstat_z_rows(&String::from_utf8_lossy(&bytes));
+        assert_eq!(by_bytes.len(), 6);
+        assert_eq!(by_bytes[5].entry.path, "tail.js");
+        assert_eq!(by_bytes.len(), by_string.len());
+        for (b, s) in by_bytes.iter().zip(&by_string) {
+            assert_eq!(
+                b.names
+                    .iter()
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .collect::<Vec<_>>(),
+                s.names
+            );
+            assert_eq!(b.entry.path, s.entry.path);
+            assert_eq!(
+                (b.entry.added, b.entry.deleted, b.entry.is_binary),
+                (s.entry.added, s.entry.deleted, s.entry.is_binary)
+            );
+        }
+
+        // …and the byte parser really kept the bytes the decode would have eaten.
+        assert_eq!(by_bytes[3].names, vec![b"caf\xE9.env".to_vec()]);
+        assert_eq!(by_bytes[3].entry.path, "caf\u{FFFD}.env");
+        assert_eq!(
+            by_bytes[4].names,
+            vec!["x\u{FFFD}y.txt".as_bytes().to_vec()],
+            "the real U+FFFD is a character, not a lost byte"
+        );
     }
 
     /// Every fixture path in the parity repo, repo-relative and sorted.
@@ -1884,9 +2007,9 @@ mod tests {
         .to_string()
     }
 
-    /// A name that is not valid UTF-8 reaches us only as a lossy string, so its
-    /// check-ignore verdict cannot be trusted in the leak direction: the row is
-    /// hidden unconditionally, through a widened glob rather than an exact term.
+    /// A name that is not valid UTF-8 has no text spelling the app can vouch for,
+    /// so the row is hidden whatever its verdict — through a widened glob rather
+    /// than an exact term, since only the lossy spelling can reach a pathspec.
     #[tokio::test]
     async fn an_unreadable_name_is_hidden_unconditionally() {
         let (_dir, repo) = seed_repo("lossy").await;
@@ -1914,11 +2037,11 @@ mod tests {
         assert!(!filtered.text.contains("caf"), "{}", filtered.text);
     }
 
-    /// An unreadable name is hidden with NO pattern configured — the "hidden
-    /// unconditionally" rule owes nothing to the user's list. A list that hides
-    /// nothing (empty, or negations only) still takes the two-pass flow when a
-    /// changed name lost bytes, because its content would otherwise ship while
-    /// every disclosure surface reported the file withheld.
+    /// An unreadable name is hidden with NO pattern configured — the fail-closed
+    /// display rule owes nothing to the user's list. A list that hides nothing
+    /// (empty, or negations only) still takes the two-pass flow when a changed name
+    /// is not valid UTF-8, because its content would otherwise ship while every
+    /// disclosure surface reported the file withheld.
     #[tokio::test]
     async fn an_unreadable_name_is_hidden_even_with_no_patterns() {
         let (_dir, repo) = seed_repo("lossy-nopattern").await;
@@ -1974,6 +2097,67 @@ mod tests {
         );
         assert_eq!(out.excluded_files, 0);
         assert!(out.text.contains("+++ b/a.txt"), "{}", out.text);
+    }
+
+    /// A REAL U+FFFD in a name is an ordinary character, not a byte that was
+    /// lost: the name decodes exactly, so it follows its true verdict instead of
+    /// being hidden as collateral of a decode that never happened.
+    #[tokio::test]
+    async fn a_real_replacement_character_name_follows_its_verdict() {
+        let (_dir, repo) = seed_repo("realfffd").await;
+        let blob = seed_blob(&repo).await;
+
+        let mut rows: Vec<u8> = format!("100644 blob {blob}\t").into_bytes();
+        rows.extend_from_slice("x\u{FFFD}y.txt\n".as_bytes());
+        rows.extend_from_slice(format!("100644 blob {blob}\tkeep.txt\n").as_bytes());
+        let (base, head) = commit_tree_pair(&repo, &rows).await;
+
+        // A positive pattern that matches neither name, so the two-pass flow runs
+        // and a verdict — not the unfiltered fast path — decides.
+        let out = git_branch_diff(repo, base, head, None, Some(vec!["*.nomatch".to_string()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["keep.txt", "x\u{FFFD}y.txt"]
+        );
+        assert_eq!(out.excluded_files, 0);
+        assert!(out.text.contains("x\u{FFFD}y.txt"), "{}", out.text);
+    }
+
+    /// …and a pattern that spells that same U+FFFD hides it, like any other
+    /// character: the name is reachable by a rule the user can write.
+    #[tokio::test]
+    async fn a_pattern_spelling_a_real_replacement_character_hides_its_file() {
+        let (_dir, repo) = seed_repo("realfffd-hit").await;
+        let blob = seed_blob(&repo).await;
+
+        let mut rows: Vec<u8> = format!("100644 blob {blob}\t").into_bytes();
+        rows.extend_from_slice("x\u{FFFD}y.txt\n".as_bytes());
+        rows.extend_from_slice(format!("100644 blob {blob}\tkeep.txt\n").as_bytes());
+        let (base, head) = commit_tree_pair(&repo, &rows).await;
+
+        let out = git_branch_diff(
+            repo,
+            base,
+            head,
+            None,
+            Some(vec!["x\u{FFFD}y.txt".to_string()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["keep.txt"]
+        );
+        assert_eq!(out.excluded_files, 1);
+        assert!(!out.text.contains("x\u{FFFD}y"), "{}", out.text);
     }
 
     /// A `repo_path` BELOW the toplevel still filters correctly, because the

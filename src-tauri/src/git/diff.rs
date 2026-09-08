@@ -562,11 +562,15 @@ fn truncate_at_file_boundary(text: String, max: usize) -> (String, bool) {
 /// One `--numstat -z` row together with EVERY path it names — one for a regular
 /// change, both sides for a rename.
 ///
-/// The AI-ignore filter needs the old side too: excluding only one side of a
-/// rename leaves the other side's half of the change (an `A` or `D` row) in the
-/// diff, so a match on either name has to hide the pair.
+/// The AI-ignore filter reads names through this struct's BYTE twin
+/// (`ai_ignore::parse_numstat_z_rows_bytes`); `names` here is read only by the
+/// equivalence pin that holds the two parsers to one grammar — hence test-scoped.
+/// Both carry EVERY side of a rename: excluding one side would leave the other
+/// half of the change (an `A` or `D` row) in the diff, so a match on either name
+/// has to hide the pair.
 pub(crate) struct DiffStatRow {
     pub entry: DiffStatEntry,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub names: Vec<String>,
 }
 

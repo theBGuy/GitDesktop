@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize, Default)]
@@ -110,7 +111,7 @@ pub async fn gh_security_get(repo_path: String) -> AppResult<SecurityStatus> {
     );
 
     let v: Value = serde_json::from_str(&repo?.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse repo: {e}")))?;
+        .map_err(|e| gh_unreadable("the repository", format!("could not parse repo: {e}")))?;
     let is_private = v.get("private").and_then(Value::as_bool).unwrap_or(false);
     let sa = v.get("security_and_analysis");
     let status_on = |key: &str| -> Option<bool> {

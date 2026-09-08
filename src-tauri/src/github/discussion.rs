@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::issue::{map_reaction_groups, IssueReactions};
 use crate::github::pr::{PrAuthor, PrRef, RepoLabel};
 use crate::github::runner::{run_gh, GhOutput, GH_NETWORK_TIMEOUT};
@@ -106,8 +107,12 @@ pub async fn gh_discussion_categories(repo_path: String) -> AppResult<Discussion
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse discussion categories: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the discussion categories",
+            format!("could not parse discussion categories: {e}"),
+        )
+    })?;
     let repo = value.pointer("/data/repository");
     let repo_id = repo
         .and_then(|r| r.get("id"))
@@ -258,8 +263,9 @@ pub async fn gh_discussion_list(
         args.push(format!("query={LIST_QUERY}"));
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
-        let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Gh(format!("could not parse discussions: {e}")))?;
+        let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable("discussions", format!("could not parse discussions: {e}"))
+        })?;
         let discussions = value.pointer("/data/repository/discussions");
         // Propagate parse errors instead of silently yielding an empty list.
         let page_nodes: Vec<RawDiscussionNode> = discussions
@@ -267,7 +273,7 @@ pub async fn gh_discussion_list(
             .cloned()
             .map(serde_json::from_value)
             .transpose()
-            .map_err(|e| AppError::Gh(format!("could not parse discussions: {e}")))?
+            .map_err(|e| gh_unreadable("discussions", format!("could not parse discussions: {e}")))?
             .unwrap_or_default();
         let got_nodes = !page_nodes.is_empty();
         raw_nodes.extend(page_nodes);
@@ -511,13 +517,13 @@ pub async fn gh_discussion_view(
     )
     .await?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse discussion: {e}")))?;
+        .map_err(|e| gh_unreadable("the discussion", format!("could not parse discussion: {e}")))?;
     let raw: RawDiscussion = value
         .pointer("/data/repository/discussion")
         .cloned()
         .map(serde_json::from_value)
         .transpose()
-        .map_err(|e| AppError::Gh(format!("could not parse discussion: {e}")))?
+        .map_err(|e| gh_unreadable("the discussion", format!("could not parse discussion: {e}")))?
         .ok_or_else(|| AppError::Gh("discussion not found".into()))?;
 
     let category = raw.category.unwrap_or_default();
@@ -638,8 +644,12 @@ pub async fn gh_discussion_create(
         ],
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse created discussion: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the new discussion",
+            format!("could not parse created discussion: {e}"),
+        )
+    })?;
     let d = value.pointer("/data/createDiscussion/discussion");
     Ok(PrRef {
         number: d
@@ -823,7 +833,7 @@ pub async fn gh_discussion_reactions(
     )
     .await?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse reactions: {e}")))?;
+        .map_err(|e| gh_unreadable("the reactions", format!("could not parse reactions: {e}")))?;
     let discussion = value.pointer("/data/repository/discussion");
 
     let body = map_reaction_groups(discussion.and_then(|d| d.get("reactionGroups")));

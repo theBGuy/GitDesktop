@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
 
 /// One collaborator. Serializes camelCase for the frontend; deserializes from
@@ -110,8 +111,12 @@ pub async fn gh_collaborators_list(repo_path: String) -> AppResult<Vec<Collabora
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse collaborators: {e}")))
+    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "collaborators",
+            format!("could not parse collaborators: {e}"),
+        )
+    })
 }
 
 /// Adds or re-roles a collaborator. Returns `true` when GitHub created a pending
@@ -178,8 +183,12 @@ pub async fn gh_invitations_list(repo_path: String) -> AppResult<Vec<Invitation>
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let raws: Vec<RawInvitation> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse invitations: {e}")))?;
+    let raws: Vec<RawInvitation> = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the invitations",
+            format!("could not parse invitations: {e}"),
+        )
+    })?;
     Ok(raws
         .into_iter()
         .map(|r| {

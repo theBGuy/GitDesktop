@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::issue::repo_owner_name;
 use crate::github::pr::validate_graphql_embed;
 use crate::github::runner::{run_gh, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
@@ -279,8 +280,12 @@ pub async fn gh_item_projects(
     )
     .await
     .map_err(map_scope_error)?;
-    let value: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the item's projects: {e}")))?;
+    let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the assigned projects",
+            format!("could not parse the item's projects: {e}"),
+        )
+    })?;
     Ok(parse_item_projects(&value, field))
 }
 

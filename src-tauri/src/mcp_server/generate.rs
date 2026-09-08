@@ -1186,18 +1186,20 @@ impl GitDesktopMcp {
             .map_err(app_err)
     }
 
-    /// Untracked (new) file paths, NUL-separated and raw — these names are matched
-    /// against the user's AI-ignore rules, so any rewriting of them fails OPEN. Without
-    /// `-z` git C-quotes a name holding a quote, backslash, or non-ASCII byte
-    /// (`"caf\303\251.txt"`), and trimming would fold a trailing-space name onto a
-    /// different name's spelling; either way the rule that covers it stops matching.
+    /// Untracked (new) file paths as the BYTES git printed — these names are matched
+    /// against the user's AI-ignore rules, and gitignore matching is byte-domain, so
+    /// any rewriting of them fails OPEN. Without `-z` git C-quotes a name holding a
+    /// quote, backslash, or non-ASCII byte (`"caf\303\251.txt"`), and trimming would
+    /// fold a trailing-space name onto a different name's spelling; either way the rule
+    /// that covers it stops matching. Spelling a name as text is the display boundary's
+    /// job, once its verdict is in.
     ///
     /// Listed from the working-tree TOPLEVEL rather than `self.repo` as given:
     /// `ls-files` prints names relative to its cwd and lists only that subtree, so a
     /// `--repo` pointing below the root would both hand the engine names an anchored
     /// rule cannot match — leaking the NAME — and silently drop every untracked file
     /// outside that subdirectory.
-    async fn untracked_files(&self) -> Result<Vec<String>, crate::error::AppError> {
+    async fn untracked_files(&self) -> Result<Vec<Vec<u8>>, crate::error::AppError> {
         let toplevel = self.toplevel().await?;
         let out = crate::git::runner::run_git(
             Some(toplevel),
@@ -1206,10 +1208,10 @@ impl GitDesktopMcp {
         )
         .await?;
         Ok(out
-            .stdout_lossy()
-            .split('\0')
+            .stdout
+            .split(|byte| *byte == 0)
             .filter(|p| !p.is_empty())
-            .map(str::to_string)
+            .map(<[u8]>::to_vec)
             .collect())
     }
 
@@ -1872,33 +1874,38 @@ struct FilteredUntracked {
     /// Every hidden name — pattern matches and unreadable ones alike, since the
     /// disclosure counts what the model can't see, not why.
     excluded: u32,
-    /// The subset hidden for being unreadable, which no pattern could have matched.
-    /// Broken out because a message that blames the user's patterns for these sends
-    /// them to a list that may well be empty.
+    /// The subset hidden for being undecodable rather than by a rule. Broken out
+    /// because a message that blames the user's patterns for these sends them to a
+    /// list that may well be empty.
     unreadable: u32,
 }
 
 /// The untracked paths the user's AI-ignore patterns leave visible, and how many
-/// they hide. Runs on the same gitignore engine the diff side is pinned to, and
-/// filters here rather than in `untracked_files` so the names reach the engine as the
-/// bytes the rules were written against, unnormalized.
+/// they hide. Runs on the same gitignore engine the diff side is pinned to, over the
+/// name BYTES git printed — the spelling the rules were written against.
 ///
-/// A name carrying U+FFFD is hidden unconditionally: the path was not valid UTF-8, the
-/// lossy decode already replaced those bytes, and no rule can match what the user
-/// actually named — so it fails CLOSED (a real U+FFFD in a name is hidden too).
+/// A name that is not valid UTF-8 stays hidden whatever its verdict, since the app
+/// cannot vouch for a spelling it cannot decode. Its verdict still decides the
+/// ATTRIBUTION: a matched one is a pattern hit, not an unreadable name.
 async fn filter_untracked_by_ai_ignore(
     repo: &str,
-    paths: Vec<String>,
+    paths: Vec<Vec<u8>>,
     exclude: &[String],
 ) -> Result<FilteredUntracked, crate::error::AppError> {
-    let matched = crate::git::ai_ignore::filter_ignored(repo, &paths, exclude).await?;
-    let matched: std::collections::HashSet<String> = matched.into_iter().collect();
+    let matched = crate::git::ai_ignore::filter_ignored_bytes(repo, &paths, exclude).await?;
+    let matched: std::collections::HashSet<Vec<u8>> = matched.into_iter().collect();
     let total = paths.len();
-    let unreadable = paths.iter().filter(|p| p.contains('\u{FFFD}')).count() as u32;
-    let kept: Vec<String> = paths
-        .into_iter()
-        .filter(|p| !matched.contains(p) && !p.contains('\u{FFFD}'))
-        .collect();
+    let mut kept: Vec<String> = Vec::new();
+    let mut unreadable = 0u32;
+    for path in &paths {
+        if matched.contains(path) {
+            continue;
+        }
+        match std::str::from_utf8(path) {
+            Ok(name) => kept.push(name.to_string()),
+            Err(_) => unreadable += 1,
+        }
+    }
     Ok(FilteredUntracked {
         excluded: (total - kept.len()) as u32,
         paths: kept,
@@ -2840,14 +2847,10 @@ mod tests {
         let repo_s = repo.to_string_lossy().into_owned();
         git(&repo_s, &["init", "-q"]).await;
 
-        let untracked = vec![
-            "secrets/customer-list.md".to_string(),
-            "src/app.rs".to_string(),
-        ];
-        let filtered =
-            filter_untracked_by_ai_ignore(&repo_s, untracked, &["secrets/".to_string()])
-                .await
-                .expect("filter untracked");
+        let untracked = vec![b"secrets/customer-list.md".to_vec(), b"src/app.rs".to_vec()];
+        let filtered = filter_untracked_by_ai_ignore(&repo_s, untracked, &["secrets/".to_string()])
+            .await
+            .expect("filter untracked");
         assert_eq!(filtered.paths, vec!["src/app.rs".to_string()]);
         assert_eq!(filtered.excluded, 1);
         assert_eq!(
@@ -2877,11 +2880,11 @@ mod tests {
             .contains("[1 additional changed file(s) hidden by the user's AI ignore rules]"));
     }
 
-    /// A name that lost bytes to the lossy decode (invalid UTF-8 on disk — reachable on
-    /// Linux/macOS, not creatable on Windows, so it's fed in as a String here) can match
-    /// no rule the user could write, and is hidden on that basis alone: no pattern is
-    /// configured here, and it is still dropped and counted — and the note the recipe
-    /// renders from that output cites only the unreadable cause.
+    /// A name that is not valid UTF-8 (reachable on Linux/macOS, not creatable on
+    /// Windows, so it's fed in as bytes here) has no text spelling the app can vouch
+    /// for, and is hidden on that basis alone: no pattern is configured here, and it is
+    /// still dropped and counted — and the note the recipe renders from that output
+    /// cites only the unreadable cause.
     #[tokio::test]
     async fn untracked_names_that_lost_bytes_are_hidden() {
         let base_dir = tempfile::Builder::new()
@@ -2893,7 +2896,8 @@ mod tests {
         let repo_s = repo.to_string_lossy().into_owned();
         git(&repo_s, &["init", "-q"]).await;
 
-        let paths = vec!["ok.rs".to_string(), "sec\u{FFFD}ret.md".to_string()];
+        // A lone `0xFF` is invalid UTF-8, so this name has no `String` spelling at all.
+        let paths = vec![b"ok.rs".to_vec(), b"sec\xFFret.md".to_vec()];
         let filtered = filter_untracked_by_ai_ignore(&repo_s, paths, &[])
             .await
             .expect("filter untracked");
@@ -2932,6 +2936,67 @@ mod tests {
         );
     }
 
+    /// A REAL U+FFFD in an untracked name is an ordinary character: the name spells
+    /// exactly what the user typed, so an unmatching pattern list leaves it visible
+    /// rather than counting it as a name nobody can read.
+    #[tokio::test]
+    async fn untracked_names_holding_a_real_replacement_character_are_kept() {
+        let base_dir = tempfile::Builder::new()
+            .prefix("gd-untracked-realfffd-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base_dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+
+        let paths = vec![b"ok.rs".to_vec(), "x\u{FFFD}y.md".as_bytes().to_vec()];
+        let filtered = filter_untracked_by_ai_ignore(&repo_s, paths, &["*.nomatch".to_string()])
+            .await
+            .expect("filter untracked");
+        assert_eq!(
+            filtered.paths,
+            vec!["ok.rs".to_string(), "x\u{FFFD}y.md".to_string()]
+        );
+        assert_eq!(filtered.excluded, 0);
+        assert_eq!(filtered.unreadable, 0);
+    }
+
+    /// A hidden name is attributed to the reason that actually hid it. An
+    /// undecodable name a PATTERN matched is a pattern hit; only an undecodable one
+    /// no rule reached is unreadable — reversed, the recipe's note points the user
+    /// at a rule list that never decided anything.
+    #[tokio::test]
+    async fn an_undecodable_name_a_pattern_matched_counts_as_a_pattern_hit() {
+        let base_dir = tempfile::Builder::new()
+            .prefix("gd-untracked-attribution-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = base_dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+
+        // Driven straight through the filter: no filesystem can carry these names
+        // under Windows git, and the engine matches path bytes that need not exist.
+        let matched = b"caf\xE9.env".to_vec();
+        let unmatched = b"caf\xE9.md".to_vec();
+        let filtered = filter_untracked_by_ai_ignore(
+            &repo_s,
+            vec![b"ok.rs".to_vec(), matched, unmatched],
+            &["*.env".to_string()],
+        )
+        .await
+        .expect("filter untracked");
+
+        assert_eq!(filtered.paths, vec!["ok.rs".to_string()]);
+        assert_eq!(filtered.excluded, 2, "both undecodable names are withheld");
+        assert_eq!(
+            filtered.unreadable, 1,
+            "only the one no pattern reached is blamed on its spelling"
+        );
+    }
+
     /// `-z` keeps the listed names byte-exact: a name with a space stays whole, and a
     /// non-ASCII one arrives raw rather than C-quoted (`"caf\303\251.txt"`), which is
     /// what makes it comparable to the AI-ignore rules at all. The other quoted shapes
@@ -2964,9 +3029,9 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "café.txt".to_string(),
-                "plain.rs".to_string(),
-                "sub dir/a b.md".to_string(),
+                "café.txt".as_bytes().to_vec(),
+                b"plain.rs".to_vec(),
+                b"sub dir/a b.md".to_vec(),
             ]
         );
     }
@@ -3014,8 +3079,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "root-untracked.txt".to_string(),
-                "services/api/secret.env".to_string(),
+                b"root-untracked.txt".to_vec(),
+                b"services/api/secret.env".to_vec(),
             ],
             "names are root-relative and the whole tree is listed"
         );

@@ -14,7 +14,8 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
+use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT};
 
 /// One open pull request or issue in the inbox, flattened for the frontend.
@@ -185,8 +186,12 @@ struct MyWorkLeg {
 /// skipped rather than sinking the batch. A top-level parse failure IS an error —
 /// an empty inbox and unreadable output must not look alike to the caller.
 fn parse_my_work(stdout: &str, default_is_pull_request: bool) -> AppResult<MyWorkLeg> {
-    let raw: Vec<Value> = serde_json::from_str(stdout)
-        .map_err(|e| AppError::Gh(format!("could not parse your GitHub work items: {e}")))?;
+    let raw: Vec<Value> = serde_json::from_str(stdout).map_err(|e| {
+        gh_unreadable(
+            "your work items",
+            format!("could not parse your GitHub work items: {e}"),
+        )
+    })?;
     let raw_len = raw.len();
     Ok(MyWorkLeg {
         items: raw

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT};
 
 /// gh emits `null` for a not-yet-decided conclusion (and timestamps that
@@ -442,8 +443,12 @@ pub async fn gh_run_page(
         run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT),
         workflow_name_index(&repo_path, &slug),
     );
-    let parsed: RestRunPage = serde_json::from_str(&out?.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the workflow runs: {e}")))?;
+    let parsed: RestRunPage = serde_json::from_str(&out?.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the workflow runs",
+            format!("could not parse the workflow runs: {e}"),
+        )
+    })?;
     let total_count = parsed.total_count;
     let runs: Vec<WorkflowRun> = parsed
         .workflow_runs
@@ -478,8 +483,12 @@ pub async fn gh_run_view(repo_path: String, run_id: u64) -> AppResult<RunDetail>
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh run view: {e}")))
+    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the workflow run",
+            format!("could not parse gh run view: {e}"),
+        )
+    })
 }
 
 /// Re-runs a completed run — all jobs, or only the failed ones.
@@ -616,8 +625,12 @@ async fn fetch_workflows(repo_path: &str, slug: &str) -> AppResult<Vec<Workflow>
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh workflow list: {e}")))
+    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the workflows",
+            format!("could not parse gh workflow list: {e}"),
+        )
+    })
 }
 
 /// The repo's workflows, for the manual-dispatch picker.

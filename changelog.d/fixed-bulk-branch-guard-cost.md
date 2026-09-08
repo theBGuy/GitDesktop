@@ -1,0 +1,1 @@
+- Cleaning up many branches at once runs faster: each branch's safety check now reuses work instead of repeating it.

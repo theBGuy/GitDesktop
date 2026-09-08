@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize, Deserialize)]
@@ -129,7 +130,7 @@ pub async fn gh_secrets_list(
     let path = secrets_path(&slug, seg, env.as_deref())?;
     let out = run_gh(Some(&repo_path), &["api", &path], GH_NETWORK_TIMEOUT).await?;
     let resp: SecretsResp = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse secrets: {e}")))?;
+        .map_err(|e| gh_unreadable("the secrets", format!("could not parse secrets: {e}")))?;
     Ok(resp.secrets)
 }
 
@@ -222,7 +223,7 @@ pub async fn gh_variables_list(
     let path = variables_path(&slug, env.as_deref())?;
     let out = run_gh(Some(&repo_path), &["api", &path], GH_NETWORK_TIMEOUT).await?;
     let resp: VariablesResp = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse variables: {e}")))?;
+        .map_err(|e| gh_unreadable("the variables", format!("could not parse variables: {e}")))?;
     Ok(resp.variables)
 }
 

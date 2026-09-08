@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize, Deserialize)]
@@ -49,7 +50,7 @@ pub async fn gh_rulesets_list(repo_path: String) -> AppResult<Vec<RulesetSummary
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse rulesets: {e}")))
+        .map_err(|e| gh_unreadable("the rulesets", format!("could not parse rulesets: {e}")))
 }
 
 /// The full ruleset object (raw GitHub JSON), for the editor to seed from.
@@ -63,7 +64,7 @@ pub async fn gh_ruleset_get(repo_path: String, id: u64) -> AppResult<Value> {
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the ruleset: {e}")))
+        .map_err(|e| gh_unreadable("the ruleset", format!("could not parse the ruleset: {e}")))
 }
 
 #[tauri::command]
@@ -241,8 +242,12 @@ pub async fn gh_branch_required_checks(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let rules: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the branch rules: {e}")))?;
+    let rules: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the branch rules",
+            format!("could not parse the branch rules: {e}"),
+        )
+    })?;
     Ok(BranchRequiredRules {
         contexts: required_check_contexts(&rules),
         required_approving_review_count: required_approving_reviews(&rules),
@@ -267,7 +272,7 @@ pub async fn gh_ruleset_set_enforcement(
     )
     .await?;
     let full: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the ruleset: {e}")))?;
+        .map_err(|e| gh_unreadable("the ruleset", format!("could not parse the ruleset: {e}")))?;
     let body = json!({
         "name": full.get("name").cloned().unwrap_or(json!("")),
         "target": full.get("target").cloned().unwrap_or(json!("branch")),
@@ -329,8 +334,12 @@ pub async fn gh_check_run_apps(repo_path: String) -> AppResult<Vec<CheckApp>> {
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let repo: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the repository: {e}")))?;
+    let repo: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the repository",
+            format!("could not parse the repository: {e}"),
+        )
+    })?;
     let branch = repo
         .get("default_branch")
         .and_then(Value::as_str)
@@ -346,8 +355,12 @@ pub async fn gh_check_run_apps(repo_path: String) -> AppResult<Vec<CheckApp>> {
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let payload: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the check runs: {e}")))?;
+    let payload: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the check runs",
+            format!("could not parse the check runs: {e}"),
+        )
+    })?;
     Ok(check_run_apps(&payload))
 }
 

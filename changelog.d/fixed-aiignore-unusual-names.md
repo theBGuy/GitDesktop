@@ -1,0 +1,1 @@
+- AI features now match ignore rules against file names exactly as git records them, so files with unusual names follow your rules instead of being hidden outright.

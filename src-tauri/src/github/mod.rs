@@ -111,9 +111,16 @@ pub(crate) fn fork_owner_of(slug: &str) -> &str {
     slug.split('/').next().unwrap_or_default()
 }
 
+/// A parse failure on GitHub output reaches the user: line 1 is what the toast and
+/// banner show (`firstMeaningfulLine`, src/lib/error-summary.ts), and `detail` — the
+/// raw serde/parse text — rides line 2 for the Details dialog.
+pub(crate) fn gh_unreadable(what: &str, detail: String) -> crate::error::AppError {
+    crate::error::AppError::Gh(format!("Couldn't read {what} from GitHub.\n{detail}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{fork_owner_of, lens_remote, valid_github_slug};
+    use super::{fork_owner_of, gh_unreadable, lens_remote, valid_github_slug};
 
     #[test]
     fn lens_remote_accepts_none_origin_upstream() {
@@ -140,6 +147,20 @@ mod tests {
         // A malformed slug with no slash yields the whole string (gh then errors).
         assert_eq!(fork_owner_of("nowhere"), "nowhere");
         assert_eq!(fork_owner_of(""), "");
+    }
+
+    #[test]
+    fn gh_unreadable_keeps_the_detail_on_its_own_line() {
+        // Two lines is the contract: the frontend summarizes line 1 and only routes
+        // the message through the Details dialog when it has more than one line.
+        let err = gh_unreadable(
+            "the pull request",
+            "could not parse gh pr view: boom".into(),
+        );
+        assert_eq!(
+            err.to_string(),
+            "Couldn't read the pull request from GitHub.\ncould not parse gh pr view: boom"
+        );
     }
 
     #[test]

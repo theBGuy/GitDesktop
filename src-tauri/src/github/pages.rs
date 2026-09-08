@@ -5,7 +5,8 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
+use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize, Default)]
@@ -42,8 +43,12 @@ pub async fn gh_pages_get(repo_path: String) -> AppResult<Option<PagesInfo>> {
     if out.code != 0 {
         return Ok(None); // 404 = Pages not enabled
     }
-    let v: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse pages: {e}")))?;
+    let v: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the Pages settings",
+            format!("could not parse pages: {e}"),
+        )
+    })?;
     let str_at = |ptr: &str| {
         v.pointer(ptr)
             .and_then(Value::as_str)

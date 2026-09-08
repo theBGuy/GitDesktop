@@ -5,6 +5,7 @@ use crate::forge::gitlab::null_to_default;
 use crate::forge::model::{ForgeTimelineEventOut, ForgeUserRef};
 use crate::forge::validate_compare_branch;
 use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
+use crate::github::gh_unreadable;
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 use crate::state::AppState;
@@ -200,8 +201,12 @@ pub async fn gh_list_repos() -> AppResult<GhRepoList> {
         description: Option<String>,
         pushed_at: Option<String>,
     }
-    let parsed: Vec<ApiRepo> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse your repositories: {e}")))?;
+    let parsed: Vec<ApiRepo> = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "your repositories",
+            format!("could not parse your repositories: {e}"),
+        )
+    })?;
     let repos = parsed
         .into_iter()
         .map(|r| GhRepo {
@@ -463,8 +468,12 @@ struct RawOwnerOrg {
 /// A missing viewer login is an error (there is nothing to publish under);
 /// null or login-less org entries are skipped rather than failing the list.
 fn parse_publish_owners(body: &str) -> AppResult<GithubPublishOwners> {
-    let parsed: RawOwnersBody = serde_json::from_str(body)
-        .map_err(|e| AppError::Gh(format!("could not parse the owner query: {e}")))?;
+    let parsed: RawOwnersBody = serde_json::from_str(body).map_err(|e| {
+        gh_unreadable(
+            "the available owners",
+            format!("could not parse the owner query: {e}"),
+        )
+    })?;
     let viewer = parsed
         .data
         .and_then(|d| d.viewer)
@@ -1294,8 +1303,12 @@ pub async fn gh_pr_base_divergence(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let refs: RawDivergenceRefs = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh pr view: {e}")))?;
+    let refs: RawDivergenceRefs = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request",
+            format!("could not parse gh pr view: {e}"),
+        )
+    })?;
     if refs.base_ref_name.is_empty() || refs.head_ref_name.is_empty() {
         return Err(AppError::Gh(format!(
             "GitHub reported no base/head refs for #{number}"
@@ -1305,8 +1318,12 @@ pub async fn gh_pr_base_divergence(
     // the first point they can be checked.
     let endpoint = build_divergence_compare_path(&slug, &refs)?;
     let out = run_gh(Some(&repo_path), &["api", &endpoint], GH_NETWORK_TIMEOUT).await?;
-    let compare: RawCompare = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse compare: {e}")))?;
+    let compare: RawCompare = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the branch comparison",
+            format!("could not parse compare: {e}"),
+        )
+    })?;
     Ok(PrBaseDivergence {
         ahead_by: compare.ahead_by,
         behind_by: compare.behind_by,
@@ -2234,8 +2251,12 @@ fn stack_write_args(endpoint: &str, pull_requests: &[u64]) -> Vec<String> {
 /// in the error. An unreadable success body is an error, never a default outcome —
 /// the caller reports these members back to the user as what the forge confirmed.
 fn stack_write_outcome_from(body: &str, op: &str) -> AppResult<StackWriteOutcome> {
-    let entry: GhStackEntry = serde_json::from_str(body)
-        .map_err(|e| AppError::Gh(format!("could not parse the {op} response: {e}")))?;
+    let entry: GhStackEntry = serde_json::from_str(body).map_err(|e| {
+        gh_unreadable(
+            "the pull request stack",
+            format!("could not parse the {op} response: {e}"),
+        )
+    })?;
     let Some(stack_number) = entry.number else {
         return Err(AppError::Gh(format!(
             "the {op} response carried no stack number"
@@ -2377,7 +2398,7 @@ pub async fn gh_pr_list(
         .unwrap_or_default()
     });
     let mut prs: Vec<PrInfo> = serde_json::from_str(&out?.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh pr list: {e}")))?;
+        .map_err(|e| gh_unreadable("pull requests", format!("could not parse gh pr list: {e}")))?;
     apply_stack_join(&mut prs, stacks.as_ref());
     Ok(prs)
 }
@@ -2715,14 +2736,22 @@ pub async fn gh_repo_labels(repo_path: String, lens: Option<String>) -> AppResul
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the label query: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the labels",
+            format!("could not parse the label query: {e}"),
+        )
+    })?;
     let nodes = value
         .pointer("/data/repository/labels/nodes")
         .cloned()
         .unwrap_or_else(|| serde_json::Value::Array(vec![]));
-    serde_json::from_value(nodes)
-        .map_err(|e| AppError::Gh(format!("could not parse the label query: {e}")))
+    serde_json::from_value(nodes).map_err(|e| {
+        gh_unreadable(
+            "the labels",
+            format!("could not parse the label query: {e}"),
+        )
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2760,14 +2789,22 @@ pub async fn gh_branch_protections(repo_path: String) -> AppResult<Vec<GhBranchP
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the protection query: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the branch protection rules",
+            format!("could not parse the protection query: {e}"),
+        )
+    })?;
     let nodes = value
         .pointer("/data/repository/branchProtectionRules/nodes")
         .cloned()
         .unwrap_or_else(|| serde_json::Value::Array(vec![]));
-    serde_json::from_value(nodes)
-        .map_err(|e| AppError::Gh(format!("could not parse the protection query: {e}")))
+    serde_json::from_value(nodes).map_err(|e| {
+        gh_unreadable(
+            "the branch protection rules",
+            format!("could not parse the protection query: {e}"),
+        )
+    })
 }
 
 #[derive(Serialize)]
@@ -2850,8 +2887,12 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the PR poll: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request",
+            format!("could not parse the PR poll: {e}"),
+        )
+    })?;
     let nodes = value
         .pointer("/data/repository/pullRequests/nodes")
         .and_then(|v| v.as_array())
@@ -2970,8 +3011,12 @@ pub async fn gh_pr_head_ref(repo_path: String, number: u64) -> AppResult<PrHeadR
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the PR head ref: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request's head branch",
+            format!("could not parse the PR head ref: {e}"),
+        )
+    })?;
     Ok(pr_head_ref_from_value(&value))
 }
 
@@ -3332,8 +3377,12 @@ pub async fn gh_pr_mergeability(
         GH_TIMEOUT,
     )
     .await?;
-    let row: GhMergeabilityRow = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh pr view: {e}")))?;
+    let row: GhMergeabilityRow = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request",
+            format!("could not parse gh pr view: {e}"),
+        )
+    })?;
     Ok(map_gh_mergeability(
         &row.state,
         &row.mergeable,
@@ -3368,7 +3417,7 @@ pub async fn gh_pr_list_mergeability(
     }
     let out = run_gh(Some(repo_path), &args, GH_TIMEOUT).await?;
     let rows: Vec<GhMergeabilityRow> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh pr list: {e}")))?;
+        .map_err(|e| gh_unreadable("pull requests", format!("could not parse gh pr list: {e}")))?;
     Ok(rows
         .into_iter()
         .map(|r| {
@@ -3677,8 +3726,12 @@ async fn gh_repo_merge_settings(repo_path: &str, pr_url: &str) -> AppResult<Repo
     args.push(&name_arg);
 
     let out = run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse merge settings: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the repository's merge settings",
+            format!("could not parse merge settings: {e}"),
+        )
+    })?;
     let repo = value.pointer("/data/repository");
     // A field GitHub omits/nulls stays `None` (unknown) rather than defaulting to a
     // gating value — the picker never disables an option on unknown.
@@ -3719,8 +3772,12 @@ pub async fn gh_pr_view(
         unknown: stack_unknown,
     } = probe;
     let out = out?;
-    let raw: RawPr = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh pr view: {e}")))?;
+    let raw: RawPr = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request",
+            format!("could not parse gh pr view: {e}"),
+        )
+    })?;
 
     let login = |a: Option<RawLogin>| a.map(|x| x.login).unwrap_or_default();
 
@@ -4031,8 +4088,12 @@ async fn current_requested_reviewer_logins(
         GH_TIMEOUT,
     )
     .await?;
-    let wrap: Wrap = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse reviewRequests: {e}")))?;
+    let wrap: Wrap = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the review requests",
+            format!("could not parse reviewRequests: {e}"),
+        )
+    })?;
     Ok(wrap
         .review_requests
         .into_iter()
@@ -4177,7 +4238,7 @@ pub async fn gh_pr_reactions(
     )
     .await?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse reactions: {e}")))?;
+        .map_err(|e| gh_unreadable("the reactions", format!("could not parse reactions: {e}")))?;
     let pr = value.pointer("/data/repository/pullRequest");
 
     let body = map_reaction_groups(pr.and_then(|p| p.get("reactionGroups")));
@@ -4420,8 +4481,12 @@ pub async fn pr_timeline(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse pr timeline: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request timeline",
+            format!("could not parse pr timeline: {e}"),
+        )
+    })?;
     let nodes = value
         .pointer("/data/repository/pullRequest/timelineItems/nodes")
         .and_then(serde_json::Value::as_array);
@@ -4556,8 +4621,13 @@ pub async fn commit_comments(
     )
     .await?;
     // `--slurp` yields `[[...page1...],[...page2...]]`; flatten.
-    let pages: Vec<Vec<GhCommitComment>> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the commit comments: {e}")))?;
+    let pages: Vec<Vec<GhCommitComment>> =
+        serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "the commit comments",
+                format!("could not parse the commit comments: {e}"),
+            )
+        })?;
     Ok(pages
         .into_iter()
         .flatten()
@@ -4880,8 +4950,12 @@ async fn gh_pr_files_paginated(
     .await?;
 
     // `--slurp` yields `[[...page1...],[...page2...]]`; flatten to the file list.
-    let pages: Vec<Vec<GhPrFile>> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the PR file list: {e}")))?;
+    let pages: Vec<Vec<GhPrFile>> = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request's files",
+            format!("could not parse the PR file list: {e}"),
+        )
+    })?;
     Ok(pages.into_iter().flatten().collect())
 }
 
@@ -5065,8 +5139,13 @@ async fn gh_pr_commits_paginated(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let pages: Vec<Vec<GhPrRestCommit>> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the PR commit list: {e}")))?;
+    let pages: Vec<Vec<GhPrRestCommit>> =
+        serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "the pull request's commits",
+                format!("could not parse the PR commit list: {e}"),
+            )
+        })?;
     Ok(pages
         .into_iter()
         .flatten()
@@ -5099,8 +5178,13 @@ async fn gh_pr_reviews_paginated(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let pages: Vec<Vec<GhPrRestReview>> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the PR review list: {e}")))?;
+    let pages: Vec<Vec<GhPrRestReview>> =
+        serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "the pull request's reviews",
+                format!("could not parse the PR review list: {e}"),
+            )
+        })?;
     Ok(pages
         .into_iter()
         .flatten()
@@ -5135,8 +5219,13 @@ async fn gh_pr_comments_paginated(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let pages: Vec<Vec<GhPrRestComment>> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the PR comment list: {e}")))?;
+    let pages: Vec<Vec<GhPrRestComment>> =
+        serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "the pull request's comments",
+                format!("could not parse the PR comment list: {e}"),
+            )
+        })?;
     // Resolve the viewer login once, only now that this top-up fired. Best-effort:
     // a failed probe leaves `viewer_did_author` false (no edit affordance).
     let viewer_login = run_gh(
@@ -5368,8 +5457,12 @@ pub async fn gh_pr_external_reviews(
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the PR reviews: {e}")))?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request's reviews",
+            format!("could not parse the PR reviews: {e}"),
+        )
+    })?;
     let pr = value.pointer("/data/repository/pullRequest");
 
     let str_at = |v: &serde_json::Value, p: &str| {
@@ -5480,8 +5573,12 @@ async fn gh_thread_comment_replies_topup(
             GH_NETWORK_TIMEOUT,
         )
         .await?;
-        let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Gh(format!("could not parse the review-thread replies: {e}")))?;
+        let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "the review replies",
+                format!("could not parse the review-thread replies: {e}"),
+            )
+        })?;
         let comments = value.pointer("/data/node/comments");
         if let Some(nodes) = comments
             .and_then(|c| c.pointer("/nodes"))
@@ -5565,8 +5662,12 @@ pub async fn gh_pr_review_threads(
         }
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
-        let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Gh(format!("could not parse the PR review threads: {e}")))?;
+        let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "the review threads",
+                format!("could not parse the PR review threads: {e}"),
+            )
+        })?;
 
         let review_threads = value.pointer("/data/repository/pullRequest/reviewThreads");
         if let Some(nodes) = review_threads
@@ -5806,8 +5907,12 @@ pub async fn gh_prs_for_branch(
             GH_TIMEOUT,
         )
         .await?;
-        let pulls: Vec<GhPrRestPull> = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Gh(format!("could not parse gh api pulls: {e}")))?;
+        let pulls: Vec<GhPrRestPull> = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "pull requests",
+                format!("could not parse gh api pulls: {e}"),
+            )
+        })?;
         return Ok(pulls.into_iter().map(rest_pull_to_pr_info).collect());
     }
     // Pin the resolved slug so this "does a PR exist for this branch?" check reads the
@@ -5831,7 +5936,7 @@ pub async fn gh_prs_for_branch(
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse gh pr list: {e}")))
+        .map_err(|e| gh_unreadable("pull requests", format!("could not parse gh pr list: {e}")))
 }
 
 /// Pushes `head` to origin, then opens a PR from `head` into `base`. Returns the new
