@@ -179,8 +179,8 @@ impl MarkerRoots {
 /// environment says". The override is process-wide, so a test that never installed one
 /// must neither read a concurrently-scheduled sibling's root nor mint under the
 /// developer's own app data. Every GUARD caller fails open on an unresolvable root —
-/// refusals answer `Ok`, claims and sweeps return, `is_managed_update_worktree` answers
-/// `false` — which is exactly what an un-overridden test should see. The MINT is the
+/// refusals answer `Ok`, claims and sweeps return, `clear_update_holder` answers
+/// `Ok(false)` — which is exactly what an un-overridden test should see. The MINT is the
 /// loud exception: `branches.rs::update_worktree_path` propagates the error rather than
 /// place a checkout somewhere nobody is guarding.
 pub(crate) async fn roots_for(repo_path: &str) -> AppResult<MarkerRoots> {
@@ -216,23 +216,17 @@ pub(crate) async fn roots_for(repo_path: &str) -> AppResult<MarkerRoots> {
 /// call). The MINT (`branches.rs::update_worktree_path` via [`root_for`]) stays on
 /// the uncached resolver: a checkout must never be placed under a stale root, while
 /// a guard reading one degrades fail-open like every other unresolvable root.
+///
+/// Staleness shares the lock-key cache's own lifetime: an identity that changes
+/// mid-process already splits every lock domain for the repo, and a guard missing a
+/// fresh mint is bounded by the update's own pin verify (branch-tip equality before any
+/// write) — it refuses rather than corrupts.
 pub(crate) async fn roots_for_cached(state: &AppState, repo_path: &str) -> AppResult<MarkerRoots> {
+    // The test seam is `roots_for`'s alone, so the two cannot drift under an override.
     #[cfg(test)]
     {
-        let _ = (state, repo_path);
-        let primary = TEST_ROOT_DIR
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-            .ok_or_else(|| {
-                AppError::Command(
-                    "no update-marker root override is installed for this test".to_string(),
-                )
-            })?;
-        Ok(MarkerRoots {
-            primary,
-            legacy: None,
-        })
+        let _ = state;
+        roots_for(repo_path).await
     }
     #[cfg(not(test))]
     {
@@ -464,8 +458,10 @@ pub(crate) fn is_managed_update_worktree_in(roots: &MarkerRoots, path: &str) -> 
     })
 }
 
-/// [`is_managed_update_worktree_in`] resolving the roots itself, for a single-call site
-/// that has no other use for them.
+/// [`is_managed_update_worktree_in`] resolving the roots itself. Test-only: every
+/// production scope check now runs over roots resolved through the cache its own
+/// follow-up uses, so one call can never arbitrate over two root sets.
+#[cfg(test)]
 pub(crate) async fn is_managed_update_worktree(repo_path: &str, path: &str) -> bool {
     match roots_for(repo_path).await {
         Ok(roots) => is_managed_update_worktree_in(&roots, path),

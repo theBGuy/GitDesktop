@@ -3729,8 +3729,11 @@ export function useAppendRepoAiIgnore(repo: string) {
  *
  * A name carrying U+FFFD leaves the corpus before the IPC call and comes back
  * as `unreadable`: generation hides such a name whatever the patterns say, so
- * attributing it to a rule would be a lie. Keyed on the global patterns, so a
- * settings edit produces a fresh view rather than a stale attribution.
+ * attributing it to a rule would be a lie. That is a conservative string-domain
+ * rule — `gitListTracked`/`gitListUntracked` decode lossily, so a real U+FFFD is
+ * indistinguishable here, while the Rust arms judge real bytes. Keyed on the
+ * global patterns, so a settings edit produces a fresh view rather than a stale
+ * attribution.
  */
 export function useAiExcludedView(
   repo: string,

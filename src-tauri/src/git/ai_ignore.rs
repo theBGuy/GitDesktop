@@ -2160,6 +2160,32 @@ mod tests {
         assert!(!out.text.contains("x\u{FFFD}y"), "{}", out.text);
     }
 
+    /// The same name down the unfiltered FAST RETURN, which builds its rows and
+    /// ships its content without a verdict pass at all: with no patterns
+    /// configured a real U+FFFD is still an ordinary character, so the row and its
+    /// content come back whole.
+    #[tokio::test]
+    async fn a_real_replacement_character_name_survives_the_fast_return() {
+        let (_dir, repo) = seed_repo("realfffd-fast").await;
+        let blob = seed_blob(&repo).await;
+
+        let mut rows: Vec<u8> = format!("100644 blob {blob}\t").into_bytes();
+        rows.extend_from_slice("x\u{FFFD}y.txt\n".as_bytes());
+        rows.extend_from_slice(format!("100644 blob {blob}\tkeep.txt\n").as_bytes());
+        let (base, head) = commit_tree_pair(&repo, &rows).await;
+
+        let out = git_branch_diff(repo, base, head, None, None).await.unwrap();
+        assert_eq!(
+            out.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["keep.txt", "x\u{FFFD}y.txt"]
+        );
+        assert_eq!(out.excluded_files, 0);
+        assert!(out.text.contains("x\u{FFFD}y.txt"), "{}", out.text);
+    }
+
     /// A `repo_path` BELOW the toplevel still filters correctly, because the
     /// flow resolves the toplevel itself.
     ///

@@ -1,1 +1,1 @@
-- AI features now match ignore rules against file names exactly as git records them, so files with unusual names follow your rules instead of being hidden outright.
+- The diffs AI features read, and the file lists agent tools see, now match ignore rules against names exactly as git records them, so files with unusual names follow your rules instead of being hidden outright.

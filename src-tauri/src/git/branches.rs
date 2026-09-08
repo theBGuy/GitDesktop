@@ -319,8 +319,9 @@ async fn worktree_holding_branch(repo_path: &str, name: &str) -> Option<String> 
 /// `gd-update-*` checkout. `true` means "cleared — re-probe"; `false` leaves the
 /// caller's own message to speak, which is also the answer whenever the marker proves
 /// nothing: an unreadable lock, or a checkout from a pre-marker build that may still be
-/// mid-update. Only a lock that EXISTS and is acquirable authorizes the age-free
-/// removal, and only a HELD one authorizes a refusal.
+/// mid-update — and, before any of that, a root set this process cannot resolve. Only a
+/// lock that EXISTS and is acquirable authorizes the age-free removal, and only a HELD
+/// one authorizes a refusal.
 async fn clear_update_holder(
     state: &AppState,
     repo_path: &str,
@@ -329,8 +330,12 @@ async fn clear_update_holder(
 ) -> AppResult<bool> {
     use crate::git::update_marker::{self as marker, LockProbe};
     // Root-scoped: a `gd-update-*` worktree the USER made, outside our app-data root, is
-    // their own and takes the ordinary path however its neighbours look.
-    if !marker::is_managed_update_worktree(repo_path, holder).await {
+    // their own and takes the ordinary path however its neighbours look. Resolved through
+    // the cache the claim below uses, so one call never arbitrates over two root sets.
+    let Ok(roots) = marker::roots_for_cached(state, repo_path).await else {
+        return Ok(false);
+    };
+    if !marker::is_managed_update_worktree_in(&roots, holder) {
         return Ok(false);
     }
     match marker::update_worktree_probe(holder) {
@@ -3505,22 +3510,26 @@ mod tests {
 
         let _serialized = marker::test_root_lock();
         let _override = marker::TestRootOverride::set(&root);
+        // A branch name no other test uses: the override root is process-wide, and the
+        // LIVE marker below would refuse a parallel test's guard on a shared name.
+        let branch = "feature-live-refusal";
+        run(&repo_s, &["branch", "-m", "feature", branch]).await;
         // Minted, not yet added: nothing is in the worktree registry.
-        let _live = marker::UpdateMarker::create_for(&root.join("gd-update-live"), "feature")
+        let _live = marker::UpdateMarker::create_for(&root.join("gd-update-live"), branch)
             .expect("the marker mints");
 
         let state = AppState::default();
-        let expected = marker::branch_update_refusal("feature").to_string();
-        let deleted = git_delete_branch_core(&state, repo_s.clone(), "feature".into())
+        let expected = marker::branch_update_refusal(branch).to_string();
+        let deleted = git_delete_branch_core(&state, repo_s.clone(), branch.into())
             .await
             .expect_err("a delete during the pre-add window is refused");
         assert_eq!(deleted.to_string(), expected);
-        let reset = branch_reset_to_upstream(&state, &repo_s, "feature", &tip)
+        let reset = branch_reset_to_upstream(&state, &repo_s, branch, &tip)
             .await
             .expect_err("a reset during the pre-add window is refused");
         assert_eq!(reset.to_string(), expected);
         assert!(
-            !run(&repo_s, &["branch", "--list", "feature"])
+            !run(&repo_s, &["branch", "--list", branch])
                 .await
                 .trim()
                 .is_empty(),
@@ -3547,20 +3556,26 @@ mod tests {
 
         let _serialized = marker::test_root_lock();
         let _override = marker::TestRootOverride::set(&root);
+        // A branch name no other test uses, as in the pre-add guard test: the override
+        // root is process-wide, so a shared name lets a parallel test's marker decide
+        // this one's verdict.
+        let branch = "feature-registered-holder";
+        run(&repo_s, &["branch", "-m", "feature", branch]).await;
         let state = AppState::default();
 
         // MARKERLESS: registered, no sidecars — the generic message, unchanged.
         let bare = root.join("gd-update-premarker");
         let bare_s = bare.to_string_lossy().into_owned();
-        run(&repo_s, &["worktree", "add", "--quiet", &bare_s, "feature"]).await;
-        let err = git_delete_branch_core(&state, repo_s.clone(), "feature".into())
+        run(&repo_s, &["worktree", "add", "--quiet", &bare_s, branch]).await;
+        let err = git_delete_branch_core(&state, repo_s.clone(), branch.into())
             .await
             .expect_err("a markerless holder still blocks the delete");
         assert!(
-            err.to_string().starts_with("feature is checked out in the worktree at")
-                && err.to_string().ends_with(
-                    "(or switch it to another branch) before deleting feature."
-                ),
+            err.to_string()
+                .starts_with(&format!("{branch} is checked out in the worktree at"))
+                && err.to_string().ends_with(&format!(
+                    "(or switch it to another branch) before deleting {branch}."
+                )),
             "the pre-marker path keeps its original wording: {err}"
         );
         assert!(bare.exists(), "and its checkout is untouched");
@@ -3572,15 +3587,15 @@ mod tests {
         // a process-spawning test binary (see `write_released_marker`).
         let dead = root.join("gd-update-crashed");
         let dead_s = dead.to_string_lossy().into_owned();
-        run(&repo_s, &["worktree", "add", "--quiet", &dead_s, "feature"]).await;
-        marker::write_released_marker(&root, "gd-update-crashed", "feature");
+        run(&repo_s, &["worktree", "add", "--quiet", &dead_s, branch]).await;
+        marker::write_released_marker(&root, "gd-update-crashed", branch);
 
-        git_delete_branch_core(&state, repo_s.clone(), "feature".into())
+        git_delete_branch_core(&state, repo_s.clone(), branch.into())
             .await
             .expect("a released holder is cleared and the delete proceeds");
         assert!(!dead.exists(), "the orphaned checkout was removed");
         assert!(
-            run(&repo_s, &["branch", "--list", "feature"])
+            run(&repo_s, &["branch", "--list", branch])
                 .await
                 .trim()
                 .is_empty(),

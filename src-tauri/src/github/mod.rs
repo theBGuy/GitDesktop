@@ -114,8 +114,8 @@ pub(crate) fn fork_owner_of(slug: &str) -> &str {
 /// A parse failure on GitHub output reaches the user: line 1 is what the toast and
 /// banner show (`firstMeaningfulLine`, src/lib/error-summary.ts), and `detail` — the
 /// raw serde/parse text — rides line 2 for the Details dialog.
-pub(crate) fn gh_unreadable(what: &str, detail: String) -> crate::error::AppError {
-    crate::error::AppError::Gh(format!("Couldn't read {what} from GitHub.\n{detail}"))
+pub(crate) fn gh_unreadable(what: &str, detail: String) -> AppError {
+    AppError::Gh(format!("Couldn't read {what} from GitHub.\n{detail}"))
 }
 
 #[cfg(test)]

@@ -46,14 +46,16 @@ export const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);
  * how many were hidden — for prompt inputs that carry file NAMES with no diff to
  * route through `filterDiffByAiIgnore` (untracked files).
  *
- * A name carrying U+FFFD is dropped whatever the patterns say: `git status` is
- * decoded lossily, so a non-UTF-8 path arrives mangled and can match no rule the
- * user could write — it fails CLOSED, ahead of the pattern check. `excluded`
- * counts every hidden name (the model can't see either kind), while `unreadable`
- * breaks out the subset no pattern could have matched — a caller explaining
- * itself must not blame the user's patterns for those. KEEP IN SYNC with
- * `filter_untracked_by_ai_ignore` (src-tauri/src/mcp_server/generate.rs). With
- * nothing left to check, or no patterns, the survivors are returned before any IPC.
+ * A name carrying U+FFFD is dropped whatever the patterns say: every path here was
+ * lossy-decoded on the Rust side before it crossed IPC, so a real U+FFFD is
+ * indistinguishable from a byte that was lost, and both fail CLOSED ahead of the
+ * pattern check. `excluded` counts every hidden name (the model can't see either
+ * kind), while `unreadable` breaks out the subset no pattern could have matched — a
+ * caller explaining itself must not blame the user's patterns for those. The Rust
+ * twin `filter_untracked_by_ai_ignore` (src-tauri/src/mcp_server/generate.rs) judges
+ * real bytes and so SHOWS a real-U+FFFD name this hides; the result shape stays KEEP
+ * IN SYNC, and aligning the rule is a recorded follow-up. With nothing left to
+ * check, or no patterns, the survivors are returned before any IPC.
  */
 export async function filterPathsByAiIgnore(input: {
   repoPath: string;
@@ -94,9 +96,11 @@ export async function filterPathsByAiIgnore(input: {
  * undercount.
  *
  * A candidate carrying U+FFFD is dropped whatever the patterns say, and with no
- * patterns configured at all: the name is a lossy decode of non-UTF-8 bytes, so
- * it can match no rule the user could write — it fails CLOSED, ahead of the
- * pattern check, exactly as `filterPathsByAiIgnore` does. `unreadableFiles`
+ * patterns configured at all: candidates arrive as already-decoded strings, so a
+ * real U+FFFD is indistinguishable from a byte lost to a lossy decode and both
+ * fail CLOSED, ahead of the pattern check, exactly as `filterPathsByAiIgnore`
+ * does. The Rust `filtered_diff` arm judges real bytes and shows a real-U+FFFD
+ * name this hides; aligning them is a recorded follow-up. `unreadableFiles`
  * breaks that subset out of `excludedFiles` so a caller explaining itself can
  * keep the two causes apart. Only decodable candidates reach the matcher; an
  * empty `exclude` skips the IPC, though the sections are parsed either way,

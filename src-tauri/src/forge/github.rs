@@ -15,6 +15,7 @@ use crate::forge::model::{
 use crate::forge::{
     validate_owner, validate_repo_name, Forge, FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
 };
+use crate::github::gh_unreadable;
 use crate::github::pr::{gh_list_repos, gh_status, gh_viewer_login, GhRepo, GhStatus};
 use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
@@ -1017,8 +1018,12 @@ pub async fn search_repos(query: &str, sort: &str, page: u32) -> AppResult<Forge
     ];
     args.extend(github_sort_args(sort));
     let out = run_gh(None, &args, GH_NETWORK_TIMEOUT).await?;
-    let value: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse GitHub search results: {e}")))?;
+    let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the search results",
+            format!("could not parse GitHub search results: {e}"),
+        )
+    })?;
     let total_count = value.get("total_count").and_then(Value::as_u64).unwrap_or(0);
     let repos = value
         .get("items")
@@ -1124,8 +1129,12 @@ fn repo_is_fork_of(repo: &Value, source: &str) -> bool {
 async fn find_viewer_fork(owner: &str, name: &str, login: &str) -> AppResult<Option<Value>> {
     let endpoint = format!("repos/{owner}/{name}/forks?per_page=100");
     let out = run_gh(None, &["api", &endpoint], GH_NETWORK_TIMEOUT).await?;
-    let forks: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the fork list: {e}")))?;
+    let forks: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the fork list",
+            format!("could not parse the fork list: {e}"),
+        )
+    })?;
     let hit = forks.as_array().and_then(|arr| {
         arr.iter()
             .find(|fork| {
@@ -1286,8 +1295,12 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
         run_gh(Some(repo_path), &repo_args, GH_TIMEOUT),
         run_gh(Some(repo_path), &forks_args, GH_TIMEOUT),
     );
-    let list: Value = serde_json::from_str(&forks?.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the fork list: {e}")))?;
+    let list: Value = serde_json::from_str(&forks?.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the fork list",
+            format!("could not parse the fork list: {e}"),
+        )
+    })?;
     let parsed: Vec<ForgeForkEntry> = list
         .as_array()
         .map(|items| items.iter().filter_map(fork_entry_from_value).collect())
@@ -1319,8 +1332,12 @@ pub async fn fork_divergence(
     let endpoint =
         format!("repos/{slug}/compare/{base_branch}...{fork_owner}:{fork_branch}?per_page=1");
     let out = run_gh(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await?;
-    let compare: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Gh(format!("could not parse the fork comparison: {e}")))?;
+    let compare: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the fork comparison",
+            format!("could not parse the fork comparison: {e}"),
+        )
+    })?;
     // Both counts must come from the response: a defaulted 0/0 would render as
     // "in sync" — a measured-looking answer nothing measured.
     let count = |key: &str| {

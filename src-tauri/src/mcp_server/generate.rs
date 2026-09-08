@@ -1866,8 +1866,13 @@ async fn committed_base_ref(repo: &str) -> Option<String> {
     None
 }
 
-/// What the AI-ignore filter left of an untracked-name list. Mirrors the TS
-/// `filterPathsByAiIgnore` result (src/lib/ai/ignore.ts). KEEP IN SYNC.
+/// What the AI-ignore filter left of an untracked-name list. The result SHAPE
+/// mirrors the TS `filterPathsByAiIgnore` (src/lib/ai/ignore.ts) — KEEP IN SYNC —
+/// but the two no longer share a RULE: this side judges the real name bytes, so a
+/// name holding a real U+FFFD gets its true verdict and only a genuinely
+/// undecodable name stays hidden, while the TS twin receives lossy-decoded strings
+/// and cannot tell a real U+FFFD from a lost byte, so it fail-closes on both.
+/// Aligning them (backend-carried verdicts) is a recorded follow-up.
 struct FilteredUntracked {
     /// The names still safe to show a model.
     paths: Vec<String>,
