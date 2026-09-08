@@ -142,13 +142,27 @@ export function settleRepoDescGeneration(
   }, PENDING_ANNOUNCE_DELAY_MS);
 }
 
+/** The live announcement per repo. The toast is the stash's public face: once
+ *  the pending result has been delivered or replaced, a surviving View is a
+ *  dead click at a dialog that is already open. */
+const announceToasts = new Map<string, string | number>();
+
+function retireAnnounceToast(repo: string): void {
+  const id = announceToasts.get(repo);
+  if (id === undefined) return;
+  toast.dismiss(id);
+  announceToasts.delete(repo);
+}
+
 /** The one announcement for a stashed result. Its copy is decided at FIRE time
  *  because the fallback can run long after the settle: while the dialog is open
  *  its host drops a deep link, so that arm points at the section instead. */
 function announcePendingRepoDesc(repoPath: string): void {
   const repo = normPath(repoPath);
+  // One live announcement per repo — a fresh stash replaces its predecessor's.
+  retireAnnounceToast(repo);
   const dialogOpen = openDialogs.has(repo);
-  toast.success("Repository description ready", {
+  const id = toast.success("Repository description ready", {
     description: dialogOpen
       ? "Switch to the General section to review it."
       : "Reopen Repository settings to review.",
@@ -175,6 +189,7 @@ function announcePendingRepoDesc(repoPath: string): void {
           },
         }),
   });
+  announceToasts.set(repo, id);
 }
 
 /** Registers a mounted section's field-apply for one repo; call the returned
@@ -203,6 +218,8 @@ export function consumePendingRepoDesc(
   const repo = normPath(repoPath);
   const result = useStore.getState().pending[repo];
   if (!result) return null;
+  // The stash is being delivered, so its announcement has been made good.
+  retireAnnounceToast(repo);
   useStore.setState((s) => {
     const { [repo]: _taken, ...rest } = s.pending;
     return { pending: rest };

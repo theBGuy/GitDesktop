@@ -703,8 +703,12 @@ test("generator-dialog-finish-and-surface flags each generator hook", () => {
 test("generator-dialog-finish-and-surface needs both halves, and clears on the primitive", () => {
   // The adopted shape — the negative control for the check.
   const adopted = [
-    "  const { generate, generating } = useGeneratePrDescription(repoPath);",
-    "  const surface = useFinishAndSurface(open, { readyTitle: t });",
+    "  const { generate, cancel, generating } = useGeneratePrDescription(repo);",
+    "  const surface = useFinishAndSurface(repo, open, {",
+    "    cancel,",
+    "    generating,",
+    "    readyTitle: t,",
+    "  });",
     "  useSeedOnOpen(open, seedOnOpen);",
   ].join("\n");
   assert.deepEqual(finishAndSurface(adopted), []);

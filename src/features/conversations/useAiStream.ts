@@ -164,8 +164,9 @@ export interface FinishAndSurfaceOpts {
  * "waiting in <repo>" promise true. It is released by whichever open consumes it
  * first: its own repo's, which shows the draft, or a FOREIGN repo's, because the
  * draft lives in the dialog's ONE shared form and the seed that runs for another
- * repo is the event that destroys it. The one deliberate discard left is the
- * caller-side tag drain (`consumeSkipSeed`).
+ * repo is the event that destroys it. The deliberate discards are the caller's
+ * own: `consumeSkipSeed`, for an identity axis that moved on or a draft request
+ * that outranks the waiting one.
  * `shouldSkipSeed` is the seed guard rather than each caller's own
  * `generating ||`, because `run` awaits its context fetch before the stream and
  * the abort reaches only the stream: a discarded run can keep `generating` true
@@ -195,12 +196,14 @@ export function useFinishAndSurface(
   /** Seed-guard predicate: true ⇒ the caller's seedOnOpen must return without
    *  reseeding. A live run justifies the skip only while it still belongs here —
    *  one discarded by an identity switch does not; failing that, a settled-unseen
-   *  latch does, and only when its stamp is THIS repo (a foreign latch is left
-   *  alone, still waiting for the repo it belongs to). */
+   *  latch does. Either way the FIRST open releases it: this repo's shows the
+   *  draft, a foreign repo's destroys latch and toast along with the form its
+   *  seed is about to reset. */
   shouldSkipSeed: (generating: boolean) => boolean;
   /** Discard the latch whatever it is stamped with, reporting whether one was
-   *  there. The identity-CHECKED consumer is `shouldSkipSeed`; this is the
-   *  deliberate drain, for a caller whose own identity axis has moved on. */
+   *  there. `shouldSkipSeed` is the identity-CHECKED consumer; this is the drain
+   *  for a caller that means to throw the waiting draft away — an identity axis
+   *  that moved on, or an explicit draft request that outranks it. */
   consumeSkipSeed: () => boolean;
 } {
   const repo = normPath(repoPath);

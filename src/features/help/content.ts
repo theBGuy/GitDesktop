@@ -2471,10 +2471,10 @@ announces the draft when it lands, its **View** action brings the dialog back, a
 everything is waiting there, your own typing included. Switching repositories discards a
 draft that's still in flight, since it belongs to the repository it started in.
 
-A **repository description** keeps generating across a repository switch too, held for
-the repository it started in. Close Repository settings while it runs and a toast tells
-you when the description is ready; **View** reopens the dialog on **General**, and from
-another repository it names the one to switch back to.
+A repository description generated in **Repository settings** keeps running across a
+repository switch, held for the repository it started in. Close that dialog while it
+runs and a toast tells you when the description is ready; **View** reopens it on
+**General**, and from another repository it names the one to switch back to.
 
 ## Instructions & privacy
 

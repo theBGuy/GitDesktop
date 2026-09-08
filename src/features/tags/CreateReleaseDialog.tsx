@@ -344,19 +344,31 @@ export function CreateReleaseDialog({
         isGitHub,
         onResult: (body) => form.setFieldValue("notes", body),
       })
-      .then((final) => {
-        // The tag switch's own abort settles here — swallow it, never re-latch.
-        // Exactly one swallow consumes a settle; the repo flag can't also arm
-        // while tag hosts unmount on a repo switch — else, per-run tokens.
-        if (tagSwitchAbortRef.current) {
-          tagSwitchAbortRef.current = false;
-          return;
-        }
-        // Resolves with the COMPLETE notes, or null — an aborted stream still
-        // fired `onResult` with its partials, so that can't be the signal.
-        settleTagRef.current = tagIdentity;
-        surface.noteRunSettled(final !== null);
-      });
+      .then(
+        (final) => {
+          // The tag switch's own abort settles here — swallow it, never re-latch.
+          // Exactly one swallow consumes a settle; the repo flag can't also arm
+          // while tag hosts unmount on a repo switch — else, per-run tokens.
+          if (tagSwitchAbortRef.current) {
+            tagSwitchAbortRef.current = false;
+            return;
+          }
+          // Resolves with the COMPLETE notes, or null — an aborted stream still
+          // fired `onResult` with its partials, so that can't be the signal.
+          settleTagRef.current = tagIdentity;
+          surface.noteRunSettled(final !== null);
+        },
+        // Two-arm, never a trailing .catch: a settle must be reported exactly
+        // once, and a throw in the arm above must not report a second time. The
+        // swallow repeats here — only a settle clears the flag.
+        () => {
+          if (tagSwitchAbortRef.current) {
+            tagSwitchAbortRef.current = false;
+            return;
+          }
+          surface.noteRunSettled(false);
+        },
+      );
   }
 
   // The generate chord drives the AI item only — never the From-GitHub one, and

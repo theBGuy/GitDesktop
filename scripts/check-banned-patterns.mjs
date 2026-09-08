@@ -423,7 +423,9 @@ const TYPEAHEAD_KEY_RE = /\bisTypeaheadKey\s*\(/;
 // seed-on-open, and the branch-name / commit-message generators are not in the
 // list, so both stay out by construction rather than by allowlist.
 // The hook list is explicit rather than a `useGenerate\w+` shape: the chord and
-// the commit-message path share that prefix without owning a dialog draft.
+// the commit-message path share that prefix without owning a dialog draft. That
+// makes the list the gate's reach: a NEW one-shot generator hook must be
+// appended here, or every dialog adopting it escapes this ratchet silently.
 // Bounded to .tsx, which is what keeps each hook's own definition file (a .ts
 // whose export line matches the call pattern) from reading as a call site.
 const GENERATOR_HOOK_RE =
