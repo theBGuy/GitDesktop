@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type KeyboardEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -801,6 +802,10 @@ export function RepositoryFilesDialog({
             </p>
           ) : (
             <FileList
+              // One FileList serves all three tabs, so a switch is a wholesale
+              // content swap: remount it, or the surviving virtualizer reuses
+              // the previous tab's measured row heights and scroll offset.
+              key={tab}
               paths={filtered}
               rowInfo={tab === "ai" ? aiRowInfo : ignoredRowInfo}
               rowSuffix={tab === "ai" ? aiRowSuffix : undefined}
@@ -1107,10 +1112,21 @@ function FileList({
   onKeyDown: (e: KeyboardEvent) => void;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
+  // The virtualizer keys its measurement projection on `getItemKey`'s IDENTITY,
+  // so this is re-minted per path sequence rather than per render — `paths` is
+  // memo-stable, making it the sequence's only input.
+  const getItemKey = useCallback(
+    (index: number) => paths[index] ?? index,
+    [paths],
+  );
   const virtualizer = useVirtualizer({
     count: paths.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => rowHeight,
+    // Key by path, not index: the rule and text filters permute the sequence,
+    // and rows carrying a second line are taller than those without — an index
+    // key hands a row the height measured for whatever sat there before.
+    getItemKey,
     overscan: 12,
   });
 

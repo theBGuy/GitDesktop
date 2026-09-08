@@ -2,6 +2,7 @@ import { ArrowLeftIcon } from "@phosphor-icons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
   useEffect,
   useEffectEvent,
   useMemo,
@@ -373,6 +374,10 @@ function SearchResults({
   }
   return (
     <ResultsList
+      // A cached search resolves synchronously, so the list never unmounts
+      // between queries — key it on the search's identity (this hook's query-key
+      // axes) or the surviving virtualizer paints new rows at the old offset.
+      key={`${provider}:${sort}:${query}`}
       rows={rows}
       selected={selected}
       onSelect={onSelect}
@@ -423,10 +428,27 @@ function ResultsList({
   footer?: React.ReactNode;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
+  // The virtualizer keys its measurement projection on `getItemKey`'s IDENTITY,
+  // so this is re-minted per row sequence rather than per render — `rows` is
+  // memo-stable, making it the sequence's only input.
+  const getItemKey = useCallback(
+    (index: number) => {
+      const row = rows[index];
+      if (!row) return index;
+      return row.kind === "header"
+        ? `h:${row.owner}`
+        : `r:${row.repo.fullName}`;
+    },
+    [rows],
+  );
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: (i) => (rows[i].kind === "header" ? 26 : 46),
+    // Key by row identity, not index: a new query replaces the rows wholesale
+    // and Load more appends, and an index key hands a 26px header the height
+    // measured for the 46px repo row that sat there before.
+    getItemKey,
     overscan: 12,
   });
 

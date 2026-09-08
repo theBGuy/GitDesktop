@@ -1,5 +1,6 @@
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { Markdown } from "@/components/markdown/markdown";
+import { hljsUpgradeStore } from "@/components/markdown/markdown-hljs";
 import { useOpenFile } from "./useOpenFile";
 
 // Extensions we treat as file references when they appear in an inline-code
@@ -70,6 +71,20 @@ const KNOWN_EXT = new Set([
   "pl",
 ]);
 
+// The marks a qualifying span carries. Listed once because the walk both adds
+// and removes them: an unmark that misses one leaves a span that still looks or
+// reads as a link.
+const MARK_ATTRS = ["data-gd-file", "role", "tabindex", "aria-label"];
+const MARK_CLASSES = [
+  "cursor-pointer",
+  "underline",
+  "decoration-dotted",
+  "underline-offset-2",
+  "hover:text-foreground",
+  "focus-visible:outline-1",
+  "focus-visible:outline-ring",
+];
+
 /** Strip a trailing `:line[:col]` or `#Lx` locator before resolving the path. */
 function filePathOf(raw: string): string {
   return raw.trim().replace(/[:#].*$/, "");
@@ -101,36 +116,46 @@ export function AgentNarration({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const openFile = useOpenFile();
+  // The shared renderer re-injects its whole innerHTML when the lazy
+  // highlight.js upgrade bumps this snapshot, discarding every mark below while
+  // `text` stays value-identical.
+  const hljsVersion = useSyncExternalStore(
+    hljsUpgradeStore.subscribe,
+    hljsUpgradeStore.getSnapshot,
+    hljsUpgradeStore.getServerSnapshot,
+  );
 
   // After each render, turn inline-code spans that look like file paths into
   // real, keyboard-operable links (button role + tab stop) — using a layout
   // effect so the styling lands before paint (no flicker while streaming) and
-  // without modifying the shared Markdown renderer. Re-runs whenever the text
-  // changes; Markdown replaces its innerHTML on each delta, so spans are fresh.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: re-mark on each streamed update
+  // without modifying the shared Markdown renderer. Marking is two-directional
+  // for symmetry: an identical re-parse preserves these nodes, so a future
+  // non-DOM input to the decision could otherwise strand marks.
+  // Neither dep is read inside the effect — `text` and `hljsVersion` are
+  // deliberate re-walk triggers for the DOM they rebuild.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: text and hljsVersion are intentional re-walk triggers
   useLayoutEffect(() => {
     const root = ref.current;
     if (!root) return;
     for (const el of root.querySelectorAll("code")) {
-      if (el.closest("pre")) continue; // fenced code blocks aren't file refs
-      const raw = el.textContent ?? "";
-      if (!isFilePath(raw)) continue;
-      const path = filePathOf(raw);
+      // A fenced block isn't a file ref, and a code span inside a link label
+      // belongs to the link — marking it would double-dispatch on activation.
+      // The `||` short-circuits past the text read for both.
+      if (el.closest("pre, a") || !isFilePath(el.textContent ?? "")) {
+        if (el.hasAttribute("data-gd-file")) {
+          for (const attr of MARK_ATTRS) el.removeAttribute(attr);
+          el.classList.remove(...MARK_CLASSES);
+        }
+        continue;
+      }
+      const path = filePathOf(el.textContent ?? "");
       el.setAttribute("data-gd-file", path);
       el.setAttribute("role", "button");
       el.setAttribute("tabindex", "0");
       el.setAttribute("aria-label", `Open ${path}`);
-      el.classList.add(
-        "cursor-pointer",
-        "underline",
-        "decoration-dotted",
-        "underline-offset-2",
-        "hover:text-foreground",
-        "focus-visible:outline-1",
-        "focus-visible:outline-ring",
-      );
+      el.classList.add(...MARK_CLASSES);
     }
-  }, [text]);
+  }, [text, hljsVersion]);
 
   const activate = (target: EventTarget | null) => {
     const el = (target as HTMLElement | null)?.closest<HTMLElement>(
@@ -145,13 +170,25 @@ export function AgentNarration({
     if (activate(e.target)) e.preventDefault();
   };
 
+  // A middle click rides `auxclick` and never fires `click`, so the dispatch has
+  // to be reachable from here too or the third button is dead on a marked span.
+  const onAuxClick = (e: React.MouseEvent) => {
+    if (e.button !== 1) return;
+    if (activate(e.target)) e.preventDefault();
+  };
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key !== "Enter" && e.key !== " ") return;
     if (activate(e.target)) e.preventDefault();
   };
 
   return (
-    <div ref={ref} onClick={onClick} onKeyDown={onKeyDown}>
+    <div
+      ref={ref}
+      onClick={onClick}
+      onAuxClick={onAuxClick}
+      onKeyDown={onKeyDown}
+    >
       <Markdown className="px-0.5">{text}</Markdown>
     </div>
   );

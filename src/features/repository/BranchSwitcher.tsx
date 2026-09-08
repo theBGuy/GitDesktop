@@ -346,6 +346,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // "Reapply after switching" — seeded from the saved preference each time the
   // dialog opens fresh, and persisted back when the user changes it.
   const [reapplyOnSwitch, setReapplyOnSwitch] = useState(false);
+  // Whether the user touched that checkbox since the dialog last opened. A ref
+  // because the dirty-tree refusal branch reads it after an await. It gates two
+  // things: the auto-tick there (an explicit untick is the user's call and is
+  // never overridden) and the persist below, so an auto-tick stays session-only.
+  const reapplyTouchedRef = useRef(false);
   // Why a first switch attempt didn't work, shown when the dialog re-opens.
   const [switchHint, setSwitchHint] = useState<string | null>(null);
   // The worktree pending a "Promote to main workspace" confirm — set by the
@@ -921,6 +926,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (hasChangesRef.current) {
       setSwitchHint(null);
       setReapplyOnSwitch(settings.data?.reapplyStashOnSwitch ?? false);
+      reapplyTouchedRef.current = false;
       setSwitchTarget({ name, remote });
       return;
     }
@@ -930,15 +936,26 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   function bringAndSwitch() {
     if (!switchTarget) return;
     const target = switchTarget;
+    // Captured with the target: the refusal branch below runs after an await and
+    // must decide from the checkbox (and its touched flag) as they stood when
+    // THIS switch started — a dialog reopened mid-checkout owns the live values.
+    const reapply = reapplyOnSwitch;
+    const touched = reapplyTouchedRef.current;
     setSwitchTarget(null);
     void runCheckout(target, {
       onError: (e) => {
         // git refused to carry the changes over rather than failing outright —
         // re-open the choice with stashing pointed out, instead of a dead-end
-        // toast. The checkbox keeps whatever the user already set.
+        // toast. Reapply is auto-ticked for this switch alone (session-only: the
+        // persist below stays gated on an explicit toggle) so the changes still
+        // come along — unless the user unticked it here, which stands.
         if (isDirtyTreeRefusal(e)) {
+          const willReapply = !touched || reapply;
+          if (!touched) setReapplyOnSwitch(true);
           setSwitchHint(
-            "Bringing changes didn't work — git would overwrite them. Stash and switch instead.",
+            willReapply
+              ? "Bringing changes didn't work — git would overwrite them. Stash and switch instead: Reapply is set, so your changes still come along."
+              : "Bringing changes didn't work — git would overwrite them. Stash and switch instead.",
           );
           setSwitchTarget(target);
           return;
@@ -955,7 +972,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const target = switchTarget;
     const reapply = reapplyOnSwitch;
     setSwitchTarget(null);
-    if (settings.data && settings.data.reapplyStashOnSwitch !== reapply) {
+    if (
+      reapplyTouchedRef.current &&
+      settings.data &&
+      settings.data.reapplyStashOnSwitch !== reapply
+    ) {
       // Fire-and-forget, and deliberately silent: a preference that didn't
       // persist must neither delay the switch nor report over its outcome.
       void saveSettings
@@ -2963,7 +2984,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         currentLabel={currentLabel}
         hint={switchHint}
         reapply={reapplyOnSwitch}
-        onReapplyChange={setReapplyOnSwitch}
+        onReapplyChange={(v) => {
+          reapplyTouchedRef.current = true;
+          setReapplyOnSwitch(v);
+        }}
         onCancel={() => setSwitchTarget(null)}
         onBringChanges={bringAndSwitch}
         onStashAndSwitch={stashAndSwitch}

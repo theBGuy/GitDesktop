@@ -7,7 +7,14 @@ import {
 import { useSelector } from "@tanstack/react-store";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -263,6 +270,10 @@ export function CloneRepoDialog({
               </div>
               <div className="h-72 rounded-none border">
                 <RepoBrowser
+                  // One RepoBrowser serves every provider tab, so remount it per
+                  // provider or the surviving virtualizer carries its scroll
+                  // offset onto another account's repositories.
+                  key={provider}
                   provider={provider}
                   repos={repos}
                   rows={rows}
@@ -379,10 +390,27 @@ function RepoBrowser({
 }) {
   const openSettings = useUiStore((s) => s.openSettings);
   const parentRef = useRef<HTMLDivElement>(null);
+  // The virtualizer keys its measurement projection on `getItemKey`'s IDENTITY,
+  // so this is re-minted per row sequence rather than per render — `rows` is
+  // memo-stable, making it the sequence's only input.
+  const getItemKey = useCallback(
+    (index: number) => {
+      const row = rows[index];
+      if (!row) return index;
+      return row.kind === "header"
+        ? `h:${row.owner}`
+        : `r:${row.repo.fullName}`;
+    },
+    [rows],
+  );
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: (i) => (rows[i].kind === "header" ? 26 : 30),
+    // Key by row identity, not index: the filter permutes headers and repos
+    // through the same indexes, and an index key hands a 26px header the height
+    // measured for the 30px repo row that sat there before.
+    getItemKey,
     overscan: 12,
   });
 

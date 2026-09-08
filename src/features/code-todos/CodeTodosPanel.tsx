@@ -5,7 +5,7 @@ import {
   ListChecksIcon,
 } from "@phosphor-icons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -35,6 +35,12 @@ type FlatRow =
 /** DOM key for an item row (also its selection identity). */
 function itemKey(item: TodoScanItem): string {
   return `${item.path}:${item.line}`;
+}
+
+/** Row identity, shared by the virtualizer's size cache and the React key so the
+ *  two can't disagree about which row an index holds. */
+function rowKeyOf(row: FlatRow): string {
+  return row.type === "header" ? `h:${row.path}` : `i:${itemKey(row.item)}`;
 }
 
 export function CodeTodosPanel({
@@ -122,10 +128,24 @@ export function CodeTodosPanel({
     return { flatRows: rows, navItems: nav };
   }, [visibleItems, collapsed]);
 
+  // The virtualizer keys its measurement projection on `getItemKey`'s IDENTITY,
+  // so this is re-minted per row sequence rather than per render — `flatRows` is
+  // memo-stable, making it the sequence's only input.
+  const getItemKey = useCallback(
+    (index: number) => {
+      const row = flatRows[index];
+      return row ? rowKeyOf(row) : index;
+    },
+    [flatRows],
+  );
   const virtualizer = useVirtualizer({
     count: flatRows.length,
     getScrollElement: () => scrollEl,
     estimateSize: (i) => (flatRows[i].type === "header" ? 28 : 32),
+    // Key by row identity, not index: the filter and collapsing a group permute
+    // headers and items through the same indexes, and an index key hands a 28px
+    // header the height measured for the 32px item row that sat there before.
+    getItemKey,
     overscan: 16,
   });
 
@@ -301,11 +321,7 @@ export function CodeTodosPanel({
                   const row = flatRows[vi.index];
                   return (
                     <div
-                      key={
-                        row.type === "header"
-                          ? `header:${row.path}`
-                          : itemKey(row.item)
-                      }
+                      key={rowKeyOf(row)}
                       data-index={vi.index}
                       ref={virtualizer.measureElement}
                       className="absolute top-0 left-0 w-full"

@@ -655,8 +655,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 {{/ai}}- Switching with **uncommitted changes** prompts you to bring them along or stash
   and switch. Tick **Reapply after switching** on that prompt to have the stashed changes
   put back for you once the switch lands; leave it unticked and they stay in the stash until
-  you pop them. If reapplying them hits conflicts, the files appear in **Changes** to resolve
-  and the stash is kept as a backup. Your choice is remembered for next time.
+  you pop them. If bringing changes along doesn't work, the prompt returns with **Reapply
+  after switching** already ticked for that switch; your saved choice changes only when you
+  tick or untick it yourself. If reapplying them hits conflicts, the files appear in
+  **Changes** to resolve and the stash is kept as a backup. Your choice is remembered for
+  next time.
 - {{Secondaryclick}} a branch to **merge**, **squash and merge**, **rebase**, or **update it
   from the default branch** ({{kbd:update-from-default}}) — the last *without* checking it
   out. On a branch listed under **Promotion branches** in *Branch rules*, that update offer
