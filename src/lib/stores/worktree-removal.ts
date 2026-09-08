@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 import { create } from "zustand";
 import {
+  gitBranches,
   gitCheckoutBranch,
   gitDefaultBranch,
   gitSetBranchArchived,
@@ -332,6 +333,21 @@ async function archiveAfterRemoval(repoPath: string, branch: string) {
     toast.success("Worktree removed");
     toast.info(`Left ${branch} unarchived — it's the default branch.`);
     return;
+  }
+  // Already-archived is re-resolved here too, so a branch archived from the
+  // branch menu while the removal ran doesn't produce a success toast claiming
+  // this step changed something. Unlike the default-branch read this fails
+  // OPEN: the set is idempotent, so an unreadable list must not skip an archive
+  // that would have succeeded.
+  try {
+    const found = (await gitBranches(repoPath)).find((b) => b.name === branch);
+    if (found?.archived) {
+      toast.success("Worktree removed");
+      toast.info(`${branch} was already archived.`);
+      return;
+    }
+  } catch {
+    // Fall through to the archive.
   }
   try {
     await gitSetBranchArchived(repoPath, branch, true);

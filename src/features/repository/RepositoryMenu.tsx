@@ -189,6 +189,22 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
   const remoteLabel = providerLabel(provider);
+  // The forge probe ends in a network call, so a repo open leaves the view item
+  // missing for its first seconds; the recents entry's last-known provider is all
+  // that item needs (openWeb resolves the URL at click time, unauthenticated).
+  // Membership-narrowed rather than cast: it is a stored plain string, and
+  // providerLabel reads an unrecognized one as "GitHub".
+  const persistedProvider =
+    repoEntry.provider === "github" ||
+    repoEntry.provider === "gitlab" ||
+    repoEntry.provider === "bitbucket"
+      ? repoEntry.provider
+      : undefined;
+  // Star, fork, and create-issue deliberately stay on `canGh` — they need the
+  // authenticated probe, and offering them before auth is known would be worse.
+  // The probe's provider wins once resolved: it is fresher than the stored one.
+  const canViewOnHost = canGh || persistedProvider !== undefined;
+  const viewLabel = providerLabel(provider ?? persistedProvider);
   const canStar = canGh && forgeSupports(gh.data, "stars");
   const canCreateHostIssue = canGh && forgeSupports(gh.data, "issues");
   const owner = gh.data?.repo?.split("/")[0];
@@ -349,7 +365,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   }
 
   // Every menu entry doubles as a hotkey/palette action with the same gates.
-  useHotkeyAction("view-on-github", () => openWeb(), canGh);
+  useHotkeyAction("view-on-github", () => openWeb(), canViewOnHost);
   // create-issue is the in-app dialog (registered in RepositoryView + IssuesPanel);
   // the "Create issue on {host}" menu item below still opens the web page.
   useHotkeyAction("fork-repository", forkAction, canForkHere);
@@ -426,12 +442,14 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
         <DotsThreeVerticalIcon />
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-60">
+        {canViewOnHost && (
+          <DropdownMenuItem onClick={() => openWeb()}>
+            <ArrowSquareOutIcon />
+            View on {viewLabel}
+          </DropdownMenuItem>
+        )}
         {canGh && (
           <>
-            <DropdownMenuItem onClick={() => openWeb()}>
-              <ArrowSquareOutIcon />
-              View on {remoteLabel}
-            </DropdownMenuItem>
             {canStar && (
               <DropdownMenuItem disabled={setStar.isPending} onClick={doStar}>
                 <StarIcon weight={starred ? "fill" : "regular"} />
@@ -463,9 +481,11 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
                   Fork repository…
                 </DropdownMenuItem>
               ))}
-            <DropdownMenuSeparator />
           </>
         )}
+        {/* Closes the host group whenever it rendered anything — the view item's
+            gate subsumes `canGh`, so this can't outlive an empty group. */}
+        {canViewOnHost && <DropdownMenuSeparator />}
         <DropdownMenuItem
           onClick={() =>
             openInTerminal(

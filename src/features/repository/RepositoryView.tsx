@@ -261,8 +261,8 @@ function SidebarRail({
   secondaryTabs: { tab: RepoTab; label: string }[];
   activeSecondaryLabel: string | null;
   taskRunning: boolean;
-  /** The expand control, pinned to the rail's foot. An action, not a tab: it
-   *  stays out of the arrow-key order and is reached by Tab. */
+  /** The expand control, pinned to the rail's head above the tabs. An action,
+   *  not a tab: it stays out of the arrow-key order and is reached by Tab. */
   toggle: ReactNode;
 }) {
   const activeId: RailId =
@@ -306,6 +306,10 @@ function SidebarRail({
       className="flex min-h-0 flex-1 flex-col overflow-y-auto"
       onKeyDownCapture={onKeyDownCapture}
     >
+      {toggle}
+      {/* Separates the action from the tab icons so it doesn't read as a
+          fourth tab; sitting at the head keeps it at the top in both modes. */}
+      <div aria-hidden className="mx-3 my-1 h-px shrink-0 bg-border" />
       {RAIL_TABS.map(({ id, label, icon: Icon }) => (
         <button
           key={id}
@@ -367,9 +371,6 @@ function SidebarRail({
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
-      {/* `mt-auto`: the toggle sits at the rail's foot, separated from the tabs
-          by whatever height is left, without a row of its own. */}
-      <div className="mt-auto">{toggle}</div>
     </nav>
   );
 }
@@ -712,7 +713,7 @@ export function RepositoryView() {
     sidebarBinding === null
       ? sidebarToggleLabel
       : `${sidebarToggleLabel} (${formatBinding(sidebarBinding)})`;
-  // One toggle with two homes — the tab row while expanded, the icon rail's foot
+  // One toggle with two homes — the tab row while expanded, the icon rail's head
   // while collapsed — and exactly one mounted at a time (each home renders under
   // the opposite condition), so both can carry the ref the focus-return effect
   // aims at.

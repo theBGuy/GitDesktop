@@ -11,7 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { useDefaultBranch } from "@/lib/git/queries";
+import { useBranches, useDefaultBranch } from "@/lib/git/queries";
 import type { UserWorktree } from "@/lib/git/worktree";
 import {
   registerRemovalListener,
@@ -73,6 +73,12 @@ export function DeleteWorktreeDialog({
     worktree?.branch && worktree.branch !== defaultBranch.data
       ? worktree.branch
       : null;
+  // Only a SETTLED true replaces the offer with the explanation: a pending or
+  // failed read must not withdraw a checkbox that would work, and the store's
+  // completion-time re-check catches a branch archived while this sat open.
+  const branches = useBranches(repoPath);
+  const alreadyArchived =
+    branches.data?.find((b) => b.name === worktree?.branch)?.archived === true;
 
   // Behind a ref because the store invokes these from its own async stack, long
   // after the render that wrote them: what gets registered is a plain object
@@ -113,7 +119,8 @@ export function DeleteWorktreeDialog({
       path: worktree.path,
       name: worktree.branch || folderName(worktree.path),
       branch: worktree.branch || null,
-      archiveWhenDone: archiveAfter && Boolean(worktree.branch),
+      archiveWhenDone:
+        archiveAfter && Boolean(worktree.branch) && !alreadyArchived,
       force,
     });
     if (refused) toast.info(refused);
@@ -139,25 +146,34 @@ export function DeleteWorktreeDialog({
           {worktree?.path}
         </p>
 
-        {archivableBranch && (
-          <label
-            className={cn(
-              "flex items-start gap-2 text-xs text-muted-foreground",
-              removing ? "cursor-not-allowed opacity-70" : "cursor-pointer",
-            )}
-          >
-            <Checkbox
-              checked={removing ? inFlightArchive : archiveAfter}
-              disabled={removing}
-              onCheckedChange={(checked) => setArchiveAfter(checked === true)}
-            />
-            <span className="min-w-0">
-              Archive{" "}
-              <span className="font-mono break-all">{archivableBranch}</span>{" "}
-              after the worktree is removed
-            </span>
-          </label>
-        )}
+        {/* While a removal that recorded an archive intent runs, keep showing
+            the checkbox even if the flag lands elsewhere — the dialog's job is
+            then to show what the running removal will do. */}
+        {archivableBranch &&
+          (alreadyArchived && (!removing || !inFlightArchive) ? (
+            <p className="text-xs text-muted-foreground">
+              <span className="font-mono break-all">{archivableBranch}</span> is
+              already archived.
+            </p>
+          ) : (
+            <label
+              className={cn(
+                "flex items-start gap-2 text-xs text-muted-foreground",
+                removing ? "cursor-not-allowed opacity-70" : "cursor-pointer",
+              )}
+            >
+              <Checkbox
+                checked={removing ? inFlightArchive : archiveAfter}
+                disabled={removing}
+                onCheckedChange={(checked) => setArchiveAfter(checked === true)}
+              />
+              <span className="min-w-0">
+                Archive{" "}
+                <span className="font-mono break-all">{archivableBranch}</span>{" "}
+                after the worktree is removed
+              </span>
+            </label>
+          ))}
 
         {worktree?.isLocked && (
           <p className="text-xs text-warning">

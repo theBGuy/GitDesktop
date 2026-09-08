@@ -92,9 +92,9 @@ rail always says where you are.
 The lists those tabs open (changes, commits, pull requests) fill the **sidebar** down
 the left. It narrows as you narrow the window, and collapses to a strip of tab icons:
 use the button at the end of the tab row, {{kbd:toggle-sidebar}}, or the command
-palette. Collapsed, the detail pane takes the full width and the icons still switch
-tabs; your filters, selections, and scroll position are all where you left them when
-you expand it again.
+palette. Collapsed, that same button sits at the top of the icon strip, the detail pane
+takes the full width, and the icons still switch tabs; your filters, selections, and
+scroll position are all where you left them when you expand it again.
 
 Switch tabs with the number keys ({{kbd:tab-changes}} through {{kbd:tab-insights}}; see
 *Keyboard & navigation*). Issues, Discussions, Actions, and Tags need \`gh\` and a
@@ -659,7 +659,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   and the stash is kept as a backup. Your choice is remembered for next time.
 - {{Secondaryclick}} a branch to **merge**, **squash and merge**, **rebase**, or **update it
   from the default branch** ({{kbd:update-from-default}}) — the last *without* checking it
-  out.
+  out. On a branch listed under **Promotion branches** in *Branch rules*, that update offer
+  is withheld, since a promotion branch takes its changes through promotions; the reason
+  rides the menu item's label, and its own **Update from _origin/…_** is unaffected.
 - **Change base…** — from the switcher's menu or the command palette — rebases the current
   branch onto a *different* branch, for the "I branched off the wrong one" case: pick the
   branch you meant to base on and the branch you actually did, and only your branch's own
@@ -758,8 +760,10 @@ from a repo's GitHub branch-protection rules. The same dialog keeps a **Promotio
 branches** list: a pull request from a branch you name there carries work onward rather
 than catching up, so GitDesktop stops offering to update it from its base. That applies
 to the repository's own pull requests — one from a fork keeps the update offer even if
-its branch shares the name. (For server-side enforcement, use **Rules** in *Repository
-settings*.)
+its branch shares the name. The branch switcher reads the same list: on a branch named
+there, **Update from _the default branch_** is withheld from the menus and the shortcut,
+with the reason on the label, while updating that branch from its own upstream stays
+available. (For server-side enforcement, use **Rules** in *Repository settings*.)
 
 ## Worktrees
 
@@ -775,7 +779,9 @@ sits in the collapsed "Archived" section, and filter text can hide the rest.
 - **Add** a worktree on a new branch (from any base) or an existing one; it's checked out
   into its own folder, defaulting to a sibling of the repository.
 - **Open** a worktree to make it the active repository — git commands then run in that
-  folder and the window title follows. Open the main workspace to switch back.
+  folder and the window title follows. The header keeps the repository's name, with the
+  worktree named beneath it, so you always know which repo you're in. Open the main
+  workspace to switch back.
 - **Rename** a worktree to move its folder to a new name in place; its branch is unchanged.
 - **Lock** a worktree (with an optional reason) so it won't be pruned, renamed, or
   removed: renaming needs an unlock first, and deleting asks for a forced confirmation.
@@ -783,8 +789,9 @@ sits in the collapsed "Archived" section, and filter text can hide the rest.
 - **Delete** a worktree to remove its folder; its branch is kept. The dialog offers to
   **archive that branch after the worktree is removed**, so a branch you're finished with
   drops into the "Archived" section on its own (offered whenever the worktree is on a
-  branch other than the default one). A worktree with uncommitted changes, or a locked
-  one, asks before force-removing. Removing a worktree can take a few minutes, and you can
+  branch other than the default one that isn't already archived — the dialog says so when
+  it is). A worktree with uncommitted changes, or a locked one, asks before
+  force-removing. Removing a worktree can take a few minutes, and you can
   close the dialog and carry on: the removal keeps a line at the top of the repository view
   until it finishes, its row here reads **Removing…**, and the actions held while it runs
   say *removal in progress*. It runs to completion once started, so there's nothing to
