@@ -347,13 +347,18 @@ export function PrReviewPanel({
     // would cancel the first (the confirm store keeps one request live), and the text
     // is never rewritten here — the user decides.
     const partial = phase === "error" || phase === "cancelled";
-    const refs = findSuspectRefs(
-      text,
-      // Absent on the local-PR / commit-review mounts, which have no forge lens;
-      // GitHub's single `#` space is the safe default there.
-      REF_TRIGGERS[context.provider ?? "github"],
-    );
-    if (partial || refs.length > 0) {
+    // A local PR is posted into app data, where no forge cross-reference or
+    // notification exists — the refs warning would be false there.
+    const suspectRefs =
+      prKind === "remote"
+        ? findSuspectRefs(
+            text,
+            // `context.provider` rides forge status, so it can still be unresolved
+            // here; GitHub's single `#` space is the safe default.
+            REF_TRIGGERS[context.provider ?? "github"],
+          )
+        : [];
+    if (partial || suspectRefs.length > 0) {
       const partialSentence =
         phase === "cancelled"
           ? "This run was cancelled before it finished, so the text may be incomplete."
@@ -361,11 +366,11 @@ export function PrReviewPanel({
             ? "This run failed before completing, so the text may be incomplete."
             : "";
       const refsTail =
-        refs.length === 1
+        suspectRefs.length === 1
           ? "it becomes a live cross-reference that notifies the thread it names. Backticks keep it plain."
-          : "each becomes a live cross-reference that notifies the thread it names. Backticks keep one plain.";
-      const refsSentence = refs.length
-        ? `The text mentions ${formatRefList(refs)} — posted as-is, ${refsTail}`
+          : "each becomes a live cross-reference that notifies the thread it names. Backticks keep them plain.";
+      const refsSentence = suspectRefs.length
+        ? `The text mentions ${formatRefList(suspectRefs)} — posted as-is, ${refsTail}`
         : "";
       const ok = await useConfirm.getState().ask({
         title: partial

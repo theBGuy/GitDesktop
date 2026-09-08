@@ -56,7 +56,10 @@ function getStore(): Promise<Store> {
 // on a ~100ms debounce, so two overlapping writes would both reload the same
 // pre-flush disk snapshot and the later would drop the earlier's record (two review
 // modes of the same commit settle back to back). With the force-save in writeAll,
-// each reload sees fresh state.
+// each reload sees fresh state. Cross-INSTANCE overlap (two app instances delivering
+// different runs) still races last-writer-wins like the sibling plugin stores — the
+// automation claim only keeps instances off the SAME run; cross-process locking for
+// this store class is a recorded deferral.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);

@@ -1,4 +1,4 @@
-- Posting an AI review now flags `#N`-style references before publishing and
-  asks whether they're meant to link, so a review lands on the thread you meant
-  and nowhere else. Automated runs, where there's no one to ask, post those
-  references as plain text and note it in the comment.
+- Posting an AI review now warns when the text carries `#N`-style references
+  that will link and notify other threads, and asks before publishing. Automated
+  runs, where there's no one to ask, post those references as plain text and
+  note it in the comment.
