@@ -36,7 +36,12 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { detectAgentCli, providerKind } from "@/lib/ai/agent";
 import { LOGIN_COMMAND } from "@/lib/ai/cli-client";
-import { buildAiCommentBody } from "@/lib/ai/comment-branding";
+import {
+  buildAiCommentBody,
+  findSuspectRefs,
+  formatRefList,
+  REF_TRIGGERS,
+} from "@/lib/ai/comment-branding";
 import { modelPickerEmptyText, useAvailableModels } from "@/lib/ai/models";
 import {
   defaultModelForProvider,
@@ -210,7 +215,8 @@ export function PrReviewPanel({
   const [ignoreNotes, setIgnoreNotes] = useState(false);
 
   // Review output cites `#N` constantly, so linkify it against the PR's own repo.
-  // `context.provider` is the AI provider — the FORGE one comes from forge status.
+  // `context.provider` is the FORGE provider too, but optional (absent on the
+  // local-PR mount); forge status is the resolved source for linkify.
   const forgeProvider = useForgeStatus(context.repoPath).data?.provider;
   const refs = forgeProvider
     ? {
@@ -335,16 +341,39 @@ export function PrReviewPanel({
 
   async function post() {
     if (!onPost || !text.trim() || posting || stale) return;
-    // A failed OR cancelled run keeps whatever streamed before it stopped, and that
-    // partial text stays postable — publishing an unfinished review is consequential,
-    // so confirm first, naming which way the run ended.
-    if (phase === "error" || phase === "cancelled") {
+    // Two reasons to stop and ask, merged into ONE dialog: a failed or cancelled run
+    // keeps whatever streamed before it stopped, and text carrying `#N`-style tokens
+    // posts as live cross-references that notify the threads they name. A second ask
+    // would cancel the first (the confirm store keeps one request live), and the text
+    // is never rewritten here — the user decides.
+    const partial = phase === "error" || phase === "cancelled";
+    const refs = findSuspectRefs(
+      text,
+      // Absent on the local-PR / commit-review mounts, which have no forge lens;
+      // GitHub's single `#` space is the safe default there.
+      REF_TRIGGERS[context.provider ?? "github"],
+    );
+    if (partial || refs.length > 0) {
+      const partialSentence =
+        phase === "cancelled"
+          ? "This run was cancelled before it finished, so the text may be incomplete."
+          : phase === "error"
+            ? "This run failed before completing, so the text may be incomplete."
+            : "";
+      const refsTail =
+        refs.length === 1
+          ? "it becomes a live cross-reference that notifies the thread it names. Backticks keep it plain."
+          : "each becomes a live cross-reference that notifies the thread it names. Backticks keep one plain.";
+      const refsSentence = refs.length
+        ? `The text mentions ${formatRefList(refs)} — posted as-is, ${refsTail}`
+        : "";
       const ok = await useConfirm.getState().ask({
-        title: "Post partial review?",
-        body:
-          phase === "cancelled"
-            ? "This run was cancelled before it finished, so the text may be incomplete. Post it as a comment anyway?"
-            : "This run failed before completing, so the text may be incomplete. Post it as a comment anyway?",
+        title: partial
+          ? "Post partial review?"
+          : "Post review with live references?",
+        body: [partialSentence, refsSentence, "Post it as a comment anyway?"]
+          .filter(Boolean)
+          .join(" "),
         confirmLabel: "Post anyway",
       });
       if (!ok) return;

@@ -78,6 +78,7 @@ const IDENTITY_STORES: IdentityStore[] = [
   { file: "local-prs.json", merge: "id-merge" },
   { file: "local-issues.json", merge: "id-merge" },
   { file: "pr-reviews.json", merge: "id-merge" },
+  { file: "automation-results.json", merge: "id-merge" },
   { file: "pr-review-drafts.json", merge: "inner-key" },
   { file: "review-notes.json", merge: "inner-key" },
   { file: "automation-dismissals.json", merge: "inner-key" },

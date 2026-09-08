@@ -68,6 +68,11 @@ export type NotificationTarget =
       reviewId?: string;
     }
   | { type: "run"; runId: number }
+  | {
+      type: "automation-result";
+      /** Persisted AutomationRunResult id — opens the app-root result dialog. */
+      id: string;
+    }
   | { type: "agent" }
   | { type: "repo" };
 

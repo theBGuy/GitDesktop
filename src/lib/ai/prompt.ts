@@ -25,10 +25,12 @@ Do not wrap the message in markdown fences. Do not add commentary before or afte
 
 /** Reference-syntax rule for every prompt whose output can be posted to a forge:
  *  a bare `#N` there is a live cross-reference that notifies the thread it names,
- *  so enumeration must not use it. Only the `(1)` form is offered — a leading
- *  `1)` renders as an ordered list in the app's own markdown. */
+ *  so it names three things that must not use it — enumeration, internal labels,
+ *  and items numbered in another document — and states the prohibition on the `#`
+ *  character itself, since parenthesizing it changes nothing. Only the `(1)` form
+ *  is offered — a leading `1)` renders as an ordered list in the app's own markdown. */
 const REFERENCE_RULE =
-  "Write #N (or !N) only when deliberately referencing a real issue or pull request in this repository — on the forge it becomes a live cross-reference and notifies that thread. For enumeration or internal labels write (1), (2), never #1. To mention a reference without linking it, wrap it in backticks.";
+  "Reference syntax: write #N (or !N) only when deliberately referencing a real issue or pull request in this repository — on the forge it becomes a live cross-reference and notifies that thread. The # character itself is what links, and parentheses do not neutralize it: (#10) is still a live reference. For enumeration or internal labels write (1), (2) — never #1, never (#1). For numbered items in ANOTHER document (the PR description's list, a linked doc, a finding in an earlier review) name or quote the item — \"the description's item 11\" — never #11, never (#11). To mention a reference without linking it, wrap it in backticks.";
 
 // KEEP IN SYNC: src-tauri/src/mcp_server/generate.rs mirrors this for the MCP recipe tools.
 export function buildCommitPrompt(input: CommitPromptInput): {

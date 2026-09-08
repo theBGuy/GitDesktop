@@ -26,6 +26,8 @@ import {
   forgePrDiff,
   forgeStatus,
   gitBranchDiff,
+  gitBranches,
+  gitBranchTips,
   gitCommitDiff,
   readRepoInstructions,
 } from "@/lib/git/api";
@@ -43,7 +45,10 @@ import {
 } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
 import { effectiveReviewAi, loadSettings } from "@/lib/settings/api";
-import { pushNotification } from "@/lib/stores/notifications";
+import {
+  type NotificationTarget,
+  pushNotification,
+} from "@/lib/stores/notifications";
 import {
   type ReviewTarget,
   registerAutomationRun,
@@ -56,7 +61,7 @@ import {
   getDismissedHeadMap,
   setDismissedHead,
 } from "./dismissals";
-import { useAutomationResults } from "./results";
+import { type AutomationRunResult, useAutomationResults } from "./results";
 import { loadAutomations, repoAutomationsFor } from "./store";
 import { sameSha } from "./sync";
 import { branchConditionsPass, effectiveActions } from "./types";
@@ -549,6 +554,9 @@ async function run(
         kind: label,
         model: reviewCfg.model,
         automated: true,
+        // Unattended seam: suspect `#N` refs are backtick-wrapped with a disclosure
+        // line (owner ruling) — the manual panel confirms with the user instead.
+        neutralizeRefs: true,
         text,
       });
       await deliver(event, action, body, text, notify);
@@ -587,6 +595,9 @@ async function run(
       // Coverage stays safe for free: a PARTIAL is dropped by `listReviews`, so the
       // pr-sync gate still sees this head as un-reviewed and re-reviews it.
       let keptPartial = false;
+      // A kept COMMIT partial's record id — the failure row's click target, since a
+      // commit review has no panel to restore the output into.
+      let partialResultId = "";
       if (
         progress.timedOut &&
         progress.text.trim() !== "" &&
@@ -605,6 +616,31 @@ async function run(
           .then(() => true)
           .catch(() => false);
       }
+      if (
+        event.kind === "commit" &&
+        progress.timedOut &&
+        progress.text.trim() !== ""
+      ) {
+        const partial: AutomationRunResult = {
+          schemaVersion: 1,
+          id: crypto.randomUUID(),
+          repoPath: event.repoPath,
+          subject: event.title,
+          mode: action,
+          text: progress.text,
+          createdAt: new Date().toISOString(),
+          hash: event.hash,
+          phase: "error",
+          error: message,
+          timedOut: true,
+        };
+        partialResultId = partial.id;
+        keptPartial = await useAutomationResults
+          .getState()
+          .add(partial)
+          .then(() => true)
+          .catch(() => false);
+      }
       toast.error(`AI ${label} failed: ${message}`);
       // Inbox parity with manual runs (reviews.ts's notifyReviewDone): a genuine failure
       // records an inbox row too, gated on the same automations pref.
@@ -616,15 +652,38 @@ async function run(
             ? `"${event.hash.slice(0, 7)}"`
             : `"${event.title}"`;
         const reason = message.trim() ? `${subject} — ${message}` : subject;
+        // Where the kept output waits differs by event: a PR partial is restored into
+        // the review panel, a commit partial only through this row.
+        const partialNote =
+          event.kind === "commit"
+            ? "Partial output is kept — open it from this notification."
+            : "Partial output is kept under Previous reviews.";
         // The inbox row is where a kept partial gets discovered — a durable failure that
         // doesn't mention it reads as a run with nothing to show for it.
         const subtitle = keptPartial
-          ? `${reason}${reason.endsWith(".") ? "" : "."} Partial output is kept under Previous reviews.`
+          ? `${reason}${reason.endsWith(".") ? "" : "."} ${partialNote}`
           : reason;
         // Local alias for the loop's `action: ReviewMode` — the Re-run closure's
         // `run` body sees the outer `action` fine, but aliasing keeps the object
         // literal (which also has a field named `action`) unambiguous to read.
         const mode = action;
+        // A commit row navigates only when a partial actually landed — that record
+        // is the whole click-through. PR rows always land on their PR: automations
+        // run against the fork's own PRs (the poll that feeds them pins the origin
+        // slug deliberately), so the lens rides along.
+        let target: NotificationTarget | undefined;
+        if (event.kind === "commit") {
+          if (keptPartial) {
+            target = { type: "automation-result", id: partialResultId };
+          }
+        } else {
+          target = {
+            type: "pr",
+            kind: event.target.type,
+            ref: targetRef(event),
+            lens: "origin",
+          };
+        }
         pushNotification({
           kind: "review-failed",
           tone: "danger",
@@ -632,19 +691,7 @@ async function run(
           subtitle,
           repoPath: event.repoPath,
           repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
-          ...(event.kind === "commit"
-            ? {}
-            : {
-                target: {
-                  type: "pr",
-                  kind: event.target.type,
-                  ref: targetRef(event),
-                  // Automations run against the fork's own PRs: the poll that
-                  // feeds them pins the origin slug deliberately, so the
-                  // click-through lands there too.
-                  lens: "origin",
-                },
-              }),
+          target,
           // This run's stopped dock row; passing a dismissed key is safe (resetReview
           // no-ops on a gone key).
           action: {
@@ -782,25 +829,55 @@ async function resolveDiff(
     return { text, truncated: false, files: filesFromDiff(text) };
   }
   if (event.target.type === "remote") {
-    // Remote pr-open: prefer the local branch diff (it carries numstat), but the head
-    // branch isn't guaranteed local — catch-up / ready-flip events cover PRs opened
-    // elsewhere that reach this machine before any fetch lands the ref (observed live:
-    // `git diff` fails on an unfetched head). Fall back to the provider's PR diff.
-    try {
-      return await gitBranchDiff(
-        event.repoPath,
-        event.base,
-        event.head,
-        DIFF_MAX_BYTES,
-      );
-    } catch {
-      const text = await forgePrDiff(
-        event.repoPath,
-        event.target.number,
-        "origin",
-      );
+    // Remote pr-open: the local branches are only a shortcut (they carry numstat) and
+    // are trusted ONLY when provably fresh — a stale-but-present local ref returns a
+    // clean but WRONG diff, which is worse than the unfetched-head case that merely
+    // throws. Head freshness is the event's headSha against the local tip; the poll
+    // payload carries no base OID, so the base's own upstream tracking is the
+    // strongest local signal there is. Everything unverifiable — no headSha, an
+    // unfetched or moved head, a base that is untracked/gone/diverged, a probe that
+    // throws, or an empty local diff (inconclusive for a remote target) — reads the
+    // provider's PR diff, the source of truth this review needs for delivery anyway.
+    // Deliberately no fetch: a review must not mutate refs, and it would still race.
+    // Hoisted: the narrowing to the remote target doesn't flow into the closures.
+    const prNumber = event.target.number;
+    const { repoPath, base, head } = event;
+    const headSha = event.headSha ?? "";
+    // Origin-pinned — the poller is origin-scoped, so this tracks the fork's own PRs.
+    const providerDiff = async () => {
+      const text = await forgePrDiff(repoPath, prNumber, "origin");
       return { text, truncated: false, files: filesFromDiff(text) };
-    }
+    };
+    const localRefsFresh = async (): Promise<boolean> => {
+      if (!headSha) return false;
+      try {
+        const [tips, branches] = await Promise.all([
+          gitBranchTips(repoPath, [head]),
+          gitBranches(repoPath),
+        ]);
+        const tip = tips[head];
+        if (!tip || !sameSha(tip, headSha)) return false;
+        const baseBranch = branches.find((b) => b.name === base);
+        return (
+          baseBranch !== undefined &&
+          baseBranch.upstream !== null &&
+          !baseBranch.upstreamGone &&
+          baseBranch.upstreamAhead === 0 &&
+          baseBranch.upstreamBehind === 0
+        );
+      } catch {
+        return false;
+      }
+    };
+    if (!(await localRefsFresh())) return providerDiff();
+    const local = await gitBranchDiff(
+      repoPath,
+      base,
+      head,
+      DIFF_MAX_BYTES,
+    ).catch(() => null);
+    if (!local || !local.text.trim()) return providerDiff();
+    return local;
   }
   // Local PR targets: both branches are inherently local.
   return gitBranchDiff(event.repoPath, event.base, event.head, DIFF_MAX_BYTES);
@@ -1049,17 +1126,25 @@ async function deliver(
   const osPing = notify && !(await loadSettings().catch(() => null))?.hideAi;
 
   if (event.kind === "commit") {
-    // Commits have no comment surface — keep the result in-session and let
-    // the toast open it.
-    const result = {
+    // Commits have no comment surface — the results store is this review's only
+    // home, so the record is persisted before the toast and the inbox row that
+    // both point at it.
+    const result: AutomationRunResult = {
+      schemaVersion: 1,
       id: crypto.randomUUID(),
       repoPath: event.repoPath,
       subject: event.title,
       mode,
       text: rawText,
       createdAt: new Date().toISOString(),
+      hash: event.hash,
     };
-    useAutomationResults.getState().add(result);
+    // The session insert is synchronous; only the durable write is awaited, and a
+    // store failure must never break delivery (the toast still opens the result).
+    await useAutomationResults
+      .getState()
+      .add(result)
+      .catch(() => undefined);
     toast.success(`AI ${label} of ${event.hash.slice(0, 7)} ready`, {
       duration: 15_000,
       action: {
@@ -1067,6 +1152,21 @@ async function deliver(
         onClick: () => useAutomationResults.getState().setOpen(result.id),
       },
     });
+    // Inbox parity with the failure path (and with manual runs): the row is gated on
+    // the automations pref ALONE, never on hideAi — the dock filters AI rows at
+    // render time, so hiding AI mutes the ping without losing the history.
+    if (notify) {
+      pushNotification({
+        kind: "review-ready",
+        tone: "success",
+        title: `AI ${label} of ${event.hash.slice(0, 7)} ready`,
+        subtitle: event.title,
+        repoPath: event.repoPath,
+        repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
+        target: { type: "automation-result", id: result.id },
+        dedupeKey: `automation-review:${event.repoPath}:commit:${event.hash}:${mode}`,
+      });
+    }
     if (osPing) {
       void notifyIfUnfocused(
         `AI ${label} ready`,
@@ -1093,6 +1193,27 @@ async function deliver(
       queryKey: ["repo", event.repoPath, "pr", "origin", event.target.number],
     });
     toast.success(`AI ${label} posted on #${event.target.number}`);
+    // Gated on the automations pref alone — see the commit arm.
+    if (notify) {
+      const prNumber = event.target.number;
+      pushNotification({
+        kind: "review-ready",
+        tone: "success",
+        title: `AI ${label} posted on #${prNumber}`,
+        subtitle: `"${event.title}"`,
+        repoPath: event.repoPath,
+        repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
+        // The lens rides both the target and the dedupe key: a fork's origin and
+        // upstream PRs share a number, and automations are origin-pinned.
+        target: {
+          type: "pr",
+          kind: "remote",
+          ref: String(prNumber),
+          lens: "origin",
+        },
+        dedupeKey: `automation-review:${event.repoPath}:remote:origin:${prNumber}:${mode}`,
+      });
+    }
     if (osPing) {
       void notifyIfUnfocused(
         `AI ${label} posted on #${event.target.number}`,
@@ -1126,6 +1247,18 @@ async function deliver(
     queryKey: ["local-prs", event.repoPath],
   });
   toast.success(`AI ${label} added to "${pr.title}"`);
+  // Gated on the automations pref alone — see the commit arm.
+  if (notify) {
+    pushNotification({
+      kind: "review-ready",
+      tone: "success",
+      title: `AI ${label} added to "${pr.title}"`,
+      repoPath: event.repoPath,
+      repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
+      target: { type: "pr", kind: "local", ref: targetId, lens: "origin" },
+      dedupeKey: `automation-review:${event.repoPath}:local:origin:${targetId}:${mode}`,
+    });
+  }
   if (osPing) {
     void notifyIfUnfocused(`AI ${label} finished`, `Local PR "${pr.title}"`);
   }

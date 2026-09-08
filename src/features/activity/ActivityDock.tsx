@@ -26,6 +26,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
+import { openAutomationResult } from "@/lib/automations/results";
 import { displayLogin } from "@/lib/git/bot-login";
 import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
@@ -258,6 +259,8 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
       openRun({ repoPath: n.repoPath, repoName: n.repoName, runId: t.runId });
     } else if (t?.type === "agent") {
       openAgentTab({ repoPath: n.repoPath, repoName: n.repoName });
+    } else if (t?.type === "automation-result" && typeof t.id === "string") {
+      void openAutomationResult(n.repoPath, t.id);
     }
     onClose();
   };
