@@ -87,9 +87,10 @@ export function protectionsFor(
 
 /**
  * Whether `branch` is configured as a promotion branch — a pull request FROM it
- * carries work onward rather than catching up, so the update-from-base offer is
- * withheld. The user's own assertion about this repository, so it needs no
- * topology check to back it up.
+ * carries work onward rather than catching up, so its PRs withhold the
+ * update-from-base offer and the branch menus withhold the update from the
+ * default branch. The user's own assertion about this repository, so it needs
+ * no topology check to back it up.
  */
 export function isPromotionBranch(
   config: BranchRulesConfig,
