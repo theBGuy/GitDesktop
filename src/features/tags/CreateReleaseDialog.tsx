@@ -340,7 +340,7 @@ export function CreateReleaseDialog({
     aiNotes
       .generate({
         tag: requestedFor,
-        target: showTarget ? target.trim() : tagTrimmed,
+        target: showTarget ? target.trim() : requestedFor,
         previousTag: effectivePreviousTag,
         repoName,
         isGitHub,
