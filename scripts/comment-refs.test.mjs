@@ -95,6 +95,460 @@ test("an indented code line hides its references", () => {
   assert.deepEqual(findSuspectRefs("   Fixes #123\n"), ["#123"]);
 });
 
+// Raw-HTML-block fixtures. GitHub's reference filter runs INSIDE raw HTML, so a
+// `#N` there autolinks and must still be detected; a backtick wrap there is
+// literal text that mangles the block and neutralizes nothing, so the region is
+// left alone and its refs are disclosed instead. Region grammar on `scanRefs`.
+const HTML_DETAILS = "<details>\nFixes #123\n</details>";
+const HTML_DETAILS_SPACED = "<details>\n\nFixes #123\n\n</details>";
+const HTML_SUMMARY_INLINE = "<details><summary>x</summary> Fixes #12";
+const HTML_CLOSER_MID_TEXT = "prose #1\n</details>\nmore #2\n";
+const HTML_SPAN_INLINE = "<span>see #5</span> and more prose";
+const HTML_SPAN_ALONE = "<span>\nsee #5\n";
+const HTML_MIXED = "prose #7\n\n<details>\nFixes #8\n</details>";
+const HTML_SAME_TOKEN = "prose #7\n\n<details>\nFixes #7\n</details>";
+const HTML_TICK_INSIDE = "<details>\na ` b\n</details>\n\nFixes #6";
+
+// Region starts CommonMark reads at the container content column, a blank line it
+// defines as spaces and tabs only, a block start that beats an open code span, and
+// the type-1 end condition. Each of these wrapped a reference INSIDE raw HTML
+// before the region grammar learned the rule.
+const HTML_IN_QUOTE = "> <details>\n> Fixes #123\n> </details>\n";
+const HTML_IN_LIST = "- <details>\n  Fixes #123\n  </details>\n";
+const HTML_IN_ORDERED_LIST = "1. <details>\n   Fixes #3\n";
+// The middle line is one NBSP, spelled as an escape so it stays visible in the
+// source: whitespace to `String.trim`, CONTENT to CommonMark, so it must not end
+// the block. The guard below pins that the fixture really carries one.
+const HTML_NBSP_LINE = "<details>\n\u00a0\nFixes #123\n</details>\n";
+const HTML_ACROSS_SPAN =
+  "text ` open\n<details>\nstill ` closed\nFixes #123\n</details>\n";
+const HTML_QUOTED_STRAY = "> prose ` x\n> <details>\n> #9\n";
+const HTML_RAW_TEXT = "<pre>\nline one\n\nFixes #123\n</pre>\n";
+
+// Link reference definitions. A wrap on one of these lines is spliced into the URL
+// the definition supplies, so this region is skipped to prevent damage rather than a
+// false claim — and the ref was never live there either, so detecting it at the
+// manual seam was a false positive.
+const LINK_DEF_USED = "[jump][dest]\n\n[dest]: #123\n";
+const LINK_DEF_ALONE = "[dest]: #123\n";
+const LINK_DEF_SPLIT = "[dest]:\n#123\n";
+// Definition-SHAPED but continuing a paragraph, so CommonMark renders it as prose
+// and the reference really does link: detection must still fire here.
+const LINK_DEF_AS_PROSE = "see below\n[dest]: #123\n";
+
+test("a link reference definition is not scanned", () => {
+  for (const source of [LINK_DEF_USED, LINK_DEF_ALONE, LINK_DEF_SPLIT]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    const out = neutralizeSuspectRefs(source);
+    assert.equal(out.text, source, label);
+    assert.deepEqual(out.wrapped, [], label);
+    assert.deepEqual(out.survived, [], label);
+  }
+});
+
+test("a definition-shaped line continuing a paragraph is prose", () => {
+  // The bound on the skip: only a line where a paragraph could START is a
+  // definition, so this one is scanned and wrapped like any other prose.
+  assert.deepEqual(findSuspectRefs(LINK_DEF_AS_PROSE), ["#123"]);
+  const out = neutralizeSuspectRefs(LINK_DEF_AS_PROSE);
+  assert.equal(out.text, "see below\n[dest]: `#123`\n");
+  assert.deepEqual(out.wrapped, ["`#123`"]);
+});
+
+// Reference-link USE sites. A wrap inside the label breaks the lookup (label matching
+// is case-fold and whitespace-collapse, nothing more), so the published link dies as
+// bracket text — and the ref renders inside the anchor, where no forge filter reaches
+// it, so detecting it was a false positive before the wrap broke anything.
+const LINK_REF_SHORTCUT = "[issue #5]\n\n[issue #5]: https://example.com\n";
+const LINK_REF_COLLAPSED = "[issue #5][]\n\n[issue #5]: /url\n";
+const LINK_REF_FULL = "[jump #5][dest]\n\n[dest]: /url\n";
+const LINK_REF_FOLDED = "[Issue   #5]\n\n[iSSUE #5]: /url\n";
+// No definition anywhere, so the brackets are prose and the ref really does link.
+const LINK_REF_NO_DEFINITION = "see [maybe #5] there\n";
+// A definition inside a fence is code, not a definition, so the label resolves
+// nothing and the use site below is prose.
+const LINK_REF_FENCED_DEF = "```\n[issue #5]: /url\n```\n\n[issue #5]\n";
+
+test("a resolving reference link is not scanned, in any of its forms", () => {
+  for (const source of [
+    LINK_REF_SHORTCUT,
+    LINK_REF_COLLAPSED,
+    LINK_REF_FULL,
+    LINK_REF_FOLDED,
+  ]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    const out = neutralizeSuspectRefs(source);
+    assert.equal(out.text, source, label);
+    assert.deepEqual(out.wrapped, [], label);
+    assert.deepEqual(out.survived, [], label);
+  }
+});
+
+test("a bracket span that resolves nothing is prose", () => {
+  // The bound on the skip. Skipping every bracket span instead would ship this
+  // reference live, which is the harm direction.
+  assert.deepEqual(findSuspectRefs(LINK_REF_NO_DEFINITION), ["#5"]);
+  assert.equal(
+    neutralizeSuspectRefs(LINK_REF_NO_DEFINITION).text,
+    "see [maybe `#5`] there\n",
+  );
+  // A full reference naming an undefined label is prose too.
+  const undefinedLabel = "[jump #5][nope]\n\n[dest]: /url\n";
+  assert.deepEqual(findSuspectRefs(undefinedLabel), ["#5"]);
+});
+
+test("a definition inside a fence defines nothing", () => {
+  // The pre-pass runs the same line classification as the scan, so a definition
+  // that is really code never enters the label set and its use site stays prose.
+  assert.deepEqual(findSuspectRefs(LINK_REF_FENCED_DEF), ["#5"]);
+  assert.equal(
+    neutralizeSuspectRefs(LINK_REF_FENCED_DEF).text,
+    "```\n[issue #5]: /url\n```\n\n[issue `#5`]\n",
+  );
+});
+
+// A label proves nothing on its own: `not a valid url` cannot be a bare destination,
+// so this whole line is a paragraph and BOTH its refs are live.
+const DEF_INVALID_TAIL = "[issue #5]: not a valid url\n\n[issue #5]\n";
+const DEF_DEFERRED_INVALID = "[dest]:\nnot a url #9\n";
+const DEF_ANGLE_DEST = "[issue #5]: <a url with spaces>\n\n[issue #5]\n";
+const DEF_TITLED = '[issue #5]: /url "A title"\n\n[issue #5]\n';
+const DEF_TITLED_PARENS = "[issue #5]: /url (A title)\n\n[issue #5]\n";
+
+test("a line whose tail is no destination is prose, label and all", () => {
+  // Registering the label would have silenced the use site below it too.
+  assert.deepEqual(findSuspectRefs(DEF_INVALID_TAIL), ["#5"]);
+  assert.equal(
+    neutralizeSuspectRefs(DEF_INVALID_TAIL).text,
+    "[issue `#5`]: not a valid url\n\n[issue `#5`]\n",
+  );
+});
+
+test("a deferred destination line is validated the same way", () => {
+  // `[dest]:` alone defers to the next line — but only if that line really is a
+  // destination, so this pair is a plain paragraph.
+  assert.deepEqual(findSuspectRefs(DEF_DEFERRED_INVALID), ["#9"]);
+  assert.equal(
+    neutralizeSuspectRefs(DEF_DEFERRED_INVALID).text,
+    "[dest]:\nnot a url `#9`\n",
+  );
+  // The valid shape still defers and still skips both lines.
+  assert.deepEqual(findSuspectRefs(LINK_DEF_SPLIT), []);
+});
+
+test("the valid destination forms are definitions", () => {
+  for (const source of [DEF_ANGLE_DEST, DEF_TITLED, DEF_TITLED_PARENS]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    assert.equal(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
+test("a malformed definition line is prose", () => {
+  // A bracket that never closes, an all-whitespace label, and a missing colon are
+  // none of them definitions, so each stays scannable.
+  assert.deepEqual(findSuspectRefs("[dest #123\n"), ["#123"]);
+  assert.deepEqual(findSuspectRefs("[ ]: #123\n"), ["#123"]);
+  assert.deepEqual(findSuspectRefs("[dest] #123\n"), ["#123"]);
+  // An unescaped `]` inside the label ends it, so this is not a definition either.
+  assert.deepEqual(findSuspectRefs("[a]b]: #123\n"), ["#123"]);
+});
+
+/** A block opens at its container's content column, so the region is byte-identical
+ *  and the ref inside it is disclosed rather than wrapped. */
+function assertHeldWhole(source, form) {
+  const out = neutralizeSuspectRefs(source);
+  const label = JSON.stringify(source);
+  assert.equal(out.text, source, label);
+  assert.deepEqual(out.wrapped, [], label);
+  assert.deepEqual(out.survived, [form], label);
+}
+
+test("a blockquote's marker does not stop a block from opening", () => {
+  assertHeldWhole(HTML_IN_QUOTE, "`#123`");
+});
+
+test("a bullet list's marker does not stop a block from opening", () => {
+  assertHeldWhole(HTML_IN_LIST, "`#123`");
+});
+
+test("an ordered list's marker does not stop a block from opening", () => {
+  assertHeldWhole(HTML_IN_ORDERED_LIST, "`#3`");
+});
+
+test("a line of NBSP is content, not the blank line that ends a block", () => {
+  assert.equal(HTML_NBSP_LINE.split("\n")[1], "\u00a0");
+  const out = neutralizeSuspectRefs(HTML_NBSP_LINE);
+  assert.equal(out.text, HTML_NBSP_LINE);
+  assert.deepEqual(out.wrapped, []);
+  assert.deepEqual(out.survived, ["`#123`"]);
+});
+
+test("an open code span cannot reach across a block opener", () => {
+  // The opener is a block start and the block pass runs first, so the tick that
+  // would have closed the span is unreachable and the ref below it is held.
+  assertHeldWhole(HTML_ACROSS_SPAN, "`#123`");
+});
+
+test("a stray tick in a quoted paragraph cannot swallow the block below it", () => {
+  assertHeldWhole(HTML_QUOTED_STRAY, "`#9`");
+});
+
+test("a raw-text block ends at its closing tag, not at a blank line", () => {
+  // Type 1 ignores blank lines entirely, so `#123` two lines below one is still
+  // inside the `<pre>` and a wrap there would be visible backtick garbage.
+  const out = neutralizeSuspectRefs(HTML_RAW_TEXT);
+  assert.equal(out.text, HTML_RAW_TEXT);
+  assert.deepEqual(out.wrapped, []);
+  assert.deepEqual(out.survived, ["`#123`"]);
+  // The closing tag may share the opener's line, and the block ends there.
+  const oneLine = neutralizeSuspectRefs("<pre>see #1</pre>\n\nFixes #2");
+  assert.equal(oneLine.text, "<pre>see #1</pre>\n\nFixes `#2`");
+  assert.deepEqual(oneLine.wrapped, ["`#2`"]);
+  assert.deepEqual(oneLine.survived, ["`#1`"]);
+});
+
+test("a raw HTML block hides nothing from the detector", () => {
+  assert.deepEqual(findSuspectRefs(HTML_DETAILS), ["#123"]);
+  assert.deepEqual(findSuspectRefs(HTML_SUMMARY_INLINE), ["#12"]);
+  assert.deepEqual(findSuspectRefs(HTML_SPAN_ALONE), ["#5"]);
+  assert.deepEqual(findSuspectRefs(HTML_CLOSER_MID_TEXT), ["#1", "#2"]);
+});
+
+test("a reference in a raw HTML block is left alone and disclosed", () => {
+  const out = neutralizeSuspectRefs(HTML_DETAILS);
+  assert.equal(out.text, HTML_DETAILS);
+  assert.deepEqual(out.wrapped, []);
+  assert.deepEqual(out.survived, ["`#123`"]);
+});
+
+test("a blank line ends the block, so the reference below it wraps", () => {
+  const out = neutralizeSuspectRefs(HTML_DETAILS_SPACED);
+  assert.equal(out.text, "<details>\n\nFixes `#123`\n\n</details>");
+  assert.deepEqual(out.wrapped, ["`#123`"]);
+  assert.deepEqual(out.survived, []);
+});
+
+test("a type-6 opener covers the rest of its own line", () => {
+  const out = neutralizeSuspectRefs(HTML_SUMMARY_INLINE);
+  assert.equal(out.text, HTML_SUMMARY_INLINE);
+  assert.deepEqual(out.wrapped, []);
+  assert.deepEqual(out.survived, ["`#12`"]);
+});
+
+test("a lone closing tag opens a block and interrupts the paragraph", () => {
+  const out = neutralizeSuspectRefs(HTML_CLOSER_MID_TEXT);
+  assert.equal(out.text, "prose `#1`\n</details>\nmore #2\n");
+  assert.deepEqual(out.wrapped, ["`#1`"]);
+  assert.deepEqual(out.survived, ["`#2`"]);
+});
+
+test("a tag with trailing content on the line opens no block", () => {
+  // `span` is not a type-6 tag, and type 7 wants the tag alone on its line, so
+  // this is ordinary prose: the wrap must still fire.
+  const out = neutralizeSuspectRefs(HTML_SPAN_INLINE);
+  assert.equal(out.text, "<span>see `#5`</span> and more prose");
+  assert.deepEqual(out.wrapped, ["`#5`"]);
+  assert.deepEqual(out.survived, []);
+});
+
+test("a tag alone on its line is a type-7 block, whatever the tag", () => {
+  const out = neutralizeSuspectRefs(HTML_SPAN_ALONE);
+  assert.equal(out.text, HTML_SPAN_ALONE);
+  assert.deepEqual(out.wrapped, []);
+  assert.deepEqual(out.survived, ["`#5`"]);
+});
+
+test("wrapped and held references are reported side by side", () => {
+  const out = neutralizeSuspectRefs(HTML_MIXED);
+  assert.equal(out.text, "prose `#7`\n\n<details>\nFixes #8\n</details>");
+  assert.deepEqual(out.wrapped, ["`#7`"]);
+  assert.deepEqual(out.survived, ["`#8`"]);
+});
+
+test("a token wrapped in one place and held in another is disowned", () => {
+  const out = neutralizeSuspectRefs(HTML_SAME_TOKEN);
+  assert.equal(out.text, "prose `#7`\n\n<details>\nFixes #7\n</details>");
+  assert.deepEqual(out.wrapped, []);
+  assert.deepEqual(out.survived, ["`#7`"]);
+});
+
+test("a tick inside a raw HTML block cannot lengthen a later wrap", () => {
+  // No inline syntax parses inside the block, and the blank line that ends one
+  // clears the paragraph's strays anyway, so that tick reaches nothing.
+  const out = neutralizeSuspectRefs(HTML_TICK_INSIDE);
+  assert.equal(out.text, "<details>\na ` b\n</details>\n\nFixes `#6`");
+  assert.deepEqual(out.wrapped, ["`#6`"]);
+});
+
+// Indented code cannot interrupt a paragraph, so these indented lines are prose
+// continuations whose refs really do link — skipping them was a silent live ref.
+const INDENT_PROSE_CONTINUATION = "Review notes:\n    Fixes #123\n";
+const INDENT_LIST_CONTINUATION = "- Finding\n    See #123\n";
+const INDENT_DEEP_LIST_CONTINUATION = "-   Finding\n        See #123\n";
+// A real indented code block: opened where a paragraph could start, and its later
+// lines stay inside it across a blank line.
+const INDENT_CODE_BLOCK = "p\n\n    a #1\n\n    Fixes #123\n";
+const INDENT_CODE_IN_LIST = "- Finding\n\n      See #123\n";
+
+test("an indented line continuing a paragraph is prose", () => {
+  for (const [source, wrapped] of [
+    [INDENT_PROSE_CONTINUATION, "Review notes:\n    Fixes `#123`\n"],
+    [INDENT_LIST_CONTINUATION, "- Finding\n    See `#123`\n"],
+    [INDENT_DEEP_LIST_CONTINUATION, "-   Finding\n        See `#123`\n"],
+  ]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#123"], label);
+    assert.equal(neutralizeSuspectRefs(source).text, wrapped, label);
+  }
+});
+
+test("a real indented code block is still skipped", () => {
+  // No separate block state is needed: every skipped line leaves the paragraph-start
+  // flag true, so the block's later lines and the blank line inside it stay code.
+  for (const source of [
+    INDENT_CODE_BLOCK,
+    INDENT_CODE_IN_LIST,
+    "    Fixes #123\n",
+  ]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    assert.equal(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
+// An unterminated fence inside a blockquote dies with its container. Without that it
+// swallows the rest of the comment, and those references post live and undisclosed.
+const FENCE_QUOTE_UNPAIRED_REPLY =
+  "> ```suggestion\n> const x = 1;\n\nThat still leaves the leak. Same root cause as #123, and it blocks !47.\n";
+const FENCE_QUOTE_UNPAIRED_MIN = "> ~~~\n> code\n\nFixes #123\n";
+const FENCE_QUOTE_LAZY = "> ~~~\nFixes #123\n";
+const FENCE_UNQUOTED_UNPAIRED = "```\nFixes #123\n";
+
+test("an unterminated fence in a blockquote ends with the blockquote", () => {
+  // A blank line ends the quote, and so does a line that drops below its depth.
+  assert.deepEqual(findSuspectRefs(FENCE_QUOTE_UNPAIRED_REPLY, ["#", "!"]), [
+    "#123",
+    "!47",
+  ]);
+  assert.deepEqual(findSuspectRefs(FENCE_QUOTE_UNPAIRED_MIN), ["#123"]);
+  assert.deepEqual(findSuspectRefs(FENCE_QUOTE_LAZY), ["#123"]);
+});
+
+// A `>`-only line is a blank line INSIDE the blockquote, which a quoted fence
+// absorbs as a blank code line. Reading it as the end of the container kills the
+// fence early, and the real closer then opens a phantom fence over the rest.
+const FENCE_QUOTE_BLANK_INSIDE =
+  "> ```js\n> const a = 1;\n>\n> const b = 2;\n> ```\n> This fixes #123 as noted.";
+const FENCE_QUOTE_BLANK_CONTENT = "> ```\n> code #1\n>\n> more #2\n> ```";
+
+test("a quote-marker-only line does not end a quoted fence", () => {
+  // Live-ref direction: the fence really closes at its closer, so the prose after
+  // it inside the same quote is scanned.
+  assert.deepEqual(findSuspectRefs(FENCE_QUOTE_BLANK_INSIDE), ["#123"]);
+  // Mangling direction: everything between the markers stays code, both sides of
+  // the blank line, so the neutralizer leaves it alone.
+  assert.deepEqual(findSuspectRefs(FENCE_QUOTE_BLANK_CONTENT), []);
+  assert.equal(
+    neutralizeSuspectRefs(FENCE_QUOTE_BLANK_CONTENT).text,
+    FENCE_QUOTE_BLANK_CONTENT,
+  );
+});
+
+const FENCE_QUOTE_BLANK_THEN_PROSE =
+  "> ```\n> a #1\n>\n> b #2\n> ```\n\nAfter #9\n";
+const FENCE_NESTED_BLANK =
+  "> > ```\n> > a #1\n> >\n> > b #2\n> > ```\n> > tail #3\n";
+
+test("a quoted fence with an inner blank still ends at its own closer", () => {
+  // Both refs inside stay code and only what follows the closer is scanned —
+  // outside the quote entirely, and at a nested depth.
+  assert.deepEqual(findSuspectRefs(FENCE_QUOTE_BLANK_THEN_PROSE), ["#9"]);
+  assert.deepEqual(findSuspectRefs(FENCE_NESTED_BLANK), ["#3"]);
+});
+
+const HTML_QUOTE_BLANK_INSIDE = "> <details>\n> #1\n>\n> #2\n";
+
+test("a quote-marker-only line DOES end a quoted HTML block", () => {
+  // The asymmetry the fence rule turns on: a fence absorbs `>` as a blank code
+  // line, a type-6 block ends at it. So the first ref is block content and held,
+  // and the second is an ordinary quoted paragraph and wraps.
+  const out = neutralizeSuspectRefs(HTML_QUOTE_BLANK_INSIDE);
+  assert.deepEqual(findSuspectRefs(HTML_QUOTE_BLANK_INSIDE), ["#1", "#2"]);
+  assert.deepEqual(out.survived, ["`#1`"]);
+  assert.deepEqual(out.wrapped, ["`#2`"]);
+});
+
+test("an unterminated fence at depth zero still runs to the end", () => {
+  // It has no container to lose, so this stays the pinned behaviour, and a properly
+  // closed quoted fence keeps suppressing its contents.
+  assert.deepEqual(findSuspectRefs(FENCE_UNQUOTED_UNPAIRED), []);
+  assert.deepEqual(findSuspectRefs(FENCE_IN_QUOTE), []);
+});
+
+// Indented code opens right after each of these leaf blocks, so a wrap there would
+// land inside rendered code while the footer claimed the reference was neutralized.
+const INDENT_AFTER_HEADING = "## Findings\n    // repro\n    fixes #123\n";
+const INDENT_AFTER_SETEXT = "Title\n---\n    fixes #123\n";
+const INDENT_AFTER_BREAK = "a\n\n***\n    fixes #123\n";
+const INDENT_AFTER_RAW_CLOSE = "<pre>\na\n</pre>\n    fixes #123\n";
+const INDENT_AFTER_TABLE = "| a | b |\n| - | - |\n    fixes #123\n";
+const INDENT_IN_QUOTE = "> intro\n>\n>     Fixes #123\n";
+const DEF_AFTER_HEADING = "## References\n[d]: #123\n\nsee [d]\n";
+const DEF_IN_QUOTE = "> intro\n>\n> [dest]: #123\n\nsee [dest]\n";
+
+test("a line that leaves no open paragraph lets indented code follow it", () => {
+  // Only recognizable paragraph content blocks the next line from starting a block;
+  // every other shape, modelled or not, falls back to treating the indent as code.
+  for (const source of [
+    INDENT_AFTER_HEADING,
+    INDENT_AFTER_SETEXT,
+    INDENT_AFTER_BREAK,
+    INDENT_AFTER_RAW_CLOSE,
+    INDENT_AFTER_TABLE,
+  ]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    assert.equal(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
+test("a blockquote's own blank line and indent are read at its content column", () => {
+  // `>` alone is the blockquote's blank line, so what follows starts a block: an
+  // indented line is code, and a definition line registers instead of corrupting.
+  for (const source of [INDENT_IN_QUOTE, DEF_IN_QUOTE, DEF_AFTER_HEADING]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    assert.equal(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
+// A fence opens at the blockquote content column, and pairs only at its own depth.
+const FENCE_IN_QUOTE = "> ~~~\n> #123\n> ~~~\n";
+const FENCE_DEPTH_MISMATCH = "> ```\n> a\n```\n#123\n";
+const FENCE_QUOTE_THEN_PROSE = "> ~~~\n> a\n> ~~~\n\n#123\n";
+
+test("a fence inside a blockquote is a fence", () => {
+  // The tilde form is the one that showed the damage: backticks in a quoted fence
+  // happen to open a code SPAN, which hid the refs by accident.
+  assert.deepEqual(findSuspectRefs(FENCE_IN_QUOTE), []);
+  assert.equal(neutralizeSuspectRefs(FENCE_IN_QUOTE).text, FENCE_IN_QUOTE);
+  // And it closes, so prose after the blockquote is scanned again.
+  assert.deepEqual(findSuspectRefs(FENCE_QUOTE_THEN_PROSE), ["#123"]);
+});
+
+test("a fence pairs only at its own container depth", () => {
+  // An unquoted ``` line cannot close a fence opened inside a blockquote, so the
+  // reference below stays inside code — which is where the renderer puts it too.
+  assert.deepEqual(findSuspectRefs(FENCE_DEPTH_MISMATCH), []);
+  assert.equal(
+    neutralizeSuspectRefs(FENCE_DEPTH_MISMATCH).text,
+    FENCE_DEPTH_MISMATCH,
+  );
+});
+
 // Backslash-parity fixtures; rule on `isEscaped`, guard below pins the counts.
 const ESC_1 = String.raw`\#123`;
 const ESC_2 = String.raw`\\#123`;
@@ -109,13 +563,82 @@ test("the escape fixtures carry the backslash runs they claim", () => {
   );
 });
 
-test("an odd backslash run escapes the trigger", () => {
-  assert.deepEqual(findSuspectRefs(ESC_1), []);
-  assert.deepEqual(findSuspectRefs(ESC_3), []);
-  assert.equal(neutralizeSuspectRefs(ESC_1).text, ESC_1);
-  assert.deepEqual(neutralizeSuspectRefs(ESC_1).wrapped, []);
-  assert.equal(neutralizeSuspectRefs(ESC_3).text, ESC_3);
-  assert.deepEqual(findSuspectRefs(String.raw`\!45`, ["#", "!"]), []);
+// The forges disagree about an escaped trigger, so the escape arm has two modes and
+// both are pinned. GitHub's reference filter runs after rendering, on text the escape
+// has already been consumed from, so `\#123` autolinks there; GitLab leaves it alone.
+test("an escaped trigger is a candidate by default, backslash run and all", () => {
+  assert.deepEqual(findSuspectRefs(ESC_1), [ESC_1]);
+  assert.deepEqual(findSuspectRefs(ESC_3), [ESC_3]);
+  assert.deepEqual(findSuspectRefs(String.raw`\!45`, ["#", "!"]), [
+    String.raw`\!45`,
+  ]);
+  // The wrap must ENCLOSE the backslashes. Opening the span after them would leave
+  // the span's own tick escaped, and the reference bare and live outside it.
+  const one = neutralizeSuspectRefs(ESC_1);
+  assert.equal(one.text, `\`${ESC_1}\``);
+  assert.deepEqual(one.wrapped, [`\`${ESC_1}\``]);
+  assert.equal(neutralizeSuspectRefs(ESC_3).text, `\`${ESC_3}\``);
+  // A word character before the run still keeps it plain: the boundary rule reads
+  // what ends up adjacent once the renderer consumes the backslash.
+  assert.deepEqual(findSuspectRefs(`a${ESC_1}`), []);
+});
+
+const ESCAPED_IN_HTML = `<details>\nFixes ${ESC_1}\n</details>`;
+
+test("an escaped reference inside a raw HTML block is held in BOTH modes", () => {
+  // No escape processing happens inside raw HTML, so the backslash is literal text
+  // and both forges linkify the reference beside it. The GitLab mode's reason for
+  // leaving an escape alone does not reach in here. The raw-HTML arm still refuses
+  // to rewrite, so it lands in `survived` carrying its backslash.
+  for (const live of [true, false]) {
+    const label = `escapedRefsLive=${live}`;
+    assert.deepEqual(
+      findSuspectRefs(ESCAPED_IN_HTML, ["#", "!"], live),
+      [ESC_1],
+      label,
+    );
+    const out = neutralizeSuspectRefs(ESCAPED_IN_HTML, ["#", "!"], live);
+    assert.equal(out.text, ESCAPED_IN_HTML, label);
+    assert.deepEqual(out.wrapped, [], label);
+    assert.deepEqual(out.survived, [`\`${ESC_1}\``], label);
+  }
+});
+
+test("the footer names an escaped reference held inside raw HTML", () => {
+  const body = buildAiCommentBody({
+    ...PARTS,
+    text: ESCAPED_IN_HTML,
+    neutralizeRefs: true,
+  });
+  assert.ok(body.includes(ESCAPED_IN_HTML), body);
+  assert.ok(
+    body.endsWith(
+      `_This automated run could not neutralize \`${ESC_1}\` — verify before trusting any links it created._`,
+    ),
+    body,
+  );
+});
+
+test("a fence recovers when a deeper quote drops a level", () => {
+  assert.deepEqual(findSuspectRefs("> > ~~~\n> > c\n> after #1\n"), ["#1"]);
+});
+
+test("the GitLab mode leaves an escaped trigger alone", () => {
+  for (const source of [ESC_1, ESC_3, String.raw`\!45`]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source, ["#", "!"], false), [], label);
+    const out = neutralizeSuspectRefs(source, ["#", "!"], false);
+    assert.equal(out.text, source, label);
+    assert.deepEqual(out.wrapped, [], label);
+  }
+  // An EVEN run is not an escape at all, so both modes agree about it.
+  for (const source of [ESC_2, ESC_4]) {
+    assert.deepEqual(
+      findSuspectRefs(source, ["#", "!"], false),
+      findSuspectRefs(source),
+      JSON.stringify(source),
+    );
+  }
 });
 
 test("an even backslash run leaves the reference live", () => {
@@ -361,6 +884,70 @@ const CORPUS = [
   "prose ` #4\n```\ny `\n```\n",
   "`#1``#2``#3``#4`#5",
   "` a ` ` b #7",
+  // Raw HTML blocks — the population that makes `survived` reachable.
+  HTML_DETAILS,
+  HTML_DETAILS_SPACED,
+  HTML_SUMMARY_INLINE,
+  HTML_CLOSER_MID_TEXT,
+  HTML_SPAN_INLINE,
+  HTML_SPAN_ALONE,
+  HTML_MIXED,
+  HTML_SAME_TOKEN,
+  HTML_TICK_INSIDE,
+  // Negative controls: each one wrapped a reference INSIDE raw HTML before the
+  // region grammar read container columns, CommonMark's blank line, and block
+  // starts that beat an open span. The renderer oracle below is what catches them.
+  HTML_IN_QUOTE,
+  HTML_IN_LIST,
+  HTML_IN_ORDERED_LIST,
+  HTML_NBSP_LINE,
+  HTML_ACROSS_SPAN,
+  HTML_QUOTED_STRAY,
+  HTML_RAW_TEXT,
+  // The oracle cannot see href corruption (a wrapped destination still renders as
+  // an anchor), so these are pinned by byte-identity above; here they only have to
+  // stay consistent with the partition and fixed-point properties.
+  LINK_DEF_USED,
+  LINK_DEF_ALONE,
+  LINK_DEF_SPLIT,
+  LINK_DEF_AS_PROSE,
+  LINK_REF_SHORTCUT,
+  LINK_REF_COLLAPSED,
+  LINK_REF_FULL,
+  LINK_REF_FOLDED,
+  LINK_REF_NO_DEFINITION,
+  LINK_REF_FENCED_DEF,
+  INDENT_PROSE_CONTINUATION,
+  INDENT_LIST_CONTINUATION,
+  INDENT_DEEP_LIST_CONTINUATION,
+  INDENT_CODE_BLOCK,
+  INDENT_CODE_IN_LIST,
+  FENCE_IN_QUOTE,
+  FENCE_DEPTH_MISMATCH,
+  FENCE_QUOTE_THEN_PROSE,
+  DEF_INVALID_TAIL,
+  DEF_DEFERRED_INVALID,
+  DEF_ANGLE_DEST,
+  DEF_TITLED,
+  DEF_TITLED_PARENS,
+  FENCE_QUOTE_UNPAIRED_REPLY,
+  FENCE_QUOTE_UNPAIRED_MIN,
+  FENCE_QUOTE_LAZY,
+  FENCE_UNQUOTED_UNPAIRED,
+  FENCE_QUOTE_BLANK_INSIDE,
+  FENCE_QUOTE_BLANK_CONTENT,
+  FENCE_QUOTE_BLANK_THEN_PROSE,
+  FENCE_NESTED_BLANK,
+  HTML_QUOTE_BLANK_INSIDE,
+  ESCAPED_IN_HTML,
+  INDENT_AFTER_HEADING,
+  INDENT_AFTER_SETEXT,
+  INDENT_AFTER_BREAK,
+  INDENT_AFTER_RAW_CLOSE,
+  INDENT_AFTER_TABLE,
+  INDENT_IN_QUOTE,
+  DEF_AFTER_HEADING,
+  DEF_IN_QUOTE,
 ];
 
 /** The token inside an emitted wrap form, whatever run length it used. */
@@ -479,11 +1066,66 @@ test("a wrapped ref never renders more exposed than it started", async (t) => {
     }
     for (const form of out.survived) {
       const token = stripTicks(form);
+      // Survivors sit outside the strictly-decreases arm above on purpose: a
+      // raw HTML block's ref is LEFT live and disclosed, so the only bar here
+      // is that neutralizing never made it more exposed than it was.
       assert.ok(
         liveCount(after, token) <= liveCount(before, token),
         `${token} renders MORE exposed after neutralizing ${label}`,
       );
     }
+  }
+});
+
+// The wrapped-arm oracle above cannot see this failure: a broken reference link still
+// renders, just as bracket text instead of an anchor, and its ref is not MORE exposed
+// than it started. So the link itself is what gets asserted.
+test("a reference link still renders as a link afterwards", async (t) => {
+  let Marked;
+  try {
+    ({ Marked } = await import("marked"));
+  } catch {
+    t.skip(
+      "marked is not installed — the guards job runs with no install step",
+    );
+    return;
+  }
+  const md = new Marked();
+  for (const source of [
+    LINK_REF_SHORTCUT,
+    LINK_REF_COLLAPSED,
+    LINK_REF_FULL,
+    LINK_REF_FOLDED,
+  ]) {
+    const label = JSON.stringify(source);
+    const out = neutralizeSuspectRefs(source);
+    assert.match(md.parse(out.text), /<a href=/, label);
+    assert.equal(md.parse(out.text), md.parse(source), label);
+  }
+});
+
+// The wrapped-arm oracle cannot speak for an escaped token: its own string carries a
+// backslash the renderer consumes, so its live count is zero before AND after and the
+// strictly-decreases assertion passes vacuously. What matters is the BARE reference
+// the forge filter would see post-render, so that is asserted directly.
+test("an escaped reference stops rendering live once wrapped", async (t) => {
+  let Marked;
+  try {
+    ({ Marked } = await import("marked"));
+  } catch {
+    t.skip(
+      "marked is not installed — the guards job runs with no install step",
+    );
+    return;
+  }
+  const md = new Marked();
+  for (const source of [ESC_1, ESC_3]) {
+    const label = JSON.stringify(source);
+    const out = neutralizeSuspectRefs(source);
+    // Before: marked consumes the escape, so `#123` is live body text — which is
+    // exactly what GitHub's post-render filter linkifies.
+    assert.equal(liveCount(outsideCode(md.parse(source)), "#123"), 1, label);
+    assert.equal(liveCount(outsideCode(md.parse(out.text)), "#123"), 0, label);
   }
 });
 
@@ -565,6 +1207,23 @@ test("the neutralize flag wraps the refs and discloses it once", () => {
   assert.deepEqual(findSuspectRefs(body), []);
 });
 
+test("the disclosure names the escaped form it actually shipped", () => {
+  const body = buildAiCommentBody({
+    ...PARTS,
+    text: `Fixes ${ESC_1} now`,
+    neutralizeRefs: true,
+  });
+  assert.ok(body.includes(`Fixes \`${ESC_1}\` now`), body);
+  assert.ok(
+    body.endsWith(
+      `_References \`${ESC_1}\` are shown as plain text — this automated run could not confirm they were meant to link._`,
+    ),
+    body,
+  );
+  // The footer's own copy sits in a code span, so it mints no reference either.
+  assert.deepEqual(findSuspectRefs(body), []);
+});
+
 test("without the flag the refs are left exactly as written", () => {
   const text = "Recorded decision (#10).";
   const body = buildAiCommentBody({ ...PARTS, text });
@@ -572,10 +1231,44 @@ test("without the flag the refs are left exactly as written", () => {
   assert.ok(!body.includes("_References "), body);
 });
 
+test("a body whose only refs sit in a raw HTML block still discloses them", () => {
+  const body = buildAiCommentBody({
+    ...PARTS,
+    text: HTML_DETAILS,
+    neutralizeRefs: true,
+  });
+  // The region is byte-identical in the shipped body, so the footer is the only
+  // thing standing between the reader and a live cross-reference.
+  assert.ok(body.includes(HTML_DETAILS), body);
+  assert.ok(!body.includes("_References "), body);
+  assert.ok(
+    body.endsWith(
+      "_This automated run could not neutralize `#123` — verify before trusting any links it created._",
+    ),
+    body,
+  );
+});
+
+test("a body with both outcomes names the wraps and the survivor", () => {
+  const body = buildAiCommentBody({
+    ...PARTS,
+    text: HTML_MIXED,
+    neutralizeRefs: true,
+  });
+  assert.ok(
+    body.endsWith(
+      "_References `#7` are shown as plain text — this automated run could not confirm they were meant to link. It could not neutralize `#8`._",
+    ),
+    body,
+  );
+});
+
 test("a body the guard cannot fully clear never claims more than it did", () => {
-  // The post-condition is the tripwire for a geometry the scan reads wrongly; no
-  // input reaches it today, so this pins the shape the footer must keep rather
-  // than a live case. Every corpus entry lands wholly in `wrapped` or in neither.
+  // The post-condition is the tripwire for a geometry the scan reads wrongly, and
+  // the corpus entries whose refs sit INSIDE a raw HTML block are its live
+  // producers, so both footer arms run against real output rather than a shape.
+  // The fixtures that deliberately open no block (the blank-line-spaced, inline
+  // `<span>`, and tick-inside variants) still wrap, and are the control.
   for (const source of CORPUS) {
     const out = neutralizeSuspectRefs(source);
     const body = buildAiCommentBody({

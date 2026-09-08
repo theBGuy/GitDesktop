@@ -357,6 +357,10 @@ export function PrReviewPanel({
             // it's unresolved the detector's both-trigger default applies —
             // over-warning in that window beats a missed live `!N`.
             forgeProvider ? REF_TRIGGERS[forgeProvider] : undefined,
+            // GitHub's reference filter runs post-render and links `\#N` anyway;
+            // GitLab honors the escape (measured on both) — so only GitLab gets
+            // escaped refs excused from the warning.
+            forgeProvider !== "gitlab",
           )
         : [];
     if (partial || suspectRefs.length > 0) {

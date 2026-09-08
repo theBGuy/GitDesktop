@@ -19,6 +19,7 @@ on:
       - "pnpm-workspace.yaml"
       - "patches/**"
       - "src/**"
+      - "scripts/**" # the reference-detector suite step reads these
       - "index.html"
       - "vite.config.ts"
       - "tsconfig*.json"

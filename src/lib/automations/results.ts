@@ -18,7 +18,7 @@ export interface AutomationRunResult {
   schemaVersion: 1;
   id: string;
   repoPath: string;
-  /** What was reviewed — a commit subject or PR title. */
+  /** What was reviewed: the commit's subject. */
   subject: string;
   mode: ReviewMode;
   text: string;
@@ -55,7 +55,7 @@ function getStore(): Promise<Store> {
 // Serialize every read-modify-write through one in-process queue: autoSave persists
 // on a ~100ms debounce, so two overlapping writes would both reload the same
 // pre-flush disk snapshot and the later would drop the earlier's record (two review
-// modes of the same commit settle back to back). With the force-save in writeAll,
+// modes of the same commit settle back to back). With the force-save in `persist`,
 // each reload sees fresh state. Cross-INSTANCE overlap (two app instances delivering
 // different runs) still races last-writer-wins like the sibling plugin stores — the
 // automation claim only keeps instances off the SAME run; cross-process locking for
@@ -83,8 +83,11 @@ async function reloadRaw(): Promise<void> {
 
 /** Shape-guard one record out of untrusted store JSON: a hand-edited (or older)
  *  `automation-results.json` reaches the dialog verbatim, so a malformed record is
- *  dropped rather than blanking the list or throwing mid-render. `phase` /
- *  `timedOut` are compared by exact value elsewhere, never coerced. */
+ *  dropped rather than blanking the list or throwing mid-render. Every field left
+ *  unchecked is guarded at its consumer instead: `mode` / `phase` / `timedOut` are
+ *  compared by exact value in `AutomationResultDialog` and `error` is typeof-guarded
+ *  at its render site there, `repoPath` is dereferenced only on the write path
+ *  (`persist`, whose caller is runner-typed), and `schemaVersion` is write-only. */
 function isStoredResult(x: unknown): x is AutomationRunResult {
   if (typeof x !== "object" || x === null) return false;
   const r = x as Record<string, unknown>;
@@ -210,9 +213,13 @@ export async function openAutomationResult(
     state.setOpen(id);
     return;
   }
-  const stored = await readMerged(repoPath).catch(
-    (): AutomationRunResult[] => [],
-  );
+  // Read through the write queue after a fresh reload: `getStore()` memoizes the
+  // first `load()`, so a record another instance wrote since then is absent from
+  // the cached snapshot and would read as pruned.
+  const stored = await serialize(async () => {
+    await reloadRaw();
+    return readMerged(repoPath);
+  }).catch((): AutomationRunResult[] => []);
   const found = stored.find((r) => r.id === id);
   if (!found) {
     toast.info("This review result is no longer available.");
