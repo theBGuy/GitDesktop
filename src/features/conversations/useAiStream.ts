@@ -230,7 +230,17 @@ export function useFinishAndSurface(
   }, []);
   // The repo key a settled-unseen draft is waiting for; null = no draft waiting.
   const latchRepoRef = useRef<string | null>(null);
+  const readyToastIdRef = useRef<string | number | null>(null);
   const abortedBySwitchRef = useRef(false);
+
+  // The ready toast is the latch's public face: once the draft has been
+  // delivered, destroyed, or drained, a surviving View would reopen onto a
+  // reseeded form and erase exactly what it promises.
+  const retireReadyToast = () => {
+    if (readyToastIdRef.current === null) return;
+    toast.dismiss(readyToastIdRef.current);
+    readyToastIdRef.current = null;
+  };
 
   useCancelOnIdentityChange(repo, () => {
     // The latch is deliberately NOT cleared here: navigation alone destroys no
@@ -265,7 +275,7 @@ export function useFinishAndSurface(
       // rather than swallow the user's only pointer to it.
       const settleRepoName = repoNameRef.current;
       const reopen = opts.reopen;
-      toast.success(opts.readyTitle, {
+      readyToastIdRef.current = toast.success(opts.readyTitle, {
         description: opts.readyDescription,
         duration: 10_000,
         action: reopen
@@ -294,14 +304,17 @@ export function useFinishAndSurface(
         // A foreign seed is about to run, and it resets the ONE shared form the
         // waiting draft lives in — so the latch dies here, with the draft.
         latchRepoRef.current = null;
+        retireReadyToast();
         return false;
       }
       latchRepoRef.current = null;
+      retireReadyToast();
       return true;
     },
     consumeSkipSeed: () => {
       const had = latchRepoRef.current !== null;
       latchRepoRef.current = null;
+      retireReadyToast();
       return had;
     },
   };

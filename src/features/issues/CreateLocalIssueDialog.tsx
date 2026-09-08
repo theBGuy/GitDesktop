@@ -1,6 +1,6 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
-import { useEffectEvent } from "react";
+import { useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -48,6 +48,8 @@ export function CreateLocalIssueDialog({
     readyDescription: "It's waiting in the dialog.",
     reopen: () => onOpenChange(true),
   });
+  /** The serialized explicit draft the current form state was seeded from. */
+  const seededDraftRef = useRef<string | null>(null);
 
   const form = useAppForm({
     defaultValues: { title: "", body: "" },
@@ -74,14 +76,27 @@ export function CreateLocalIssueDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // reset values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
-    // A generation still streaming — or one that settled while the dialog was
-    // closed — leaves the whole draft in form state, which this reset would blank
-    // on reopen.
-    if (surface.shouldSkipSeed(generating)) return;
+    const key = initialDraft
+      ? JSON.stringify([initialDraft.title, initialDraft.body])
+      : null;
+    // A plan or to-do handing over new content retargets the one shared form, so
+    // a waiting or streaming run's result must not survive into it; a reopen
+    // carrying the same content is the ordinary hold path below.
+    const isNewRequest = key !== null && key !== seededDraftRef.current;
+    if (isNewRequest) {
+      if (generating) cancel();
+      void surface.consumeSkipSeed();
+    } else if (surface.shouldSkipSeed(generating)) {
+      // A generation still streaming — or one that settled while the dialog was
+      // closed — leaves the whole draft in form state, which this reset would
+      // blank on reopen.
+      return;
+    }
     form.reset(
       { title: initialDraft?.title ?? "", body: initialDraft?.body ?? "" },
       { keepDefaultValues: true },
     );
+    seededDraftRef.current = key;
   });
   useSeedOnOpen(open, seedOnOpen);
 

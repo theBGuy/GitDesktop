@@ -2,7 +2,7 @@ import { Popover } from "@base-ui/react/popover";
 import { SparkleIcon, TagIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffectEvent, useState } from "react";
+import { useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -94,6 +94,8 @@ export function CreateIssueDialog({
   const [assignees, setAssignees] = useState<ForgeUserRef[]>([]);
   const [milestone, setMilestone] = useState<number | null>(null);
   const [issueType, setIssueType] = useState<IssueType | null>(null);
+  /** The lens the metadata pickers below were filled under. */
+  const stateLensRef = useRef(lens);
 
   const form = useAppForm({
     defaultValues: { title: "", body: "" },
@@ -159,10 +161,29 @@ export function CreateIssueDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // reset values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
-    // A generation still streaming — or one that settled while the dialog was
-    // closed — leaves the whole draft in form state, which this reset would blank
-    // on reopen.
-    if (surface.shouldSkipSeed(generating)) return;
+    // The only host that seeds this dialog clears its request at close, so a
+    // draft present here is always a fresh explicit ask (duplicate, reference)
+    // and outranks any waiting or streaming run.
+    const isNewRequest = initialDraft !== undefined;
+    if (isNewRequest) {
+      if (generating) cancel();
+      void surface.consumeSkipSeed();
+    } else if (surface.shouldSkipSeed(generating)) {
+      // A generation still streaming — or one that settled while the dialog was
+      // closed — leaves the whole draft in form state, which this reset would
+      // blank on reopen.
+      // Label sets, assignee ids, milestone numbers and org issue types are local
+      // to the create target, and the lens can move while a kept draft holds the
+      // seed off: the prose survives that switch, the picks can't.
+      if (stateLensRef.current !== lens) {
+        setLabels(new Set());
+        setAssignees([]);
+        setMilestone(null);
+        setIssueType(null);
+        stateLensRef.current = lens;
+      }
+      return;
+    }
     form.reset(
       { title: initialDraft?.title ?? "", body: initialDraft?.body ?? "" },
       { keepDefaultValues: true },
@@ -171,6 +192,7 @@ export function CreateIssueDialog({
     setAssignees([]);
     setMilestone(null);
     setIssueType(null);
+    stateLensRef.current = lens;
   });
   useSeedOnOpen(open, seedOnOpen);
 
