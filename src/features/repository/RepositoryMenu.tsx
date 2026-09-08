@@ -59,6 +59,7 @@ import {
   openWithDefault,
   openWithProgram,
 } from "@/lib/git/api";
+import { normPath } from "@/lib/git/path";
 import {
   EMPTY_NAMESPACES,
   forgeFeatureReady,
@@ -266,18 +267,26 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // dialog can never re-fire it.
   useEffect(() => {
     if (!repoSettingsRequest) return;
+    // The request names the repo it was raised for, and the gate hold below can
+    // carry it across a repo switch — opening another repo's settings is worse
+    // than dropping it, and a deferral would only re-offer it on a third repo.
+    if (repoSettingsRequest.repo !== normPath(repoPath)) {
+      clearRepoSettingsRequest();
+      return;
+    }
     // Same admin gate as the menu item: the dialog is admin-only. An unresolved
     // gate HOLDS the request — clearing mid-probe drops a deep link whose toast
     // is already gone — and a resolved refusal drops it rather than letting it
     // fire later.
     if (!settingsGateResolved) return;
-    if (canOpenRepoSettings) openRepoSettingsAt(repoSettingsRequest);
+    if (canOpenRepoSettings) openRepoSettingsAt(repoSettingsRequest.section);
     clearRepoSettingsRequest();
   }, [
     repoSettingsRequest,
     clearRepoSettingsRequest,
     canOpenRepoSettings,
     settingsGateResolved,
+    repoPath,
   ]);
 
   // The palette and the Findings deep link have no menu to warm on, so the open

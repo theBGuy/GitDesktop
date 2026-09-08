@@ -156,9 +156,10 @@ export interface FinishAndSurfaceOpts {
  *
  * A generation belongs to the repository it started in. `<RepositoryView>` is one
  * instance across repo switches, so the dialogs' state outlives the repo: a
- * switch therefore cancels the run, closes an open dialog, and disarms the
- * toast's action once the live repo is a different one (the identity-cancel the
- * edit views already use). The latch is STAMPED with its run's repo and survives
+ * switch therefore cancels the run and closes an open dialog (the
+ * identity-cancel the edit views already use), while the toast's View re-checks
+ * the live repo — reopening only in the repo the run belongs to, and naming it
+ * otherwise. The latch is STAMPED with its run's repo and survives
  * navigation, so a pure detour — away and back without opening the dialog
  * elsewhere — still shows the waiting draft, which is what makes the toast's
  * "waiting in <repo>" promise true. It is released by whichever open consumes it

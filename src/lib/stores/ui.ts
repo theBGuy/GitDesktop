@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { normPath } from "@/lib/git/path";
 import type { CommitAuthor, RemoteLens, RepoInfo } from "@/lib/git/types";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import { startViewTransition } from "@/lib/view-transition";
@@ -321,9 +322,14 @@ interface UiState {
   findingsLimits: FindingsLimits;
   /** A one-shot request to open Repository Settings at a section, raised by
    *  another surface (the Findings tab's "Dependabot is off" card, the
-   *  description-ready toast). The menu that owns the dialog consumes and
-   *  clears it. */
-  repoSettingsRequest: "security" | "general" | null;
+   *  description-ready toast). Stamped with the {@link normPath} repo it was
+   *  raised for: its consumer can hold it while an admin probe resolves, so it
+   *  can outlive a repo switch and must never fire against another repo. The
+   *  menu that owns the dialog consumes and clears it. */
+  repoSettingsRequest: {
+    section: "security" | "general";
+    repo: string;
+  } | null;
   /** Selected tag (by name) on the Tags tab. */
   selectedTag: { tag: string } | null;
   /** Selected TODO on the Code TODOs tab. Carries the scan's authoritative
@@ -455,8 +461,12 @@ interface UiState {
   selectFinding: (finding: SelectedFinding | null) => void;
   setFindingsLimits: (limits: FindingsLimits) => void;
   /** Ask whichever surface owns the Repository Settings dialog to open it at
-   *  `section`. Cleared by that surface as it opens (one-shot). */
-  requestRepoSettings: (section: "security" | "general") => void;
+   *  `section`, for the repo `repoPath` names. Cleared by that surface as it
+   *  opens (one-shot). */
+  requestRepoSettings: (
+    section: "security" | "general",
+    repoPath: string,
+  ) => void;
   clearRepoSettingsRequest: () => void;
   selectTag: (tag: { tag: string } | null) => void;
   setSelectedTodo: (
@@ -696,7 +706,8 @@ export const useUiStore = create<UiState>()((set, get) => {
     selectRun: (id) => set({ selectedRunId: id }),
     selectFinding: (finding) => set({ selectedFinding: finding }),
     setFindingsLimits: (limits) => set({ findingsLimits: limits }),
-    requestRepoSettings: (section) => set({ repoSettingsRequest: section }),
+    requestRepoSettings: (section, repoPath) =>
+      set({ repoSettingsRequest: { section, repo: normPath(repoPath) } }),
     clearRepoSettingsRequest: () => set({ repoSettingsRequest: null }),
     selectTag: (tag) => set({ selectedTag: tag }),
     setSelectedTodo: (todo) => set({ selectedTodo: todo }),

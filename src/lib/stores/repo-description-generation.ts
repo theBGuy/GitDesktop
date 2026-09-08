@@ -184,7 +184,7 @@ function announcePendingRepoDesc(repoPath: string): void {
                 );
                 return;
               }
-              ui.requestRepoSettings("general");
+              ui.requestRepoSettings("general", repoPath);
             },
           },
         }),

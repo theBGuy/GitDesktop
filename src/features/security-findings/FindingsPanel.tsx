@@ -1582,7 +1582,7 @@ export function FindingsPanel({
                 onRetry={() => alerts.refetch()}
                 onEnable={
                   canOpenRepoSettings
-                    ? () => requestRepoSettings("security")
+                    ? () => requestRepoSettings("security", repoPath)
                     : undefined
                 }
               />
@@ -1688,7 +1688,7 @@ export function FindingsPanel({
                 onRetry={() => codeScanning.refetch()}
                 onEnable={
                   canOpenRepoSettings
-                    ? () => requestRepoSettings("security")
+                    ? () => requestRepoSettings("security", repoPath)
                     : undefined
                 }
               />
@@ -1808,7 +1808,7 @@ export function FindingsPanel({
                 onRetry={() => secrets.refetch()}
                 onEnable={
                   canOpenRepoSettings
-                    ? () => requestRepoSettings("security")
+                    ? () => requestRepoSettings("security", repoPath)
                     : undefined
                 }
               />
