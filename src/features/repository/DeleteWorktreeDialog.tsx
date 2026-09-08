@@ -147,8 +147,9 @@ export function DeleteWorktreeDialog({
         </p>
 
         {/* While a removal that recorded an archive intent runs, keep showing
-            the checkbox even if the flag lands elsewhere — the dialog's job is
-            then to show what the running removal will do. */}
+            the checkbox even if the branch is archived from another surface
+            meanwhile — the dialog's job is then to show what the running
+            removal will do. */}
         {archivableBranch &&
           (alreadyArchived && (!removing || !inFlightArchive) ? (
             <p className="text-xs text-muted-foreground">

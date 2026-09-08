@@ -208,7 +208,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const canViewOnHost =
     canGh ||
     persistedProvider === "bitbucket" ||
-    (persistedProvider !== undefined && gh.data === undefined);
+    (persistedProvider !== undefined && gh.isPending);
   const viewLabel = providerLabel(provider ?? persistedProvider);
   const canStar = canGh && forgeSupports(gh.data, "stars");
   const canCreateHostIssue = canGh && forgeSupports(gh.data, "issues");
