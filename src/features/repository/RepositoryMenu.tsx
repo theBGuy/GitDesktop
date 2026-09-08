@@ -267,9 +267,9 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // dialog can never re-fire it.
   useEffect(() => {
     if (!repoSettingsRequest) return;
-    // The request names the repo it was raised for, and the gate hold below can
-    // carry it across a repo switch — opening another repo's settings is worse
-    // than dropping it, and a deferral would only re-offer it on a third repo.
+    // The request names the repo it was raised for. CROSS_REPO_RESET already
+    // nulls it on every repo switch, so this drop is the backstop for a route
+    // that ever sets repoPath without the reset — never fire it cross-repo.
     if (repoSettingsRequest.repo !== normPath(repoPath)) {
       clearRepoSettingsRequest();
       return;

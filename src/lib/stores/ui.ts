@@ -323,9 +323,9 @@ interface UiState {
   /** A one-shot request to open Repository Settings at a section, raised by
    *  another surface (the Findings tab's "Dependabot is off" card, the
    *  description-ready toast). Stamped with the {@link normPath} repo it was
-   *  raised for: its consumer can hold it while an admin probe resolves, so it
-   *  can outlive a repo switch and must never fire against another repo. The
-   *  menu that owns the dialog consumes and clears it. */
+   *  raised for: CROSS_REPO_RESET already nulls this on every repo switch, so
+   *  the stamp is the backstop for a route that ever sets repoPath without it.
+   *  The menu that owns the dialog consumes and clears it. */
   repoSettingsRequest: {
     section: "security" | "general";
     repo: string;

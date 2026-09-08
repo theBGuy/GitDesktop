@@ -334,15 +334,21 @@ export function CreateReleaseDialog({
 
   function generateWithAi() {
     if (!tagTrimmed) return;
+    // Same requestedFor rule as From-GitHub: a retyped form is another release.
+    const requestedFor = tagTrimmed;
     form.setFieldValue("notes", "");
     aiNotes
       .generate({
-        tag: tagTrimmed,
+        tag: requestedFor,
         target: showTarget ? target.trim() : tagTrimmed,
         previousTag: effectivePreviousTag,
         repoName,
         isGitHub,
-        onResult: (body) => form.setFieldValue("notes", body),
+        onResult: (body) => {
+          if (form.getFieldValue("tag").trim() === requestedFor) {
+            form.setFieldValue("notes", body);
+          }
+        },
       })
       .then(
         (final) => {
@@ -351,6 +357,10 @@ export function CreateReleaseDialog({
           // while tag hosts unmount on a repo switch — else, per-run tokens.
           if (tagSwitchAbortRef.current) {
             tagSwitchAbortRef.current = false;
+            return;
+          }
+          if (form.getFieldValue("tag").trim() !== requestedFor) {
+            surface.noteRunSettled(false);
             return;
           }
           // Resolves with the COMPLETE notes, or null — an aborted stream still
