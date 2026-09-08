@@ -29,6 +29,8 @@ export function useSaveBranchRules(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (config: BranchRulesConfig) => saveBranchRules(repo, config),
+    // Local write — see useBranchRules: "online" mode would park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: branchRulesKey(repo) }),
   });
@@ -53,6 +55,8 @@ export function useSaveSharedBranchRules(repo: string) {
   return useMutation({
     mutationFn: (config: BranchRulesConfig) =>
       saveSharedBranchRules(repo, config),
+    // Local write — see useBranchRules: "online" mode would park it offline.
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: sharedBranchRulesKey(repo) }),
   });

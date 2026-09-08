@@ -105,6 +105,9 @@ export function SwitchWithChangesDialog({
             Stash and switch
           </Button>
           <DisabledReasonButton
+            // Below `sm` the footer stacks and stretches the wrapper span; the
+            // Button fills it to match the plain siblings beside it.
+            className="w-full"
             disabled={refused}
             reason={
               refused

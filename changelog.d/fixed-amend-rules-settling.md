@@ -1,2 +1,3 @@
-- Amending a pushed commit now checks your branch protection rules before
-  offering the force-push, and again when you confirm it.
+- Amending a pushed commit now waits for branch protection rules to finish
+  loading before offering the force-push, and re-checks them when you confirm
+  it.
