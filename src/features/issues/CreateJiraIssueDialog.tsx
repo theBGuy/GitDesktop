@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useFinishAndSurface } from "@/features/conversations/useAiStream";
 import { required, useAppForm } from "@/lib/form";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraCreateIssue, useJiraIssueTypes } from "@/lib/jira/queries";
@@ -57,6 +58,13 @@ export function CreateJiraIssueDialog({
   const repoName = useUiStore((s) => s.repoName) ?? "";
   const aiEnabled = useAiEnabled();
   const { generate, cancel, generating } = useGenerateIssueDraft(repoPath);
+  // Closing mid-generation never cancels the run: it finishes into the retained
+  // form state, and this surfaces the result while the dialog is away.
+  const surface = useFinishAndSurface(open, {
+    readyTitle: "Issue draft ready",
+    readyDescription: "It's waiting in the dialog.",
+    reopen: () => onOpenChange(true),
+  });
 
   // Creatable types only (a subtask needs a parent — not offered here). Manual
   // useMemo is LOAD-BEARING: the submit handler's try/catch bails this component
@@ -103,8 +111,14 @@ export function CreateJiraIssueDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the reset
   // values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
-    form.reset({ summary: "", body: "" }, { keepDefaultValues: true });
+    // The previous attempt's error is stale on every open transition, guarded or
+    // not — it must clear even when the draft below is kept.
     setCreateError(null);
+    // A generation still streaming — or one that settled while the dialog was
+    // closed — leaves the whole draft in form state, which this reset would blank
+    // on reopen.
+    if (generating || surface.consumeSkipSeed()) return;
+    form.reset({ summary: "", body: "" }, { keepDefaultValues: true });
   });
   useSeedOnOpen(open, seedOnOpen);
 
@@ -131,15 +145,20 @@ export function CreateJiraIssueDialog({
       : null;
 
   // Shared by the Draft-with-AI button and the generate chord below.
-  function runGenerate() {
-    generate({
+  async function runGenerate() {
+    // `generate` resolves void and fires onResult only on a usable draft, so the
+    // flag is how the settle learns whether a result actually landed.
+    let ok = false;
+    await generate({
       notes,
       repoName,
       onResult: (d) => {
+        ok = true;
         if (d.title) form.setFieldValue("summary", d.title);
         form.setFieldValue("body", d.body);
       },
     });
+    surface.noteRunSettled(ok);
   }
   // The generate chord drafts this issue while the dialog is open. It's mounted
   // on DialogContent, not the <form>: the X close button is a form SIBLING
@@ -152,6 +171,9 @@ export function CreateJiraIssueDialog({
     enabled: aiEnabled && !generating && notes.trim() !== "",
     run: runGenerate,
   });
+  // The one submit gate, shared by the button and the form's native submit:
+  // Enter must submit exactly when the button would.
+  const submitBlocked = generating || !issueTypeId;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -163,6 +185,7 @@ export function CreateJiraIssueDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
+            if (submitBlocked) return;
             form.handleSubmit();
           }}
         >
@@ -297,7 +320,7 @@ export function CreateJiraIssueDialog({
             </Button>
             <form.AppForm>
               <span className="inline-flex" title={submitReason ?? undefined}>
-                <form.SubmitButton disabled={generating || !issueTypeId}>
+                <form.SubmitButton disabled={submitBlocked}>
                   Create issue
                 </form.SubmitButton>
               </span>

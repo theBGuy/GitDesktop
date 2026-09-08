@@ -320,9 +320,10 @@ interface UiState {
   /** Per-category row limits on the Findings tab; "Load more" bumps one. */
   findingsLimits: FindingsLimits;
   /** A one-shot request to open Repository Settings at a section, raised by
-   *  another surface (the Findings tab's "Dependabot is off" card). The menu
-   *  that owns the dialog consumes and clears it. */
-  repoSettingsRequest: "security" | null;
+   *  another surface (the Findings tab's "Dependabot is off" card, the
+   *  description-ready toast). The menu that owns the dialog consumes and
+   *  clears it. */
+  repoSettingsRequest: "security" | "general" | null;
   /** Selected tag (by name) on the Tags tab. */
   selectedTag: { tag: string } | null;
   /** Selected TODO on the Code TODOs tab. Carries the scan's authoritative
@@ -455,7 +456,7 @@ interface UiState {
   setFindingsLimits: (limits: FindingsLimits) => void;
   /** Ask whichever surface owns the Repository Settings dialog to open it at
    *  `section`. Cleared by that surface as it opens (one-shot). */
-  requestRepoSettings: (section: "security") => void;
+  requestRepoSettings: (section: "security" | "general") => void;
   clearRepoSettingsRequest: () => void;
   selectTag: (tag: { tag: string } | null) => void;
   setSelectedTodo: (

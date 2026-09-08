@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { LabelChip } from "@/features/conversations/Thread";
+import { useFinishAndSurface } from "@/features/conversations/useAiStream";
 import { required, useAppForm } from "@/lib/form";
 import {
   useAddSubIssue,
@@ -79,6 +80,13 @@ export function CreateIssueDialog({
   const repoName = useUiStore((s) => s.repoName) ?? "";
   const aiEnabled = useAiEnabled();
   const { generate, cancel, generating } = useGenerateIssueDraft(repoPath);
+  // Closing mid-generation never cancels the run: it finishes into the retained
+  // form state, and this surfaces the result while the dialog is away.
+  const surface = useFinishAndSurface(open, {
+    readyTitle: "Issue draft ready",
+    readyDescription: "It's waiting in the dialog.",
+    reopen: () => onOpenChange(true),
+  });
   const [labels, setLabels] = useState<Set<string>>(new Set());
   const [assignees, setAssignees] = useState<ForgeUserRef[]>([]);
   const [milestone, setMilestone] = useState<number | null>(null);
@@ -148,6 +156,10 @@ export function CreateIssueDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // reset values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
+    // A generation still streaming — or one that settled while the dialog was
+    // closed — leaves the whole draft in form state, which this reset would blank
+    // on reopen.
+    if (generating || surface.consumeSkipSeed()) return;
     form.reset(
       { title: initialDraft?.title ?? "", body: initialDraft?.body ?? "" },
       { keepDefaultValues: true },
@@ -173,15 +185,20 @@ export function CreateIssueDialog({
   );
 
   // Shared by the Draft-with-AI button and the generate chord below.
-  function runGenerate() {
-    generate({
+  async function runGenerate() {
+    // `generate` resolves void and fires onResult only on a usable draft, so the
+    // flag is how the settle learns whether a result actually landed.
+    let ok = false;
+    await generate({
       notes,
       repoName,
       onResult: (d) => {
+        ok = true;
         if (d.title) form.setFieldValue("title", d.title);
         form.setFieldValue("body", d.body);
       },
     });
+    surface.noteRunSettled(ok);
   }
   // The generate chord drafts this issue while the dialog is open. It's mounted
   // on DialogContent, not the <form>: the X close button is a form SIBLING
@@ -194,6 +211,9 @@ export function CreateIssueDialog({
     enabled: aiEnabled && !generating && notes.trim() !== "",
     run: runGenerate,
   });
+  // The one submit gate, shared by the button and the form's native submit:
+  // Enter must submit exactly when the button would.
+  const submitBlocked = generating;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -205,6 +225,7 @@ export function CreateIssueDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
+            if (submitBlocked) return;
             form.handleSubmit();
           }}
         >
@@ -384,7 +405,7 @@ export function CreateIssueDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton disabled={generating}>
+              <form.SubmitButton disabled={submitBlocked}>
                 {subIssueParentId
                   ? "Create sub-issue"
                   : isUpstream

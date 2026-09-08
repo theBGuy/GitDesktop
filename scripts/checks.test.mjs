@@ -55,6 +55,7 @@ const bareMutate = scanner("bare-mutate-in-converted-trees");
 const menuSuppression = scanner("context-menu-suppression");
 const loneActivity = scanner("lone-activity-boundary");
 const seedOnOpen = scanner("seed-effect-on-open");
+const finishAndSurface = scanner("generator-dialog-finish-and-surface");
 const diffStatPair = scanner("hand-rolled-diff-stat");
 const kindBadge = scanner("kind-badge-single-source");
 const nullFallback = scanner("null-suspense-fallback");
@@ -681,6 +682,61 @@ test("seed-effect-on-open ignores the hook and non-first-statement reads", () =>
     "}, [open]);",
   ].join("\n");
   assert.deepEqual(seedOnOpen(gate), []);
+});
+
+test("generator-dialog-finish-and-surface flags each generator hook", () => {
+  for (const hook of [
+    "useGeneratePrDescription",
+    "useGenerateIssueDraft",
+    "useGenerateReleaseNotes",
+    "useGenerateRepoDescription",
+  ]) {
+    const source = [
+      `  const { generate, generating } = ${hook}(repoPath);`,
+      "  const seedOnOpen = useEffectEvent(() => form.reset(seeds));",
+      "  useSeedOnOpen(open, seedOnOpen);",
+    ].join("\n");
+    assert.deepEqual(finishAndSurface(source), [1], `should flag ${hook}`);
+  }
+});
+
+test("generator-dialog-finish-and-surface needs both halves, and clears on the primitive", () => {
+  // The adopted shape — the negative control for the check.
+  const adopted = [
+    "  const { generate, generating } = useGeneratePrDescription(repoPath);",
+    "  const surface = useFinishAndSurface(open, { readyTitle: t });",
+    "  useSeedOnOpen(open, seedOnOpen);",
+  ].join("\n");
+  assert.deepEqual(finishAndSurface(adopted), []);
+  // Each half alone is ordinary: a generator on a surface with no open-transition
+  // seed (the edit dialogs), and a seeded dialog with no generator at all.
+  assert.deepEqual(
+    finishAndSurface(
+      "  const { generate } = useGeneratePrDescription(repoPath);",
+    ),
+    [],
+  );
+  assert.deepEqual(finishAndSurface("  useSeedOnOpen(open, seedOnOpen);"), []);
+  // A generator named in a comment is not a call site.
+  const documented = [
+    "  // useGeneratePrDescription() streams into this dialog's form.",
+    "  useSeedOnOpen(open, seedOnOpen);",
+  ].join("\n");
+  assert.deepEqual(finishAndSurface(documented), []);
+});
+
+test("generator-dialog-finish-and-surface applies to .tsx call sites only", () => {
+  // The .ts bound is what keeps each hook's own definition file — whose export
+  // line matches the call pattern — from reading as a violation.
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "generator-dialog-finish-and-surface",
+  );
+  assert.equal(
+    appliesTo("src/features/pulls/useGeneratePrDescription.ts"),
+    false,
+  );
+  assert.equal(appliesTo("src/components/ui/dialog.tsx"), false);
+  assert.equal(appliesTo("src/features/pulls/CreatePrDialog.tsx"), true);
 });
 
 test("lone-activity-boundary flags a JSX Activity in either spelling", () => {

@@ -168,6 +168,14 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   sibling). The hook returns the `hint` string so buttons can't forget it.
   Recorded exception: surfaces with several per-row generators and no
   focused-row concept (Edit history's reword buttons) carry no chord.
+- A generator dialog that stays mounted across its own close rides
+  `useFinishAndSurface` (`src/features/conversations/useAiStream.ts`) — closing
+  never cancels the run; a settle while closed latches skip-seed (the reopen
+  shows the whole draft) and toasts it with a "View" reopen. The
+  `generator-dialog-finish-and-surface` guard in `pnpm run checks` is the
+  ratchet; the deliberate abort-on-close surfaces (the PR edit dialogs, branch /
+  rename / task dialogs) are exempt by hook choice or by having no
+  `useSeedOnOpen`.
 - Worktree actions gate on in-flight removal/promote state: menu items disable
   with the parenthetical reason riding the label (a disabled menu item can't
   carry a tooltip), and mutation choke points re-check at fire time —

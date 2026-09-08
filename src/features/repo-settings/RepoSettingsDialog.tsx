@@ -9,7 +9,7 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { AnimatePresence, m, useReducedMotion } from "motion/react";
-import { type ComponentType, useState } from "react";
+import { type ComponentType, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { NavRail, type NavRailGroup } from "@/components/NavRail";
@@ -63,6 +63,7 @@ import {
   useGenerateChord,
 } from "@/lib/hotkeys/useGenerateChord";
 import { quickTransition } from "@/lib/motion";
+import { registerRepoSettingsOpenMarker } from "@/lib/stores/repo-description-generation";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { BitbucketBranchRestrictionsSection } from "./BitbucketBranchRestrictionsSection";
@@ -363,6 +364,11 @@ export function RepoSettingsDialog({
     enabled: true,
     run: generate.runPublished,
   });
+
+  // This tree is mounted only while the dialog is open (its host gates it), so
+  // the marker's lifetime is the dialog's: a description generation settling
+  // with no section listening reads it to pick toast copy that still works.
+  useEffect(() => registerRepoSettingsOpenMarker(repoPath), [repoPath]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

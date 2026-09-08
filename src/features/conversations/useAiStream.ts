@@ -1,4 +1,10 @@
-import { useCallback, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { createAiClient, MissingApiKeyError } from "@/lib/ai/client";
 import { loadSettings } from "@/lib/settings/api";
@@ -84,4 +90,78 @@ export function useAiStream(repoPath: string) {
   );
 
   return { generating, cancel, run };
+}
+
+/** Where a run that settles while its dialog is closed should surface. */
+export interface FinishAndSurfaceOpts {
+  /** toast.success title, e.g. "Pull request description ready". */
+  readyTitle: string;
+  /** Toast description, e.g. "It's waiting in the dialog." */
+  readyDescription?: string;
+  /** Reopens the surface (the toast's "View" action). Omit when no reliable
+   *  reopen path exists from a toast. */
+  reopen?: () => void;
+}
+
+/**
+ * Closing a generator dialog never cancels its run — this decides where the
+ * result lands instead. A run settling while the dialog is CLOSED latches
+ * skip-seed (the reopen keeps the whole draft rather than resetting it) and, on
+ * success, toasts with a "View" reopen; one settling while the dialog is OPEN is
+ * already visible in place, so it latches nothing.
+ *
+ * The latch is a ref, so it survives an `<Activity>` tab hide (which tears down
+ * effects but keeps refs) and dies with a true unmount, where nothing is left to
+ * skip. The toast alone gates on effects being live, since after an unmount
+ * there is no draft to promise — the accepted cost being that a run settling
+ * while its host tab is hidden resurfaces silently on reopen instead of
+ * toasting.
+ */
+export function useFinishAndSurface(
+  open: boolean,
+  opts: FinishAndSurfaceOpts,
+): {
+  /** Report a run settling; ok = a non-null result landed. */
+  noteRunSettled: (ok: boolean) => void;
+  /** Consume the settled-while-closed latch; true ⇒ the caller's seedOnOpen
+   *  must return without reseeding. */
+  consumeSkipSeed: () => boolean;
+} {
+  // Effects, never render-time ref writes: React may discard and replay a
+  // render, and both flags are read from stream continuations outside render.
+  // The open sync is a LAYOUT effect: a settle landing between the commit and a
+  // passive flush would otherwise read the previous open state and either miss
+  // the latch or toast over a dialog that is back on screen.
+  const openRef = useRef(open);
+  useLayoutEffect(() => {
+    openRef.current = open;
+  }, [open]);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const skipSeedRef = useRef(false);
+
+  return {
+    noteRunSettled: (ok: boolean) => {
+      if (openRef.current) return;
+      skipSeedRef.current = true;
+      if (!ok || !mountedRef.current) return;
+      toast.success(opts.readyTitle, {
+        description: opts.readyDescription,
+        duration: 10_000,
+        action: opts.reopen
+          ? { label: "View", onClick: opts.reopen }
+          : undefined,
+      });
+    },
+    consumeSkipSeed: () => {
+      const skip = skipSeedRef.current;
+      skipSeedRef.current = false;
+      return skip;
+    },
+  };
 }

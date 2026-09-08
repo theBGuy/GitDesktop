@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { useFinishAndSurface } from "@/features/conversations/useAiStream";
 import { required, useAppForm } from "@/lib/form";
 import {
   useBbWorkspaces,
@@ -137,6 +138,14 @@ export function PublishDialog({
   const publish = usePublishRepo(repoPath);
   const aiEnabled = useAiEnabled();
   const descGen = useGenerateRepoDescription(repoPath);
+  // Closing mid-generation never cancels the run: it finishes into the retained
+  // form state, and this surfaces the result while the dialog is away. The lone
+  // host passes a plain open setter, so `onOpenChange(true)` reopens.
+  const surface = useFinishAndSurface(open, {
+    readyTitle: "Repository description ready",
+    readyDescription: "It's waiting in the dialog.",
+    reopen: () => onOpenChange(true),
+  });
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
   const isGitHub = provider === "github";
@@ -250,7 +259,11 @@ export function PublishDialog({
   // advisory names the Owner select, so it rides only the arm that renders one.
   const nameWarning = ghPickerActive ? ghNameWarning : NAME_WARNINGS[provider];
 
-  const seedOnOpen = useEffectEvent(() =>
+  const seedOnOpen = useEffectEvent(() => {
+    // A generation still streaming — or one that settled while the dialog was
+    // closed — leaves the description and topics in form state, which this
+    // reset would blank on reopen.
+    if (descGen.generating || surface.consumeSkipSeed()) return;
     form.reset({
       name: defaultName,
       description: "",
@@ -259,8 +272,8 @@ export function PublishDialog({
       workspace: "",
       owner: "",
       isPrivate: true,
-    }),
-  );
+    });
+  });
   useSeedOnOpen(open, seedOnOpen);
 
   // Workspaces load after the dialog opens, so seed the picker once they arrive
@@ -293,10 +306,14 @@ export function PublishDialog({
   }, [open, isGitHub, defaultOwner, ownerLogins]);
 
   // Shared by the Generate button and the generate chord below.
-  function runGenerate() {
-    descGen.generate({
+  async function runGenerate() {
+    // The hook resolves void and fires `onResult` only for a run that produced
+    // usable content, so this flag is the settled-with-result signal.
+    let ok = false;
+    await descGen.generate({
       repoName: nameVal.trim() || defaultName,
       onResult: ({ description, topics }) => {
+        ok = true;
         if (description) {
           form.setFieldValue("description", description);
         }
@@ -306,6 +323,7 @@ export function PublishDialog({
         }
       },
     });
+    surface.noteRunSettled(ok);
   }
   // This dialog opens from the header over any tab, including Changes where the
   // global generate-commit-message action is live. The chord is swallowed here
@@ -316,6 +334,10 @@ export function PublishDialog({
     enabled: aiEnabled && !descGen.generating,
     run: runGenerate,
   });
+
+  // The one submit gate, shared by the button and the form's native submit:
+  // Enter must submit exactly when the button would.
+  const submitBlocked = descGen.generating || bbBlocked || ghBlocked;
 
   const githubScope = ghPickerActive ? (
     <>
@@ -340,6 +362,7 @@ export function PublishDialog({
           className="flex min-h-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
+            if (submitBlocked) return;
             form.handleSubmit();
           }}
         >
@@ -520,9 +543,7 @@ export function PublishDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton
-                disabled={descGen.generating || bbBlocked || ghBlocked}
-              >
+              <form.SubmitButton disabled={submitBlocked}>
                 Publish
               </form.SubmitButton>
             </form.AppForm>

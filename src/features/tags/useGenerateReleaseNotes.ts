@@ -71,6 +71,10 @@ async function gatherReleaseSource(
  * `target` since `previousTag` (the prior release), falling back to recent
  * commits. Streams into the notes field so the user previews + edits before
  * publishing. Mirrors useGenerateIssueDraft.
+ *
+ * `generate` resolves the COMPLETE notes, or null when nothing usable landed —
+ * a bail, abort, error, or a blank completion. Callers need that to tell a
+ * settled run from an aborted one, whose per-chunk `onResult` still fired.
  */
 export function useGenerateReleaseNotes(repoPath: string) {
   const { generating, cancel, run } = useAiStream(repoPath);
@@ -106,8 +110,13 @@ export function useGenerateReleaseNotes(repoPath: string) {
         { onChunk: (buffer) => opts.onResult(buffer) },
       );
 
-      if (buffer !== null && !buffer.trim())
+      // A blank completion is a failed generation, so it collapses to the same
+      // null a bail/abort/error resolves — one owner for "no notes landed".
+      if (buffer !== null && !buffer.trim()) {
         toast.error("Couldn't generate notes — try again.");
+        return null;
+      }
+      return buffer;
     },
     [repoPath, run],
   );

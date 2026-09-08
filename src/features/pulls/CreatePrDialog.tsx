@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { LabelChip } from "@/features/conversations/Thread";
+import { useFinishAndSurface } from "@/features/conversations/useAiStream";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
@@ -212,6 +213,16 @@ export function CreatePrDialog({
   const prNoun = isGitLab ? "merge request" : "pull request";
   const { generate, cancel, generating } = useGeneratePrDescription(repoPath);
   const aiEnabled = useAiEnabled();
+  // Closing mid-generation never cancels the run: it finishes into the retained
+  // form state, and this surfaces the result while the dialog is away. Both
+  // hosts pass a plain open setter, so `onOpenChange(true)` reopens.
+  const surface = useFinishAndSurface(open, {
+    readyTitle: isGitLab
+      ? "Merge request description ready"
+      : "Pull request description ready",
+    readyDescription: "It's waiting in the dialog.",
+    reopen: () => onOpenChange(true),
+  });
   const aiDescriptionRef = useRef(false);
   // Whether THIS mount has seeded, so the skip below can tell a reopen (form
   // state may hold a draft the user typed) from a fresh mount (it cannot).
@@ -427,16 +438,20 @@ export function CreatePrDialog({
   // seeded values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
     const h = defaultHead ?? currentName ?? names[0] ?? "";
-    // A create still running in the background — or one that failed while the
-    // dialog was closed — leaves everything the user typed in form state, and
-    // this reset would blank it on reopen. The draft's identity is the RETAINED
-    // form head, not this open's default: the user may have submitted a head
-    // that differs from the branch they are on now. The `||` short-circuit is
-    // deliberate — while a create is in flight the latch stays unconsumed, so a
-    // later reopen after it fails still preserves the draft.
+    // A generation still streaming — or one that settled while the dialog was
+    // closed — and a create still running in the background, or one that failed
+    // while closed, all leave everything the user typed in form state, and this
+    // reset would blank it on reopen. The draft's identity is the RETAINED form
+    // head, not this open's default: the user may have submitted a head that
+    // differs from the branch they are on now. The `||` short-circuit is
+    // deliberate — while a generation or create is in flight the pr-create
+    // latches stay unconsumed, so a later reopen after a failure still
+    // preserves the draft.
     if (seededRef.current) {
       const retained = form.state.values.head || h;
       if (
+        generating ||
+        surface.consumeSkipSeed() ||
         isCreatingPrFor(repoPath, retained) ||
         consumeLastFailed(repoPath, retained)
       )
@@ -575,6 +590,16 @@ export function CreatePrDialog({
       (createLens === "upstream" || !p.crossRepository),
   );
 
+  // The one submit gate, shared by the button, the mod+enter chord, and the
+  // form's native submit: Enter must submit exactly when the button would.
+  const submitBlocked =
+    generating ||
+    nothingToMerge ||
+    baseLoading ||
+    isSubmitting ||
+    creatingElsewhere ||
+    Boolean(existingPr);
+
   // Linked-issue chip cluster — extraction seeding, AI union, candidate ranking and
   // the chip mutations live in the shared hook. Gated on a usable tracker AND the
   // dialog being open; the parent target reads the parent's issues (createLens).
@@ -671,6 +696,7 @@ export function CreatePrDialog({
       jiraCandidates,
     ).then((final) => {
       if (final) setDroppedLabels(final.droppedLabels);
+      surface.noteRunSettled(final !== null);
     });
   }
   // Context-sensitive reuse of the `generate-commit-message` binding while this
@@ -695,18 +721,7 @@ export function CreatePrDialog({
         onKeyDown={(e) => {
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
-            if (
-              !(
-                generating ||
-                nothingToMerge ||
-                baseLoading ||
-                isSubmitting ||
-                creatingThisHead ||
-                Boolean(existingPr)
-              )
-            ) {
-              form.handleSubmit();
-            }
+            if (!submitBlocked) form.handleSubmit();
             return;
           }
           // The generate chord runs this dialog's own Generate while it's open.
@@ -725,6 +740,7 @@ export function CreatePrDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
+            if (submitBlocked) return;
             form.handleSubmit();
           }}
         >
@@ -1137,13 +1153,7 @@ export function CreatePrDialog({
               <form.Subscribe selector={(s) => s.values.draft}>
                 {(draft) => (
                   <form.SubmitButton
-                    disabled={
-                      generating ||
-                      nothingToMerge ||
-                      baseLoading ||
-                      creatingElsewhere ||
-                      Boolean(existingPr)
-                    }
+                    disabled={submitBlocked}
                     aria-describedby={
                       creatingElsewhere ? creatingHintId : undefined
                     }

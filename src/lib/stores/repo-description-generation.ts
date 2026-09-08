@@ -1,0 +1,162 @@
+import { toast } from "sonner";
+import { create } from "zustand";
+import { normPath } from "@/lib/git/path";
+import { useUiStore } from "./ui";
+
+/** What one finished generation has to hand back to a form. */
+export interface RepoDescResult {
+  description: string;
+  topics: string[];
+}
+
+/**
+ * AI description generations, held outside the settings dialog's tree: the
+ * dialog unmounts on close and the rail unmounts the outgoing section on every
+ * switch, so a stream settling afterwards would land on a dead component and a
+ * paid run would be lost. Claimed here, its result is delivered to a mounted
+ * section or stashed for the next one. Keyed by {@link normPath} repo path and
+ * never cleared on repo switch — a run belongs to the repo it started in.
+ */
+interface RepoDescGenerationState {
+  /** repo key → the running generation's abort hook. Presence IS the busy flag,
+   *  so a reopened section paints busy for a run it never started. */
+  inFlight: Record<string, { cancel: () => void }>;
+  /** repo key → a result that settled with no section mounted to take it. */
+  pending: Record<string, RepoDescResult>;
+}
+
+const useStore = create<RepoDescGenerationState>()(() => ({
+  inFlight: {},
+  pending: {},
+}));
+
+/** Mounted sections waiting for a result, newest last. A stack rather than one
+ *  slot: each unregister splices only itself, so an unmounting section can never
+ *  linger as the recipient while a live one exists. Listeners never affect
+ *  rendering, so they live beside the store, not in its state. */
+const listeners = new Map<string, ((result: RepoDescResult) => void)[]>();
+
+/** Repos whose settings dialog is mounted, counted so overlapping mounts can't
+ *  clear each other. The dialog's host DROPS a request to open it while it is
+ *  already open, so a "View" action offered then would be dead. */
+const openDialogs = new Map<string, number>();
+
+/** Marks this repo's settings dialog as mounted; call the returned function on
+ *  unmount. */
+export function registerRepoSettingsOpenMarker(repoPath: string): () => void {
+  const repo = normPath(repoPath);
+  openDialogs.set(repo, (openDialogs.get(repo) ?? 0) + 1);
+  return () => {
+    const count = openDialogs.get(repo);
+    if (count === undefined) return;
+    if (count > 1) openDialogs.set(repo, count - 1);
+    else openDialogs.delete(repo);
+  };
+}
+
+/**
+ * Claims the lane for one repo. Returns false when a generation is already
+ * running there — the caller no-ops, because whatever surface is mounted already
+ * paints the busy affordance for it. Call this synchronously before the first
+ * await: the stream runs for a while behind a closed dialog.
+ */
+export function claimRepoDescGeneration(
+  repoPath: string,
+  cancel: () => void,
+): boolean {
+  const repo = normPath(repoPath);
+  if (useStore.getState().inFlight[repo]) return false;
+  useStore.setState((s) => ({
+    inFlight: { ...s.inFlight, [repo]: { cancel } },
+  }));
+  return true;
+}
+
+/**
+ * Releases the lane and routes the outcome. `null` (bailed, aborted, or errored)
+ * only frees it — those paths have already toasted for themselves. A result goes
+ * to the newest mounted listener when there is one; otherwise it waits in
+ * `pending` for the next section to mount, and a toast says so, since a result
+ * nobody can see is the failure this store exists to prevent.
+ */
+export function settleRepoDescGeneration(
+  repoPath: string,
+  result: RepoDescResult | null,
+): void {
+  const repo = normPath(repoPath);
+  useStore.setState((s) => {
+    if (!s.inFlight[repo]) return s;
+    const { [repo]: _settled, ...rest } = s.inFlight;
+    return { inFlight: rest };
+  });
+  if (!result) return;
+  const apply = listeners.get(repo)?.at(-1);
+  if (apply) {
+    apply(result);
+    return;
+  }
+  useStore.setState((s) => ({ pending: { ...s.pending, [repo]: result } }));
+  // With the dialog open on another section the deep link is refused, so that
+  // arm names the section to switch to instead of offering a dead button.
+  const dialogOpen = openDialogs.has(repo);
+  toast.success("Repository description ready", {
+    description: dialogOpen
+      ? "Switch to the General section to review it."
+      : "Reopen Repository settings to review.",
+    duration: 10_000,
+    ...(dialogOpen
+      ? {}
+      : {
+          action: {
+            label: "View",
+            onClick: () => useUiStore.getState().requestRepoSettings("general"),
+          },
+        }),
+  });
+}
+
+/** Registers a mounted section's field-apply for one repo; call the returned
+ *  function on unmount. */
+export function registerRepoDescListener(
+  repoPath: string,
+  apply: (result: RepoDescResult) => void,
+): () => void {
+  const repo = normPath(repoPath);
+  const stack = listeners.get(repo) ?? [];
+  stack.push(apply);
+  listeners.set(repo, stack);
+  return () => {
+    const cur = listeners.get(repo);
+    if (!cur) return;
+    const i = cur.indexOf(apply);
+    if (i !== -1) cur.splice(i, 1);
+    if (cur.length === 0) listeners.delete(repo);
+  };
+}
+
+/** Reads and clears the result a closed dialog never got to show. */
+export function consumePendingRepoDesc(
+  repoPath: string,
+): RepoDescResult | null {
+  const repo = normPath(repoPath);
+  const result = useStore.getState().pending[repo];
+  if (!result) return null;
+  useStore.setState((s) => {
+    const { [repo]: _taken, ...rest } = s.pending;
+    return { pending: rest };
+  });
+  return result;
+}
+
+/** Aborts the running generation for one repo — the affordance a section that
+ *  remounted over an orphaned run needs. The stream's own settle clears the
+ *  lane; a missing entry is a no-op. */
+export function cancelRepoDescGeneration(repoPath: string): void {
+  useStore.getState().inFlight[normPath(repoPath)]?.cancel();
+}
+
+/** True while a description generation is running for this repo, whichever
+ *  surface started it. */
+export function useIsGeneratingRepoDesc(repoPath: string): boolean {
+  return useStore((s) => Boolean(s.inFlight[normPath(repoPath)]));
+}

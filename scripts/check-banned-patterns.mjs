@@ -415,6 +415,22 @@ const EDITABLE_GUARD_RE = /\bisEditableTarget\s*\(/;
 const TYPEAHEAD_GUARD_RE = /\bisTypeaheadTarget\s*\(/;
 const TYPEAHEAD_KEY_RE = /\bisTypeaheadKey\s*\(/;
 
+// A generator dialog that stays mounted across its own close: a one-shot AI
+// generator hook, in a file that also seeds on open. Both halves are needed —
+// the generator is what a close would otherwise strand, and `useSeedOnOpen` is
+// what would wipe the finished draft on the next open. Surfaces with a
+// deliberate abort-on-close (the PR/issue EDIT dialogs, TaskDialog) carry no
+// seed-on-open, and the branch-name / commit-message generators are not in the
+// list, so both stay out by construction rather than by allowlist.
+// The hook list is explicit rather than a `useGenerate\w+` shape: the chord and
+// the commit-message path share that prefix without owning a dialog draft.
+// Bounded to .tsx, which is what keeps each hook's own definition file (a .ts
+// whose export line matches the call pattern) from reading as a call site.
+const GENERATOR_HOOK_RE =
+  /\buse(?:GeneratePrDescription|GenerateIssueDraft|GenerateReleaseNotes|GenerateRepoDescription)\s*\(/;
+const USE_SEED_ON_OPEN_CALL_RE = /\buseSeedOnOpen\s*\(/g;
+const FINISH_AND_SURFACE_RE = /\buseFinishAndSurface\s*\(/g;
+
 // The two halves of an async settings rollback. The gate: an OPTIMISTIC patch of
 // the settings cache — the file flips the preference itself so the UI can commit
 // before the store write resolves. The hit: that file's mutation `onError`
@@ -669,6 +685,17 @@ export const CHECKS = [
     ],
     message:
       "an open-transition reset must ride useSeedOnOpen (src/lib/use-seed-on-open.ts) — a hidden <Activity> tab re-mounts its effects on show, so a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires and wipes the user's draft; a data-arrival or otherwise idempotent seed needs an allowlist entry with rationale",
+  },
+  {
+    name: "generator-dialog-finish-and-surface",
+    appliesTo: (file) => file.endsWith(".tsx") && notVendoredUi(file),
+    scan: unlessAllPresent(
+      [FINISH_AND_SURFACE_RE],
+      onlyWhen(USE_SEED_ON_OPEN_CALL_RE, perLine(GENERATOR_HOOK_RE)),
+    ),
+    allowlist: [],
+    message:
+      "closing a dialog must never discard a paid AI generation — a mounted generator dialog rides useFinishAndSurface (src/features/conversations/useAiStream.ts): a run that settles while the dialog is closed latches skip-seed so the reopen shows the draft, and toasts it with a View reopen; a surface that genuinely aborts its run on close needs an allowlist entry with rationale",
   },
   {
     name: "hand-rolled-diff-stat",

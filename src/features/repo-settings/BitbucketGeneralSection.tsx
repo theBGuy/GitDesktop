@@ -1,5 +1,5 @@
 import { SparkleIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,15 @@ import type {
 } from "@/lib/git/types";
 import { usePublishGenerateAction } from "@/lib/hotkeys/useGenerateChord";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
+import {
+  cancelRepoDescGeneration,
+  claimRepoDescGeneration,
+  consumePendingRepoDesc,
+  type RepoDescResult,
+  registerRepoDescListener,
+  settleRepoDescGeneration,
+  useIsGeneratingRepoDesc,
+} from "@/lib/stores/repo-description-generation";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { DescriptionField } from "./DescriptionField";
@@ -114,6 +123,11 @@ function BitbucketGeneralForm({
   const repoName =
     useUiStore((s) => s.repoName) ?? repoPath.split(/[/\\]/).pop() ?? repoPath;
   const descGen = useGenerateRepoDescription(repoPath);
+  // A run started here outlives this form (the dialog and the rail both unmount
+  // their section immediately), so the store owns it: `generating` covers the
+  // stream this mount launched, the store covers one it inherited.
+  const storeBusy = useIsGeneratingRepoDesc(repoPath);
+  const busy = descGen.generating || storeBusy;
 
   function set<K extends keyof BitbucketRepoSettingsInput>(
     key: K,
@@ -122,19 +136,41 @@ function BitbucketGeneralForm({
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  // Seeds the draft the way a manual edit would, so the Save bar goes live.
+  // Bitbucket has no topics field, so the result's topics are dropped.
+  const applyResult = useCallback(({ description }: RepoDescResult) => {
+    if (description) setForm((f) => ({ ...f, description }));
+  }, []);
+
+  // Take a result that settled while no section was mounted, then stay the
+  // recipient for one that settles during this mount.
+  useEffect(() => {
+    const pending = consumePendingRepoDesc(repoPath);
+    if (pending) applyResult(pending);
+    return registerRepoDescListener(repoPath, applyResult);
+  }, [repoPath, applyResult]);
+
   // Shared by the Generate button and the settings dialog's generate chord,
   // which this publishes to — the shell owns the chord because it owns the
   // DialogContent every section renders inside.
-  function runGenerate() {
-    descGen.generate({
-      repoName,
-      onResult: ({ description }) => {
-        if (description) set("description", description);
-      },
-    });
+  async function runGenerate() {
+    if (!claimRepoDescGeneration(repoPath, descGen.cancel)) return;
+    let result: RepoDescResult | null = null;
+    try {
+      await descGen.generate({
+        repoName,
+        onResult: (r) => {
+          result = r;
+        },
+      });
+    } finally {
+      // In a `finally` because nothing else clears the lane: a throw between
+      // the claim and here would leave every surface for this repo busy.
+      settleRepoDescGeneration(repoPath, result);
+    }
   }
   const { hint: generateHint } = usePublishGenerateAction(
-    aiEnabled && aiConfigured && !descGen.generating,
+    aiEnabled && aiConfigured && !busy,
     runGenerate,
   );
 
@@ -182,13 +218,16 @@ function BitbucketGeneralForm({
               <SparkleIcon data-icon="inline-start" />
               Set up AI
             </Button>
-          ) : descGen.generating ? (
+          ) : busy ? (
             <Button
               type="button"
               variant="ghost"
               size="xs"
               className="text-muted-foreground"
-              onClick={descGen.cancel}
+              onClick={() => {
+                if (descGen.generating) descGen.cancel();
+                else cancelRepoDescGeneration(repoPath);
+              }}
             >
               <Spinner data-icon="inline-start" />
               Cancel
@@ -304,7 +343,7 @@ function BitbucketGeneralForm({
 
       <div className="flex items-center justify-end gap-2 border-t pt-3">
         <Button
-          disabled={!dirty || update.isPending || descGen.generating}
+          disabled={!dirty || update.isPending || busy}
           onClick={handleSave}
         >
           {update.isPending && <Spinner data-icon="inline-start" />}

@@ -3500,8 +3500,7 @@ export function RemotePrView({
         form={edit.form}
         open={edit.open}
         onOpenChange={(open) => {
-          // The dialog stays mounted, so cancel any in-flight generation when it
-          // closes (unlike the create dialogs, which unmount on close).
+          // The dialog stays mounted, so cancel any in-flight generation on close.
           if (!open) prGen.cancel();
           edit.setOpen(open);
         }}

@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useFinishAndSurface } from "@/features/conversations/useAiStream";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { useAppForm } from "@/lib/form";
 import {
@@ -105,6 +106,15 @@ export function CreateReleaseDialog({
   const createRelease = useCreateRelease(repoPath);
   const githubNotes = useGithubReleaseNotes(repoPath);
   const aiNotes = useGenerateReleaseNotes(repoPath);
+  const busyGenerating = githubNotes.isPending || aiNotes.generating;
+  // Closing mid-generation never cancels the run: it finishes into the retained
+  // form state, and this surfaces the result while the dialog is away. Both
+  // hosts pass a plain open setter, so `onOpenChange(true)` reopens.
+  const surface = useFinishAndSurface(open, {
+    readyTitle: "Release notes ready",
+    readyDescription: "They're waiting in the dialog.",
+    reopen: () => onOpenChange(true),
+  });
   // GitLab has no draft/pre-release/latest concepts and no auto-notes API, so
   // those checkboxes and the "From GitHub" generator hide there (AI notes still
   // work — they fall back to local commits).
@@ -197,6 +207,10 @@ export function CreateReleaseDialog({
     : "";
 
   const seedOnOpen = useEffectEvent(() => {
+    // A generation still streaming — or one that settled while the dialog was
+    // closed — leaves the notes and the rest of the draft in form state, which
+    // this reset would blank on reopen.
+    if (busyGenerating || surface.consumeSkipSeed()) return;
     form.reset(
       {
         ...RELEASE_DEFAULTS,
@@ -221,8 +235,6 @@ export function CreateReleaseDialog({
     setTagOpen(false);
   }
 
-  const busyGenerating = githubNotes.isPending || aiNotes.generating;
-
   // Awaited like the submit above: react-query drops per-call callbacks once the
   // observer loses listeners, and this dialog's host panel hides with its tab
   // while generation is still in flight.
@@ -238,29 +250,43 @@ export function CreateReleaseDialog({
       });
     } catch (e) {
       toastError(e);
+      // Still a settle: the typed draft has to survive one reopen for a retry.
+      surface.noteRunSettled(false);
       return;
     }
     // The response belongs to the tag it was requested for — a reseeded or
     // retyped form is another release, and stale notes must not touch it.
-    if (form.getFieldValue("tag").trim() !== requestedFor) return;
+    if (form.getFieldValue("tag").trim() !== requestedFor) {
+      surface.noteRunSettled(false);
+      return;
+    }
     if (gen.body) form.setFieldValue("notes", gen.body);
     if (gen.name && !form.getFieldValue("title").trim()) {
       form.setFieldValue("title", gen.name);
     }
     notesEditorRef.current?.showPreview();
+    // Only a body is notes "waiting in the dialog" — a name-only response has
+    // nothing for the toast to promise.
+    surface.noteRunSettled(Boolean(gen.body));
   }
 
   function generateWithAi() {
     if (!tagTrimmed) return;
     form.setFieldValue("notes", "");
-    aiNotes.generate({
-      tag: tagTrimmed,
-      target: showTarget ? target.trim() : tagTrimmed,
-      previousTag: effectivePreviousTag,
-      repoName,
-      isGitHub,
-      onResult: (body) => form.setFieldValue("notes", body),
-    });
+    aiNotes
+      .generate({
+        tag: tagTrimmed,
+        target: showTarget ? target.trim() : tagTrimmed,
+        previousTag: effectivePreviousTag,
+        repoName,
+        isGitHub,
+        onResult: (body) => form.setFieldValue("notes", body),
+      })
+      .then((final) => {
+        // Resolves with the COMPLETE notes, or null — an aborted stream still
+        // fired `onResult` with its partials, so that can't be the signal.
+        surface.noteRunSettled(final !== null);
+      });
   }
 
   // The generate chord drives the AI item only — never the From-GitHub one, and
@@ -282,6 +308,10 @@ export function CreateReleaseDialog({
     ? aiNotesHintTitle
     : "Enable AI in Settings first.";
 
+  // The one submit gate, shared by the button and the form's native submit:
+  // Enter must submit exactly when the button would.
+  const submitBlocked = !tagTrimmed || busyGenerating;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* A fixed height (not a cap): release bodies routinely run thousands of
@@ -294,6 +324,7 @@ export function CreateReleaseDialog({
           className="flex min-h-0 flex-1 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
+            if (submitBlocked) return;
             form.handleSubmit();
           }}
         >
@@ -543,7 +574,7 @@ export function CreateReleaseDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton disabled={!tagTrimmed || busyGenerating}>
+              <form.SubmitButton disabled={submitBlocked}>
                 {draft ? "Save draft" : "Publish release"}
               </form.SubmitButton>
             </form.AppForm>
