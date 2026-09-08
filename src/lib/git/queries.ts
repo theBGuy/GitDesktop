@@ -299,11 +299,18 @@ export function userWorktreesOptions(repo: string) {
 
 /** The repo's user-facing worktrees (session worktrees filtered out by the
  *  backend). `enabled` gates the fetch to the surface asking for it — the
- *  manager, the branch switcher and its cleanup dialog, the branch pickers. */
+ *  manager, the branch switcher and its cleanup dialog, the branch pickers;
+ *  the repo header reads it ungated for the worktree subtitle. */
 export function useUserWorktrees(repo: string, enabled = true) {
   return useQuery({
     ...userWorktreesOptions(repo),
     enabled: enabled && Boolean(repo),
+    // On the HOOK only — the header observes this key on every open repo, so
+    // without a staleTime the window-focus refetch re-spawns `git worktree
+    // list` on each Alt-Tab back (mutations invalidate the key regardless).
+    // The switcher's imperative fetchQuery spreads the OPTIONS and must keep
+    // fetch-always semantics for its checkout-redirect guard.
+    staleTime: 30_000,
   });
 }
 

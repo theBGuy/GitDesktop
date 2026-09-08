@@ -392,6 +392,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const lockCurrent = currentName
     ? requiresPullRequest(rulesConfig, currentName)
     : false;
+  // A promotion branch takes its changes through promotions, so the one-click
+  // update from the default branch is withheld (the current-branch twin of the
+  // per-row `rowPromotion`).
+  const currentPromotion = Boolean(
+    currentName && isPromotionBranch(rulesConfig, currentName),
+  );
   const canMergeIntoCurrent =
     !lockCurrent &&
     (currentName
@@ -1008,9 +1014,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       // git refuses to delete the checked-out branch: move off it first — onto a
       // branch not already occupied by another worktree (that checkout fails too).
       if (deleteTarget === currentName) {
-        // Fetch occupancy FRESH: the cached `worktreeByBranch` is gated on the
-        // popover or the cleanup dialog being open, and the `delete-branch`
-        // hotkey opens neither — leaving the map empty and the guard moot.
+        // Fetch occupancy FRESH: `worktreeByBranch` only observes its query
+        // while the popover or cleanup dialog is open, and even a warm cache
+        // (the header keeps one now) can be stale for a guard this destructive.
         let occupied: Set<string>;
         try {
           const wts = await listUserWorktrees(repoPath);
@@ -1637,7 +1643,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         defaultName !== currentName &&
         !busy &&
         currentName &&
-        !isPromotionBranch(rulesConfig, currentName),
+        !currentPromotion,
     ),
   );
   const defaultBranchRow = allBranches.find((b) => b.name === defaultName);
@@ -2697,10 +2703,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     !currentName ||
                     defaultName === currentName ||
                     busy ||
-                    Boolean(
-                      currentName &&
-                        isPromotionBranch(rulesConfig, currentName),
-                    )
+                    currentPromotion
                   }
                   reason={updateFromDefaultBlockedReason}
                   onClick={() => {
@@ -2708,9 +2711,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   }}
                 >
                   Update from {defaultName ?? "default branch"}
-                  {currentName && isPromotionBranch(rulesConfig, currentName)
-                    ? " (promotion branch)"
-                    : ""}
+                  {currentPromotion ? " (promotion branch)" : ""}
                 </MenuRow>
                 <MenuRow
                   disabled={otherBranches.length === 0 || !canMergeIntoCurrent}

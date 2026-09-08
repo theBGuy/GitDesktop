@@ -498,7 +498,8 @@ export const capabilities: Capability[] = [
   { group: "Admin & settings", label: "Branch-protection rules, locally" },
   {
     group: "Admin & settings",
-    label: "Promotion branches — no Update-branch on staging→production PRs",
+    label:
+      "Promotion branches — update offers withheld on their PRs and branch menus",
   },
   {
     group: "Admin & settings",

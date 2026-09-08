@@ -190,10 +190,9 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const isBitbucket = provider === "bitbucket";
   const remoteLabel = providerLabel(provider);
   // The forge probe ends in a network call, so a repo open leaves the view item
-  // missing for its first seconds; the recents entry's last-known provider is all
-  // that item needs (openWeb resolves the URL at click time, unauthenticated).
-  // Membership-narrowed rather than cast: it is a stored plain string, and
-  // providerLabel reads an unrecognized one as "GitHub".
+  // missing for its first seconds; until the probe answers, the recents entry's
+  // last-known provider stands in. Membership-narrowed rather than cast: it is a
+  // stored plain string, and providerLabel reads an unrecognized one as "GitHub".
   const persistedProvider =
     repoEntry.provider === "github" ||
     repoEntry.provider === "gitlab" ||
@@ -202,8 +201,14 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
       : undefined;
   // Star, fork, and create-issue deliberately stay on `canGh` — they need the
   // authenticated probe, and offering them before auth is known would be worse.
-  // The probe's provider wins once resolved: it is fresher than the stored one.
-  const canViewOnHost = canGh || persistedProvider !== undefined;
+  // The stand-in never outlives a SETTLED probe on GitHub/GitLab: forgeRepoUrl
+  // shells `gh repo view` / `glab api` there, so "not ready" means the click
+  // would fail. Bitbucket's resolver is a local remote parse, so its item works
+  // regardless of the probe's verdict.
+  const canViewOnHost =
+    canGh ||
+    persistedProvider === "bitbucket" ||
+    (persistedProvider !== undefined && gh.data === undefined);
   const viewLabel = providerLabel(provider ?? persistedProvider);
   const canStar = canGh && forgeSupports(gh.data, "stars");
   const canCreateHostIssue = canGh && forgeSupports(gh.data, "issues");

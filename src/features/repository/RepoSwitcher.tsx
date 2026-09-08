@@ -60,14 +60,20 @@ export function RepoSwitcher() {
   // The alias lookup and the picker's highlight both compare paths by exact
   // string, but git prints forward slashes while the app stores native
   // separators — so resolve the main worktree to its recents row's own spelling
-  // before handing it to either. Unlisted (or not in a worktree) falls through
-  // to the path we already have.
-  const mainRepoPath =
+  // before handing it to either.
+  const mainRow =
     inLinkedWorktree && mainWt
-      ? (settings.data?.recentRepos.find(
+      ? settings.data?.recentRepos.find(
           (r) => normPath(r.path) === normPath(mainWt.path),
-        )?.path ?? mainWt.path)
-      : repoPath;
+        )
+      : undefined;
+  const mainRepoPath =
+    inLinkedWorktree && mainWt ? (mainRow?.path ?? mainWt.path) : repoPath;
+  // The highlight falls back to the CHECKOUT's path when the main workspace has
+  // no recents row: a worktree opened via the picker is itself a row, and that
+  // row lighting up beats highlighting nothing.
+  const pickerCurrentPath =
+    inLinkedWorktree && mainWt ? (mainRow?.path ?? repoPath) : repoPath;
   const alias = useRepoAlias(mainRepoPath);
   const [open, setOpen] = useState(false);
   // Dialogs live outside the popover: closing it unmounts its contents.
@@ -145,7 +151,7 @@ export function RepoSwitcher() {
           >
             <Popover.Popup className="w-80 rounded-none bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10">
               <RepoList
-                currentPath={mainRepoPath}
+                currentPath={pickerCurrentPath}
                 onOpened={() => setOpen(false)}
                 onAliasRepo={(repo) => {
                   setOpen(false);
