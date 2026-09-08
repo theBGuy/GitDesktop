@@ -353,9 +353,10 @@ export function PrReviewPanel({
       prKind === "remote"
         ? findSuspectRefs(
             text,
-            // `context.provider` rides forge status, so it can still be unresolved
-            // here; GitHub's single `#` space is the safe default.
-            REF_TRIGGERS[context.provider ?? "github"],
+            // Keyed off the same resolved forge status the linkifier uses; while
+            // it's unresolved the detector's both-trigger default applies —
+            // over-warning in that window beats a missed live `!N`.
+            forgeProvider ? REF_TRIGGERS[forgeProvider] : undefined,
           )
         : [];
     if (partial || suspectRefs.length > 0) {

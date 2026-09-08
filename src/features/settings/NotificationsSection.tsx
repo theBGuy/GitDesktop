@@ -71,7 +71,7 @@ export const NotificationsSection = withForm({
             <form.AppField name="notifications.automations">
               {(field) => (
                 <field.CheckboxField
-                  label="Automation results (AI reviews posted or failed)"
+                  label="Automation results (AI reviews ready, posted, or failed)"
                   className="flex cursor-pointer items-center gap-2 text-xs"
                 />
               )}

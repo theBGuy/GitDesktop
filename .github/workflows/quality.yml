@@ -61,8 +61,10 @@ jobs:
 
       # Negative controls for the scanners themselves — their worst failure is a
       # silent fail-open, so the fixtures that prove each predicate still fires
-      # run in CI. The test file is stdlib-only (node:test, node:assert), so this
-      # job still needs no install step. The argument is a QUOTED glob, not the
+      # run in CI. The test files run installless here (node:test/node:assert;
+      # optional imports like the marked render oracle skip when absent), so this
+      # job needs no install step — the frontend job is the oracle's enforced,
+      # installed run. The argument is a QUOTED glob, not the
       # `scripts` directory: node 24's runner resolves a bare directory path as
       # an entry module and dies with MODULE_NOT_FOUND.
       - name: Guard self-tests

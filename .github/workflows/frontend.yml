@@ -61,3 +61,9 @@ jobs:
       # Check-only (biome ci never writes); `pnpm lint` locally is --write.
       - name: Lint and format check
         run: pnpm exec biome ci ./src/
+
+      # The reference-detector suite's render oracle needs `marked` from
+      # node_modules and skips in the no-install guards job — this installed
+      # job is its one enforced run.
+      - name: Reference-detector suite (render oracle enforced)
+        run: node --test "scripts/comment-refs.test.mjs"
