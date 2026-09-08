@@ -60,7 +60,10 @@ export function CreateJiraIssueDialog({
   const { generate, cancel, generating } = useGenerateIssueDraft(repoPath);
   // Closing mid-generation never cancels the run: it finishes into the retained
   // form state, and this surfaces the result while the dialog is away.
-  const surface = useFinishAndSurface(open, {
+  const surface = useFinishAndSurface(repoPath, open, {
+    cancel,
+    generating,
+    close: () => onOpenChange(false),
     readyTitle: "Issue draft ready",
     readyDescription: "It's waiting in the dialog.",
     reopen: () => onOpenChange(true),
@@ -117,7 +120,7 @@ export function CreateJiraIssueDialog({
     // A generation still streaming — or one that settled while the dialog was
     // closed — leaves the whole draft in form state, which this reset would blank
     // on reopen.
-    if (generating || surface.consumeSkipSeed()) return;
+    if (surface.shouldSkipSeed(generating)) return;
     form.reset({ summary: "", body: "" }, { keepDefaultValues: true });
   });
   useSeedOnOpen(open, seedOnOpen);
@@ -149,16 +152,21 @@ export function CreateJiraIssueDialog({
     // `generate` resolves void and fires onResult only on a usable draft, so the
     // flag is how the settle learns whether a result actually landed.
     let ok = false;
-    await generate({
-      notes,
-      repoName,
-      onResult: (d) => {
-        ok = true;
-        if (d.title) form.setFieldValue("summary", d.title);
-        form.setFieldValue("body", d.body);
-      },
-    });
-    surface.noteRunSettled(ok);
+    // finally: a throw past the stream (draft extraction, these field writes)
+    // must still settle, or the switch-abort latch stays armed for the next run.
+    try {
+      await generate({
+        notes,
+        repoName,
+        onResult: (d) => {
+          ok = true;
+          if (d.title) form.setFieldValue("summary", d.title);
+          form.setFieldValue("body", d.body);
+        },
+      });
+    } finally {
+      surface.noteRunSettled(ok);
+    }
   }
   // The generate chord drafts this issue while the dialog is open. It's mounted
   // on DialogContent, not the <form>: the X close button is a form SIBLING

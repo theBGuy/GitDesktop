@@ -216,7 +216,10 @@ export function CreatePrDialog({
   // Closing mid-generation never cancels the run: it finishes into the retained
   // form state, and this surfaces the result while the dialog is away. Both
   // hosts pass a plain open setter, so `onOpenChange(true)` reopens.
-  const surface = useFinishAndSurface(open, {
+  const surface = useFinishAndSurface(repoPath, open, {
+    cancel,
+    generating,
+    close: () => onOpenChange(false),
     readyTitle: isGitLab
       ? "Merge request description ready"
       : "Pull request description ready",
@@ -446,14 +449,16 @@ export function CreatePrDialog({
     // differs from the branch they are on now. The `||` short-circuit is
     // deliberate — while a generation or create is in flight the pr-create
     // latches stay unconsumed, so a later reopen after a failure still
-    // preserves the draft.
+    // preserves the draft. A run discarded by a repo switch skips those arms
+    // entirely: the retained head is the OLD repo's, so keying this repo's
+    // latches on it would spend a latch that was never formed for it.
     if (seededRef.current) {
       const retained = form.state.values.head || h;
       if (
-        generating ||
-        surface.consumeSkipSeed() ||
-        isCreatingPrFor(repoPath, retained) ||
-        consumeLastFailed(repoPath, retained)
+        surface.shouldSkipSeed(generating) ||
+        (!surface.runDiscardedBySwitch() &&
+          (isCreatingPrFor(repoPath, retained) ||
+            consumeLastFailed(repoPath, retained)))
       )
         return;
     } else {
@@ -694,10 +699,15 @@ export function CreatePrDialog({
       issueCandidates,
       // Grounded Jira mention candidates — empty/undefined ⇒ no Jira variant.
       jiraCandidates,
-    ).then((final) => {
-      if (final) setDroppedLabels(final.droppedLabels);
-      surface.noteRunSettled(final !== null);
-    });
+    ).then(
+      (final) => {
+        if (final) setDroppedLabels(final.droppedLabels);
+        surface.noteRunSettled(final !== null);
+      },
+      // Two-arm, never a trailing .catch: a settle must be reported exactly
+      // once, and a throw in the arm above must not report a second time.
+      () => surface.noteRunSettled(false),
+    );
   }
   // Context-sensitive reuse of the `generate-commit-message` binding while this
   // dialog is open. `run` is undefined with AI off — no Generate surface, so

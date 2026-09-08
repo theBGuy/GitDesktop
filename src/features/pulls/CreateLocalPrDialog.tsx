@@ -67,7 +67,10 @@ export function CreateLocalPrDialog({
   // form state, and this surfaces the result while the dialog is away. The host's
   // onOpenChange only ever CLOSES, so the reopen goes through the store action —
   // seedless, since the skip-seed latch keeps the retained draft.
-  const surface = useFinishAndSurface(open, {
+  const surface = useFinishAndSurface(repoPath, open, {
+    cancel,
+    generating,
+    close: () => onOpenChange(false),
     readyTitle: "PR description ready",
     readyDescription: "It's waiting in the dialog.",
     reopen: () => useUiStore.getState().openLocalPrCreate(),
@@ -189,7 +192,7 @@ export function CreateLocalPrDialog({
     // A generation still streaming — or one that settled while the dialog was
     // closed — leaves the whole draft in form state, which this reset would blank
     // on reopen.
-    if (generating || surface.consumeSkipSeed()) return;
+    if (surface.shouldSkipSeed(generating)) return;
     // Reset the linked-issue chips (and their dismissed/probed refs) to empty —
     // the dialog opens with no seeded body refs; extraction/AI seeding then
     // repopulates from the head branch + commits.
@@ -265,10 +268,13 @@ export function CreateLocalPrDialog({
       [],
       notes.trim() || undefined,
       buildIssueCandidates(),
-    ).then((final) => {
+    ).then(
       // Resolves with the COMPLETE draft, or null on bail/abort/error.
-      surface.noteRunSettled(final !== null);
-    });
+      (final) => surface.noteRunSettled(final !== null),
+      // Two-arm, never a trailing .catch: a settle must be reported exactly
+      // once, and a throw in the arm above must not report a second time.
+      () => surface.noteRunSettled(false),
+    );
   }
   // Context-sensitive reuse of the `generate-commit-message` binding while this
   // dialog is open. `run` is undefined with AI off — no Generate surface, so

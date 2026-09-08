@@ -175,7 +175,16 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   `generator-dialog-finish-and-surface` guard in `pnpm run checks` is the
   ratchet; the deliberate abort-on-close surfaces (the PR edit dialogs, branch /
   rename / task dialogs) are exempt by hook choice or by having no
-  `useSeedOnOpen`.
+  `useSeedOnOpen`. A generation belongs to the repo it started in: the hook
+  takes `repoPath` plus the dialog's own `cancel` and `close`, and a switch
+  aborts the run, drops the latch, closes an open dialog, and disarms the
+  toast's action — `<RepositoryView>` is a single instance across repo switches,
+  so dialog state outlives the repo. Two contracts the types can't enforce: the
+  seed guard is `surface.shouldSkipSeed(generating)`, never a caller-owned
+  `generating ||` arm (a cancelled run keeps that flag true through its context
+  fetch; `consumeSkipSeed` remains only for caller-side identity drains), and
+  the repo-description store delivers only while the dialog reports General
+  active, stashing otherwise.
 - Worktree actions gate on in-flight removal/promote state: menu items disable
   with the parenthetical reason riding the label (a disabled menu item can't
   carry a tooltip), and mutation choke points re-check at fire time —

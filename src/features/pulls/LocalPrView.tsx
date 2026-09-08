@@ -41,6 +41,7 @@ import {
   useEditTitleBody,
 } from "@/features/conversations/EditTitleBodyDialog";
 import { LocalComment } from "@/features/conversations/LocalComment";
+import { useCancelOnIdentityChange } from "@/features/conversations/useAiStream";
 import { useLocalConversation } from "@/features/conversations/useLocalConversation";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
@@ -89,10 +90,7 @@ import {
   type TimelineEntry,
 } from "./PrTimeline";
 import { ResolveConflictsView } from "./ResolveConflictsView";
-import {
-  useCancelOnIdentityChange,
-  useGeneratePrDescription,
-} from "./useGeneratePrDescription";
+import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
   composeBodyWithRefs,
   splitBodyRefBlock,

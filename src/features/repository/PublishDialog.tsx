@@ -141,7 +141,10 @@ export function PublishDialog({
   // Closing mid-generation never cancels the run: it finishes into the retained
   // form state, and this surfaces the result while the dialog is away. The lone
   // host passes a plain open setter, so `onOpenChange(true)` reopens.
-  const surface = useFinishAndSurface(open, {
+  const surface = useFinishAndSurface(repoPath, open, {
+    cancel: descGen.cancel,
+    generating: descGen.generating,
+    close: () => onOpenChange(false),
     readyTitle: "Repository description ready",
     readyDescription: "It's waiting in the dialog.",
     reopen: () => onOpenChange(true),
@@ -263,7 +266,7 @@ export function PublishDialog({
     // A generation still streaming — or one that settled while the dialog was
     // closed — leaves the description and topics in form state, which this
     // reset would blank on reopen.
-    if (descGen.generating || surface.consumeSkipSeed()) return;
+    if (surface.shouldSkipSeed(descGen.generating)) return;
     form.reset({
       name: defaultName,
       description: "",
@@ -310,20 +313,25 @@ export function PublishDialog({
     // The hook resolves void and fires `onResult` only for a run that produced
     // usable content, so this flag is the settled-with-result signal.
     let ok = false;
-    await descGen.generate({
-      repoName: nameVal.trim() || defaultName,
-      onResult: ({ description, topics }) => {
-        ok = true;
-        if (description) {
-          form.setFieldValue("description", description);
-        }
-        // Bitbucket has no topics field — drop that arm.
-        if (!isBitbucket && topics.length) {
-          form.setFieldValue("topics", topics.join(" "));
-        }
-      },
-    });
-    surface.noteRunSettled(ok);
+    try {
+      await descGen.generate({
+        repoName: nameVal.trim() || defaultName,
+        onResult: ({ description, topics }) => {
+          ok = true;
+          if (description) {
+            form.setFieldValue("description", description);
+          }
+          // Bitbucket has no topics field — drop that arm.
+          if (!isBitbucket && topics.length) {
+            form.setFieldValue("topics", topics.join(" "));
+          }
+        },
+      });
+    } finally {
+      // Every arm reports: a throw that skipped this would strand the surface's
+      // one-shot state armed, swallowing the next run's settle.
+      surface.noteRunSettled(ok);
+    }
   }
   // This dialog opens from the header over any tab, including Changes where the
   // global generate-commit-message action is live. The chord is swallowed here

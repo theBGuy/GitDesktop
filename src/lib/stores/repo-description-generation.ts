@@ -36,21 +36,36 @@ const useStore = create<RepoDescGenerationState>()(() => ({
  *  rendering, so they live beside the store, not in its state. */
 const listeners = new Map<string, ((result: RepoDescResult) => void)[]>();
 
-/** Repos whose settings dialog is mounted, counted so overlapping mounts can't
- *  clear each other. The dialog's host DROPS a request to open it while it is
- *  already open, so a "View" action offered then would be dead. */
+/** Repos whose settings dialog is mounted. Its host DROPS a request to open it
+ *  while it is already open, so a "View" action offered then would be dead. */
 const openDialogs = new Map<string, number>();
 
 /** Marks this repo's settings dialog as mounted; call the returned function on
  *  unmount. */
 export function registerRepoSettingsOpenMarker(repoPath: string): () => void {
-  const repo = normPath(repoPath);
-  openDialogs.set(repo, (openDialogs.get(repo) ?? 0) + 1);
+  return mark(openDialogs, normPath(repoPath));
+}
+
+/** Repos whose settings dialog is showing its General section. The crossfade
+ *  keeps an EXITING section mounted — listener included — for the whole fade,
+ *  so delivery follows the dialog's own view, which is outside the animation. */
+const generalSections = new Map<string, number>();
+
+/** Marks this repo's General section as the dialog's active one; call the
+ *  returned function when it stops being active. */
+export function registerRepoDescActiveSection(repoPath: string): () => void {
+  return mark(generalSections, normPath(repoPath));
+}
+
+/** Counted rather than a flag, so overlapping registrations for one key —
+ *  StrictMode's double-invoke included — can't clear each other. */
+function mark(counts: Map<string, number>, key: string): () => void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
   return () => {
-    const count = openDialogs.get(repo);
+    const count = counts.get(key);
     if (count === undefined) return;
-    if (count > 1) openDialogs.set(repo, count - 1);
-    else openDialogs.delete(repo);
+    if (count > 1) counts.set(key, count - 1);
+    else counts.delete(key);
   };
 }
 
@@ -72,12 +87,16 @@ export function claimRepoDescGeneration(
   return true;
 }
 
+/** Long enough to outlast the section crossfade, so the fallback announcement
+ *  only fires when the arriving General section really never mounted. */
+const PENDING_ANNOUNCE_DELAY_MS = 800;
+
 /**
  * Releases the lane and routes the outcome. `null` (bailed, aborted, or errored)
  * only frees it — those paths have already toasted for themselves. A result goes
- * to the newest mounted listener when there is one; otherwise it waits in
- * `pending` for the next section to mount, and a toast says so, since a result
- * nobody can see is the failure this store exists to prevent.
+ * to the newest listener while General is the live section; otherwise it waits
+ * in `pending` and gets announced, at once or once the crossfade has had its
+ * chance — a result nobody can see is what this store prevents.
  */
 export function settleRepoDescGeneration(
   repoPath: string,
@@ -90,14 +109,37 @@ export function settleRepoDescGeneration(
     return { inFlight: rest };
   });
   if (!result) return;
-  const apply = listeners.get(repo)?.at(-1);
-  if (apply) {
-    apply(result);
-    return;
+  // Deliver only while General is the dialog's active section: a section on its
+  // way out still holds a registered listener, and applying there writes into a
+  // form that is about to be discarded.
+  const generalActive = generalSections.has(repo);
+  if (generalActive) {
+    const apply = listeners.get(repo)?.at(-1);
+    if (apply) {
+      apply(result);
+      return;
+    }
   }
   useStore.setState((s) => ({ pending: { ...s.pending, [repo]: result } }));
-  // With the dialog open on another section the deep link is refused, so that
-  // arm names the section to switch to instead of offering a dead button.
+  if (!generalActive) {
+    announcePendingRepoDesc(repoPath);
+    return;
+  }
+  // Mid-switch ONTO General: the arriving section is expected to consume this,
+  // but leaving or closing inside the fade breaks that promise, so one timer
+  // turns a stash nobody claimed into a late announcement.
+  setTimeout(() => {
+    if (!useStore.getState().pending[repo]) return;
+    if (listeners.get(repo)?.length) return;
+    announcePendingRepoDesc(repoPath);
+  }, PENDING_ANNOUNCE_DELAY_MS);
+}
+
+/** The one announcement for a stashed result. Its copy is decided at FIRE time
+ *  because the fallback can run long after the settle: while the dialog is open
+ *  its host drops a deep link, so that arm points at the section instead. */
+function announcePendingRepoDesc(repoPath: string): void {
+  const repo = normPath(repoPath);
   const dialogOpen = openDialogs.has(repo);
   toast.success("Repository description ready", {
     description: dialogOpen
@@ -109,7 +151,19 @@ export function settleRepoDescGeneration(
       : {
           action: {
             label: "View",
-            onClick: () => useUiStore.getState().requestRepoSettings("general"),
+            onClick: () => {
+              const ui = useUiStore.getState();
+              // The request targets the ACTIVE repo. Away from it the result is
+              // still recoverable, so say where rather than doing nothing —
+              // clicking dismisses the toast, and with it the only pointer.
+              if (normPath(ui.repoPath ?? "") !== repo) {
+                const name =
+                  repoPath.split(/[/\\]/).filter(Boolean).pop() ?? repoPath;
+                toast.info(`Waiting in ${name} — switch back to see it.`);
+                return;
+              }
+              ui.requestRepoSettings("general");
+            },
           },
         }),
   });
