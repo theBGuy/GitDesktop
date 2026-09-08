@@ -33,7 +33,8 @@ export function SwitchWithChangesDialog({
   /**
    * One-line note above the choices. Set only when a bring-changes attempt was
    * refused — the switcher clears it on every fresh open — so its presence is
-   * also what puts the footer in its refusal state below.
+   * also what puts the footer in its refusal state below, and what the reapply
+   * clause is appended to.
    */
   hint?: string | null;
   reapply: boolean;
@@ -76,7 +77,14 @@ export function SwitchWithChangesDialog({
             className="flex items-start gap-1.5 text-xs text-warning"
           >
             <WarningIcon className="size-4 shrink-0" />
-            <span>{hint}</span>
+            {/* The reapply clause is appended here rather than baked into the
+                hint: the checkbox stays live while this note shows. */}
+            <span>
+              {hint}
+              {refused && reapply
+                ? " Reapply is set, so your changes still come along."
+                : null}
+            </span>
           </p>
         )}
         <label className="flex cursor-pointer items-center gap-2 text-xs">

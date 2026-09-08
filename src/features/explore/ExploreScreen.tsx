@@ -322,6 +322,10 @@ function YoursResults({
   }
   return (
     <ResultsList
+      // A cached provider resolves synchronously, so the list never unmounts
+      // between providers — key it or the surviving virtualizer carries one
+      // account's scroll offset onto the other's repositories.
+      key={provider}
       rows={rows}
       selected={selected}
       onSelect={onSelect}
@@ -349,10 +353,17 @@ function SearchResults({
 }) {
   const search = useForgeSearchRepos(provider, query, sort, true);
 
-  const repos = useMemo<ForgeSearchRepo[]>(
-    () => search.data?.pages.flatMap((p) => p.repos) ?? [],
-    [search.data],
-  );
+  // Dedupe by full name: the forge's index can shift between page fetches and
+  // repeat a repo, which the content-derived row keys would collide on — one
+  // React key and one measurement entry for two rows.
+  const repos = useMemo<ForgeSearchRepo[]>(() => {
+    const seen = new Set<string>();
+    return (search.data?.pages.flatMap((p) => p.repos) ?? []).filter((r) => {
+      if (seen.has(r.fullName)) return false;
+      seen.add(r.fullName);
+      return true;
+    });
+  }, [search.data]);
   // Search results are already provider-ranked (best/stars/updated), so present
   // them flat — no owner grouping, which would fight the ranking.
   const rows = useMemo<ExploreRow[]>(
