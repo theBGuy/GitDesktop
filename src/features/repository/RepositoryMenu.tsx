@@ -203,12 +203,13 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // authenticated probe, and offering them before auth is known would be worse.
   // The stand-in never outlives a SETTLED probe on GitHub/GitLab: forgeRepoUrl
   // shells `gh repo view` / `glab api` there, so "not ready" means the click
-  // would fail. Bitbucket's resolver is a local remote parse, so its item works
-  // regardless of the probe's verdict.
+  // would fail. `!isPaused` keeps an offline session (the query parks, pending
+  // forever) from counting as in-flight. Bitbucket's resolver is a local remote
+  // parse, so its item works regardless of the probe's verdict.
   const canViewOnHost =
     canGh ||
     persistedProvider === "bitbucket" ||
-    (persistedProvider !== undefined && gh.isPending);
+    (persistedProvider !== undefined && gh.isPending && !gh.isPaused);
   const viewLabel = providerLabel(provider ?? persistedProvider);
   const canStar = canGh && forgeSupports(gh.data, "stars");
   const canCreateHostIssue = canGh && forgeSupports(gh.data, "issues");

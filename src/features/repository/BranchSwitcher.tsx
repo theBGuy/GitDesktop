@@ -833,12 +833,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // still exists, and mid-removal is `refuseWhileLeaving`'s job), but a miss
     // is worthless from a list that is unanswered or in flight, because
     // react-query serves the previous data through a refetch and every worktree
-    // mutation invalidates this key. Routed through `fetchQuery` on that same
-    // key so a click during the refetch JOINS it instead of racing it with a
-    // second `git worktree list`. A failed lookup falls through to the ordinary
-    // checkout, where git refuses with its own message. Local rows only: a
-    // remote-only row's name has no local branch by construction, so no
-    // worktree can hold it and the lookup would only add a subprocess.
+    // mutation invalidates this key. (The header's always-on observer keeps the
+    // key warm under the hook's 30s staleTime, so a miss inside that window is
+    // trusted; git's own checkout refusal backstops it.) Routed through
+    // `fetchQuery` on that same key so a click during the refetch JOINS it
+    // instead of racing it with a second `git worktree list`. A failed lookup
+    // falls through to the ordinary checkout, where git refuses with its own
+    // message. Local rows only: a remote-only row's name has no local branch
+    // by construction, so no worktree can hold it and the lookup would only
+    // add a subprocess.
     if (
       remote === null &&
       !wtPath &&
@@ -1473,6 +1476,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return headUnread ?? "HEAD is detached — there's no branch to update.";
     if (defaultName === currentName) return `You're already on ${defaultName}.`;
     if (busy) return "Another git operation is running.";
+    // The remaining arm is the promotion rule, which the label already states.
     return null;
   })();
   // The branch-count rows below share a shape: an unanswered branch list counts

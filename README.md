@@ -201,8 +201,9 @@ PR badge.
 - **Local branch-protection rules**: naming, merge methods, require-PR, and
   force-push rules, shareable via a committed file or importable from
   GitHub. A promotion-branches list marks pull requests from those branches
-  as promotions, so GitDesktop stops offering to update them from their
-  base.
+  as promotions and withholds the one-click update from the default branch,
+  on their PRs and in the branch menus alike, so promotion flows keep their
+  direction.
 
 ### History
 
