@@ -106,7 +106,10 @@ export function RepoSwitcher() {
                 worktreeName && "h-auto py-1",
               )}
             >
-              <span className="flex min-w-0 flex-col items-start">
+              {/* Default (stretch) alignment on purpose: a non-stretched column
+                  child keeps its intrinsic width, so `truncate` never engages
+                  and long names paint past the button (measured). */}
+              <span className="flex min-w-0 flex-col">
                 <span
                   className="min-w-0 truncate text-sm font-medium leading-tight"
                   onMouseEnter={clipTitle(repoLabel)}
