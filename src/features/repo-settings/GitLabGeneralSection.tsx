@@ -1,5 +1,5 @@
 import { SparkleIcon } from "@phosphor-icons/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useLayoutEffect, useState } from "react";
 import { toast } from "sonner";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
@@ -75,6 +75,7 @@ export function GitLabGeneralSection({
 
   return (
     <GitLabGeneralForm
+      key={repoPath}
       repoPath={repoPath}
       settings={settings.data}
       branches={branches.data ?? []}
@@ -198,8 +199,9 @@ function GitLabGeneralForm({
   }, []);
 
   // Take a result that settled while no section was mounted, then stay the
-  // recipient for one that settles during this mount.
-  useEffect(() => {
+  // recipient for one that settles during this mount. A LAYOUT effect: a settle
+  // between the commit and a passive flush would find no listener and toast.
+  useLayoutEffect(() => {
     const pending = consumePendingRepoDesc(repoPath);
     if (pending) applyResult(pending);
     return registerRepoDescListener(repoPath, applyResult);

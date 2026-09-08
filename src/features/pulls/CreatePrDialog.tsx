@@ -657,7 +657,6 @@ export function CreatePrDialog({
   // AI title+description generation — shared by the Generate button and the
   // dialog-local generate chord.
   function runGenerate() {
-    aiDescriptionRef.current = true;
     setDroppedLabels([]);
     // Grounded issue candidates the model may link: current chips pinned first,
     // then the highest-scoring OPEN issues, capped at 8 (the hook records the set
@@ -675,6 +674,10 @@ export function CreatePrDialog({
       (d) => {
         form.setFieldValue("title", d.title);
         form.setFieldValue("body", d.body);
+        // Flagged on delivery, not on start: a run that writes nothing (bailed,
+        // failed, aborted before the first chunk) leaves a hand-typed
+        // description, and the reopen may skip the seed that would reset this.
+        if (d.body.trim()) aiDescriptionRef.current = true;
         // Additive: union the model's (already repo-validated) labels with the
         // user's manual picks, never replace.
         setLabels((prev) => new Set([...prev, ...d.labels]));

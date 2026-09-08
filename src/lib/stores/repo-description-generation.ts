@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 import { create } from "zustand";
 import { normPath } from "@/lib/git/path";
+import { repoNameFromPath } from "./notifications";
 import { useUiStore } from "./ui";
 
 /** What one finished generation has to hand back to a form. */
@@ -16,6 +17,12 @@ export interface RepoDescResult {
  * paid run would be lost. Claimed here, its result is delivered to a mounted
  * section or stashed for the next one. Keyed by {@link normPath} repo path and
  * never cleared on repo switch — a run belongs to the repo it started in.
+ *
+ * The key is the CHECKOUT path, not `--git-common-dir`: this is ephemeral UI
+ * bookkeeping rather than app data, and two worktrees of one repo run two
+ * independent lanes with their own dialogs. PublishDialog's generator stays
+ * outside this lane deliberately — an unpublished repo and a remote admin's
+ * settings barely overlap, and it does its own finish-and-surface.
  */
 interface RepoDescGenerationState {
   /** repo key → the running generation's abort hook. Presence IS the busy flag,
@@ -157,9 +164,10 @@ function announcePendingRepoDesc(repoPath: string): void {
               // still recoverable, so say where rather than doing nothing —
               // clicking dismisses the toast, and with it the only pointer.
               if (normPath(ui.repoPath ?? "") !== repo) {
-                const name =
-                  repoPath.split(/[/\\]/).filter(Boolean).pop() ?? repoPath;
-                toast.info(`Waiting in ${name} — switch back to see it.`);
+                // Name off the RAW path — the key is lower-cased for comparison.
+                toast.info(
+                  `Waiting in ${repoNameFromPath(repoPath)} — switch back to see it.`,
+                );
                 return;
               }
               ui.requestRepoSettings("general");

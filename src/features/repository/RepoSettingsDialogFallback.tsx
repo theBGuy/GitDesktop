@@ -1,3 +1,4 @@
+import { useLayoutEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -6,6 +7,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
+import { registerRepoSettingsOpenMarker } from "@/lib/stores/repo-description-generation";
 import { cn } from "@/lib/utils";
 
 /** Six rows: the shortest provider rail (GitLab) offers six sections, and the
@@ -20,10 +22,17 @@ const RAIL_ROW_WIDTHS = ["w-16", "w-20", "w-14", "w-24", "w-12", "w-18"];
  * stays skeletal here rather than flashing a label the repo's forge contradicts.
  */
 export function RepoSettingsDialogFallback({
+  repoPath,
   onOpenChange,
 }: {
+  repoPath: string;
   onOpenChange: (open: boolean) => void;
 }) {
+  // This frame is a dialog-open period like any other, so it carries the marker
+  // too: a description generation settling here would otherwise offer a "View"
+  // deep link that the open dialog's own host drops.
+  useLayoutEffect(() => registerRepoSettingsOpenMarker(repoPath), [repoPath]);
+
   // The Changes-tab generator must not run behind this frame. A defined `run`
   // is what arms the hook's swallow at all, and the chord is then swallowed
   // whenever it may fire (the hook mirrors the global listener's own guards);

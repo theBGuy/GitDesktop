@@ -12,7 +12,7 @@ import { normPath } from "@/lib/git/path";
 import { loadSettings } from "@/lib/settings/api";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 
 type Settings = Awaited<ReturnType<typeof loadSettings>>;
 
@@ -71,14 +71,24 @@ export function useAiStream(repoPath: string) {
         return buffer;
       } catch (e) {
         if (!abort.signal.aborted) {
+          // The surface that started this run may be off-screen by now, so a
+          // failure raised against another repo has to name the one it belongs to.
+          const away =
+            normPath(useUiStore.getState().repoPath ?? "") !==
+            normPath(repoPath)
+              ? `In ${repoNameFromPath(repoPath)}`
+              : undefined;
           if (e instanceof MissingApiKeyError) {
             toast.error(e.message, {
               duration: 8000,
+              description: away,
               action: {
                 label: "Open settings",
                 onClick: () => useUiStore.getState().openSettings("ai"),
               },
             });
+          } else if (away) {
+            toastErrorWithNote(e, away);
           } else {
             toastError(e);
           }
@@ -146,14 +156,20 @@ export interface FinishAndSurfaceOpts {
  *
  * A generation belongs to the repository it started in. `<RepositoryView>` is one
  * instance across repo switches, so the dialogs' state outlives the repo: a
- * switch therefore cancels the run and drops the latch (the identity-cancel the
- * edit views already use), and the toast's action refuses to fire once the live
- * repo is a different one. The draft a settled-but-unseen run left behind is
- * discarded by that switch — the toast announced it while the user was still in
- * the originating repo. `shouldSkipSeed` is the seed guard rather than each
- * caller's own `generating ||`, because `run` awaits its context fetch before
- * the stream and the abort reaches only the stream: a discarded run can keep
- * `generating` true for seconds, and a reopen inside that window must reseed.
+ * switch therefore cancels the run, closes an open dialog, and disarms the
+ * toast's action once the live repo is a different one (the identity-cancel the
+ * edit views already use). The latch is STAMPED with its run's repo and survives
+ * navigation, so a pure detour — away and back without opening the dialog
+ * elsewhere — still shows the waiting draft, which is what makes the toast's
+ * "waiting in <repo>" promise true. It is released by whichever open consumes it
+ * first: its own repo's, which shows the draft, or a FOREIGN repo's, because the
+ * draft lives in the dialog's ONE shared form and the seed that runs for another
+ * repo is the event that destroys it. The one deliberate discard left is the
+ * caller-side tag drain (`consumeSkipSeed`).
+ * `shouldSkipSeed` is the seed guard rather than each caller's own
+ * `generating ||`, because `run` awaits its context fetch before the stream and
+ * the abort reaches only the stream: a discarded run can keep `generating` true
+ * for seconds, and a reopen inside that window must reseed.
  */
 export function useFinishAndSurface(
   repoPath: string,
@@ -179,10 +195,12 @@ export function useFinishAndSurface(
   /** Seed-guard predicate: true ⇒ the caller's seedOnOpen must return without
    *  reseeding. A live run justifies the skip only while it still belongs here —
    *  one discarded by an identity switch does not; failing that, a settled-unseen
-   *  latch (consumed here) does. */
+   *  latch does, and only when its stamp is THIS repo (a foreign latch is left
+   *  alone, still waiting for the repo it belongs to). */
   shouldSkipSeed: (generating: boolean) => boolean;
-  /** Consume the settled-while-closed latch; true ⇒ the caller's seedOnOpen
-   *  must return without reseeding. */
+  /** Discard the latch whatever it is stamped with, reporting whether one was
+   *  there. The identity-CHECKED consumer is `shouldSkipSeed`; this is the
+   *  deliberate drain, for a caller whose own identity axis has moved on. */
   consumeSkipSeed: () => boolean;
 } {
   const repo = normPath(repoPath);
@@ -210,11 +228,14 @@ export function useFinishAndSurface(
       mountedRef.current = false;
     };
   }, []);
-  const skipSeedRef = useRef(false);
+  // The repo key a settled-unseen draft is waiting for; null = no draft waiting.
+  const latchRepoRef = useRef<string | null>(null);
   const abortedBySwitchRef = useRef(false);
 
   useCancelOnIdentityChange(repo, () => {
-    skipSeedRef.current = false;
+    // The latch is deliberately NOT cleared here: navigation alone destroys no
+    // draft, so a detour back still shows it. The foreign seed that DOES destroy
+    // it is what releases the latch.
     // The abort's settle lands after this effect — a microtask later at best,
     // seconds later when the run is still in its context fetch. Without this the
     // discarded run would re-latch and the next repo's open would show its
@@ -226,12 +247,6 @@ export function useFinishAndSurface(
     if (openRef.current) opts.close?.();
   });
 
-  const consumeLatch = () => {
-    const skip = skipSeedRef.current;
-    skipSeedRef.current = false;
-    return skip;
-  };
-
   return {
     noteRunSettled: (ok: boolean) => {
       if (abortedBySwitchRef.current) {
@@ -239,13 +254,15 @@ export function useFinishAndSurface(
         return;
       }
       if (openRef.current) return;
-      skipSeedRef.current = true;
+      // Stamped with the run's own repo: only that repo's seed may consume it,
+      // so the draft is still there whenever the user comes back to it.
+      const settleRepo = repoRef.current;
+      latchRepoRef.current = settleRepo;
       if (!ok || !mountedRef.current) return;
       // The action outlives the repo the run belongs to, so it re-checks the
       // live repo rather than the one captured here. Sonner dismisses the toast
       // on any action click, so the mismatch arm has to say where the draft is
       // rather than swallow the user's only pointer to it.
-      const settleRepo = repoRef.current;
       const settleRepoName = repoNameRef.current;
       const reopen = opts.reopen;
       toast.success(opts.readyTitle, {
@@ -271,8 +288,21 @@ export function useFinishAndSurface(
       // The latch stays unconsumed behind this short-circuit: a run that is
       // still ours will settle and latch, and that latch is for a later open.
       if (generating && !abortedBySwitchRef.current) return true;
-      return consumeLatch();
+      // The REF, not the render closure: callers are effect events today, but a
+      // long-lived closure would compare against a stale key.
+      if (latchRepoRef.current !== repoRef.current) {
+        // A foreign seed is about to run, and it resets the ONE shared form the
+        // waiting draft lives in — so the latch dies here, with the draft.
+        latchRepoRef.current = null;
+        return false;
+      }
+      latchRepoRef.current = null;
+      return true;
     },
-    consumeSkipSeed: consumeLatch,
+    consumeSkipSeed: () => {
+      const had = latchRepoRef.current !== null;
+      latchRepoRef.current = null;
+      return had;
+    },
   };
 }

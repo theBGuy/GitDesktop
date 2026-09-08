@@ -1,6 +1,6 @@
 import { ArrowSquareOutIcon, SparkleIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useLayoutEffect, useState } from "react";
 import { toast } from "sonner";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { SelectClipText } from "@/components/select-clip-text";
@@ -72,7 +72,10 @@ export function GeneralSettingsSection({
   }
 
   return (
+    // Keyed by repo: a cache-warm switch would otherwise reconcile the form in
+    // place, carrying the previous repo's draft and its generation's abort handle.
     <GeneralForm
+      key={repoPath}
       repoPath={repoPath}
       settings={settings.data}
       branches={branches.data ?? []}
@@ -254,8 +257,9 @@ function GeneralForm({
   }, []);
 
   // Take a result that settled while no section was mounted, then stay the
-  // recipient for one that settles during this mount.
-  useEffect(() => {
+  // recipient for one that settles during this mount. A LAYOUT effect: a settle
+  // between the commit and a passive flush would find no listener and toast.
+  useLayoutEffect(() => {
     const pending = consumePendingRepoDesc(repoPath);
     if (pending) applyResult(pending);
     return registerRepoDescListener(repoPath, applyResult);

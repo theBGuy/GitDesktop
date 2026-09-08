@@ -111,6 +111,16 @@ export function CreateReleaseDialog({
   const githubNotes = useGithubReleaseNotes(repoPath);
   const aiNotes = useGenerateReleaseNotes(repoPath);
   const busyGenerating = githubNotes.isPending || aiNotes.generating;
+  // The dialog is retained across repo AND tag switches, so nothing a run settles
+  // may write this form or skip its seed for the identity now on screen: the
+  // GitHub mutation validates start-vs-live identity; the AI stream is cancelled
+  // at the switch and its settle swallowed.
+  const tagIdentity = initialTag ?? "";
+  const liveTagRef = useRef(tagIdentity);
+  useLayoutEffect(() => {
+    liveTagRef.current = tagIdentity;
+  }, [tagIdentity]);
+  const settleTagRef = useRef(tagIdentity);
   // Closing mid-generation never cancels the run: it finishes into the retained
   // form state, and this surfaces the result while the dialog is away. Both
   // hosts pass a plain open setter, so `onOpenChange(true)` reopens.
@@ -121,17 +131,18 @@ export function CreateReleaseDialog({
     close: () => onOpenChange(false),
     readyTitle: "Release notes ready",
     readyDescription: "They're waiting in the dialog.",
-    reopen: () => onOpenChange(true),
+    reopen: () => {
+      // A tag switch drains the latch, so the notes are gone — say so instead of
+      // opening an emptied dialog. Inert in TagsPanel, whose tagIdentity is "".
+      if (liveTagRef.current !== settleTagRef.current) {
+        toast.info(
+          `Those notes were for ${settleTagRef.current} — they were discarded when you switched tags.`,
+        );
+        return;
+      }
+      onOpenChange(true);
+    },
   });
-  // The dialog is retained across repo AND tag switches, so nothing a run settles
-  // may write this form or skip its seed for the identity now on screen: the
-  // GitHub mutation validates start-vs-live identity; the AI stream is cancelled
-  // at the switch and its settle swallowed.
-  const tagIdentity = initialTag ?? "";
-  const liveTagRef = useRef(tagIdentity);
-  useLayoutEffect(() => {
-    liveTagRef.current = tagIdentity;
-  }, [tagIdentity]);
   const tagSwitchAbortRef = useRef(false);
   useCancelOnIdentityChange(tagIdentity, () => {
     void surface.consumeSkipSeed();
@@ -317,6 +328,7 @@ export function CreateReleaseDialog({
     notesEditorRef.current?.showPreview();
     // Only a body is notes "waiting in the dialog" — a name-only response has
     // nothing for the toast to promise.
+    settleTagRef.current = startTag;
     surface.noteRunSettled(Boolean(gen.body));
   }
 
@@ -342,6 +354,7 @@ export function CreateReleaseDialog({
         }
         // Resolves with the COMPLETE notes, or null — an aborted stream still
         // fired `onResult` with its partials, so that can't be the signal.
+        settleTagRef.current = tagIdentity;
         surface.noteRunSettled(final !== null);
       });
   }

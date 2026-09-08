@@ -9,7 +9,7 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { AnimatePresence, m, useReducedMotion } from "motion/react";
-import { type ComponentType, useEffect, useState } from "react";
+import { type ComponentType, useLayoutEffect, useState } from "react";
 import { toast } from "sonner";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { NavRail, type NavRailGroup } from "@/components/NavRail";
@@ -368,15 +368,19 @@ export function RepoSettingsDialog({
     run: generate.runPublished,
   });
 
+  // Both registrations are LAYOUT effects: a generation settling between the
+  // commit and a passive flush would read the previous state and announce
+  // itself wrongly — the same window `useFinishAndSurface` documents.
+  //
   // This tree is mounted only while the dialog is open (its host gates it), so
   // the marker's lifetime is the dialog's: a description generation settling
   // with no section listening reads it to pick toast copy that still works.
-  useEffect(() => registerRepoSettingsOpenMarker(repoPath), [repoPath]);
+  useLayoutEffect(() => registerRepoSettingsOpenMarker(repoPath), [repoPath]);
 
   // Which section is live, for that same generation's delivery. Read here
   // rather than from the section itself: the crossfade keeps an exiting
   // section mounted, while these effects run on the switch.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (activeSection !== "general") return;
     return registerRepoDescActiveSection(repoPath);
   }, [repoPath, activeSection]);
