@@ -2889,7 +2889,7 @@ pub async fn gh_pr_poll(repo_path: String) -> AppResult<Vec<PrPollInfo>> {
     .await?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
-            "the pull request",
+            "pull requests",
             format!("could not parse the PR poll: {e}"),
         )
     })?;

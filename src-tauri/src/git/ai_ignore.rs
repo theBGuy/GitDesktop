@@ -440,16 +440,26 @@ pub fn has_positive_pattern(patterns: &[String]) -> bool {
 
 /// Whether a name is inexpressible as a `,literal` exclude term and needs
 /// [`widened_glob_for_name`] instead — see that function for both causes.
-fn needs_widened_term(name: &str) -> bool {
-    name.contains(REPLACEMENT) || name.contains('\\')
+///
+/// Asked of the raw BYTES, because only they tell the causes apart: a name that
+/// decodes cleanly spells itself exactly, a real U+FFFD character included, so
+/// widening it would sweep siblings for nothing.
+fn needs_widened_term(name: &[u8]) -> bool {
+    match std::str::from_utf8(name) {
+        Ok(text) => text.contains('\\'),
+        Err(_) => true,
+    }
 }
 
 /// An exclude term for a name `,literal` cannot express, deliberately WIDER than
 /// the name itself. Two causes, both fail-OPEN without this:
 ///
-/// A non-UTF-8 byte arrives only as U+FFFD, so a literal term would compare the
-/// lossy string against the real bytes and match nothing; each RUN of U+FFFD
-/// becomes one `*`, which cannot cross `/` because no lossy byte is one.
+/// A name that is not valid UTF-8 reaches a pathspec only as its lossy spelling,
+/// so a literal term would compare that against the real bytes and match nothing;
+/// each RUN of U+FFFD becomes one `*`, which cannot cross `/` because no lossy
+/// byte is one. Only genuinely undecodable names ROUTE here for this cause — a
+/// real U+FFFD spells itself on the literal arm, though a name widened for its
+/// backslash still collapses any U+FFFD it carries (over-hides, never leaks).
 /// A literal `\` is normalized to a separator by Windows git even under
 /// `,literal`, so that term matches nothing there while the content ships; `?`
 /// in its place excludes the file on Windows and, since glob `?` matches a
@@ -652,11 +662,13 @@ pub async fn filtered_diff(
                 continue;
             }
             excluded_files += 1;
-            // Terms are built from the LOSSY spelling — the only one a pathspec
-            // can carry — which is what [`widened_glob_for_name`] makes safe.
+            // A pathspec carries text, so an undecodable name reaches it only as
+            // its lossy spelling — which is what [`widened_glob_for_name`] makes
+            // safe. The decision is taken on the bytes, before that decode.
             for name in row.names {
+                let widened = needs_widened_term(&name);
                 let name = String::from_utf8_lossy(&name);
-                terms.push(if needs_widened_term(&name) {
+                terms.push(if widened {
                     format!(":(exclude,glob){}", widened_glob_for_name(&name))
                 } else {
                     format!(":(exclude,literal){name}")
@@ -794,11 +806,14 @@ mod tests {
         // Nothing inexpressible, nothing special: unchanged.
         assert_eq!(widened_glob_for_name("src/a.rs"), "src/a.rs");
 
-        // Only these two shapes route away from the exact `,literal` spelling.
-        assert!(needs_widened_term("a\\b.env"));
-        assert!(needs_widened_term("caf\u{FFFD}.env"));
-        assert!(!needs_widened_term("weird[1].txt"));
-        assert!(!needs_widened_term("notes "));
+        // Only these two shapes route away from the exact `,literal` spelling,
+        // and the decision reads BYTES: a lone `0xE9` cannot be spelled, while the
+        // real U+FFFD character can and so keeps the exact term.
+        assert!(needs_widened_term(b"a\\b.env"));
+        assert!(needs_widened_term(b"caf\xE9.env"));
+        assert!(!needs_widened_term("caf\u{FFFD}.env".as_bytes()));
+        assert!(!needs_widened_term(b"weird[1].txt"));
+        assert!(!needs_widened_term(b"notes "));
     }
 
     /// The byte parser and the `String` one read the SAME grammar: 0x00 and 0x09
@@ -2184,6 +2199,47 @@ mod tests {
         );
         assert_eq!(out.excluded_files, 0);
         assert!(out.text.contains("x\u{FFFD}y.txt"), "{}", out.text);
+    }
+
+    /// The exclude TERM for a hidden real-U+FFFD name is exact, not widened: a
+    /// glob would sweep an unrelated sibling's content out of the re-diffed text
+    /// while its row stayed listed — a file reported visible with nothing to show.
+    #[tokio::test]
+    async fn a_hidden_real_replacement_name_does_not_sweep_its_siblings() {
+        let (_dir, repo) = seed_repo("realfffd-sibling").await;
+        let blob = seed_blob(&repo).await;
+
+        // `xay.txt` is exactly what a widened `x*y.txt` term would also exclude.
+        let mut rows: Vec<u8> = format!("100644 blob {blob}\t").into_bytes();
+        rows.extend_from_slice("x\u{FFFD}y.txt\n".as_bytes());
+        for name in ["keep.txt", "xay.txt"] {
+            rows.extend_from_slice(format!("100644 blob {blob}\t{name}\n").as_bytes());
+        }
+        let (base, head) = commit_tree_pair(&repo, &rows).await;
+
+        let out = git_branch_diff(
+            repo,
+            base,
+            head,
+            None,
+            Some(vec!["x\u{FFFD}y.txt".to_string()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["keep.txt", "xay.txt"]
+        );
+        assert_eq!(out.excluded_files, 1);
+        assert!(!out.text.contains("x\u{FFFD}y"), "{}", out.text);
+        assert!(
+            out.text.contains("+++ b/xay.txt"),
+            "the sibling's CONTENT survives: {}",
+            out.text
+        );
     }
 
     /// A `repo_path` BELOW the toplevel still filters correctly, because the
