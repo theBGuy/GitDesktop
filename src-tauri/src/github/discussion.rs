@@ -1072,7 +1072,7 @@ mod tests {
     /// programmatically formatted, so their `-F`/`-f` choice is fixed by their
     /// GraphQL type instead.
     #[test]
-    fn category_rides_f_never_capital_f() {
+    fn discussion_list_args_pins_every_field_flag() {
         let args = discussion_list_args("o", "r", 50, Some("DIC_kwABC"), None);
         let cat = args.iter().position(|a| a == "category=DIC_kwABC").expect("category present");
         assert_eq!(args[cat - 1], "-f", "category must ride -f: {args:?}");

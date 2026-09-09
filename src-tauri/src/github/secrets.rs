@@ -106,7 +106,7 @@ fn validate_var_name(name: &str) -> AppResult<()> {
     let body_ok = name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_');
-    let github_prefixed = name.len() >= 7 && name[..7].eq_ignore_ascii_case("GITHUB_");
+    let github_prefixed = name.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("GITHUB_"));
     if !first_ok || !body_ok || github_prefixed {
         return Err(AppError::InvalidArgument(
             "names use letters, numbers and _, can't start with a number, and can't start with GITHUB_".into(),
@@ -309,7 +309,15 @@ mod tests {
         for ok in ["MY_SECRET", "_leading_underscore", "a1", "GITHUBX"] {
             assert!(validate_var_name(ok).is_ok(), "{ok} should be valid");
         }
-        for bad in ["1STARTS_WITH_DIGIT", "has-hyphen", "has space", "", "GITHUB_TOKEN", "github_token"] {
+        for bad in [
+            "1STARTS_WITH_DIGIT",
+            "has-hyphen",
+            "has space",
+            "",
+            "GITHUB_TOKEN",
+            "github_token",
+            "ééééé",
+        ] {
             assert!(validate_var_name(bad).is_err(), "{bad} should be rejected");
         }
     }
