@@ -1233,7 +1233,7 @@ test("titled-disabled-trigger leaves the primitive and the non-trigger wrappers 
   assert.deepEqual(titledDisabledTrigger(stacked), []);
 });
 
-test("titled-disabled-trigger allowlists the residual sites per file", () => {
+test("titled-disabled-trigger reports every site now that the allowlist is empty", () => {
   const check = CHECKS.find((c) => c.name === "titled-disabled-trigger");
   const row = [
     '<span title={heldReason} className="inline-flex">',
@@ -1250,8 +1250,11 @@ test("titled-disabled-trigger allowlists the residual sites per file", () => {
     "src/features/issues/SomeNewPicker.tsx",
   ];
   const views = new Map(files.map((f) => [f, view(row)]));
-  // A deferred residual stays quiet; the same markup in a fresh picker reports.
+  // Every residual site converted, so the allowlist is empty: the same
+  // hover-only shape reports wherever it appears, the old site or a new one —
+  // proving there is no silent gap left behind.
   assert.deepEqual(runCheck(check, files, views).violations, [
+    "src/features/conversations/ProjectsPopover.tsx:1",
     "src/features/issues/SomeNewPicker.tsx:1",
   ]);
 });
