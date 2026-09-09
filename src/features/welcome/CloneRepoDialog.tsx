@@ -204,13 +204,18 @@ export function CloneRepoDialog({
   const canClone =
     values.destination.trim().length > 0 &&
     (tab === "url" ? values.url.trim().length > 0 : selected !== null);
-  const cloneDisabledReason = canClone
-    ? undefined
-    : !values.destination.trim()
-      ? "Choose a local path to clone into"
-      : tab === "url"
-        ? "Enter a repository URL to clone"
-        : "Select a repository to clone";
+  const cloneDisabledReason = (() => {
+    switch (true) {
+      case canClone:
+        return undefined;
+      case !values.destination.trim():
+        return "Choose a local path to clone into";
+      case tab === "url":
+        return "Enter a repository URL to clone";
+      default:
+        return "Select a repository to clone";
+    }
+  })();
   const { blockedReason, reasonId, wrapperTitle, describedBy } =
     useDisabledReason({ disabled: !canClone, reason: cloneDisabledReason });
 

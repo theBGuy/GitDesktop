@@ -2463,17 +2463,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           }
         }}
       >
-        {/* The wrapper is the header's flex item, so it owns the shrink-20
-            that makes the branch label collapse before the CI badge (4); the
-            inner Button needs `shrink` to undo the vendored `shrink-0`, or
-            nothing truncates. */}
         <Popover.Trigger
-          disabled={busy || amending}
           render={
             <DisabledReasonButton
               variant="ghost"
               size="sm"
+              // The wrapper is the header's flex item, so it owns the shrink-20
+              // that makes the branch label collapse before the CI badge (4).
               wrapperClassName="min-w-0 shrink-20"
+              disabled={busy || amending}
               reason={(() => {
                 switch (true) {
                   case amending:
@@ -2484,9 +2482,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     return undefined;
                 }
               })()}
-              // overflow-hidden clips the box the shrink cascade squeezes;
-              // without it the icons (shrink-0) spill out both sides into the
-              // separator and the repository menu on a narrow header.
+              // overflow-hidden clips the box the shrink cascade squeezes; the
+              // shrink undoes the vendored Button's own shrink-0, or nothing
+              // truncates — without either, the icons spill out both sides
+              // into the separator and the repository menu on a narrow header.
               className="min-w-0 shrink overflow-hidden"
             >
               <GitBranchIcon data-icon="inline-start" />

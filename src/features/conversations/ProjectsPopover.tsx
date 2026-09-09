@@ -276,12 +276,12 @@ export function ProjectsPopover({
   const trigger = (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
       <Popover.Trigger
-        disabled={!!heldReason}
         render={
           <DisabledReasonButton
             variant="ghost"
             size="xs"
             aria-label="Edit projects"
+            disabled={!!heldReason}
             reason={heldReason}
           />
         }

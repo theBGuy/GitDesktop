@@ -349,8 +349,10 @@ export function RemoteIssueView({
     closeIssue.isPending ||
     reopenIssue.isPending ||
     detailsStale;
-  // Which term of `busy` the composer names, ranked: the switch window outranks a
-  // write the viewer started, being the hold they can't have caused themselves.
+  // Which term of `busy` to name, ranked: the switch window outranks a write the
+  // viewer started, being the hold they can't have caused themselves. Shared by
+  // the composer and the close/reopen controls below — every one of them holds
+  // for exactly these same terms.
   const composerReason = (() => {
     switch (true) {
       case detailsStale:
@@ -764,7 +766,7 @@ export function RemoteIssueView({
               variant="outline"
               size="sm"
               disabled={busy || triageBlocked}
-              reason={triageReason ?? staleReason}
+              reason={triageReason ?? composerReason}
               onClick={() => doClose("completed")}
               title={
                 draftRidesStateChange
@@ -784,7 +786,7 @@ export function RemoteIssueView({
                       size="icon-sm"
                       aria-label="Other close options"
                       disabled={busy || triageBlocked}
-                      reason={triageReason ?? staleReason}
+                      reason={triageReason ?? composerReason}
                     />
                   }
                 >
@@ -809,7 +811,7 @@ export function RemoteIssueView({
             variant="outline"
             size="sm"
             disabled={busy || triageBlocked}
-            reason={triageReason ?? staleReason}
+            reason={triageReason ?? composerReason}
             onClick={doReopen}
             title={
               draftRidesStateChange

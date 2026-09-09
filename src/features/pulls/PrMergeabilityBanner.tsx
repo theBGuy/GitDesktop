@@ -557,44 +557,30 @@ export function PrMergeabilityBanner({
               )}
               Update branch
             </DisabledReasonButton>
-            {/* A span-wrapped `render` would swallow the caret's disabled state — the
-              vendored Button's `pointer-events-none` routes the click to the span,
-              which IS the trigger — so a refused update renders no trigger at all. */}
-            {updateDisabled ? (
-              <span className="inline-flex" title={updateDisabledReason}>
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label="Update branch options"
-                  disabled
-                >
-                  <CaretDownIcon />
-                </Button>
-              </span>
-            ) : (
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  render={
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label="Update branch options"
-                      title={updateOptionsLabel}
-                    />
-                  }
-                >
-                  <CaretDownIcon />
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-48">
-                  <DropdownMenuItem
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <DisabledReasonButton
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="Update branch options"
                     disabled={updateDisabled}
-                    onClick={onUpdateWithRebase}
-                  >
-                    Update with rebase…
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
+                    reason={updateDisabledReason}
+                    title={updateOptionsLabel}
+                  />
+                }
+              >
+                <CaretDownIcon />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-48">
+                <DropdownMenuItem
+                  disabled={updateDisabled}
+                  onClick={onUpdateWithRebase}
+                >
+                  Update with rebase…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         )}
 

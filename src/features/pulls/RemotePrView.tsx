@@ -2345,9 +2345,10 @@ export function RemotePrView({
     );
   }
 
-  // The Merge control's state. Hoisted because the refusal has to sit on the
-  // wrapping span while `disabled` sits on the trigger — a disabled trigger is
-  // what actually keeps the menu (and with it an unguarded merge) shut.
+  // The Merge control's state. `disabled`/`reason` land on the rendered
+  // DisabledReasonButton, never the trigger — its own inner useButton swallows
+  // activation while blocked, which is what actually keeps an unguarded merge
+  // from firing.
   const mergeBlocked =
     busy ||
     writeBlocked ||
@@ -2357,17 +2358,28 @@ export function RemotePrView({
   // Permission outranks the availability hints: a viewer who can't push can't
   // act on any of them. The wait outranks them in turn — every hint below reads
   // the RENDERED pr, which through a switch is the previous one, so each would
-  // describe a pull request the viewer didn't pick.
-  const mergeReason =
-    writeReason ??
-    staleReason ??
-    (pr.isDraft
-      ? `Mark the ${prNoun} ready before merging`
-      : mergeGuardMissing
-        ? "Reload to merge — couldn't load the head commit to guard the merge"
-        : allMergeMethodsBlocked
-          ? "No merge method is enabled by both this repository's settings and its branch rules"
-          : `Merge this ${prNoun}`);
+  // describe a pull request the viewer didn't pick. `busy` alone (an unrelated
+  // mutation in flight) gets its own line rather than falling through to the
+  // enabled-state hint, which would misdescribe what's actually holding it —
+  // this same string doubles as the hover title while nothing blocks.
+  const mergeReason = (() => {
+    switch (true) {
+      case writeReason !== undefined:
+        return writeReason;
+      case staleReason !== undefined:
+        return staleReason;
+      case pr.isDraft:
+        return `Mark the ${prNoun} ready before merging`;
+      case mergeGuardMissing:
+        return "Reload to merge — couldn't load the head commit to guard the merge";
+      case allMergeMethodsBlocked:
+        return "No merge method is enabled by both this repository's settings and its branch rules";
+      case busy:
+        return "Another operation is in progress";
+      default:
+        return `Merge this ${prNoun}`;
+    }
+  })();
 
   // The header's meta fields, row-major, as label/value pairs for the grid
   // below: an editable field emits its trigger as the label cell and its chips
@@ -3372,6 +3384,7 @@ export function RemotePrView({
                     size="sm"
                     disabled={mergeBlocked}
                     reason={mergeReason}
+                    title={mergeReason}
                   />
                 }
               >

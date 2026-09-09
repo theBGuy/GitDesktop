@@ -653,15 +653,23 @@ export function LocalPrView({
     );
   }
 
-  // The Merge control's state. Hoisted because the refusal has to sit on the
-  // wrapping span while `disabled` sits on the trigger — a disabled trigger is
-  // what actually keeps the menu shut.
+  // The Merge control's state. `disabled`/`reason` land on the rendered
+  // DisabledReasonButton, never the trigger — its own inner useButton swallows
+  // activation while blocked, which is what actually keeps the menu shut.
   const mergeBlocked = !canMerge || merge.isPending || dirtyBlocks;
-  const mergeReason = !canMerge
-    ? "Approve the PR before merging"
-    : dirtyBlocks
-      ? "Commit or stash your changes before merging into the current branch"
-      : `Merge ${pr.head} into ${pr.base}`;
+  // This same string doubles as the hover title while nothing blocks.
+  const mergeReason = (() => {
+    switch (true) {
+      case !canMerge:
+        return "Approve the PR before merging";
+      case dirtyBlocks:
+        return "Commit or stash your changes before merging into the current branch";
+      case merge.isPending:
+        return "Merging…";
+      default:
+        return `Merge ${pr.head} into ${pr.base}`;
+    }
+  })();
 
   return (
     <div className="flex h-full flex-col">
@@ -1156,6 +1164,7 @@ export function LocalPrView({
                     size="sm"
                     disabled={mergeBlocked}
                     reason={mergeReason}
+                    title={mergeReason}
                   />
                 }
               >

@@ -1250,9 +1250,10 @@ test("titled-disabled-trigger reports every site now that the allowlist is empty
     "src/features/issues/SomeNewPicker.tsx",
   ];
   const views = new Map(files.map((f) => [f, view(row)]));
-  // Every residual site converted, so the allowlist is empty: the same
-  // hover-only shape reports wherever it appears, the old site or a new one —
-  // proving there is no silent gap left behind.
+  // Every residual site converted, so the allowlist is empty: this ONE former
+  // entry's path reports again alongside a fresh one, rather than staying
+  // quiet as it did before. The separate stale-allowlist test is what pins
+  // the general mechanism for every entry, past or future.
   assert.deepEqual(runCheck(check, files, views).violations, [
     "src/features/conversations/ProjectsPopover.tsx:1",
     "src/features/issues/SomeNewPicker.tsx:1",
