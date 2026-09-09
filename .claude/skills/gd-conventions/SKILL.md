@@ -152,7 +152,12 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   explain via the field's `warning` hint. Raw-`<button>` sites the vendored
   Button can't size (reaction chips, the discussion upvote chip) take the SAME
   contract from the shared `useDisabledReason` hook + `ARIA_DISABLED_CLASS`
-  (`src/lib/use-disabled-reason.ts`) — never hand-rolled.
+  (`src/lib/use-disabled-reason.ts`) — never hand-rolled. A vendored Button the
+  render composition can't reach because a form component wraps it
+  (`form.SubmitButton`, which forwards props but isn't itself a Trigger) takes
+  the same hook directly: `focusableWhenDisabled`/`aria-describedby`/
+  `wrapperTitle` passed straight through, plus its own sr-only reason span
+  alongside (`src/features/welcome/CloneRepoDialog.tsx` is the reference).
 - A conversation surface's own actions sit before the submit button via
   `CommentComposer`'s `leadingActions` slot when submit is the row's last
   action (the issue views); a surface whose right-slot action is itself a

@@ -304,8 +304,9 @@ const CONTEXT_MENU_SUPPRESS_RE =
 // room for a tooltip), so neither is ever wrapped in one. Sub/Submenu triggers
 // are excluded by name as well, pinning that idiom rather than resting on the
 // absence of a wrapper. Discriminating on a `Reason`-suffixed value instead
-// would miss the live sites whose hint is a bare conditional string rather than
-// a named reason (the discussions category menu, the branch trigger).
+// would have missed sites whose hint was a bare conditional string rather
+// than a named reason (the discussions category menu and the branch trigger,
+// both converted at #326).
 // The tempered `(?!</)` steps hold the match inside one unclosed element chain,
 // so a titled span that already closed cannot pair with a later sibling's
 // trigger; the `DisabledReasonButton` step makes the FIXED composition
