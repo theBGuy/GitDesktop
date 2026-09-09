@@ -257,20 +257,37 @@ function opensDeferredDestination(line: string, depth: number): boolean {
   );
 }
 
-/** Whether `line` starts a container relative to `depth` — the notion the type-7 arm
- *  needs, shared by its two call sites so they cannot drift apart. Any CHANGE of
- *  blockquote depth ends the paragraph that was running (a rise enters a new one, a
- *  drop leaves it into lazy-continuation position) and a list marker begins a fresh
- *  item; in each case a type-7 tag may open where mid-paragraph it could not.
+/** Whether `line` starts a container relative to `depth`. A RISE always does, and so
+ *  does a list marker; a DROP depends on what the caller is asking, which is what
+ *  `lazyContinues` selects.
+ *
+ *  With `lazyContinues` false — the type-7 arm's reading, and the default — any
+ *  change counts, because that arm must fail OPEN: over-holding costs a truthful
+ *  disclosure while a missed block start costs a false claim.
+ *
+ *  With it true, a shallower line is a LAZY CONTINUATION that CommonMark folds back
+ *  into the paragraph above, so it starts nothing — the same rule
+ *  {@link opensDeferredDestination} follows. {@link paragraphLimit} passes its own
+ *  open-paragraph state here, since a span really does reach across such a line.
+ *
+ *  The two call sites therefore diverge ON PURPOSE, and only on drops. The scan may
+ *  then open a type-7 region inside a span the limit let form; the `span === 0` guard
+ *  shuts the HTML arm there, which is what the renderer does too.
  *
  *  KNOWN GAP: a list DEDENT is invisible here, because measuring it needs the item's
  *  content column and this scan has no indentation model. `- text` then `<span>`
  *  leaves the item, so the tag opens a block and the reference under it is raw HTML;
  *  the scan wraps it instead and claims it neutralized — the same false-claim class
  *  this function exists to prevent, narrowed to list dedents. */
-function opensContainer(line: string, depth: number): boolean {
+function opensContainer(
+  line: string,
+  depth: number,
+  lazyContinues = false,
+): boolean {
+  const lineDepth = quoteDepth(line);
   return (
-    quoteDepth(line) !== depth ||
+    lineDepth > depth ||
+    (!lazyContinues && lineDepth !== depth) ||
     LIST_MARKER.test(line.replace(QUOTE_PREFIX, ""))
   );
 }
@@ -443,7 +460,14 @@ function recordTicks(
  *  the paragraph CommonMark parses the span within — the block pass runs before
  *  inline parsing — so reading past any of them would let a delimiter or another
  *  block's content pose as a closer. The bounding line itself is EXCLUDED: the index
- *  returned is its first character, and the caller's window is half-open. */
+ *  returned is its first character, and the caller's window is half-open.
+ *
+ *  Two of those need spelling out. A `>`-only line is a blockquote's blank line, and
+ *  `BLANK_LINE` cannot see it — that pattern wants two newlines — so the gate tests
+ *  the quote-stripped line itself. And the OPENER's own line may be the block that
+ *  ends: a heading can carry a backtick and still close at its line end, so the
+ *  search is capped there before the walk begins. A drop in depth, by contrast, is a
+ *  lazy continuation while a paragraph is open, and does NOT bound. */
 function paragraphLimit(text: string, from: number): number {
   BLANK_LINE.lastIndex = from;
   const blank = BLANK_LINE.exec(text);
@@ -457,6 +481,11 @@ function paragraphLimit(text: string, from: number): number {
   let openerEnd = text.indexOf("\n", openerStart);
   if (openerEnd === -1) openerEnd = text.length;
   const opener = text.slice(openerStart, openerEnd);
+  // The opener's OWN line can be the block that ends here — a heading may carry a
+  // backtick and still close at its line end, so nothing after it can be the closer.
+  // `openerEnd` never exceeds `limit`: the earliest newline at or after `from` is the
+  // opener's own, and `BLANK_LINE` needs one before it can match.
+  if (breaksParagraph(opener.replace(QUOTE_PREFIX, ""))) return openerEnd;
   let prevDepth = quoteDepth(opener);
   let openParagraph = leavesOpenParagraph(opener.replace(QUOTE_PREFIX, ""));
   let nl = text.indexOf("\n", from);
@@ -466,18 +495,11 @@ function paragraphLimit(text: string, from: number): number {
     if (end === -1) end = text.length;
     const line = text.slice(start, end);
     const quoted = line.replace(QUOTE_PREFIX, "");
-    // The gate is read BEFORE the state advances, so this line is judged by what the
-    // one above it left behind — the same order the scan's arm uses. If the two
-    // disagree, a span candidate runs through a line the scan treats as a block
-    // start: the `span === 0` guard then suppresses the whole HTML arm there, and a
-    // reference inside the raw block is either wrapped and falsely claimed or lost
-    // to a span the renderer never opened.
-    // Each arm ends the paragraph the opener sits in, so a closer past it belongs to
-    // another block. The container and paragraph-interrupting arms return outright;
-    // by the time the HTML arm is reached a container start has already returned, so
-    // its gate carries the paragraph half alone.
+    // Read before the state advances, so each line is judged by what the one above it
+    // left behind — the same order the scan's arm uses.
     if (
-      opensContainer(line, prevDepth) ||
+      BLANK.test(quoted) ||
+      opensContainer(line, prevDepth, openParagraph) ||
       breaksParagraph(quoted) ||
       FENCE.test(quoted) ||
       opensHtmlBlock(containerContent(line), !openParagraph)
@@ -697,7 +719,10 @@ function scanRefs(
   // container from one that was already there.
   let prevDepth = 0;
   // Lengths of the unpaired literal runs seen so far in THIS paragraph; inline
-  // syntax is paragraph-scoped, so a blank line clears them.
+  // syntax is paragraph-scoped, so a blank line clears them. Only a blank line does,
+  // though a heading or container start also ends the paragraph for span purposes —
+  // so a tick above one still lengthens a wrap below it, which over-shoots in the
+  // direction this set is meant to over-shoot in.
   let strays = new Set<number>();
   let lineStart = 0;
   while (true) {

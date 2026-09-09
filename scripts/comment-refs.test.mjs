@@ -597,6 +597,66 @@ const SPAN_OVER_EMOJI = "a ` open\n\u{1F916}\nb #5 ` c";
 const SPAN_OVER_BANGS = "a ` open\n!!!\nb #5 ` c";
 const SPAN_OVER_PIPES = "a ` open\n| x | y |\nb #5 ` c";
 
+// The opener's OWN line can be the block that ends: a heading may carry a backtick
+// and still close at its line end, so nothing below it can be that tick's closer.
+// (Only the heading arm is reachable here — a setext underline or thematic break
+// admits no backtick, so a span can never open on one.)
+const SPAN_OPENS_ON_HEADING = "## H ` x\nb #5 ` c";
+const SPAN_OPENS_ON_QUOTED_HEADING = "> ## H ` x\n> b #5 ` c";
+// A `>`-only line is the blockquote's blank line. `BLANK_LINE` never sees it — it
+// wants two newlines — and the depth is unchanged, so the gate has to test it.
+const SPAN_ACROSS_QUOTED_BLANK = "> a ` open\n>\n> b #5 ` c";
+// A shallower line under an OPEN paragraph is a lazy continuation the renderer folds
+// back, so the span really does reach across it and the reference inside is inert.
+const SPAN_OVER_LAZY_DEDENT = "> a ` open\nb #5 ` c";
+const SPAN_OVER_LAZY_DEDENT_OUTSIDE = "> a ` open\nb ` c #5";
+// Dedents that genuinely end the paragraph must still bound, via their own arms.
+const SPAN_DEDENT_TO_HEADING = "> a ` open\n## H\nb #5 ` c";
+const SPAN_DEDENT_TO_LIST = "> a ` open\n- item #5 ` c";
+
+test("a heading on the opener's own line caps the search", () => {
+  for (const source of [SPAN_OPENS_ON_HEADING, SPAN_OPENS_ON_QUOTED_HEADING]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+    assert.deepEqual(neutralizeSuspectRefs(source).wrapped, ["``#5``"], label);
+  }
+});
+
+test("a blockquote's own blank line bounds the closer search", () => {
+  assert.deepEqual(findSuspectRefs(SPAN_ACROSS_QUOTED_BLANK), ["#5"]);
+  assert.deepEqual(neutralizeSuspectRefs(SPAN_ACROSS_QUOTED_BLANK).wrapped, [
+    "``#5``",
+  ]);
+  // At depth zero `BLANK_LINE` already stops the walk before the blank line, so
+  // this arm changes nothing there.
+  assert.deepEqual(neutralizeSuspectRefs("a ` open\n\nb #5 ` c").wrapped, [
+    "`#5`",
+  ]);
+});
+
+test("a lazy continuation is not a container start", () => {
+  // The span reaches across the dedent, so this reference is already inert —
+  // wrapping it would put literal backticks inside the rendered code span.
+  assert.deepEqual(findSuspectRefs(SPAN_OVER_LAZY_DEDENT), []);
+  assert.equal(
+    neutralizeSuspectRefs(SPAN_OVER_LAZY_DEDENT).text,
+    SPAN_OVER_LAZY_DEDENT,
+  );
+  // With the reference past the closer the span leaves it live, and it wraps.
+  assert.deepEqual(findSuspectRefs(SPAN_OVER_LAZY_DEDENT_OUTSIDE), ["#5"]);
+});
+
+test("a dedent that really ends the paragraph still bounds", () => {
+  // Each of these leaves the quote AND starts something: the sibling arms catch
+  // them even though the depth drop alone no longer counts.
+  for (const source of [SPAN_DEDENT_TO_HEADING, SPAN_DEDENT_TO_LIST]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+  }
+  // A fence dedent swallows the rest into code, so nothing is detected there.
+  assert.deepEqual(findSuspectRefs("> a ` open\n```\nb #5 ` c"), []);
+});
+
 test("a heading bounds the closer search", () => {
   for (const source of [SPAN_ACROSS_HEADING, SPAN_ACROSS_QUOTED_HEADING]) {
     const label = JSON.stringify(source);
@@ -1322,6 +1382,13 @@ const CORPUS = [
   SPAN_OVER_EMOJI,
   SPAN_OVER_BANGS,
   SPAN_OVER_PIPES,
+  SPAN_OPENS_ON_HEADING,
+  SPAN_OPENS_ON_QUOTED_HEADING,
+  SPAN_ACROSS_QUOTED_BLANK,
+  SPAN_OVER_LAZY_DEDENT,
+  SPAN_OVER_LAZY_DEDENT_OUTSIDE,
+  SPAN_DEDENT_TO_HEADING,
+  SPAN_DEDENT_TO_LIST,
   HTML_TYPE7_CONTAINER_ALREADY_OPEN,
   HTML_TYPE7_AFTER_QUOTED_FENCE,
   INDENT_AFTER_HEADING,
