@@ -2358,8 +2358,8 @@ export function RemotePrView({
   // Permission outranks the availability hints: a viewer who can't push can't
   // act on any of them. The wait outranks them in turn — every hint below reads
   // the RENDERED pr, which through a switch is the previous one, so each would
-  // describe a pull request the viewer didn't pick. `busy` alone (an unrelated
-  // mutation in flight) gets its own line rather than falling through to the
+  // describe a pull request the viewer didn't pick. `busy` alone names the term
+  // in flight (`composerReason`) rather than falling through to the
   // enabled-state hint, which would misdescribe what's actually holding it —
   // this same string doubles as the hover title while nothing blocks.
   const mergeReason = (() => {
@@ -2375,7 +2375,7 @@ export function RemotePrView({
       case allMergeMethodsBlocked:
         return "No merge method is enabled by both this repository's settings and its branch rules";
       case busy:
-        return "Another operation is in progress";
+        return composerReason ?? "Another operation is in progress";
       default:
         return `Merge this ${prNoun}`;
     }
@@ -3295,7 +3295,7 @@ export function RemotePrView({
               variant="outline"
               size="sm"
               disabled={busy || writeBlocked}
-              reason={writeReason ?? staleReason}
+              reason={writeReason ?? composerReason}
               onClick={() => void markReadyForReview()}
             >
               Ready for review
@@ -3306,7 +3306,7 @@ export function RemotePrView({
               variant="ghost"
               size="sm"
               disabled={busy || writeBlocked}
-              reason={writeReason ?? staleReason}
+              reason={writeReason ?? composerReason}
               title="Turn this pull request back into a draft"
               onClick={() => void convertToDraft()}
             >
@@ -3350,7 +3350,7 @@ export function RemotePrView({
                 variant="outline"
                 size="sm"
                 disabled={busy || writeBlocked}
-                reason={writeReason ?? staleReason}
+                reason={writeReason ?? composerReason}
                 onClick={() => void doCancelAutoMerge()}
               >
                 Cancel auto-merge
@@ -3365,7 +3365,7 @@ export function RemotePrView({
               variant="outline"
               size="sm"
               disabled={busy || triageBlocked}
-              reason={triageReason ?? staleReason}
+              reason={triageReason ?? composerReason}
               onClick={doClose}
               title={
                 draftRidesStateChange
@@ -3465,7 +3465,7 @@ export function RemotePrView({
             variant="outline"
             size="sm"
             disabled={busy || triageBlocked}
-            reason={triageReason ?? staleReason}
+            reason={triageReason ?? composerReason}
             onClick={doReopen}
             title={
               draftRidesStateChange

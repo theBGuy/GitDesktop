@@ -657,15 +657,18 @@ export function LocalPrView({
   // DisabledReasonButton, never the trigger — its own inner useButton swallows
   // activation while blocked, which is what actually keeps the menu shut.
   const mergeBlocked = !canMerge || merge.isPending || dirtyBlocks;
-  // This same string doubles as the hover title while nothing blocks.
+  // This same string doubles as the hover title while nothing blocks. The
+  // active merge outranks `dirtyBlocks`: a merge already in flight can't be
+  // unblocked by committing or stashing, so a dirty tree that shows up mid-merge
+  // must not override "Merging…" with a remedy that doesn't apply.
   const mergeReason = (() => {
     switch (true) {
       case !canMerge:
         return "Approve the PR before merging";
-      case dirtyBlocks:
-        return "Commit or stash your changes before merging into the current branch";
       case merge.isPending:
         return "Merging…";
+      case dirtyBlocks:
+        return "Commit or stash your changes before merging into the current branch";
       default:
         return `Merge ${pr.head} into ${pr.base}`;
     }
@@ -1142,6 +1145,10 @@ export function LocalPrView({
                 }
                 reason={(() => {
                   switch (true) {
+                    case updateBranchFrom.isPending:
+                      return "Updating this branch…";
+                    case recovery.pending:
+                      return "Another git operation is running.";
                     case defaultBranch.isPending:
                       return "Checking which branch is the default…";
                     case rulesSettling:

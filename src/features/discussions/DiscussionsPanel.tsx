@@ -45,6 +45,29 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
   const meta = useDiscussionMeta(repoPath, ghReady && supportsDiscussions);
   const enabled = meta.data?.hasDiscussionsEnabled ?? false;
   const listEnabled = ghReady && supportsDiscussions && enabled;
+  // `listEnabled` folds four distinct states into one boolean; the trigger's
+  // reason has to name the one that's actually true, in the same order the
+  // body below checks them, or it reads as a permanent "sign in" hint even
+  // for a GitLab host, a discussions-off repo, or a still-loading probe.
+  // `meta` is gated on `ghReady && supportsDiscussions`, so its query stays
+  // permanently "pending" while disabled — checking it before those two would
+  // read every not-ready/unsupported state as "loading" instead.
+  const listDisabledReason = (() => {
+    switch (true) {
+      case gh.isPending:
+        return "Loading discussions…";
+      case !ghReady:
+        return "Sign in to GitHub to browse discussions";
+      case !supportsDiscussions:
+        return "Discussions aren't available on this repository's host";
+      case meta.isPending:
+        return "Loading discussions…";
+      case meta.isError:
+        return "Couldn't load discussions for this repository";
+      default:
+        return "Discussions aren't enabled for this repository";
+    }
+  })();
   const [categoryId, setCategoryId] = useState<string | null>(null);
   // How many discussions to load; "Load more" bumps it by PAGE_SIZE. A category
   // switch resets it so a filtered view starts from the first page again.
@@ -124,11 +147,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
                 variant="outline"
                 size="xs"
                 disabled={!listEnabled}
-                reason={
-                  listEnabled
-                    ? undefined
-                    : "Sign in to GitHub to browse discussions"
-                }
+                reason={listEnabled ? undefined : listDisabledReason}
               />
             }
           >

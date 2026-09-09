@@ -3,5 +3,5 @@
   caret, the branch switcher, and the clone dialog's Clone button now explain
   why they're unavailable to keyboard and screen-reader users too: the
   disabled control stays focusable, announces its reason, and shows it on
-  hover. Pull-request merge buttons also keep their normal hover hint again
-  once nothing is blocking them.
+  hover. A pull-request merge held only by another operation in flight now
+  says so, instead of showing the ordinary "Merge this pull request" hint.

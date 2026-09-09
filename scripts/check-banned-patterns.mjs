@@ -311,8 +311,11 @@ const CONTEXT_MENU_SUPPRESS_RE =
 // trigger; the `DisabledReasonButton` step makes the FIXED composition
 // unmatchable even where a wrapper survives to carry layout classes. Both
 // windows are PAIR_GAP with ~1.4x headroom: across the live sites the widest
-// title→trigger run measures 113 normalized chars, the widest trigger→disabled
-// 84. Accepted evasions, all zero-instance today: a hint delivered by something
+// title→trigger run measured 113 normalized chars, the widest trigger→disabled
+// 84 (measured at #305, before every one of those sites converted — #326
+// converted the last of them, so the figure is no longer re-checkable against
+// a live site and stands on that record instead). Accepted evasions, all
+// zero-instance today: a hint delivered by something
 // other than `title`, a wrapper that is a component rather than a tag, and a
 // `disabled` computed too far from the tag.
 const TITLED_TRIGGER_DISABLED_RE = new RegExp(
