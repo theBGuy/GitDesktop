@@ -45,19 +45,21 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
   const meta = useDiscussionMeta(repoPath, ghReady && supportsDiscussions);
   const enabled = meta.data?.hasDiscussionsEnabled ?? false;
   const listEnabled = ghReady && supportsDiscussions && enabled;
-  // `listEnabled` folds four distinct states into one boolean; the trigger's
+  // `listEnabled` folds four distinct states into one boolean; each control's
   // reason has to name the one that's actually true, in the same order the
   // body below checks them, or it reads as a permanent "sign in" hint even
   // for a GitLab host, a discussions-off repo, or a still-loading probe.
   // `meta` is gated on `ghReady && supportsDiscussions`, so its query stays
   // permanently "pending" while disabled — checking it before those two would
-  // read every not-ready/unsupported state as "loading" instead.
-  const listDisabledReason = (() => {
+  // read every not-ready/unsupported state as "loading" instead. The sign-in
+  // sentence is the only part that differs between callers (each names its
+  // own action), so it's the one parameter.
+  const discussionsDisabledReason = (signedOutReason: string) => {
     switch (true) {
       case gh.isPending:
         return "Loading discussions…";
       case !ghReady:
-        return "Sign in to GitHub to browse discussions";
+        return signedOutReason;
       case !supportsDiscussions:
         return "Discussions aren't available on this repository's host";
       case meta.isPending:
@@ -67,7 +69,7 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
       default:
         return "Discussions aren't enabled for this repository";
     }
-  })();
+  };
   const [categoryId, setCategoryId] = useState<string | null>(null);
   // How many discussions to load; "Load more" bumps it by PAGE_SIZE. A category
   // switch resets it so a filtered view starts from the first page again.
@@ -147,7 +149,13 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
                 variant="outline"
                 size="xs"
                 disabled={!listEnabled}
-                reason={listEnabled ? undefined : listDisabledReason}
+                reason={
+                  listEnabled
+                    ? undefined
+                    : discussionsDisabledReason(
+                        "Sign in to GitHub to browse discussions",
+                      )
+                }
               />
             }
           >
@@ -182,7 +190,13 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           size="xs"
           wrapperClassName="ml-auto"
           disabled={!listEnabled}
-          reason="Sign in to GitHub to start a discussion"
+          reason={
+            listEnabled
+              ? undefined
+              : discussionsDisabledReason(
+                  "Sign in to GitHub to start a discussion",
+                )
+          }
           title="New discussion"
           onClick={() => setCreateOpen(true)}
         >

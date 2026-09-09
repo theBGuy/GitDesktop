@@ -3080,9 +3080,10 @@ export function RemotePrView({
                       size="sm"
                       disabled={busy}
                       // `busy` folds in the placeholder window, where the review
-                      // would open against the previously rendered PR. The pending
-                      // arms carry no reason here, as on the neighbours.
-                      reason={staleReason}
+                      // would open against the previously rendered PR;
+                      // `composerReason` names whichever term is in flight so the
+                      // hold is never mute.
+                      reason={composerReason}
                       onClick={() => setSubmitOpen(true)}
                       title="Submit a review (verdict, summary, and any pending comments)"
                     >
@@ -3099,14 +3100,23 @@ export function RemotePrView({
                         // Approve that would fire the wrong direction on click. The
                         // failed read has no other surface, so it rides `reason` —
                         // hoverable and announced while the button is unavailable.
+                        // Every term of `disabled` gets words this way, `busy`'s via
+                        // `composerReason`, so the hold is never mute.
                         disabled={
                           busy || approvals.isPending || approvals.isError
                         }
-                        reason={
-                          approvals.isError
-                            ? "Couldn't load approval state"
-                            : staleReason
-                        }
+                        reason={(() => {
+                          switch (true) {
+                            case approvals.isError:
+                              return "Couldn't load approval state";
+                            case busy:
+                              return composerReason;
+                            case approvals.isPending:
+                              return "Checking approval state…";
+                            default:
+                              return undefined;
+                          }
+                        })()}
                         // Unknown state is announced as unknown: a failed read
                         // must not claim "not pressed" while the reason says the
                         // state couldn't be loaded.
@@ -3154,15 +3164,23 @@ export function RemotePrView({
                       // posture as the approve toggle: `reason` carries the read
                       // failure nothing else reports, and DisabledReasonButton keeps
                       // the disabled button focusable so that reason is announced
-                      // rather than lost.
+                      // rather than lost. Every term of `disabled` gets words this
+                      // way, `busy`'s via `composerReason`.
                       disabled={
                         busy || approvals.isPending || approvals.isError
                       }
-                      reason={
-                        approvals.isError
-                          ? "Couldn't load review state"
-                          : staleReason
-                      }
+                      reason={(() => {
+                        switch (true) {
+                          case approvals.isError:
+                            return "Couldn't load review state";
+                          case busy:
+                            return composerReason;
+                          case approvals.isPending:
+                            return "Checking review state…";
+                          default:
+                            return undefined;
+                        }
+                      })()}
                       // Unknown state is announced as unknown (same as approve).
                       aria-pressed={
                         approvals.isError

@@ -312,12 +312,10 @@ const CONTEXT_MENU_SUPPRESS_RE =
 // unmatchable even where a wrapper survives to carry layout classes. Both
 // windows are PAIR_GAP with ~1.4x headroom: across the live sites the widest
 // title→trigger run measured 113 normalized chars, the widest trigger→disabled
-// 84 (measured at #305, before every one of those sites converted — #326
-// converted the last of them, so the figure is no longer re-checkable against
-// a live site and stands on that record instead). Accepted evasions, all
-// zero-instance today: a hint delivered by something
-// other than `title`, a wrapper that is a component rather than a tag, and a
-// `disabled` computed too far from the tag.
+// 84 (measured at #305, before those sites converted). Accepted evasions, all
+// zero-instance today: a hint delivered by something other than `title`, a
+// wrapper that is a component rather than a tag, and a `disabled` computed
+// too far from the tag.
 const TITLED_TRIGGER_DISABLED_RE = new RegExp(
   `title\\s*=(?:(?!</|DisabledReasonButton)[\\s\\S]){0,${PAIR_GAP}}?` +
     `<(?![A-Za-z][\\w.]*Sub(?:menu)?Trigger\\b)[A-Za-z][\\w.]*Trigger\\b` +
@@ -793,7 +791,11 @@ export const CHECKS = [
     scan: perFile(TITLED_TRIGGER_DISABLED_RE),
     // Every residual site of the class the pickers were converted out of has
     // now converted too — the allowlist is empty on purpose, not pruned away:
-    // a fresh violation here is a NEW instance of the class, not a returning one.
+    // a fresh violation here is a NEW instance of the class, not a returning
+    // one. The regex's own blind spot still stands, though: a disabled branch
+    // that swaps out the whole trigger for a plain non-`*Trigger` element (the
+    // shape `PrMergeabilityBanner`'s update-branch caret used to take) carries
+    // no `*Trigger` tag for the pattern to anchor on.
     allowlist: [],
     message:
       "a menu/popover trigger that carries its disabled reason on a titled wrapper is hover-only — a natively disabled trigger leaves the tab order, so keyboard and screen-reader users reach neither the control nor the reason; compose `<Trigger render={<DisabledReasonButton disabled reason/>}>` instead (src/components/disabled-reason-button.tsx), which holds the reason on a focusable aria-disabled button whose own useButton swallows activation; a site that genuinely cannot take the primitive needs an allowlist entry with rationale",
