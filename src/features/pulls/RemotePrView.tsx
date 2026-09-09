@@ -2357,16 +2357,10 @@ export function RemotePrView({
     allMergeMethodsBlocked;
   // Permission outranks the availability hints: a viewer who can't push can't
   // act on any of them. The wait outranks them in turn — every hint below reads
-  // the RENDERED pr, which through a switch is the previous one, so each would
-  // describe a pull request the viewer didn't pick. `busy` ranks above the
-  // static availability hints too: `pr.isDraft` (and the other two) still read
-  // true while a term of `busy` is in flight FOR THIS SAME PR — e.g.
-  // `setDraft.isPending` on a draft PR, mid-flip to ready — so checking them
-  // first would tell the viewer to do the exact thing already in progress.
-  // `busy` alone names the term in flight (`composerReason`) rather than
-  // falling through to the enabled-state hint, which would misdescribe what's
-  // actually holding it — this same string doubles as the hover title while
-  // nothing blocks.
+  // the RENDERED pr, which through a switch is the previous one. `busy` also
+  // outranks the static hints: `pr.isDraft` and the rest can stay true while a
+  // term of `busy` is in flight for this same PR, and `composerReason` names
+  // it — this same string doubles as the hover title while nothing blocks.
   const mergeReason = (() => {
     switch (true) {
       case writeReason !== undefined:
