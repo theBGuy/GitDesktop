@@ -97,9 +97,9 @@ pub async fn gh_discussion_categories(repo_path: String) -> AppResult<Discussion
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-f",
             &format!("query={META_QUERY}"),
@@ -215,25 +215,23 @@ struct RawDiscussionNode {
     labels: RawLabels,
 }
 
-/// Discussions for the list, newest-updated first. `category` is a category
-/// node id to filter by, or empty for all categories. (Discussions have no
-/// open/closed tabs — they're filtered by category; `closed`/`stateReason`
-/// surface as a badge.) `limit` caps the total; `None` keeps the historical
-/// single page of [`DISCUSSION_DEFAULT_LIMIT`]. Larger limits page the GraphQL
-/// connection (≤[`DISCUSSION_PAGE_MAX`] per request) until the limit is met or
-/// GitHub reports no further page.
-/// The `gh api graphql` argv for one page of [`gh_discussion_list`]. `owner`/`name`
-/// ride `-F`: they come from the checked-out repo's own slug (already charset-gated
-/// by `valid_github_slug` before reaching here), and `$owner`/`$name` are typed
-/// `String!` variables where `-F`'s coercion is a no-op. `first`/`after` are
-/// likewise typed (`Int!`/`String`). `category` is the
-/// ONE field here `-f`, never `-F`: it is `$category:ID`, a string on the wire, and
-/// — unlike owner/name — this app never validates its charset, so `-F`'s leading-`@`
-/// file-read magic would be reachable through it. It also crosses a genuinely
-/// untrusted boundary: the MCP `list_discussions` tool forwards its caller's
-/// `category` argument here verbatim (`mcp_server/read_forge.rs`), and an MCP
-/// client can be an LLM agent steered by a prompt-injected repo. Pure, so the shape
-/// is pinned without a spawn.
+/// The `gh api graphql` argv for one page of [`gh_discussion_list`]. Every field
+/// but `first` rides `-f` (raw string), never `-F` (gh's typed form): `-F` coerces
+/// an all-digit or `true`/`false`/`null`-shaped value to a JSON non-string, which
+/// a `String!`/`ID` GraphQL variable rejects (measured: `gh api --help` — "literal
+/// values `true`, `false`, `null`, and integer numbers get converted to
+/// appropriate JSON types") — a real GitHub repo literally named `2048` would
+/// break `-F name=2048`. `owner`/`name` are pre-validated slugs (`valid_github_slug`
+/// gates them before reaching here, so `-f`'s leading-`@` exposure doesn't apply),
+/// but `-f` is still the correct flag for their `$owner:String!`/`$name:String!`
+/// types. `first` is the one field that must stay `-F`: `$first:Int!` needs the
+/// typed coercion, and it can only ever format to digits, so the magic-`@` risk
+/// never applies to it either. `category` additionally crosses a genuinely
+/// untrusted boundary the others don't: the MCP `list_discussions` tool forwards
+/// its caller's `category` argument here verbatim (`mcp_server/read_forge.rs`),
+/// and an MCP client can be an LLM agent steered by a prompt-injected repo — `-f`
+/// there closes the leading-`@` file-read magic `-F` would otherwise expose. Pure,
+/// so the shape is pinned without a spawn.
 fn discussion_list_args(
     owner: &str,
     name: &str,
@@ -244,9 +242,9 @@ fn discussion_list_args(
     let mut args = vec![
         "api".to_string(),
         "graphql".to_string(),
-        "-F".to_string(),
+        "-f".to_string(),
         format!("owner={owner}"),
-        "-F".to_string(),
+        "-f".to_string(),
         format!("name={name}"),
         "-F".to_string(),
         format!("first={page}"),
@@ -268,6 +266,13 @@ fn discussion_list_args(
     args
 }
 
+/// Discussions for the list, newest-updated first. `category` is a category
+/// node id to filter by, or empty for all categories. (Discussions have no
+/// open/closed tabs — they're filtered by category; `closed`/`stateReason`
+/// surface as a badge.) `limit` caps the total; `None` keeps the historical
+/// single page of [`DISCUSSION_DEFAULT_LIMIT`]. Larger limits page the GraphQL
+/// connection (≤[`DISCUSSION_PAGE_MAX`] per request) until the limit is met or
+/// GitHub reports no further page.
 #[tauri::command]
 pub async fn gh_discussion_list(
     repo_path: String,
@@ -533,9 +538,9 @@ pub async fn gh_discussion_view(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -849,9 +854,9 @@ pub async fn gh_discussion_reactions(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -1094,11 +1099,27 @@ mod tests {
             .iter()
             .any(|a| a.starts_with("after=")));
 
-        // owner/name/first are the typed fields and ride -F.
+        // `first` is the one field that must stay `-F` — `$first:Int!` needs the
+        // typed coercion. `owner`/`name` ride `-f`: they're `String!`, and `-F`'s
+        // magic type conversion would coerce an all-digit or true/false/null-shaped
+        // value into a non-string JSON type, which `String!` rejects.
         let args = discussion_list_args("o", "r", 50, None, None);
-        for (field, want) in [("owner=o", "-F"), ("name=r", "-F"), ("first=50", "-F")] {
+        for (field, want) in [("owner=o", "-f"), ("name=r", "-f"), ("first=50", "-F")] {
             let i = args.iter().position(|a| a == field).unwrap_or_else(|| panic!("{field} present"));
             assert_eq!(args[i - 1], want, "{field}: {args:?}");
+        }
+
+        // A real GitHub repo can be named entirely in digits (`gabrielecirulli/2048`)
+        // or a magic-word owner/name — `-F` would coerce these into a JSON number
+        // or boolean, which `$owner:String!`/`$name:String!` refuses. `-f` sends
+        // them as JSON strings regardless of shape.
+        let digit_named = discussion_list_args("gabrielecirulli", "2048", 50, None, None);
+        for field in ["owner=gabrielecirulli", "name=2048"] {
+            let i = digit_named
+                .iter()
+                .position(|a| a == field)
+                .unwrap_or_else(|| panic!("{field} present"));
+            assert_eq!(digit_named[i - 1], "-f", "{field}: {digit_named:?}");
         }
     }
 }

@@ -192,9 +192,11 @@ pub async fn gh_release_view(
 
 /// The `gh release create` argv: `--title`/`--notes`/`--target` append only when
 /// non-empty (empty and unset both mean "let gh decide", so there is nothing to
-/// send). Owned `Vec<String>`, not `Vec<&str>`: the caller's trimmed slices don't
-/// outlive this call the way `release_delete_args`'s borrowed inputs do. Pure, so
-/// the shape is pinned without a spawn.
+/// send). Owned `Vec<String>` for the same reason its sibling `release_edit_args`
+/// needs one — `--prerelease=`/`--draft=` there are locally-computed `format!`
+/// strings that can't outlive a borrowed return — even though every value here
+/// happens to come from a caller-owned `&str` that could borrow. Pure, so the
+/// shape is pinned without a spawn.
 #[allow(clippy::too_many_arguments)]
 fn release_create_args(
     slug: &str,

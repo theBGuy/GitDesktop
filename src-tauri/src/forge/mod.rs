@@ -243,19 +243,53 @@ pub(crate) fn remote_path(url: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
-/// A remote's web (browser) URL — `https://{authority}/{path}`, always `https`
-/// regardless of the remote's own scheme, so an ssh-cloned repo still opens a
-/// browser tab. `None` when the remote has no parseable host+path.
+/// A remote's web (browser) URL — `{scheme}://{authority}/{path}`. `None` when the
+/// remote has no parseable host+path.
+///
+/// The scheme is preserved for an explicit `http://` origin — a self-managed
+/// instance without TLS termination (the plain-HTTP Gitea case
+/// [[push-failure-classification-task]] already handles) serves its web UI over
+/// `http`, and forcing `https` would point the browser at a listener that never
+/// answers there. Every other form — `https://`, any non-http(s) scheme, and
+/// scp-style `git@host:path` (no scheme to read at all) — defaults to `https`: a
+/// non-http(s) transport (`ssh://`, `git://`, `git+ssh://`, …) carries no
+/// information about the web UI's scheme, so `https` is the reasonable
+/// assumption, and matches what `https://` origins already say.
+///
+/// A non-http(s) scheme also carries its OWN transport port — a self-managed host
+/// commonly exposes git-over-SSH on a non-default port (2222 is the standard
+/// workaround when the host OS already owns 22) or git-daemon on 9418, while the
+/// web UI stays on 443, so that port is dropped rather than reused as a bogus web
+/// port ([`remote_host`], bare). The `http`/`https` schemes are the ONLY ones whose
+/// port IS the web port: a self-managed instance conventionally serves
+/// git-over-http(s) and the web UI on the SAME port ([`remote_authority`], kept).
+/// scp-style `git@host:path` structurally carries no port to begin with, so which
+/// branch it takes doesn't matter.
 ///
 /// The authority is gated through [`is_safe_authority`]: unlike [`remote_path`]'s
 /// callers (git argv, API path segments the CLI itself validates), this string is
-/// handed to the OS URL opener, and `remote_authority` alone does not charset-check
-/// the host — only a malformed port falls back to the bare host. A crafted origin
-/// (`https://evil.com;rm -rf /path`) would otherwise reach the opener verbatim.
+/// handed to the OS URL opener, and neither `remote_host` nor `remote_authority`
+/// charset-checks the host — only a malformed port falls back to the bare host. A
+/// crafted origin (`https://evil.com;rm -rf /path`) would otherwise reach the opener
+/// verbatim.
 pub(crate) fn web_repo_url(remote_url: &str) -> Option<String> {
-    let authority = remote_authority(remote_url).filter(|a| is_safe_authority(a))?;
+    let trimmed = remote_url.trim_start();
+    let is_plain_http = trimmed.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("http://"));
+    let is_https = trimmed.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+    // Any scheme OTHER than http(s) carries a transport port, never the web port —
+    // `ssh://`, `git://`, `git+ssh://`, and anything else spelled `word://…`.
+    // scp-style `git@host:path` has no `://` at all and takes the kept-port branch,
+    // which is moot since it never carries a port either way.
+    let has_non_web_scheme = !is_plain_http && !is_https && trimmed.contains("://");
+    let scheme = if is_plain_http { "http" } else { "https" };
+    let authority = if has_non_web_scheme {
+        remote_host(remote_url)
+    } else {
+        remote_authority(remote_url)
+    }
+    .filter(|a| is_safe_authority(a))?;
     let path = remote_path(remote_url)?;
-    Some(format!("https://{authority}/{path}"))
+    Some(format!("{scheme}://{authority}/{path}"))
 }
 
 /// Percent-encode a value for an API query string (RFC-3986 unreserved kept,
@@ -4612,6 +4646,46 @@ mod tests {
         // A host string carrying config/shell-injection characters is refused by
         // the safety gate rather than handed to the OS URL opener.
         assert_eq!(web_repo_url("https://evil.com;rm -rf /path"), None);
+        // `ssh://` on a NON-default port is a transport port, not a web port — a
+        // self-managed host commonly runs git-over-SSH on 2222 (the standard move
+        // when the OS already owns 22) while the web UI stays on 443. Keeping the
+        // port here would send "View on Host" to the SSH listener.
+        assert_eq!(
+            web_repo_url("ssh://git@gitlab.acme.com:2222/group/repo.git").as_deref(),
+            Some("https://gitlab.acme.com/group/repo"),
+        );
+        // The https-scheme sibling of the same host+port DOES keep the port: a
+        // self-managed instance conventionally serves git-over-https and the web UI
+        // on the same port, unlike SSH.
+        assert_eq!(
+            web_repo_url("https://gitlab.acme.com:2222/group/repo.git").as_deref(),
+            Some("https://gitlab.acme.com:2222/group/repo"),
+        );
+        // An explicit `http://` origin (a self-managed instance with no TLS
+        // termination, the plain-HTTP Gitea shape) keeps its scheme — forcing
+        // `https` would point the browser at a listener that never answers there.
+        assert_eq!(
+            web_repo_url("http://gitea.internal:3000/group/repo.git").as_deref(),
+            Some("http://gitea.internal:3000/group/repo"),
+        );
+        // `ssh://` still defaults to `https` (no web-scheme information in an SSH
+        // transport URL) even though it's checked in the same branch as `http://`.
+        assert_eq!(
+            web_repo_url("ssh://git@gitea.internal/group/repo.git").as_deref(),
+            Some("https://gitea.internal/group/repo"),
+        );
+        // The port-dropping branch is keyed on "any non-http(s) scheme", not on a
+        // literal `ssh://` allowlist — `git+ssh://` and ported `git://`
+        // (git-daemon's default 9418) are transport ports too, and must drop them
+        // the same way `ssh://` does.
+        assert_eq!(
+            web_repo_url("git+ssh://git@gitea.internal:2222/group/repo.git").as_deref(),
+            Some("https://gitea.internal/group/repo"),
+        );
+        assert_eq!(
+            web_repo_url("git://gitea.internal:9418/group/repo.git").as_deref(),
+            Some("https://gitea.internal/group/repo"),
+        );
     }
 
     #[test]

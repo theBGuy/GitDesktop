@@ -2343,7 +2343,7 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
     fn marks_gitlab_archived_project(report: &str) -> bool {
         js_lines(report).any(|l| {
             l.trim_start_matches([' ', '\t'])
-                == "remote: You can't push code to an archived project."
+                .starts_with("remote: You can't push code to an archived project.")
         })
     }
 
@@ -2466,6 +2466,18 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
                  something else, or nothing. Actual stderr:\n{stderr}"
             );
         }
+
+        // The TS regex has no `$` anchor, so it matches a line carrying trailing
+        // text after the period too (a version banner, a self-managed instance's
+        // appended hint) — the Rust mirror must match the SAME set, not a
+        // stricter one, or the canary could pass while under-approximating what
+        // the frontend actually classifies.
+        assert!(
+            REMOTE_ACCESS_MARKERS[GITLAB_ARCHIVED](
+                "remote: You can't push code to an archived project. Contact an admin.\n"
+            ),
+            "a trailing-text variant of the archived-project line must still match"
+        );
 
         // All three read-only-family blobs also carry git's generic 403 line, so
         // the read-only/archived verdicts above rest on the table's ORDER rather
