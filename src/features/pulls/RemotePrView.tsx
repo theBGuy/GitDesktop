@@ -2358,24 +2358,29 @@ export function RemotePrView({
   // Permission outranks the availability hints: a viewer who can't push can't
   // act on any of them. The wait outranks them in turn — every hint below reads
   // the RENDERED pr, which through a switch is the previous one, so each would
-  // describe a pull request the viewer didn't pick. `busy` alone names the term
-  // in flight (`composerReason`) rather than falling through to the
-  // enabled-state hint, which would misdescribe what's actually holding it —
-  // this same string doubles as the hover title while nothing blocks.
+  // describe a pull request the viewer didn't pick. `busy` ranks above the
+  // static availability hints too: `pr.isDraft` (and the other two) still read
+  // true while a term of `busy` is in flight FOR THIS SAME PR — e.g.
+  // `setDraft.isPending` on a draft PR, mid-flip to ready — so checking them
+  // first would tell the viewer to do the exact thing already in progress.
+  // `busy` alone names the term in flight (`composerReason`) rather than
+  // falling through to the enabled-state hint, which would misdescribe what's
+  // actually holding it — this same string doubles as the hover title while
+  // nothing blocks.
   const mergeReason = (() => {
     switch (true) {
       case writeReason !== undefined:
         return writeReason;
       case staleReason !== undefined:
         return staleReason;
+      case busy:
+        return composerReason ?? "Another operation is in progress";
       case pr.isDraft:
         return `Mark the ${prNoun} ready before merging`;
       case mergeGuardMissing:
         return "Reload to merge — couldn't load the head commit to guard the merge";
       case allMergeMethodsBlocked:
         return "No merge method is enabled by both this repository's settings and its branch rules";
-      case busy:
-        return composerReason ?? "Another operation is in progress";
       default:
         return `Merge this ${prNoun}`;
     }
