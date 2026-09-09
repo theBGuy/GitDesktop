@@ -554,10 +554,10 @@ test("a type-7 tag opens inside a container that starts on its line", () => {
   }
 });
 
-// `paragraphLimit` inspects only lines AFTER the one a span opened on, so type 7 can
-// never open there. Passing that on keeps the closer search and the scan agreeing
-// about where the paragraph ends — otherwise the scan walks through a mid-paragraph
-// `<span>` line the limit stopped at, and the span it should have entered never opens.
+// `paragraphLimit` carries the same block state the scan does, so the two agree about
+// where the paragraph ends. A type-7 line only counts as a block start when something
+// makes it one; mid-paragraph, with no container opening and a paragraph still open
+// above it, it is inline HTML and the span closes straight across it.
 const SPAN_ACROSS_TYPE7 = "text ` open\n<span>\nstill ` closed\ncode #5 here\n";
 const SPAN_HIDING_A_DEFINITION =
   "text `\n<span>\n[d #5]: /u2\n`\n\nSee [d #5] now.\n";
@@ -570,6 +570,46 @@ const SPAN_THROUGH_QUOTE_TYPE7 = "text ` open\n> <span>\n> a ` b #5";
 const SPAN_THROUGH_LIST_TYPE7 = "text ` open\n- <span>\n  a ` b #5";
 const SPAN_THROUGH_NESTED_TYPE7 = "text ` open\n> - <span>\n>   a ` b #5";
 const SPAN_THROUGH_DEDENT_TYPE7 = "> text ` open\n<span>\n> a ` b #5";
+
+// A type-7 tag also opens where the line above it left no paragraph — after a
+// heading, or after a blockquote's own blank line. The closer search has to know
+// that too, or the span swallows a reference the renderer leaves as raw HTML.
+const SPAN_THROUGH_HEADING_TYPE7 = "a ` open\n## H\n<span>\n#5\nb ` c";
+const SPAN_THROUGH_QUOTED_BLANK_TYPE7 =
+  "> a ` open\n>\n> <span>\n> #5\n> b ` c";
+const SPAN_FROM_HEADING_LINE = "## H ` x\n<span>\n#5\nb ` c";
+// The paragraph the span opened in ends at the blockquote, so the closer inside it
+// belongs to another block and cannot pair — the reference between them is prose.
+const SPAN_STOPPED_BY_CONTAINER = "a ` open\n> q\n> <span>\n> #5\nb ` c";
+
+test("a block start after a heading bounds the closer search", () => {
+  for (const source of [
+    SPAN_THROUGH_HEADING_TYPE7,
+    SPAN_THROUGH_QUOTED_BLANK_TYPE7,
+    // The opener's OWN line can be the heading, so the walk seeds from it rather
+    // than assuming the line a span opened on leaves a paragraph behind.
+    SPAN_FROM_HEADING_LINE,
+  ]) {
+    const label = JSON.stringify(source);
+    const out = neutralizeSuspectRefs(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+    assert.equal(out.text, source, label);
+    assert.deepEqual(out.survived, ["`#5`"], label);
+  }
+});
+
+test("a container start bounds the closer search", () => {
+  // The depths are compared line to line, not against the opener: here the `<span>`
+  // sits at the same depth as the `> q` above it, so it opens nothing and the
+  // reference under it is ordinary quoted prose that wraps. The run is TWO because
+  // the unpaired tick above the blockquote is still counted as a stray — it sits in
+  // another block and could not have stolen a single-tick wrap, so this is the
+  // over-long-but-safe direction `strays` is documented to take.
+  const out = neutralizeSuspectRefs(SPAN_STOPPED_BY_CONTAINER);
+  assert.deepEqual(findSuspectRefs(SPAN_STOPPED_BY_CONTAINER), ["#5"]);
+  assert.deepEqual(out.wrapped, ["``#5``"]);
+  assert.deepEqual(out.survived, []);
+});
 
 test("a span candidate cannot run through a container-opening type-7 line", () => {
   for (const source of [
@@ -1219,6 +1259,10 @@ const CORPUS = [
   SPAN_THROUGH_LIST_TYPE7,
   SPAN_THROUGH_NESTED_TYPE7,
   SPAN_THROUGH_DEDENT_TYPE7,
+  SPAN_THROUGH_HEADING_TYPE7,
+  SPAN_THROUGH_QUOTED_BLANK_TYPE7,
+  SPAN_FROM_HEADING_LINE,
+  SPAN_STOPPED_BY_CONTAINER,
   HTML_TYPE7_CONTAINER_ALREADY_OPEN,
   HTML_TYPE7_AFTER_QUOTED_FENCE,
   INDENT_AFTER_HEADING,

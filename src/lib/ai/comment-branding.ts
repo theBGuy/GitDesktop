@@ -109,12 +109,11 @@ const HTML_TAG_NAME = "[A-Za-z][A-Za-z0-9-]*";
 const HTML_ATTR = `[ \\t]+[a-zA-Z_:][\\w.:-]*(?:[ \\t]*=[ \\t]*(?:[^ \\t"'=<>\`]+|'[^']*'|"[^"]*"))?`;
 
 /** Type 7: one COMPLETE open or closing tag alone on a line, any tag name. Unlike
- *  types 1 and 6 it cannot interrupt a paragraph, so its opener is gated on the
- *  paragraph-start flag OR {@link opensContainer} — a gate of its own, since the
- *  indented and definition arms read the flag alone. Without it a `<span>` line
- *  mid-paragraph opened a region and the reference below it became a phantom "could
- *  not neutralize"; without the container half, a `> <span>` line failed to open one
- *  and the reference inside the raw block was wrapped and falsely claimed. */
+ *  types 1 and 6 it cannot interrupt a paragraph, so it needs a BLOCK START under
+ *  it: either a line whose predecessor left no open paragraph, or a container
+ *  opening on the line itself ({@link opensContainer}). Both halves are load-bearing
+ *  and the gate is this arm's own — the indented and definition arms read the
+ *  paragraph flag alone. */
 const HTML_BLOCK_TYPE_7 = new RegExp(
   `^ {0,3}(?:<${HTML_TAG_NAME}(?:${HTML_ATTR})*[ \\t]*/?>|</${HTML_TAG_NAME}[ \\t]*>)[ \\t]*$`,
 );
@@ -419,28 +418,42 @@ function paragraphLimit(text: string, from: number): number {
   BLANK_LINE.lastIndex = from;
   const blank = BLANK_LINE.exec(text);
   const limit = blank ? blank.index : text.length;
-  // The container the span opened inside, so the lines below can be judged against it.
+  // The block state the scan's own arm would carry, walked line by line from the one
+  // the span opened on. Both halves matter: a type-7 tag needs a block start, which
+  // is EITHER a line whose predecessor left no open paragraph OR a container opening
+  // here. Seeding from the opener rather than assuming it is paragraph content keeps
+  // a heading (which can hold a backtick and yet ends the paragraph) honest.
   const openerStart = text.lastIndexOf("\n", from - 1) + 1;
   let openerEnd = text.indexOf("\n", openerStart);
   if (openerEnd === -1) openerEnd = text.length;
-  const fromDepth = quoteDepth(text.slice(openerStart, openerEnd));
+  const opener = text.slice(openerStart, openerEnd);
+  let prevDepth = quoteDepth(opener);
+  let openParagraph = leavesOpenParagraph(opener.replace(QUOTE_PREFIX, ""));
   let nl = text.indexOf("\n", from);
   while (nl !== -1 && nl + 1 < limit) {
     const start = nl + 1;
     let end = text.indexOf("\n", start);
     if (end === -1) end = text.length;
     const line = text.slice(start, end);
-    // A line after the opener is paragraph-continuation text, where a type-7 tag
-    // cannot open a block — UNLESS it starts a container, which ends that paragraph
-    // and lets one open after all. The scan's own arm reads exactly the same notion;
-    // if these two disagree, a span candidate runs through a line the scan treats as
-    // a block start, the `span === 0` guard suppresses the whole HTML arm there, and
-    // a reference inside the raw block gets wrapped and falsely claimed.
+    const quoted = line.replace(QUOTE_PREFIX, "");
+    // The gate is read BEFORE the state advances, so this line is judged by what the
+    // one above it left behind — the same order the scan's arm uses. If the two
+    // disagree, a span candidate runs through a line the scan treats as a block
+    // start: the `span === 0` guard then suppresses the whole HTML arm there, and a
+    // reference inside the raw block is either wrapped and falsely claimed or lost
+    // to a span the renderer never opened.
+    const containerStart = opensContainer(line, prevDepth);
+    // A container start ends the paragraph outright, whatever follows its marker, so
+    // the search stops there: a closer beyond it sits in another block and cannot
+    // pair with this opener.
     if (
-      FENCE.test(line.replace(QUOTE_PREFIX, "")) ||
-      opensHtmlBlock(containerContent(line), opensContainer(line, fromDepth))
+      containerStart ||
+      FENCE.test(quoted) ||
+      opensHtmlBlock(containerContent(line), !openParagraph || containerStart)
     )
       return start;
+    openParagraph = leavesOpenParagraph(quoted);
+    prevDepth = quoteDepth(line);
     nl = end < text.length ? end : -1;
   }
   return limit;
@@ -451,19 +464,14 @@ function paragraphLimit(text: string, from: number): number {
  *  opener without one is literal text — entering span state there would silently
  *  swallow every later reference.
  *
- *  APPROXIMATE, and NOT safely so: {@link paragraphLimit} bounds at blank lines,
- *  fences and HTML-block starts, but not at every block that can interrupt a
- *  paragraph — a heading or a list start is not bounded, so its content can pose as
- *  a closer and answer TRUE where markdown would not.
- *
- *  The old claim here was that such an arm "produces no wrap, so the post-condition
- *  keeps the disclosure honest". That is FALSE for spans crossing a blockquote or
- *  list start: fuzzing the shape found both arms of the failure — a reference
- *  wrapped inside a region the renderer treats as code or raw HTML and then claimed
- *  neutralized, and a live reference swallowed by a span the renderer never opens
- *  and so never reported. The class predates the HTML-region work and closing it
- *  means bounding this search at container starts as well, which is a larger change
- *  than a region rule; it is tracked separately rather than patched here. */
+ *  APPROXIMATE, and NOT safely so. {@link paragraphLimit} bounds at blank lines,
+ *  fences, container starts and HTML-block starts — but a HEADING is none of those,
+ *  so content past one can pose as a closer and answer TRUE where markdown would
+ *  not. Both failure arms are reachable there: a reference wrapped inside a region
+ *  the renderer treats as code or raw HTML and then claimed neutralized, and a live
+ *  reference swallowed by a span the renderer never opens and so never reported.
+ *  Neither direction is safe; the remedy is bounding at every block that can
+ *  interrupt a paragraph, which is tracked separately. */
 function hasClosingRun(text: string, from: number, run: number): boolean {
   const limit = paragraphLimit(text, from);
   let i = from;
