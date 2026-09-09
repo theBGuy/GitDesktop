@@ -316,6 +316,9 @@ mod tests {
             "",
             "GITHUB_TOKEN",
             "github_token",
+            // Byte-boundary regression control: 10 bytes, char boundaries at
+            // 0/2/4/6/8/10 — byte 7 lands mid-character, which a slicing
+            // prefix check (rather than `str::get`) would panic on.
             "ééééé",
         ] {
             assert!(validate_var_name(bad).is_err(), "{bad} should be rejected");
