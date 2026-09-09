@@ -30,7 +30,7 @@ export function RepoHeader({ repoPath }: { repoPath: string }) {
       </Button>
       <RepoSwitcher />
       <RepositoryMenu repoPath={repoPath} />
-      <Separator orientation="vertical" className="h-5" />
+      <Separator orientation="vertical" className="my-1" />
       <BranchSwitcher repoPath={repoPath} />
       <BranchCiBadge repoPath={repoPath} />
       <BranchJiraBadge repoPath={repoPath} />

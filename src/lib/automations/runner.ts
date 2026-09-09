@@ -1198,7 +1198,7 @@ async function deliver(
     if (notify) {
       const prNumber = event.target.number;
       pushNotification({
-        kind: "review-ready",
+        kind: "review-posted",
         tone: "success",
         title: `AI ${label} posted on #${prNumber}`,
         subtitle: `"${event.title}"`,
@@ -1251,7 +1251,7 @@ async function deliver(
   // Gated on the automations pref alone — see the commit arm.
   if (notify) {
     pushNotification({
-      kind: "review-ready",
+      kind: "review-posted",
       tone: "success",
       title: `AI ${label} added to "${pr.title}"`,
       repoPath: event.repoPath,

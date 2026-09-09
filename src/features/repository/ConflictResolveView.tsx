@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { Spinner } from "@/components/ui/spinner";
@@ -256,9 +257,10 @@ export function ConflictResolveView({
       <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
         <span className="flex min-w-0 items-center gap-1.5">
           <SparkleIcon className="size-3.5 shrink-0 text-primary" />
-          <span className="truncate font-mono text-xs text-muted-foreground">
-            {path}
-          </span>
+          <PathText
+            path={path}
+            className="font-mono text-xs text-muted-foreground"
+          />
         </span>
         <span className="shrink-0 text-[11px] text-muted-foreground">
           {providerLabel} · {model}

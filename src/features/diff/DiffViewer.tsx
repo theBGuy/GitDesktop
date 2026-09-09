@@ -12,6 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -410,12 +411,10 @@ function WorkingTreeDiff({
           selection && "bg-primary/10",
         )}
       >
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
-          title={file.path}
-        >
-          {file.path}
-        </span>
+        <PathText
+          path={file.path}
+          className="flex-1 font-mono text-xs text-muted-foreground"
+        />
         {/* min-h-7 pins the cluster to the language picker's h-7 trigger: the
             xs (h-6) selection buttons — and an extensionless file, where the
             picker renders nothing — would otherwise shrink the row by 4px.

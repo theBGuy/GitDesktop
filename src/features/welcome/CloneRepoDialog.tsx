@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { PathText } from "@/components/path-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -329,13 +330,16 @@ export function CloneRepoDialog({
               </Button>
             </div>
             {values.destination.trim() && finalName && (
-              <p className="truncate text-[11px] text-muted-foreground">
-                Clones into{" "}
-                <span className="font-mono">
-                  {values.destination.trim().replace(/[\\/]$/, "")}
-                  {values.destination.includes("/") ? "/" : "\\"}
-                  {finalName}
-                </span>
+              // gap-1, not a trailing space in the label: a flex line box
+              // trims a trailing collapsible space, fusing the two items.
+              <p className="flex min-w-0 gap-1 text-[11px] text-muted-foreground">
+                <span className="shrink-0">Clones into</span>
+                <PathText
+                  path={`${values.destination.trim().replace(/[\\/]$/, "")}${
+                    values.destination.includes("/") ? "/" : "\\"
+                  }${finalName}`}
+                  className="font-mono"
+                />
               </p>
             )}
           </div>

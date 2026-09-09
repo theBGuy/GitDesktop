@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { PathText } from "@/components/path-text";
 import {
   Dialog,
   DialogContent,
@@ -213,9 +214,7 @@ function FileList({
                   path === activePath && "bg-accent text-accent-foreground",
                 )}
               >
-                <span className="block truncate font-mono" title={path}>
-                  {path}
-                </span>
+                <PathText path={path} className="flex-1 font-mono" />
               </button>
             </div>
           );

@@ -6,6 +6,7 @@ import {
 import hljs from "highlight.js/lib/common";
 import { useState } from "react";
 import { toast } from "sonner";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -154,9 +155,11 @@ export function CodeTodoDetailView({
             )}
           </p>
         </div>
-        <p className="mt-1 font-mono text-xs text-muted-foreground">
-          {path}:{line}
-        </p>
+        <PathText
+          path={path}
+          line={line}
+          className="mt-1 font-mono text-xs text-muted-foreground"
+        />
         {/* Attribution line for the TODO's blame — hidden while stale/absent. */}
         {todoLine && isRealCommit(todoLine.hash) && (
           <p className="mt-2 text-xs text-muted-foreground">

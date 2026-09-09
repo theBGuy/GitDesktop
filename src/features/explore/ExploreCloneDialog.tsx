@@ -1,6 +1,7 @@
 import { useSelector } from "@tanstack/react-store";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEffectEvent } from "react";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -130,13 +131,16 @@ export function ExploreCloneDialog({
               </Button>
             </div>
             {values.destination.trim() && target && (
-              <p className="truncate text-[11px] text-muted-foreground">
-                Clones into{" "}
-                <span className="font-mono">
-                  {values.destination.trim().replace(/[\\/]$/, "")}
-                  {values.destination.includes("/") ? "/" : "\\"}
-                  {target.name}
-                </span>
+              // gap-1, not a trailing space in the label: a flex line box
+              // trims a trailing collapsible space, fusing the two items.
+              <p className="flex min-w-0 gap-1 text-[11px] text-muted-foreground">
+                <span className="shrink-0">Clones into</span>
+                <PathText
+                  path={`${values.destination.trim().replace(/[\\/]$/, "")}${
+                    values.destination.includes("/") ? "/" : "\\"
+                  }${target.name}`}
+                  className="font-mono"
+                />
               </p>
             )}
           </div>

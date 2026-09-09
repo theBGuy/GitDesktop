@@ -15,6 +15,7 @@ import {
 import { useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Badge } from "@/components/ui/badge";
@@ -43,7 +44,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { normPath } from "@/lib/git/path";
 import {
@@ -386,12 +387,10 @@ function WorktreeRow({
               isRemoving={isRemoving}
             />
           </span>
-          <span
-            className="mt-0.5 block truncate text-[11px] text-muted-foreground"
-            onMouseEnter={clipTitle(path)}
-          >
-            {path}
-          </span>
+          <PathText
+            path={path}
+            className="mt-0.5 text-[11px] text-muted-foreground"
+          />
         </span>
         {lastActivityMs != null && validEpochMs(lastActivityMs) && (
           <span className="shrink-0 text-[11px] text-muted-foreground">
@@ -639,9 +638,16 @@ export function RenameWorktreeDialog({
             className="h-7 font-mono"
             aria-invalid={invalid || undefined}
           />
-          <span className="col-start-2 mt-1 block truncate font-mono text-[11px] text-muted-foreground">
-            {invalid ? "Use a folder name, not a path." : newPath}
-          </span>
+          {invalid ? (
+            <span className="col-start-2 mt-1 block truncate font-mono text-[11px] text-muted-foreground">
+              Use a folder name, not a path.
+            </span>
+          ) : (
+            <PathText
+              path={newPath}
+              className="col-start-2 mt-1 font-mono text-[11px] text-muted-foreground"
+            />
+          )}
         </form>
 
         {/* A disabled button can't carry a tooltip; the reason goes on screen. */}

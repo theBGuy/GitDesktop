@@ -8,6 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -417,8 +418,8 @@ export function PrMergeabilityBanner({
   const fileList = conflictFiles.length > 0 && (
     <ul className="basis-full pl-5 text-muted-foreground">
       {shownFiles.map((path) => (
-        <li key={path} className="truncate font-mono" title={path}>
-          {path}
+        <li key={path}>
+          <PathText path={path} className="font-mono" />
         </li>
       ))}
       {extraFiles > 0 && (

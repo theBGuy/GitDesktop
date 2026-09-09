@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -142,9 +143,10 @@ export function DeleteWorktreeDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <p className="truncate rounded bg-muted px-2 py-1.5 font-mono text-[11px] text-muted-foreground">
-          {worktree?.path}
-        </p>
+        <PathText
+          path={worktree?.path ?? ""}
+          className="rounded bg-muted px-2 py-1.5 font-mono text-[11px] text-muted-foreground"
+        />
 
         {/* While a removal that recorded an archive intent runs, keep showing
             the checkbox even if the branch is archived from another surface

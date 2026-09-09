@@ -11,6 +11,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { PathText } from "@/components/path-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -936,8 +937,8 @@ export function RepositoryFilesDialog({
           {shownPending?.kind === "untrack" && (
             <ul className="max-h-40 overflow-auto border p-2 text-xs">
               {shownPending.paths.map((p) => (
-                <li key={p} className="truncate font-mono" title={p}>
-                  {ignoreLabel(p)}
+                <li key={p}>
+                  <PathText path={ignoreLabel(p)} className="font-mono" />
                 </li>
               ))}
             </ul>
@@ -945,10 +946,10 @@ export function RepositoryFilesDialog({
           {shownPending?.kind === "forceAdd" && (
             <ul className="max-h-40 overflow-auto border p-2 text-xs">
               {shownPending.paths.map((p) => (
-                <li key={p} className="truncate font-mono" title={p}>
-                  {p}
+                <li key={p} className="flex min-w-0 items-baseline font-mono">
+                  <PathText path={p} />
                   {p.endsWith("/") && (
-                    <span className="ml-1 font-sans text-muted-foreground">
+                    <span className="ml-1 shrink-0 font-sans text-muted-foreground">
                       — directory, adds all contents
                     </span>
                   )}
@@ -1176,15 +1177,11 @@ function FileList({
                       shortens instead of swallowing the marker. */}
                   {rowSuffix ? (
                     <span className="flex items-baseline gap-1">
-                      <span className="truncate font-mono" title={path}>
-                        {path}
-                      </span>
+                      <PathText path={path} className="font-mono" />
                       {rowSuffix(path)}
                     </span>
                   ) : (
-                    <span className="block truncate font-mono" title={path}>
-                      {path}
-                    </span>
+                    <PathText path={path} className="font-mono" />
                   )}
                   {rowInfo(path)}
                 </span>

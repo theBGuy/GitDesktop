@@ -1,6 +1,7 @@
 import { useDeferredValue, useState } from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
+import { PathText } from "@/components/path-text";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
@@ -151,11 +152,8 @@ export function BranchDiffView({
                       : "hover:bg-muted/60",
                   )}
                   onClick={() => setSelectedPath(file.path)}
-                  title={file.path}
                 >
-                  <span className="min-w-0 flex-1 truncate font-mono">
-                    {file.path}
-                  </span>
+                  <PathText path={file.path} className="flex-1 font-mono" />
                   <DiffStat
                     added={file.added}
                     deleted={file.deleted}

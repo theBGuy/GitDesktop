@@ -11,12 +11,12 @@ import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { MarkdownEditor } from "@/components/markdown-editor";
+import { PathText } from "@/components/path-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Thread } from "@/features/conversations/Thread";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
-import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import type {
   ApplyLinesResult,
@@ -1010,12 +1010,10 @@ export function ReviewThreadList({
         const resolvedOpen = openResolvedGroups.has(path);
         return (
           <div key={path} className="space-y-1.5">
-            <p
-              className="truncate font-mono text-xs text-muted-foreground"
-              onMouseEnter={clipTitle(path)}
-            >
-              {path}
-            </p>
+            <PathText
+              path={path}
+              className="font-mono text-xs text-muted-foreground"
+            />
             <div className="space-y-1.5">
               {unresolved.map((t) => (
                 <ReviewThreadCard

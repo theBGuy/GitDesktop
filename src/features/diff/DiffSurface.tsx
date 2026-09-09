@@ -23,6 +23,7 @@ import {
   useState,
 } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { decodeBase64Utf8 } from "@/lib/git/api";
@@ -1314,12 +1315,10 @@ export function DiffContent({
       className="ph-no-capture @container/diff-pane flex h-full flex-col"
     >
       <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
-          title={filePath}
-        >
-          {filePath}
-        </span>
+        <PathText
+          path={filePath}
+          className="flex-1 font-mono text-xs text-muted-foreground"
+        />
         {/* ~200px of unshrinkable text, so it shows only where the pane has the
             room; the sr-only twin carries it at every width, and `aria-hidden`
             on the visible copy keeps the two from announcing twice. Hidden in

@@ -9,6 +9,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type MouseEvent, useEffect, useRef, useState } from "react";
+import { PathText } from "@/components/path-text";
 import { ProviderIcon } from "@/components/provider-icon";
 import {
   ContextMenu,
@@ -516,9 +517,10 @@ function RepoRow({
           >
             {repoDisplayName(repo)}
           </span>
-          <span className="block truncate text-[11px] text-muted-foreground">
-            {repo.path}
-          </span>
+          <PathText
+            path={repo.path}
+            className="text-[11px] text-muted-foreground"
+          />
         </span>
         {repo.isFork && (
           <span

@@ -650,6 +650,7 @@ const TONE_CLASS: Record<NotificationTone, string> = {
  *  (e.g. `ci-run`, whose success/failure lives in the tone). */
 const KIND_GLYPH: Partial<Record<NotificationKind, typeof CheckCircleIcon>> = {
   "review-ready": SparkleIcon,
+  "review-posted": SparkleIcon,
   "review-failed": SparkleIcon,
   "checks-passed": CheckCircleIcon,
   "checks-failed": XCircleIcon,
@@ -672,10 +673,14 @@ const KIND_GLYPH: Partial<Record<NotificationKind, typeof CheckCircleIcon>> = {
  *  is therefore already on screen from every section. A `review-failed` from an
  *  *automation* still points at Review even though the panel shows idle: those
  *  runs use a separate `auto:<n>` key namespace, but Review is where the Run
- *  button lives. Read with a row's plain-string kind — a hydrated row can carry
- *  a kind from an older build, so a lookup must miss, never fail. */
+ *  button lives. `review-posted` means the automation already posted the review
+ *  as a PR comment, so it lives in the Conversation timeline; `review-ready` is
+ *  saved to the review panel un-posted, so Review is its landing. Read with a
+ *  row's plain-string kind — a hydrated row can carry a kind from an older
+ *  build, so a lookup must miss, never fail. */
 const KIND_SECTION: Partial<Record<NotificationKind, PrSection>> = {
   "review-ready": "review",
+  "review-posted": "conversation",
   "review-failed": "review",
   "pr-opened": "conversation",
   "pr-merged": "conversation",

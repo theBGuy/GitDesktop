@@ -522,7 +522,12 @@ export const CHECKS = [
     appliesTo: (file) =>
       file !== "src/lib/clip-title.ts" && notVendoredUi(file),
     scan: perFile(INLINE_CLIP_TITLE_RE),
-    allowlist: [],
+    allowlist: [
+      // PathText measures its two inner spans and titles the outer one, which
+      // never overflows itself — clipTitle can't serve that shape. It keeps
+      // the helper's remove-don't-blank contract.
+      "src/components/path-text.tsx",
+    ],
     message:
       "clip-measured tooltips route through clipTitle/clipTitleFromText (src/lib/clip-title.ts) — an inline rewrite re-opens the blank-title ancestor-suppression class; if the pairing is a false positive, add an allowlist entry with rationale",
   },

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import {
   Dialog,
@@ -65,8 +66,8 @@ export function FileHistoryDialog({
       <DialogContent className="flex h-[80vh] flex-col sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle className="truncate">History of {name}</DialogTitle>
-          <DialogDescription className="truncate font-mono">
-            {path}
+          <DialogDescription>
+            <PathText path={path} className="font-mono" />
           </DialogDescription>
         </DialogHeader>
 

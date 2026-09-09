@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useRef } from "react";
 import { toast } from "sonner";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -171,13 +172,13 @@ function PromoteBody({
 
       <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
         <span className="text-muted-foreground">Worktree</span>
-        <span className="truncate font-mono" title={worktree.path}>
-          {worktree.path}
-        </span>
+        <PathText path={worktree.path} className="font-mono" />
         <span className="text-muted-foreground">Main workspace</span>
-        <span className="truncate font-mono" title={mainPath ?? undefined}>
-          {mainPath ?? "—"}
-        </span>
+        {mainPath ? (
+          <PathText path={mainPath} className="font-mono" />
+        ) : (
+          <span className="font-mono">—</span>
+        )}
       </div>
 
       {checking ? (

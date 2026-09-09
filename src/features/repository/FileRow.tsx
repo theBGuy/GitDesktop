@@ -2,6 +2,7 @@ import { MinusIcon, PlusIcon } from "@phosphor-icons/react";
 import { memo } from "react";
 import { DiffStat } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { PathText } from "@/components/path-text";
 import { KIND_BADGE } from "@/lib/git/change-kind-badge";
 import { reservedDeviceName } from "@/lib/git/reserved-device-name";
 import type { ChangeKind, DiffStatEntry, FileEntry } from "@/lib/git/types";
@@ -89,9 +90,18 @@ export const FileRow = memo(function FileRow({
           is absolutely positioned so it never becomes a flex item here. The
           trailing space keeps the name from fusing with the path text. */}
       <span className="sr-only">{badge.label} </span>
-      <span className="min-w-0 flex-1 truncate" title={label}>
-        {label}
-      </span>
+      {entry.origPath ? (
+        // A rename is two paths and an arrow: the composite can't ride
+        // PathText's only-when-clipped measurement, so the row keeps a static
+        // title for the whole label.
+        <span className="flex min-w-0 flex-1 items-center gap-1" title={label}>
+          <PathText path={entry.origPath} />
+          <span className="shrink-0">→</span>
+          <PathText path={entry.path} />
+        </span>
+      ) : (
+        <PathText path={entry.path} className="flex-1" />
+      )}
       {stat ? (
         <DiffStat
           added={stat.added}

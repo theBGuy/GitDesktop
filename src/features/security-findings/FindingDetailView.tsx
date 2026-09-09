@@ -2,6 +2,7 @@ import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReactNode } from "react";
 import { Markdown } from "@/components/markdown/markdown";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -201,7 +202,7 @@ function AlertDetail({ alert }: { alert: DependabotAlertOut }) {
             </Row>
           ) : null}
           <Row label="Manifest">
-            <span className="font-mono">{alert.manifestPath}</span>
+            <PathText path={alert.manifestPath} className="font-mono" />
           </Row>
           <Row label="GHSA">
             <span className="font-mono">{alert.ghsaId}</span>
