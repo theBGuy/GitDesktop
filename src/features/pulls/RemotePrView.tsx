@@ -3366,27 +3366,19 @@ export function RemotePrView({
           )}
           {canMerge && (
             <DropdownMenu>
-              {/* A natively-disabled Button swallows `title`, so the hint rides a
-                  wrapping span (house idiom). The span stays OUTSIDE the trigger:
-                  as the trigger it would take the click the disabled button
-                  refuses and open the menu anyway — merging past every gate,
-                  including GitLab's stale-head guard. */}
-              <span
-                title={mergeReason}
-                className={cn(
-                  "inline-flex",
-                  mergeBlocked && "cursor-not-allowed",
-                )}
+              <DropdownMenuTrigger
+                render={
+                  <DisabledReasonButton
+                    size="sm"
+                    disabled={mergeBlocked}
+                    reason={mergeReason}
+                  />
+                }
               >
-                <DropdownMenuTrigger
-                  disabled={mergeBlocked}
-                  render={<Button size="sm" />}
-                >
-                  <GitMergeIcon data-icon="inline-start" />
-                  Merge
-                  <CaretDownIcon data-icon="inline-end" />
-                </DropdownMenuTrigger>
-              </span>
+                <GitMergeIcon data-icon="inline-start" />
+                Merge
+                <CaretDownIcon data-icon="inline-end" />
+              </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 {/* Branch-rule gating is GitHub branch-protection data, so it
                     never applies to GitLab/Bitbucket. */}

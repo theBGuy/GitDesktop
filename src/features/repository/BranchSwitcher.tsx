@@ -15,9 +15,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -2463,50 +2463,50 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           }
         }}
       >
-        {/* The reason rides the wrapper (a disabled trigger drops pointer
-            events, so its own `title` never surfaces), and the wrapper is the
-            header's flex item, so it owns the shrink-20 that makes the branch
-            label collapse before the CI badge (4); the inner Button needs
-            `shrink` to undo the vendored `shrink-0`, or nothing truncates. */}
-        <span
-          className={cn(
-            "inline-flex min-w-0 shrink-20",
-            amending && "cursor-not-allowed",
-          )}
-          title={
-            amending ? "Finish or stop amending to switch branches" : undefined
-          }
-        >
-          <Popover.Trigger
-            disabled={busy || amending}
-            render={
-              <Button
-                variant="ghost"
-                size="sm"
-                // overflow-hidden clips the box the shrink cascade squeezes;
-                // without it the icons (shrink-0) spill out both sides into the
-                // separator and the repository menu on a narrow header.
-                className="min-w-0 shrink overflow-hidden"
+        {/* The wrapper is the header's flex item, so it owns the shrink-20
+            that makes the branch label collapse before the CI badge (4); the
+            inner Button needs `shrink` to undo the vendored `shrink-0`, or
+            nothing truncates. */}
+        <Popover.Trigger
+          disabled={busy || amending}
+          render={
+            <DisabledReasonButton
+              variant="ghost"
+              size="sm"
+              wrapperClassName="min-w-0 shrink-20"
+              reason={(() => {
+                switch (true) {
+                  case amending:
+                    return "Finish or stop amending to switch branches";
+                  case busy:
+                    return "Another git operation is running.";
+                  default:
+                    return undefined;
+                }
+              })()}
+              // overflow-hidden clips the box the shrink cascade squeezes;
+              // without it the icons (shrink-0) spill out both sides into the
+              // separator and the repository menu on a narrow header.
+              className="min-w-0 shrink overflow-hidden"
+            >
+              <GitBranchIcon data-icon="inline-start" />
+              <span
+                className="min-w-0 truncate"
+                // Sits under the wrapper's conditional title — a static or
+                // blanked title here would suppress that tooltip.
+                onMouseEnter={clipTitle(currentLabel)}
               >
-                <GitBranchIcon data-icon="inline-start" />
-                <span
-                  className="min-w-0 truncate"
-                  // Sits under the wrapper's conditional (amending) title — a
-                  // static or blanked title here would suppress that tooltip.
-                  onMouseEnter={clipTitle(currentLabel)}
-                >
-                  {currentLabel}
-                </span>
-                {head?.detached && (
-                  <Badge variant="secondary" className="ml-1 shrink-0">
-                    detached
-                  </Badge>
-                )}
-                <CaretDownIcon data-icon="inline-end" />
-              </Button>
-            }
-          />
-        </span>
+                {currentLabel}
+              </span>
+              {head?.detached && (
+                <Badge variant="secondary" className="ml-1 shrink-0">
+                  detached
+                </Badge>
+              )}
+              <CaretDownIcon data-icon="inline-end" />
+            </DisabledReasonButton>
+          }
+        />
         <Popover.Portal>
           <Popover.Positioner
             align="start"

@@ -77,7 +77,6 @@ import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
-import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
 import { PROMOTION_REASON, type PromotionKind } from "./PrMergeabilityBanner";
@@ -1151,26 +1150,19 @@ export function LocalPrView({
               </DisabledReasonButton>
             )}
             <DropdownMenu>
-              {/* A natively-disabled Button swallows `title`, so the refusal
-                  rides a wrapping span (house idiom) — outside the trigger,
-                  which carries `disabled` itself so a blocked merge can't open
-                  the menu. */}
-              <span
-                title={mergeReason}
-                className={cn(
-                  "inline-flex",
-                  mergeBlocked && "cursor-not-allowed",
-                )}
+              <DropdownMenuTrigger
+                render={
+                  <DisabledReasonButton
+                    size="sm"
+                    disabled={mergeBlocked}
+                    reason={mergeReason}
+                  />
+                }
               >
-                <DropdownMenuTrigger
-                  disabled={mergeBlocked}
-                  render={<Button size="sm" />}
-                >
-                  <GitMergeIcon data-icon="inline-start" />
-                  Merge
-                  <CaretDownIcon data-icon="inline-end" />
-                </DropdownMenuTrigger>
-              </span>
+                <GitMergeIcon data-icon="inline-start" />
+                Merge
+                <CaretDownIcon data-icon="inline-end" />
+              </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuItem
                   disabled={

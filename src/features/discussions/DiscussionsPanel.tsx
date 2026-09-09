@@ -5,7 +5,6 @@ import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -119,25 +118,23 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-1 border-b p-2">
         <DropdownMenu>
-          {/* A trigger can't take the disabled-reason primitive — a `render`
-              target can't carry its wrapper — so the reason rides a span around
-              the trigger, whose own `disabled` keeps the button inert. */}
-          <span
-            className={cn("inline-flex", !listEnabled && "cursor-not-allowed")}
-            title={
-              listEnabled
-                ? undefined
-                : "Sign in to GitHub to browse discussions"
+          <DropdownMenuTrigger
+            render={
+              <DisabledReasonButton
+                variant="outline"
+                size="xs"
+                disabled={!listEnabled}
+                reason={
+                  listEnabled
+                    ? undefined
+                    : "Sign in to GitHub to browse discussions"
+                }
+              />
             }
           >
-            <DropdownMenuTrigger
-              disabled={!listEnabled}
-              render={<Button variant="outline" size="xs" />}
-            >
-              {categoryLabel}
-              <CaretDownIcon data-icon="inline-end" />
-            </DropdownMenuTrigger>
-          </span>
+            {categoryLabel}
+            <CaretDownIcon data-icon="inline-end" />
+          </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="min-w-52">
             <DropdownMenuItem
               onClick={() => chooseCategory(null)}

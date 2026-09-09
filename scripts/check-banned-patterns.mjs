@@ -788,28 +788,10 @@ export const CHECKS = [
     name: "titled-disabled-trigger",
     appliesTo: notVendoredUi,
     scan: perFile(TITLED_TRIGGER_DISABLED_RE),
-    // DEFERRED, not exempt: every entry is a residual site of the class the
-    // pickers were converted out of, held back because each needs its own live
-    // keyboard pass. The gate blocks NEW sites; these come off the list as they
-    // convert, and the stale-entry rule turns each conversion into a required
-    // edit here.
-    allowlist: [
-      // The projects picker — the direct twin of the converted labels picker.
-      "src/features/conversations/ProjectsPopover.tsx",
-      // Category menu; its hint is a bare sign-in string rather than a reason
-      // prop, so the conversion has to introduce the reason first.
-      "src/features/discussions/DiscussionsPanel.tsx",
-      // Two menus (close options, more actions) whose `disabled` sits inside the
-      // render Button rather than on the trigger.
-      "src/features/issues/RemoteIssueView.tsx",
-      // Merge menus: the wrapper is what refuses the click a disabled Button
-      // drops, so converting them wants the live merge-gate pass.
-      "src/features/pulls/LocalPrView.tsx",
-      "src/features/pulls/RemotePrView.tsx",
-      // The branch trigger's wrapper also owns the header shrink cascade, so a
-      // conversion has to move those classes to wrapperClassName.
-      "src/features/repository/BranchSwitcher.tsx",
-    ],
+    // Every residual site of the class the pickers were converted out of has
+    // now converted too — the allowlist is empty on purpose, not pruned away:
+    // a fresh violation here is a NEW instance of the class, not a returning one.
+    allowlist: [],
     message:
       "a menu/popover trigger that carries its disabled reason on a titled wrapper is hover-only — a natively disabled trigger leaves the tab order, so keyboard and screen-reader users reach neither the control nor the reason; compose `<Trigger render={<DisabledReasonButton disabled reason/>}>` instead (src/components/disabled-reason-button.tsx), which holds the reason on a focusable aria-disabled button whose own useButton swallows activation; a site that genuinely cannot take the primitive needs an allowlist entry with rationale",
   },

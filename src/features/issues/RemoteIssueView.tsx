@@ -774,29 +774,22 @@ export function RemoteIssueView({
             >
               {draftRidesStateChange ? "Close with comment" : "Close issue"}
             </DisabledReasonButton>
-            {/* Close reasons are a GitHub concept; GitLab has none. The caret is
-                a menu TRIGGER: native `disabled` holds the menu shut, and the
-                hint rides a wrapping span since a disabled Button swallows
-                `title` (house trigger idiom). */}
+            {/* Close reasons are a GitHub concept; GitLab has none. */}
             {canWrite && (
               <DropdownMenu>
-                <span
-                  title={triageReason ?? staleReason}
-                  className="inline-flex"
+                <DropdownMenuTrigger
+                  render={
+                    <DisabledReasonButton
+                      variant="outline"
+                      size="icon-sm"
+                      aria-label="Other close options"
+                      disabled={busy || triageBlocked}
+                      reason={triageReason ?? staleReason}
+                    />
+                  }
                 >
-                  <DropdownMenuTrigger
-                    render={
-                      <Button
-                        variant="outline"
-                        size="icon-sm"
-                        aria-label="Other close options"
-                        disabled={busy || triageBlocked}
-                      />
-                    }
-                  >
-                    <CaretDownIcon />
-                  </DropdownMenuTrigger>
-                </span>
+                  <CaretDownIcon />
+                </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="min-w-52">
                   {/* A menu item drops pointer events when disabled and has no
                       room for a title, so the draft promise rides the label —
@@ -887,22 +880,20 @@ export function RemoteIssueView({
             <DropdownMenu>
               {/* Every item but Transfer is withheld while the rendered issue is
                   the previous one, so hold the menu shut rather than open a near-
-                  empty popup; the reason rides a wrapping span since a disabled
-                  Button swallows `title` (house trigger idiom). */}
-              <span title={staleReason} className="inline-flex">
-                <DropdownMenuTrigger
-                  render={
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      aria-label="More actions"
-                      disabled={detailsStale}
-                    />
-                  }
-                >
-                  <DotsThreeIcon className="size-4" weight="bold" />
-                </DropdownMenuTrigger>
-              </span>
+                  empty popup. */}
+              <DropdownMenuTrigger
+                render={
+                  <DisabledReasonButton
+                    variant="outline"
+                    size="xs"
+                    aria-label="More actions"
+                    disabled={detailsStale}
+                    reason={staleReason}
+                  />
+                }
+              >
+                <DotsThreeIcon className="size-4" weight="bold" />
+              </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-52">
                 {/* Absent while a placeholder is served: the verb comes from the
                     rendered issue's pin state while the write addresses
