@@ -317,7 +317,10 @@ mod tests {
     /// `env` reaches an endpoint path, never a `-f`/`-F` field — `{`/`}` must be
     /// refused alongside the pre-existing `/`, `?`, `#`, `\n`, or a crafted
     /// environment name (`{owner}`, say) could retarget the request via gh's own
-    /// endpoint placeholder expansion.
+    /// endpoint placeholder expansion. A bare `.`/`..` is refused too — the
+    /// surrounding endpoint template already supplies the slashes, so `env`
+    /// doesn't need one to traverse a path segment; the `..staging`/`prod..`
+    /// positives prove the check stays an exact-match, not a substring ban.
     #[test]
     fn validate_env_refuses_path_and_brace_metacharacters() {
         for ok in ["production", "staging-2", "My Env", "..staging", "prod.."] {

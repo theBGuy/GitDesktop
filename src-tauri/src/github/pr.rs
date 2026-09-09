@@ -7201,9 +7201,9 @@ mod tests {
     }
 
     /// The no-lens arm resolves purely from `origin` — real repo, no `gh` spawn —
-    /// for https, scp-style ssh, and a ported self-managed (GHE) host. The upstream
-    /// lens is untouched: with no `upstream` remote configured it still fails, proving
-    /// the split didn't accidentally widen origin's derivation onto it.
+    /// for https and scp-style ssh. The upstream lens is untouched: with no
+    /// `upstream` remote configured it still fails, proving the split didn't
+    /// accidentally widen origin's derivation onto it.
     ///
     /// A FRESH temp repo per remote form — `git_remote_url`'s TTL cache is keyed by
     /// `(repo_path, name)`, and this test's raw `git remote add` bypasses the

@@ -2388,8 +2388,11 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
         marks_forbidden_403,
     ];
 
-    /// Positions in [`REMOTE_ACCESS_MARKERS`], named for the verdict each entry
-    /// produces in the toast.
+    /// Positions in [`REMOTE_ACCESS_MARKERS`], named for the pattern each entry
+    /// matches — not a 1:1 verdict: `READ_ONLY` and `GITLAB_ARCHIVED` are
+    /// different patterns that both resolve to the same toast text
+    /// (`READ_ONLY_REPOSITORY_SUMMARY`, error-summary.ts), since GitLab's
+    /// archived-project wording is exactly the case that summary describes.
     const READ_ONLY: usize = 0;
     const GITLAB_ARCHIVED: usize = 1;
     const NO_CREDENTIALS: usize = 2;
@@ -2397,7 +2400,8 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
     const FORBIDDEN_403: usize = 4;
 
     /// The entry `remoteAccessSummary` would pick: the FIRST match in table order,
-    /// mirroring its `.find()`. The index IS the verdict, so order is precedence.
+    /// mirroring its `.find()`. The index is the table POSITION, so order is
+    /// precedence — not a unique verdict, since two positions can share one.
     fn first_remote_access_match(report: &str) -> Option<usize> {
         REMOTE_ACCESS_MARKERS.iter().position(|m| m(report))
     }
