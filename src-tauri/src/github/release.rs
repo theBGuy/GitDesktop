@@ -240,8 +240,7 @@ fn release_create_args(
 }
 
 /// Creates a release for `tag` (gh creates the tag off `target` if it doesn't
-/// exist). `generate_notes` adds GitHub's auto commit-based notes; an explicit
-/// `notes` body is included too. Returns the new release's URL.
+/// exist). Returns the new release's URL.
 #[allow(clippy::too_many_arguments)]
 pub async fn gh_release_create(
     repo_path: String,

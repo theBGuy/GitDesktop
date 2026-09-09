@@ -78,9 +78,17 @@ fn check_env_app(app: &str, env: Option<&str>) -> AppResult<()> {
 /// endpoint path (`secrets_path`/`variables_path`), never a `-f`/`-F` field, so
 /// `{`/`}` are rejected alongside the rest: gh expands `{…}` in an endpoint as an
 /// owner/repo placeholder, retargeting the request at another repo (the same class
-/// `rulesets.rs`'s `refuse_braced` guards for branch names).
+/// `rulesets.rs`'s `refuse_braced` guards for branch names). `.`/`..` are refused
+/// outright too — the surrounding template already supplies the slashes
+/// (`environments/{env}/secrets`), so a bare `..` traverses up a path segment
+/// without `env` itself needing to carry a `/` (the same risk
+/// `valid_github_slug`'s doc names for owner/repo segments).
 fn validate_env(env: &str) -> AppResult<()> {
-    if env.is_empty() || env.contains(['/', '?', '#', '\n', '{', '}']) {
+    if env.is_empty()
+        || env == "."
+        || env == ".."
+        || env.contains(['/', '?', '#', '\n', '{', '}'])
+    {
         return Err(AppError::InvalidArgument(format!(
             "invalid environment: {env}"
         )));
@@ -312,10 +320,12 @@ mod tests {
     /// endpoint placeholder expansion.
     #[test]
     fn validate_env_refuses_path_and_brace_metacharacters() {
-        for ok in ["production", "staging-2", "My Env"] {
+        for ok in ["production", "staging-2", "My Env", "..staging", "prod.."] {
             assert!(validate_env(ok).is_ok(), "{ok} should be valid");
         }
-        for bad in ["", "a/b", "a?b", "a#b", "a\nb", "{owner}", "a{b", "a}b"] {
+        for bad in [
+            "", "a/b", "a?b", "a#b", "a\nb", "{owner}", "a{b", "a}b", ".", "..",
+        ] {
             assert!(validate_env(bad).is_err(), "{bad} should be rejected");
         }
     }

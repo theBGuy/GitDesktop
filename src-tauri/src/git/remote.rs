@@ -2257,9 +2257,10 @@ fatal: could not read Username for 'https://gitlab.com': terminal prompts disabl
     /// (`https://user@bitbucket.org/...` — this app's own Bitbucket remotes are
     /// shaped this way, see `strip_https_userinfo`). Git already has a username, so
     /// it asks for the missing half instead: "Password", not "Username". Measured
-    /// against bitbucket.org, same provenance.
+    /// against bitbucket.org, same provenance; the account name itself is
+    /// immaterial to the shape, so it's swapped for a placeholder here.
     const BITBUCKET_NO_CREDENTIALS_STDERR: &str = "\
-fatal: could not read Password for 'https://evangoldberg98@bitbucket.org': terminal prompts disabled
+fatal: could not read Password for 'https://user@bitbucket.org': terminal prompts disabled
 ";
 
     /// Credentials gitlab.com refused, same provenance as the GitHub fixture. The

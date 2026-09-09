@@ -276,10 +276,6 @@ pub(crate) fn web_repo_url(remote_url: &str) -> Option<String> {
     let trimmed = remote_url.trim_start();
     let is_plain_http = trimmed.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("http://"));
     let is_https = trimmed.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://"));
-    // Any scheme OTHER than http(s) carries a transport port, never the web port —
-    // `ssh://`, `git://`, `git+ssh://`, and anything else spelled `word://…`.
-    // scp-style `git@host:path` has no `://` at all and takes the kept-port branch,
-    // which is moot since it never carries a port either way.
     let has_non_web_scheme = !is_plain_http && !is_https && trimmed.contains("://");
     let scheme = if is_plain_http { "http" } else { "https" };
     let authority = if has_non_web_scheme {
@@ -4685,6 +4681,20 @@ mod tests {
         assert_eq!(
             web_repo_url("git://gitea.internal:9418/group/repo.git").as_deref(),
             Some("https://gitea.internal/group/repo"),
+        );
+        // Userinfo never reaches the OS URL opener — this app's own Bitbucket
+        // remotes embed a username (`strip_https_userinfo`'s reason for
+        // existing), and a GitLab PAT-in-URL remote is a real shape too. Both
+        // rely on `remote_authority`/`remote_path`'s own `rsplit_once('@')`
+        // stripping userinfo before the authority is read; pinned here since
+        // this is the one consumer that hands the result to a browser.
+        assert_eq!(
+            web_repo_url("https://user@bitbucket.org/ws/repo.git").as_deref(),
+            Some("https://bitbucket.org/ws/repo"),
+        );
+        assert_eq!(
+            web_repo_url("https://oauth2:glpat-fake@gitlab.com/g/r.git").as_deref(),
+            Some("https://gitlab.com/g/r"),
         );
     }
 
