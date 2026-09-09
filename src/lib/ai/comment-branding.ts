@@ -108,10 +108,13 @@ const HTML_BLOCK_TYPE_6 = new RegExp(
 const HTML_TAG_NAME = "[A-Za-z][A-Za-z0-9-]*";
 const HTML_ATTR = `[ \\t]+[a-zA-Z_:][\\w.:-]*(?:[ \\t]*=[ \\t]*(?:[^ \\t"'=<>\`]+|'[^']*'|"[^"]*"))?`;
 
-/** Type 7: one COMPLETE open or closing tag alone on a line, any tag name. The one
- *  deliberate over-approximation left here is paragraph state: CommonMark forbids a
- *  type-7 block from interrupting a paragraph, and this scan does not track which
- *  lines are inside one. */
+/** Type 7: one COMPLETE open or closing tag alone on a line, any tag name. Unlike
+ *  types 1 and 6 it cannot interrupt a paragraph, so its opener is gated on the
+ *  paragraph-start flag OR {@link opensContainer} — a gate of its own, since the
+ *  indented and definition arms read the flag alone. Without it a `<span>` line
+ *  mid-paragraph opened a region and the reference below it became a phantom "could
+ *  not neutralize"; without the container half, a `> <span>` line failed to open one
+ *  and the reference inside the raw block was wrapped and falsely claimed. */
 const HTML_BLOCK_TYPE_7 = new RegExp(
   `^ {0,3}(?:<${HTML_TAG_NAME}(?:${HTML_ATTR})*[ \\t]*/?>|</${HTML_TAG_NAME}[ \\t]*>)[ \\t]*$`,
 );
@@ -126,11 +129,11 @@ const RAW_TEXT_CLOSE = /<\/(?:pre|script|style|textarea)>/i;
 /** Whether `line` (at its content column) opens a raw HTML block — see
  *  {@link scanRefs} for why the region suppresses wrapping without suppressing
  *  detection. */
-function opensHtmlBlock(line: string): boolean {
+function opensHtmlBlock(line: string, atParagraphStart = true): boolean {
   return (
     RAW_TEXT_OPEN.test(line) ||
     HTML_BLOCK_TYPE_6.test(line) ||
-    HTML_BLOCK_TYPE_7.test(line)
+    (atParagraphStart && HTML_BLOCK_TYPE_7.test(line))
   );
 }
 
@@ -200,6 +203,49 @@ function leavesOpenParagraph(quoted: string): boolean {
   const inner = quoted.replace(LIST_MARKER, "");
   if (ATX_HEADING.test(inner) || TABLE_ROW.test(inner)) return false;
   return HAS_TEXT.test(quoted);
+}
+
+/** Whether `line` can serve as a definition's DEFERRED destination — the line after a
+ *  `]:` that ended its own line, where `depth` is that line's own blockquote depth.
+ *  CommonMark settles BLOCK STRUCTURE before it looks for link reference
+ *  definitions, so any line that STARTS a block ends the definition instead of
+ *  supplying its destination: a fence, a raw-HTML or ATX opener, a setext underline
+ *  or thematic break (both punctuation-only, hence the text test), and any container
+ *  that opens here. A container already open is a different matter — a quoted
+ *  definition's destination carries the same `>` its label did — so the depths are
+ *  compared rather than required to be zero. */
+function opensDeferredDestination(line: string, depth: number): boolean {
+  // Only a container that OPENS ends the definition. A shallower line is a lazy
+  // continuation, which CommonMark folds back into the same paragraph, so the
+  // destination still belongs to the definition and rewriting it corrupts the URL.
+  if (quoteDepth(line) > depth) return false;
+  const content = line.replace(QUOTE_PREFIX, "");
+  return (
+    DEFINITION_TAIL.test(content) &&
+    HAS_TEXT.test(content) &&
+    !FENCE.test(content) &&
+    !ATX_HEADING.test(content) &&
+    !interruptsParagraph(content) &&
+    !LIST_MARKER.test(content)
+  );
+}
+
+/** Whether `line` starts a container relative to `depth` — the notion the type-7 arm
+ *  needs, shared by its two call sites so they cannot drift apart. Any CHANGE of
+ *  blockquote depth ends the paragraph that was running (a rise enters a new one, a
+ *  drop leaves it into lazy-continuation position) and a list marker begins a fresh
+ *  item; in each case a type-7 tag may open where mid-paragraph it could not.
+ *
+ *  KNOWN GAP: a list DEDENT is invisible here, because measuring it needs the item's
+ *  content column and this scan has no indentation model. `- text` then `<span>`
+ *  leaves the item, so the tag opens a block and the reference under it is raw HTML;
+ *  the scan wraps it instead and claims it neutralized — the same false-claim class
+ *  this function exists to prevent, narrowed to list dedents. */
+function opensContainer(line: string, depth: number): boolean {
+  return (
+    quoteDepth(line) !== depth ||
+    LIST_MARKER.test(line.replace(QUOTE_PREFIX, ""))
+  );
 }
 
 /** How many blockquote markers a line opens with. A fence must pair at the SAME
@@ -373,15 +419,26 @@ function paragraphLimit(text: string, from: number): number {
   BLANK_LINE.lastIndex = from;
   const blank = BLANK_LINE.exec(text);
   const limit = blank ? blank.index : text.length;
+  // The container the span opened inside, so the lines below can be judged against it.
+  const openerStart = text.lastIndexOf("\n", from - 1) + 1;
+  let openerEnd = text.indexOf("\n", openerStart);
+  if (openerEnd === -1) openerEnd = text.length;
+  const fromDepth = quoteDepth(text.slice(openerStart, openerEnd));
   let nl = text.indexOf("\n", from);
   while (nl !== -1 && nl + 1 < limit) {
     const start = nl + 1;
     let end = text.indexOf("\n", start);
     if (end === -1) end = text.length;
     const line = text.slice(start, end);
+    // A line after the opener is paragraph-continuation text, where a type-7 tag
+    // cannot open a block — UNLESS it starts a container, which ends that paragraph
+    // and lets one open after all. The scan's own arm reads exactly the same notion;
+    // if these two disagree, a span candidate runs through a line the scan treats as
+    // a block start, the `span === 0` guard suppresses the whole HTML arm there, and
+    // a reference inside the raw block gets wrapped and falsely claimed.
     if (
       FENCE.test(line.replace(QUOTE_PREFIX, "")) ||
-      opensHtmlBlock(containerContent(line))
+      opensHtmlBlock(containerContent(line), opensContainer(line, fromDepth))
     )
       return start;
     nl = end < text.length ? end : -1;
@@ -394,11 +451,19 @@ function paragraphLimit(text: string, from: number): number {
  *  opener without one is literal text — entering span state there would silently
  *  swallow every later reference.
  *
- *  APPROXIMATE in one direction still: another block that can interrupt a paragraph
- *  (a heading, a list) is not bounded here, so its content can pose as a closer and
- *  answer TRUE where markdown would not. That arm opens a span the renderer never
- *  opens, which under-detects — the status quo — and produces no wrap, so the
- *  post-condition in {@link neutralizeSuspectRefs} keeps the disclosure honest. */
+ *  APPROXIMATE, and NOT safely so: {@link paragraphLimit} bounds at blank lines,
+ *  fences and HTML-block starts, but not at every block that can interrupt a
+ *  paragraph — a heading or a list start is not bounded, so its content can pose as
+ *  a closer and answer TRUE where markdown would not.
+ *
+ *  The old claim here was that such an arm "produces no wrap, so the post-condition
+ *  keeps the disclosure honest". That is FALSE for spans crossing a blockquote or
+ *  list start: fuzzing the shape found both arms of the failure — a reference
+ *  wrapped inside a region the renderer treats as code or raw HTML and then claimed
+ *  neutralized, and a live reference swallowed by a span the renderer never opens
+ *  and so never reported. The class predates the HTML-region work and closing it
+ *  means bounding this search at container starts as well, which is a larger change
+ *  than a region rule; it is tracked separately rather than patched here. */
 function hasClosingRun(text: string, from: number, run: number): boolean {
   const limit = paragraphLimit(text, from);
   let i = from;
@@ -480,7 +545,23 @@ function hasClosingRun(text: string, from: number, run: number): boolean {
  * prose. A malformed definition at a genuine start is skipped anyway; that is an
  * under-detect, the status-quo direction.
  *
- * A fifth region, the raw HTML block (CommonMark types 1, 6 and 7), is DETECTED
+ * A deferred destination must not be a BLOCK START — see
+ * {@link opensDeferredDestination}. Block structure is settled before definitions
+ * are looked for, so `[d]:` over `---`, `***`, a fence, a type-1/6 tag, or any
+ * container marker leaves both references live rather than minting a definition.
+ * `## H` needs no rule of its own: a space makes it an invalid bare destination and
+ * {@link DEFINITION_TAIL} already rejects it.
+ *
+ * ORACLE DIVERGENCE, worth knowing before trusting a test here: marked 18.0.11
+ * disagrees on the leaf shapes — it swallows `---`, `***`, a type-6 tag or a fence
+ * line into the destination and renders the pair as an empty definition. GitHub
+ * renders `[d #5]:` over `---` as a HEADING carrying a live linked reference
+ * (probed 2026-09-08), which is what CommonMark's two-phase parse predicts. Where
+ * the two disagree the FORGE wins, since predicting the forge is this module's whole
+ * job; the suite pins those shapes directly and excludes them from its
+ * marked-oracle sweep.
+ *
+ * A sixth region, the raw HTML block (CommonMark types 1, 6 and 7), is DETECTED
  * but never rewritten. A forge's reference filter runs inside raw HTML, so a `#N`
  * there really does autolink and the manual seam must still warn about it; a
  * backtick wrap there, though, is literal text that mangles the block while the
@@ -494,14 +575,13 @@ function hasClosingRun(text: string, from: number, run: number): boolean {
  * its content is scanned. That mangles at worst, since fenced content never
  * autolinks either way.
  *
- * The remaining approximation is paragraph state, which this scan does not track,
- * so a type-7 opener CommonMark would read as a lazy paragraph continuation opens
- * a region here. That costs a wrap, and usually gains an honest disclosure — but
- * not always: where the stranded ref sits somewhere the forge would not have
- * linked anyway (inside a link label, say, as in a `<span>` line followed by
- * `[issue #123](url)`, or in `<a href="#123">` alone on a line), the disclosure
- * names a reference that was never live. Over-warning is the tolerable failure;
- * a false claim of neutralization is not.
+ * Paragraph state IS tracked ({@link leavesOpenParagraph}), and the type-7 arm reads
+ * it alongside {@link opensContainer}. What remains is that pair answering YES too
+ * readily: `text` then `2. <span>` looks like a container start, but an ordered list
+ * beginning at 2 cannot interrupt a paragraph, so no block opens and the reference
+ * below stays ordinary prose. The scan holds it and discloses it — an over-hold with
+ * a TRUTHFUL disclosure, which is the polarity this arm is built for. Over-warning
+ * is the tolerable failure; a false claim of neutralization is not.
  *
  * That phantom-disclosure arm has one cosmetic sibling and one that is not. A `#N`
  * inside an inline HTML ATTRIBUTE is inert — no reference filter rewrites attribute
@@ -529,9 +609,10 @@ function hasClosingRun(text: string, from: number, run: number): boolean {
  * inside a label is still live for pairing), definition lines YES — a valid one
  * renders nothing and could pair with nothing, but the INVALID lines this arm also
  * skips are prose whose ticks are live, and over-recording only lengthens a wrap —
- * so the link arm alone feeds `strays`. Every claim built on that set is
- * SCANNER-RELATIVE; the marked-oracle test in `scripts/comment-refs.test.mjs` is
- * what grounds it against a real parser.
+ * so the link and definition arms are what feed `strays`. Every claim built on that
+ * set is SCANNER-RELATIVE; the marked-oracle test in `scripts/comment-refs.test.mjs`
+ * is what grounds it against a real parser, except where marked itself diverges from
+ * the forges — those fixtures are pinned directly instead.
  */
 function scanRefs(
   text: string,
@@ -542,8 +623,20 @@ function scanRefs(
   if (triggers.length === 0) return out;
   // A reference link resolves against a definition that may sit ANYWHERE in the
   // document, so phase 0 walks the lines first and collects the labels. Both phases
-  // run this one classification, so the pre-pass honours the same regions the scan
-  // does and no definition inside a fence, an indent, or raw HTML is ever collected.
+  // run the same line classification AND the same character scan, so the pre-pass
+  // honours every region the scan does — no definition inside a fence, an indent,
+  // raw HTML, or a multi-line code span is ever collected.
+  //
+  // The one thing phase 0 lacks is the label set it is building, so a `[` it cannot
+  // resolve is walked into rather than skipped. NO COUNTEREXAMPLE HAS BEEN FOUND to
+  // the claim that this only ever shrinks the label set: the subset argument is
+  // solid for the reference lookups themselves, but the span-state divergence it can
+  // cause has not been proven monotonic, so treat the direction as observed rather
+  // than guaranteed. That divergence can open a code span phase 1
+  // never opens, which suppresses a definition line phase 0 would otherwise have
+  // collected — a SMALLER label set, so fewer use sites are skipped and more
+  // references are reported. Under-collecting is the safe direction here, and two
+  // passes settle it: nothing feeds back into phase 0.
   const labels = new Set<string>();
   let phase = 0;
   let fence: { char: string; len: number; depth: number } | null = null;
@@ -561,6 +654,9 @@ function scanRefs(
   // on the line after a `]:` that ended its own line.
   let atParagraphStart = true;
   let definitionTail = false;
+  // The previous line's blockquote depth, so the HTML arm can tell an opening
+  // container from one that was already there.
+  let prevDepth = 0;
   // Lengths of the unpaired literal runs seen so far in THIS paragraph; inline
   // syntax is paragraph-scoped, so a blank line clears them.
   let strays = new Set<number>();
@@ -568,8 +664,9 @@ function scanRefs(
   while (true) {
     if (lineStart > text.length) {
       if (phase === 1) break;
-      // Rewind for the scanning pass with every piece of block state reset, so the
-      // two walks classify identically and the label set is complete before use.
+      // Rewind for the scanning pass with every piece of block state reset — the
+      // stray set included, so phase 0's tick bookkeeping cannot leak into the wrap
+      // lengths phase 1 computes — and with the label set now built.
       phase = 1;
       fence = null;
       span = 0;
@@ -577,6 +674,7 @@ function scanRefs(
       rawText = false;
       atParagraphStart = true;
       definitionTail = false;
+      prevDepth = 0;
       strays = new Set();
       lineStart = 0;
       continue;
@@ -589,6 +687,16 @@ function scanRefs(
     // nothing and read as the blank line that ends an open block.
     const quoted = line.replace(QUOTE_PREFIX, "");
     const inner = quoted.replace(LIST_MARKER, "");
+    const depth = quoteDepth(line);
+    // A container that starts on this line begins a fresh block context, so a type-7
+    // tag may open inside it even while the outer paragraph is still going. Only the
+    // HTML arm reads this, and it fails OPEN on purpose: over-holding costs an honest
+    // disclosure, whereas wrapping inside raw HTML is a false claim of
+    // neutralization — the opposite polarity from the indent arm, which fails closed.
+    const containerOpens = opensContainer(line, prevDepth);
+    // Updated here rather than at the loop's foot, so the block arms' `continue`
+    // paths cannot leave it stale.
+    prevDepth = depth;
     // Closing a type-1 block is deferred past this line's scan: the line carrying
     // the closing tag is the block's LAST line, content included.
     let closeAfterLine = false;
@@ -620,7 +728,6 @@ function scanRefs(
         // depths. A fence opened by `- ~~~` therefore stays unrecognized, which is
         // today's behaviour and mangles at worst — fenced content never autolinks.
         const fenced = FENCE.exec(quoted);
-        const depth = quoteDepth(line);
         if (fence) {
           if (
             fenced &&
@@ -697,8 +804,9 @@ function scanRefs(
             // one, so it is validated here rather than trusted on arrival.
             let nextEnd = text.indexOf("\n", lineEnd + 1);
             if (nextEnd === -1) nextEnd = text.length;
-            const next = containerContent(text.slice(lineEnd + 1, nextEnd));
-            defines = lineEnd < text.length && DEFINITION_TAIL.test(next);
+            const next = text.slice(lineEnd + 1, nextEnd);
+            defines =
+              lineEnd < text.length && opensDeferredDestination(next, depth);
             deferred = defines;
           }
         }
@@ -718,15 +826,17 @@ function scanRefs(
           htmlBlock = true;
           rawText = true;
           if (RAW_TEXT_CLOSE.test(line)) closeAfterLine = true;
-        } else if (opensHtmlBlock(inner)) {
+        } else if (opensHtmlBlock(inner, atParagraphStart || containerOpens)) {
           htmlBlock = true;
         }
       }
     }
     let i = lineStart;
-    // Phase 0 classifies lines and nothing else — the character scan belongs to the
-    // pass that has the whole label set in hand.
-    while (phase === 1 && i < lineEnd) {
+    // BOTH phases run the character scan. Phase 0 needs it for its side effects, not
+    // its output: code-span state is derived here, and without it a definition line
+    // sitting inside a multi-line span would register a phantom label that phase 1
+    // then resolves a live reference against. Only the recording is phase-gated.
+    while (i < lineEnd) {
       const ch = text[i];
       // A raw HTML block parses no inline syntax, so its backticks and brackets
       // are ordinary characters and only the trigger scan runs inside one.
@@ -793,13 +903,16 @@ function scanRefs(
           );
           if (num) {
             const end = i + 1 + num[0].length;
-            out.push({
-              start,
-              end,
-              token: text.slice(start, end),
-              wrapRun: wrapRunLength(strays),
-              htmlBlock,
-            });
+            if (phase === 1) {
+              out.push({
+                start,
+                end,
+                token: text.slice(start, end),
+                wrapRun: wrapRunLength(strays),
+                htmlBlock,
+              });
+            }
+            // Advanced in both phases, so the two walks stay in step.
             i = end;
             continue;
           }

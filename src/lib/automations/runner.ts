@@ -554,8 +554,9 @@ async function run(
         kind: label,
         model: reviewCfg.model,
         automated: true,
-        // Unattended seam: suspect `#N` refs are backtick-wrapped with a disclosure
-        // line (owner ruling) — the manual panel confirms with the user instead.
+        // Unattended seam: suspect `#N` refs are backtick-wrapped — or, where a
+        // wrap can't neutralize (raw HTML), left alone — with a disclosure line
+        // naming each (owner ruling); the manual panel confirms with the user.
         neutralizeRefs: true,
         text,
       });

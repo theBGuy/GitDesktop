@@ -246,6 +246,145 @@ test("the valid destination forms are definitions", () => {
   }
 });
 
+// A definition line inside a multi-line code span is not a definition, so its label
+// must not resolve a later use site whose reference the renderer leaves live.
+const DEF_INSIDE_SPAN =
+  "See:\n`\n[dest #5]: /url\n`\n\nAlso [dest #5] is unresolved.\n";
+// Deferred destinations that are really BLOCK STARTS. CommonMark settles block
+// structure before it looks for definitions, so none of these supplies a destination:
+// the `]:` line stays a paragraph (or becomes a setext heading) and its reference is
+// live, as is the use site below. Verified against GitHub 2026-09-08.
+//
+// marked 18.0.11 disagrees on the leaf shapes — it swallows `---`, `***`, a type-6
+// tag and a fence line into the destination and renders the pair as an empty
+// definition. Where a fixture is marked-divergent it is pinned directly here and
+// kept out of the renderer-oracle sweep; the container shapes below are NOT
+// divergent (marked and the forge agree the marker prevents the definition).
+const DEF_DEFERRED_SETEXT = "[dest #5]:\n---\n\nAlso [dest #5] here.\n";
+const DEF_DEFERRED_BREAK = "[dest #5]:\n***\n\nAlso [dest #5] here.\n";
+const DEF_DEFERRED_TAG =
+  "[dest #5]:\n<details>x</details>\n\nAlso [dest #5] here.\n";
+const DEF_DEFERRED_FENCE = "[dest #5]:\n```\n\nAlso [dest #5] here.\n";
+const DEF_DEFERRED_QUOTE = "[dest #5]:\n> x\n\nAlso [dest #5] here.\n";
+const DEF_DEFERRED_BULLET = "[dest #5]:\n- item\n\nAlso [dest #5] here.\n";
+const DEF_DEFERRED_ORDERED = "[dest #5]:\n1. item\n\nAlso [dest #5] here.\n";
+const DEF_DEFERRED_HEADING = "[dest #5]:\n## H\n\nAlso [dest #5] here.\n";
+/** Fixtures the renderer oracle cannot judge, and why — kept to the ones that
+ *  actually misbehave rather than the whole divergent family. Under marked the fence
+ *  line becomes the destination, so the pair is a definition; wrapping the reference
+ *  inside the LABEL changes that label, the use site below stops resolving against
+ *  it, and it falls back to live text. The count is therefore 1 before and 1 after,
+ *  and the strictly-decreases arm reads a regression where the forge sees two
+ *  references correctly wrapped. The other divergent shapes (`---`, `***`, a type-6
+ *  tag) still decrease under both models, so they stay in the sweep; all four are
+ *  pinned directly regardless. */
+const ORACLE_EXCLUDED = new Set([DEF_DEFERRED_FENCE]);
+
+test("a definition inside a code span defines nothing", () => {
+  // Phase 0 runs the character scan for exactly this: without span state it would
+  // collect a phantom label and phase 1 would skip the live use site below.
+  assert.deepEqual(findSuspectRefs(DEF_INSIDE_SPAN), ["#5"]);
+  assert.ok(neutralizeSuspectRefs(DEF_INSIDE_SPAN).text.includes("`#5`"));
+});
+
+test("a block start is not a deferred destination", () => {
+  // Every one of these leaves both references live, so both must be detected. The
+  // leaf shapes are pinned here rather than through the oracle because marked reads
+  // them as definitions; the container shapes are not divergent.
+  for (const source of [
+    DEF_DEFERRED_SETEXT,
+    DEF_DEFERRED_BREAK,
+    DEF_DEFERRED_TAG,
+    DEF_DEFERRED_FENCE,
+    DEF_DEFERRED_QUOTE,
+    DEF_DEFERRED_BULLET,
+    DEF_DEFERRED_ORDERED,
+    // A space makes a bare destination invalid, so the heading shape needs no rule
+    // of its own — DEFINITION_TAIL already rejects it.
+    DEF_DEFERRED_HEADING,
+  ]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+    assert.notEqual(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
+const DEF_DEFERRED_QUOTE_TIGHT = "[dest #5]:\n>x\n\nAlso [dest #5] here.\n";
+const DEF_DEFERRED_TYPE7 = "[dest #5]:\n<span>\n\nAlso [dest #5] here.\n";
+
+test("a blockquote marker needs no space to stop a definition", () => {
+  // `>x` is still a blockquote, so the container check has to read the marker rather
+  // than rely on the destination grammar rejecting a space.
+  assert.deepEqual(findSuspectRefs(DEF_DEFERRED_QUOTE_TIGHT), ["#5"]);
+});
+
+test("a type-7 tag DOES supply a deferred destination", () => {
+  // The counterpart that keeps the predicate honest: type 7 cannot interrupt a
+  // paragraph, so unlike a type-6 tag it never displaces the definition.
+  assert.deepEqual(findSuspectRefs(DEF_DEFERRED_TYPE7), []);
+  assert.equal(
+    neutralizeSuspectRefs(DEF_DEFERRED_TYPE7).text,
+    DEF_DEFERRED_TYPE7,
+  );
+});
+
+const DEF_DEFERRED_IN_QUOTE =
+  "> [dest #5]:\n> /url\n>\n> Also [dest #5] here.\n";
+
+// A LAZY continuation — a shallower line under a quoted definition — folds back into
+// the same paragraph, so it still supplies the destination. Rejecting it wraps a
+// working URL's fragment.
+const DEF_LAZY_CONTINUATION = "> [dest]:\n/a?x=#5\n";
+const DEF_LAZY_DEDENT = "> > [dest]:\n> /a?x=#5\n";
+const DEF_LAZY_WITH_USE = "> [dest]:\n/a?x=#5\n>\n> See [dest] now.\n";
+const DEF_LAZY_BLOCK_START = "> [dest #5]:\n---\n\nAlso [dest #5] here.\n";
+
+test("a lazy continuation still carries the destination", () => {
+  // Only a container that OPENS ends the definition; a shallower line does not.
+  for (const source of [
+    DEF_LAZY_CONTINUATION,
+    DEF_LAZY_DEDENT,
+    DEF_LAZY_WITH_USE,
+  ]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    assert.equal(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
+test("a lazy continuation that starts a block still ends the definition", () => {
+  // The block-start checks apply on the lazy path too — `---` is a setext underline
+  // here, so the label's own reference stays live.
+  assert.deepEqual(findSuspectRefs(DEF_LAZY_BLOCK_START), ["#5"]);
+});
+
+test("a container already open still carries the destination", () => {
+  // The depths are COMPARED, not required to be zero: a quoted definition's
+  // destination wears the same `>` its label did, and rejecting it would splice
+  // backticks into a working URL.
+  assert.deepEqual(findSuspectRefs(DEF_DEFERRED_IN_QUOTE), []);
+  assert.equal(
+    neutralizeSuspectRefs(DEF_DEFERRED_IN_QUOTE).text,
+    DEF_DEFERRED_IN_QUOTE,
+  );
+  // And with nothing after the `]:` at all there is no destination to defer to.
+  assert.deepEqual(findSuspectRefs("[dest #5]:"), ["#5"]);
+  assert.deepEqual(findSuspectRefs("[dest #5]:\n"), ["#5"]);
+});
+
+test("a real deferred destination still forms a definition", () => {
+  // The next line is ordinary text, so it supplies the destination and both lines
+  // are skipped — the behaviour the block-start rule must not disturb.
+  for (const source of [
+    "[dest #5]:\n/url\n\nAlso [dest #5] here.\n",
+    LINK_DEF_SPLIT,
+  ]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    assert.equal(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
 test("a malformed definition line is prose", () => {
   // A bracket that never closes, an all-whitespace label, and a missing colon are
   // none of them definitions, so each stays scannable.
@@ -361,6 +500,135 @@ test("a tag alone on its line is a type-7 block, whatever the tag", () => {
   assert.deepEqual(out.survived, ["`#5`"]);
 });
 
+const HTML_TYPE7_MID_PARAGRAPH = "text\n<span>\n#5\n";
+const HTML_TYPE7_AFTER_BLANK = "text\n\n<span>\n#5\n";
+const HTML_TYPE6_MID_PARAGRAPH = "text\n<details>\n#5\n";
+
+test("a type-6 tag DOES interrupt a paragraph", () => {
+  // The counterpart to the gate below: types 1 and 6 may interrupt, so this opener
+  // is not gated and the reference under it is held rather than wrapped.
+  const out = neutralizeSuspectRefs(HTML_TYPE6_MID_PARAGRAPH);
+  assert.equal(out.text, HTML_TYPE6_MID_PARAGRAPH);
+  assert.deepEqual(out.survived, ["`#5`"]);
+});
+
+// A container that OPENS on the line starts a fresh block context, so a type-7 tag
+// may open inside it even mid-paragraph. The paragraph flag alone is depth-blind and
+// said no, which wrapped these references inside raw HTML with a false claim.
+const HTML_TYPE7_IN_CONTAINER = [
+  "text\n> <span>\n> #5\n",
+  "text\n> <span id=x>\n> #5\n",
+  "text\n- <span>\n  #5\n",
+  "text\n1. <span>\n   #5\n",
+  "text\n> > <span>\n> > #5\n",
+  "text\n> </span>\n> #5\n",
+];
+
+const HTML_TYPE7_CONTAINER_ALREADY_OPEN = "> text\n> <span>\n> #5\n";
+const HTML_TYPE7_AFTER_QUOTED_FENCE =
+  "> ```\n> c\n> ```\n> text\n> <span>\n> #5\n";
+
+test("a container already open does not restart the paragraph", () => {
+  // The depth has to INCREASE. Inside a quote that was already there the tag is
+  // still mid-paragraph, so the reference below it is live prose and wraps — and
+  // the second shape proves the depth stays fresh across skipped fence lines.
+  for (const source of [
+    HTML_TYPE7_CONTAINER_ALREADY_OPEN,
+    HTML_TYPE7_AFTER_QUOTED_FENCE,
+  ]) {
+    const label = JSON.stringify(source);
+    const out = neutralizeSuspectRefs(source);
+    assert.deepEqual(out.wrapped, ["`#5`"], label);
+    assert.deepEqual(out.survived, [], label);
+  }
+});
+
+test("a type-7 tag opens inside a container that starts on its line", () => {
+  for (const source of HTML_TYPE7_IN_CONTAINER) {
+    const label = JSON.stringify(source);
+    const out = neutralizeSuspectRefs(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+    assert.equal(out.text, source, label);
+    assert.deepEqual(out.wrapped, [], label);
+    assert.deepEqual(out.survived, ["`#5`"], label);
+  }
+});
+
+// `paragraphLimit` inspects only lines AFTER the one a span opened on, so type 7 can
+// never open there. Passing that on keeps the closer search and the scan agreeing
+// about where the paragraph ends — otherwise the scan walks through a mid-paragraph
+// `<span>` line the limit stopped at, and the span it should have entered never opens.
+const SPAN_ACROSS_TYPE7 = "text ` open\n<span>\nstill ` closed\ncode #5 here\n";
+const SPAN_HIDING_A_DEFINITION =
+  "text `\n<span>\n[d #5]: /u2\n`\n\nSee [d #5] now.\n";
+
+// A span CANDIDATE must not run through a container-opening line. If the closer
+// search reads past one, the span opens, the `span === 0` guard suppresses the whole
+// HTML arm on that line, and the reference inside the raw block is wrapped and
+// falsely claimed. Both call sites read one shared container notion for that reason.
+const SPAN_THROUGH_QUOTE_TYPE7 = "text ` open\n> <span>\n> a ` b #5";
+const SPAN_THROUGH_LIST_TYPE7 = "text ` open\n- <span>\n  a ` b #5";
+const SPAN_THROUGH_NESTED_TYPE7 = "text ` open\n> - <span>\n>   a ` b #5";
+const SPAN_THROUGH_DEDENT_TYPE7 = "> text ` open\n<span>\n> a ` b #5";
+
+test("a span candidate cannot run through a container-opening type-7 line", () => {
+  for (const source of [
+    SPAN_THROUGH_QUOTE_TYPE7,
+    SPAN_THROUGH_LIST_TYPE7,
+    SPAN_THROUGH_NESTED_TYPE7,
+  ]) {
+    const label = JSON.stringify(source);
+    const out = neutralizeSuspectRefs(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+    assert.equal(out.text, source, label);
+    assert.deepEqual(out.wrapped, [], label);
+    assert.deepEqual(out.survived, ["`#5`"], label);
+  }
+});
+
+test("a span candidate cannot run through a dedenting type-7 line", () => {
+  // The depth DROP ends the paragraph just as a rise does, so the two call sites
+  // read a change of depth rather than an increase.
+  const out = neutralizeSuspectRefs(SPAN_THROUGH_DEDENT_TYPE7);
+  assert.equal(out.text, SPAN_THROUGH_DEDENT_TYPE7);
+  assert.deepEqual(out.survived, ["`#5`"]);
+});
+
+test("a depth drop lets a type-7 block open", () => {
+  const source = "> text\n<span>\n> #5\n";
+  const out = neutralizeSuspectRefs(source);
+  assert.equal(out.text, source);
+  assert.deepEqual(out.wrapped, []);
+  assert.deepEqual(out.survived, ["`#5`"]);
+});
+
+test("a code span closes across a mid-paragraph type-7 line", () => {
+  // The tick pairs, so it is not a live stray and the wrap needs only one backtick.
+  assert.equal(
+    neutralizeSuspectRefs(SPAN_ACROSS_TYPE7).text,
+    "text ` open\n<span>\nstill ` closed\ncode `#5` here\n",
+  );
+  // And the span's contents stay untouched: the definition line inside it is code,
+  // so only the live use site below is wrapped.
+  assert.equal(
+    neutralizeSuspectRefs(SPAN_HIDING_A_DEFINITION).text,
+    "text `\n<span>\n[d #5]: /u2\n`\n\nSee [d `#5`] now.\n",
+  );
+});
+
+test("a type-7 tag cannot interrupt a paragraph", () => {
+  // Mid-paragraph the renderer keeps both lines in the paragraph, so the reference
+  // is live and wrapping it beats disclosing a phantom survivor.
+  const mid = neutralizeSuspectRefs(HTML_TYPE7_MID_PARAGRAPH);
+  assert.equal(mid.text, "text\n<span>\n`#5`\n");
+  assert.deepEqual(mid.wrapped, ["`#5`"]);
+  assert.deepEqual(mid.survived, []);
+  // After a blank line it really does open a block, and the reference is held.
+  const after = neutralizeSuspectRefs(HTML_TYPE7_AFTER_BLANK);
+  assert.equal(after.text, HTML_TYPE7_AFTER_BLANK);
+  assert.deepEqual(after.survived, ["`#5`"]);
+});
+
 test("wrapped and held references are reported side by side", () => {
   const out = neutralizeSuspectRefs(HTML_MIXED);
   assert.equal(out.text, "prose `#7`\n\n<details>\nFixes #8\n</details>");
@@ -426,6 +694,8 @@ const FENCE_QUOTE_UNPAIRED_REPLY =
 const FENCE_QUOTE_UNPAIRED_MIN = "> ~~~\n> code\n\nFixes #123\n";
 const FENCE_QUOTE_LAZY = "> ~~~\nFixes #123\n";
 const FENCE_UNQUOTED_UNPAIRED = "```\nFixes #123\n";
+// A fence opens at the blockquote content column, and pairs only at its own depth.
+const FENCE_IN_QUOTE = "> ~~~\n> #123\n> ~~~\n";
 
 test("an unterminated fence in a blockquote ends with the blockquote", () => {
   // A blank line ends the quote, and so does a line that drops below its depth.
@@ -525,8 +795,6 @@ test("a blockquote's own blank line and indent are read at its content column", 
   }
 });
 
-// A fence opens at the blockquote content column, and pairs only at its own depth.
-const FENCE_IN_QUOTE = "> ~~~\n> #123\n> ~~~\n";
 const FENCE_DEPTH_MISMATCH = "> ```\n> a\n```\n#123\n";
 const FENCE_QUOTE_THEN_PROSE = "> ~~~\n> a\n> ~~~\n\n#123\n";
 
@@ -547,6 +815,10 @@ test("a fence pairs only at its own container depth", () => {
     neutralizeSuspectRefs(FENCE_DEPTH_MISMATCH).text,
     FENCE_DEPTH_MISMATCH,
   );
+});
+
+test("a fence recovers when a deeper quote drops a level", () => {
+  assert.deepEqual(findSuspectRefs("> > ~~~\n> > c\n> after #1\n"), ["#1"]);
 });
 
 // Backslash-parity fixtures; rule on `isEscaped`, guard below pins the counts.
@@ -602,25 +874,6 @@ test("an escaped reference inside a raw HTML block is held in BOTH modes", () =>
     assert.deepEqual(out.wrapped, [], label);
     assert.deepEqual(out.survived, [`\`${ESC_1}\``], label);
   }
-});
-
-test("the footer names an escaped reference held inside raw HTML", () => {
-  const body = buildAiCommentBody({
-    ...PARTS,
-    text: ESCAPED_IN_HTML,
-    neutralizeRefs: true,
-  });
-  assert.ok(body.includes(ESCAPED_IN_HTML), body);
-  assert.ok(
-    body.endsWith(
-      `_This automated run could not neutralize \`${ESC_1}\` — verify before trusting any links it created._`,
-    ),
-    body,
-  );
-});
-
-test("a fence recovers when a deeper quote drops a level", () => {
-  assert.deepEqual(findSuspectRefs("> > ~~~\n> > c\n> after #1\n"), ["#1"]);
 });
 
 test("the GitLab mode leaves an escaped trigger alone", () => {
@@ -940,6 +1193,34 @@ const CORPUS = [
   FENCE_NESTED_BLANK,
   HTML_QUOTE_BLANK_INSIDE,
   ESCAPED_IN_HTML,
+  HTML_TYPE7_MID_PARAGRAPH,
+  HTML_TYPE7_AFTER_BLANK,
+  HTML_TYPE6_MID_PARAGRAPH,
+  DEF_INSIDE_SPAN,
+  DEF_DEFERRED_SETEXT,
+  DEF_DEFERRED_BREAK,
+  DEF_DEFERRED_TAG,
+  DEF_DEFERRED_FENCE,
+  DEF_DEFERRED_QUOTE,
+  DEF_DEFERRED_BULLET,
+  DEF_DEFERRED_ORDERED,
+  DEF_DEFERRED_HEADING,
+  ...HTML_TYPE7_IN_CONTAINER,
+  SPAN_ACROSS_TYPE7,
+  SPAN_HIDING_A_DEFINITION,
+  DEF_DEFERRED_QUOTE_TIGHT,
+  DEF_DEFERRED_TYPE7,
+  DEF_DEFERRED_IN_QUOTE,
+  DEF_LAZY_CONTINUATION,
+  DEF_LAZY_DEDENT,
+  DEF_LAZY_WITH_USE,
+  DEF_LAZY_BLOCK_START,
+  SPAN_THROUGH_QUOTE_TYPE7,
+  SPAN_THROUGH_LIST_TYPE7,
+  SPAN_THROUGH_NESTED_TYPE7,
+  SPAN_THROUGH_DEDENT_TYPE7,
+  HTML_TYPE7_CONTAINER_ALREADY_OPEN,
+  HTML_TYPE7_AFTER_QUOTED_FENCE,
   INDENT_AFTER_HEADING,
   INDENT_AFTER_SETEXT,
   INDENT_AFTER_BREAK,
@@ -1047,6 +1328,9 @@ test("a wrapped ref never renders more exposed than it started", async (t) => {
   }
   const md = new Marked();
   for (const source of CORPUS) {
+    // marked parses a few geometries differently from the forges; those are pinned
+    // directly instead — see ORACLE_EXCLUDED for which and why.
+    if (ORACLE_EXCLUDED.has(source)) continue;
     const out = neutralizeSuspectRefs(source);
     if (out.wrapped.length === 0 && out.survived.length === 0) continue;
     const after = outsideCode(md.parse(out.text));
@@ -1222,6 +1506,21 @@ test("the disclosure names the escaped form it actually shipped", () => {
   );
   // The footer's own copy sits in a code span, so it mints no reference either.
   assert.deepEqual(findSuspectRefs(body), []);
+});
+
+test("the footer names an escaped reference held inside raw HTML", () => {
+  const body = buildAiCommentBody({
+    ...PARTS,
+    text: ESCAPED_IN_HTML,
+    neutralizeRefs: true,
+  });
+  assert.ok(body.includes(ESCAPED_IN_HTML), body);
+  assert.ok(
+    body.endsWith(
+      `_This automated run could not neutralize \`${ESC_1}\` — verify before trusting any links it created._`,
+    ),
+    body,
+  );
 });
 
 test("without the flag the refs are left exactly as written", () => {
