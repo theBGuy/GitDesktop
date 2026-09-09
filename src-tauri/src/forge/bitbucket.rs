@@ -5417,6 +5417,45 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
 mod tests {
     use super::*;
 
+    /// The web URL resolves purely from `origin` for both https and scp-style ssh
+    /// (real repo, temp_dir, git on PATH) — Bitbucket has no subgroup or
+    /// self-managed host concept here, so `bitbucket.org` stays fixed.
+    ///
+    /// A FRESH temp repo per remote form — `git_remote_url`'s TTL cache is keyed by
+    /// `(repo_path, name)`, and this test's raw `git remote add` bypasses the
+    /// app-side commands that invalidate it, so reusing one path across iterations
+    /// would serve the first remote's cached URL to every later assertion.
+    #[tokio::test]
+    async fn repo_url_resolves_from_origin() {
+        async fn run(repo: &str, args: &[&str]) {
+            let _ = crate::git::runner::run_git(
+                Some(repo),
+                args,
+                crate::git::runner::DEFAULT_TIMEOUT,
+            )
+            .await;
+        }
+
+        for (tag, remote) in [
+            ("https", "https://bitbucket.org/thebguy1/dispatch-demo.git"),
+            ("scp", "git@bitbucket.org:thebguy1/dispatch-demo.git"),
+        ] {
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("gd-bb-repo-url-{tag}-"))
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let repo_s = repo.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q"]).await;
+            run(&repo_s, &["remote", "add", "origin", remote]).await;
+            assert_eq!(
+                repo_url(&repo_s).await.unwrap(),
+                "https://bitbucket.org/thebguy1/dispatch-demo"
+            );
+        }
+    }
+
     /// Bitbucket Cloud's PR payload has no mergeability field and its only
     /// pre-check needs a write scope, so the honest answer is "unavailable" —
     /// mirroring how `merge_commit_allowed` stays `None` here.

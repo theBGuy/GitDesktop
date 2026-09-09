@@ -579,6 +579,19 @@ pub async fn gh_issue_types(repo_path: String, lens: Option<String>) -> AppResul
     Ok(types)
 }
 
+/// The `gh issue edit` argv for setting/clearing an issue's type: `--type <t>` and
+/// `--remove-type` are mutually exclusive on gh's own grammar, so a blank or absent
+/// name must switch the WHOLE shape to `--remove-type` rather than sending both or
+/// an empty `--type`. Pure, so the shape is pinned without a spawn.
+fn issue_set_type_args<'a>(slug: &'a str, n: &'a str, type_name: Option<&'a str>) -> Vec<&'a str> {
+    match type_name {
+        Some(t) if !t.trim().is_empty() => {
+            vec!["issue", "edit", n, "--repo", slug, "--type", t]
+        }
+        _ => vec!["issue", "edit", n, "--repo", slug, "--remove-type"],
+    }
+}
+
 /// Sets (or, with `None`, clears) an issue's type by name (`gh issue edit`).
 #[tauri::command]
 pub async fn gh_issue_set_type(
@@ -589,12 +602,7 @@ pub async fn gh_issue_set_type(
 ) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    let args: Vec<&str> = match type_name.as_deref() {
-        Some(t) if !t.trim().is_empty() => {
-            vec!["issue", "edit", &n, "--repo", &slug, "--type", t]
-        }
-        _ => vec!["issue", "edit", &n, "--repo", &slug, "--remove-type"],
-    };
+    let args = issue_set_type_args(&slug, &n, type_name.as_deref());
     run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
     Ok(())
 }
@@ -1466,8 +1474,22 @@ pub fn read_issue_templates(repo_path: String) -> AppResult<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_issues_disabled, map_gh_too_old, ISSUE_TIMELINE_QUERY};
+    use super::{is_issues_disabled, issue_set_type_args, map_gh_too_old, ISSUE_TIMELINE_QUERY};
     use crate::error::AppError;
+
+    /// `--type`/`--remove-type` are mutually exclusive on gh's grammar — a blank or
+    /// absent name must switch the whole shape, never send an empty `--type` value
+    /// alongside `--remove-type`.
+    #[test]
+    fn issue_set_type_args_switches_shape_never_sends_both() {
+        let typed = issue_set_type_args("o/r", "7", Some("bug"));
+        assert_eq!(typed, ["issue", "edit", "7", "--repo", "o/r", "--type", "bug"]);
+
+        for cleared in [None, Some(""), Some("   ")] {
+            let args = issue_set_type_args("o/r", "7", cleared);
+            assert_eq!(args, ["issue", "edit", "7", "--repo", "o/r", "--remove-type"]);
+        }
+    }
 
     #[test]
     fn detects_the_disabled_issues_signature() {

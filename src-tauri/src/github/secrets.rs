@@ -74,9 +74,13 @@ fn check_env_app(app: &str, env: Option<&str>) -> AppResult<()> {
 }
 
 /// A loose guard against path-breaking environment names (the value comes from
-/// our own environments list, so this is belt-and-suspenders).
+/// our own environments list, so this is belt-and-suspenders). `env` reaches an
+/// endpoint path (`secrets_path`/`variables_path`), never a `-f`/`-F` field, so
+/// `{`/`}` are rejected alongside the rest: gh expands `{…}` in an endpoint as an
+/// owner/repo placeholder, retargeting the request at another repo (the same class
+/// `rulesets.rs`'s `refuse_braced` guards for branch names).
 fn validate_env(env: &str) -> AppResult<()> {
-    if env.is_empty() || env.contains(['/', '?', '#', '\n']) {
+    if env.is_empty() || env.contains(['/', '?', '#', '\n', '{', '}']) {
         return Err(AppError::InvalidArgument(format!(
             "invalid environment: {env}"
         )));
@@ -286,4 +290,64 @@ pub async fn gh_environments_list(repo_path: String) -> AppResult<Vec<String>> {
         environments: Vec::new(),
     });
     Ok(resp.environments.into_iter().map(|e| e.name).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_var_name_admits_only_the_documented_shape() {
+        for ok in ["MY_SECRET", "_leading_underscore", "a1", "GITHUBX"] {
+            assert!(validate_var_name(ok).is_ok(), "{ok} should be valid");
+        }
+        for bad in ["1STARTS_WITH_DIGIT", "has-hyphen", "has space", "", "GITHUB_TOKEN", "github_token"] {
+            assert!(validate_var_name(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    /// `env` reaches an endpoint path, never a `-f`/`-F` field — `{`/`}` must be
+    /// refused alongside the pre-existing `/`, `?`, `#`, `\n`, or a crafted
+    /// environment name (`{owner}`, say) could retarget the request via gh's own
+    /// endpoint placeholder expansion.
+    #[test]
+    fn validate_env_refuses_path_and_brace_metacharacters() {
+        for ok in ["production", "staging-2", "My Env"] {
+            assert!(validate_env(ok).is_ok(), "{ok} should be valid");
+        }
+        for bad in ["", "a/b", "a?b", "a#b", "a\nb", "{owner}", "a{b", "a}b"] {
+            assert!(validate_env(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn secrets_and_variables_path_scope_to_the_app_or_environment() {
+        assert_eq!(
+            secrets_path("o/r", "actions", None).unwrap(),
+            "repos/o/r/actions/secrets?per_page=100"
+        );
+        assert_eq!(
+            secrets_path("o/r", "actions", Some("prod")).unwrap(),
+            "repos/o/r/environments/prod/secrets?per_page=100"
+        );
+        assert_eq!(
+            variables_path("o/r", None).unwrap(),
+            "repos/o/r/actions/variables?per_page=100"
+        );
+        assert_eq!(
+            variables_path("o/r", Some("prod")).unwrap(),
+            "repos/o/r/environments/prod/variables?per_page=100"
+        );
+        // A braced environment name never reaches the endpoint string at all.
+        assert!(secrets_path("o/r", "actions", Some("{owner}")).is_err());
+        assert!(variables_path("o/r", Some("{owner}")).is_err());
+    }
+
+    #[test]
+    fn app_segment_rejects_unknown_apps() {
+        for ok in ["actions", "dependabot", "codespaces"] {
+            assert_eq!(app_segment(ok).unwrap(), ok);
+        }
+        assert!(app_segment("unknown").is_err());
+    }
 }

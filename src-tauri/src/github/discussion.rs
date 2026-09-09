@@ -222,6 +222,52 @@ struct RawDiscussionNode {
 /// single page of [`DISCUSSION_DEFAULT_LIMIT`]. Larger limits page the GraphQL
 /// connection (≤[`DISCUSSION_PAGE_MAX`] per request) until the limit is met or
 /// GitHub reports no further page.
+/// The `gh api graphql` argv for one page of [`gh_discussion_list`]. `owner`/`name`
+/// ride `-F`: they come from the checked-out repo's own slug (already charset-gated
+/// by `valid_github_slug` before reaching here), and `$owner`/`$name` are typed
+/// `String!` variables where `-F`'s coercion is a no-op. `first`/`after` are
+/// likewise typed (`Int!`/`String`). `category` is the
+/// ONE field here `-f`, never `-F`: it is `$category:ID`, a string on the wire, and
+/// — unlike owner/name — this app never validates its charset, so `-F`'s leading-`@`
+/// file-read magic would be reachable through it. It also crosses a genuinely
+/// untrusted boundary: the MCP `list_discussions` tool forwards its caller's
+/// `category` argument here verbatim (`mcp_server/read_forge.rs`), and an MCP
+/// client can be an LLM agent steered by a prompt-injected repo. Pure, so the shape
+/// is pinned without a spawn.
+fn discussion_list_args(
+    owner: &str,
+    name: &str,
+    page: u32,
+    category: Option<&str>,
+    cursor: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-F".to_string(),
+        format!("owner={owner}"),
+        "-F".to_string(),
+        format!("name={name}"),
+        "-F".to_string(),
+        format!("first={page}"),
+    ];
+    // Only pass categoryId when filtering; absent leaves the variable null.
+    if let Some(cat) = category.filter(|c| !c.is_empty()) {
+        args.push("-f".to_string());
+        args.push(format!("category={cat}"));
+    }
+    // The `after` cursor is server-opaque text, so it travels as a String
+    // variable; omitted on the first request (a missing GraphQL variable is
+    // null → the first page).
+    if let Some(c) = cursor {
+        args.push("-f".to_string());
+        args.push(format!("after={c}"));
+    }
+    args.push("-f".to_string());
+    args.push(format!("query={LIST_QUERY}"));
+    args
+}
+
 #[tauri::command]
 pub async fn gh_discussion_list(
     repo_path: String,
@@ -237,30 +283,13 @@ pub async fn gh_discussion_list(
         // Ask for only what's still needed, capped at GraphQL's per-page max.
         let remaining = target.saturating_sub(raw_nodes.len() as u32);
         let page = remaining.min(DISCUSSION_PAGE_MAX);
-        let mut args = vec![
-            "api".to_string(),
-            "graphql".to_string(),
-            "-F".to_string(),
-            format!("owner={owner}"),
-            "-F".to_string(),
-            format!("name={name}"),
-            "-F".to_string(),
-            format!("first={page}"),
-        ];
-        // Only pass categoryId when filtering; absent leaves the variable null.
-        if let Some(cat) = category.as_deref().filter(|c| !c.is_empty()) {
-            args.push("-F".to_string());
-            args.push(format!("category={cat}"));
-        }
-        // The `after` cursor is server-opaque text, so it travels as a String
-        // variable; omitted on the first request (a missing GraphQL variable is
-        // null → the first page).
-        if let Some(c) = &cursor {
-            args.push("-f".to_string());
-            args.push(format!("after={c}"));
-        }
-        args.push("-f".to_string());
-        args.push(format!("query={LIST_QUERY}"));
+        let args = discussion_list_args(
+            &owner,
+            &name,
+            page,
+            category.as_deref(),
+            cursor.as_deref(),
+        );
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
         let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
@@ -1029,5 +1058,47 @@ mod tests {
             map_scope_error(AppError::InvalidArgument("write:discussion".into())),
             AppError::InvalidArgument(_)
         ));
+    }
+
+    /// `category` — the one field here sourced from an untrusted boundary (MCP's
+    /// `list_discussions` forwards it verbatim) — must ride `-f`, never `-F`: a
+    /// leading `@` on `-F`'s value reads a host file and sends its contents to
+    /// GitHub's API. `owner`/`name`/`first`/`after` are pre-validated or
+    /// programmatically formatted, so their `-F`/`-f` choice is fixed by their
+    /// GraphQL type instead.
+    #[test]
+    fn category_rides_f_never_capital_f() {
+        let args = discussion_list_args("o", "r", 50, Some("DIC_kwABC"), None);
+        let cat = args.iter().position(|a| a == "category=DIC_kwABC").expect("category present");
+        assert_eq!(args[cat - 1], "-f", "category must ride -f: {args:?}");
+        assert!(
+            !args.windows(2).any(|w| w[0] == "-F" && w[1].starts_with("category=")),
+            "category must never ride -F (magic-@ file-read): {args:?}"
+        );
+
+        // Absent/empty category adds no field at all — the GraphQL variable stays
+        // null, not an empty-string filter.
+        for absent in [None, Some("")] {
+            let args = discussion_list_args("o", "r", 50, absent, None);
+            assert!(
+                !args.iter().any(|a| a.starts_with("category=")),
+                "{absent:?} must add no category field: {args:?}"
+            );
+        }
+
+        // The cursor is likewise `-f` (server-opaque text) and absent on the first page.
+        let paged = discussion_list_args("o", "r", 50, None, Some("cursor123"));
+        let after = paged.iter().position(|a| a == "after=cursor123").expect("after present");
+        assert_eq!(paged[after - 1], "-f", "after must ride -f: {paged:?}");
+        assert!(!discussion_list_args("o", "r", 50, None, None)
+            .iter()
+            .any(|a| a.starts_with("after=")));
+
+        // owner/name/first are the typed fields and ride -F.
+        let args = discussion_list_args("o", "r", 50, None, None);
+        for (field, want) in [("owner=o", "-F"), ("name=r", "-F"), ("first=50", "-F")] {
+            let i = args.iter().position(|a| a == field).unwrap_or_else(|| panic!("{field} present"));
+            assert_eq!(args[i - 1], want, "{field}: {args:?}");
+        }
     }
 }

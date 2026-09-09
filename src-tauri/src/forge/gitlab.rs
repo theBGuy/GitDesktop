@@ -5118,18 +5118,15 @@ struct GlabProjectRef {
     http_url_to_repo: String,
 }
 
-/// The repo's web URL (project home) for "View on GitLab".
+/// The repo's web URL (project home) for "View on GitLab" — derived from the
+/// `origin` remote alone, no `glab` call, so it resolves signed out too (mirrors
+/// Bitbucket's `repo_url`, which has always worked this way).
 pub async fn repo_url(repo_path: &str) -> AppResult<String> {
-    let enc = encode_project(&project_path(repo_path).await?);
-    let out = run_glab(
-        Some(repo_path),
-        &["api", &format!("projects/{enc}")],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await?;
-    let p: GlabProjectRef = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab project: {e}")))?;
-    Ok(p.web_url)
+    let url =
+        crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
+    crate::forge::web_repo_url(&url).ok_or_else(|| {
+        AppError::Glab("could not determine the repository's web URL from the origin remote".into())
+    })
 }
 
 /// The project's visibility (`public` / `internal` / `private`, already
@@ -8474,6 +8471,47 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The web URL resolves purely from `origin` — no `glab` spawn — for https,
+    /// scp-style ssh, and a self-managed host with a subgroup path and a port (real
+    /// repo, temp_dir, git on PATH).
+    ///
+    /// A FRESH temp repo per remote form — `git_remote_url`'s TTL cache is keyed by
+    /// `(repo_path, name)`, and this test's raw `git remote add` bypasses the
+    /// app-side commands that invalidate it, so reusing one path across iterations
+    /// would serve the first remote's cached URL to every later assertion.
+    #[tokio::test]
+    async fn repo_url_resolves_from_origin_without_glab() {
+        async fn run(repo: &str, args: &[&str]) {
+            let _ = crate::git::runner::run_git(
+                Some(repo),
+                args,
+                crate::git::runner::DEFAULT_TIMEOUT,
+            )
+            .await;
+        }
+
+        for (tag, remote, want) in [
+            ("https", "https://gitlab.com/group/sub/repo.git", "https://gitlab.com/group/sub/repo"),
+            ("scp", "git@gitlab.com:group/sub/repo.git", "https://gitlab.com/group/sub/repo"),
+            (
+                "self-managed",
+                "https://gitlab.acme.corp:8443/team/svc.git",
+                "https://gitlab.acme.corp:8443/team/svc",
+            ),
+        ] {
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("gd-gitlab-repo-url-{tag}-"))
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let repo_s = repo.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q"]).await;
+            run(&repo_s, &["remote", "add", "origin", remote]).await;
+            assert_eq!(repo_url(&repo_s).await.unwrap(), want);
+        }
+    }
 
     /// The MR edit PUT sends `target_branch` only when retargeting — the no-base
     /// form must stay byte-identical to the title/description-only request.

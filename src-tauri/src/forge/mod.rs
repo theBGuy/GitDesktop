@@ -243,6 +243,21 @@ pub(crate) fn remote_path(url: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
+/// A remote's web (browser) URL — `https://{authority}/{path}`, always `https`
+/// regardless of the remote's own scheme, so an ssh-cloned repo still opens a
+/// browser tab. `None` when the remote has no parseable host+path.
+///
+/// The authority is gated through [`is_safe_authority`]: unlike [`remote_path`]'s
+/// callers (git argv, API path segments the CLI itself validates), this string is
+/// handed to the OS URL opener, and `remote_authority` alone does not charset-check
+/// the host — only a malformed port falls back to the bare host. A crafted origin
+/// (`https://evil.com;rm -rf /path`) would otherwise reach the opener verbatim.
+pub(crate) fn web_repo_url(remote_url: &str) -> Option<String> {
+    let authority = remote_authority(remote_url).filter(|a| is_safe_authority(a))?;
+    let path = remote_path(remote_url)?;
+    Some(format!("https://{authority}/{path}"))
+}
+
 /// Percent-encode a value for an API query string (RFC-3986 unreserved kept,
 /// everything else encoded) — an unencoded `&`/`#`/`?`/`=`/`%`/space corrupts the
 /// query. Shared by the GitLab (`glab api`) and Bitbucket (HTTP) providers, which
@@ -4554,6 +4569,49 @@ mod tests {
         // The gate also refuses an EMPTY authority, so a file:// remote no longer
         // yields its filesystem path as a bogus owner/repo slug.
         assert_eq!(remote_path("file:///srv/repos/x"), None);
+    }
+
+    #[test]
+    fn web_repo_url_derives_a_browser_link_from_any_remote_form() {
+        // https, with and without `.git`.
+        assert_eq!(
+            web_repo_url("https://github.com/theBGuy/biome.git").as_deref(),
+            Some("https://github.com/theBGuy/biome"),
+        );
+        assert_eq!(
+            web_repo_url("https://github.com/theBGuy/biome").as_deref(),
+            Some("https://github.com/theBGuy/biome"),
+        );
+        // scp-style ssh.
+        assert_eq!(
+            web_repo_url("git@github.com:theBGuy/biome.git").as_deref(),
+            Some("https://github.com/theBGuy/biome"),
+        );
+        // `ssh://` scheme.
+        assert_eq!(
+            web_repo_url("ssh://git@gitlab.com/group/repo.git").as_deref(),
+            Some("https://gitlab.com/group/repo"),
+        );
+        // GitLab subgroup — no per-provider path knowledge needed, `remote_path`
+        // already keeps the whole nested path.
+        assert_eq!(
+            web_repo_url("https://gitlab.com/group/sub/repo.git").as_deref(),
+            Some("https://gitlab.com/group/sub/repo"),
+        );
+        // Self-managed host with a port, both https and scp form.
+        assert_eq!(
+            web_repo_url("https://gitlab.acme.com:8443/g/r.git").as_deref(),
+            Some("https://gitlab.acme.com:8443/g/r"),
+        );
+        assert_eq!(
+            web_repo_url("git@git.corp.internal:team/svc.git").as_deref(),
+            Some("https://git.corp.internal/team/svc"),
+        );
+        // Host-only (no path) → nothing to open.
+        assert_eq!(web_repo_url("https://github.com"), None);
+        // A host string carrying config/shell-injection characters is refused by
+        // the safety gate rather than handed to the OS URL opener.
+        assert_eq!(web_repo_url("https://evil.com;rm -rf /path"), None);
     }
 
     #[test]

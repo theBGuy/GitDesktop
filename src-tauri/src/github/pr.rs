@@ -518,7 +518,22 @@ pub async fn gh_publish_owners() -> AppResult<GithubPublishOwners> {
 /// `lens` picks WHICH remote's repo answers: `None`/`Some("origin")` is the fork
 /// itself, `Some("upstream")` the parent. A body rendered under the upstream lens
 /// resolves its relative links against the parent, where those paths actually live.
+///
+/// The origin lens resolves purely from the `origin` remote — no `gh` call, so it
+/// works signed out (mirrors Bitbucket's `repo_url`, always a local parse, and
+/// GitLab's no-lens arm, moved the same day). The upstream lens keeps the `gh repo
+/// view` round-trip: resolving a fork's parent is a real API question this app
+/// doesn't answer from local remote config alone.
 pub async fn gh_repo_url(repo_path: String, lens: Option<String>) -> AppResult<String> {
+    if matches!(lens.as_deref(), None | Some("origin")) {
+        let url =
+            crate::git::remote::git_remote_url(repo_path.clone(), "origin".to_string()).await?;
+        return crate::forge::web_repo_url(&url).ok_or_else(|| {
+            AppError::Gh(
+                "could not determine the repository's web URL from the origin remote".into(),
+            )
+        });
+    }
     // Pin the slug positionally (`gh repo view <slug>` — the `repo` family has no
     // `-R` flag): a bare `gh repo view` on a fork with an `upstream` remote
     // auto-resolves to the PARENT, so the lens would never be what decides.
@@ -6141,7 +6156,7 @@ mod tests {
         apply_stack_join, classify_gh_merge_refusal, classify_merge_async,
         external_items_from_thread_nodes,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message,
-        gh_pr_discard_pending_review, host_from_url,
+        gh_pr_discard_pending_review, gh_repo_url, host_from_url,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
         parse_auth_accounts, parse_pr_url_repo, parse_publish_owners, pr_edit_args,
         pr_head_ref_from_value, pr_head_ref_query, pr_poll_query,
@@ -7166,6 +7181,61 @@ mod tests {
         )
         .await;
         assert!(!oid_outside_origin_graph(&repo_s, &local_oid).await);
+    }
+
+    /// The no-lens arm resolves purely from `origin` — real repo, no `gh` spawn —
+    /// for https, scp-style ssh, and a ported self-managed (GHE) host. The upstream
+    /// lens is untouched: with no `upstream` remote configured it still fails, proving
+    /// the split didn't accidentally widen origin's derivation onto it.
+    ///
+    /// A FRESH temp repo per remote form — `git_remote_url`'s TTL cache is keyed by
+    /// `(repo_path, name)`, and this test's raw `git remote add` bypasses the
+    /// app-side commands that invalidate it, so reusing one path across iterations
+    /// would serve the first remote's cached URL to every later assertion.
+    #[tokio::test]
+    async fn repo_url_no_lens_arm_resolves_from_origin_without_gh() {
+        async fn run(repo: &str, args: &[&str]) {
+            let _ = run_git(Some(repo), args, DEFAULT_TIMEOUT).await;
+        }
+
+        async fn repo_with_origin(tag: &str, remote: &str) -> (tempfile::TempDir, String) {
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("gd-pr-repo-url-{tag}-"))
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let repo_s = repo.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q"]).await;
+            run(&repo_s, &["remote", "add", "origin", remote]).await;
+            (dir, repo_s)
+        }
+
+        for (tag, remote, want) in [
+            ("https", "https://github.com/theBGuy/biome.git", "https://github.com/theBGuy/biome"),
+            ("scp", "git@github.com:theBGuy/biome.git", "https://github.com/theBGuy/biome"),
+            (
+                "ghe",
+                "https://github.example.com:8443/team/svc.git",
+                "https://github.example.com:8443/team/svc",
+            ),
+        ] {
+            let (_dir, repo_s) = repo_with_origin(tag, remote).await;
+            assert_eq!(gh_repo_url(repo_s.clone(), None).await.unwrap(), want);
+            assert_eq!(
+                gh_repo_url(repo_s.clone(), Some("origin".into())).await.unwrap(),
+                want
+            );
+        }
+
+        // No `upstream` remote exists — the lens arm still goes through
+        // `gh_lens_slug`, which resolves the remote via `git remote get-url` first;
+        // that fails (AppError::Git) before any `gh` spawn.
+        let (_dir, repo_s) = repo_with_origin("no-upstream", "https://github.com/theBGuy/biome.git").await;
+        let err = gh_repo_url(repo_s.clone(), Some("upstream".into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Git { .. }));
     }
 
     /// The detail view's mergeability rides the SAME `gh pr view` call, so the
