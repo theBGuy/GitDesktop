@@ -168,6 +168,34 @@ const TABLE_ROW = /^ {0,3}\||\|[ \t]*$/;
  *  lines (setext underlines, thematic breaks) that are structure. */
 const HAS_TEXT = /[\p{L}\p{N}]/u;
 
+/** The two punctuation-only lines that really are block starts, as opposed to prose
+ *  that merely happens to carry no letters. */
+const THEMATIC_BREAK =
+  /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+const SETEXT_UNDERLINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
+
+/**
+ * Whether this line unconditionally ENDS the paragraph above it. A code span cannot
+ * cross a paragraph boundary, so {@link paragraphLimit} stops here: a closer beyond
+ * one of these belongs to another block and must never pair with an opener before it.
+ *
+ * Deliberately NARROWER than the inverse of {@link leavesOpenParagraph}, because the
+ * two answer for opposite polarities. That one may guess "no open paragraph" freely —
+ * its consumer then reads an indented line as code, which over-skips. This one may
+ * not: a wrong YES splits a paragraph the renderer keeps whole, so the span never
+ * opens and a reference the renderer had already made inert is wrapped inside
+ * rendered code and claimed neutralized. Hence prose without letters (a line of
+ * emoji, `!!!`) stays paragraph content here, and so does a `| a | b |` line, which
+ * is only a table when a delimiter row follows it.
+ */
+function breaksParagraph(quoted: string): boolean {
+  return (
+    ATX_HEADING.test(quoted) ||
+    THEMATIC_BREAK.test(quoted) ||
+    SETEXT_UNDERLINE.test(quoted)
+  );
+}
+
 /**
  * Whether this line leaves an OPEN PARAGRAPH behind it, which is the one thing that
  * stops the next line from starting a block. Only a line recognized as paragraph
@@ -409,11 +437,13 @@ function recordTicks(
   }
 }
 
-/** Where a code span opened at `from` must stop looking for its closer: the next
- *  blank line, fence line, or raw-HTML-block opener, whichever comes first. All
- *  three end the paragraph CommonMark parses the span within — a fence and an HTML
- *  block are block starts, and the block pass runs first — so reading past any of
- *  them would let a delimiter or another block's content pose as a closer. */
+/** Where a code span opened at `from` must stop looking for its closer: whichever
+ *  comes first of the next blank line, container start, paragraph-interrupting line
+ *  ({@link breaksParagraph}), fence line, or raw-HTML-block opener. Every one ends
+ *  the paragraph CommonMark parses the span within — the block pass runs before
+ *  inline parsing — so reading past any of them would let a delimiter or another
+ *  block's content pose as a closer. The bounding line itself is EXCLUDED: the index
+ *  returned is its first character, and the caller's window is half-open. */
 function paragraphLimit(text: string, from: number): number {
   BLANK_LINE.lastIndex = from;
   const blank = BLANK_LINE.exec(text);
@@ -442,14 +472,15 @@ function paragraphLimit(text: string, from: number): number {
     // start: the `span === 0` guard then suppresses the whole HTML arm there, and a
     // reference inside the raw block is either wrapped and falsely claimed or lost
     // to a span the renderer never opened.
-    const containerStart = opensContainer(line, prevDepth);
-    // A container start ends the paragraph outright, whatever follows its marker, so
-    // the search stops there: a closer beyond it sits in another block and cannot
-    // pair with this opener.
+    // Each arm ends the paragraph the opener sits in, so a closer past it belongs to
+    // another block. The container and paragraph-interrupting arms return outright;
+    // by the time the HTML arm is reached a container start has already returned, so
+    // its gate carries the paragraph half alone.
     if (
-      containerStart ||
+      opensContainer(line, prevDepth) ||
+      breaksParagraph(quoted) ||
       FENCE.test(quoted) ||
-      opensHtmlBlock(containerContent(line), !openParagraph || containerStart)
+      opensHtmlBlock(containerContent(line), !openParagraph)
     )
       return start;
     openParagraph = leavesOpenParagraph(quoted);
@@ -464,14 +495,14 @@ function paragraphLimit(text: string, from: number): number {
  *  opener without one is literal text — entering span state there would silently
  *  swallow every later reference.
  *
- *  APPROXIMATE, and NOT safely so. {@link paragraphLimit} bounds at blank lines,
- *  fences, container starts and HTML-block starts — but a HEADING is none of those,
- *  so content past one can pose as a closer and answer TRUE where markdown would
- *  not. Both failure arms are reachable there: a reference wrapped inside a region
- *  the renderer treats as code or raw HTML and then claimed neutralized, and a live
- *  reference swallowed by a span the renderer never opens and so never reported.
- *  Neither direction is safe; the remedy is bounding at every block that can
- *  interrupt a paragraph, which is tracked separately. */
+ *  APPROXIMATE in one narrow place. {@link paragraphLimit} bounds at blank lines,
+ *  container starts, headings, thematic breaks, setext underlines, fences and
+ *  HTML-block starts — every paragraph interruption recognizable from a single line.
+ *  What it cannot see is a GFM TABLE: `| a | b |` is ordinary prose until a delimiter
+ *  row follows it, and that lookahead is beyond a line-at-a-time model. A span can
+ *  therefore still pair across a real table and swallow a reference the renderer
+ *  leaves live in a cell — a silent miss, sharing its missing-lookahead root cause
+ *  with the table arm of {@link leavesOpenParagraph}. */
 function hasClosingRun(text: string, from: number, run: number): boolean {
   const limit = paragraphLimit(text, from);
   let i = from;

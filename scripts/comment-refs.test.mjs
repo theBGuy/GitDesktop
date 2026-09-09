@@ -582,6 +582,57 @@ const SPAN_FROM_HEADING_LINE = "## H ` x\n<span>\n#5\nb ` c";
 // belongs to another block and cannot pair — the reference between them is prose.
 const SPAN_STOPPED_BY_CONTAINER = "a ` open\n> q\n> <span>\n> #5\nb ` c";
 
+// A paragraph-interrupting line ends the paragraph the span opened in, so a closer
+// beyond it belongs to another block. Without the bound the span pairs across, the
+// stray tick below is never recorded, and the wrap it picks is stolen by that tick.
+const SPAN_ACROSS_HEADING = "a ` open\n## H\nb ` c #5";
+const SPAN_ACROSS_QUOTED_HEADING = "> a ` open\n> ## H\n> b ` c #5";
+const SPAN_CLOSER_ON_HEADING = "a ` open\n## H ` close\nb #5 c";
+const SPAN_ACROSS_THEMATIC = "a ` open\n***\nb #5 ` c";
+const SPAN_ACROSS_SETEXT = "a ` open\nH\n---\nb ` c #5";
+// Prose the renderer keeps whole: a line without letters is NOT a block start, and
+// `| a | b |` is a table only when a delimiter row follows. Splitting the paragraph
+// here would wrap a reference the renderer had already sealed inside a code span.
+const SPAN_OVER_EMOJI = "a ` open\n\u{1F916}\nb #5 ` c";
+const SPAN_OVER_BANGS = "a ` open\n!!!\nb #5 ` c";
+const SPAN_OVER_PIPES = "a ` open\n| x | y |\nb #5 ` c";
+
+test("a heading bounds the closer search", () => {
+  for (const source of [SPAN_ACROSS_HEADING, SPAN_ACROSS_QUOTED_HEADING]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+    // Run TWO: the tick below the heading is a live stray once the span cannot
+    // form, and a single-tick wrap would have been stolen by it.
+    assert.deepEqual(neutralizeSuspectRefs(source).wrapped, ["``#5``"], label);
+  }
+});
+
+test("the bounding line's own tick cannot close the span", () => {
+  // The returned index is the bounding line's first character and the caller's
+  // window is half-open, so that line is never searched.
+  assert.deepEqual(findSuspectRefs(SPAN_CLOSER_ON_HEADING), ["#5"]);
+  assert.deepEqual(neutralizeSuspectRefs(SPAN_CLOSER_ON_HEADING).wrapped, [
+    "``#5``",
+  ]);
+});
+
+test("a thematic break or setext underline bounds the closer search", () => {
+  for (const source of [SPAN_ACROSS_THEMATIC, SPAN_ACROSS_SETEXT]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+  }
+});
+
+test("a paragraph the renderer keeps whole is not split", () => {
+  // These bound nothing: the span forms, the reference inside it is already inert,
+  // and wrapping there would put literal backticks into rendered code.
+  for (const source of [SPAN_OVER_EMOJI, SPAN_OVER_BANGS, SPAN_OVER_PIPES]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    assert.equal(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
 test("a block start after a heading bounds the closer search", () => {
   for (const source of [
     SPAN_THROUGH_HEADING_TYPE7,
@@ -1263,6 +1314,14 @@ const CORPUS = [
   SPAN_THROUGH_QUOTED_BLANK_TYPE7,
   SPAN_FROM_HEADING_LINE,
   SPAN_STOPPED_BY_CONTAINER,
+  SPAN_ACROSS_HEADING,
+  SPAN_ACROSS_QUOTED_HEADING,
+  SPAN_CLOSER_ON_HEADING,
+  SPAN_ACROSS_THEMATIC,
+  SPAN_ACROSS_SETEXT,
+  SPAN_OVER_EMOJI,
+  SPAN_OVER_BANGS,
+  SPAN_OVER_PIPES,
   HTML_TYPE7_CONTAINER_ALREADY_OPEN,
   HTML_TYPE7_AFTER_QUOTED_FENCE,
   INDENT_AFTER_HEADING,
