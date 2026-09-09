@@ -280,6 +280,17 @@ const DEF_DEFERRED_HEADING = "[dest #5]:\n## H\n\nAlso [dest #5] here.\n";
  *  pinned directly regardless. */
 const ORACLE_EXCLUDED = new Set([DEF_DEFERRED_FENCE]);
 
+/** Also excluded, for a divergence isolated by differential measurement: marked
+ *  renders a wrap inside a LIST ITEM whose paragraph holds an UNCLOSED inline tag as
+ *  literal backticks, so the live count reads 1 before and 1 after. It forms the code
+ *  span for the same shape with a CLOSED tag, and in a plain paragraph with an
+ *  unclosed one — the item's paragraph content is `text\n<span>\n` + a code span, and
+ *  nothing in CommonMark lets an unclosed inline tag swallow the rest of the item.
+ *  The behaviour is pinned directly instead. */
+function excludeListTagQuirk(...sources) {
+  for (const source of sources) ORACLE_EXCLUDED.add(source);
+}
+
 test("a definition inside a code span defines nothing", () => {
   // Phase 0 runs the character scan for exactly this: without span state it would
   // collect a phantom label and phase 1 would skip the live use site below.
@@ -503,6 +514,196 @@ test("a tag alone on its line is a type-7 block, whatever the tag", () => {
 const HTML_TYPE7_MID_PARAGRAPH = "text\n<span>\n#5\n";
 const HTML_TYPE7_AFTER_BLANK = "text\n\n<span>\n#5\n";
 const HTML_TYPE6_MID_PARAGRAPH = "text\n<details>\n#5\n";
+
+// An inline tag is markup, not a text node: nothing inside it autolinks, and a wrap
+// there corrupts it — a quoted value becomes href="`#123`" and the link dies, an
+// unquoted one stops parsing as HTML at all. Its TEXT CONTENT is ordinary prose.
+const TAG_ATTR_DOUBLE = 'See <a href="#123">the section</a>.';
+const TAG_ATTR_SINGLE = "See <a href='#123'>x</a>.";
+const TAG_ATTR_TWO = 'See <a title="#1" href="#2">x</a>.';
+const TAG_ATTR_UNQUOTED = "See <a href=#123>x</a>.";
+const TAG_TEXT_CONTENT = "See <b>fixes #123</b> now.";
+const TAG_TEXT_AFTER = 'See <a href="/x">y</a> fixes #123.';
+const TAG_TICKS_INSIDE = '<a title="`x`">y</a> and #5';
+// Shapes the grammar must NOT swallow: no tag name, a digit start, an escape.
+const TAG_NOT_A_TAG_DIGIT = "a <3 and 5> #5";
+const TAG_NOT_A_TAG_BARE = "a < b and #5";
+const TAG_ESCAPED_ANGLE = 'a \\<a href="#1"> b';
+
+test("a reference in an attribute value is not scanned", () => {
+  for (const source of [
+    TAG_ATTR_DOUBLE,
+    TAG_ATTR_SINGLE,
+    TAG_ATTR_TWO,
+    TAG_ATTR_UNQUOTED,
+  ]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), [], label);
+    assert.equal(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
+test("a reference in a tag's text content is still scanned", () => {
+  for (const source of [TAG_TEXT_CONTENT, TAG_TEXT_AFTER]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#123"], label);
+    assert.deepEqual(neutralizeSuspectRefs(source).wrapped, ["`#123`"], label);
+  }
+});
+
+test("something that only looks like a tag stays prose", () => {
+  // A tag name must start with a letter, and an escaped `<` is literal text.
+  for (const source of [
+    TAG_NOT_A_TAG_DIGIT,
+    TAG_NOT_A_TAG_BARE,
+    TAG_ESCAPED_ANGLE,
+  ]) {
+    const label = JSON.stringify(source);
+    assert.equal(findSuspectRefs(source).length, 1, label);
+    assert.notEqual(neutralizeSuspectRefs(source).text, source, label);
+  }
+});
+
+test("a tag's own backticks are not strays", () => {
+  // Code spans and raw HTML have equal precedence and the leftmost wins. This arm
+  // only runs with no span open, so the tag starts first and its ticks are raw —
+  // they cannot steal a single-tick wrap after it.
+  const out = neutralizeSuspectRefs(TAG_TICKS_INSIDE);
+  assert.deepEqual(findSuspectRefs(TAG_TICKS_INSIDE), ["#5"]);
+  assert.deepEqual(out.wrapped, ["`#5`"]);
+});
+
+// A type-7 tag at a column the list marker's content had left is EITHER outside the
+// item (a block start, refs raw HTML) OR a lazy continuation of its paragraph (refs
+// prose). Both readings leave the reference live, so holding it is truthful either
+// way — which is what lets one boolean stand in for an indentation model here.
+const LIST_DEDENT_BULLET = "- text\n<span>\n#5";
+const LIST_DEDENT_ORDERED = "1. text\n<span>\n   #5";
+const LIST_DEDENT_AFTER_BODY = "- text\nmore\n<span>\n#5";
+const LIST_DEDENT_AFTER_INDENTED_BODY = "- text\n  more\n<span>\n#5";
+const LIST_DEDENT_AFTER_BLANK = "- text\n\n<span>\n#5";
+// Indented INTO the item's content column: not a dedent, so this arm ignores it.
+const LIST_TAG_INDENTED = "- text\n  <span>\n  #5";
+const LIST_TAG_INDENTED_ORDERED = "1. text\n   <span>\n   #5";
+excludeListTagQuirk(LIST_TAG_INDENTED, LIST_TAG_INDENTED_ORDERED);
+
+// A fence behind a list marker pairs against the ITEM's content column. Missing the
+// opener was never only cosmetic: the closer then opened a phantom fence that
+// swallowed everything after it, so the mangled code example came with a silently
+// missed reference below.
+const LIST_FENCE_CHAIN = "- ~~~\n  #5\n  ~~~\n\nSee #6";
+const LIST_FENCE_ORDERED = "1. ~~~\n   #5\n   ~~~\n\nSee #6";
+const LIST_FENCE_BACKTICK = "- ```\n  #5\n  ```\n\nSee #6";
+const LIST_FENCE_UNCLOSED = "- ~~~\n  #5\n\nSee #6";
+const LIST_FENCE_DEDENT_ENDS = "- ~~~\n  #5\nplain #6";
+const LIST_FENCE_INNER_BLANK = "- ~~~\n\n  #5\n  ~~~\n\nSee #6";
+const LIST_FENCE_CONTINUATION = "- text\n  ~~~\n  #5\n  ~~~\n\nSee #6";
+const LIST_FENCE_DEDENT_CLOSER = "- ~~~\n  #5\n~~~\n\nSee #6";
+
+test("a fence behind a list marker is a fence", () => {
+  // The reference inside stays untouched, and the one after the item is scanned.
+  for (const source of [
+    LIST_FENCE_CHAIN,
+    LIST_FENCE_ORDERED,
+    LIST_FENCE_BACKTICK,
+    LIST_FENCE_CONTINUATION,
+    LIST_FENCE_INNER_BLANK,
+  ]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#6"], label);
+    assert.ok(neutralizeSuspectRefs(source).text.includes("#5"), label);
+    assert.ok(!neutralizeSuspectRefs(source).text.includes("`#5`"), label);
+  }
+});
+
+test("a list fence ends with its item", () => {
+  // Unclosed, it runs to the blank line that ends the item; a dedented line ends it
+  // too. Either way the reference below is scanned rather than swallowed.
+  for (const source of [LIST_FENCE_UNCLOSED, LIST_FENCE_DEDENT_ENDS]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#6"], label);
+  }
+});
+
+test("a list fence closer takes the three-space slack", () => {
+  // Measured against the renderer: the closer pairs from the item's column through
+  // column+3, and a fourth space makes it code content instead. The reference below
+  // it is item prose in the first case and inside the block in the second.
+  for (let indent = 2; indent <= 5; indent++) {
+    const source = `- ~~~\n  #5\n${" ".repeat(indent)}~~~\n  after #6`;
+    assert.deepEqual(findSuspectRefs(source), ["#6"], JSON.stringify(source));
+  }
+  const tooDeep = `- ~~~\n  #5\n${" ".repeat(6)}~~~\n  after #6`;
+  assert.deepEqual(findSuspectRefs(tooDeep), [], JSON.stringify(tooDeep));
+});
+
+test("a fence-shaped line inside the item does not re-open", () => {
+  // The closer-as-opener flip is what turned a mangle into a swallow: treating this
+  // line as content defers the item's end to the next ordinary line, which keeps the
+  // reference after it scannable.
+  assert.deepEqual(findSuspectRefs(LIST_FENCE_DEDENT_CLOSER), ["#6"]);
+});
+
+test("the fence arm leaves the list HTML shapes alone", () => {
+  // Round 4's `- <details>` and round 14's dedent hold both run through the same
+  // marker state, so they are pinned against this arm too.
+  assert.deepEqual(neutralizeSuspectRefs(HTML_IN_LIST).survived, ["`#123`"]);
+  assert.deepEqual(neutralizeSuspectRefs(LIST_DEDENT_BULLET).survived, [
+    "`#5`",
+  ]);
+});
+
+test("a tag that leaves a list item's indent holds its references", () => {
+  for (const source of [
+    LIST_DEDENT_BULLET,
+    LIST_DEDENT_ORDERED,
+    LIST_DEDENT_AFTER_BODY,
+    LIST_DEDENT_AFTER_INDENTED_BODY,
+    // A blank line clears the remembered column; the paragraph-start flag already
+    // opens the region here, so this path holds for its own reason.
+    LIST_DEDENT_AFTER_BLANK,
+  ]) {
+    const label = JSON.stringify(source);
+    const out = neutralizeSuspectRefs(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+    assert.equal(out.text, source, label);
+    assert.deepEqual(out.wrapped, [], label);
+    assert.deepEqual(out.survived, ["`#5`"], label);
+  }
+});
+
+test("a tag indented into the item is left to the ordinary arms", () => {
+  // Still inside the item, so the heuristic does not fire and the reference wraps.
+  for (const source of [LIST_TAG_INDENTED, LIST_TAG_INDENTED_ORDERED]) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(findSuspectRefs(source), ["#5"], label);
+    assert.deepEqual(neutralizeSuspectRefs(source).wrapped, ["`#5`"], label);
+  }
+});
+
+test("a list line that is not a tag is untouched by the heuristic", () => {
+  // The arm reads only the type-7 gate, so ordinary item prose still wraps.
+  const source = "- text\n- more #5\n";
+  assert.deepEqual(findSuspectRefs(source), ["#5"]);
+  assert.deepEqual(neutralizeSuspectRefs(source).wrapped, ["`#5`"]);
+  // And a type-6 tag on the marker's own line keeps its round-4 behaviour.
+  assert.deepEqual(neutralizeSuspectRefs(HTML_IN_LIST).survived, ["`#123`"]);
+});
+
+test("the held reference gets a disclosure that is true either way", () => {
+  const body = buildAiCommentBody({
+    ...PARTS,
+    text: LIST_DEDENT_BULLET,
+    neutralizeRefs: true,
+  });
+  assert.ok(body.includes(LIST_DEDENT_BULLET), body);
+  assert.ok(
+    body.endsWith(
+      "_This automated run could not neutralize `#5` — verify before trusting any links it created._",
+    ),
+    body,
+  );
+});
 
 test("a type-6 tag DOES interrupt a paragraph", () => {
   // The counterpart to the gate below: types 1 and 6 may interrupt, so this opener
@@ -1347,6 +1548,31 @@ const CORPUS = [
   HTML_TYPE7_MID_PARAGRAPH,
   HTML_TYPE7_AFTER_BLANK,
   HTML_TYPE6_MID_PARAGRAPH,
+  TAG_ATTR_DOUBLE,
+  TAG_ATTR_SINGLE,
+  TAG_ATTR_TWO,
+  TAG_ATTR_UNQUOTED,
+  TAG_TEXT_CONTENT,
+  TAG_TEXT_AFTER,
+  TAG_TICKS_INSIDE,
+  TAG_NOT_A_TAG_DIGIT,
+  TAG_NOT_A_TAG_BARE,
+  TAG_ESCAPED_ANGLE,
+  LIST_DEDENT_BULLET,
+  LIST_DEDENT_ORDERED,
+  LIST_DEDENT_AFTER_BODY,
+  LIST_DEDENT_AFTER_INDENTED_BODY,
+  LIST_DEDENT_AFTER_BLANK,
+  LIST_TAG_INDENTED,
+  LIST_TAG_INDENTED_ORDERED,
+  LIST_FENCE_CHAIN,
+  LIST_FENCE_ORDERED,
+  LIST_FENCE_BACKTICK,
+  LIST_FENCE_UNCLOSED,
+  LIST_FENCE_DEDENT_ENDS,
+  LIST_FENCE_INNER_BLANK,
+  LIST_FENCE_CONTINUATION,
+  LIST_FENCE_DEDENT_CLOSER,
   DEF_INSIDE_SPAN,
   DEF_DEFERRED_SETEXT,
   DEF_DEFERRED_BREAK,
@@ -1444,6 +1670,79 @@ test("the reported split is scanner-relative but never self-contradicting", () =
       );
     }
   }
+});
+
+/** The same document with Windows line endings. Written as a `\r` escape, never a
+ *  literal byte: this repo checks out CRLF, so a real CR in a fixture would be both
+ *  invisible in review and rewritten by the next checkout. */
+const toCrlf = (s) => s.replace(/\n/g, "\r\n");
+
+test("CRLF input classifies exactly as its LF twin", () => {
+  // The scan splits on `\n`, so every line would otherwise carry a trailing `\r` into
+  // tests anchored at `$` — a blank line stops reading blank, a closing fence's tail
+  // stops reading empty, and the fence swallows the rest of the comment.
+  for (const source of CORPUS) {
+    const label = JSON.stringify(source);
+    assert.deepEqual(
+      findSuspectRefs(toCrlf(source)),
+      findSuspectRefs(source),
+      label,
+    );
+  }
+});
+
+test("CRLF output is its LF twin's output, transformed", () => {
+  // The invariant that holds for every entry: wrapping commutes with the line-ending
+  // transform. Wraps are inserted at offsets into the ORIGINAL text and never rewrite
+  // a line ending, so converting first and wrapping second gives the same bytes as
+  // wrapping first and converting second.
+  for (const source of CORPUS) {
+    const label = JSON.stringify(source);
+    const lf = neutralizeSuspectRefs(source);
+    const crlf = neutralizeSuspectRefs(toCrlf(source));
+    assert.equal(crlf.text, toCrlf(lf.text), label);
+    assert.deepEqual(crlf.wrapped, lf.wrapped, label);
+    assert.deepEqual(crlf.survived, lf.survived, label);
+  }
+});
+
+// Direct pins for the arms `\r` broke, each stated as its own shape rather than left
+// to the sweep above. The fence chain is the reported one: unclosed, it swallowed
+// every reference after it and posted them live with no disclosure.
+const CRLF_FENCE_CHAIN = "~~~\r\nexample\r\n~~~\r\nSee #123";
+const CRLF_BLANK_BOUND = "a ` open\r\n\r\nb #5 ` c";
+const CRLF_DEFINITION = "[dest]: /url\r\n\r\nSee [dest] and #5.\r\n";
+const CRLF_HTML_BLOCK = "<details>\r\nFixes #123\r\n</details>\r\n";
+// One document with both endings, to prove the strip is per-line and not global.
+const MIXED_EOL = "a ` open\r\n\nb #5 ` c\r\nSee #6\n";
+
+test("a CRLF fence closes and the text after it is scanned", () => {
+  assert.deepEqual(findSuspectRefs(CRLF_FENCE_CHAIN), ["#123"]);
+  assert.ok(
+    !neutralizeSuspectRefs(CRLF_FENCE_CHAIN).text.includes("`example`"),
+  );
+});
+
+test("a CRLF blank line still bounds a paragraph", () => {
+  assert.deepEqual(findSuspectRefs(CRLF_BLANK_BOUND), ["#5"]);
+});
+
+test("CRLF definition and HTML-block lines classify normally", () => {
+  assert.deepEqual(findSuspectRefs(CRLF_DEFINITION), ["#5"]);
+  const html = neutralizeSuspectRefs(CRLF_HTML_BLOCK);
+  assert.equal(html.text, CRLF_HTML_BLOCK);
+  assert.deepEqual(html.survived, ["`#123`"]);
+});
+
+test("a document with mixed line endings classifies per line", () => {
+  assert.deepEqual(findSuspectRefs(MIXED_EOL), ["#5", "#6"]);
+  // Every line ending is preserved exactly as it was. `#6` takes a run of two
+  // because the tick after `#5` is an unpaired stray in the same paragraph, and
+  // `#5` takes a run of one because the blank line above cleared the first tick.
+  assert.equal(
+    neutralizeSuspectRefs(MIXED_EOL).text,
+    "a ` open\r\n\nb `#5` ` c\r\nSee ``#6``\n",
+  );
 });
 
 test("neutralizing reaches a fixed point in one pass", () => {
@@ -1555,6 +1854,39 @@ test("a reference link still renders as a link afterwards", async (t) => {
     const out = neutralizeSuspectRefs(source);
     assert.match(md.parse(out.text), /<a href=/, label);
     assert.equal(md.parse(out.text), md.parse(source), label);
+  }
+});
+
+test("the renderer agrees about the CRLF corpus too", async (t) => {
+  let Marked;
+  try {
+    ({ Marked } = await import("marked"));
+  } catch {
+    t.skip(
+      "marked is not installed — the guards job runs with no install step",
+    );
+    return;
+  }
+  const md = new Marked();
+  // CommonMark accepts `\r\n`, so the same claim has to hold over the transformed
+  // corpus. Exclusions are keyed on the LF original — the divergence they name is
+  // about the parser's block model, not about line endings.
+  for (const source of CORPUS) {
+    if (ORACLE_EXCLUDED.has(source)) continue;
+    const crlf = toCrlf(source);
+    const out = neutralizeSuspectRefs(crlf);
+    if (out.wrapped.length === 0 && out.survived.length === 0) continue;
+    const after = outsideCode(md.parse(out.text));
+    const before = outsideCode(md.parse(crlf));
+    const label = JSON.stringify(crlf);
+    for (const form of out.wrapped) {
+      const token = stripTicks(form);
+      const beforeN = liveCount(before, token);
+      assert.ok(
+        liveCount(after, token) <= Math.max(beforeN - 1, 0),
+        `${token} still renders outside a code span for ${label}`,
+      );
+    }
   }
 });
 

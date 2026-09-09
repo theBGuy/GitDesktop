@@ -118,6 +118,35 @@ const HTML_BLOCK_TYPE_7 = new RegExp(
   `^ {0,3}(?:<${HTML_TAG_NAME}(?:${HTML_ATTR})*[ \\t]*/?>|</${HTML_TAG_NAME}[ \\t]*>)[ \\t]*$`,
 );
 
+/** A COMPLETE inline tag starting here — the type-7 shapes without the line anchors.
+ *  Sticky, so it can be tried at a position without slicing; the caller still has to
+ *  reject a match that ran past the line, since a quoted attribute value may hold a
+ *  newline. */
+const INLINE_TAG = new RegExp(
+  `(?:<${HTML_TAG_NAME}(?:${HTML_ATTR})*[ \\t]*/?>|</${HTML_TAG_NAME}[ \\t]*>)`,
+  "y",
+);
+
+/**
+ * The end index (exclusive) of a complete inline tag opening at `open`, or `open` when
+ * what is there is not one. The WHOLE tag is skipped, attribute values and all: it is
+ * raw-HTML markup rather than a text node, so no reference inside it is live and a
+ * wrap there corrupts the tag — a quoted `href="#123"` becomes ``href="`#123`"`` and
+ * the link breaks, while an unquoted one stops parsing as HTML altogether.
+ *
+ * Ticks inside the tag are NOT recorded as strays. CommonMark gives code spans and raw
+ * HTML equal precedence and lets the leftmost win; this arm is only reached with no
+ * span open, so the tag genuinely starts first and its backticks are raw. A tick
+ * BEFORE the tag wins instead, and the scan is already in span state by then.
+ */
+function inlineTagEnd(text: string, open: number, limit: number): number {
+  INLINE_TAG.lastIndex = open;
+  const tag = INLINE_TAG.exec(text);
+  if (!tag) return open;
+  const end = open + tag[0].length;
+  return end <= limit && !tag[0].includes("\n") ? end : open;
+}
+
 /** Type 1, the raw-text tags. Their block ignores blank lines entirely and ends only
  *  at {@link RAW_TEXT_CLOSE} — which CommonMark takes as ANY of the four closing tags
  *  anywhere on a line, the opener's own line included. Note the start condition
@@ -274,11 +303,14 @@ function opensDeferredDestination(line: string, depth: number): boolean {
  *  then open a type-7 region inside a span the limit let form; the `span === 0` guard
  *  shuts the HTML arm there, which is what the renderer does too.
  *
- *  KNOWN GAP: a list DEDENT is invisible here, because measuring it needs the item's
- *  content column and this scan has no indentation model. `- text` then `<span>`
- *  leaves the item, so the tag opens a block and the reference under it is raw HTML;
- *  the scan wraps it instead and claims it neutralized — the same false-claim class
- *  this function exists to prevent, narrowed to list dedents. */
+ *  A list DEDENT is invisible to this function — measuring one needs the item's
+ *  content column — so the type-7 gate carries a separate stand-in for it: a tag at a
+ *  column the last list marker's content had left counts as a transition there. That
+ *  heuristic can only ever HOLD a reference, and holding is truthful under both
+ *  readings of the shape (outside the item its refs are raw HTML; inside it they are
+ *  prose), so it cannot produce a false claim. What it costs is the occasional
+ *  over-hold, disclosed honestly; and it deliberately ignores a tag indented INTO the
+ *  item, which the ordinary arms handle. */
 function opensContainer(
   line: string,
   depth: number,
@@ -321,7 +353,25 @@ const NEUTRALIZE_PASSES = 4;
  *  or tabs satisfies just as well as an empty one. Sticky-ish by `lastIndex` so the
  *  lookahead below needs no tail slice; every use MUST set `lastIndex` first, since
  *  the flag makes that position shared state between calls. */
-const BLANK_LINE = /\n[ \t]*\n/g;
+const BLANK_LINE = /\r?\n[ \t]*\r?\n/g;
+
+/**
+ * A line's text for CLASSIFICATION, with the CR of a CRLF pair removed.
+ *
+ * The scan splits on `\n`, so under CRLF every line would otherwise carry a trailing
+ * `\r` — and each line test is anchored at `$`, so a blank line would not read blank,
+ * a closing fence's tail would not read empty, and the fence would run to the end of
+ * the comment swallowing every reference after it. Stripping at EXTRACTION fixes all
+ * of them at once.
+ *
+ * Offsets are never derived from this string. The raw text keeps feeding `lineStart`
+ * / `lineEnd`, so wraps still land at positions in the original and every untouched
+ * region stays byte-identical — which is why the input is not normalized instead.
+ */
+function classifyLine(text: string, start: number, end: number): string {
+  const stop = end > start && text[end - 1] === "\r" ? end - 1 : end;
+  return text.slice(start, stop);
+}
 
 /** One suspect token's position in the scanned text. */
 interface RefOccurrence {
@@ -480,7 +530,7 @@ function paragraphLimit(text: string, from: number): number {
   const openerStart = text.lastIndexOf("\n", from - 1) + 1;
   let openerEnd = text.indexOf("\n", openerStart);
   if (openerEnd === -1) openerEnd = text.length;
-  const opener = text.slice(openerStart, openerEnd);
+  const opener = classifyLine(text, openerStart, openerEnd);
   // The opener's OWN line can be the block that ends here — a heading may carry a
   // backtick and still close at its line end, so nothing after it can be the closer.
   // `openerEnd` never exceeds `limit`: the earliest newline at or after `from` is the
@@ -493,7 +543,7 @@ function paragraphLimit(text: string, from: number): number {
     const start = nl + 1;
     let end = text.indexOf("\n", start);
     if (end === -1) end = text.length;
-    const line = text.slice(start, end);
+    const line = classifyLine(text, start, end);
     const quoted = line.replace(QUOTE_PREFIX, "");
     // Read before the state advances, so each line is judged by what the one above it
     // left behind — the same order the scan's arm uses.
@@ -629,12 +679,12 @@ function hasClosingRun(text: string, from: number, run: number): boolean {
  * reference stays live. So its occurrences carry `htmlBlock` and
  * {@link neutralizeSuspectRefs} routes them into `survived` for the footer to
  * name. Region starts are read at the CONTAINER CONTENT COLUMN, since a `> ` or a
- * list marker does not stop a block from opening. The fence arm reads blockquote
- * markers too, pairs a fence only at the depth it opened at, and ends one when the
- * line's depth drops below that — which closes the lazy continuation as well. What
- * remains there is the LIST case: `- ~~~` opens a fence this scan does not see, so
- * its content is scanned. That mangles at worst, since fenced content never
- * autolinks either way.
+ * list marker does not stop a block from opening. The fence arm reads both kinds of
+ * marker, and pairs each fence against the container it opened in: a quoted one by
+ * blockquote depth, a `- ~~~` one by the item's content column. An unrecognized
+ * opener was never merely cosmetic — its own closer would go on to open a PHANTOM
+ * fence that swallowed the rest of the comment, so the wrap inside the code example
+ * came with a silently missed reference after it.
  *
  * Paragraph state IS tracked ({@link leavesOpenParagraph}), and the type-7 arm reads
  * it alongside {@link opensContainer}. What remains is that pair answering YES too
@@ -644,12 +694,14 @@ function hasClosingRun(text: string, from: number, run: number): boolean {
  * a TRUTHFUL disclosure, which is the polarity this arm is built for. Over-warning
  * is the tolerable failure; a false claim of neutralization is not.
  *
- * That phantom-disclosure arm has one cosmetic sibling and one that is not. A `#N`
- * inside an inline HTML ATTRIBUTE is inert — no reference filter rewrites attribute
- * values — so a wrap there only adds noise. A `#N` in an inline element's TEXT
- * (`<span>see #5</span>` mid-paragraph) is LIVE: the filter walks text nodes, and
- * that one is a text node. It is detected and wrapped like any other prose
- * reference, which is correct; only the attribute case is the harmless one.
+ * The inline-HTML family splits two ways, and both are handled. A `#N` inside a
+ * complete inline TAG is markup: no filter rewrites it, and wrapping it corrupts the
+ * tag, so {@link inlineTagEnd} skips the whole thing. A `#N` in an element's TEXT
+ * (`<span>see #5</span>`) is LIVE — the filter walks text nodes and that is one — so
+ * it is detected and wrapped like any other prose. What is left of the family is a
+ * tag this line-local grammar cannot complete: one split across lines, or a
+ * malformed one. Those fall through to being scanned as prose, which is where the
+ * cross-line class below already leaves them.
  *
  * Backslash parity is an EXACT rule, not an approximation. It still GATES the two
  * region openers, a span's opening backtick run and a link's opening bracket, where
@@ -700,7 +752,12 @@ function scanRefs(
   // passes settle it: nothing feeds back into phase 0.
   const labels = new Set<string>();
   let phase = 0;
-  let fence: { char: string; len: number; depth: number } | null = null;
+  let fence: {
+    char: string;
+    len: number;
+    depth: number;
+    column: number;
+  } | null = null;
   // The open code span's backtick-run length; 0 when none. A run of N backticks
   // closes at the next run of exactly N (CommonMark), and a span may cross lines.
   let span = 0;
@@ -718,6 +775,9 @@ function scanRefs(
   // The previous line's blockquote depth, so the HTML arm can tell an opening
   // container from one that was already there.
   let prevDepth = 0;
+  // Content column of the most recent list marker, or -1 when none is in play; a
+  // blank line clears it. Read ONLY by the type-7 gate — see `leftListIndent`.
+  let listColumn = -1;
   // Lengths of the unpaired literal runs seen so far in THIS paragraph; inline
   // syntax is paragraph-scoped, so a blank line clears them. Only a blank line does,
   // though a heading or container start also ends the paragraph for span purposes —
@@ -745,7 +805,7 @@ function scanRefs(
     }
     let lineEnd = text.indexOf("\n", lineStart);
     if (lineEnd === -1) lineEnd = text.length;
-    const line = text.slice(lineStart, lineEnd);
+    const line = classifyLine(text, lineStart, lineEnd);
     // A blockquote's content column is where its leaf blocks live; the list-marker
     // strip is for the opener test only, since a lone `-` would otherwise strip to
     // nothing and read as the blank line that ends an open block.
@@ -758,9 +818,20 @@ function scanRefs(
     // disclosure, whereas wrapping inside raw HTML is a false claim of
     // neutralization — the opposite polarity from the indent arm, which fails closed.
     const containerOpens = opensContainer(line, prevDepth);
+    // A type-7 tag sitting at a column the list marker's content had left is either
+    // outside the item (a block start, its refs raw HTML) or a lazy continuation of
+    // the item's paragraph (its refs prose). Both readings leave the reference LIVE,
+    // so holding it is truthful either way — which is what makes this one-boolean
+    // stand-in for an indentation model safe. Over-tripping only ever over-holds.
+    const leftListIndent =
+      listColumn >= 0 &&
+      quoted.length - quoted.replace(/^[ \t]*/, "").length < listColumn;
     // Updated here rather than at the loop's foot, so the block arms' `continue`
     // paths cannot leave it stale.
     prevDepth = depth;
+    const marker = LIST_MARKER.exec(quoted);
+    if (BLANK.test(quoted)) listColumn = -1;
+    else if (marker) listColumn = marker[0].length;
     // Closing a type-1 block is deferred past this line's scan: the line carrying
     // the closing tag is the block's LAST line, content included.
     let closeAfterLine = false;
@@ -783,28 +854,76 @@ function scanRefs(
           htmlBlock = false;
         }
       } else {
-        // Fences are read at the blockquote content column — `> ~~~` opens one, and
-        // a wrap inside it would corrupt a displayed code example. List markers are
-        // deliberately NOT stripped here: a blockquote marker repeats on every line,
-        // so opener and closer stay at the same depth, while a list marker appears
-        // only on the item's first line and its block's continuation is indentation
-        // this scanner does not model, so the two ends would pair at different
-        // depths. A fence opened by `- ~~~` therefore stays unrecognized, which is
-        // today's behaviour and mangles at worst — fenced content never autolinks.
+        // Fences are read at their CONTAINER's content column. A blockquote marker
+        // repeats on every line, so `quoted` carries opener and closer alike; a list
+        // marker appears only on the item's first line, so a fence behind one records
+        // the item's column and its later lines are matched against that instead.
         const fenced = FENCE.exec(quoted);
+        const indent = quoted.length - quoted.replace(/^[ \t]*/, "").length;
+        // Inside a list fence the closer sits at the item's column, plus CommonMark's
+        // usual three-space slack; `quoted` still carries that indentation.
+        const listClose =
+          fence && fence.column > 0 && indent >= fence.column
+            ? FENCE.exec(quoted.slice(fence.column))
+            : null;
+        const closer = fence && fence.column > 0 ? listClose : fenced;
         if (fence) {
           if (
-            fenced &&
-            fenced[1][0] === fence.char &&
-            fenced[1].length >= fence.len &&
+            closer &&
+            closer[1][0] === fence.char &&
+            closer[1].length >= fence.len &&
             depth === fence.depth &&
-            BLANK.test(quoted.slice(fenced[0].length))
+            BLANK.test(quoted.slice(fence.column + closer[0].length))
           ) {
             fence = null;
             atParagraphStart = true;
             lineStart = lineEnd + 1;
             continue;
           }
+          // A list fence dies with its ITEM. A non-blank line short of the column has
+          // left it; a blank line ends it too unless the next non-blank line is still
+          // indented into the item, which CommonMark keeps as code content.
+          //
+          // A fence-shaped line that is NOT this fence's closer is treated as content
+          // instead, deferring the death to the next ordinary line. That is the arm
+          // that keeps later references scannable: ending the item here would let the
+          // very same line re-open a fence at column 0 and swallow everything after
+          // it. Every judgment call in here is settled that way — an item ended too
+          // soon only exposes more text to the scan, while one left open hides it.
+          if (fence.column > 0 && !fenced) {
+            let ends = false;
+            if (BLANK.test(quoted)) {
+              let at = lineEnd + 1;
+              while (at <= text.length) {
+                let to = text.indexOf("\n", at);
+                if (to === -1) to = text.length;
+                const ahead = classifyLine(text, at, to).replace(
+                  QUOTE_PREFIX,
+                  "",
+                );
+                if (!BLANK.test(ahead)) {
+                  ends =
+                    ahead.length - ahead.replace(/^[ \t]*/, "").length <
+                    fence.column;
+                  break;
+                }
+                at = to + 1;
+              }
+              if (at > text.length) ends = true;
+            } else if (indent < fence.column) {
+              ends = true;
+            }
+            if (ends) {
+              // Outside the item now, so this line falls through to be classified.
+              fence = null;
+            } else {
+              atParagraphStart = true;
+              lineStart = lineEnd + 1;
+              continue;
+            }
+          }
+        }
+        if (fence) {
           // A fence dies with its CONTAINER, and DEPTH is the whole test: a line
           // that drops below the fence's depth has left the blockquote, and a truly
           // blank line is depth 0, so it is already covered. Testing the
@@ -824,8 +943,19 @@ function scanRefs(
             continue;
           }
         }
-        if (fenced) {
-          fence = { char: fenced[1][0], len: fenced[1].length, depth };
+        // A fence behind a list marker opens at the item's content column; one
+        // anywhere else opens at column 0 and keeps the blockquote-depth rules.
+        const markerFence = marker ? FENCE.exec(inner) : null;
+        if (fenced || markerFence) {
+          const open = fenced ?? markerFence;
+          if (open) {
+            fence = {
+              char: open[1][0],
+              len: open[1].length,
+              depth,
+              column: fenced ? 0 : (marker?.[0].length ?? 0),
+            };
+          }
           atParagraphStart = true;
           lineStart = lineEnd + 1;
           continue;
@@ -868,7 +998,7 @@ function scanRefs(
             // one, so it is validated here rather than trusted on arrival.
             let nextEnd = text.indexOf("\n", lineEnd + 1);
             if (nextEnd === -1) nextEnd = text.length;
-            const next = text.slice(lineEnd + 1, nextEnd);
+            const next = classifyLine(text, lineEnd + 1, nextEnd);
             defines =
               lineEnd < text.length && opensDeferredDestination(next, depth);
             deferred = defines;
@@ -890,7 +1020,12 @@ function scanRefs(
           htmlBlock = true;
           rawText = true;
           if (RAW_TEXT_CLOSE.test(line)) closeAfterLine = true;
-        } else if (opensHtmlBlock(inner, atParagraphStart || containerOpens)) {
+        } else if (
+          opensHtmlBlock(
+            inner,
+            atParagraphStart || containerOpens || leftListIndent,
+          )
+        ) {
           htmlBlock = true;
         }
       }
@@ -926,6 +1061,16 @@ function scanRefs(
       if (span > 0) {
         i++;
         continue;
+      }
+      // An inline tag is markup, not text: nothing in it autolinks, and a wrap there
+      // breaks the tag. Its TEXT CONTENT is a different matter and keeps being
+      // scanned — a reference between the tags is live prose.
+      if (ch === "<" && !htmlBlock && !isEscaped(text, i)) {
+        const skip = inlineTagEnd(text, i, lineEnd);
+        if (skip > i) {
+          i = skip;
+          continue;
+        }
       }
       if (ch === "[" && !htmlBlock && !isEscaped(text, i)) {
         // Inline syntax first, then the reference forms. A label that resolves to no
