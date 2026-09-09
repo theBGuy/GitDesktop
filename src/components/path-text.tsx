@@ -1,4 +1,4 @@
-import type { MouseEvent } from "react";
+import { type MouseEvent, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 
 const isSep = (ch: string) => ch === "/" || ch === "\\";
@@ -10,16 +10,23 @@ const isSep = (ch: string) => ch === "/" || ch === "\\";
  * renders through this — hand-rolling `truncate` on one re-mints the
  * inconsistent-truncation class. The only-when-clipped tooltip lives here (same
  * remove-don't-blank contract as `clipTitle`): the outer span never overflows
- * once a child truncates, so a handler on it would be dead.
+ * once a child truncates, so a handler on it would be dead. The tooltip keeps
+ * the path's own leading/trailing whitespace — those are identity characters
+ * in a git path.
  */
 export function PathText({
   path,
   line,
+  title,
   className,
 }: {
   path: string;
   /** Optional line number rendered as `:{line}` in the protected tail. */
   line?: number | null;
+  /** Tooltip value when clipped, for a rendered path that is a relativized
+   *  form of a longer canonical one (e.g. a transcript target) — the richer
+   *  string wins where the truncation already hides text. */
+  title?: string;
   className?: string;
 }) {
   // Trailing separators belong to the tail, so `a/b/` splits at `a` | `/b/`;
@@ -33,9 +40,19 @@ export function PathText({
       break;
     }
   }
-  const dir = cut > 0 ? path.slice(0, cut) : "";
+  const dir = cut >= 0 ? path.slice(0, cut) : "";
   const base = cut >= 0 ? path.slice(cut) : path;
   const full = line != null ? `${path}:${line}` : path;
+  const tip = title ?? full;
+
+  const ref = useRef<HTMLSpanElement>(null);
+  // The title is set imperatively, so React never clears it: a reused element
+  // (navigated header, windowed row) would keep the PREVIOUS path's tooltip
+  // until the next hover. Drop it the moment it no longer matches the content.
+  useEffect(() => {
+    const el = ref.current;
+    if (el && el.title && el.title !== tip) el.removeAttribute("title");
+  }, [tip]);
 
   const onMouseEnter = (e: MouseEvent<HTMLElement>) => {
     const el = e.currentTarget;
@@ -43,15 +60,20 @@ export function PathText({
     for (const child of el.children) {
       if (child.scrollWidth > child.clientWidth) clipped = true;
     }
-    const v = full.trim();
-    if (clipped && v) el.title = v;
+    if (clipped && tip.trim()) el.title = tip;
     else el.removeAttribute("title");
   };
 
   return (
-    <span className={cn("flex min-w-0", className)} onMouseEnter={onMouseEnter}>
-      {/* min-w-0 is mandatory: a flex item's `min-width: auto` floors it at
-          content width, and `truncate` silently never engages without it. */}
+    // min-w-0 here is the load-bearing one: without it the outer span floors
+    // at content width in ITS flex row and the children never shrink. (The
+    // dir span's copy is belt-and-braces — `truncate`'s overflow:hidden
+    // already zeroes a flex item's automatic minimum size.)
+    <span
+      ref={ref}
+      className={cn("flex min-w-0", className)}
+      onMouseEnter={onMouseEnter}
+    >
       {dir ? <span className="min-w-0 truncate">{dir}</span> : null}
       {/* max-w-full + truncate is the degradation path for a lone filename with
           no head to give: it end-ellipses instead of overflowing the row. */}

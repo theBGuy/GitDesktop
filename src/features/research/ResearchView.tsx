@@ -555,8 +555,7 @@ function ResearchResult({ run }: { run: ResearchRun }) {
               </span>
             )}
             {reportPath && (
-              // gap-1, not a trailing space in the label: a flex line box
-              // trims a trailing collapsible space, fusing the two items.
+              // gap-1, not a trailing label space — flex line boxes trim those.
               <span className="flex min-w-0 gap-1 text-[11px] text-muted-foreground">
                 <span className="shrink-0">Saved to</span>
                 <PathText path={reportPath} className="font-mono" />

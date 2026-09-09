@@ -82,8 +82,8 @@ function ToolStep({
   const shown = target && meta.file ? relativize(target, baseDir) : target;
   return (
     // A file row renders the path relative to the run's base dir, so the row
-    // itself carries the absolute one — PathText removes its own title when the
-    // text isn't clipped, which lets this tooltip through.
+    // carries the absolute one for hovers beside the path, and the title prop
+    // makes the path's own clipped tooltip show the same absolute form.
     <div
       className="flex items-center gap-1.5 bg-muted/40 px-2 py-1 text-[11px] leading-relaxed"
       title={meta.file && target ? target : undefined}
@@ -94,7 +94,11 @@ function ToolStep({
         // `meta.file` is what makes the target a path; every other tool's
         // target is a command or URL, which has no filename to protect.
         (meta.file ? (
-          <PathText path={shown} className="font-mono text-foreground/75" />
+          <PathText
+            path={shown}
+            title={target ?? undefined}
+            className="font-mono text-foreground/75"
+          />
         ) : (
           <span
             className="min-w-0 truncate font-mono text-foreground/75"
@@ -240,8 +244,8 @@ function EditDiffStep({
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         // The row renders the path relative to the run's base dir, so the
-        // button carries the absolute one — PathText removes its own title when
-        // the text isn't clipped, which lets this tooltip through.
+        // button carries the absolute one for hovers beside the path, and the
+        // title prop makes the path's clipped tooltip show the same absolute.
         title={target}
         className="flex items-center gap-1.5 px-2 py-1 text-left text-[11px] leading-relaxed hover:bg-muted/70 focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
       >
@@ -255,6 +259,7 @@ function EditDiffStep({
         <span className="shrink-0 text-muted-foreground">{meta.verb}</span>
         <PathText
           path={relPath}
+          title={target}
           className="flex-1 font-mono text-foreground/75"
         />
       </button>

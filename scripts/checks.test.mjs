@@ -226,11 +226,10 @@ test("select-item-clip-title flags the superseded item-level handler, wrapped or
     "</SelectItem>",
   ].join("\n");
   assert.deepEqual(selectItemClipTitle(deadSpan), [1]);
-  // A SELF-BOUNDED span (explicit max-w) keeps its handler LIVE — TaskDialog's
-  // interpreter-path sub-span. At close range it still pairs: the guard cannot
-  // see width bounds, so this is the known false positive the allowlist
-  // remedies. In the real tree the row's markup holds it ~2× outside the
-  // window.
+  // A synthetic SELF-BOUNDED span (an explicit max-w keeps its handler live).
+  // At close range it still pairs — the guard cannot see width bounds — so a
+  // real one would need the allowlist. No in-tree site carries this shape
+  // today: in-item path rows route through PathText.
   const bounded = [
     "<SelectItem key={i.id} value={i.id}>",
     "  <span",

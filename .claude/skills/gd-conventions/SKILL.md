@@ -140,6 +140,8 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   new path display hand-rolling `truncate` re-mints the inconsistency this
   fixed. Label composites (`Saved to <PathText/>`) space via `gap-*` on the
   flex row, never a trailing space in the label — flex line boxes trim it.
+  Non-flex-item text is exempt: the absolutely-positioned `sr-only` badge
+  spans keep their trailing announcement space.
 - A `SelectControl`/`SelectField` `items` Record silently reorders integer-like
   keys to the front (JS object semantics) — any picker whose option values are
   user-supplied identifiers that can be all-digits (logins, slugs) must pass

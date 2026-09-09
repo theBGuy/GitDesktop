@@ -318,8 +318,8 @@ export function TaskDialog({
               {/* Wider than the trigger: the popup defaults to the trigger's
                   width (w-(--anchor-width)) and hard-clips overflow, which cut
                   the detected interpreter paths mid-character. 320px gives the
-                  paths room; anything longer still ellipsizes inside the span
-                  (max-w-64) with the clipped-title tooltip. */}
+                  paths room; anything longer still middle-truncates inside the
+                  span (max-w-64) with its clipped-only tooltip. */}
               <SelectContent className="w-80">
                 {options.map((i) => {
                   // The selected interpreter reflects the login-shell confirm (what
