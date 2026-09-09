@@ -299,7 +299,7 @@ function isServerMergeDisabled(pr: PrDetails, s: MergeStrategy): boolean {
 /** Defensive fallback for a `busy` hold whose term `composerReason` doesn't
  *  (yet) name — coverage holds today, but this keeps the four sites that
  *  guard against it in step rather than re-typing the sentence. */
-const MERGE_BUSY_FALLBACK_REASON = "Another operation is in progress";
+const BUSY_HOLD_FALLBACK_REASON = "Another operation is in progress";
 
 export function RemotePrView({
   repoPath,
@@ -2373,7 +2373,7 @@ export function RemotePrView({
       case staleReason !== undefined:
         return staleReason;
       case busy:
-        return composerReason ?? MERGE_BUSY_FALLBACK_REASON;
+        return composerReason ?? BUSY_HOLD_FALLBACK_REASON;
       case pr.isDraft:
         return `Mark the ${prNoun} ready before merging`;
       case mergeGuardMissing:
@@ -3082,7 +3082,7 @@ export function RemotePrView({
                       // would open against the previously rendered PR;
                       // `composerReason` names whichever term is in flight so the
                       // hold is never mute.
-                      reason={composerReason ?? MERGE_BUSY_FALLBACK_REASON}
+                      reason={composerReason ?? BUSY_HOLD_FALLBACK_REASON}
                       onClick={() => setSubmitOpen(true)}
                       title="Submit a review (verdict, summary, and any pending comments)"
                     >
@@ -3110,7 +3110,7 @@ export function RemotePrView({
                               return "Couldn't load approval state";
                             case busy:
                               return (
-                                composerReason ?? MERGE_BUSY_FALLBACK_REASON
+                                composerReason ?? BUSY_HOLD_FALLBACK_REASON
                               );
                             case approvals.isPending:
                               return "Checking approval state…";
@@ -3175,7 +3175,7 @@ export function RemotePrView({
                           case approvals.isError:
                             return "Couldn't load review state";
                           case busy:
-                            return composerReason ?? MERGE_BUSY_FALLBACK_REASON;
+                            return composerReason ?? BUSY_HOLD_FALLBACK_REASON;
                           case approvals.isPending:
                             return "Checking review state…";
                           default:

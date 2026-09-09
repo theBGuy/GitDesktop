@@ -306,7 +306,7 @@ const CONTEXT_MENU_SUPPRESS_RE =
 // absence of a wrapper. Discriminating on a `Reason`-suffixed value instead
 // would have missed sites whose hint was a bare conditional string rather
 // than a named reason (the discussions category menu and the branch trigger,
-// both converted at #326).
+// both since converted).
 // The tempered `(?!</)` steps hold the match inside one unclosed element chain,
 // so a titled span that already closed cannot pair with a later sibling's
 // trigger; the `DisabledReasonButton` step makes the FIXED composition
