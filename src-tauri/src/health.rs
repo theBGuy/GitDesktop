@@ -133,8 +133,8 @@ pub async fn system_health() -> AppResult<SystemHealth> {
             (id, handle)
         })
         // collect() is the concurrency: it drives every spawn before the first
-        // await below — awaiting inside one loop would serialize seven probes of
-        // up to two 20 s captures each.
+        // await below — awaiting inside one loop would serialize seven probes,
+        // each up to three 20 s subprocess legs (resolve + two captures).
         .collect();
 
     let mut tools = Vec::with_capacity(handles.len());

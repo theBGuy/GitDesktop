@@ -377,9 +377,10 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 - **Command futures stay small:** the invoke handler CONSTRUCTS a
   `#[tauri::command]`'s future on the WebView2 UI-thread stack before the
   runtime polls it on a worker — a large command future overflows that stack
-  in release builds (debug lays futures out smaller and `Box::pin`s them at
-  the IPC boundary, so dev never sees it; on Windows dev IPC uses the same
-  custom protocol). The trigger is per-future stack footprint, not join
+  in release builds (dev never reproduced it: the debug-profile future
+  measured 123,000 B against a ~721 KB release handler frame, and debug
+  `Box::pin`s command futures at the IPC boundary; on Windows dev IPC uses
+  the same custom protocol). The trigger is per-future stack footprint, not join
   arity: sub-futures holding capture buffers or nested async chains get
   spawned (`tauri::async_runtime::spawn`) or `Box::pin`ned before a `join!`.
   A 7-way inline join of process-spawning probes measured ~721 KB of handler
