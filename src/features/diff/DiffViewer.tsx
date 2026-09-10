@@ -705,8 +705,9 @@ function paintLines(container: HTMLElement, lines: SelectedLine[]) {
 /** Highlight the library-reported drag range for live feedback (includes
  *  context), over `base` — the lines an additive drag is merging into, which
  *  would otherwise vanish on the next mousemove (this repaints from scratch).
- *  Split view's painter; unified falls through here only on a cleared (null)
- *  range or a start row it can't resolve — otherwise `paintRowSpan`. */
+ *  Split view's painter; unified falls through here only when no anchors
+ *  exist — a cleared (null) range, an unresolvable start row, or a stranded
+ *  drag's advance that must not re-mint them — otherwise `paintRowSpan`. */
 function paintRange(
   container: HTMLElement,
   range: {
@@ -1016,6 +1017,13 @@ function StagingDiffView({
       additiveRef.current ? (selectedRef.current ?? []) : [];
     const onMouseOver = (e: MouseEvent) => {
       if (!unified || !drag || !(e.target instanceof Element)) return;
+      // A mouseup lost to a focus steal leaves `drag` set with no button held —
+      // without this, plain hovering would wipe the committed tint and trail a
+      // phantom span until the next press re-anchors.
+      if ((e.buttons & 1) === 0) {
+        drag = null;
+        return;
+      }
       const row = e.target.closest(".diff-line-num")?.closest("tr");
       if (!row) return;
       // mouseover fires per descendant entered (the gutter cell and its number
@@ -1031,9 +1039,12 @@ function StagingDiffView({
       isUnifiedMode: unified,
       onSelectionChange: (range) => {
         if (unified) {
-          // A null range is the manager clearing itself (teardown).
+          // A null range is the manager clearing itself (teardown). Anchors
+          // mint only on a fresh press (start === end at mousedown): a stranded
+          // drag's library range stays live after a lost mouseup, and its
+          // start !== end advances must not re-create what the hover guard cleared.
           if (!range) drag = null;
-          else if (!drag) {
+          else if (!drag && range.startLineNumber === range.endLineNumber) {
             const row = rowForLine(
               container,
               range.side,
