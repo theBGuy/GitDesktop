@@ -706,8 +706,9 @@ function paintLines(container: HTMLElement, lines: SelectedLine[]) {
  *  context), over `base` — the lines an additive drag is merging into, which
  *  would otherwise vanish on the next mousemove (this repaints from scratch).
  *  Split view's painter; unified falls through here only when no anchors
- *  exist — a cleared (null) range, an unresolvable start row, or a press
- *  already released — otherwise `paintRowSpan`. */
+ *  exist — a cleared (null) range, an unresolvable start row, or no live
+ *  primary gutter press (one already released, or a non-primary-button
+ *  drag) — otherwise `paintRowSpan`. */
 function paintRange(
   container: HTMLElement,
   range: {
@@ -1004,10 +1005,12 @@ function StagingDiffView({
       startRow: HTMLTableRowElement;
       endRow: HTMLTableRowElement;
     } | null = null;
-    // The latch that licenses anchor minting: a primary press on the number
-    // gutter — the only press the manager starts a selection from — captured
-    // ahead of its mousedown. A mint request without one can only be a
-    // stranded drag's range still emitting after a lost mouseup.
+    // The latch that licenses anchor minting. Gutter ancestry is what lets
+    // the manager start a selection at all; the primary-button clause then
+    // scopes the two-sided span deliberately — a non-primary gutter drag
+    // keeps the library's single-sided range. A mint request without a live
+    // primary gutter press can only be a stranded drag's range still
+    // emitting after a lost mouseup.
     let pressed = false;
     const onMouseDownCapture = (e: MouseEvent) => {
       additiveRef.current = isAdditiveDrag(e);
