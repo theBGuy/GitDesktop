@@ -778,8 +778,11 @@ where
 {
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let mut obuf = [0u8; 8192];
-    let mut ebuf = [0u8; 8192];
+    // Heap, not inline arrays: these live across the select awaits, so arrays would
+    // ride every caller's future onto the stack a `#[tauri::command]` future is
+    // constructed on (the WebView2 UI thread in release builds).
+    let mut obuf = vec![0u8; 8192];
+    let mut ebuf = vec![0u8; 8192];
     let (mut odone, mut edone) = (false, false);
     let mut overflowed = false;
     loop {
@@ -3353,6 +3356,21 @@ mod tests {
         assert_eq!(err.len(), 16);
         assert!(!overflowed);
         assert!(out.is_empty());
+    }
+
+    /// Guards the read buffers staying off the future: every `run_capture_parts`
+    /// caller is reachable from a `#[tauri::command]`, whose future is built on the
+    /// WebView2 UI-thread stack in release builds, so inline arrays here would ride
+    /// that stack. Building the future is enough to measure it; it is never polled.
+    #[test]
+    fn capture_capped_future_stays_small() {
+        let (mut o, mut e): (&[u8], &[u8]) = (b"", b"");
+        let fut = capture_capped(&mut o, &mut e, 16);
+        let size = std::mem::size_of_val(&fut);
+        assert!(
+            size < 1024,
+            "capture_capped() future is {size} bytes (debug layout); keep the read buffers heap-allocated so it stays under 1 KiB"
+        );
     }
 
     // Real opencode `run --format json` lines (captured 2026-06-23, v1.17.9).
