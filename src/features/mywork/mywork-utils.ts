@@ -1,4 +1,4 @@
-import type { MyWorkItem } from "@/lib/git/types";
+import type { MyWorkItem, MyWorkPage } from "@/lib/git/types";
 import type { RecentRepo } from "@/lib/settings/api";
 
 /** Which slice of the inbox the tab strip is showing. */
@@ -57,6 +57,30 @@ export function sortMyWork(items: readonly MyWorkItem[]): MyWorkItem[] {
     if (!aOk) return 0;
     return bt - at;
   });
+}
+
+/**
+ * Every provider's leg merged into one page, in the order given. Dedups by
+ * `url` — the identity a row navigates by — keeping the first leg's copy, and
+ * never re-caps: each leg arrives already capped, so `truncated` only has to
+ * carry whether ANY of them was.
+ */
+export function mergeMyWorkPages(
+  pages: Array<MyWorkPage | undefined>,
+): MyWorkPage {
+  const seen = new Set<string>();
+  const items: MyWorkItem[] = [];
+  for (const page of pages) {
+    for (const item of page?.items ?? []) {
+      if (seen.has(item.url)) continue;
+      seen.add(item.url);
+      items.push(item);
+    }
+  }
+  return {
+    items: sortMyWork(items),
+    truncated: pages.some((p) => p?.truncated ?? false),
+  };
 }
 
 /** The rows a tab + filter leave visible. Client-side over already-loaded data,

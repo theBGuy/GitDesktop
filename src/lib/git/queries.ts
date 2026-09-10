@@ -48,6 +48,7 @@ import type {
   IssueReactions,
   IssueRelation,
   IssueType,
+  MyWorkSources,
   PrDetails,
   PrInfo,
   PrMergeabilityState,
@@ -3280,15 +3281,58 @@ export function useForgeOwnedNamespaces(
   });
 }
 
+/** The "no forge connected" answer cold-start test mode forces. */
+const NO_MY_WORK_SOURCES: MyWorkSources = {
+  github: false,
+  gitlab: false,
+  bitbucket: false,
+};
+
+// Shared definition so the hook and the app-open prefetch can't drift. Honors
+// the cold-start test mode like `useForgeStatus`: the probe spawns the real CLIs
+// otherwise, and it now runs at app open rather than only when the inbox does.
+const myWorkSourcesOptions = () =>
+  queryOptions({
+    queryKey: ["my-work-sources"] as const,
+    queryFn: COLD_START_NO_GH
+      ? (): Promise<MyWorkSources> => Promise.resolve(NO_MY_WORK_SOURCES)
+      : () => api.forgeMyWorkSources(),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+
+/** Which providers the work inbox can fetch from, probed once when it opens so
+ *  each provider's leg is asked for only when there is a sign-in behind it. */
+export function useMyWorkSources(enabled: boolean) {
+  return useQuery({ ...myWorkSourcesOptions(), enabled });
+}
+
+/** Warms that probe at app open. It spawns a CLI, so on a cold open it would
+ *  otherwise serialize ahead of the inbox's first leg; welcome → My work is a
+ *  common enough path to pay for it once, up front. prefetchQuery honors the
+ *  staleTime, so an already-warm entry costs nothing. */
+export function usePrefetchMyWorkSources() {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    void queryClient.prefetchQuery(myWorkSourcesOptions());
+  }, [queryClient]);
+}
+
 /** The viewer's work items across every repository on a provider, for the
  *  cross-repo inbox. Resolves the whole `MyWorkPage` envelope, not a bare array,
  *  so consumers can read its `truncated` flag. The key carries no host/account
  *  axis, same as `["forge-repos", provider]` — one ambient account per provider
- *  today. */
-export function useForgeMyWork(provider: ForgeProvider, enabled: boolean) {
+ *  today. `repoPaths` scopes providers that can't search account-wide; it is
+ *  sorted into the key so caller order can't fork the cache. */
+export function useForgeMyWork(
+  provider: ForgeProvider,
+  enabled: boolean,
+  repoPaths?: string[],
+) {
+  const paths = repoPaths ? [...repoPaths].sort() : null;
   return useQuery({
-    queryKey: ["forge-my-work", provider] as const,
-    queryFn: () => api.forgeMyWork(provider),
+    queryKey: ["forge-my-work", provider, paths] as const,
+    queryFn: () => api.forgeMyWork(provider, paths ?? undefined),
     enabled,
     staleTime: 60_000,
     retry: false,

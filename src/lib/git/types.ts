@@ -682,6 +682,10 @@ export interface MyWorkItem {
   url: string;
   updatedAt: string;
   authorLogin?: string | null;
+  /** Which forge the row came from. The rows of several providers merge into one
+   *  list, so the item carries its own provider rather than inheriting the
+   *  screen's — it drives the row glyph and the per-row open/link copy. */
+  provider: ForgeProvider;
 }
 
 /** One page of the work inbox. `truncated` is true when either search leg hit
@@ -691,6 +695,15 @@ export interface MyWorkItem {
 export interface MyWorkPage {
   items: MyWorkItem[];
   truncated: boolean;
+}
+
+/** Which forges the work inbox can fetch from right now — one flag per provider,
+ *  so a provider the user isn't signed in to is never asked and never contributes
+ *  a failure the other providers' rows would have to share a screen with. */
+export interface MyWorkSources {
+  github: boolean;
+  gitlab: boolean;
+  bitbucket: boolean;
 }
 
 export interface GhAccount {

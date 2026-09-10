@@ -34,7 +34,12 @@ pub struct RepoOwner {
 /// Owner segment + host + repo name of a git remote URL — handles
 /// `https://host/owner/repo(.git)` and scp-style `git@host:owner/repo(.git)`.
 /// None per component if it can't be parsed.
-fn parse_owner_host(url: &str) -> (Option<String>, Option<String>, Option<String>) {
+///
+/// The owner is ONE segment — the one before the repo name — so a nested GitLab
+/// group yields `sub`, not `group/sub`. This is the spelling persisted on
+/// `RecentRepo.owner`, which the My work inbox's rows are matched against, so
+/// `forge::gitlab`'s mapper is pinned against this function directly.
+pub(crate) fn parse_owner_host(url: &str) -> (Option<String>, Option<String>, Option<String>) {
     let url = url.trim().trim_end_matches('/');
     let url = url.strip_suffix(".git").unwrap_or(url);
     // Split into host and the `owner/repo` path (scheme or scp form).

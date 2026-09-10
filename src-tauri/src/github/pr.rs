@@ -3027,7 +3027,9 @@ fn pr_head_ref_from_value(value: &serde_json::Value) -> PrHeadRef {
 /// Pins the origin slug like [`gh_pr_poll`]: an unpinned `gh repo view` on a fork
 /// with an `upstream` remote auto-resolves to the PARENT, which would answer for
 /// the upstream's PR of the same number.
-#[tauri::command]
+///
+/// Not a command: the frontend reaches this through `forge_pr_head_ref`, which
+/// dispatches on the item's provider — a My work row can name any repo.
 pub async fn gh_pr_head_ref(repo_path: String, number: u64) -> AppResult<PrHeadRef> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let Some((owner, name)) = slug.split_once('/') else {

@@ -52,9 +52,10 @@ instead, see [Development](#development).
   [Bitbucket Cloud](#bitbucket-cloud), each with PRs/MRs, CI, and project
   settings in the same panels; [issues in-app](#issues-and-to-dos) on GitHub
   and GitLab, or via [Jira](#jira-cloud-issues) on Bitbucket.
-- **[My work](#my-work), one inbox across repos**: your open pull
-  requests, review requests, and issues from every repository you've
-  added, with Enter opening each right where the work lives.
+- **[My work](#my-work), one inbox across repos and forges**: your open
+  pull requests, merge requests, review requests, and issues from
+  GitHub, GitLab, and Bitbucket, with Enter opening each right where
+  the work lives.
 - **A [GitHub Actions cockpit](#github-actions)**: runs, jobs, steps,
   re-run / cancel / dispatch (from the run or a right-click on its row),
   failed-step logs, and AI debugging.
@@ -634,19 +635,25 @@ it doesn't normally appear. Fully keyboard-navigable.
 
 ### My work
 
-A cross-repo inbox of your open **GitHub** pull requests and issues:
-anything you authored, were assigned, were mentioned in, or commented on,
-plus anything awaiting your review. Newest first, so what's waiting on you
-is one screen away instead of one repository at a time. Narrow it with the
-**All / Pull requests / Issues** tabs and a filter box that takes arrow
-keys and Enter, then press Enter on a row: an item from a repository
-you've added to GitDesktop usually opens right in the app, and the ↗ marks
-the rows that will open on GitHub instead. A pull request usually lands in the
-**worktree** its head branch is checked out in (when GitDesktop can
-resolve that in time), so you arrive in the checkout the work lives in; **Shift+Enter** (or *Open in
-main workspace* on the row's right-click menu) takes you to the main
-workspace instead. Read-only, with a **Refresh** in the header and *Open
-on GitHub* / *Copy link* alongside. Reach it with `Ctrl`/`⌘`+`Shift`+`M`,
+A cross-repo inbox of the open work that involves you, across all three
+forges. On **GitHub** it collects every pull request and issue you
+authored, were assigned, were mentioned in, or commented on, plus
+anything awaiting your review; **GitLab** adds the merge requests and
+issues from each host you're signed in to, and **Bitbucket** the pull
+requests from your recent repositories. Newest first, so what's waiting
+on you is one screen away instead of one repository at a time. Every row
+carries the mark of the forge it came from, each forge loads on its own,
+and a forge you haven't connected simply doesn't appear. Narrow it with
+the **All / Pull requests / Issues** tabs and a filter box that takes
+arrow keys and Enter, then press Enter on a row: an item from a
+repository you've added to GitDesktop usually opens right in the app, and
+the ↗ marks the rows that open on their host in your browser. A pull
+request usually lands in the **worktree** its head branch is checked out
+in (when GitDesktop can resolve that in time), so you arrive in the
+checkout the work lives in; **Shift+Enter** (or *Open in main workspace*
+on the row's right-click menu) takes you to the main workspace instead.
+Read-only, with a **Refresh** in the header, plus *Open on GitHub / GitLab /
+Bitbucket* and *Copy link* alongside. Reach it with `Ctrl`/`⌘`+`Shift`+`M`,
 from the welcome screen, or from the command palette (*My work*).
 
 ### GitLab

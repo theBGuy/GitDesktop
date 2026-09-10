@@ -15,6 +15,7 @@ pub mod glab;
 pub mod http;
 pub mod jira;
 pub mod model;
+pub mod my_work;
 pub mod session;
 
 use crate::error::{AppError, AppResult};
@@ -969,24 +970,76 @@ pub async fn forge_owned_namespaces(provider: Provider) -> AppResult<Vec<String>
     }
 }
 
-/// Every open pull request and issue involving the signed-in user, across all the
-/// repos they can see — the "My work" inbox's single cross-repo read. Account-scoped
-/// (no repo path), so it dispatches on an explicit `provider` like the clone browser.
+/// Every open pull/merge request and issue involving the signed-in user — the "My
+/// work" inbox's single cross-repo read. Account-scoped (no repo path), so it
+/// dispatches on an explicit `provider` like the clone browser.
 ///
-/// GitHub only for now: the other arms error rather than returning an empty list, so
-/// a caller can't read "not wired up" as "you have no open work".
+/// `repo_paths` serves the Bitbucket arm alone: Bitbucket retired every
+/// account-scoped listing, so its inbox has to name the repos to ask. GitHub and
+/// GitLab answer for the whole account and ignore it.
 #[tauri::command]
 pub async fn forge_my_work(
     provider: Provider,
-) -> AppResult<crate::github::my_work::MyWorkPage> {
+    repo_paths: Option<Vec<String>>,
+) -> AppResult<my_work::MyWorkPage> {
     match provider {
         Provider::GitHub => crate::github::my_work::my_work().await,
-        Provider::GitLab => Err(AppError::InvalidArgument(
-            "My work isn't supported for GitLab yet.".into(),
-        )),
-        Provider::Bitbucket => Err(AppError::InvalidArgument(
-            "My work isn't supported for Bitbucket yet.".into(),
-        )),
+        Provider::GitLab => gitlab::gitlab_my_work().await,
+        Provider::Bitbucket => bitbucket::bitbucket_my_work(repo_paths.unwrap_or_default()).await,
+    }
+}
+
+/// Which providers the "My work" inbox can currently ask — its availability
+/// signal, kept out of `Implemented` because those flags are per-repo/per-provider
+/// FEATURE support while this is about whether an ACCOUNT is configured at all.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyWorkSources {
+    pub github: bool,
+    pub gitlab: bool,
+    pub bitbucket: bool,
+}
+
+/// Probe all three providers' account configuration concurrently. This command
+/// never errors: each arm folds its OWN failure to `false`, so a broken probe
+/// reads as "not configured" and the inbox simply doesn't offer that source —
+/// safer than failing the whole picker over one provider.
+#[tauri::command]
+pub async fn forge_my_work_sources() -> AppResult<MyWorkSources> {
+    let (github, gitlab, bitbucket) = tokio::join!(
+        async {
+            crate::github::pr::gh_accounts()
+                .await
+                .is_ok_and(|a| !a.accounts.is_empty())
+        },
+        async { !glab::known_hosts().await.is_empty() },
+        async { http::load_credentials().await.is_ok() },
+    );
+    Ok(MyWorkSources {
+        github,
+        gitlab,
+        bitbucket,
+    })
+}
+
+/// The head branch of ONE pull/merge request, plus the repo that branch lives in —
+/// what the inbox's open path needs to prefer the worktree already holding that
+/// branch. Dispatches on an explicit `provider` (the row carries it) rather than
+/// re-detecting from `repo_path`, which the caller has already matched.
+///
+/// Every arm answers `""` for what its provider can't supply rather than erroring:
+/// the caller's question is "which branch, on which repo", and the gate declines
+/// on an unknown — a usable answer where a failed call is not.
+#[tauri::command]
+pub async fn forge_pr_head_ref(
+    provider: Provider,
+    repo_path: String,
+    number: u64,
+) -> AppResult<crate::github::pr::PrHeadRef> {
+    match provider {
+        Provider::GitHub => crate::github::pr::gh_pr_head_ref(repo_path, number).await,
+        Provider::GitLab => gitlab::pr_head_ref(&repo_path, number).await,
+        Provider::Bitbucket => bitbucket::pr_head_ref(&repo_path, number).await,
     }
 }
 
@@ -4832,17 +4885,39 @@ mod tests {
         assert!(matches!(zero_page, Err(AppError::InvalidArgument(_))));
     }
 
-    /// The unsupported arms must fail typed, before any CLI spawn — this test
-    /// would hang or shell out if either arm fell through to the gh path.
+    /// The one dispatch outcome reachable without a CLI or network: the Bitbucket
+    /// arm with no repos to ask answers a benign empty page rather than erroring
+    /// or spending a credential read. The GitHub and GitLab arms shell out, so
+    /// their dispatch is covered by their own modules' tests, not here.
     #[tokio::test]
-    async fn my_work_refuses_the_unimplemented_providers() {
-        for provider in [Provider::GitLab, Provider::Bitbucket] {
-            let refused = forge_my_work(provider).await;
-            assert!(
-                matches!(refused, Err(AppError::InvalidArgument(_))),
-                "{provider:?} should be refused, got {refused:?}",
-            );
-        }
+    async fn my_work_bitbucket_with_no_repos_is_a_benign_empty_page() {
+        let empty = forge_my_work(Provider::Bitbucket, None).await;
+        let page = empty.expect("no repo paths is a benign empty page, not an error");
+        assert!(page.items.is_empty());
+        assert!(!page.truncated);
+        assert!(
+            forge_my_work(Provider::Bitbucket, Some(Vec::new()))
+                .await
+                .is_ok(),
+            "an explicitly empty repo list is the same benign case",
+        );
+    }
+
+    /// The picker keys each source by name, so the wire shape is pinned here
+    /// rather than trusted to the `rename_all` attribute. (The command itself
+    /// probes gh, glab and the keyring — machine state, not a unit test.)
+    #[test]
+    fn my_work_sources_serializes_one_flag_per_provider() {
+        let wire = serde_json::to_value(MyWorkSources {
+            github: true,
+            gitlab: false,
+            bitbucket: true,
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"github": true, "gitlab": false, "bitbucket": true})
+        );
     }
 
     #[test]

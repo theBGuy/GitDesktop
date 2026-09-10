@@ -35,6 +35,9 @@ use crate::forge::model::{
     ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
     ForgeTimelineEventOut, ForgeUserRef, Implemented, Provider,
 };
+use crate::forge::my_work::{
+    merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
+};
 use crate::forge::{
     cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
     FORK_POLL_DELAY, README_CANDIDATES,
@@ -43,8 +46,8 @@ use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::pr::{
     ApprovalState, CommitCommentOut, DraftCommentIn, PrAuthor, PrCiRefIn, PrCiStatus, PrCommitOut,
-    PrDetails, PrFileOut, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef, PrThreadOut,
-    ReviewSubmitOut, ReviewThreadOut,
+    PrDetails, PrFileOut, PrHeadRef, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef,
+    PrThreadOut, ReviewSubmitOut, ReviewThreadOut,
 };
 
 /// Whether this process has SUCCESSFULLY seeded git's credential store this session
@@ -549,6 +552,192 @@ async fn workspace_slugs(creds: &BbCredentials) -> AppResult<Vec<String>> {
 pub async fn owned_namespaces() -> AppResult<Vec<String>> {
     let creds = http::load_credentials().await?;
     Ok(namespace_set(workspace_slugs(&creds).await?))
+}
+
+// ── My work (cross-repo inbox) ────────────────────────────────────────────────
+//
+// Bitbucket has no account-scoped PR feed: `GET /2.0/pullrequests/{user}` is gone
+// and the workspace/role listings retired with CHANGE-2770 (see `list_repos`). So
+// the inbox is repo-scoped by necessity — it asks each of the user's KNOWN local
+// Bitbucket repos, which is why this arm alone takes repo paths.
+
+/// Page size for a My work repo query — Bitbucket's PR-list endpoint caps here.
+const BB_MY_WORK_PAGELEN: u32 = 50;
+
+/// The BBQL filter selecting the viewer's open PRs in one repo. `uuid` is the
+/// braced account UUID, escaped for the double-quoted literal like every other
+/// BBQL embed; the whole string is percent-encoded by the caller.
+fn my_work_query(uuid: &str) -> String {
+    let uuid = bbql_escape(uuid);
+    format!("state=\"OPEN\" AND (author.uuid=\"{uuid}\" OR reviewers.uuid=\"{uuid}\")")
+}
+
+/// Narrow one raw PR element to a wire item, or `None` when it can't address
+/// anything — a record without id, title, web link, or a splittable
+/// `workspace/slug` has no usable link, so it is skipped rather than sinking the
+/// repo's leg.
+fn my_work_item_from_value(raw: &serde_json::Value) -> Option<MyWorkItem> {
+    use serde_json::Value;
+    let number = raw.get("id").and_then(Value::as_u64)?;
+    let title = raw
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())?
+        .to_string();
+    let url = raw
+        .pointer("/links/html/href")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())?
+        .to_string();
+    // The PR's DESTINATION repo is the one it belongs to; a fork's source repo
+    // would file the row under someone else's clone.
+    let repo_full_name = raw
+        .pointer("/destination/repository/full_name")
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty())?
+        .to_string();
+    // Bitbucket paths are exactly `workspace/slug`, so the first `/` splits them.
+    let (owner, name) = repo_full_name.split_once('/')?;
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    let repo_owner = owner.to_string();
+    let repo_name = name.to_string();
+    Some(MyWorkItem {
+        provider: Provider::Bitbucket,
+        number,
+        title,
+        // Bitbucket Cloud's native issue tracker is deleted platform-wide, so
+        // every item this arm can produce is a pull request.
+        is_pull_request: true,
+        repo_full_name,
+        repo_owner,
+        repo_name,
+        host: BB_HOST.to_string(),
+        url,
+        updated_at: normalize_updated_at(
+            raw.get("updated_on")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        // `nickname` is the display handle present on other users' objects too —
+        // `username` is self-only (privacy).
+        author_login: raw
+            .pointer("/author/nickname")
+            .and_then(Value::as_str)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string),
+    })
+}
+
+/// Every open pull request the signed-in Bitbucket user authored or is a reviewer
+/// on, across the local repos in `repo_paths`.
+///
+/// One page per repo, fetched concurrently. Best-effort per repo — one erroring
+/// doesn't sink the rest, mirroring [`search_repos`] — but if EVERY repo fetch
+/// fails, the last error surfaces rather than a misleading empty inbox. A path
+/// whose origin isn't a Bitbucket remote is skipped, never an error: the caller
+/// hands over every repo it knows about, whatever forge each one is on.
+pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage> {
+    // Resolve the repos FIRST: with nothing to ask, the benign empty page must not
+    // depend on a keyring read and a `/user` round trip that would answer
+    // "not configured" instead.
+    //
+    // `workspace_slug` parses any origin's path, Bitbucket or not, so the provider
+    // gate is what actually keeps a github.com clone from resolving to a plausible
+    // (workspace, slug) pair and spending a 404 leg on it.
+    let mut pairs: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    for path in &repo_paths {
+        if !matches!(
+            crate::forge::detect_non_github(path).await,
+            Some((Provider::Bitbucket, _))
+        ) {
+            continue;
+        }
+        if let Ok(pair) = workspace_slug(path).await {
+            pairs.insert(pair);
+        }
+    }
+    if pairs.is_empty() {
+        return Ok(MyWorkPage::empty());
+    }
+
+    let creds = http::load_credentials().await?;
+    let viewer: BbUser = http::bb_get_json(&creds, "user", "user").await?;
+    let uuid = viewer
+        .uuid
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| AppError::Bitbucket("Bitbucket did not report your account id.".into()))?;
+
+    let q_enc = encode_query_value(&my_work_query(&uuid));
+    let pages = crate::forge::futures_join_all(pairs.iter().map(|(ws, slug)| {
+        let creds = &creds;
+        let q_enc = &q_enc;
+        async move {
+            // `sort=-updated_on` pins the ordering the page cap depends on rather
+            // than trusting the endpoint's default, exactly as `poll_prs` does.
+            let path = format!(
+                "repositories/{}/{}/pullrequests?q={q_enc}&sort=-updated_on&pagelen={BB_MY_WORK_PAGELEN}",
+                encode_query_value(ws),
+                encode_query_value(slug),
+            );
+            http::bb_get_json::<BbPage<serde_json::Value>>(creds, &path, "pull requests").await
+        }
+    }))
+    .await;
+
+    let mut legs: Vec<MyWorkLeg> = Vec::new();
+    let mut any_ok = false;
+    let mut last_err: Option<AppError> = None;
+    for page in pages {
+        match page {
+            Ok(page) => {
+                any_ok = true;
+                legs.push(MyWorkLeg {
+                    items: page
+                        .values
+                        .iter()
+                        .filter_map(my_work_item_from_value)
+                        .collect(),
+                    // One page only, so a `next` is this repo's own truncation.
+                    capped: page.next.is_some(),
+                });
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if !any_ok {
+        return Err(last_err.unwrap_or_else(|| {
+            AppError::Bitbucket("could not read your Bitbucket pull requests".into())
+        }));
+    }
+    Ok(merge_legs(legs, MY_WORK_LIMIT))
+}
+
+/// The head branch of ONE pull request, plus the repo that branch lives in.
+/// Bitbucket names the source repo inline, so a fork's head is addressable here
+/// (unlike the GitLab arm). Absences map to `""` rather than an error — the
+/// caller's question is "which repo is this branch on", and "unknown" is a usable
+/// answer where a failed call is not.
+pub async fn pr_head_ref(repo_path: &str, number: u64) -> AppResult<PrHeadRef> {
+    let (ws, slug) = workspace_slug(repo_path).await?;
+    let creds = http::load_credentials().await?;
+    let path = format!(
+        "repositories/{}/{}/pullrequests/{number}",
+        encode_query_value(&ws),
+        encode_query_value(&slug),
+    );
+    let pr: serde_json::Value = http::bb_get_json(&creds, &path, "pull request").await?;
+    let str_at = |p: &str| {
+        pr.pointer(p)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Ok(PrHeadRef {
+        head_ref_name: str_at("/source/branch/name"),
+        head_repo_full_name: str_at("/source/repository/full_name"),
+    })
 }
 
 /// The signed-in user's repositories, for the clone browser. Both `GET
@@ -5411,6 +5600,111 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
         default_branch: None,
         forks,
     })
+}
+
+#[cfg(test)]
+mod my_work_tests {
+    use super::{my_work_item_from_value, my_work_query};
+    use crate::forge::encode_query_value;
+    use crate::forge::model::Provider;
+    use serde_json::json;
+
+    /// The one filter that still answers: the account-scoped
+    /// `GET /2.0/pullrequests/{user}` is gone, so open-and-mine is a per-repo BBQL
+    /// query over author OR reviewer.
+    #[test]
+    fn query_selects_open_prs_the_viewer_authored_or_reviews() {
+        let q = my_work_query("{1a2b-3c4d}");
+        assert_eq!(
+            q,
+            "state=\"OPEN\" AND (author.uuid=\"{1a2b-3c4d}\" OR reviewers.uuid=\"{1a2b-3c4d}\")"
+        );
+        // A uuid can't break out of the BBQL string literal — the same escape every
+        // other embed here uses, before the whole query is percent-encoded.
+        assert_eq!(
+            my_work_query("a\"b\\c"),
+            "state=\"OPEN\" AND (author.uuid=\"a\\\"b\\\\c\" OR reviewers.uuid=\"a\\\"b\\\\c\")"
+        );
+        // Query-significant bytes must not reach the wire raw.
+        let enc = encode_query_value(&q);
+        for raw in ['"', ' ', '{', '}', '(', ')', '&', '='] {
+            assert!(!enc.contains(raw), "{raw:?} survived encoding: {enc}");
+        }
+        assert!(enc.contains("state%3D%22OPEN%22"));
+    }
+
+    /// A real `GET repositories/{ws}/{slug}/pullrequests` element, trimmed to the
+    /// fields this surface reads.
+    #[test]
+    fn maps_a_pull_request_payload() {
+        let raw = json!({
+            "id": 17,
+            "title": "fix(diff): raw preview toggle",
+            "state": "OPEN",
+            "updated_on": "2026-09-05T23:21:02.482913+00:00",
+            "author": {"nickname": "octo-cat", "display_name": "Octo Cat",
+                       "uuid": "{1a2b-3c4d}"},
+            "source": {"branch": {"name": "fix/diff"},
+                       "repository": {"full_name": "someone/fork"}},
+            "destination": {"branch": {"name": "main"},
+                            "repository": {"full_name": "acme/tools"}},
+            "links": {"html": {"href": "https://bitbucket.org/acme/tools/pull-requests/17"}}
+        });
+        let item = my_work_item_from_value(&raw).expect("maps");
+        assert_eq!(item.provider, Provider::Bitbucket);
+        assert_eq!(item.number, 17);
+        assert!(item.is_pull_request, "Cloud has no native issues left");
+        // The DESTINATION repo, not the fork the branch lives on.
+        assert_eq!(item.repo_full_name, "acme/tools");
+        assert_eq!(item.repo_owner, "acme");
+        assert_eq!(item.repo_name, "tools");
+        assert_eq!(item.host, "bitbucket.org");
+        assert_eq!(
+            item.url,
+            "https://bitbucket.org/acme/tools/pull-requests/17"
+        );
+        // The `+00:00` offset and microseconds fold to the merge's one width.
+        assert_eq!(item.updated_at, "2026-09-05T23:21:02Z");
+        assert_eq!(item.author_login.as_deref(), Some("octo-cat"));
+    }
+
+    #[test]
+    fn skips_records_that_address_nothing() {
+        let base = |patch: serde_json::Value| {
+            let mut v = json!({
+                "id": 1, "title": "t",
+                "destination": {"repository": {"full_name": "ws/slug"}},
+                "links": {"html": {"href": "https://bitbucket.org/ws/slug/pull-requests/1"}}
+            });
+            for (k, pv) in patch.as_object().unwrap() {
+                v[k] = pv.clone();
+            }
+            v
+        };
+        assert!(my_work_item_from_value(&base(json!({}))).is_some());
+        for bad in [
+            base(json!({"id": null})),
+            base(json!({"title": ""})),
+            base(json!({"links": {}})),
+            // No destination repo — nothing to file the row under.
+            base(json!({"destination": {}})),
+            // A `workspace/slug` that won't split.
+            base(json!({"destination": {"repository": {"full_name": "noslash"}}})),
+            base(json!({"destination": {"repository": {"full_name": "/slug"}}})),
+        ] {
+            assert!(
+                my_work_item_from_value(&bad).is_none(),
+                "should have skipped {bad}"
+            );
+        }
+        // A missing author is absence, not a fabricated login.
+        assert_eq!(
+            my_work_item_from_value(&base(json!({})))
+                .unwrap()
+                .author_login,
+            None
+        );
+    }
 }
 
 #[cfg(test)]

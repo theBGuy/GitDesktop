@@ -14,11 +14,13 @@ import {
   type MouseEvent as ReactMouseEvent,
   useEffect,
   useEffectEvent,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import { toast } from "sonner";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
+import { ProviderIcon } from "@/components/provider-icon";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,10 +35,16 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
-import { ghPrHeadRef, validateRepo } from "@/lib/git/api";
+import { forgePrHeadRef, validateRepo } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
-import { useForgeMyWork } from "@/lib/git/queries";
-import type { MyWorkItem, PrHeadRef, RepoInfo } from "@/lib/git/types";
+import { useForgeMyWork, useMyWorkSources } from "@/lib/git/queries";
+import {
+  type ForgeProvider,
+  type MyWorkItem,
+  type PrHeadRef,
+  providerLabel,
+  type RepoInfo,
+} from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
@@ -52,13 +60,149 @@ import {
   MY_WORK_LISTBOX_ID,
   type MyWorkTab,
   matchLocalRepo,
+  mergeMyWorkPages,
   myWorkOptionId,
-  sortMyWork,
 } from "./mywork-utils";
 
 /** Stable empty default, so a settings read that hasn't landed doesn't hand a
  *  fresh array to every render. */
 const NO_RECENTS: RecentRepo[] = [];
+
+// Per-provider copy as Records rather than ternary chains, so adding a forge is
+// one entry per surface and no sentence can silently keep another's wording.
+
+const FETCH_NOTICE: Record<ForgeProvider, string> = {
+  github: "Fetching from GitHub…",
+  gitlab: "Fetching from GitLab…",
+  bitbucket: "Fetching from Bitbucket…",
+};
+
+const FAILURE_NOTICE: Record<ForgeProvider, string> = {
+  github:
+    "GitHub couldn't be reached. Check that gh is installed and signed in.",
+  gitlab: "GitLab couldn't be reached.",
+  bitbucket: "Bitbucket couldn't be reached.",
+};
+
+const SIGN_IN_TITLE: Record<ForgeProvider, string> = {
+  github: "GitHub CLI (gh) not found",
+  gitlab: "GitLab CLI (glab) not found",
+  bitbucket: "Bitbucket account not connected",
+};
+
+const SIGN_IN_BODY: Record<ForgeProvider, string> = {
+  github:
+    "Install the GitHub CLI (gh) and run gh auth login to see your pull requests and issues here.",
+  gitlab:
+    "Install the GitLab CLI (glab) and run glab auth login to see your merge requests and issues here.",
+  bitbucket:
+    "Add an Atlassian API token in Settings → Accounts to see your Bitbucket pull requests here.",
+};
+
+/** The failure kinds a sign-in fixes, so a lone broken provider can name the
+ *  remedy instead of echoing an IPC message. Reached by the stale-probe race
+ *  rather than a cold start: the sources probe folds a missing CLI to "not
+ *  configured", so only a sign-out inside the probe's 5-minute window lands a
+ *  leg here. */
+const SIGN_IN_KINDS = new Set([
+  "ghNotFound",
+  "glabNotFound",
+  "bitbucketNotConfigured",
+]);
+
+/** The sources probe's own failure. Its command folds every provider probe to
+ *  false internally, so reaching this means the IPC call itself didn't land. */
+const SOURCES_NOTICE = "Couldn't check which forges are connected.";
+
+/** Which forges answer account-wide. Bitbucket has no cross-repo search, so its
+ *  leg is asked per opened checkout and must never ride a claim about every repo
+ *  you're involved in. */
+const ACCOUNT_WIDE: Record<ForgeProvider, boolean> = {
+  github: true,
+  gitlab: true,
+  bitbucket: false,
+};
+
+/** The empty state's second sentence when exactly one forge is configured. */
+const EMPTY_SCOPE: Record<ForgeProvider, string> = {
+  github: "This searches every repo you're involved in, not just local ones.",
+  gitlab:
+    "This searches every project you're involved in, not just local ones.",
+  bitbucket: "This searches the Bitbucket repositories you've opened here.",
+};
+
+/** Every provider id, as an exhaustive Record so widening `ForgeProvider` fails
+ *  the build here rather than quietly narrowing the check below. */
+const FORGE_PROVIDERS: Record<ForgeProvider, true> = {
+  github: true,
+  gitlab: true,
+  bitbucket: true,
+};
+
+/** `RecentRepo.provider` is a stored string, so an id this build doesn't know
+ *  fails over to the item's own provider rather than reaching the backend as a
+ *  tag it can't deserialize — a rejection the open's deadline would swallow into
+ *  a silent main-workspace landing. */
+function asForgeProvider(value: string | undefined): ForgeProvider | null {
+  return value !== undefined && Object.hasOwn(FORGE_PROVIDERS, value)
+    ? (value as ForgeProvider)
+    : null;
+}
+
+/** "A" / "A and B" — the configured set is at most three. */
+const joinLabels = (labels: string[]) =>
+  labels.length > 1
+    ? `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`
+    : labels[0];
+
+/** What the configured legs actually cover, so an empty inbox never claims a
+ *  reach it doesn't have. One forge speaks for itself; a mix names which part is
+ *  account-wide and which is bounded by the checkouts you've opened. */
+function scopeSentence(providers: ForgeProvider[]): string {
+  if (providers.length === 1) return EMPTY_SCOPE[providers[0]];
+  const wide = providers.filter((p) => ACCOUNT_WIDE[p]).map(providerLabel);
+  const scoped = providers.filter((p) => !ACCOUNT_WIDE[p]).map(providerLabel);
+  const parts: string[] = [];
+  if (wide.length > 0) {
+    parts.push(
+      `${joinLabels(wide)} ${wide.length > 1 ? "cover" : "covers"} every repo you're involved in, not just local ones.`,
+    );
+  }
+  if (scoped.length > 0) {
+    parts.push(
+      `${joinLabels(scoped)} ${scoped.length > 1 ? "cover" : "covers"} the repositories you've opened here.`,
+    );
+  }
+  return parts.join(" ");
+}
+
+/** One provider's slice of the inbox: whether it is configured at all, and the
+ *  query carrying its rows. */
+type MyWorkLeg = {
+  provider: ForgeProvider;
+  enabled: boolean;
+  query: ReturnType<typeof useForgeMyWork>;
+};
+
+/** Which provider a failure came from, or null for the sources probe itself. */
+type LegError = { provider: ForgeProvider | null; error: unknown };
+
+/** A leg has answered, either way. `isPending` can't stand in for this: a leg
+ *  the sources probe left disabled stays pending forever. */
+const settled = (leg: MyWorkLeg) => leg.query.isSuccess || leg.query.isError;
+
+/** What the error screen speaks for: the sources probe when IT failed, else the
+ *  configured legs, and only once every one of them has failed. */
+function failedLegs(sourcesError: unknown, legs: MyWorkLeg[]): LegError[] {
+  if (sourcesError !== null) return [{ provider: null, error: sourcesError }];
+  if (legs.length === 0 || !legs.every((l) => l.query.isError)) return [];
+  return legs.map((l) => ({ provider: l.provider, error: l.query.error }));
+}
+
+/** Stable empty defaults, so a suppressed notice or error list doesn't hand a
+ *  fresh array to every render. */
+const NO_LEGS: MyWorkLeg[] = [];
+const NO_ERRORS: LegError[] = [];
 
 /** Total budget for resolving where to open a PR, spanning EVERY awaited leg of
  *  the resolution — the worktree list, the head-ref read, and the validate of
@@ -71,6 +215,14 @@ const WORKTREE_RESOLVE_BUDGET_MS = 1500;
 /** Grace period before a resolving open lights its row, so a resolution that
  *  answers quickly never flashes a spinner. */
 const PENDING_AFFORDANCE_MS = 300;
+
+/** How long the skeleton holds after the FIRST forge answers, waiting for the
+ *  rest. Owner-ratified trade: one clean paint beats fastest-first rows — a
+ *  handful of rows landing and then reshuffling as a slower leg arrives reads
+ *  worse than a brief wait. Sized to cover a cold `gh search` pair (measured
+ *  2-4s), the slowest common leg; a forge slower than this still paints late
+ *  under its "Fetching from…" notice. */
+const FIRST_PAINT_GRACE_MS = 3500;
 
 /** Open generation. Module-scoped because MyWorkScreen unmounts on every view
  *  change: against a component ref, a continuation from a previous mount would
@@ -148,15 +300,16 @@ async function branchWorktreeOf(
   item: MyWorkItem,
   worktrees: UserWorktree[],
   repoPath: string,
+  provider: ForgeProvider,
   deadline: number,
 ): Promise<string | null> {
   const candidates = worktrees.filter((w) => w.branch !== "");
   if (candidates.length === 0) return null;
-  // A spent budget would race gh against a zero-length timeout and discard the
-  // result — don't spawn the process at all.
+  // A spent budget would race the forge CLI against a zero-length timeout and
+  // discard the result — don't spawn the process at all.
   if (Date.now() >= deadline) return null;
   const head = await withDeadline<PrHeadRef | null>(
-    ghPrHeadRef(repoPath, item.number),
+    forgePrHeadRef(provider, repoPath, item.number),
     deadline,
     null,
   );
@@ -204,8 +357,10 @@ function openRowContextMenu(url: string): void {
 }
 
 /**
- * The cross-repo work inbox — every open GitHub pull request and issue
- * involving you, newest first, without switching repositories to find them.
+ * The cross-repo work inbox — every open pull request and issue involving you on
+ * GitHub, GitLab and Bitbucket, newest first, without switching repositories to
+ * find them. Each forge loads on its own, so a provider you aren't signed in to
+ * (or one that is down) never decides what the others can show.
  * Read-only: Enter (or a click) navigates, to the repo when it's cloned locally
  * and to the browser when it isn't. Palette-reachable and launched from the
  * Welcome screen; Back / Esc return to the previous view.
@@ -221,19 +376,53 @@ export function MyWorkScreen() {
   const [activeUrl, setActiveUrl] = useState<string | null>(null);
   // The row whose open is still resolving where to land, or null.
   const [pendingOpenUrl, setPendingOpenUrl] = useState<string | null>(null);
+  // Latches the first paint: set when every configured leg has answered, or when
+  // the grace window closes, whichever comes first. Never unset — a leg that
+  // becomes configured later (a sign-in mid-session) and every refetch arrive
+  // underneath the rows already on screen instead of dropping back to a
+  // skeleton. Component state because the screen unmounts on close, so each open
+  // gets its own window.
+  const [firstPaint, setFirstPaint] = useState(false);
 
-  // GitHub-only in this slice: the backend refuses the other providers outright,
-  // so there is no provider axis to offer.
-  const work = useForgeMyWork("github", true);
   const settings = useSettings();
   const recents = settings.data?.recentRepos ?? NO_RECENTS;
+  // One leg per forge, each gated on the sources probe: a provider with no
+  // sign-in behind it is never asked, so it can neither fail nor delay the rows
+  // the others already have. Bitbucket's API has no account-wide search, so its
+  // leg is scoped to the Bitbucket checkouts recents knows about — a clone whose
+  // provider backfill hasn't landed simply joins the next fetch.
+  const sources = useMyWorkSources(true);
+  const bitbucketPaths = useMemo(
+    () =>
+      recents
+        .filter((r) => r.provider === "bitbucket")
+        .map((r) => r.path)
+        .sort(),
+    [recents],
+  );
+  const githubOn = sources.data?.github === true;
+  const gitlabOn = sources.data?.gitlab === true;
+  const bitbucketOn = sources.data?.bitbucket === true;
+  const github = useForgeMyWork("github", githubOn);
+  const gitlab = useForgeMyWork("gitlab", gitlabOn);
+  const bitbucket = useForgeMyWork("bitbucket", bitbucketOn, bitbucketPaths);
+  const legs: MyWorkLeg[] = [
+    { provider: "github", enabled: githubOn, query: github },
+    { provider: "gitlab", enabled: gitlabOn, query: gitlab },
+    { provider: "bitbucket", enabled: bitbucketOn, query: bitbucket },
+  ];
+  const enabledLegs = legs.filter((l) => l.enabled);
+  // Only configured legs contribute rows: a provider the probe has since turned
+  // off keeps its cached page, and serving rows nothing can refresh would also
+  // leave the combobox pointing at a listbox no branch mounts.
+  const page = mergeMyWorkPages(enabledLegs.map((l) => l.query.data));
   const queryClient = useQueryClient();
   const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Which open generation lit the pending row, so an older open finishing late
   // can't darken an affordance a newer one owns.
   const pendingGenRef = useRef(0);
 
-  const items = sortMyWork(work.data?.items ?? []);
+  const items = page.items;
   const prCount = items.filter((i) => i.isPullRequest).length;
   const visible = filterMyWork(items, tab, filter);
   // Derived, never stored: a row the filter has hidden simply stops being
@@ -241,6 +430,44 @@ export function MyWorkScreen() {
   const activeIndex = visible.findIndex((i) => i.url === activeUrl);
   const activeId =
     activeIndex >= 0 ? myWorkOptionId(visible[activeIndex].url) : undefined;
+
+  const anySettled = enabledLegs.some(settled);
+  const allSettled = enabledLegs.every(settled);
+  const sourcesPending = sources.isPending;
+  const loading = !firstPaint;
+  // Drives that latch. A leg's settled state is monotonic within a mount, so the
+  // window arms at most once — when the first forge answers — and is cleared
+  // again the moment the rest catch up inside it.
+  useEffect(() => {
+    if (firstPaint || sourcesPending) return;
+    // Nothing configured, or every leg already answered: paint now.
+    if (allSettled) {
+      setFirstPaint(true);
+      return;
+    }
+    // Still waiting on the very first answer — there is nothing to hold yet.
+    if (!anySettled) return;
+    const timer = setTimeout(() => setFirstPaint(true), FIRST_PAINT_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [firstPaint, sourcesPending, allSettled, anySettled]);
+  // Only a total failure earns the error screen — one failed leg among several
+  // is a quiet notice under the rows the rest supplied.
+  const errors = failedLegs(
+    sources.isError ? sources.error : null,
+    enabledLegs,
+  );
+  // And only when there is nothing for it to replace: rows an earlier fetch or
+  // another leg supplied outlive the failure, which drops to a notice line.
+  const fatal = errors.length > 0 && items.length === 0;
+  const anyLoaded = enabledLegs.some((l) => l.query.isSuccess);
+  const refreshing =
+    sources.isFetching || enabledLegs.some((l) => l.query.isFetching);
+  // Refetches the sources probe too: a sign-in that landed while the inbox was
+  // open only shows up as a newly configured leg.
+  function refresh() {
+    void sources.refetch();
+    for (const leg of enabledLegs) void leg.query.refetch();
+  }
 
   // Esc closes the inbox. Guarded so Base UI popups (which mark the event
   // consumed) get first claim; an effect event reads the latest closeMyWork.
@@ -368,10 +595,15 @@ export function MyWorkScreen() {
           item.isPullRequest &&
           (opts?.preferWorktree ?? true)
         ) {
+          // The matched checkout's own provider wins: it was resolved backend-side
+          // for that clone, where the item's provider only says which leg the row
+          // arrived on. A recent the probe hasn't touched, or one carrying an id
+          // this build doesn't know, falls back to the item's.
           const branch = await branchWorktreeOf(
             item,
             worktrees,
             match.path,
+            asForgeProvider(match.provider) ?? item.provider,
             deadline,
           );
           if (superseded()) return;
@@ -482,7 +714,7 @@ export function MyWorkScreen() {
           <ArrowLeftIcon />
         </Button>
         <span className="text-sm font-medium">My work</span>
-        {work.isSuccess && (
+        {anyLoaded && (
           <span className="text-xs tabular-nums text-muted-foreground">
             {items.length}
           </span>
@@ -493,10 +725,10 @@ export function MyWorkScreen() {
           className="ml-auto"
           aria-label="Refresh"
           title="Refresh"
-          disabled={work.isFetching}
-          onClick={() => work.refetch()}
+          disabled={refreshing}
+          onClick={refresh}
         >
-          {work.isFetching ? <Spinner /> : <ArrowsClockwiseIcon />}
+          {refreshing ? <Spinner /> : <ArrowsClockwiseIcon />}
         </Button>
       </header>
 
@@ -536,14 +768,30 @@ export function MyWorkScreen() {
       </div>
 
       <MyWorkBody
-        work={work}
+        loading={loading}
+        errors={fatal ? errors : NO_ERRORS}
+        // Set server-side when a search leg hit its cap or a merged union
+        // overshot the page — leg caps count raw hits before unaddressable ones
+        // drop, so it stays true on a page that arrives short.
+        capped={page.truncated}
+        noSources={sources.isSuccess && enabledLegs.length === 0}
+        providers={enabledLegs.map((l) => l.provider)}
+        allSettled={allSettled}
         items={items}
         visible={visible}
         activeIndex={activeIndex}
         recents={recents}
         pendingOpenUrl={pendingOpenUrl}
+        onRetry={refresh}
         onSelect={setActiveUrl}
         onOpen={(item, opts) => void openItem(item, opts)}
+      />
+      {/* Outside every body branch and never unmounted: a live region announces
+          CHANGES, so one that appears already carrying its first line is silent.
+          Given nothing to say while the error screen owns the message. */}
+      <MyWorkNotices
+        legs={fatal ? NO_LEGS : enabledLegs}
+        sourcesFailed={!fatal && sources.isError}
       />
     </div>
   );
@@ -552,50 +800,80 @@ export function MyWorkScreen() {
 /** Opens an item, optionally overriding the worktree preference. */
 type OpenItem = (item: MyWorkItem, opts?: { preferWorktree?: boolean }) => void;
 
-/** The body's state machine: loading → error → empty → filtered-empty → list.
- *  Split from the shell so the virtualizer below only ever mounts with rows. */
+/** The body's state machine: loading → error → no sources → empty →
+ *  filtered-empty → list. Split from the shell so the virtualizer below only
+ *  ever mounts with rows. */
 function MyWorkBody({
-  work,
+  loading,
+  errors,
+  capped,
+  noSources,
+  providers,
+  allSettled,
   items,
   visible,
   activeIndex,
   recents,
   pendingOpenUrl,
+  onRetry,
   onSelect,
   onOpen,
 }: {
-  work: ReturnType<typeof useForgeMyWork>;
+  loading: boolean;
+  errors: LegError[];
+  capped: boolean;
+  noSources: boolean;
+  providers: ForgeProvider[];
+  allSettled: boolean;
   items: MyWorkItem[];
   visible: MyWorkItem[];
   activeIndex: number;
   recents: readonly RecentRepo[];
   pendingOpenUrl: string | null;
+  onRetry: () => void;
   onSelect: (url: string) => void;
   onOpen: OpenItem;
 }) {
-  if (work.isPending) {
+  if (loading) {
     return <ListRowSkeletons rows={8} lines={1} name="your work" />;
   }
-  if (work.isError) {
-    return <MyWorkError error={work.error} onRetry={() => work.refetch()} />;
+  if (errors.length > 0) {
+    return <MyWorkError errors={errors} onRetry={onRetry} />;
   }
-  // Set server-side when a search leg hit its cap or the merged union overshot
-  // the page — leg caps count raw hits before unaddressable ones drop, so it
-  // stays true on a page that arrives short. A capped EMPTY page carries its
-  // own sentence rather than CapNote: the note's filter advice has nothing to
-  // narrow, but the page must not read as "nothing exists".
-  const capped = work.data?.truncated ?? false;
+  if (noSources) {
+    // The cold-start landing for a machine with no CLI installed: the sources
+    // probe folds a missing gh to "not configured", so this line, not the error
+    // screen, is where a first run needs the sign-in commands.
+    return (
+      <QuietLine>
+        No forge accounts connected. Run gh auth login or glab auth login for
+        GitHub or GitLab, or add an Atlassian API token in Settings → Accounts
+        for Bitbucket.
+      </QuietLine>
+    );
+  }
+  // Rows appear on the first leg's data, but "nothing involves you" answers for
+  // EVERY forge — a leg that settles instantly and empty (Bitbucket with no
+  // local checkouts) must not speak for one still fetching.
+  if (items.length === 0 && !allSettled) {
+    return <ListRowSkeletons rows={8} lines={1} name="your work" />;
+  }
   if (items.length === 0) {
+    // One configured forge names itself; several can only speak neutrally, since
+    // the empty answer is every one of theirs. A capped EMPTY page carries its
+    // own sentence rather than CapNote: the note's filter advice has nothing to
+    // narrow, but the page must not read as "nothing exists".
+    const sole = providers.length === 1 ? providers[0] : null;
+    const source = sole ? providerLabel(sole) : "Your forges";
+    const nothing = sole
+      ? `Nothing on ${providerLabel(sole)} involves you right now.`
+      : "Nothing involves you right now.";
     return capped ? (
       <QuietLine>
-        GitHub returned results this view can't display. There may be more than
-        this page holds.
+        {`${source} returned results this view can't display. There may be more than this page holds.`}
       </QuietLine>
     ) : (
-      <QuietLine>
-        Nothing on GitHub involves you right now. This searches every repo
-        you're involved in, not just local ones.
-      </QuietLine>
+      <QuietLine>{`${nothing} ${scopeSentence(providers)}`}</QuietLine>
     );
   }
   if (visible.length === 0) {
@@ -652,9 +930,12 @@ function MyWorkList({
   // slide the list out from under it.
   const skipAlignRef = useRef(false);
 
-  // Keep the keyboard-selected row in view. Keyed on the selection alone: a
-  // re-scroll on any list change would fight the user's own scrolling on every
-  // unrelated re-render (the shared clock ticks these rows every 30s).
+  // Keep the keyboard-selected row in view. Keyed on the active ITEM, not its
+  // index: a re-scroll on any list change would fight the user's own scrolling
+  // on every unrelated re-render (the shared clock ticks these rows every 30s),
+  // and a later provider's rows merging in ABOVE the selection shift its index
+  // without moving it — re-aligning there yanks a user who scrolled elsewhere.
+  const activeItemUrl = activeIndex >= 0 ? items[activeIndex].url : null;
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll when the selection moves
   useEffect(() => {
     if (skipAlignRef.current) {
@@ -664,7 +945,7 @@ function MyWorkList({
     if (activeIndex >= 0) {
       virtualizer.scrollToIndex(activeIndex, { align: "auto" });
     }
-  }, [activeIndex]);
+  }, [activeItemUrl]);
 
   // A right-click on blank space hits no row — suppress the menu rather than
   // show an empty popup.
@@ -757,7 +1038,7 @@ function MyWorkList({
                   </ContextMenuItem>
                 )}
               <ContextMenuItem onClick={() => openUrl(menuItem.url)}>
-                Open on GitHub
+                {`Open on ${providerLabel(menuItem.provider)}`}
               </ContextMenuItem>
               <ContextMenuItem
                 onClick={() => copyText(menuItem.url, "Link copied")}
@@ -768,6 +1049,34 @@ function MyWorkList({
           )}
         </ContextMenuContent>
       </ContextMenu>
+    </div>
+  );
+}
+
+/** One muted line per configured leg that is still working or already broken,
+ *  under whatever the body rendered, plus the sources probe's own failure. The
+ *  caller keeps this mounted through every body state — a live region announces
+ *  changes to itself, never the content it first appears holding — so with
+ *  nothing to say it renders an empty, zero-height container. */
+function MyWorkNotices({
+  legs,
+  sourcesFailed,
+}: {
+  legs: MyWorkLeg[];
+  sourcesFailed: boolean;
+}) {
+  const lines = legs.flatMap((leg) => {
+    if (leg.query.isError) return [FAILURE_NOTICE[leg.provider]];
+    return settled(leg) ? [] : [FETCH_NOTICE[leg.provider]];
+  });
+  if (sourcesFailed) lines.push(SOURCES_NOTICE);
+  return (
+    <div aria-live="polite" className="px-3 text-[11px] text-muted-foreground">
+      {lines.map((line) => (
+        <p key={line} className="py-1">
+          {line}
+        </p>
+      ))}
     </div>
   );
 }
@@ -801,7 +1110,7 @@ function MyWorkRow({
 }) {
   const Icon = item.isPullRequest ? GitPullRequestIcon : CircleDashedIcon;
   const typeLabel = item.isPullRequest ? "Pull request" : "Issue";
-  const browserLabel = `Opens on ${item.host || "GitHub"} — not a local repository`;
+  const browserLabel = `Opens on ${item.host || providerLabel(item.provider)} — not a local repository`;
   return (
     <button
       type="button"
@@ -847,11 +1156,13 @@ function MyWorkRow({
       >
         {item.title}
       </span>
-      <span
-        className="max-w-56 shrink-0 truncate text-muted-foreground"
-        onMouseEnter={clipTitleFromText}
-      >
-        {item.repoFullName}
+      {/* The forge glyph is decorative: the repo name beside it, and the menu's
+          "Open on …" wording, are what say which forge a row came from. */}
+      <span className="flex max-w-56 shrink-0 items-center gap-1 text-muted-foreground">
+        <ProviderIcon provider={item.provider} className="size-3 shrink-0" />
+        <span className="min-w-0 truncate" onMouseEnter={clipTitleFromText}>
+          {item.repoFullName}
+        </span>
       </span>
       {!local && (
         <span
@@ -896,26 +1207,44 @@ function QuietLine({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** The two failure branches: gh missing (the fixable one, named) or anything
- *  else, both offering a retry. */
+/** The lines under the error title: a lone provider whose sign-in is the fixable
+ *  thing gets that remedy, a lone provider otherwise gets its own message, and
+ *  several failing at once each get a labelled one. */
+function errorLines(
+  errors: LegError[],
+  signIn: ForgeProvider | null,
+): string[] {
+  if (signIn !== null) return [SIGN_IN_BODY[signIn]];
+  if (errors.length === 1) return [errorMessage(errors[0].error)];
+  return errors.map(
+    (e) => `${providerLabel(e.provider)}: ${errorMessage(e.error)}`,
+  );
+}
+
+/** Shown only when every configured forge failed, so it never hides rows another
+ *  provider supplied. Offers a retry either way. */
 function MyWorkError({
-  error,
+  errors,
   onRetry,
 }: {
-  error: unknown;
+  errors: LegError[];
   onRetry: () => void;
 }) {
-  const cliMissing = isAppError(error) && error.kind === "ghNotFound";
+  const soleProvider = errors.length === 1 ? errors[0].provider : null;
+  const soleError = errors.length === 1 ? errors[0].error : null;
+  const soleKind = isAppError(soleError) ? soleError.kind : "";
+  const signIn =
+    soleProvider !== null && SIGN_IN_KINDS.has(soleKind) ? soleProvider : null;
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
       <p className="text-xs font-medium">
-        {cliMissing ? "GitHub CLI (gh) not found" : "Couldn't load your work"}
+        {signIn !== null ? SIGN_IN_TITLE[signIn] : "Couldn't load your work"}
       </p>
-      <p className="max-w-xs text-xs text-muted-foreground">
-        {cliMissing
-          ? "Install the GitHub CLI (gh) and run gh auth login to see your pull requests and issues here."
-          : errorMessage(error)}
-      </p>
+      <div className="max-w-xs text-xs text-muted-foreground">
+        {errorLines(errors, signIn).map((line) => (
+          <p key={line}>{line}</p>
+        ))}
+      </div>
       <Button type="button" variant="outline" size="sm" onClick={onRetry}>
         Retry
       </Button>
