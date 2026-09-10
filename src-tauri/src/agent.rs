@@ -779,8 +779,8 @@ where
     let mut out = Vec::new();
     let mut err = Vec::new();
     // Heap, not inline arrays: these live across the select awaits, so arrays would
-    // ride every caller's future onto the stack a `#[tauri::command]` future is
-    // constructed on (the WebView2 UI thread in release builds).
+    // bloat every caller's future by 16 KiB — and release builds construct
+    // `#[tauri::command]` futures on the WebView2 UI thread's stack.
     let mut obuf = vec![0u8; 8192];
     let mut ebuf = vec![0u8; 8192];
     let (mut odone, mut edone) = (false, false);
@@ -3362,6 +3362,8 @@ mod tests {
     /// caller is reachable from a `#[tauri::command]`, whose future is built on the
     /// WebView2 UI-thread stack in release builds, so inline arrays here would ride
     /// that stack. Building the future is enough to measure it; it is never polled.
+    /// The composite `run_capture_parts` future is what a command actually holds, so
+    /// it carries its own bound.
     #[test]
     fn capture_capped_future_stays_small() {
         let (mut o, mut e): (&[u8], &[u8]) = (b"", b"");
@@ -3370,6 +3372,13 @@ mod tests {
         assert!(
             size < 1024,
             "capture_capped() future is {size} bytes (debug layout); keep the read buffers heap-allocated so it stays under 1 KiB"
+        );
+
+        let fut = run_capture_parts(Path::new("x"), &[], Duration::from_secs(1));
+        let size = std::mem::size_of_val(&fut);
+        assert!(
+            size < 2 * 1024,
+            "run_capture_parts() future is {size} bytes (debug layout); keep the capture read buffers heap-allocated so it stays under 2 KiB"
         );
     }
 
