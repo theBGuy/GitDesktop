@@ -1004,16 +1004,20 @@ function StagingDiffView({
       startRow: HTMLTableRowElement;
       endRow: HTMLTableRowElement;
     } | null = null;
-    // The latch that licenses anchor minting: our capture-phase mousedown runs
-    // ahead of the manager's, so a mint request without a live press can only
-    // be a stranded drag's range still emitting after a lost mouseup.
+    // The latch that licenses anchor minting: a primary press on the number
+    // gutter — the only press the manager starts a selection from — captured
+    // ahead of its mousedown. A mint request without one can only be a
+    // stranded drag's range still emitting after a lost mouseup.
     let pressed = false;
     const onMouseDownCapture = (e: MouseEvent) => {
       additiveRef.current = isAdditiveDrag(e);
       // A mouseup lost to a focus steal would strand the last drag's anchors;
       // capture precedes the manager's mousedown, so every press re-anchors.
       drag = null;
-      pressed = true;
+      pressed =
+        e.button === 0 &&
+        e.target instanceof Element &&
+        !!e.target.closest(".diff-line-num");
     };
     container.addEventListener("mousedown", onMouseDownCapture, true);
     // An additive drag paints over the committed selection; a plain one replaces
