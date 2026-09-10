@@ -1024,7 +1024,7 @@ async fn all_objects_present(repo_path: &str, refs: &[String]) -> bool {
 }
 
 /// Cap on one [`git_objects_present`] call, bounding its per-oid `rev-parse` spawns.
-/// Its callers ask about a single PR's commits, so this is far above real use.
+/// Today's callers ask about one commit each, so this is far above real use.
 const OBJECTS_PRESENT_MAX: usize = 64;
 
 /// Whether every OID is already a local commit object — the frontend's read-only
@@ -1035,6 +1035,12 @@ const OBJECTS_PRESENT_MAX: usize = 64;
 /// the other end, since the helper spawns one `rev-parse` per entry.
 #[tauri::command]
 pub async fn git_objects_present(repo_path: String, oids: Vec<String>) -> AppResult<bool> {
+    if oids.len() > OBJECTS_PRESENT_MAX {
+        return Err(AppError::InvalidArgument(format!(
+            "too many oids: {} (max {OBJECTS_PRESENT_MAX})",
+            oids.len()
+        )));
+    }
     for oid in &oids {
         validate_hash(oid)?;
         if oid.len() != 40 && oid.len() != 64 {
@@ -1042,12 +1048,6 @@ pub async fn git_objects_present(repo_path: String, oids: Vec<String>) -> AppRes
                 "expected a full commit sha: {oid}"
             )));
         }
-    }
-    if oids.len() > OBJECTS_PRESENT_MAX {
-        return Err(AppError::InvalidArgument(format!(
-            "too many oids: {} (max {OBJECTS_PRESENT_MAX})",
-            oids.len()
-        )));
     }
     if oids.is_empty() {
         return Ok(true);
