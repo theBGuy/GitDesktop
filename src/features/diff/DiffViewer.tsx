@@ -576,8 +576,7 @@ function WorkingTreeDiff({
                 <span className="flex-1 leading-snug">
                   Drag across the line numbers to{" "}
                   {file.staged ? "unstage" : "stage"} just those lines. Hold{" "}
-                  {ADDITIVE_MODIFIER} while dragging to add to the selection, so
-                  one selection can mix added and removed lines.
+                  {ADDITIVE_MODIFIER} while dragging to add to the selection.
                   {selectionBinding !== null && (
                     <>
                       {" "}
@@ -703,9 +702,10 @@ function paintLines(container: HTMLElement, lines: SelectedLine[]) {
   }
 }
 
-/** Highlight an in-progress drag range for live feedback (includes context),
- *  over `base` — the lines an additive drag is merging into, which would
- *  otherwise vanish on the next mousemove (this repaints from scratch). */
+/** Highlight the library-reported drag range for live feedback (includes
+ *  context), over `base` — the lines an additive drag is merging into, which
+ *  would otherwise vanish on the next mousemove (this repaints from scratch).
+ *  Split view only; unified paints from its own row anchors. */
 function paintRange(
   container: HTMLElement,
   range: {
@@ -724,9 +724,70 @@ function paintRange(
   }
 }
 
+/** The old/new numbers a unified row carries: both = context, one = added or
+ *  removed, neither = a `@@` separator or expand control. An empty attribute
+ *  counts as absent, matching the library's own validity test. */
+function rowLineNumbers(row: Element): { old?: number; new?: number } {
+  const read = (attr: string) => {
+    const raw = row
+      .querySelector(`.diff-line-num span[${attr}]`)
+      ?.getAttribute(attr);
+    const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+    return Number.isNaN(n) ? undefined : n;
+  };
+  return { old: read("data-line-old-num"), new: read("data-line-new-num") };
+}
+
+/** The rows a unified drag crossed, inclusive and in document order (either
+ *  drag direction). Empty when an anchor has left the DOM — the signal callers
+ *  use to fall back to the library's own range. */
+function rowsBetween(
+  container: HTMLElement,
+  startRow: HTMLTableRowElement,
+  endRow: HTMLTableRowElement,
+): HTMLTableRowElement[] {
+  const rows = Array.from(
+    container.querySelectorAll<HTMLTableRowElement>("tr"),
+  );
+  const a = rows.indexOf(startRow);
+  const b = rows.indexOf(endRow);
+  if (a < 0 || b < 0) return [];
+  return rows.slice(Math.min(a, b), Math.max(a, b) + 1);
+}
+
+/** Highlight a unified drag's crossed rows over `base` (same additive base as
+ *  `paintRange`). Context rows in the span tint for live feedback; numberless
+ *  rows never do. */
+function paintRowSpan(
+  container: HTMLElement,
+  startRow: HTMLTableRowElement,
+  endRow: HTMLTableRowElement,
+  base: SelectedLine[],
+) {
+  paintLines(container, base);
+  for (const row of rowsBetween(container, startRow, endRow)) {
+    const { old, new: added } = rowLineNumbers(row);
+    if (old !== undefined || added !== undefined)
+      row.classList.add(SELECT_CLASS);
+  }
+}
+
+/** The changed lines of a crossed-row span — a row with both numbers is
+ *  context and one with neither is a separator, so both drop out. */
+function linesForRows(rows: HTMLTableRowElement[]): SelectedLine[] {
+  const out: SelectedLine[] = [];
+  for (const row of rows) {
+    const { old, new: added } = rowLineNumbers(row);
+    if (old !== undefined && added !== undefined) continue;
+    if (old !== undefined) out.push({ side: "old", line: old });
+    else if (added !== undefined) out.push({ side: "new", line: added });
+  }
+  return out;
+}
+
 /** Union of two line selections, deduped by side+line — an additive drag adds
- *  to the committed selection instead of replacing it, and the two can overlap
- *  or (unlike one library-reported drag) span both sides. */
+ *  to the committed selection instead of replacing it, and the two can
+ *  overlap. */
 function mergeSelection(
   base: SelectedLine[] | null,
   added: SelectedLine[],
@@ -805,8 +866,10 @@ function HunkActionButtons({
  * collapsible expand, drag the line-number gutter to select lines to stage
  * across the whole file, and per-hunk Stage/Unstage/Discard buttons OVERLAID on
  * each hunk header (the library exposes no hunk-header slot). The library's
- * selection manager handles the drag; we paint the `gd-line-selected` highlight
- * ourselves (its own class doesn't apply in this standalone setup).
+ * selection manager drives the drag, but unified mode derives the crossed rows
+ * from our own anchors (its range is single-sided); we paint the
+ * `gd-line-selected` highlight ourselves — its own class doesn't apply in this
+ * standalone setup.
  */
 function StagingDiffView({
   repoPath,
@@ -930,31 +993,83 @@ function StagingDiffView({
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !diffFile) return;
+    const unified = viewMode !== "split";
+    // A unified drag's two anchor rows. The library's range is pinned to the
+    // side the drag started on and its end sticks at the last row bearing a
+    // number there, so the end anchor is tracked below instead. Effect-scoped:
+    // the drag dies with the manager it belongs to.
+    let drag: {
+      startRow: HTMLTableRowElement;
+      endRow: HTMLTableRowElement;
+    } | null = null;
     const onMouseDownCapture = (e: MouseEvent) => {
       additiveRef.current = isAdditiveDrag(e);
+      // A mouseup lost to a focus steal would strand the last drag's anchors;
+      // capture precedes the manager's mousedown, so every press re-anchors.
+      drag = null;
     };
     container.addEventListener("mousedown", onMouseDownCapture, true);
     // An additive drag paints over the committed selection; a plain one replaces
     // it, so its base is empty (the pre-additive behavior).
     const paintBase = () =>
       additiveRef.current ? (selectedRef.current ?? []) : [];
+    const onMouseOver = (e: MouseEvent) => {
+      if (!unified || !drag || !(e.target instanceof Element)) return;
+      const row = e.target.closest(".diff-line-num")?.closest("tr");
+      if (!row) return;
+      const { old, new: added } = rowLineNumbers(row);
+      if (old === undefined && added === undefined) return; // separator row
+      drag.endRow = row;
+      paintRowSpan(container, drag.startRow, row, paintBase());
+    };
+    container.addEventListener("mouseover", onMouseOver);
     const manager = createDiffMultiSelectManager(container, diffFile, {
-      isUnifiedMode: viewMode !== "split",
-      onSelectionChange: (range) => paintRange(container, range, paintBase()),
+      isUnifiedMode: unified,
+      onSelectionChange: (range) => {
+        if (unified) {
+          // A null range is the manager clearing itself (teardown).
+          if (!range) drag = null;
+          else if (!drag) {
+            const row = rowForLine(
+              container,
+              range.side,
+              range.startLineNumber,
+            );
+            if (row) drag = { startRow: row, endRow: row };
+          }
+          if (drag) {
+            paintRowSpan(container, drag.startRow, drag.endRow, paintBase());
+            return;
+          }
+        }
+        paintRange(container, range, paintBase());
+      },
       onSelectionComplete: (result) => {
-        // One drag is single-sided by library contract; the union across drags
-        // is what lets a selection carry added AND deleted lines.
-        const lines = (result?.lines ?? [])
-          .filter((l) => l.isAdd || l.isDelete)
-          .map(
-            (l): SelectedLine => ({
-              side: l.isAdd ? "new" : "old",
-              line: l.lineNumber,
-            }),
-          );
+        // Unified derives the crossed rows from our own anchors — the library's
+        // range is single-sided by model, so it drops the opposite side's lines.
+        // Split takes the library-reported lines; so does unified when an anchor
+        // is gone, which degrades to that same single-sided behavior.
+        const rows = drag
+          ? rowsBetween(container, drag.startRow, drag.endRow)
+          : [];
+        drag = null;
+        const lines = rows.length
+          ? linesForRows(rows)
+          : (result?.lines ?? [])
+              .filter((l) => l.isAdd || l.isDelete)
+              .map(
+                (l): SelectedLine => ({
+                  side: l.isAdd ? "new" : "old",
+                  line: l.lineNumber,
+                }),
+              );
         const next = additiveRef.current
           ? mergeSelection(selectedRef.current, lines)
           : lines;
+        // Paint the outcome now — a null commit over an already-null selection
+        // re-renders nothing and would strand the drag tint. If the text moved
+        // mid-drag this tints briefly; the manager effect's re-run clears it.
+        paintLines(container, next);
         // Stamp against the text these rows were BUILT from — the live
         // diff.data.text can already be newer while the deferred render lags.
         onSelectRef.current(next.length ? next : null, deferredText);
@@ -963,6 +1078,7 @@ function StagingDiffView({
     paintLines(container, selectedRef.current ?? []); // re-assert after (re)mount
     return () => {
       container.removeEventListener("mousedown", onMouseDownCapture, true);
+      container.removeEventListener("mouseover", onMouseOver);
       manager.destroy();
     };
   }, [diffFile, viewMode, deferredText]);

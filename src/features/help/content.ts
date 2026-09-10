@@ -458,9 +458,10 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 - **Hunk-level staging** — in a file's diff, each hunk has its own Stage / Unstage /
   Discard buttons.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,
-  then stage or discard just those. Hold {{key:mod}} while dragging and the new run joins
-  the selection instead of replacing it, so one selection can mix added and removed lines
-  across as many hunks as you like; a plain drag starts a fresh one.
+  spanning as many hunks as you like, then stage or discard just those. In the unified
+  view a drag picks up every changed line it crosses, added and removed alike; in the
+  split view each drag selects one side. Hold {{key:mod}} while dragging and the new
+  run joins the selection instead of replacing it; a plain drag starts a fresh one.
   {{kbd:stage-selected-lines}} stages the selection (or unstages it, on a staged file's
   diff) without reaching for the button, and the command palette offers **Clear line
   selection**.
