@@ -705,7 +705,8 @@ function paintLines(container: HTMLElement, lines: SelectedLine[]) {
 /** Highlight the library-reported drag range for live feedback (includes
  *  context), over `base` — the lines an additive drag is merging into, which
  *  would otherwise vanish on the next mousemove (this repaints from scratch).
- *  Split view only; unified paints from its own row anchors. */
+ *  Split view's painter; unified falls through here only on a cleared (null)
+ *  range or a start row it can't resolve — otherwise `paintRowSpan`. */
 function paintRange(
   container: HTMLElement,
   range: {
@@ -766,8 +767,8 @@ function paintRowSpan(
 ) {
   paintLines(container, base);
   for (const row of rowsBetween(container, startRow, endRow)) {
-    const { old, new: added } = rowLineNumbers(row);
-    if (old !== undefined || added !== undefined)
+    const { old: oldNum, new: newNum } = rowLineNumbers(row);
+    if (oldNum !== undefined || newNum !== undefined)
       row.classList.add(SELECT_CLASS);
   }
 }
@@ -777,10 +778,10 @@ function paintRowSpan(
 function linesForRows(rows: HTMLTableRowElement[]): SelectedLine[] {
   const out: SelectedLine[] = [];
   for (const row of rows) {
-    const { old, new: added } = rowLineNumbers(row);
-    if (old !== undefined && added !== undefined) continue;
-    if (old !== undefined) out.push({ side: "old", line: old });
-    else if (added !== undefined) out.push({ side: "new", line: added });
+    const { old: oldNum, new: newNum } = rowLineNumbers(row);
+    if (oldNum !== undefined && newNum !== undefined) continue;
+    if (oldNum !== undefined) out.push({ side: "old", line: oldNum });
+    else if (newNum !== undefined) out.push({ side: "new", line: newNum });
   }
   return out;
 }
@@ -1017,8 +1018,11 @@ function StagingDiffView({
       if (!unified || !drag || !(e.target instanceof Element)) return;
       const row = e.target.closest(".diff-line-num")?.closest("tr");
       if (!row) return;
-      const { old, new: added } = rowLineNumbers(row);
-      if (old === undefined && added === undefined) return; // separator row
+      // mouseover fires per descendant entered (the gutter cell and its number
+      // spans fire separately), so same-row is the common case — skip its repaint.
+      if (row === drag.endRow) return;
+      const { old: oldNum, new: newNum } = rowLineNumbers(row);
+      if (oldNum === undefined && newNum === undefined) return; // separator row
       drag.endRow = row;
       paintRowSpan(container, drag.startRow, row, paintBase());
     };
