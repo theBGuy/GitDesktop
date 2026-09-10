@@ -1008,9 +1008,9 @@ function StagingDiffView({
     // The latch that licenses anchor minting. Gutter ancestry is what lets
     // the manager start a selection at all; the primary-button clause then
     // scopes the two-sided span deliberately — a non-primary gutter drag
-    // keeps the library's single-sided range. A mint request without a live
-    // primary gutter press can only be a stranded drag's range still
-    // emitting after a lost mouseup.
+    // keeps the library's single-sided range. Absent the latch a mint is
+    // declined: either that non-primary drag, or a stranded drag's range
+    // still emitting after a lost mouseup.
     let pressed = false;
     const onMouseDownCapture = (e: MouseEvent) => {
       additiveRef.current = isAdditiveDrag(e);
