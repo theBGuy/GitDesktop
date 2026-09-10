@@ -706,8 +706,8 @@ function paintLines(container: HTMLElement, lines: SelectedLine[]) {
  *  context), over `base` — the lines an additive drag is merging into, which
  *  would otherwise vanish on the next mousemove (this repaints from scratch).
  *  Split view's painter; unified falls through here only when no anchors
- *  exist — a cleared (null) range, an unresolvable start row, or a stranded
- *  drag's advance that must not re-mint them — otherwise `paintRowSpan`. */
+ *  exist — a cleared (null) range, an unresolvable start row, or a press
+ *  already released — otherwise `paintRowSpan`. */
 function paintRange(
   container: HTMLElement,
   range: {
@@ -1004,11 +1004,16 @@ function StagingDiffView({
       startRow: HTMLTableRowElement;
       endRow: HTMLTableRowElement;
     } | null = null;
+    // The latch that licenses anchor minting: our capture-phase mousedown runs
+    // ahead of the manager's, so a mint request without a live press can only
+    // be a stranded drag's range still emitting after a lost mouseup.
+    let pressed = false;
     const onMouseDownCapture = (e: MouseEvent) => {
       additiveRef.current = isAdditiveDrag(e);
       // A mouseup lost to a focus steal would strand the last drag's anchors;
       // capture precedes the manager's mousedown, so every press re-anchors.
       drag = null;
+      pressed = true;
     };
     container.addEventListener("mousedown", onMouseDownCapture, true);
     // An additive drag paints over the committed selection; a plain one replaces
@@ -1016,14 +1021,20 @@ function StagingDiffView({
     const paintBase = () =>
       additiveRef.current ? (selectedRef.current ?? []) : [];
     const onMouseOver = (e: MouseEvent) => {
-      if (!unified || !drag || !(e.target instanceof Element)) return;
-      // A mouseup lost to a focus steal leaves `drag` set with no button held —
-      // without this, plain hovering would wipe the committed tint and trail a
-      // phantom span until the next press re-anchors.
+      if (!unified || !(e.target instanceof Element)) return;
+      // No button held: drop the latch, and if a stranded drag left its span
+      // painted, restore the committed paint — this stops OUR two-sided span
+      // from following the cursor or re-anchoring; the library's own stranded
+      // range still repaints single-sided via paintRange (pre-existing).
       if ((e.buttons & 1) === 0) {
-        drag = null;
+        if (drag) {
+          drag = null;
+          paintLines(container, selectedRef.current ?? []);
+        }
+        pressed = false;
         return;
       }
+      if (!drag) return;
       const row = e.target.closest(".diff-line-num")?.closest("tr");
       if (!row) return;
       // mouseover fires per descendant entered (the gutter cell and its number
@@ -1040,11 +1051,11 @@ function StagingDiffView({
       onSelectionChange: (range) => {
         if (unified) {
           // A null range is the manager clearing itself (teardown). Anchors
-          // mint only on a fresh press (start === end at mousedown): a stranded
-          // drag's library range stays live after a lost mouseup, and its
-          // start !== end advances must not re-create what the hover guard cleared.
+          // mint only under a live press: a stranded drag's library range keeps
+          // emitting after a lost mouseup and must not re-create what the hover
+          // guard cleared.
           if (!range) drag = null;
-          else if (!drag && range.startLineNumber === range.endLineNumber) {
+          else if (!drag && pressed) {
             const row = rowForLine(
               container,
               range.side,
@@ -1068,6 +1079,7 @@ function StagingDiffView({
           ? rowsBetween(container, drag.startRow, drag.endRow)
           : [];
         drag = null;
+        pressed = false;
         const lines = rows.length
           ? linesForRows(rows)
           : (result?.lines ?? [])
