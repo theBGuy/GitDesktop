@@ -496,12 +496,15 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will
-  ship; a deleted file previews its last version instead, and frontmatter (an unbroken
-  leading \`---\` or \`+++\` block) stays out of the render. MDX renders approximately:
-  components and expressions appear as plain text. **Raw** stays the default for
-  every file. The toggle appears on the working tree, commit details, stashes, and an
-  agent session's worktree changes; a pull request's **Files** tab, which reads from
-  the remote, doesn't offer it. *Toggle Markdown preview* in the command palette
+  ship, and frontmatter (an unbroken leading \`---\` or \`+++\` block) stays out of the
+  render. MDX renders approximately: components and expressions appear as plain text.
+  **Raw** stays the default for every file. The toggle appears on the working tree,
+  commit details, stashes, an agent session's worktree changes, a file's history, and
+  branch compare — on those a deleted file previews its last version instead. A pull
+  request's **Files** tab (and a commit drilled into from its **Commits** tab) offers it
+  once the PR's commits are available locally, after **Checkout** or a fetch that brought
+  them in; those read the new version alone, so a file the PR deletes shows
+  **Nothing to preview**. *Toggle Markdown preview* in the command palette
   (palette-only by default — bind a key in **Settings → Keyboard**) flips it too.
 - Very large diffs are capped (with a **Show full diff** escape hatch) so a huge file
   never freezes the view.

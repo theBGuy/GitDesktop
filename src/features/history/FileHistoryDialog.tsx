@@ -132,7 +132,16 @@ export function FileHistoryDialog({
 
           <div className="min-h-0 flex-1 overflow-hidden border">
             {activeHash ? (
-              <DiffSurface filePath={path} diff={diff} repoPath={repoPath} />
+              <DiffSurface
+                filePath={path}
+                diff={diff}
+                repoPath={repoPath}
+                imageRevs={{ old: `${activeHash}~1`, new: activeHash }}
+                contentRevs={{
+                  oldRev: `${activeHash}~1`,
+                  newRev: activeHash,
+                }}
+              />
             ) : (
               <DiffPlaceholder message="Select a commit" />
             )}

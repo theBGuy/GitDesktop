@@ -18,8 +18,9 @@ import {
  *  union as a third toggle segment. */
 export type MarkdownDiffView = "raw" | "preview";
 
-/** Preview needs somewhere to read the file's text from — surfaces that pass
- *  no revs (the PR views) keep the plain raw diff, with no inert control. */
+/** Preview needs somewhere to read the file's text from — surfaces that supply
+ *  neither a rev pair nor a new-side preview rev keep the plain raw diff, with
+ *  no inert control. */
 export function canPreviewMarkdown(
   filePath: string,
   repoPath: string | undefined,
@@ -88,7 +89,8 @@ export function MarkdownDocPreview({
 }: {
   repoPath: string;
   filePath: string;
-  /** Must be the same pair the raw diff renders from. */
+  /** The versions the diff itself shows. Omit a side rather than passing `null`
+   *  unless the working tree really is that side — `null` reads the checkout. */
   revs: DiffContentRevs;
 }) {
   const hasNew = revs.newRev !== undefined;

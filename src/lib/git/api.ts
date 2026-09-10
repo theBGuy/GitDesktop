@@ -1413,6 +1413,16 @@ export const gitBranchFileDiff = (
     filePath,
   });
 
+/** The fork point of two refs. The compare surfaces diff three-dot, so their old
+ *  side must be read from this commit rather than from `base`. */
+export const gitMergeBase = (repoPath: string, base: string, compare: string) =>
+  invoke<string>("git_merge_base", { repoPath, base, compare });
+
+/** Whether every SHA is already a local commit object (no network). Gates reads
+ *  that need a remote PR's commits to exist in this checkout. */
+export const gitObjectsPresent = (repoPath: string, oids: string[]) =>
+  invoke<boolean>("git_objects_present", { repoPath, oids });
+
 /** Three-dot `base...compare` diff. `exclude` takes gitignore-style patterns the
  *  backend filters out of the text and file list (counting them in
  *  `excludedFiles`); generation callers pass the user's AI-ignore patterns here.

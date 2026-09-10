@@ -8,7 +8,11 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { clipTitleFromText } from "@/lib/clip-title";
-import { useBranchDiffFiles, useBranchFileDiff } from "@/lib/git/queries";
+import {
+  useBranchDiffFiles,
+  useBranchFileDiff,
+  useMergeBase,
+} from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 
@@ -58,6 +62,19 @@ export function BranchDiffView({
     deferredPath,
     diffEnabled,
   );
+  // The diff is three-dot, so its old side is the fork point, not `base`'s tip.
+  // Both queries keep the PREVIOUS comparison's data while a new pair loads, and
+  // a stale old side paired with a fresh diff maps tokens onto wrong lines.
+  // Content mode maps onto the diff TEXT, so it waits for the diff to settle too;
+  // images and preview read whole files by rev and don't.
+  const mergeBase = useMergeBase(repoPath, base, compare);
+  const sideOldRev =
+    mergeBase.data !== undefined &&
+    !mergeBase.isPlaceholderData &&
+    !files.isPlaceholderData
+      ? mergeBase.data
+      : null;
+  const diffSettled = !diff.isPlaceholderData;
 
   // A placeholder list is the PREVIOUS comparison's, so an empty one says nothing
   // about this pair — hold the skeleton rather than claim "no changes" below.
@@ -173,7 +190,14 @@ export function BranchDiffView({
               filePath={deferredPath}
               diff={diff}
               repoPath={repoPath}
-              imageRevs={{ old: base, new: compare }}
+              imageRevs={
+                sideOldRev ? { old: sideOldRev, new: compare } : undefined
+              }
+              contentRevs={
+                sideOldRev && diffSettled
+                  ? { oldRev: sideOldRev, newRev: compare }
+                  : undefined
+              }
             />
           ) : (
             <DiffPlaceholder message="Select a file to see its changes" />

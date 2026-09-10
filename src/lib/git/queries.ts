@@ -154,6 +154,10 @@ export const repoKeys = {
     ["repo", repo, "compare", base, compare, "files"] as const,
   branchFileDiff: (repo: string, base: string, compare: string, file: string) =>
     ["repo", repo, "compare", base, compare, "diff", file] as const,
+  mergeBase: (repo: string, base: string, compare: string) =>
+    ["repo", repo, "compare", base, compare, "merge-base"] as const,
+  objectsPresent: (repo: string, oids: string) =>
+    ["repo", repo, "objects-present", oids] as const,
 };
 
 /**
@@ -959,6 +963,39 @@ export function useBranchFileDiff(
       base !== compare &&
       file !== null,
     placeholderData: keepPreviousDataForRepo(repo),
+  });
+}
+
+/** The fork point the three-dot compare diffs against — the old side whole-file
+ *  reads must use. Same enabled gate and placeholder policy as
+ *  {@link useBranchDiffFiles}, so callers can pair the two on one
+ *  `isPlaceholderData` check. */
+export function useMergeBase(
+  repo: string,
+  base: string | null,
+  compare: string | null,
+) {
+  return useQuery({
+    queryKey: repoKeys.mergeBase(repo, base ?? "", compare ?? ""),
+    queryFn: () => api.gitMergeBase(repo, base ?? "", compare ?? ""),
+    enabled: base !== null && compare !== null && base !== compare,
+    placeholderData: keepPreviousDataForRepo(repo),
+  });
+}
+
+/** Whether every SHA is a local commit object. Deliberately no
+ *  `keepPreviousData`: a verdict belongs to the exact set it was measured on, and
+ *  one PR's "present" must never stand in for the next one's. The key sits under
+ *  the repo subtree so checkout/fetch's whole-repo invalidation re-measures it,
+ *  and `refetchOnMount: "always"` covers any narrower writer — the probe is a
+ *  millisecond-class `git rev-parse`. */
+export function useObjectsPresent(repo: string | null, oids: string[]) {
+  const joined = oids.join(",");
+  return useQuery({
+    queryKey: repoKeys.objectsPresent(repo ?? "", joined),
+    queryFn: () => api.gitObjectsPresent(repo ?? "", oids),
+    enabled: repo !== null && oids.length > 0,
+    refetchOnMount: "always",
   });
 }
 

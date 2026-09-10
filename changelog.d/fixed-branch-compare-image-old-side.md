@@ -1,0 +1,1 @@
+- Branch compare's image diffs now show the old side as of the branches' fork point, matching what the text diff compares against.

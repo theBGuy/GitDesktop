@@ -309,6 +309,8 @@ pub fn run() {
             git::compare::git_branch_ahead_count,
             git::compare::git_branch_diff_files,
             git::compare::git_branch_file_diff,
+            git::compare::git_merge_base,
+            git::compare::git_objects_present,
             git::compare::git_branch_diff,
             git::compare::git_diff_between_refs,
             git::compare::git_grep_at_ref,

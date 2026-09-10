@@ -286,7 +286,7 @@ export function ConflictResolveView({
       {/* View switcher (ready only) */}
       {phase === "ready" && (
         <div className="flex items-center gap-2 border-b px-3 py-1.5">
-          <ButtonGroup>
+          <ButtonGroup aria-label="Resolution view">
             {sideViews
               .filter((v) => v.body != null)
               .map((v) => (

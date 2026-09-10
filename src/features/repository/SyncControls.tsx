@@ -513,7 +513,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           adjacency magic (it has now misfired on two arrangements). The group's
           `*:focus-visible:z-10` also can't reach the Buttons through the spans,
           so each Button carries `focus-visible:relative focus-visible:z-10`. */}
-      <ButtonGroup>
+      <ButtonGroup aria-label="Sync actions">
         <DisabledReasonButton
           variant="outline"
           size="sm"

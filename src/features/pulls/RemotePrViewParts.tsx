@@ -32,6 +32,7 @@ import { TimeTrackingControls } from "@/features/issues/RemoteIssueViewParts";
 import {
   useAddMrSpentTime,
   useGlMrTimeStats,
+  useObjectsPresent,
   useSetMrTimeEstimate,
 } from "@/lib/git/queries";
 import type {
@@ -160,6 +161,14 @@ export function PrFilesPane({
   /** PR head sha — pins the file-row Blame at the PR's tip. Omit to hide Blame. */
   blameRev?: string;
 } & DiffThreadWiring) {
+  // Markdown preview reads the file at the PR head, so it's offered only once
+  // that commit is a local object (after a Check out PR or a fetch).
+  const headPresent = useObjectsPresent(
+    repoPath ?? null,
+    blameRev ? [blameRev] : [],
+  );
+  const previewRev =
+    repoPath && blameRev && headPresent.data === true ? blameRev : undefined;
   // Arrow keys walk the file list, mirroring the app's other diff lists.
   const onFilesKeyDown = listKeyboardNav({
     items: files,
@@ -296,6 +305,8 @@ export function PrFilesPane({
             data={fileDiff}
             isPending={isPending}
             isError={isError}
+            repoPath={repoPath}
+            previewRev={previewRev}
             lineAnchors={lineAnchors}
             lineWidget={lineWidget}
           />
