@@ -65,8 +65,8 @@ export function BranchDiffView({
   // The diff is three-dot, so its old side is the fork point, not `base`'s tip.
   // Both queries keep the PREVIOUS comparison's data while a new pair loads, and
   // a stale old side paired with a fresh diff maps tokens onto wrong lines.
-  // Content mode maps onto the diff TEXT, so it waits for the diff to settle too;
-  // images and preview read whole files by rev and don't.
+  // Pairing this rev with a diff that is still a placeholder is DiffSurface's to
+  // refuse — it drops content mode there for every surface.
   const mergeBase = useMergeBase(repoPath, base, compare);
   const sideOldRev =
     mergeBase.data !== undefined &&
@@ -74,7 +74,6 @@ export function BranchDiffView({
     !files.isPlaceholderData
       ? mergeBase.data
       : null;
-  const diffSettled = !diff.isPlaceholderData;
 
   // A placeholder list is the PREVIOUS comparison's, so an empty one says nothing
   // about this pair — hold the skeleton rather than claim "no changes" below.
@@ -194,9 +193,7 @@ export function BranchDiffView({
                 sideOldRev ? { old: sideOldRev, new: compare } : undefined
               }
               contentRevs={
-                sideOldRev && diffSettled
-                  ? { oldRev: sideOldRev, newRev: compare }
-                  : undefined
+                sideOldRev ? { oldRev: sideOldRev, newRev: compare } : undefined
               }
             />
           ) : (

@@ -1,0 +1,1 @@
+- Whole-file syntax highlighting now waits for the selected commit's or stash's diff to load instead of briefly pairing with the previous selection's.
