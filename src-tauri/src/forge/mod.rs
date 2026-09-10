@@ -4903,6 +4903,55 @@ mod tests {
         );
     }
 
+    /// `futures_join_all`'s ORDER contract. Both `my_work` folds report the LAST
+    /// error of a set of concurrent fetches, so input order is what makes that
+    /// error deterministic rather than a race — and the primitive has five call
+    /// sites, so the contract is pinned here rather than at each of them.
+    #[tokio::test]
+    async fn futures_join_all_returns_input_order_not_completion_order() {
+        use std::cell::RefCell;
+
+        // Ready after `yields` re-polls, recording the order the futures ACTUALLY
+        // finish in. `yield_now` wakes the task itself, so that order is
+        // deterministic without betting on a timer.
+        async fn ready_after(yields: usize, value: usize, done: &RefCell<Vec<usize>>) -> usize {
+            for _ in 0..yields {
+                tokio::task::yield_now().await;
+            }
+            done.borrow_mut().push(value);
+            value
+        }
+
+        let done = RefCell::new(Vec::new());
+        let out = futures_join_all([
+            ready_after(4, 0, &done),
+            ready_after(0, 1, &done),
+            ready_after(2, 2, &done),
+        ])
+        .await;
+        // Recorded first, so the assertion below can't pass vacuously: the two
+        // orders provably differ, and only one of them is the contract.
+        assert_eq!(
+            done.into_inner(),
+            [1, 2, 0],
+            "the futures really do finish out of order"
+        );
+        assert_eq!(out, [0, 1, 2], "yet results must follow INPUT order");
+
+        // A future that is already ready must not cause a slower sibling to be
+        // dropped — every input produces exactly one output.
+        let done = RefCell::new(Vec::new());
+        let out = futures_join_all([ready_after(0, 10, &done), ready_after(3, 11, &done)]).await;
+        assert_eq!(out, [10, 11]);
+        assert_eq!(done.into_inner().len(), 2, "both futures ran to completion");
+
+        // Empty input yields empty output rather than tripping the
+        // `expect("all futures ready")` arm.
+        let done = RefCell::new(Vec::new());
+        let none: Vec<_> = (0..0).map(|i| ready_after(0, i, &done)).collect();
+        assert!(futures_join_all(none).await.is_empty());
+    }
+
     /// The picker keys each source by name, so the wire shape is pinned here
     /// rather than trusted to the `rename_all` attribute. (The command itself
     /// probes gh, glab and the keyring — machine state, not a unit test.)

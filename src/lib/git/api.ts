@@ -160,6 +160,13 @@ export const checkGitInstalled = () => invoke<GitInfo>("check_git_installed");
 export const validateRepo = (path: string) =>
   invoke<RepoInfo>("validate_repo", { path });
 
+/** The checkout's origin namespace as its provider spells it ("group/sub/repo"
+ *  on a nested GitLab path), or "" when there is no origin to read. Proves a
+ *  checkout really is a given repository where a recents match key cannot: that
+ *  key keeps only the segment before the repo name. */
+export const repoOriginPath = (repoPath: string) =>
+  invoke<string>("repo_origin_path", { repoPath });
+
 export const cloneRepo = (
   url: string,
   parentDir: string,

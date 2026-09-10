@@ -634,10 +634,12 @@ fn my_work_item_from_value(raw: &serde_json::Value) -> Option<MyWorkItem> {
 /// on, across the local repos in `repo_paths`.
 ///
 /// One page per repo, fetched concurrently. Best-effort per repo — one erroring
-/// doesn't sink the rest, mirroring [`search_repos`] — but if EVERY repo fetch
-/// fails, the last error surfaces rather than a misleading empty inbox. A path
-/// whose origin isn't a Bitbucket remote is skipped, never an error: the caller
-/// hands over every repo it knows about, whatever forge each one is on.
+/// doesn't sink the rest, mirroring [`search_repos`] — but a lost repo marks the
+/// page `truncated` ([`my_work_column`]) so a partial answer can't read as a
+/// complete one, and if EVERY repo fetch fails the last error surfaces rather
+/// than a misleading empty inbox. A path whose origin isn't a Bitbucket remote is
+/// skipped, never an error: the caller hands over every repo it knows about,
+/// whatever forge each one is on.
 pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage> {
     // Resolve the repos FIRST: with nothing to ask, the benign empty page must not
     // depend on a keyring read and a `/user` round trip that would answer
@@ -686,6 +688,17 @@ pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage>
     }))
     .await;
 
+    my_work_column(pages)
+}
+
+/// Fold the per-repo pages into the column's one answer. Pure, so the branches
+/// are pinned by tests rather than by a live multi-repo account.
+///
+/// A repo that failed contributes no leg, so the union's own length can never see
+/// the loss: without the `truncated` mark, one 404 beside one empty-but-healthy
+/// repo would render as a confident "nothing involves you". Mirrors the GitLab
+/// arm's host fold — same meaning, one rung down (repo rather than host).
+fn my_work_column(pages: Vec<AppResult<BbPage<serde_json::Value>>>) -> AppResult<MyWorkPage> {
     let mut legs: Vec<MyWorkLeg> = Vec::new();
     let mut any_ok = false;
     let mut last_err: Option<AppError> = None;
@@ -711,7 +724,9 @@ pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage>
             AppError::Bitbucket("could not read your Bitbucket pull requests".into())
         }));
     }
-    Ok(merge_legs(legs, MY_WORK_LIMIT))
+    let mut page = merge_legs(legs, MY_WORK_LIMIT);
+    page.truncated |= last_err.is_some();
+    Ok(page)
 }
 
 /// The head branch of ONE pull request, plus the repo that branch lives in.
@@ -5604,14 +5619,108 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
 
 #[cfg(test)]
 mod my_work_tests {
-    use super::{my_work_item_from_value, my_work_query};
+    use super::{my_work_column, my_work_item_from_value, my_work_query, BbPage};
+    use crate::error::AppError;
     use crate::forge::encode_query_value;
     use crate::forge::model::Provider;
     use serde_json::json;
 
+    /// One repo's page carrying `count` addressable PRs, and whether Bitbucket
+    /// offered a `next` (this repo's own cap).
+    fn repo_page(first_id: u64, count: u64, next: bool) -> BbPage<serde_json::Value> {
+        BbPage {
+            values: (0..count)
+                .map(|i| {
+                    let id = first_id + i;
+                    json!({
+                        "id": id,
+                        "title": "t",
+                        "updated_on": "2026-09-05T23:21:02+00:00",
+                        "destination": {"repository": {"full_name": "acme/tools"}},
+                        "links": {"html": {"href":
+                            format!("https://bitbucket.org/acme/tools/pull-requests/{id}")}}
+                    })
+                })
+                .collect(),
+            next: next.then(|| format!("{}repositories/acme/tools?page=2", super::BB_API_BASE)),
+            size: None,
+        }
+    }
+
+    /// The concrete harm: one repo 404s while another answers EMPTY. Without the
+    /// mark the page is `{items: [], truncated: false}` — which the screen renders
+    /// as a confident "nothing involves you" about a repo it never managed to ask.
+    #[test]
+    fn a_failed_repo_cannot_leave_an_empty_page_claiming_to_be_complete() {
+        let page = my_work_column(vec![
+            Ok(repo_page(0, 0, false)),
+            Err(AppError::Bitbucket("404 repository not found".into())),
+        ])
+        .expect("one healthy repo still answers");
+        assert!(page.items.is_empty());
+        assert!(
+            page.truncated,
+            "an empty page beside a failed repo must not read as a complete inbox"
+        );
+    }
+
+    /// Best-effort is unchanged — the healthy repos' items all survive — but the
+    /// loss is now visible.
+    #[test]
+    fn a_failed_repo_keeps_the_others_and_marks_the_page_truncated() {
+        let page = my_work_column(vec![
+            Ok(repo_page(1, 2, false)),
+            Err(AppError::Bitbucket("boom".into())),
+            Ok(repo_page(10, 1, false)),
+        ])
+        .expect("healthy repos still answer");
+        assert_eq!(page.items.len(), 3, "one repo failing never sinks the rest");
+        assert!(page.truncated);
+
+        // Order-independent: the failure arriving first changes nothing.
+        let page = my_work_column(vec![
+            Err(AppError::Bitbucket("boom".into())),
+            Ok(repo_page(1, 2, false)),
+        ])
+        .expect("healthy repo still answers");
+        assert_eq!(page.items.len(), 2);
+        assert!(page.truncated);
+    }
+
+    /// The two arms that must NOT change: an all-healthy page stays complete, and
+    /// a repo at its own `next` cap still reports truncation on its own.
+    #[test]
+    fn all_repos_healthy_leaves_the_page_untruncated() {
+        let clean = my_work_column(vec![
+            Ok(repo_page(1, 2, false)),
+            Ok(repo_page(10, 1, false)),
+        ])
+        .expect("healthy");
+        assert_eq!(clean.items.len(), 3);
+        assert!(!clean.truncated, "nothing was lost and nothing was capped");
+
+        // A `next` on any repo is that repo's own cap — unchanged by this fold.
+        let capped = my_work_column(vec![Ok(repo_page(1, 2, true))]).expect("healthy");
+        assert!(capped.truncated);
+    }
+
+    /// Every repo failing still surfaces the error rather than an empty inbox —
+    /// the best-effort contract's other half, deliberately untouched.
+    #[test]
+    fn every_repo_failing_is_still_an_error() {
+        let all_failed = my_work_column(vec![
+            Err(AppError::Bitbucket("first".into())),
+            Err(AppError::Bitbucket("second".into())),
+        ]);
+        assert!(
+            matches!(all_failed, Err(AppError::Bitbucket(ref m)) if m == "second"),
+            "no repo answered → surface the failure, got {all_failed:?}",
+        );
+    }
+
     /// The one filter that still answers: the account-scoped
-    /// `GET /2.0/pullrequests/{user}` is gone, so open-and-mine is a per-repo BBQL
-    /// query over author OR reviewer.
+    /// `GET /2.0/pullrequests/{user}` is gone, so open-and-mine is a
+    /// per-repo BBQL query over author OR reviewer.
     #[test]
     fn query_selects_open_prs_the_viewer_authored_or_reviews() {
         let q = my_work_query("{1a2b-3c4d}");

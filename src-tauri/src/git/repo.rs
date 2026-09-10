@@ -120,6 +120,25 @@ pub async fn git_repo_owners(repo_paths: Vec<String>) -> AppResult<Vec<RepoOwner
     Ok(out)
 }
 
+/// The origin remote's full namespace path (`group/subgroup/name`, `.git` and
+/// surrounding slashes trimmed) — open-time identity proof for a "My work" row
+/// whose namespace is ambiguous.
+///
+/// [`parse_owner_host`] keeps only ONE owner segment, so `team-a/sub/repo` and
+/// `team-b/sub/repo` are indistinguishable by owner+name+host and a row can match
+/// the wrong local checkout. This is the whole path, so the caller can prove the
+/// match before opening a project's issue or MR by that number.
+///
+/// `""` when there is no origin or its URL carries no parseable path: the caller
+/// reads an absent path as UNPROVEN, never as a mismatch.
+#[tauri::command]
+pub async fn repo_origin_path(repo_path: String) -> AppResult<String> {
+    let Ok(url) = crate::git::remote::git_remote_url(repo_path, "origin".to_string()).await else {
+        return Ok(String::new());
+    };
+    Ok(crate::forge::remote_path(&url).unwrap_or_default())
+}
+
 /// A repository's worktree-stable identity key: the absolute path of its common
 /// git directory (`git rev-parse --path-format=absolute --git-common-dir`), which
 /// is identical for the main checkout and every linked worktree of the same repo
@@ -603,5 +622,109 @@ mod owner_tests {
         keys.sort_unstable();
         assert_eq!(keys, ["host", "owner", "path", "provider", "repoName"]);
         assert_eq!(wire.get("repoName").and_then(|v| v.as_str()), Some("GitDesktop"));
+    }
+
+    /// The disambiguator itself: `parse_owner_host` folds two DIFFERENT nested
+    /// projects onto the same owner+name+host, which is what lets a work-inbox row
+    /// match the wrong checkout. `repo_origin_path` has to tell them apart.
+    #[test]
+    fn nested_namespaces_collide_on_owner_but_not_on_the_full_path() {
+        let a = parse_owner_host("https://gitlab.com/team-a/sub/repo.git");
+        let b = parse_owner_host("https://gitlab.com/team-b/sub/repo.git");
+        assert_eq!(a, b, "owner+host+name cannot separate these — the bug");
+        assert_ne!(
+            crate::forge::remote_path("https://gitlab.com/team-a/sub/repo.git"),
+            crate::forge::remote_path("https://gitlab.com/team-b/sub/repo.git"),
+            "the full origin path is what proves the match",
+        );
+    }
+}
+
+#[cfg(test)]
+mod origin_path_tests {
+    use super::repo_origin_path;
+
+    /// Resolved from `origin` against a real repo (temp_dir, git on PATH), for the
+    /// forms the inbox meets: nested groups, scp-style ssh, a ported self-managed
+    /// host, and no origin at all.
+    ///
+    /// A FRESH temp repo per remote form — `git_remote_url`'s TTL cache is keyed by
+    /// `(repo_path, name)`, and this test's raw `git remote add` bypasses the
+    /// app-side commands that invalidate it, so reusing one path across iterations
+    /// would serve the first remote's cached URL to every later assertion.
+    #[tokio::test]
+    async fn origin_path_keeps_the_whole_namespace() {
+        async fn run(repo: &str, args: &[&str]) {
+            let _ =
+                crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+                    .await;
+        }
+
+        for (tag, remote, want) in [
+            // The collision case: the segment before the name is identical, so only
+            // the whole path separates these two projects.
+            (
+                "nested-a",
+                Some("https://gitlab.com/team-a/sub/repo.git"),
+                "team-a/sub/repo",
+            ),
+            (
+                "nested-b",
+                Some("https://gitlab.com/team-b/sub/repo.git"),
+                "team-b/sub/repo",
+            ),
+            (
+                "flat",
+                Some("https://github.com/theBGuy/GitDesktop.git"),
+                "theBGuy/GitDesktop",
+            ),
+            (
+                "scp",
+                Some("git@gitlab.com:group/sub/repo.git"),
+                "group/sub/repo",
+            ),
+            (
+                "ported",
+                Some("https://gitlab.acme.corp:8443/team/svc.git"),
+                "team/svc",
+            ),
+            // No `.git` suffix to strip, and a trailing slash to trim.
+            (
+                "bare",
+                Some("https://gitlab.com/group/sub/repo/"),
+                "group/sub/repo",
+            ),
+            // No origin at all → "" (unproven), never an error.
+            ("no-origin", None, ""),
+        ] {
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("gd-origin-path-{tag}-"))
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let repo_s = repo.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q"]).await;
+            if let Some(url) = remote {
+                run(&repo_s, &["remote", "add", "origin", url]).await;
+            }
+            assert_eq!(
+                repo_origin_path(repo_s.clone()).await.unwrap(),
+                want,
+                "case: {tag}",
+            );
+        }
+    }
+
+    /// A path that isn't a repo answers "" rather than erroring — the caller's
+    /// contract is "unproven", and a stale recents row must not fail the open.
+    #[tokio::test]
+    async fn a_non_repo_path_is_unproven_not_an_error() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-origin-path-nonrepo-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_string_lossy().into_owned();
+        assert_eq!(repo_origin_path(path).await.unwrap(), "");
     }
 }

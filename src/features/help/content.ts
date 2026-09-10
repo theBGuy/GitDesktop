@@ -265,7 +265,8 @@ On **GitHub** it gathers anything you **authored**, are **assigned** to, were
 **mentioned** in, or **commented on**, together with anything **awaiting your
 review**, across every repository your account can see, so items from repos you've
 never cloned sit alongside the ones you have. **GitLab** contributes the merge
-requests and issues that involve you on every host you're signed in to, and
+requests and issues you authored, are assigned to, or are asked to review, from
+every host you're signed in to, and
 **Bitbucket** the pull requests from the Bitbucket repositories in your recents
 (Bitbucket has no account-wide search, so the inbox asks the checkouts it knows).
 
@@ -340,8 +341,8 @@ CLI (\`glab\`), and Bitbucket the Atlassian API token you saved. Set them up in
 of them connected the screen says so and points you at the sign-in. When every
 connected forge fails with nothing to show, the screen reports it with a
 **Retry**, naming each forge that failed when more than one did. If your only
-connected forge failed because it isn't signed in, the screen names that
-sign-in instead of the error behind it.`,
+connected forge failed for a missing CLI or token, the screen points you at
+that setup instead of the error behind it.`,
   },
   {
     id: "repo-settings",

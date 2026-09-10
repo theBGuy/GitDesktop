@@ -57,9 +57,15 @@ pub struct MyWorkItem {
     pub author_login: Option<String>,
 }
 
-/// One page of the inbox, and whether anything was left off it: `truncated` is
-/// true when any leg hit its own server-side cap or the merged union overshot the
-/// page — so it can be true on a page that arrives short.
+/// One page of the inbox, and whether anything was left off it.
+///
+/// `truncated` means "items may be missing", NOT "the page is full" — so it can
+/// be true on a page that arrives short. [`merge_legs`] raises it for a leg at
+/// its own cap or a union overshooting the page; a provider arm ORs in its own
+/// losses on top (a GitLab host or a Bitbucket repo that failed while its
+/// siblings answered). Any new cause of a silently incomplete page belongs here
+/// rather than in a second flag: the frontend's one job is to stop claiming the
+/// inbox is complete.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MyWorkPage {
@@ -135,6 +141,10 @@ pub fn normalize_updated_at(raw: &str) -> String {
 /// reverse error — a leg holding exactly its cap with nothing more on the server —
 /// reports a cap that isn't there, and that is the safe direction: an inbox that
 /// hides items must never look complete.
+///
+/// This sees only the legs it was HANDED, so a producer that lost a whole host or
+/// repo ORs that into `truncated` afterwards — the legs it would have contributed
+/// never reach here.
 pub fn merge_legs(legs: Vec<MyWorkLeg>, limit: usize) -> MyWorkPage {
     let leg_capped = legs.iter().any(|l| l.capped);
     let mut seen: HashSet<String> = HashSet::new();

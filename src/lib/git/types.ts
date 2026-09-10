@@ -688,10 +688,10 @@ export interface MyWorkItem {
   provider: ForgeProvider;
 }
 
-/** One page of the work inbox. `truncated` is true when either search leg hit
- *  its own server-side cap or the merged union overshot the page, so it can be
- *  true on a page that arrives short — a leg's raw count is measured before
- *  unaddressable hits are dropped. */
+/** One page of the work inbox. `truncated` is true when a search leg hit its
+ *  own server-side cap, the merged union overshot the page, or a provider lost
+ *  part of its results (a host, a repo) — so it can be true on a page that
+ *  arrives short; it means "items may be missing", not "the page is full". */
 export interface MyWorkPage {
   items: MyWorkItem[];
   truncated: boolean;

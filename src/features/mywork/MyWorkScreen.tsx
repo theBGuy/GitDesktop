@@ -35,7 +35,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
-import { forgePrHeadRef, validateRepo } from "@/lib/git/api";
+import { forgePrHeadRef, repoOriginPath, validateRepo } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import { useForgeMyWork, useMyWorkSources } from "@/lib/git/queries";
 import {
@@ -60,6 +60,7 @@ import {
   MY_WORK_LISTBOX_ID,
   type MyWorkTab,
   matchLocalRepo,
+  matchLocalRepos,
   mergeMyWorkPages,
   myWorkOptionId,
 } from "./mywork-utils";
@@ -187,9 +188,15 @@ type MyWorkLeg = {
 /** Which provider a failure came from, or null for the sources probe itself. */
 type LegError = { provider: ForgeProvider | null; error: unknown };
 
-/** A leg has answered, either way. `isPending` can't stand in for this: a leg
+/** A leg has ANSWERED for its current key. Placeholder rows belong to the
+ *  previous one — a recents change re-keys the Bitbucket leg — so they stay on
+ *  screen without being an answer this screen may count or speak for. */
+const hasAnswered = (leg: MyWorkLeg) =>
+  leg.query.isSuccess && !leg.query.isPlaceholderData;
+
+/** A leg has settled, either way. `isPending` can't stand in for this: a leg
  *  the sources probe left disabled stays pending forever. */
-const settled = (leg: MyWorkLeg) => leg.query.isSuccess || leg.query.isError;
+const settled = (leg: MyWorkLeg) => hasAnswered(leg) || leg.query.isError;
 
 /** What the error screen speaks for: the sources probe when IT failed, else the
  *  configured legs, and only once every one of them has failed. */
@@ -199,10 +206,11 @@ function failedLegs(sourcesError: unknown, legs: MyWorkLeg[]): LegError[] {
   return legs.map((l) => ({ provider: l.provider, error: l.query.error }));
 }
 
-/** Stable empty defaults, so a suppressed notice or error list doesn't hand a
- *  fresh array to every render. */
+/** Stable empty defaults, so a suppressed notice, error list or unpainted row
+ *  set doesn't hand a fresh array to every render. */
 const NO_LEGS: MyWorkLeg[] = [];
 const NO_ERRORS: LegError[] = [];
+const NO_ITEMS: MyWorkItem[] = [];
 
 /** Total budget for resolving where to open a PR, spanning EVERY awaited leg of
  *  the resolution — the worktree list, the head-ref read, and the validate of
@@ -270,6 +278,66 @@ async function resolveTarget(
     null,
   );
   return info ? { path: info.root, name: info.name } : null;
+}
+
+/**
+ * Whether a row's local match could be the WRONG checkout. `matchLocalRepo` keys
+ * on host + owner + name, and GitLab persists only the segment BEFORE the repo
+ * name as the owner — so any two GitLab paths sharing their last two segments
+ * collide: `team-a/sub/repo` with `team-b/sub/repo`, and equally a flat
+ * `sub/repo` with a nested `team/sub/repo`. The extra depth can sit entirely on
+ * the CHECKOUT side, which the item cannot see, so the item's own path depth
+ * proves nothing and every matched GitLab row pays the proof. GitHub and
+ * Bitbucket are exempt because their namespaces are one segment on BOTH sides —
+ * the key is the whole path for item and checkout alike, so equal keys are the
+ * same repository.
+ */
+function matchNeedsOriginProof(item: MyWorkItem): boolean {
+  return item.provider === "gitlab";
+}
+
+/**
+ * Whether `repoPath`'s origin really is this item's repository, read inside the
+ * caller's deadline. Every unknown — a slow or failed read, a checkout with no
+ * origin, a different namespace — answers false: an identity that can't be
+ * proven must not become a navigation into somebody else's project.
+ */
+async function originMatches(
+  item: MyWorkItem,
+  repoPath: string,
+  deadline: number,
+): Promise<boolean> {
+  const origin = await withDeadline<string | null>(
+    repoOriginPath(repoPath),
+    deadline,
+    null,
+  );
+  return (
+    origin !== null &&
+    origin !== "" &&
+    origin.toLowerCase() === item.repoFullName.toLowerCase()
+  );
+}
+
+/**
+ * The first candidate whose origin really is this item's repository, else null.
+ * Both clones of an ambiguous key can be in recents, so a single failed proof
+ * says nothing about the rest. Sequential and bounded: candidates number a
+ * handful at most, and an expiry mid-loop simply stops proving — the caller
+ * treats that like any other unproven match.
+ */
+async function provenCandidate(
+  item: MyWorkItem,
+  candidates: readonly RecentRepo[],
+  deadline: number,
+): Promise<RecentRepo | null> {
+  for (const candidate of candidates) {
+    // A spent budget would race git against a zero-length timeout and discard
+    // the result — stop rather than spawn one per remaining candidate.
+    if (Date.now() >= deadline) return null;
+    if (await originMatches(item, candidate.path, deadline)) return candidate;
+  }
+  return null;
 }
 
 /**
@@ -412,6 +480,10 @@ export function MyWorkScreen() {
     { provider: "bitbucket", enabled: bitbucketOn, query: bitbucket },
   ];
   const enabledLegs = legs.filter((l) => l.enabled);
+  // The legs that actually ANSWERED. Only these may describe what an empty inbox
+  // covers: a forge that failed has no reach to claim, and saying otherwise makes
+  // a page that is hiding items look complete.
+  const answeredLegs = enabledLegs.filter(hasAnswered);
   // Only configured legs contribute rows: a provider the probe has since turned
   // off keeps its cached page, and serving rows nothing can refresh would also
   // leave the combobox pointing at a listbox no branch mounts.
@@ -425,31 +497,45 @@ export function MyWorkScreen() {
   const items = page.items;
   const prCount = items.filter((i) => i.isPullRequest).length;
   const visible = filterMyWork(items, tab, filter);
-  // Derived, never stored: a row the filter has hidden simply stops being
-  // active, and arrow keys restart from the ends of the new visible set.
-  const activeIndex = visible.findIndex((i) => i.url === activeUrl);
-  const activeId =
-    activeIndex >= 0 ? myWorkOptionId(visible[activeIndex].url) : undefined;
 
   const anySettled = enabledLegs.some(settled);
   const allSettled = enabledLegs.every(settled);
   const sourcesPending = sources.isPending;
-  const loading = !firstPaint;
-  // Drives that latch. A leg's settled state is monotonic within a mount, so the
-  // window arms at most once — when the first forge answers — and is cleared
-  // again the moment the rest catch up inside it.
+  // Everything configured has answered — or the probe came back with nothing to
+  // configure — so there is no window left to wait out. Read during render, not
+  // only from the latch effect below: a reopen with every leg still cached is
+  // due on its FIRST render, and waiting for the effect would paint one
+  // skeleton frame the single-query screen never had.
+  const paintDue = !sourcesPending && allSettled;
+  const loading = !firstPaint && !paintDue;
+  // The latch. A leg's settled state is monotonic within a mount, so the window
+  // arms at most once — when the first forge answers — and is cleared again the
+  // moment the rest catch up inside it. Latching even when `paintDue` already
+  // painted is what stops a leg configured LATER from dropping rows back to a
+  // skeleton.
   useEffect(() => {
-    if (firstPaint || sourcesPending) return;
-    // Nothing configured, or every leg already answered: paint now.
-    if (allSettled) {
+    if (firstPaint) return;
+    if (paintDue) {
       setFirstPaint(true);
       return;
     }
-    // Still waiting on the very first answer — there is nothing to hold yet.
-    if (!anySettled) return;
+    // Nothing to hold yet: the probe is still out, or no forge has answered.
+    if (sourcesPending || !anySettled) return;
     const timer = setTimeout(() => setFirstPaint(true), FIRST_PAINT_GRACE_MS);
     return () => clearTimeout(timer);
-  }, [firstPaint, sourcesPending, allSettled, anySettled]);
+  }, [firstPaint, paintDue, sourcesPending, anySettled]);
+
+  // The rows a user can actually act on. The grace window holds skeletons over a
+  // settled leg's rows, so `visible` alone would let arrows reach — and Enter
+  // OPEN — an item never painted, and would point the combobox's ARIA ids at a
+  // listbox no branch has mounted. Keyboard, ARIA and the painted list read this
+  // one set, which is `visible` itself the moment anything paints.
+  const interactive = loading ? NO_ITEMS : visible;
+  // Derived, never stored: a row the filter has hidden simply stops being
+  // active, and arrow keys restart from the ends of the new visible set.
+  const activeIndex = interactive.findIndex((i) => i.url === activeUrl);
+  const activeId =
+    activeIndex >= 0 ? myWorkOptionId(interactive[activeIndex].url) : undefined;
   // Only a total failure earns the error screen — one failed leg among several
   // is a quiet notice under the rows the rest supplied.
   const errors = failedLegs(
@@ -459,7 +545,7 @@ export function MyWorkScreen() {
   // And only when there is nothing for it to replace: rows an earlier fetch or
   // another leg supplied outlive the failure, which drops to a notice line.
   const fatal = errors.length > 0 && items.length === 0;
-  const anyLoaded = enabledLegs.some((l) => l.query.isSuccess);
+  const anyLoaded = answeredLegs.length > 0;
   const refreshing =
     sources.isFetching || enabledLegs.some((l) => l.query.isFetching);
   // Refetches the sources probe too: a sign-in that landed while the inbox was
@@ -511,11 +597,16 @@ export function MyWorkScreen() {
     const gen = ++openGen;
     const superseded = () =>
       gen !== openGen || useUiStore.getState().view !== "mywork";
-    const match = matchLocalRepo(item, recents);
-    if (!match) {
+    const candidates = matchLocalRepos(item, recents);
+    if (candidates.length === 0) {
       openUrl(item.url);
       return;
     }
+    // A GitLab key can name several checkouts, so the proof inside the budget
+    // picks which one is this row's; every other provider's key is identity, so
+    // the list is one entry and this stays the single-match path throughout.
+    const needsProof = matchNeedsOriginProof(item);
+    let match = candidates[0];
     // Recents rows outlive deleted and moved clones, so prove the path is still
     // a repo before navigating; the browser fallback keeps the row a working
     // link while the toast names the stale path (repair lives in the repo list).
@@ -523,15 +614,21 @@ export function MyWorkScreen() {
       await validateRepo(match.path);
     } catch (e) {
       if (superseded()) return;
-      openUrl(item.url);
-      // Only a real notARepo earns the stale-path sentence — a missing CLI or an
-      // IPC failure would be misdescribed by it, so it takes the generic toast.
-      if (isAppError(e) && e.kind === "notARepo") {
-        toast.error(`${match.path} is no longer a git repository.`);
-      } else {
-        toastError(e);
+      // A stale FIRST candidate is not the end of an ambiguous row: the proof
+      // rejects a dead path anyway, so only a row with nowhere else to look
+      // reports it and gives up here.
+      if (!needsProof || candidates.length === 1) {
+        openUrl(item.url);
+        // Only a real notARepo earns the stale-path sentence — a missing CLI or
+        // an IPC failure would be misdescribed by it, so it takes the generic
+        // toast.
+        if (isAppError(e) && e.kind === "notARepo") {
+          toast.error(`${match.path} is no longer a git repository.`);
+        } else {
+          toastError(e);
+        }
+        return;
       }
-      return;
     }
     if (superseded()) return;
     // Where a local landing goes, in one rule: a matched row that is itself a
@@ -558,6 +655,24 @@ export function MyWorkScreen() {
       // One budget for the whole resolution, however many legs it takes.
       const deadline = Date.now() + WORKTREE_RESOLVE_BUDGET_MS;
       try {
+        // A GitLab match key can name a DIFFERENT project's checkout, so settle
+        // which candidate is this row's first in the budget — ahead of the
+        // optional worktree legs, which may spend the rest of it. None proven
+        // opens the browser: the row stays a working link, and no open lands on
+        // another project's #N.
+        if (needsProof) {
+          const proven = await provenCandidate(item, candidates, deadline);
+          if (superseded()) return;
+          if (!proven) {
+            openUrl(item.url);
+            return;
+          }
+          // Everything below resolves against the PROVEN checkout, not the key's
+          // first match.
+          match = proven;
+          targetPath = proven.path;
+          targetName = proven.name;
+        }
         // Listed once and shared: both preferences read the same snapshot, and
         // this is the leg that can block.
         const worktrees = await withDeadline(
@@ -671,13 +786,13 @@ export function MyWorkScreen() {
   // without ever leaving the input. Shift+Enter is the keyboard route to the
   // main workspace.
   const onInputArrow = listKeyboardNav({
-    items: visible,
+    items: interactive,
     activeIndex,
     onActivate: (item) => setActiveUrl(item.url),
   });
   function onInputKeyDown(e: ReactKeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter") {
-      const item = visible[activeIndex];
+      const item = interactive[activeIndex];
       if (!item) return;
       e.preventDefault();
       void openItem(item, { preferWorktree: !e.shiftKey });
@@ -688,7 +803,7 @@ export function MyWorkScreen() {
     // it sits outside the list's menu trigger, so the rows' only menu route is
     // this one. Targets the active row, which the menu already acts on.
     if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
-      const item = visible[activeIndex];
+      const item = interactive[activeIndex];
       // Swallowed whenever a row is active, even if it scrolled out of the
       // virtualizer and couldn't be found: the input's own edit menu is the
       // wrong answer to a row-menu request. With no active row there is no row
@@ -714,7 +829,9 @@ export function MyWorkScreen() {
           <ArrowLeftIcon />
         </Button>
         <span className="text-sm font-medium">My work</span>
-        {anyLoaded && (
+        {/* Same paint gate as the body: a count above skeletons would be a
+            partial total that then changes as the held-back legs land. */}
+        {!loading && anyLoaded && (
           <span className="text-xs tabular-nums text-muted-foreground">
             {items.length}
           </span>
@@ -756,11 +873,14 @@ export function MyWorkScreen() {
           placeholder="Filter by title, repository, or number"
           aria-label="Filter your work"
           role="combobox"
-          aria-expanded={visible.length > 0}
-          // Same predicate as aria-expanded: the listbox only mounts in the list
-          // branch, so pointing at its id from any other state would reference a
-          // node that isn't there.
-          aria-controls={visible.length > 0 ? MY_WORK_LISTBOX_ID : undefined}
+          aria-expanded={interactive.length > 0}
+          // Same predicate as aria-expanded, and the same set the list renders:
+          // the listbox only mounts in the list branch, so pointing at its id
+          // from any other state — including the grace window's skeletons —
+          // would reference a node that isn't there.
+          aria-controls={
+            interactive.length > 0 ? MY_WORK_LISTBOX_ID : undefined
+          }
           aria-autocomplete="list"
           aria-activedescendant={activeId}
           className="h-8 min-w-40 flex-1"
@@ -775,7 +895,7 @@ export function MyWorkScreen() {
         // drop, so it stays true on a page that arrives short.
         capped={page.truncated}
         noSources={sources.isSuccess && enabledLegs.length === 0}
-        providers={enabledLegs.map((l) => l.provider)}
+        answered={answeredLegs.map((l) => l.provider)}
         allSettled={allSettled}
         items={items}
         visible={visible}
@@ -808,7 +928,7 @@ function MyWorkBody({
   errors,
   capped,
   noSources,
-  providers,
+  answered,
   allSettled,
   items,
   visible,
@@ -823,7 +943,8 @@ function MyWorkBody({
   errors: LegError[];
   capped: boolean;
   noSources: boolean;
-  providers: ForgeProvider[];
+  /** The forges that ANSWERED — the only ones the empty state may speak for. */
+  answered: ForgeProvider[];
   allSettled: boolean;
   items: MyWorkItem[];
   visible: MyWorkItem[];
@@ -859,11 +980,13 @@ function MyWorkBody({
     return <ListRowSkeletons rows={8} lines={1} name="your work" />;
   }
   if (items.length === 0) {
-    // One configured forge names itself; several can only speak neutrally, since
-    // the empty answer is every one of theirs. A capped EMPTY page carries its
-    // own sentence rather than CapNote: the note's filter advice has nothing to
-    // narrow, but the page must not read as "nothing exists".
-    const sole = providers.length === 1 ? providers[0] : null;
+    // Every claim here is scoped to the forges that ANSWERED, so a failed leg's
+    // reach is never spoken for; the notice below names it instead. One answering
+    // forge names itself; several can only speak neutrally, since the empty
+    // answer is every one of theirs. A capped EMPTY page carries its own sentence
+    // rather than CapNote: the note's filter advice has nothing to narrow, but
+    // the page must not read as "nothing exists".
+    const sole = answered.length === 1 ? answered[0] : null;
     const source = sole ? providerLabel(sole) : "Your forges";
     const nothing = sole
       ? `Nothing on ${providerLabel(sole)} involves you right now.`
@@ -873,7 +996,7 @@ function MyWorkBody({
         {`${source} returned results this view can't display. There may be more than this page holds.`}
       </QuietLine>
     ) : (
-      <QuietLine>{`${nothing} ${scopeSentence(providers)}`}</QuietLine>
+      <QuietLine>{`${nothing} ${scopeSentence(answered)}`}</QuietLine>
     );
   }
   if (visible.length === 0) {
