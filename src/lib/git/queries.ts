@@ -156,8 +156,8 @@ export const repoKeys = {
     ["repo", repo, "compare", base, compare, "diff", file] as const,
   mergeBase: (repo: string, base: string, compare: string) =>
     ["repo", repo, "compare", base, compare, "merge-base"] as const,
-  objectsPresent: (repo: string, oids: string) =>
-    ["repo", repo, "objects-present", oids] as const,
+  objectsPresent: (repo: string, oidsKey: string) =>
+    ["repo", repo, "objects-present", oidsKey] as const,
 };
 
 /**

@@ -63,15 +63,12 @@ export function BranchDiffView({
     diffEnabled,
   );
   // The diff is three-dot, so its old side is the fork point, not `base`'s tip.
-  // Both queries keep the PREVIOUS comparison's data while a new pair loads, and
-  // a stale old side paired with a fresh diff maps tokens onto wrong lines.
-  // Pairing this rev with a diff that is still a placeholder is DiffSurface's to
-  // refuse — it drops content mode there for every surface.
+  // The merge base's own placeholder flag proves the fork point belongs to this
+  // (base, compare); the converse — a stale DIFF paired with fresh revs — is
+  // DiffContent's refusal via `dataIsPlaceholder`.
   const mergeBase = useMergeBase(repoPath, base, compare);
   const sideOldRev =
-    mergeBase.data !== undefined &&
-    !mergeBase.isPlaceholderData &&
-    !files.isPlaceholderData
+    mergeBase.data !== undefined && !mergeBase.isPlaceholderData
       ? mergeBase.data
       : null;
 

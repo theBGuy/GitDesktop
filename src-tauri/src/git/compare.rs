@@ -1023,11 +1023,16 @@ async fn all_objects_present(repo_path: &str, refs: &[String]) -> bool {
     true
 }
 
+/// Cap on one [`git_objects_present`] call, bounding its per-oid `rev-parse` spawns.
+/// Its callers ask about a single PR's commits, so this is far above real use.
+const OBJECTS_PRESENT_MAX: usize = 64;
+
 /// Whether every OID is already a local commit object — the frontend's read-only
 /// view of [`all_objects_present`], with no network anywhere in it. Full-length
 /// oids only (sha-1 or sha-256): an abbreviation can resolve ambiguously, and this
 /// answers about one named object. An empty list is vacuously present, callers
-/// gating the call on having something to ask about.
+/// gating the call on having something to ask about; [`OBJECTS_PRESENT_MAX`] bounds
+/// the other end, since the helper spawns one `rev-parse` per entry.
 #[tauri::command]
 pub async fn git_objects_present(repo_path: String, oids: Vec<String>) -> AppResult<bool> {
     for oid in &oids {
@@ -1037,6 +1042,12 @@ pub async fn git_objects_present(repo_path: String, oids: Vec<String>) -> AppRes
                 "expected a full commit sha: {oid}"
             )));
         }
+    }
+    if oids.len() > OBJECTS_PRESENT_MAX {
+        return Err(AppError::InvalidArgument(format!(
+            "too many oids: {} (max {OBJECTS_PRESENT_MAX})",
+            oids.len()
+        )));
     }
     if oids.is_empty() {
         return Ok(true);
@@ -1393,6 +1404,23 @@ mod tests {
         );
     }
 
+    /// The fork-point command shares `git_compare_branches`' guard: an option-shaped
+    /// ref is rejected before any git runs, on either side.
+    #[tokio::test]
+    async fn merge_base_rejects_option_like_refs() {
+        let (_base, repo) = seed_repo("merge-base-badref").await;
+
+        for (base, compare) in [("-oops", "HEAD"), ("HEAD", "-oops")] {
+            let err = git_merge_base(repo.clone(), base.into(), compare.into())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidArgument(_)),
+                "git_merge_base rejects a leading-dash ref ({base}..{compare})"
+            );
+        }
+    }
+
     /// Unrelated histories have no fork point, and git says so with a non-zero exit —
     /// the caller sees the error rather than a silently empty sha.
     #[tokio::test]
@@ -1459,12 +1487,20 @@ mod tests {
 
         // An abbreviation is valid hex, so only this command's own length check
         // stops it from reaching rev-parse and resolving ambiguously.
-        let err = git_objects_present(repo, vec!["dead".into()])
+        let err = git_objects_present(repo.clone(), vec!["dead".into()])
             .await
             .unwrap_err();
         assert!(
             matches!(err, AppError::InvalidArgument(_)),
             "a short oid is rejected at the boundary"
+        );
+
+        // Every entry is well-formed, so only the cap can refuse this list.
+        let over_cap = vec!["deadbeef".repeat(5); OBJECTS_PRESENT_MAX + 1];
+        let err = git_objects_present(repo, over_cap).await.unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidArgument(_)),
+            "a list past the spawn cap is rejected at the boundary"
         );
     }
 
