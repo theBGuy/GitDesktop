@@ -1091,6 +1091,11 @@ export function usePrList(
     queryFn: () => api.forgePrList(repo, state, limit, lens, filter),
     enabled,
     staleTime: 30_000,
+    // invalidArgument marks a refusal that is deterministic for this scope — the filter
+    // caps, the magic values, and GitLab's walk horizon — so a retry only re-spends the
+    // walk (up to 30 `glab` calls) to reach the same answer.
+    retry: (failureCount, err) =>
+      !(isAppError(err) && err.kind === "invalidArgument") && failureCount < 1,
     // State, limit and filter stay free so a tab switch, "Load more" or a filter
     // change keeps the current rows instead of flashing skeletons, but lens must
     // match: a fork numbers PRs independently of its parent, so another lens's rows
@@ -2016,8 +2021,13 @@ export function useIssueList(
     enabled,
     staleTime: 30_000,
     // issuesDisabled is a permanent repo condition — retrying only delays the notice.
+    // invalidArgument is the same story per scope (filter caps, magic values, GitLab's
+    // walk horizon): the second walk reaches the same refusal at the same cost.
     retry: (failureCount, err) =>
-      !(isAppError(err) && err.kind === "issuesDisabled") && failureCount < 1,
+      !(
+        isAppError(err) &&
+        (err.kind === "issuesDisabled" || err.kind === "invalidArgument")
+      ) && failureCount < 1,
     // State, limit and filter stay free so a tab switch, "Load more" or a filter
     // change keeps the current rows instead of flashing skeletons, but lens must
     // match: a fork numbers issues independently of its parent, so another lens's

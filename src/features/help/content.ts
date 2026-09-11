@@ -1067,17 +1067,20 @@ with it, author and label picks included. The **funnel** beside it holds those a
 by one (**Assigned to me**, **Review requested: me**, **My teams**) alongside searchable
 **author** and **label** rows, each showing how many of the loaded rows it covers, with
 long lists scrolling inside the popup. On **GitHub** and **GitLab** the filtering happens
-on the server, across the whole repository you're currently viewing. Type any author or
-label name and the funnel offers to filter by exactly that, whether or not the list has
-shown it. Several picks within one group widen the list (any of them matches), while
-picks in different groups narrow it. The **Mine** rows are remembered per repository;
-author and label picks last for the session.
+on the server, across the whole repository you're currently viewing. On a very large
+GitLab repository a filter can need more of the list than GitDesktop searches, and the
+list says so rather than guessing. Type any author or label name and the funnel offers to
+filter by exactly that, whether or not the list has shown it. Several picks within one
+group widen the list (any of them matches), while picks in different groups narrow it.
+The **Mine** rows are remembered per repository; author and label picks last for the
+session.
 
 **Group by my review**, the funnel's last row and what **Needs review** turns on, splits
 the open list into **Not reviewed yet**, **Updated since my review**, and **Reviewed**,
 each collapsible and carrying its count; *updated* means any activity after your last
-review, including commits, comments, and labels. Past a few hundred reviewed pull
-requests it says so and leaves the list flat. The command palette carries every scope:
+review, including commits, comments, and labels. The grouping covers the list as it
+stands; a list grown past a few hundred rows can outrun the review check, and then it
+says so and leaves the list flat. The command palette carries every scope:
 **Show all pull requests**, **Filter pull requests: mine**, **Filter pull requests: needs
 my review**, and **Toggle grouping by my review**. The assignee, reviewer, author, and
 label axes work on **GitHub** and **GitLab**; **My teams** and the review grouping are

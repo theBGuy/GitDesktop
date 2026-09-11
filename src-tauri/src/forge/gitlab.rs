@@ -1268,9 +1268,13 @@ where
 /// no unread leg could displace it — the per-leg boundary proof this refusal replaces.
 fn refuse_truncated_walk(truncated: bool) -> AppResult<()> {
     if truncated {
-        return Err(AppError::Glab(format!(
+        // InvalidArgument, not Glab: the refusal is deterministic for this scope, and the
+        // frontend's list retry keys on the kind to skip a re-walk that would only spend
+        // another round of `glab` calls reaching the same horizon.
+        return Err(AppError::InvalidArgument(format!(
             "This filter needs more of GitLab's list than GitDesktop searches ({} rows \
-             per filter value). Narrow the filter to fewer values, or to more specific ones.",
+             per filter value). Narrow the filter to fewer values, or to more specific \
+             ones, or drop one of the combined filters.",
             FILTER_PAGE_SIZE * MAX_LEG_PAGES
         )));
     }
@@ -10280,16 +10284,21 @@ mod tests {
     /// rows the page already holds. The row count is deliberately not an input.
     #[test]
     fn a_truncated_walk_is_refused_whatever_it_collected() {
+        // The kind is part of the contract: the frontend's list retry skips a re-walk on
+        // InvalidArgument, and a transient-looking Glab would spend another round of
+        // `glab` calls reaching the same horizon.
         match refuse_truncated_walk(true) {
-            Err(AppError::Glab(msg)) => {
+            Err(AppError::InvalidArgument(msg)) => {
                 // The copy has to name the bound and the remedy, or it leaves the user
-                // with no next move.
+                // with no next move. A narrow filter can hit the horizon too, so dropping
+                // one of the combined filters has to be offered alongside narrowing.
                 assert!(
                     msg.contains(&(FILTER_PAGE_SIZE * MAX_LEG_PAGES).to_string()),
                     "{msg}"
                 );
                 assert!(msg.contains("Narrow the filter"), "{msg}");
                 assert!(msg.contains("per filter value"), "{msg}");
+                assert!(msg.contains("drop one of the combined filters"), "{msg}");
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
