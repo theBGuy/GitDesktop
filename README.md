@@ -127,7 +127,9 @@ delete), and deep links to the settings GitHub keeps browser-only.
 
 A unified or split diff with syntax highlighting, collapsible surrounding
 context, and image diffing. Filter the changes list by path or category, and
-read a file's `+added -deleted` line counts without opening it. The
+read a file's `+added -deleted` line counts without opening it. Show that
+list flat or as a compacted directory tree: collapsible folders, single-child
+folder chains merged into one row, and arrow keys that walk and fold it. The
 working-tree diff is one whole-file view with hunk- and line-level staging
 and discarding (drag across the line numbers, spanning hunks freely — in
 the unified view a drag picks up added and removed lines together; hold

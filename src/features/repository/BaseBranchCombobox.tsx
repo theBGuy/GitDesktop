@@ -22,6 +22,7 @@ import {
   useUserWorktrees,
 } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
+import { rowCheckoutCopy } from "./checkout-copy";
 
 /** Whether a local branch may be offered as a base: drop the agent-session
  *  namespace (a hard repo invariant — every branch surface filters
@@ -47,8 +48,9 @@ function isOfferableRemoteName(name: string): boolean {
 interface RowMeta {
   /** ISO-8601 committer date of the branch tip (recency chip). */
   lastCommitDate: string;
-  /** Set when this branch is checked out in ANOTHER worktree. */
-  worktreePath?: string;
+  /** Set when this branch is checked out in ANOTHER checkout — the main
+   *  workspace included, which is what `isMain` lets the row name properly. */
+  worktree?: { path: string; isMain: boolean };
 }
 
 /**
@@ -92,15 +94,16 @@ export function BaseBranchCombobox({
   const remoteBranches = useRemoteBranches(repoPath, open);
   const userWorktrees = useUserWorktrees(repoPath, open);
 
-  // Branches checked out in *another* worktree → that worktree's path. Git
-  // forbids the same branch in two worktrees; the active repo's own checkout is
-  // excluded (that's just the current branch).
+  // Branches checked out in *another* checkout → that checkout. Git forbids the
+  // same branch in two worktrees; the active repo's own checkout is excluded
+  // (that's just the current branch). The main workspace stays IN — git counts
+  // it as a worktree, and `isMain` is what lets the row name it properly.
   const activeNorm = normPath(repoPath);
   const worktreeByBranch = useMemo(() => {
-    const map = new Map<string, string>();
+    const map = new Map<string, { path: string; isMain: boolean }>();
     for (const w of userWorktrees.data ?? []) {
       if (w.branch && normPath(w.path) !== activeNorm)
-        map.set(w.branch, w.path);
+        map.set(w.branch, { path: w.path, isMain: w.isMain });
     }
     return map;
   }, [userWorktrees.data, activeNorm]);
@@ -156,7 +159,7 @@ export function BaseBranchCombobox({
     for (const b of localBranches) {
       map.set(b.name, {
         lastCommitDate: b.lastCommitDate,
-        worktreePath: worktreeByBranch.get(b.name),
+        worktree: worktreeByBranch.get(b.name),
       });
     }
     for (const r of remoteBranchList) {
@@ -285,6 +288,10 @@ function BaseBranchRow({
   currentName: string | null;
   defaultName: string | null;
 }) {
+  // Names the holding checkout the way every branch row does. The record's
+  // `title` arm is deliberately not used: its "this row opens it" clause is true
+  // in the branch dropdown, while this row picks a base branch.
+  const copy = rowCheckoutCopy(meta?.worktree?.isMain);
   return (
     <ComboboxItem value={name}>
       <span className="min-w-0 flex-1 truncate" onMouseEnter={clipTitle(name)}>
@@ -300,13 +307,13 @@ function BaseBranchRow({
           </span>
         )}
       </span>
-      {meta?.worktreePath && (
+      {meta?.worktree && (
         <span
           className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
-          title={`Checked out in another worktree (${meta.worktreePath})`}
+          title={copy.blockedTitle(meta.worktree.path)}
         >
           <TreeStructureIcon className="size-3" weight="bold" />
-          worktree
+          {copy.noun}
         </span>
       )}
       {meta?.lastCommitDate && (

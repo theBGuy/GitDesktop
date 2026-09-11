@@ -121,6 +121,7 @@ import {
   worktreeCheckStateFrom,
 } from "./CleanupBranchesDialog";
 import { CreateBranchDialog } from "./CreateBranchDialog";
+import { baseName, rowCheckoutCopy } from "./checkout-copy";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { OperationHistoryDialog } from "./OperationHistoryDialog";
@@ -140,42 +141,6 @@ import {
   refuseWhileLeaving,
   worktreeItemLabel,
 } from "./WorktreesDialog";
-
-/** Last path segment (folder name), tolerating either separator. */
-const baseName = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() ?? p;
-
-/** How a branch row NAMES the checkout holding its branch — chip, tooltip, open
- *  item, after-the-fact toast, and the phrases that say a row is held because of
- *  it. Git counts the main workspace as a worktree and this row can point at it
- *  when you're standing in a linked one, but users don't call it one; routing
- *  the naming through one record keeps a later phrase from drifting back.
- *  "Rename worktree…" and "Delete worktree…" are deliberately NOT routed here:
- *  they name the git operation, and their held-reason carries the naming instead.
- *  `noun` is bare, for badges and parenthetical reasons. */
-const ROW_CHECKOUT_COPY = {
-  linked: {
-    noun: "worktree",
-    open: "Open worktree",
-    title: (path: string) =>
-      `Checked out in worktree ${baseName(path)} (${path}) — this row opens it`,
-    opened: (path: string) => `Opened worktree ${baseName(path)}`,
-    blocked: "checked out in another worktree",
-    held: "in a worktree",
-  },
-  main: {
-    noun: "main workspace",
-    open: "Open main workspace",
-    title: (path: string) =>
-      `Checked out in the main workspace (${path}) — this row opens it`,
-    opened: (_path: string) => "Opened the main workspace",
-    blocked: "checked out in the main workspace",
-    held: "in the main workspace",
-  },
-} as const;
-
-/** Which {@link ROW_CHECKOUT_COPY} arm a listed worktree speaks in. */
-const rowCheckoutCopy = (isMain: boolean | undefined) =>
-  ROW_CHECKOUT_COPY[isMain ? "main" : "linked"];
 
 /** Sentence-initial form of the platform's secondary-click word — for
  *  status-icon hints where the phrase leads a sentence. */
@@ -1830,6 +1795,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // this row's holding checkout come from the record instead of saying
     // "worktree" flat.
     const rowCopy = rowCheckoutCopy(rowWorktree?.isMain);
+    // A natively-disabled menu item swallows its tooltip, so the items `busy`
+    // alone holds carry the reason in the label. A structural reason always
+    // wins — this arm shows only where nothing else explains the dimming.
+    const busySuffix = busy ? " (operation in progress)" : "";
     const rowWorktreeRemoving = Boolean(
       rowWorktree && removingPaths.has(rowWorktree.path),
     );
@@ -2158,7 +2127,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   onClick={() => void doUpdateFromDefault(branch.name)}
                 >
                   Update from {defaultName}
-                  {rowPromotion ? " (promotion branch)" : ""}
+                  {rowPromotion ? " (promotion branch)" : busySuffix}
                 </ContextMenuItem>
               )}
               {/* Pull the branch's own upstream in without switching — the star
@@ -2188,7 +2157,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                         onClick={() => void doResetToUpstream(branch, resetTip)}
                       >
                         Reset to {base}…
-                        {inWorktree && ` (checked out in ${holder})`}
+                        {inWorktree
+                          ? ` (checked out in ${holder})`
+                          : busySuffix}
                       </ContextMenuItem>
                     );
                   }
@@ -2208,6 +2179,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       }
                     >
                       Update from {base}
+                      {busySuffix}
                     </ContextMenuItem>
                   );
                 })()}
@@ -2224,7 +2196,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 >
                   {branch.upstreamBehind > 0
                     ? `Push to ${branch.upstream} (diverged)`
-                    : `Push to ${branch.upstream}`}
+                    : `Push to ${branch.upstream}${busySuffix}`}
                 </ContextMenuItem>
               )}
               {/* Publish an unpushed / upstream-deleted branch: one remote → a
@@ -2237,8 +2209,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   onClick={() => doPushBranch(branch, publishRemotes[0])}
                 >
                   {publishRemotes[0] === "origin"
-                    ? "Publish branch"
-                    : `Publish to ${publishRemotes[0]}`}
+                    ? `Publish branch${busySuffix}`
+                    : `Publish to ${publishRemotes[0]}${busySuffix}`}
                 </ContextMenuItem>
               ) : (
                 publishRemotes.map((r) => (
@@ -2248,6 +2220,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     onClick={() => doPushBranch(branch, r)}
                   >
                     Publish to {r}
+                    {busySuffix}
                   </ContextMenuItem>
                 ))
               )}

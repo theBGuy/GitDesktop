@@ -671,6 +671,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "toggle-changes-tree",
+    label: "Toggle directory tree view",
+    category: "Changes",
+    defaultBinding: null,
+  },
+  {
     id: "change-diff-language",
     label: "Change diff language…",
     category: "Changes",

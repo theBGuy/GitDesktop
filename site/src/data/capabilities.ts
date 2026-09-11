@@ -65,6 +65,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Diffs & staging",
+    label:
+      "Flat list ⇄ compacted directory tree in the Changes panel — collapsible folders, keyboard-first",
+  },
+  {
+    group: "Diffs & staging",
     label: "Per-file added/deleted line counts on the changes list",
   },
   {

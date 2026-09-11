@@ -216,6 +216,9 @@ export const NODE_VERSIONS = ["24", "22", "20"] as const;
 /** The diff layouts offered in the diff surface's view toggle. */
 export const DIFF_VIEW_MODES = ["unified", "split"] as const;
 
+/** The layouts offered in the Changes panel's view toggle. */
+export const CHANGES_VIEW_MODES = ["list", "tree"] as const;
+
 export interface AppSettings {
   ai: AiSettings;
   /** Provider/model for AI PR review (independent of the commit model). */
@@ -346,6 +349,9 @@ export interface AppSettings {
    *  outside the bulk settings form (apply-on-change), like diffViewMode. */
   theme: ThemeSetting;
   diffViewMode: (typeof DIFF_VIEW_MODES)[number];
+  /** Changes panel layout: flat list or compacted directory tree. Applied outside
+   *  the bulk settings form (apply-on-change), like diffViewMode. */
+  changesViewMode: (typeof CHANGES_VIEW_MODES)[number];
   /** Which conversation-list sections the user collapsed, keyed `"<feature>:<kind>"`
    *  (`pulls:local`, `issues:remote`, …); a missing key = expanded. Global and
    *  feature-scoped, so the remote key collapses that section across every repo. */
@@ -428,6 +434,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   recentRepos: [],
   theme: "system",
   diffViewMode: "unified",
+  changesViewMode: "list",
   collapsedConversationSections: [],
   commentComposerCollapsed: false,
   diffFileListCollapsed: false,
@@ -590,6 +597,11 @@ function healEnumerated(settings: AppSettings): AppSettings {
       settings.diffViewMode,
       DIFF_VIEW_MODES,
       DEFAULT_SETTINGS.diffViewMode,
+    ),
+    changesViewMode: pick(
+      settings.changesViewMode,
+      CHANGES_VIEW_MODES,
+      DEFAULT_SETTINGS.changesViewMode,
     ),
     // A corrupt container is passed through, never substituted: every writer in the
     // serialized RMW chain re-reads through loadSettings, so a stand-in [] would

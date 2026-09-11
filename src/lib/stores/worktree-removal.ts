@@ -159,6 +159,13 @@ export function isWorktreePromoting(path: string): boolean {
   return promotingWorktrees.has(normPath(path));
 }
 
+/** True while a promote has claimed this MAIN workspace as its destination.
+ *  Fire-time check only, like {@link isWorktreePromoting} — {@link promotingMains}
+ *  is deliberately not store state, so never use this to decide what renders. */
+export function isMainPromoting(path: string): boolean {
+  return promotingMains.has(normPath(path));
+}
+
 /** The refusal every surface shows for a worktree a promote has claimed — one
  *  spelling, so the store's refusals and the callers' can't drift apart. */
 export const WORKTREE_PROMOTING_MESSAGE = "This worktree is being promoted.";

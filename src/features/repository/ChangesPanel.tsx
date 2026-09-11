@@ -1,9 +1,11 @@
 import { Popover } from "@base-ui/react/popover";
 import {
+  CaretDownIcon,
   CaretRightIcon,
   FunnelIcon,
   InfoIcon,
   StackIcon,
+  TreeStructureIcon,
 } from "@phosphor-icons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -19,6 +21,7 @@ import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { usePanelPortalContainer } from "@/components/panel-portal";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -57,6 +60,7 @@ import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { flattenPathTree } from "@/lib/path-tree";
 import {
   useAiEnabled,
   useReviewConfigured,
@@ -133,12 +137,42 @@ type ChangeActionScope =
   | { kind: "all" }
   | null;
 
-/** A flattened row in the virtualized changes list: a section header or a file.
- *  One flat list (not two nested sections) keeps virtualization, cross-section
- *  arrow-key navigation, and range selection in a single index space. */
+/** A flattened row in the virtualized changes list: a section header, a file, or
+ *  (tree mode) a compacted directory. One flat list (not two nested sections)
+ *  keeps virtualization, cross-section arrow-key navigation, and range selection
+ *  in a single index space. */
 type FlatRow =
   | { type: "header"; section: "staged" | "unstaged"; count: number }
-  | { type: "file"; entry: FileEntry; staged: boolean };
+  | {
+      type: "folder";
+      section: "staged" | "unstaged";
+      path: string;
+      label: string;
+      depth: number;
+      count: number;
+      collapsed: boolean;
+    }
+  /** `depth` is the tree-mode indent level; list mode leaves it unset. */
+  | { type: "file"; entry: FileEntry; staged: boolean; depth?: number };
+
+type FolderRow = Extract<FlatRow, { type: "folder" }>;
+
+/** Drops the selection keys hidden under `collapsedKeys` (each `"<section>:<dir>"`,
+ *  sharing the selection keys' `"<section>:<path>"` spelling). One rule for both
+ *  ways a row can go hidden — collapsing a folder, and entering tree mode with
+ *  folders already collapsed — so a collapsed folder can never hold a
+ *  selectable-but-invisible row. Returns `keys` itself when nothing was hidden. */
+function pruneHiddenKeys(
+  keys: Set<string>,
+  collapsedKeys: Iterable<string>,
+): Set<string> {
+  const prefixes = [...collapsedKeys].map((k) => `${k}/`);
+  if (prefixes.length === 0) return keys;
+  const next = new Set(
+    [...keys].filter((k) => !prefixes.some((p) => k.startsWith(p))),
+  );
+  return next.size === keys.size ? keys : next;
+}
 
 /** A row's identity, shared by React's key and the virtualizer's `getItemKey`
  *  so the two can't drift. A measured height only follows its row while
@@ -148,9 +182,16 @@ function keyOf(path: string, staged: boolean): string {
   return `${staged ? "staged" : "unstaged"}:${path}`;
 }
 function rowKeyOf(row: FlatRow): string {
-  return row.type === "header"
-    ? `header:${row.section}`
-    : keyOf(row.entry.path, row.staged);
+  if (row.type === "header") return `header:${row.section}`;
+  if (row.type === "folder") return `folder:${row.section}:${row.path}`;
+  return keyOf(row.entry.path, row.staged);
+}
+
+/** The indent level a row sits at; headers and list-mode files are at the root. */
+function rowDepth(row: FlatRow): number {
+  if (row.type === "header") return 0;
+  if (row.type === "folder") return row.depth;
+  return row.depth ?? 0;
 }
 
 export function ChangesPanel({
@@ -195,6 +236,15 @@ export function ChangesPanel({
   // whose diff is shown; `anchorKey` is the pivot for shift-range selection.
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [anchorKey, setAnchorKey] = useState<string | null>(null);
+  // Tree mode's collapsed directories, keyed `"<section>:<dirPath>"`. Session-local
+  // by design: the changes list is ephemeral, so a collapse outlives neither a
+  // repo switch nor a restart.
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(
+    new Set(),
+  );
+  // The nav cursor when it rests on a folder row (which has no diff to show, so
+  // `selectedFile` stays where it was). Null = the cursor follows `selectedFile`.
+  const [activeFolderKey, setActiveFolderKey] = useState<string | null>(null);
   const [filterText, setFilterText] = useState("");
   const [activeKinds, setActiveKinds] = useState<Set<FilterKind>>(new Set());
   const [stashesOpen, setStashesOpen] = useState(false);
@@ -203,6 +253,10 @@ export function ChangesPanel({
   // The one shared context menu acts on whatever was right-clicked.
   const [menuTarget, setMenuTarget] = useState<MenuTarget>(null);
   const filterRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLElement | null>(null);
+  // A cursor row a horizontal jump could not focus because the virtualizer had
+  // not mounted it yet; claimed once the scroll brings it in.
+  const pendingFocusKey = useRef<string | null>(null);
 
   const entries = status.data?.entries ?? [];
   const conflictedPaths = entries
@@ -282,12 +336,8 @@ export function ChangesPanel({
     stagedEntries.length === 0 &&
     unstagedEntries.length === 0;
 
-  // The rows in render order, so ArrowUp/Down can walk the selection
-  // across both sections.
-  const visibleRows = [
-    ...stagedEntries.map((entry) => ({ entry, staged: true })),
-    ...unstagedEntries.map((entry) => ({ entry, staged: false })),
-  ];
+  const viewMode = settings.data?.changesViewMode ?? "list";
+  const treeMode = viewMode === "tree";
   const activeKey = selectedFile
     ? keyOf(selectedFile.path, selectedFile.staged)
     : null;
@@ -305,54 +355,198 @@ export function ChangesPanel({
     (e) => e.unstaged !== "untracked" && e.staged !== "added",
   );
 
+  /** A section's collapsed directories, its `"<section>:"` prefix stripped. */
+  function collapsedIn(section: "staged" | "unstaged"): Set<string> {
+    const prefix = `${section}:`;
+    return new Set(
+      [...collapsedFolders]
+        .filter((k) => k.startsWith(prefix))
+        .map((k) => k.slice(prefix.length)),
+    );
+  }
+
   // One flattened list (section headers + their files) drives a single
   // virtualizer, so a working tree with thousands of changed files only renders
-  // a window of rows instead of mounting every row (which used to crash).
+  // a window of rows instead of mounting every row (which used to crash). Tree
+  // mode swaps each section's flat run for a compacted directory tree; the
+  // filter has already been applied, so folder counts describe what's listed.
   const flatRows: FlatRow[] = [];
-  if (stagedEntries.length > 0) {
-    flatRows.push({
-      type: "header",
-      section: "staged",
-      count: stagedEntries.length,
-    });
-    for (const entry of stagedEntries)
-      flatRows.push({ type: "file", entry, staged: true });
+  function pushSection(
+    section: "staged" | "unstaged",
+    sectionEntries: FileEntry[],
+  ) {
+    if (sectionEntries.length === 0) return;
+    const staged = section === "staged";
+    flatRows.push({ type: "header", section, count: sectionEntries.length });
+    if (!treeMode) {
+      for (const entry of sectionEntries)
+        flatRows.push({ type: "file", entry, staged });
+      return;
+    }
+    const collapsed = collapsedIn(section);
+    // A rename is placed by its NEW path; the old one is only the label's left
+    // half, and the row's identity is the new path everywhere else too.
+    for (const row of flattenPathTree(
+      sectionEntries,
+      (e) => e.path,
+      collapsed,
+    )) {
+      if (row.kind === "folder") {
+        flatRows.push({
+          type: "folder",
+          section,
+          path: row.path,
+          label: row.label,
+          depth: row.depth,
+          count: row.fileCount,
+          collapsed: collapsed.has(row.path),
+        });
+      } else {
+        flatRows.push({
+          type: "file",
+          entry: row.item,
+          staged,
+          depth: row.depth,
+        });
+      }
+    }
   }
-  if (unstagedEntries.length > 0) {
-    flatRows.push({
-      type: "header",
-      section: "unstaged",
-      count: unstagedEntries.length,
-    });
-    for (const entry of unstagedEntries)
-      flatRows.push({ type: "file", entry, staged: false });
+  pushSection("staged", stagedEntries);
+  pushSection("unstaged", unstagedEntries);
+
+  // The navigable rows in render order (headers excepted), so ArrowUp/Down walk
+  // the cursor across both sections — and, in tree mode, across folder rows.
+  const navRows = flatRows.filter((r) => r.type !== "header");
+  // The cursor may rest on a folder, which owns no diff; file rows keep pointing
+  // at `selectedFile`, so selection behaviour is unchanged.
+  const cursorKey = activeFolderKey ?? activeKey;
+  const navIndex = cursorKey
+    ? navRows.findIndex((r) => rowKeyOf(r) === cursorKey)
+    : -1;
+
+  /** Moves the cursor to `row` (at `to` in `navRows`); `shift` extends the
+   *  selection from the anchor. Folder rows take the cursor alone. */
+  function activateRow(row: FlatRow, to: number, shift: boolean) {
+    if (row.type === "folder") {
+      setActiveFolderKey(rowKeyOf(row));
+      return;
+    }
+    if (row.type === "header") return;
+    setActiveFolderKey(null);
+    const key = rowKeyOf(row);
+    select(row.entry, row.staged);
+    if (shift && anchorKey) {
+      const a = navRows.findIndex((r) => rowKeyOf(r) === anchorKey);
+      if (a !== -1) {
+        const [lo, hi] = a <= to ? [a, to] : [to, a];
+        // Folder rows contribute no keys: a range spans the files it covers.
+        setSelectedKeys(
+          new Set(
+            navRows
+              .slice(lo, hi + 1)
+              .filter((r) => r.type === "file")
+              .map(rowKeyOf),
+          ),
+        );
+      }
+    } else {
+      setSelectedKeys(new Set([key]));
+      setAnchorKey(key);
+    }
   }
+
+  /** Focus + reveal a row the horizontal keys moved the cursor to (the vertical
+   *  keys get this from `listKeyboardNav` itself). A jump past the virtualizer's
+   *  overscan window finds no node, so it defers instead: unfocused, the row the
+   *  user came from unmounts and every arrow key goes dead. */
+  function focusRow(key: string) {
+    const el = listRef.current?.querySelector<HTMLElement>(
+      `[data-row="${CSS.escape(key)}"]`,
+    );
+    if (!el) {
+      pendingFocusKey.current = key;
+      return;
+    }
+    el.focus();
+    el.scrollIntoView({ block: "nearest" });
+  }
+
+  /** Claims focus for a deferred row once the list has scrolled to it. Returns
+   *  false only while the row is still unmounted, so the caller can retry on a
+   *  later frame. */
+  function claimPendingFocus(): boolean {
+    const key = pendingFocusKey.current;
+    if (key === null) return true;
+    // A newer cursor move owns focus now, so this claim is stale.
+    if (key !== cursorKey) {
+      pendingFocusKey.current = null;
+      return true;
+    }
+    const focused = document.activeElement;
+    // Only an orphaned focus is ours to claim — never take a caret out of the
+    // filter input or any other live control.
+    if (focused && focused !== document.body && focused.isConnected) {
+      pendingFocusKey.current = null;
+      return true;
+    }
+    const el = listRef.current?.querySelector<HTMLElement>(
+      `[data-row="${CSS.escape(key)}"]`,
+    );
+    if (!el) return false;
+    pendingFocusKey.current = null;
+    el.focus();
+    return true;
+  }
+
+  function moveCursor(row: FlatRow, to: number) {
+    activateRow(row, to, false);
+    focusRow(rowKeyOf(row));
+  }
+
+  // Right expands a collapsed folder, else steps into it; Left collapses an
+  // expanded one, else steps out to the parent folder.
+  function onArrowRight(row: FlatRow, index: number) {
+    if (row.type !== "folder") return;
+    if (row.collapsed) {
+      toggleFolder(row.section, row.path);
+      return;
+    }
+    const child = navRows[index + 1];
+    if (child && rowDepth(child) > row.depth) moveCursor(child, index + 1);
+  }
+
+  function onArrowLeft(row: FlatRow, index: number) {
+    if (row.type === "folder" && !row.collapsed) {
+      toggleFolder(row.section, row.path);
+      return;
+    }
+    const depth = rowDepth(row);
+    for (let i = index - 1; i >= 0; i--) {
+      const candidate = navRows[i];
+      if (candidate.type === "folder" && candidate.depth < depth) {
+        moveCursor(candidate, i);
+        return;
+      }
+    }
+  }
+
   // Arrow keys walk the rows across both sections; Shift extends from the
   // anchor, a plain arrow collapses to the single active row.
-  const rowKey = (r: { entry: FileEntry; staged: boolean }) =>
-    keyOf(r.entry.path, r.staged);
-  const onListKeyDown = listKeyboardNav({
-    items: visibleRows,
-    activeIndex: activeKey
-      ? visibleRows.findIndex((r) => rowKey(r) === activeKey)
-      : -1,
-    rowKey,
-    onActivate: (row, to, shift) => {
-      const key = rowKey(row);
-      select(row.entry, row.staged);
-      if (shift && anchorKey) {
-        const keys = visibleRows.map(rowKey);
-        const a = keys.indexOf(anchorKey);
-        if (a !== -1) {
-          const [lo, hi] = a <= to ? [a, to] : [to, a];
-          setSelectedKeys(new Set(keys.slice(lo, hi + 1)));
-        }
-      } else {
-        setSelectedKeys(new Set([key]));
-        setAnchorKey(key);
-      }
-    },
+  const navKeyDown = listKeyboardNav({
+    items: navRows,
+    activeIndex: navIndex,
+    rowKey: rowKeyOf,
+    onActivate: activateRow,
+    // List mode has no tree to walk, so Left/Right stay the browser's.
+    onArrowLeft: treeMode ? onArrowLeft : undefined,
+    onArrowRight: treeMode ? onArrowRight : undefined,
   });
+  const onListKeyDown = (e: KeyboardEvent) => {
+    // The list element only exists in the virtualized child; take it from the
+    // event so the horizontal keys can focus the row they move to.
+    listRef.current = e.currentTarget as HTMLElement;
+    navKeyDown(e);
+  };
 
   // Drop the selection when the selected file leaves its section
   // (e.g. it was staged, committed, or reverted externally).
@@ -377,6 +571,16 @@ export function ChangesPanel({
       return next.size === prev.size ? prev : next;
     });
   }, [status.data]);
+  // Collapse state and the folder cursor name directories of the repo they were
+  // made in. Guarded on the path actually changing: <Activity> replays effects
+  // on every tab show, and an unguarded reset would drop the user's collapses.
+  const prevRepo = useRef(repoPath);
+  useEffect(() => {
+    if (prevRepo.current === repoPath) return;
+    prevRepo.current = repoPath;
+    setCollapsedFolders(new Set());
+    setActiveFolderKey(null);
+  }, [repoPath]);
   const mutating = stage.isPending || unstage.isPending;
   const onError = (e: unknown) => toastError(e);
 
@@ -407,13 +611,22 @@ export function ChangesPanel({
   ) {
     const key = keyOf(entry.path, staged);
     select(entry, staged);
+    setActiveFolderKey(null);
     if (mods.shift && anchorKey) {
-      const keys = visibleRows.map((r) => keyOf(r.entry.path, r.staged));
+      const keys = navRows.map(rowKeyOf);
       const a = keys.indexOf(anchorKey);
       const b = keys.indexOf(key);
       if (a !== -1 && b !== -1) {
         const [lo, hi] = a <= b ? [a, b] : [b, a];
-        setSelectedKeys(new Set(keys.slice(lo, hi + 1)));
+        // Folder rows contribute no keys: a range spans the files it covers.
+        setSelectedKeys(
+          new Set(
+            navRows
+              .slice(lo, hi + 1)
+              .filter((r) => r.type === "file")
+              .map(rowKeyOf),
+          ),
+        );
         return;
       }
     }
@@ -441,6 +654,45 @@ export function ChangesPanel({
     // site must not reach a `git add` that dies reading the device.
     if (!canStage(entry)) return;
     void stage.mutateAsync([literalPathspec(entry.path)]).catch(onError);
+  }
+
+  // Collapse or expand one directory. Collapsing drops the hidden descendants
+  // from the multi-selection: a collapsed folder must never hold a
+  // selectable-but-invisible row. The shown diff deliberately survives being
+  // hidden, exactly as it does behind the text filter.
+  function toggleFolder(section: "staged" | "unstaged", dirPath: string) {
+    const key = `${section}:${dirPath}`;
+    const collapsing = !collapsedFolders.has(key);
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (collapsing) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+    if (!collapsing) return;
+    setSelectedKeys((prev) => pruneHiddenKeys(prev, [key]));
+  }
+
+  // Clicking a folder both toggles it and parks the cursor there.
+  function handleFolderActivate(row: FolderRow) {
+    toggleFolder(row.section, row.path);
+    setActiveFolderKey(rowKeyOf(row));
+  }
+
+  function toggleViewMode() {
+    if (!settings.data) return;
+    // The flat list has no folder rows for a parked cursor to name.
+    setActiveFolderKey(null);
+    // Collapse state outlives list mode by design, so entering tree mode can
+    // hide rows selected while they were flat — prune them as a collapse does.
+    if (!treeMode)
+      setSelectedKeys((prev) => pruneHiddenKeys(prev, collapsedFolders));
+    void saveSettings
+      .mutateAsync({
+        ...settings.data,
+        changesViewMode: treeMode ? "list" : "tree",
+      })
+      .catch(() => undefined);
   }
 
   // Single-file ignore / untrack (the per-row menu); the bulk equivalents are
@@ -490,7 +742,8 @@ export function ChangesPanel({
   function handleContextMenu(e: MouseEvent) {
     const rowEl = (e.target as HTMLElement).closest("[data-row]");
     const key = rowEl?.getAttribute("data-row");
-    if (key) {
+    // A directory row carries no file actions, so it takes the whole-tree menu.
+    if (key && !key.startsWith("folder:")) {
       const staged = key.startsWith("staged:");
       const path = key.slice(key.indexOf(":") + 1);
       const entry = entries.find((en) => en.path === path);
@@ -710,6 +963,11 @@ export function ChangesPanel({
     () => filterRef.current?.focus(),
     entries.length > 0,
   );
+  useHotkeyAction(
+    "toggle-changes-tree",
+    toggleViewMode,
+    entries.length > 0 && settings.data !== undefined,
+  );
   // Resolve the selected conflicted file with AI, or start an all-conflicts run
   // when the selection isn't a conflict. Palette-only (no default binding).
   useHotkeyAction(
@@ -811,41 +1069,80 @@ export function ChangesPanel({
   // One row's inner content, closing over the panel's selection/mutation state.
   // Passed to the virtualized list so all that state stays here and only the
   // virtualizer instance lives in the keyed leaf.
-  const renderRow = (row: FlatRow): ReactNode =>
-    row.type === "header" ? (
-      <div
-        data-section-header
-        className={cn(
-          "flex items-center justify-between pr-1 pl-2",
-          // Gap only between the staged and unstaged sections, never at the
-          // very top of the list.
-          row.section === "unstaged" && stagedEntries.length > 0 && "pt-2",
-        )}
-      >
-        <h3 className="py-1 text-xs font-medium text-muted-foreground">
-          {row.section === "staged"
-            ? `Staged (${row.count})`
-            : `Changes (${row.count})`}
-        </h3>
-        <DisabledReasonButton
-          variant="ghost"
-          size="xs"
-          className="text-muted-foreground"
-          disabled={
-            mutating ||
-            (row.section === "unstaged" && stageableUnstaged.length === 0)
-          }
-          reason={
-            row.section === "unstaged" && stageableUnstaged.length === 0
-              ? "Git can't stage Windows-reserved device names, and every file here has one"
-              : null
-          }
-          onClick={row.section === "staged" ? unstageAll : stageAll}
+  const renderRow = (row: FlatRow): ReactNode => {
+    if (row.type === "header")
+      return (
+        <div
+          data-section-header
+          className={cn(
+            "flex items-center justify-between pr-1 pl-2",
+            // Gap only between the staged and unstaged sections, never at the
+            // very top of the list.
+            row.section === "unstaged" && stagedEntries.length > 0 && "pt-2",
+          )}
         >
-          {row.section === "staged" ? "Unstage all" : "Stage all"}
-        </DisabledReasonButton>
-      </div>
-    ) : (
+          <h3 className="py-1 text-xs font-medium text-muted-foreground">
+            {row.section === "staged"
+              ? `Staged (${row.count})`
+              : `Changes (${row.count})`}
+          </h3>
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            className="text-muted-foreground"
+            disabled={
+              mutating ||
+              (row.section === "unstaged" && stageableUnstaged.length === 0)
+            }
+            reason={
+              row.section === "unstaged" && stageableUnstaged.length === 0
+                ? "Git can't stage Windows-reserved device names, and every file here has one"
+                : null
+            }
+            onClick={row.section === "staged" ? unstageAll : stageAll}
+          >
+            {row.section === "staged" ? "Unstage all" : "Stage all"}
+          </DisabledReasonButton>
+        </div>
+      );
+    if (row.type === "folder")
+      return (
+        // The caret, the indent, and the count carry the structure — never the
+        // colour alone. No collapse animation: the rows are virtualized, so the
+        // caret swap is the state feedback.
+        <div
+          data-row={rowKeyOf(row)}
+          role="option"
+          aria-selected={false}
+          aria-expanded={!row.collapsed}
+          // ARIA 1.2 doesn't give `option` an expanded state, so the label
+          // carries what the caret shows; `aria-expanded` stays for the readers
+          // that do honour it.
+          aria-label={`${row.label} — ${row.count} ${
+            row.count === 1 ? "file" : "files"
+          }, ${row.collapsed ? "collapsed" : "expanded"}`}
+          tabIndex={0}
+          className="flex cursor-pointer items-center gap-1 py-1 pr-2 text-xs text-muted-foreground hover:bg-muted/60"
+          style={{ paddingLeft: 8 + row.depth * 12 }}
+          onClick={() => handleFolderActivate(row)}
+          onKeyDown={(e) => {
+            if (e.target !== e.currentTarget) return;
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              handleFolderActivate(row);
+            }
+          }}
+        >
+          {row.collapsed ? (
+            <CaretRightIcon className="size-3 shrink-0" />
+          ) : (
+            <CaretDownIcon className="size-3 shrink-0" />
+          )}
+          <PathText path={row.label} className="min-w-0 flex-1" />
+          <span className="shrink-0 tabular-nums">({row.count})</span>
+        </div>
+      );
+    return (
       <FileRow
         entry={row.entry}
         kind={
@@ -859,10 +1156,13 @@ export function ChangesPanel({
           selectedFile?.path === row.entry.path &&
           selectedFile.staged === row.staged
         }
+        treeDisplay={treeMode}
+        indentPx={treeMode ? (row.depth ?? 0) * 12 : undefined}
         onSelect={handleSelect}
         onToggle={handleToggle}
       />
     );
+  };
 
   return (
     // Calm fade as data replaces the loading skeleton (runs once on mount; a
@@ -949,6 +1249,20 @@ export function ChangesPanel({
               className="h-7 flex-1"
               autoComplete="off"
             />
+            <Button
+              variant={treeMode ? "secondary" : "outline"}
+              size="icon-sm"
+              aria-pressed={treeMode}
+              aria-label="Directory tree view"
+              title={
+                treeMode
+                  ? "Show changes as a flat list"
+                  : "Group changes by directory"
+              }
+              onClick={toggleViewMode}
+            >
+              <TreeStructureIcon />
+            </Button>
           </div>
 
           {/* Gate on settings.data being loaded so "Don't show again" (which
@@ -994,7 +1308,9 @@ export function ChangesPanel({
               entries={status.data?.entries}
               text={text}
               activeKinds={activeKinds}
-              activeKey={activeKey}
+              viewMode={viewMode}
+              collapsedFolders={collapsedFolders}
+              activeRowKey={cursorKey}
               nothingMatches={nothingMatches}
               onClearFilter={() => {
                 setFilterText("");
@@ -1002,6 +1318,7 @@ export function ChangesPanel({
               }}
               onListKeyDown={onListKeyDown}
               onContextMenuCapture={handleContextMenu}
+              onCursorScrolled={claimPendingFocus}
               renderRow={renderRow}
             />
             <ContextMenuContent className="min-w-64">
@@ -1130,11 +1447,14 @@ function VirtualizedChangeList({
   entries,
   text,
   activeKinds,
-  activeKey,
+  viewMode,
+  collapsedFolders,
+  activeRowKey,
   nothingMatches,
   onClearFilter,
   onListKeyDown,
   onContextMenuCapture,
+  onCursorScrolled,
   renderRow,
 }: {
   flatRows: FlatRow[];
@@ -1143,11 +1463,19 @@ function VirtualizedChangeList({
   entries: FileEntry[] | undefined;
   text: string;
   activeKinds: Set<FilterKind>;
-  activeKey: string | null;
+  /** A `getItemKey` identity input, not read directly. */
+  viewMode: string;
+  /** A `getItemKey` identity input, not read directly. */
+  collapsedFolders: Set<string>;
+  /** The cursor row — a file or (tree mode) a folder — kept scrolled into view. */
+  activeRowKey: string | null;
   nothingMatches: boolean;
   onClearFilter: () => void;
   onListKeyDown: (e: KeyboardEvent) => void;
   onContextMenuCapture: (e: MouseEvent) => void;
+  /** Called a frame after the cursor row is scrolled to, so the panel can focus
+   *  a row it could not reach while unmounted. False = still unmounted, retry. */
+  onCursorScrolled: () => boolean;
   renderRow: (row: FlatRow) => ReactNode;
 }) {
   // State-backed (not a plain ref) so the virtualizer observes the scroll
@@ -1158,7 +1486,8 @@ function VirtualizedChangeList({
   // every render rebuilds all rows (1.7ms vs 0.019ms at 20k rows, measured on
   // virtual-core 3.17.8), while never re-minting leaves a pure permutation —
   // stage one file, count unchanged — painting each header into the previous
-  // occupant's slot. These deps are the sequence's only inputs.
+  // occupant's slot. These deps are the sequence's only inputs: the entries, the
+  // filter, and (tree mode) the layout and which directories are collapsed.
   const flatRowsRef = useRef(flatRows);
   flatRowsRef.current = flatRows;
   // biome-ignore lint/correctness/useExhaustiveDependencies: deps re-mint the identity; the ref supplies the rows
@@ -1167,7 +1496,7 @@ function VirtualizedChangeList({
       const row = flatRowsRef.current[index];
       return row ? rowKeyOf(row) : index;
     },
-    [entries, text, activeKinds],
+    [entries, text, activeKinds, viewMode, collapsedFolders],
   );
   const rowVirtualizer = useVirtualizer({
     count: flatRows.length,
@@ -1175,6 +1504,7 @@ function VirtualizedChangeList({
     estimateSize: (i) => {
       const r = flatRows[i];
       if (r.type === "file") return 28;
+      if (r.type === "folder") return 24;
       // The "Changes" header carries a top gap only when it follows the staged
       // section; bake that into the estimate so the first paint never overlaps.
       return r.section === "unstaged" && hasStaged ? 40 : 32;
@@ -1185,19 +1515,29 @@ function VirtualizedChangeList({
     getItemKey,
     overscan: 16,
   });
-  // Flat index of the active file row, so we can keep it scrolled into view
-  // under virtualization (its own DOM node may not be mounted).
-  const activeFlatIndex = activeKey
-    ? flatRows.findIndex(
-        (r) => r.type === "file" && keyOf(r.entry.path, r.staged) === activeKey,
-      )
+  // Flat index of the cursor row, so we can keep it scrolled into view under
+  // virtualization (its own DOM node may not be mounted). Folder rows count: in
+  // tree mode the cursor can rest on one.
+  const activeFlatIndex = activeRowKey
+    ? flatRows.findIndex((r) => rowKeyOf(r) === activeRowKey)
     : -1;
   // Keep the active row scrolled into view as the selection moves — under
-  // virtualization its DOM node may not be mounted, so scroll by index.
+  // virtualization its DOM node may not be mounted, so scroll by index. The row
+  // mounts on the virtualizer's own re-render, a frame or more after the scroll,
+  // so the deferred focus claim gets a few frames before it gives up.
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on active change
   useEffect(() => {
-    if (activeFlatIndex >= 0)
-      rowVirtualizer.scrollToIndex(activeFlatIndex, { align: "auto" });
+    if (activeFlatIndex < 0) return;
+    rowVirtualizer.scrollToIndex(activeFlatIndex, { align: "auto" });
+    let frame = 0;
+    let tries = 3;
+    const claim = () => {
+      tries -= 1;
+      if (onCursorScrolled() || tries === 0) return;
+      frame = requestAnimationFrame(claim);
+    };
+    frame = requestAnimationFrame(claim);
+    return () => cancelAnimationFrame(frame);
   }, [activeFlatIndex]);
   // Jump back to the top whenever the filter changes the visible set. Gated on
   // the filter actually changing: <Activity> replays effects on every tab show,
