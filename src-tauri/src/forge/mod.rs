@@ -289,6 +289,47 @@ pub(crate) fn web_repo_url(remote_url: &str) -> Option<String> {
     Some(format!("{scheme}://{authority}/{path}"))
 }
 
+/// A remote's WEB authority — `host[:port]` as the provider's own web URL would
+/// spell it, lowercased, or `None` when there's no parseable host. The axis that
+/// distinguishes two instances sharing a hostname on different ports, which
+/// [`remote_host`] cannot see (it strips every port) and [`remote_authority`]
+/// over-reports (it keeps `:443`, deliberately, for credential keys).
+///
+/// The port rules follow the scheme, matching [`web_repo_url`]'s reasoning:
+///  - `https://` — `:443` elided, any other port kept.
+///  - `http://` — `:80` elided, any other port kept.
+///  - scp-style `git@host:path` — carries no port at all; that `:` opens the path.
+///  - ANY other scheme (`ssh://`, `git://`, …) — the port is DROPPED, not kept: it
+///    is a transport port, never the web port. A self-managed host commonly serves
+///    git-over-SSH on 2222 while its web UI stays on 443, so carrying `:2222` here
+///    would make that checkout fail to match its own instance's items.
+///
+/// The elision is what keeps this comparable with the FRONTEND's spelling: the
+/// item side parses a provider web URL with the browser's `URL`, whose `host`
+/// natively elides a scheme-default port (measured: `https://h:443/x` → `h`,
+/// `https://h:8443/x` → `h:8443`). An un-elided `:443` here would mismatch every
+/// default-port item.
+pub(crate) fn web_authority(url: &str) -> Option<String> {
+    let trimmed = url.trim_start();
+    let is_plain_http = trimmed
+        .get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("http://"));
+    let is_https = trimmed
+        .get(..8)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+    // A non-web scheme's port belongs to its transport, so only the host survives.
+    if !is_plain_http && !is_https && trimmed.contains("://") {
+        return remote_host(url);
+    }
+    let authority = remote_authority(url)?;
+    let default_port = if is_plain_http { ":80" } else { ":443" };
+    Some(
+        authority
+            .strip_suffix(default_port)
+            .map_or(authority.clone(), str::to_string),
+    )
+}
+
 /// Percent-encode a value for an API query string (RFC-3986 unreserved kept,
 /// everything else encoded) — an unencoded `&`/`#`/`?`/`=`/`%`/space corrupts the
 /// query. Shared by the GitLab (`glab api`) and Bitbucket (HTTP) providers, which
@@ -4574,6 +4615,57 @@ mod tests {
         assert!(!is_safe_authority("[::1];rm -rf /"));
         assert!(!is_safe_authority("[::1%25eth0]"));
         assert!(!is_safe_authority("[2001:db8::1]:443.helper=!evil #"));
+    }
+
+    /// The web authority's port rules, including the elision that has to agree
+    /// with the browser `URL` spelling the item side is parsed with.
+    #[test]
+    fn web_authority_elides_only_the_scheme_default_web_port() {
+        let a = |u: &str| web_authority(u).unwrap_or_default();
+
+        // https: the default elides, anything else is the instance's identity.
+        assert_eq!(a("https://gitlab.example/team/repo"), "gitlab.example");
+        assert_eq!(a("https://gitlab.example:443/team/repo"), "gitlab.example");
+        assert_eq!(
+            a("https://gitlab.example:8443/team/repo"),
+            "gitlab.example:8443"
+        );
+        // http keeps its own default.
+        assert_eq!(a("http://gitea.example:80/team/repo"), "gitea.example");
+        assert_eq!(
+            a("http://gitea.example:8080/team/repo"),
+            "gitea.example:8080"
+        );
+        // Case folds, so the two sides compare without either re-normalizing.
+        assert_eq!(a("https://GitLab.EXAMPLE/team/repo"), "gitlab.example");
+
+        // scp-style carries no port — that `:` opens the path.
+        assert_eq!(a("git@gitlab.example:team/repo.git"), "gitlab.example");
+
+        // A TRANSPORT port is dropped, never carried: ssh on 2222 beside a web UI
+        // on 443 is the common self-managed shape, and keeping it would make the
+        // checkout fail to match its own instance's items.
+        assert_eq!(a("ssh://git@gitlab.example:22/team/repo"), "gitlab.example");
+        assert_eq!(
+            a("ssh://git@gitlab.example:2222/team/repo"),
+            "gitlab.example"
+        );
+        assert_eq!(a("git://gitlab.example:9418/team/repo"), "gitlab.example");
+
+        // A bracketed IPv6 literal keeps its brackets, and its default elides.
+        assert_eq!(a("https://[2001:db8::1]:443/team/repo"), "[2001:db8::1]");
+        assert_eq!(
+            a("https://[2001:db8::1]:8443/team/repo"),
+            "[2001:db8::1]:8443"
+        );
+
+        // No parseable host → unproven.
+        assert_eq!(web_authority(""), None);
+        assert_eq!(web_authority("   "), None);
+        // A Windows drive-path remote reads as host "c" here, exactly as
+        // `remote_host`/`remote_authority` already spell it — harmless for an
+        // identity proof, since no provider item can present that authority.
+        assert_eq!(a("C:/local/path"), "c");
     }
 
     #[test]

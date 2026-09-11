@@ -12,7 +12,9 @@ use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
-use crate::forge::glab::{run_glab, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT};
+use crate::forge::glab::{
+    run_glab, run_glab_api_for_host, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT,
+};
 use crate::forge::model::{
     namespace_set, Capabilities, CompletedReviewerOut, ForgeForkActivity, ForgeForkEntry,
     ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
@@ -222,22 +224,13 @@ const GITLAB_MY_WORK_PER_PAGE: usize = 100;
 /// A PORTED value is skipped for the same reason: glab rejects it outright
 /// (measured on 1.105 — `--hostname host:8443` exits with "Error parsing
 /// --hostname: invalid hostname", scheme or no scheme), so it names nothing this
-/// arm can reach. `is_safe_authority` admits an optional port, so the bare-host
-/// requirement is enforced here rather than inherited. Unreachable in practice —
-/// `known_hosts` port-strips both config-key forms — but the gate, the doc and
-/// the test have to agree on what a ported host means.
+/// arm can reach. Rarely hit — the enumeration's own sources keep ports out (saved
+/// keys are port-stripped, and a ported token target is refused rather than
+/// stripped) — but the gate, the doc and the test have to agree on what a ported
+/// host means, and `is_addressable_host` is the one place that rule lives, shared
+/// with the token-scoping decision so the two can't disagree about reachability.
 fn my_work_hostname(host: &str) -> Option<&str> {
-    if !crate::forge::is_safe_authority(host) || host.starts_with('-') {
-        return None;
-    }
-    // Bare host only. A bracketed IPv6 literal carries its own `:`s, so the port
-    // slot is whatever follows the span; everything else has a port iff it has a
-    // colon at all (the charset gate already rejected any other use of one).
-    let bare = match crate::forge::bracketed_split(host) {
-        Some((_, after)) => after.is_empty(),
-        None => !host.contains(':'),
-    };
-    bare.then_some(host)
+    crate::forge::glab::is_addressable_host(host).then_some(host)
 }
 
 /// The project full path, owner and name of a GitLab web URL — the segments
@@ -329,12 +322,7 @@ async fn my_work_leg(
     hostname: &str,
     is_pull_request: bool,
 ) -> AppResult<MyWorkLeg> {
-    let out = run_glab(
-        None,
-        &["api", "--hostname", hostname, endpoint],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await?;
+    let out = run_glab_api_for_host(hostname, &[endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let raw: Vec<serde_json::Value> = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Glab(format!("could not parse your GitLab work items: {e}")))?;
     let capped = raw.len() >= GITLAB_MY_WORK_PER_PAGE;
@@ -360,12 +348,7 @@ async fn my_work_for_host(hostname: &str) -> AppResult<Vec<MyWorkLeg>> {
     // Same network round trip as the legs below and fail-CLOSED (`?`), so it takes
     // their timeout — not the short probe timeout `viewer_username` uses, which
     // can afford to fail open.
-    let out = run_glab(
-        None,
-        &["api", "--hostname", hostname, "user"],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await?;
+    let out = run_glab_api_for_host(hostname, &["user"], GLAB_NETWORK_TIMEOUT).await?;
     let user: GlabUser = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| AppError::Glab(format!("could not read your GitLab identity: {e}")))?;
     // Fails this HOST rather than skipping it: the instance answered, so its items

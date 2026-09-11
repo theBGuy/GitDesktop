@@ -39,8 +39,9 @@ function localMatcher(item: MyWorkItem): ((r: RecentRepo) => boolean) | null {
  * EVERY recent repository that looks like this item's, in recents order. The key
  * is not always identity: a GitLab item's owner is only the segment before the
  * repo name, so two different projects can both answer it and only reading each
- * checkout's origin can say which is the row's. The open path resolves across
- * these; {@link matchLocalRepo} is the first of them, for display.
+ * checkout's origin can say which is the row's. Callers narrow this further and
+ * resolve across what remains — both to open and to decide whether a row may
+ * advertise a local action at all.
  */
 export function matchLocalRepos(
   item: MyWorkItem,
@@ -48,20 +49,6 @@ export function matchLocalRepos(
 ): RecentRepo[] {
   const matches = localMatcher(item);
   return matches ? recents.filter(matches) : [];
-}
-
-/**
- * The first recent repository that looks like this item's, or null — whether the
- * row resolves locally AT ALL, which is what the ↗ affordance and the local-only
- * menu entries read. Deliberately optimistic: which checkout an ambiguous row
- * belongs to is settled at open time, not at render, so this never spawns git.
- */
-export function matchLocalRepo(
-  item: MyWorkItem,
-  recents: readonly RecentRepo[],
-): RecentRepo | null {
-  const matches = localMatcher(item);
-  return (matches ? recents.find(matches) : undefined) ?? null;
 }
 
 /**

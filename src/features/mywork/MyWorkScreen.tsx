@@ -44,6 +44,7 @@ import {
   type PrHeadRef,
   providerLabel,
   type RepoInfo,
+  type RepoOrigin,
 } from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
@@ -59,7 +60,6 @@ import {
   filterMyWork,
   MY_WORK_LISTBOX_ID,
   type MyWorkTab,
-  matchLocalRepo,
   matchLocalRepos,
   mergeMyWorkPages,
   myWorkOptionId,
@@ -290,13 +290,17 @@ async function resolveTarget(
 }
 
 /**
- * Whether a matched checkout's classification can support opening this row. Repo
- * detection answers from glab's SAVED hosts, while the inbox enumerates account
- * hosts as well — a token authenticates glab with no saved host at all — so a
- * self-managed host known only by token classifies its clones as GitHub while
- * its rows arrive as GitLab. Landing there would resolve the wrong integration,
- * and the origin proof cannot see it: that compares namespaces, not providers.
- * Absence is not disagreement — an unresolved `provider` keeps the row's own.
+ * Whether a matched checkout's STORED classification can support opening this
+ * row. Repo detection answers from glab's SAVED hosts, while the inbox
+ * enumerates account hosts as well — a token authenticates glab with no saved
+ * host at all — so a self-managed host known only by token classifies its clones
+ * as GitHub while its rows arrive as GitLab, and landing there would resolve the
+ * wrong integration.
+ *
+ * This is the cheap half of a two-stage gate, and it only drops KNOWN
+ * disagreement: it runs at render time with no IPC, so an unclassified checkout
+ * (the same token-only host, which the backfill can never tag) has to pass here.
+ * `originMatches` settles those against the backend's own live verdict.
  */
 function providerAgrees(recent: RecentRepo, item: MyWorkItem): boolean {
   const stored = asForgeProvider(recent.provider);
@@ -304,7 +308,23 @@ function providerAgrees(recent: RecentRepo, item: MyWorkItem): boolean {
 }
 
 /**
- * Whether a row's local match could be the WRONG checkout. `matchLocalRepo` keys
+ * The checkouts an open may land on: key-matched AND classified compatibly.
+ * `openItem` resolves from this list and the row affordances read it, so a row
+ * can never advertise a local action the open refuses over a provider — that
+ * disagreement is knowable at render time, from fields already in memory.
+ * The ORIGIN proof is deliberately not part of it: it costs a git read per
+ * candidate, so it stays an open-time check whose browser fallback remains the
+ * recorded optimistic-display trade.
+ */
+function openableMatches(
+  item: MyWorkItem,
+  recents: readonly RecentRepo[],
+): RecentRepo[] {
+  return matchLocalRepos(item, recents).filter((r) => providerAgrees(r, item));
+}
+
+/**
+ * Whether a row's local match could be the WRONG checkout. `matchLocalRepos` keys
  * on host + owner + name, and GitLab persists only the segment BEFORE the repo
  * name as the owner — so any two GitLab paths sharing their last two segments
  * collide: `team-a/sub/repo` with `team-b/sub/repo`, and equally a flat
@@ -319,26 +339,65 @@ function matchNeedsOriginProof(item: MyWorkItem): boolean {
   return item.provider === "gitlab";
 }
 
+/** The item's own authority: `URL.host` is the hostname plus any port the scheme
+ *  doesn't default (`:443` drops on https, `:8443` stays), lowercased as it
+ *  parses — the spelling the origin side answers with. Null when it won't parse. */
+function itemAuthority(item: MyWorkItem): string | null {
+  try {
+    return new URL(item.url).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Whether `repoPath`'s origin really is this item's repository, read inside the
- * caller's deadline. Every unknown — a slow or failed read, a checkout with no
- * origin, a different namespace — answers false: an identity that can't be
- * proven must not become a navigation into somebody else's project.
+ * Whether `repoPath`'s origin really is this item's repository AND would resolve
+ * this item's integration, read inside the caller's deadline.
+ *
+ * EVERY axis must match. Equal namespaces on two hosts are different projects;
+ * equal hostnames on two ports are different instances; and the match key's host
+ * is a stored value that goes stale the moment a remote is re-pointed — only the
+ * origin's own answer settles any of it. Host and authority are deliberately
+ * BOTH compared even though authority subsumes host in practice: should the two
+ * derivations ever drift apart, requiring both turns that drift into a browser
+ * open rather than a wrong one.
+ *
+ * `provider` is the axis identity alone cannot supply: a checkout on a host only
+ * a glab TOKEN knows is the right repository, yet detection can't recognise it
+ * and its landing would resolve GitHub's resilient default. Only rows needing
+ * the proof reach here (GitLab today), so this reads "the checkout must route to
+ * the forge this row came from" — the live verdict `providerAgrees` can't see.
+ *
+ * Every unknown — a slow or failed read, a checkout with no origin, an
+ * unparseable row URL, any field empty — answers false: an identity that can't
+ * be proven must not become a navigation into somebody else's project.
  */
 async function originMatches(
   item: MyWorkItem,
   repoPath: string,
   deadline: number,
 ): Promise<boolean> {
-  const origin = await withDeadline<string | null>(
+  const origin = await withDeadline<RepoOrigin | null>(
     repoOriginPath(repoPath),
     deadline,
     null,
   );
+  const authority = itemAuthority(item);
+  if (
+    origin === null ||
+    authority === null ||
+    origin.host === "" ||
+    origin.authority === "" ||
+    origin.path === "" ||
+    origin.provider === ""
+  ) {
+    return false;
+  }
   return (
-    origin !== null &&
-    origin !== "" &&
-    origin.toLowerCase() === item.repoFullName.toLowerCase()
+    origin.path.toLowerCase() === item.repoFullName.toLowerCase() &&
+    origin.host.toLowerCase() === item.host.toLowerCase() &&
+    origin.authority.toLowerCase() === authority &&
+    origin.provider === item.provider
   );
 }
 
@@ -559,7 +618,8 @@ export function MyWorkScreen() {
   // predicate so they can't disagree: numbers appear once something is on screen
   // for them to describe — rows, or a forge that answered empty. Skeletons, "no
   // accounts connected" and the all-failed screen get none.
-  const showCounts = !loading && (answeredLegs.length > 0 || items.length > 0);
+  const showCounts =
+    !loading && (items.length > 0 || (allSettled && answeredLegs.length > 0));
   const counts = showCounts
     ? { all: items.length, prs: prCount, issues: items.length - prCount }
     : { all: null, prs: null, issues: null };
@@ -628,13 +688,10 @@ export function MyWorkScreen() {
     const gen = ++openGen;
     const superseded = () =>
       gen !== openGen || useUiStore.getState().view !== "mywork";
-    // A checkout whose stored provider contradicts the row's is dropped before
-    // anything can land on it: classification that disagrees can't support the
-    // open, so it takes the browser like any other unproven match. Both open
-    // arms below start here, so PRs and issues are gated alike.
-    const candidates = matchLocalRepos(item, recents).filter((r) =>
-      providerAgrees(r, item),
-    );
+    // The same set the row's affordances render from, so a local-looking row is
+    // never one this refuses over a provider. Both open arms below start here,
+    // so PRs and issues are gated alike.
+    const candidates = openableMatches(item, recents);
     if (candidates.length === 0) {
       openUrl(item.url);
       return;
@@ -747,10 +804,10 @@ export function MyWorkScreen() {
           item.isPullRequest &&
           (opts?.preferWorktree ?? true)
         ) {
-          // The matched checkout's own provider wins: it was resolved backend-side
-          // for that clone, where the item's provider only says which leg the row
-          // arrived on. A recent the probe hasn't touched, or one carrying an id
-          // this build doesn't know, falls back to the item's.
+          // `providerAgrees` already dropped every candidate whose stored provider
+          // contradicts the row, so a CLASSIFIED checkout necessarily agrees here.
+          // The fallback covers the unclassified ones: a recent the owner probe
+          // hasn't touched, or one carrying an id this build doesn't know.
           const branch = await branchWorktreeOf(
             item,
             worktrees,
@@ -786,7 +843,7 @@ export function MyWorkScreen() {
       }
       if (superseded()) return;
     }
-    // Land under the origin lens (matchLocalRepo matched the ORIGIN slug): a fork
+    // Land under the origin lens (the match keyed on the ORIGIN slug): a fork
     // sitting on "upstream" resolves this number against the parent repo. Keyed on
     // the path actually navigated to, since a worktree carries its own lens. The
     // lens write is session-only. Clears are safe: an unchanged lens short-circuits
@@ -1171,7 +1228,7 @@ function MyWorkList({
                   >
                     <MyWorkRow
                       item={item}
-                      local={matchLocalRepo(item, recents) !== null}
+                      local={openableMatches(item, recents).length > 0}
                       active={v.index === activeIndex}
                       pending={item.url === pendingOpenUrl}
                       onSelect={onSelect}
@@ -1187,9 +1244,11 @@ function MyWorkList({
           {menuItem && (
             <>
               {/* The escape hatch from the worktree-aware default: only ever
-                  offered for a PR that resolves to a local repo at all. */}
+                  offered for a PR that resolves to a checkout the open would
+                  actually take — same set, so the entry can't promise a landing
+                  the provider gate refuses. */}
               {menuItem.isPullRequest &&
-                matchLocalRepo(menuItem, recents) !== null && (
+                openableMatches(menuItem, recents).length > 0 && (
                   <ContextMenuItem
                     onClick={() => onOpen(menuItem, { preferWorktree: false })}
                   >

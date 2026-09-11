@@ -565,6 +565,25 @@ export interface PrPollInfo {
   createdAt: string;
 }
 
+/** A checkout's origin remote, split into the axes a work-inbox row has to match
+ *  before it may open locally. Any field is `""` when unknown, which the caller
+ *  reads as UNPROVEN rather than as a mismatch. All are needed: equal namespaces
+ *  on two hosts are different projects, and so are equal hostnames on two ports. */
+export interface RepoOrigin {
+  /** Hostname alone, ports stripped. */
+  host: string;
+  /** Hostname plus any port the scheme doesn't default (`:443`/`:80`/`:22`
+   *  elided), lowercased — the spelling a web URL's `URL.host` yields. */
+  authority: string;
+  /** The full namespace path the provider spells ("group/sub/repo"). */
+  path: string;
+  /** The checkout's detection verdict at proof time — the integration a landing
+   *  there would actually resolve. `"github"` covers the resilient default an
+   *  unrecognized host falls back to, so it is an answer, not an absence; `""`
+   *  means the path is not a repo at all. */
+  provider: string;
+}
+
 /** Where one PR's head branch lives — the targeted read behind opening a PR in
  *  the worktree that has it checked out. Both fields are "" when unknown (a
  *  deleted fork answers "" rather than failing), and a resolver must require
