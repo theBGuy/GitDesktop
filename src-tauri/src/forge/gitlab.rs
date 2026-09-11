@@ -219,13 +219,25 @@ const GITLAB_MY_WORK_PER_PAGE: usize = 100;
 /// than failing the arm, which stays reserved for FETCH errors against a host we
 /// really can address.
 ///
-/// The value is always a BARE host: `known_hosts` port-strips its keys, and glab
-/// would reject a port anyway (measured on 1.105 — `--hostname host:8443` exits
-/// with "Error parsing --hostname: invalid hostname", scheme or no scheme). A
-/// ported instance is therefore unaddressable from this list; `gitlab_my_work`
-/// isolates the resulting failure to that host instead of losing the column.
+/// A PORTED value is skipped for the same reason: glab rejects it outright
+/// (measured on 1.105 — `--hostname host:8443` exits with "Error parsing
+/// --hostname: invalid hostname", scheme or no scheme), so it names nothing this
+/// arm can reach. `is_safe_authority` admits an optional port, so the bare-host
+/// requirement is enforced here rather than inherited. Unreachable in practice —
+/// `known_hosts` port-strips both config-key forms — but the gate, the doc and
+/// the test have to agree on what a ported host means.
 fn my_work_hostname(host: &str) -> Option<&str> {
-    (crate::forge::is_safe_authority(host) && !host.starts_with('-')).then_some(host)
+    if !crate::forge::is_safe_authority(host) || host.starts_with('-') {
+        return None;
+    }
+    // Bare host only. A bracketed IPv6 literal carries its own `:`s, so the port
+    // slot is whatever follows the span; everything else has a port iff it has a
+    // colon at all (the charset gate already rejected any other use of one).
+    let bare = match crate::forge::bracketed_split(host) {
+        Some((_, after)) => after.is_empty(),
+        None => !host.contains(':'),
+    };
+    bare.then_some(host)
 }
 
 /// The project full path, owner and name of a GitLab web URL — the segments
@@ -398,7 +410,9 @@ async fn my_work_for_host(hostname: &str) -> AppResult<Vec<MyWorkLeg>> {
 /// marking truncation: such a key is a config artifact naming no reachable
 /// instance ([`my_work_hostname`]), so nothing was lost.
 pub async fn gitlab_my_work() -> AppResult<MyWorkPage> {
-    let hosts = crate::forge::glab::known_hosts().await;
+    // `account_hosts`, not `known_hosts`: the availability probe reads the same
+    // enumeration, and it covers the token-only session that has no saved host.
+    let hosts = crate::forge::glab::account_hosts().await;
     if hosts.is_empty() {
         return Ok(MyWorkPage::empty());
     }
@@ -8782,7 +8796,7 @@ mod my_work_tests {
                 repo_name: "p".into(),
                 host: "gitlab.com".into(),
                 url: url.into(),
-                updated_at: "2026-09-05T00:00:00Z".into(),
+                updated_at: "2026-09-05T00:00:00.000Z".into(),
                 author_login: None,
             }],
             capped: false,
@@ -8965,10 +8979,21 @@ mod my_work_tests {
     fn hostname_skips_unaddressable_hosts_and_names_gitlab_com() {
         assert_eq!(my_work_hostname("gitlab.com"), Some("gitlab.com"));
         assert_eq!(my_work_hostname("gitlab.acme.dev"), Some("gitlab.acme.dev"));
+        // A bare bracketed IPv6 literal keeps the spelling `known_hosts` yields.
         assert_eq!(
-            my_work_hostname("gitlab.acme.dev:8443"),
-            Some("gitlab.acme.dev:8443")
+            my_work_hostname("[2001:db8::1]"),
+            Some("[2001:db8::1]"),
+            "a literal's own colons are not a port"
         );
+
+        // A PORT is unaddressable — glab refuses `--hostname host:8443` outright,
+        // so the value names no instance this arm can reach. Unreachable via
+        // `known_hosts` (it port-strips both config-key forms), so this pins the
+        // contract rather than a live path: the gate, its doc and this test have
+        // to agree on what a ported host means.
+        assert_eq!(my_work_hostname("gitlab.acme.dev:8443"), None);
+        assert_eq!(my_work_hostname("[2001:db8::1]:8443"), None);
+
         for bad in [
             "-oProxyCommand=evil",
             "--hostname",
@@ -9001,8 +9026,9 @@ mod my_work_tests {
         assert_eq!(item.repo_name, "proj");
         assert_eq!(item.host, "gitlab.com");
         assert_eq!(item.author_login.as_deref(), Some("octo-cat"));
-        // Fractional seconds fold to the merge's one comparable width.
-        assert_eq!(item.updated_at, "2026-09-05T23:21:02Z");
+        // GitLab's milliseconds survive the fold to the merge's fixed width —
+        // that precision is what breaks a same-second tie at the page cut.
+        assert_eq!(item.updated_at, "2026-09-05T23:21:02.987Z");
 
         // The host comes from the item's own URL — a self-managed row keeps its
         // own instance, and its port drops the way every other host spelling does.

@@ -265,8 +265,8 @@ On **GitHub** it gathers anything you **authored**, are **assigned** to, were
 **mentioned** in, or **commented on**, together with anything **awaiting your
 review**, across every repository your account can see, so items from repos you've
 never cloned sit alongside the ones you have. **GitLab** contributes the merge
-requests and issues you authored, are assigned to, or are asked to review, from
-every host you're signed in to, and
+requests you authored, are assigned to, or are asked to review, plus the issues
+you authored or are assigned to, from every host you're signed in to, and
 **Bitbucket** the pull requests from the Bitbucket repositories in your recents
 (Bitbucket has no account-wide search, so the inbox asks the checkouts it knows).
 
@@ -286,10 +286,10 @@ carries its own count.
 
 Rows are ordered by **most recently updated**, merged across the forges that answered.
 Each forge fetches a single page of results, so a big inbox won't arrive whole. When
-there may be more than the page holds, a note says so at the bottom: *This view
-fetches one page of results. Filter to narrow the list.* You'll see it under the rows,
-and under **No items match** as well, since a filter that finds nothing is when an
-item off the page matters most.
+items may be missing (a page filled up, or part of a fetch didn't arrive), a note
+says so at the bottom: *This list may be missing items. Filter to narrow what's
+loaded.* You'll see it under the rows, and under **No items match** as well, since a
+filter that finds nothing is when a missing item matters most.
 
 ## Narrowing and opening
 
@@ -308,10 +308,10 @@ switches to that repository and lands on the pull request or issue. Everything e
 opens **on its own host in your browser**. The match reads each repo's resolved owner,
 host, and the name its remote spells, so a clone sitting in a folder you renamed still
 counts as yours once GitDesktop has looked at it; one you added moments ago, before any
-of that is resolved, can still go to the browser. The **↗** on a row is the signal to
-trust: it marks every row that opens in the browser, so you know which you're getting
-before you press Enter. The inbox itself changes nothing: it finds the item and hands
-you to the place where you can act on it.
+of that is resolved, can still go to the browser. The **↗** on a row marks the ones
+GitDesktop already knows open in the browser; a row without it can still land there
+when its checkout can't be confirmed at open time. The inbox itself changes nothing:
+it finds the item and hands you to the place where you can act on it.
 
 A pull request usually lands where its branch already is. When one of the repository's
 worktrees has that pull request's head branch checked out, GitDesktop opens it there

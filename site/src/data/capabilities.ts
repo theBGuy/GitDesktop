@@ -373,7 +373,7 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "My work — one cross-repo inbox of your open PRs, MRs & issues on GitHub, GitLab and Bitbucket",
+      "My work — one cross-repo inbox of your open GitHub PRs and issues, GitLab MRs and issues, and Bitbucket PRs",
     ai: false,
     highlight: true,
   },

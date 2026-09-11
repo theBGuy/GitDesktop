@@ -101,10 +101,10 @@ const SIGN_IN_BODY: Record<ForgeProvider, string> = {
 };
 
 /** The failure kinds a sign-in fixes, so a lone broken provider can name the
- *  remedy instead of echoing an IPC message. Reached by the stale-probe race
- *  rather than a cold start: the sources probe folds a missing CLI to "not
- *  configured", so only a sign-out inside the probe's 5-minute window lands a
- *  leg here. */
+ *  remedy instead of echoing an IPC message. Reached two ways: the sources
+ *  probe reads local config, so a CLI uninstalled while its hosts file
+ *  survives still enables the leg and fails here loudly; and a sign-out
+ *  inside the probe's 5-minute window does the same. */
 const SIGN_IN_KINDS = new Set([
   "ghNotFound",
   "glabNotFound",
@@ -198,11 +198,20 @@ const hasAnswered = (leg: MyWorkLeg) =>
  *  the sources probe left disabled stays pending forever. */
 const settled = (leg: MyWorkLeg) => hasAnswered(leg) || leg.query.isError;
 
-/** What the error screen speaks for: the sources probe when IT failed, else the
- *  configured legs, and only once every one of them has failed. */
+/**
+ * What the error screen speaks for. The sources probe answers only when it left
+ * nothing behind to ask: its data survives a failed refetch, so legs that are
+ * still configured have their own answers and those are the truth — the probe's
+ * failure drops to a notice rather than replacing a forge's real reply. Legs
+ * speak only once every one of them has failed.
+ */
 function failedLegs(sourcesError: unknown, legs: MyWorkLeg[]): LegError[] {
-  if (sourcesError !== null) return [{ provider: null, error: sourcesError }];
-  if (legs.length === 0 || !legs.every((l) => l.query.isError)) return [];
+  if (legs.length === 0) {
+    return sourcesError === null
+      ? []
+      : [{ provider: null, error: sourcesError }];
+  }
+  if (!legs.every((l) => l.query.isError)) return [];
   return legs.map((l) => ({ provider: l.provider, error: l.query.error }));
 }
 
@@ -456,16 +465,14 @@ export function MyWorkScreen() {
   const recents = settings.data?.recentRepos ?? NO_RECENTS;
   // One leg per forge, each gated on the sources probe: a provider with no
   // sign-in behind it is never asked, so it can neither fail nor delay the rows
-  // the others already have. Bitbucket's API has no account-wide search, so its
-  // leg is scoped to the Bitbucket checkouts recents knows about — a clone whose
-  // provider backfill hasn't landed simply joins the next fetch.
+  // the others already have. Bitbucket has no account-wide search, so its leg
+  // takes EVERY recent path: `bitbucket_my_work` gates each on its own origin
+  // (one cached `git remote get-url` per recent, concurrent), and filtering on
+  // the stored `provider` here would instead hide Bitbucket work forever for
+  // anyone who never opens the repo list that backfills it.
   const sources = useMyWorkSources(true);
-  const bitbucketPaths = useMemo(
-    () =>
-      recents
-        .filter((r) => r.provider === "bitbucket")
-        .map((r) => r.path)
-        .sort(),
+  const recentPaths = useMemo(
+    () => recents.map((r) => r.path).sort(),
     [recents],
   );
   const githubOn = sources.data?.github === true;
@@ -473,7 +480,7 @@ export function MyWorkScreen() {
   const bitbucketOn = sources.data?.bitbucket === true;
   const github = useForgeMyWork("github", githubOn);
   const gitlab = useForgeMyWork("gitlab", gitlabOn);
-  const bitbucket = useForgeMyWork("bitbucket", bitbucketOn, bitbucketPaths);
+  const bitbucket = useForgeMyWork("bitbucket", bitbucketOn, recentPaths);
   const legs: MyWorkLeg[] = [
     { provider: "github", enabled: githubOn, query: github },
     { provider: "gitlab", enabled: gitlabOn, query: gitlab },
@@ -531,6 +538,12 @@ export function MyWorkScreen() {
   // listbox no branch has mounted. Keyboard, ARIA and the painted list read this
   // one set, which is `visible` itself the moment anything paints.
   const interactive = loading ? NO_ITEMS : visible;
+  // Every page-derived total in the shell rides the body's paint gate together:
+  // a partial number sitting above skeletons and then changing as the held-back
+  // legs land is one defect, not one per tab.
+  const counts = loading
+    ? { all: null, prs: null, issues: null }
+    : { all: items.length, prs: prCount, issues: items.length - prCount };
   // Derived, never stored: a row the filter has hidden simply stops being
   // active, and arrow keys restart from the ends of the new visible set.
   const activeIndex = interactive.findIndex((i) => i.url === activeUrl);
@@ -854,15 +867,15 @@ export function MyWorkScreen() {
           <TabsList>
             <TabsTrigger value="all">
               All
-              <Count n={items.length} />
+              <Count n={counts.all} />
             </TabsTrigger>
             <TabsTrigger value="prs">
               Pull requests
-              <Count n={prCount} />
+              <Count n={counts.prs} />
             </TabsTrigger>
             <TabsTrigger value="issues">
               Issues
-              <Count n={items.length - prCount} />
+              <Count n={counts.issues} />
             </TabsTrigger>
           </TabsList>
         </Tabs>
@@ -890,9 +903,10 @@ export function MyWorkScreen() {
       <MyWorkBody
         loading={loading}
         errors={fatal ? errors : NO_ERRORS}
-        // Set server-side when a search leg hit its cap or a merged union
-        // overshot the page — leg caps count raw hits before unaddressable ones
-        // drop, so it stays true on a page that arrives short.
+        // "Items may be missing", never "the page is full": a leg hit its
+        // server-side cap, the merged union overshot, or a provider lost part of
+        // its results. True on a page that arrives short, so the copy it drives
+        // may only claim incompleteness.
         capped={page.truncated}
         noSources={sources.isSuccess && enabledLegs.length === 0}
         answered={answeredLegs.map((l) => l.provider)}
@@ -993,7 +1007,7 @@ function MyWorkBody({
       : "Nothing involves you right now.";
     return capped ? (
       <QuietLine>
-        {`${source} returned results this view can't display. There may be more than this page holds.`}
+        {`${source} didn't return everything. There may be work this view can't show.`}
       </QuietLine>
     ) : (
       <QuietLine>{`${nothing} ${scopeSentence(answered)}`}</QuietLine>
@@ -1209,7 +1223,7 @@ function MyWorkNotices({
 function CapNote() {
   return (
     <p className="px-3 py-2 text-center text-[11px] text-muted-foreground">
-      This view fetches one page of results. Filter to narrow the list.
+      This list may be missing items. Filter to narrow what's loaded.
     </p>
   );
 }
@@ -1279,13 +1293,18 @@ function MyWorkRow({
       >
         {item.title}
       </span>
-      {/* The forge glyph is decorative: the repo name beside it, and the menu's
-          "Open on …" wording, are what say which forge a row came from. */}
+      {/* The glyph is decorative, so the forge rides the row's ACCESSIBLE text,
+          announced after the name (rows are scanned by repo): one name can live
+          on several forges, and a shape says nothing to a screen reader.
+          `sr-only` is absolutely positioned, so the name's truncation is
+          untouched. Kept on ↗ rows too — their hint names the HOST, which on a
+          self-managed server doesn't reveal the forge. */}
       <span className="flex max-w-56 shrink-0 items-center gap-1 text-muted-foreground">
         <ProviderIcon provider={item.provider} className="size-3 shrink-0" />
         <span className="min-w-0 truncate" onMouseEnter={clipTitleFromText}>
           {item.repoFullName}
         </span>
+        <span className="sr-only">, {providerLabel(item.provider)}</span>
       </span>
       {!local && (
         <span
@@ -1314,7 +1333,10 @@ function MyWorkRow({
   );
 }
 
-function Count({ n }: { n: number }) {
+/** A tab's item count. Null while the list is still resolving: the tab keeps its
+ *  label, but a total that would change as held-back legs land shows nothing. */
+function Count({ n }: { n: number | null }) {
+  if (n === null) return null;
   return (
     <span className="ml-1.5 text-[10px] tabular-nums text-muted-foreground">
       {n}

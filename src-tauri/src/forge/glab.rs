@@ -371,6 +371,158 @@ pub async fn known_hosts() -> Vec<String> {
     known_hosts_from(&glab_config_paths(), env_host.as_deref()).await
 }
 
+// ── Account-scoped host enumeration (My work) ────────────────────────────────
+//
+// Detection asks "which host is THIS repo on" and answers from `known_hosts`.
+// The account-scoped surfaces ask "which hosts should I fetch the signed-in
+// user's work from", and a token in the environment authenticates glab with NO
+// saved host at all — so they need their own enumeration, below.
+
+/// The token variables glab authenticates from, per `glab auth login --help`:
+/// they "take precedence over the stored credentials". `CI_JOB_TOKEN` is
+/// deliberately absent — glab honors it only under CI auto-login, a runner mode
+/// a desktop app is never in, and treating it as a credential here would light
+/// the source up for a shell that merely inherited one.
+const GLAB_TOKEN_VARS: &[&str] = &["GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN"];
+
+/// The host glab targets when nothing else names one.
+const GLAB_DEFAULT_HOST: &str = "gitlab.com";
+
+/// A non-empty token from the environment, or `None`. Examined for EMPTINESS
+/// only — the value never leaves this function.
+fn env_token() -> Option<String> {
+    GLAB_TOKEN_VARS
+        .iter()
+        .find_map(|var| std::env::var(var).ok().filter(|t| !t.trim().is_empty()))
+}
+
+/// A config VALUE, trimmed of a trailing comment and surrounding quotes. `None`
+/// when nothing is left. Only ever applied to the top-level `host:` scalar, never
+/// to anything inside the token-bearing `hosts:` section.
+fn config_scalar(raw: &str) -> Option<&str> {
+    let value = raw.trim();
+    // A comment opens at `#` only after whitespace — or at the very start, which
+    // means the key carries no value at all.
+    let code = value
+        .char_indices()
+        .find(|&(i, c)| c == '#' && (i == 0 || value[..i].ends_with(char::is_whitespace)))
+        .map_or(value, |(i, _)| &value[..i])
+        .trim();
+    let bytes = code.as_bytes();
+    let unquoted = match (bytes.first(), bytes.last()) {
+        (Some(b'"'), Some(b'"')) | (Some(b'\''), Some(b'\'')) if code.len() >= 2 => {
+            &code[1..code.len() - 1]
+        }
+        _ => code,
+    };
+    (!unquoted.is_empty()).then_some(unquoted)
+}
+
+/// The default instance glab targets when nothing else names one: the TOP-LEVEL
+/// `host:` key of its config. `None` when absent, unreadable, or not an
+/// addressable authority.
+///
+/// This is the same key a bare `glab` call resolves — measured on 1.105, a config
+/// carrying `host: bogus-b.invalid` made `glab api user` (no cwd repo, no
+/// `--hostname`) dial `https://bogus-b.invalid/api/v4/user` — so reading it here
+/// makes the token-only enumeration match glab's OWN routing rather than assuming
+/// gitlab.com.
+///
+/// Value-reading is confined to this one key: the `hosts:` section holds live
+/// tokens and is never descended into. The result is normalized like every other
+/// config-sourced host ([`normalize_host`]: scheme, path and PORT stripped,
+/// lowercased) and gated by [`crate::forge::is_safe_authority`] plus the
+/// leading-`-` rejection the argv guard applies, so an unaddressable value yields
+/// `None` and the caller falls back rather than building a request around it.
+fn default_host_from_config(text: &str) -> Option<String> {
+    let mut flow_depth = 0usize;
+    for line in text.lines() {
+        let content = line.trim_end();
+        let trimmed = content.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // A line continuing an open flow collection is value text whatever its
+        // indent, so it can never be the top-level key.
+        if flow_depth > 0 {
+            flow_depth = flow_depth_after(flow_depth, trimmed);
+            continue;
+        }
+        // Only column 0 carries the default; `hosts:` entries are indented.
+        if content.len() != trimmed.len() {
+            continue;
+        }
+        flow_depth = flow_open_depth(trimmed);
+        let Some((key, value)) = split_key_value(trimmed) else {
+            continue;
+        };
+        // `hosts` starts with `host`, so the key must match exactly.
+        if key.trim() != "host" {
+            continue;
+        }
+        let host = config_scalar(value).and_then(normalize_host)?;
+        return (crate::forge::is_safe_authority(&host) && !host.starts_with('-')).then_some(host);
+    }
+    None
+}
+
+/// The hosts an ACCOUNT-scoped surface should ask, given glab's saved hosts, the
+/// config's default host, and whichever token variable the environment supplies.
+/// The env-free core, so every arm is testable without mutating process-global
+/// state.
+///
+/// A saved host always wins — `GITLAB_HOST` already joins [`known_hosts`], so the
+/// only gap is a token with NO saved host, which glab authenticates against its
+/// default instance (measured on 1.105: with an empty config dir and any one of
+/// the three variables set, `glab api user --hostname gitlab.com` reaches
+/// gitlab.com and 401s on a placeholder token, where the same call with none set
+/// refuses before any request). That default is the config's own `host:` key when
+/// it names an addressable instance, and gitlab.com otherwise — glab's ultimate
+/// default, and the safe direction for an unusable value: a junk `host:` must not
+/// disable a source the user holds a working token for.
+pub(crate) fn account_hosts_from(
+    known: Vec<String>,
+    config_default: Option<&str>,
+    env_token: Option<&str>,
+) -> Vec<String> {
+    if !known.is_empty() {
+        return known;
+    }
+    if env_token.is_some_and(|t| !t.trim().is_empty()) {
+        return vec![config_default.unwrap_or(GLAB_DEFAULT_HOST).to_string()];
+    }
+    Vec::new()
+}
+
+/// The text of the first readable glab config, mirroring [`known_hosts_from`]'s
+/// first-readable candidate walk.
+async fn read_config_text(paths: &[PathBuf]) -> Option<String> {
+    for path in paths {
+        if let Ok(text) = tokio::fs::read_to_string(path).await {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// The hosts the "My work" inbox fetches from — the ONE enumeration its
+/// availability probe and its fetch both read, so the two can never disagree
+/// about whether GitLab has anything to offer.
+pub async fn account_hosts() -> Vec<String> {
+    let known = known_hosts().await;
+    let token = env_token();
+    // Only the token-without-host path needs the config default, so an ordinary
+    // signed-in session never pays for the extra read.
+    let config_default = if known.is_empty() && token.is_some() {
+        read_config_text(&glab_config_paths())
+            .await
+            .and_then(|text| default_host_from_config(&text))
+    } else {
+        None
+    };
+    account_hosts_from(known, config_default.as_deref(), token.as_deref())
+}
+
 /// Runs glab, treating any non-zero exit as an error carrying glab's stderr
 /// (mirrors `run_gh`). For read ops where a failure should surface, not be empty.
 pub async fn run_glab(
@@ -474,6 +626,131 @@ pub async fn run_glab_ex(
         }));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod account_hosts_tests {
+    use super::{account_hosts_from, default_host_from_config};
+
+    fn saved(hosts: &[&str]) -> Vec<String> {
+        hosts.iter().map(|h| h.to_string()).collect()
+    }
+
+    /// The regression this closes: glab authenticates from a token variable with
+    /// NO saved host, so a saved-hosts-only enumeration hides every GitLab row.
+    /// The probe and the fetch share this function, so both learn about it at
+    /// once — a boolean that disagreed with the enumeration would offer a source
+    /// that then answered empty.
+    #[test]
+    fn a_token_with_no_saved_host_enumerates_the_default_host() {
+        // Config names a default → that instance, matching glab's own routing.
+        assert_eq!(
+            account_hosts_from(Vec::new(), Some("gitlab.acme.dev"), Some("t")),
+            vec!["gitlab.acme.dev".to_string()],
+        );
+        // No default to read → glab's ultimate default.
+        assert_eq!(
+            account_hosts_from(Vec::new(), None, Some("t")),
+            vec!["gitlab.com".to_string()],
+        );
+    }
+
+    /// A saved host always wins, alone or alongside a token — `GITLAB_HOST`
+    /// already joins `known_hosts`, so neither default must ever be appended to a
+    /// list that already names where to look.
+    #[test]
+    fn saved_hosts_are_unchanged_by_the_token_arm() {
+        let one = saved(&["gitlab.acme.dev"]);
+        assert_eq!(account_hosts_from(one.clone(), None, None), one);
+        assert_eq!(account_hosts_from(one.clone(), None, Some("t")), one);
+        assert_eq!(
+            account_hosts_from(one.clone(), Some("gitlab.other.dev"), Some("t")),
+            one,
+            "a saved host outranks the config default",
+        );
+
+        let many = saved(&["gitlab.acme.dev", "gitlab.other.dev"]);
+        assert_eq!(account_hosts_from(many.clone(), None, Some("t")), many);
+        assert!(
+            !account_hosts_from(many.clone(), None, Some("t"))
+                .iter()
+                .any(|h| h == "gitlab.com"),
+            "the default host must not be appended to a saved list",
+        );
+    }
+
+    /// Neither source configured, and the blank-token boundary: an empty or
+    /// whitespace-only variable is not a credential, so it must not conjure a
+    /// host to fetch from — not even when the config names a default.
+    #[test]
+    fn neither_source_enumerates_nothing() {
+        assert!(account_hosts_from(Vec::new(), None, None).is_empty());
+        assert!(account_hosts_from(Vec::new(), Some("gitlab.acme.dev"), None).is_empty());
+        for blank in ["", " ", "\t", "\n", "   \t "] {
+            assert!(
+                account_hosts_from(Vec::new(), None, Some(blank)).is_empty(),
+                "{blank:?} is not a token",
+            );
+            assert!(
+                account_hosts_from(Vec::new(), Some("gitlab.acme.dev"), Some(blank)).is_empty(),
+                "{blank:?} must not activate the config default either",
+            );
+        }
+    }
+
+    /// The top-level `host:` scalar — the same key a bare glab call resolves.
+    /// Never the `hosts:` section, which holds tokens.
+    #[test]
+    fn reads_the_top_level_default_host() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            (
+                "the real config shape",
+                "git_protocol: ssh\nhost: gitlab.acme.dev\nhosts:\n    gitlab.acme.dev:\n        token: secret\n",
+                Some("gitlab.acme.dev"),
+            ),
+            ("absent", "git_protocol: ssh\ncheck_update: true\n", None),
+            (
+                "`hosts:` must not satisfy the `host` key",
+                "hosts:\n    gitlab.acme.dev:\n        token: secret\n",
+                None,
+            ),
+            (
+                "a nested `host:` is a host's own sub-key, not the default",
+                "hosts:\n    gitlab.acme.dev:\n        host: nested.example.com\n",
+                None,
+            ),
+            (
+                "scheme, port and path normalize away like every config host",
+                "host: https://GitLab.Acme.dev:8443/gitlab\n",
+                Some("gitlab.acme.dev"),
+            ),
+            ("quoted", "host: \"gitlab.acme.dev\"\n", Some("gitlab.acme.dev")),
+            (
+                "trailing comment",
+                "host: gitlab.acme.dev # work\n",
+                Some("gitlab.acme.dev"),
+            ),
+            ("no value at all", "host:\n", None),
+            ("value is only a comment", "host: # nothing\n", None),
+            (
+                "a wrapped flow map's continuation is a value, not the key",
+                "custom: {a: 1,\nhost: evil.example.com}\n",
+                None,
+            ),
+            ("CRLF", "host: gitlab.acme.dev\r\n", Some("gitlab.acme.dev")),
+            // Unaddressable values yield None so the caller falls back to
+            // gitlab.com rather than building a request around junk.
+            ("a leading dash would be read as a flag", "host: -evil\n", None),
+            ("config syntax", "host: evil.dev;rm -rf /\n", None),
+        ];
+        for (label, text, expected) in cases {
+            assert_eq!(
+                default_host_from_config(text).as_deref(),
+                *expected,
+                "case: {label}",
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -648,18 +648,24 @@ pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage>
     // `workspace_slug` parses any origin's path, Bitbucket or not, so the provider
     // gate is what actually keeps a github.com clone from resolving to a plausible
     // (workspace, slug) pair and spending a 404 leg on it.
-    let mut pairs: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
-    for path in &repo_paths {
+    //
+    // Resolved CONCURRENTLY: each path bottoms out in a `git remote get-url` spawn
+    // whose TTL cache is cold on first open, so one-at-a-time would charge a git
+    // process per recent against the caller's grace budget before the first page
+    // is even requested. The `BTreeSet` dedupes and orders the survivors, so
+    // completion order can't reach the result.
+    let resolved = crate::forge::futures_join_all(repo_paths.iter().map(|path| async move {
         if !matches!(
             crate::forge::detect_non_github(path).await,
             Some((Provider::Bitbucket, _))
         ) {
-            continue;
+            return None;
         }
-        if let Ok(pair) = workspace_slug(path).await {
-            pairs.insert(pair);
-        }
-    }
+        workspace_slug(path).await.ok()
+    }))
+    .await;
+    let pairs: std::collections::BTreeSet<(String, String)> =
+        resolved.into_iter().flatten().collect();
     if pairs.is_empty() {
         return Ok(MyWorkPage::empty());
     }
@@ -5772,8 +5778,9 @@ mod my_work_tests {
             item.url,
             "https://bitbucket.org/acme/tools/pull-requests/17"
         );
-        // The `+00:00` offset and microseconds fold to the merge's one width.
-        assert_eq!(item.updated_at, "2026-09-05T23:21:02Z");
+        // The `+00:00` offset folds to `Z` and the microseconds TRUNCATE to the
+        // merge's fixed millisecond width (never round into the next second).
+        assert_eq!(item.updated_at, "2026-09-05T23:21:02.482Z");
         assert_eq!(item.author_login.as_deref(), Some("octo-cat"));
     }
 

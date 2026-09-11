@@ -50,9 +50,9 @@ pub struct MyWorkItem {
     /// never a guess).
     pub host: String,
     pub url: String,
-    /// RFC 3339 UTC at second precision, via [`normalize_updated_at`] — the
-    /// merge sorts on this as a STRING, so every arm must normalize or mixed
-    /// spellings mis-order silently.
+    /// RFC 3339 UTC at MILLISECOND precision (`…THH:MM:SS.mmmZ`), via
+    /// [`normalize_updated_at`] — the merge sorts on this as a STRING, so every
+    /// arm must normalize or mixed spellings mis-order silently.
     pub updated_at: String,
     pub author_login: Option<String>,
 }
@@ -94,12 +94,17 @@ impl MyWorkPage {
     }
 }
 
+/// Width of the canonical spelling `YYYY-MM-DDTHH:MM:SS.mmmZ`.
+const CANONICAL_LEN: usize = 24;
+
 /// A timestamp in the exact form [`normalize_updated_at`] emits. The merge's sort
 /// is a lexical string compare, which is chronological order ONLY across this one
 /// fixed-width UTC spelling; anything else sorts last rather than claiming a
-/// position it hasn't earned.
+/// position it hasn't earned. The length check is what enforces "exact form" — a
+/// second-precision `…SSZ` also parses as RFC 3339 but compares WRONG against a
+/// fractional sibling (`'Z'` > `'.'`), so it must not pass as canonical.
 fn is_canonical(ts: &str) -> bool {
-    ts.len() == 20 && ts.ends_with('Z') && DateTime::parse_from_rfc3339(ts).is_ok()
+    ts.len() == CANONICAL_LEN && ts.ends_with('Z') && DateTime::parse_from_rfc3339(ts).is_ok()
 }
 
 /// The sort key: the timestamp when it is canonical, else `""` — which sorts LAST
@@ -112,11 +117,18 @@ fn sort_key(item: &MyWorkItem) -> &str {
     }
 }
 
-/// An RFC 3339 timestamp normalized to `YYYY-MM-DDTHH:MM:SSZ`, or the input
-/// unchanged when it doesn't parse. Fractional seconds truncate and a non-UTC
-/// offset is applied, because the merge orders items by comparing these as
-/// STRINGS: GitHub emits `…Z`, GitLab `…123Z`, Bitbucket `…+00:00`, and mixing
-/// those widths in one lexical sort silently interleaves the page.
+/// An RFC 3339 timestamp normalized to `YYYY-MM-DDTHH:MM:SS.mmmZ`, or the input
+/// unchanged when it doesn't parse. A non-UTC offset is applied; sub-millisecond
+/// digits truncate; a source with no fraction gets `.000`.
+///
+/// The width is FIXED because the merge orders items by comparing these as
+/// STRINGS, and lexical order is chronological order only at uniform width —
+/// GitHub emits `…SSZ`, GitLab `…SS.123Z`, Bitbucket `…SS.123456+00:00`, and a
+/// bare `…02Z` sorts ABOVE `…02.500Z` (`'Z'` > `'.'`), so mixed widths interleave
+/// the page silently. Millisecond rather than second precision so that a
+/// provider's own sub-second ordering survives: at second precision every
+/// same-second item ties, and the page cut can then drop a newer item while
+/// keeping an older one.
 ///
 /// Returning the input unchanged on garbage is deliberate — an unparseable
 /// timestamp is data we can't improve, and dropping it would cost the frontend
@@ -125,7 +137,7 @@ pub fn normalize_updated_at(raw: &str) -> String {
     match DateTime::parse_from_rfc3339(raw) {
         Ok(dt) => dt
             .with_timezone(&Utc)
-            .to_rfc3339_opts(SecondsFormat::Secs, true),
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
         Err(_) => raw.to_string(),
     }
 }
@@ -200,7 +212,7 @@ mod tests {
         let wire = serde_json::to_value(item(
             7,
             "https://gitlab.com/group/proj/-/merge_requests/7",
-            "2026-09-05T23:21:02Z",
+            "2026-09-05T23:21:02.000Z",
         ))
         .unwrap();
         let mut keys: Vec<&str> = wire
@@ -240,34 +252,51 @@ mod tests {
 
     #[test]
     fn normalize_folds_every_provider_spelling_to_one_width() {
-        // GitHub's spelling is already canonical.
+        // GitHub carries no fraction, so it is zero-PADDED to the fixed width
+        // rather than left short — a bare `…02Z` would sort above `…02.500Z`.
         assert_eq!(
             normalize_updated_at("2026-09-05T23:21:02Z"),
-            "2026-09-05T23:21:02Z"
+            "2026-09-05T23:21:02.000Z"
         );
-        // GitLab's fractional seconds truncate rather than round.
+        // GitLab's milliseconds SURVIVE — that sub-second ordering is exactly what
+        // breaks same-second ties at the page cut.
         assert_eq!(
             normalize_updated_at("2026-09-05T23:21:02.987Z"),
-            "2026-09-05T23:21:02Z"
+            "2026-09-05T23:21:02.987Z"
         );
-        // Bitbucket spells UTC as an explicit zero offset.
+        // Bitbucket spells UTC as an explicit zero offset, with or without a
+        // fraction; microseconds TRUNCATE to millis rather than rounding up.
         assert_eq!(
             normalize_updated_at("2026-09-05T23:21:02+00:00"),
-            "2026-09-05T23:21:02Z"
+            "2026-09-05T23:21:02.000Z"
         );
         assert_eq!(
             normalize_updated_at("2026-09-05T23:21:02.123456+00:00"),
-            "2026-09-05T23:21:02Z"
+            "2026-09-05T23:21:02.123Z"
+        );
+        assert_eq!(
+            normalize_updated_at("2026-09-05T23:21:02.999999Z"),
+            "2026-09-05T23:21:02.999Z",
+            "truncation, not rounding — .999999 must not carry into the next second"
         );
         // A real offset is APPLIED, not dropped — here it rolls the date over.
         assert_eq!(
             normalize_updated_at("2026-09-05T20:00:00-04:00"),
-            "2026-09-06T00:00:00Z"
+            "2026-09-06T00:00:00.000Z"
         );
         assert_eq!(
             normalize_updated_at("2026-09-06T02:30:00+05:30"),
-            "2026-09-05T21:00:00Z"
+            "2026-09-05T21:00:00.000Z"
         );
+        // Every accepted output is the ONE width the lexical sort depends on.
+        for raw in [
+            "2026-09-05T23:21:02Z",
+            "2026-09-05T23:21:02.987Z",
+            "2026-09-05T23:21:02.123456+00:00",
+            "2026-09-05T20:00:00-04:00",
+        ] {
+            assert_eq!(normalize_updated_at(raw).len(), 24, "width drift on {raw}");
+        }
         // Garbage and absence ride through untouched.
         assert_eq!(normalize_updated_at("not a date"), "not a date");
         assert_eq!(normalize_updated_at(""), "");
@@ -281,17 +310,17 @@ mod tests {
             item(
                 309,
                 "https://gitlab.com/g/p/-/merge_requests/309",
-                "2026-09-05T23:21:02Z",
+                "2026-09-05T23:21:02.000Z",
             ),
-            item(300, shared, "2026-09-04T15:30:38Z"),
+            item(300, shared, "2026-09-04T15:30:38.000Z"),
         ]);
         let b = leg(vec![
             // The same MR from a second scope — first leg's copy wins.
-            item(300, shared, "2026-09-04T15:30:38Z"),
+            item(300, shared, "2026-09-04T15:30:38.000Z"),
             item(
                 2,
                 "https://gitlab.com/g/other/-/merge_requests/2",
-                "2026-09-06T00:00:00Z",
+                "2026-09-06T00:00:00.000Z",
             ),
         ]);
         let page = merge_legs(vec![a, b], MY_WORK_LIMIT);
@@ -313,7 +342,7 @@ mod tests {
                 leg(vec![item(
                     i,
                     &format!("https://gitlab.com/g/p/-/issues/{i}"),
-                    &format!("2026-09-0{}T00:00:00Z", i + 1),
+                    &format!("2026-09-0{}T00:00:00.000Z", i + 1),
                 )])
             })
             .collect();
@@ -332,7 +361,7 @@ mod tests {
                 item(
                     i,
                     &format!("https://gitlab.com/g/p/-/merge_requests/{i}"),
-                    &format!("2026-09-05T00:{:02}:00Z", 59 - i),
+                    &format!("2026-09-05T00:{:02}:00.000Z", 59 - i),
                 )
             })
             .collect();
@@ -340,11 +369,58 @@ mod tests {
         assert_eq!(page.items.len(), 10);
         assert!(page.truncated, "an over-limit union must report truncation");
         // Truncation keeps the NEWEST page.
-        assert_eq!(page.items[0].updated_at, "2026-09-05T00:59:00Z");
+        assert_eq!(page.items[0].updated_at, "2026-09-05T00:59:00.000Z");
         assert!(page
             .items
             .windows(2)
             .all(|w| w[0].updated_at >= w[1].updated_at));
+    }
+
+    /// Sub-second precision is what breaks a same-second tie, and the page cut is
+    /// where a mis-broken tie costs the user an item: at second precision these
+    /// four collapse to one value, the stable sort falls back to LEG order, and
+    /// truncating through the tie keeps whichever happened to be fetched first —
+    /// dropping a newer item to make room for an older one.
+    #[test]
+    fn merge_orders_same_second_items_by_their_millis() {
+        // Deliberately fed in the WRONG order, so leg order and time order differ.
+        let same_second = vec![
+            item(
+                1,
+                "https://gitlab.com/g/p/-/merge_requests/1",
+                "2026-09-05T12:00:00.100Z",
+            ),
+            item(
+                2,
+                "https://gitlab.com/g/p/-/merge_requests/2",
+                "2026-09-05T12:00:00.900Z",
+            ),
+            item(
+                3,
+                "https://gitlab.com/g/p/-/merge_requests/3",
+                "2026-09-05T12:00:00.000Z",
+            ),
+            item(
+                4,
+                "https://gitlab.com/g/p/-/merge_requests/4",
+                "2026-09-05T12:00:00.500Z",
+            ),
+        ];
+        let page = merge_legs(vec![leg(same_second.clone())], 10);
+        assert_eq!(
+            page.items.iter().map(|i| i.number).collect::<Vec<_>>(),
+            [2, 4, 1, 3],
+            "same-second items must order by millisecond, newest first",
+        );
+
+        // The cut keeps the two NEWEST, not the two that arrived first.
+        let cut = merge_legs(vec![leg(same_second)], 2);
+        assert_eq!(
+            cut.items.iter().map(|i| i.number).collect::<Vec<_>>(),
+            [2, 4],
+            "truncating through a same-second tie must not drop a newer item",
+        );
+        assert!(cut.truncated);
     }
 
     /// The arm the union's length can never see: a leg hit its cap, dropped items
@@ -356,7 +432,7 @@ mod tests {
             items: vec![item(
                 1,
                 "https://gitlab.com/g/p/-/issues/1",
-                "2026-09-05T00:00:00Z",
+                "2026-09-05T00:00:00.000Z",
             )],
             capped: true,
         };
@@ -374,7 +450,7 @@ mod tests {
                 leg(vec![item(
                     1,
                     "https://gitlab.com/g/p/-/issues/1",
-                    "2026-09-05T00:00:00Z",
+                    "2026-09-05T00:00:00.000Z",
                 )]),
                 MyWorkLeg {
                     items: Vec::new(),
@@ -402,12 +478,12 @@ mod tests {
                 item(
                     3,
                     "https://gitlab.com/g/p/-/issues/3",
-                    "2026-09-01T00:00:00Z",
+                    "2026-09-01T00:00:00.000Z",
                 ),
                 item(
                     4,
                     "https://gitlab.com/g/p/-/issues/4",
-                    "2026-09-05T00:00:00Z",
+                    "2026-09-05T00:00:00.000Z",
                 ),
             ])],
             10,

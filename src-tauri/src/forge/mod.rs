@@ -1004,15 +1004,23 @@ pub struct MyWorkSources {
 /// never errors: each arm folds its OWN failure to `false`, so a broken probe
 /// reads as "not configured" and the inbox simply doesn't offer that source —
 /// safer than failing the whole picker over one provider.
+///
+/// Every arm is LOCAL — a config read, an env read, or a keyring read; no spawn
+/// and no network. The results are returned together and the frontend gates its
+/// first paint on them, so one slow arm would delay every provider's rows: the
+/// GitHub arm reads gh's own config and token variables rather than running
+/// `gh auth status`, which validates the token over the network behind a 30s
+/// timeout. Each arm therefore answers "an account is configured", not "the
+/// credential still works" — the fetch that follows reports a dead credential as
+/// the error it is, where a probe that timed out would have silently hidden the
+/// source instead.
 #[tauri::command]
 pub async fn forge_my_work_sources() -> AppResult<MyWorkSources> {
     let (github, gitlab, bitbucket) = tokio::join!(
-        async {
-            crate::github::pr::gh_accounts()
-                .await
-                .is_ok_and(|a| !a.accounts.is_empty())
-        },
-        async { !glab::known_hosts().await.is_empty() },
+        crate::github::auth::gh_has_configured_host(),
+        // The SAME enumeration the GitLab fetch walks — a probe reading a
+        // different set could offer a source that then answers empty.
+        async { !glab::account_hosts().await.is_empty() },
         async { http::load_credentials().await.is_ok() },
     );
     Ok(MyWorkSources {

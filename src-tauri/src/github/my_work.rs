@@ -284,7 +284,8 @@ mod tests {
                 "repoName": "GitDesktop",
                 "host": "github.com",
                 "url": "https://github.com/theBGuy/GitDesktop/pull/309",
-                "updatedAt": "2026-09-05T23:21:02Z",
+                // gh's `…SSZ` is zero-padded to the merge's fixed width.
+                "updatedAt": "2026-09-05T23:21:02.000Z",
                 "authorLogin": "octo-cat",
             })
         );
@@ -519,7 +520,7 @@ mod tests {
                 .all(|w| w[0].updated_at >= w[1].updated_at),
             "truncated page must still be newest-first",
         );
-        assert_eq!(page.items[0].updated_at, "2026-09-01T00:59:00Z");
+        assert_eq!(page.items[0].updated_at, "2026-09-01T00:59:00.000Z");
 
         // A leg that filled its own `--limit` IS the truncation event, even
         // though the page lands exactly on the cap and never overshoots it —
