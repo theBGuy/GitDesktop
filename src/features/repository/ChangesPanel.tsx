@@ -510,7 +510,7 @@ export function ChangesPanel({
   function onArrowRight(row: FlatRow, index: number) {
     if (row.type !== "folder") return;
     if (row.collapsed) {
-      toggleFolder(row.section, row.path);
+      toggleFolder(row.section, row.path, true);
       return;
     }
     const child = navRows[index + 1];
@@ -519,7 +519,7 @@ export function ChangesPanel({
 
   function onArrowLeft(row: FlatRow, index: number) {
     if (row.type === "folder" && !row.collapsed) {
-      toggleFolder(row.section, row.path);
+      toggleFolder(row.section, row.path, true);
       return;
     }
     const depth = rowDepth(row);
@@ -658,27 +658,75 @@ export function ChangesPanel({
     void stage.mutateAsync([literalPathspec(entry.path)]).catch(onError);
   }
 
+  /** The row key `dirPath` carries once `nextCollapsed` applies. Expanding a
+   *  node re-enables compaction THROUGH it, which re-keys its row to the deeper
+   *  compacted path; the tree is pure, so the post-toggle rows can be asked
+   *  directly. Null = no folder row names this directory any more. */
+  function folderKeyAfterToggle(
+    section: "staged" | "unstaged",
+    dirPath: string,
+    nextCollapsed: Set<string>,
+  ): string | null {
+    const sectionEntries =
+      section === "staged" ? stagedEntries : unstagedEntries;
+    // The node's own row precedes every descendant, so the first row at or under
+    // dirPath is the (possibly re-keyed) chain this directory now lives in.
+    const row = flattenPathTree(
+      sectionEntries,
+      (e) => e.path,
+      nextCollapsed,
+    ).find(
+      (r) =>
+        r.kind === "folder" &&
+        (r.path === dirPath || r.path.startsWith(`${dirPath}/`)),
+    );
+    return row && row.kind === "folder"
+      ? `folder:${section}:${row.path}`
+      : null;
+  }
+
   // Collapse or expand one directory. Collapsing drops the hidden descendants
   // from the multi-selection: a collapsed folder must never hold a
   // selectable-but-invisible row. The shown diff deliberately survives being
   // hidden, exactly as it does behind the text filter.
-  function toggleFolder(section: "staged" | "unstaged", dirPath: string) {
+  function toggleFolder(
+    section: "staged" | "unstaged",
+    dirPath: string,
+    /** The cursor belongs on this row after the toggle (click / arrow routes),
+     *  even when it sat elsewhere before. */
+    cursorFollows = false,
+  ) {
     const key = `${section}:${dirPath}`;
+    const rowKey = `folder:${key}`;
     const collapsing = !collapsedFolders.has(key);
+    const cursorHere = cursorFollows || activeFolderKey === rowKey;
     setCollapsedFolders((prev) => {
       const next = new Set(prev);
       if (collapsing) next.add(key);
       else next.delete(key);
       return next;
     });
-    if (!collapsing) return;
-    setSelectedKeys((prev) => pruneHiddenKeys(prev, [key]));
+    if (collapsing) {
+      // A collapsing row keeps its key — compaction never runs through a
+      // collapsed node — so the cursor and its focus stay put.
+      if (cursorHere) setActiveFolderKey(rowKey);
+      setSelectedKeys((prev) => pruneHiddenKeys(prev, [key]));
+      return;
+    }
+    if (!cursorHere) return;
+    // Re-key the cursor with the row, or the expanded row unmounts under the
+    // focus and every arrow key goes dead. `focusRow` misses the not-yet-mounted
+    // row and defers to the pending-focus claim.
+    const nextCollapsed = collapsedIn(section);
+    nextCollapsed.delete(dirPath);
+    const nextKey = folderKeyAfterToggle(section, dirPath, nextCollapsed);
+    setActiveFolderKey(nextKey);
+    if (nextKey !== null) focusRow(nextKey);
   }
 
   // Clicking a folder both toggles it and parks the cursor there.
   function handleFolderActivate(row: FolderRow) {
-    toggleFolder(row.section, row.path);
-    setActiveFolderKey(rowKeyOf(row));
+    toggleFolder(row.section, row.path, true);
   }
 
   function toggleViewMode() {
