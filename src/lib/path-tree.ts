@@ -35,9 +35,15 @@ export function pathBasename(path: string): string {
   return cut === -1 ? path : path.slice(cut + 1);
 }
 
+/** Hoisted: a per-comparison collator is the expensive half of a sort this size. */
+const NAME_COLLATOR = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: "base",
+});
+
 /** Numeric-aware, case-insensitive name order — "file2" before "file10". */
 function compareNames(a: string, b: string): number {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+  return NAME_COLLATOR.compare(a, b);
 }
 
 interface DirNode<T> {

@@ -16,19 +16,14 @@ export interface ListKeyboardNavOptions<T> {
    * several callers deliberately drive nav from a filter input.
    */
   ignoreTextEntry?: boolean;
-  /** Handle ArrowLeft/ArrowRight for the ACTIVE item (tree consumers: collapse/
-   *  expand, jump to parent). Only consulted when provided AND an item is active;
-   *  absent = Left/Right pass through untouched (existing consumers unchanged). */
-  onArrowLeft?: (item: T, index: number) => void;
-  onArrowRight?: (item: T, index: number) => void;
 }
 
 /**
  * Builds the `onKeyDown` handler for ArrowUp/ArrowDown navigation of a vertical
- * list, plus ArrowLeft/ArrowRight for callers that opt in. Callers own their
- * selection logic via `onActivate` (single- or multi-select) and optionally a
- * `rowKey` so the active row is focused and scrolled into view. Not a hook — it
- * calls no hooks, so it's safe to build after early returns.
+ * list. Callers own their selection logic via `onActivate` (single- or
+ * multi-select) and optionally a `rowKey` so the active row is focused and
+ * scrolled into view. Not a hook — it calls no hooks, so it's safe to build
+ * after early returns.
  */
 export function listKeyboardNav<T>({
   items,
@@ -37,15 +32,9 @@ export function listKeyboardNav<T>({
   rowKey,
   rowAttr = "data-row",
   ignoreTextEntry = false,
-  onArrowLeft,
-  onArrowRight,
 }: ListKeyboardNavOptions<T>) {
   return (e: KeyboardEvent) => {
-    let horizontal: ((item: T, index: number) => void) | undefined;
-    if (e.key === "ArrowLeft") horizontal = onArrowLeft;
-    else if (e.key === "ArrowRight") horizontal = onArrowRight;
-    const vertical = e.key === "ArrowDown" || e.key === "ArrowUp";
-    if (!vertical && !horizontal) return;
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     if (items.length === 0) return;
     // Ancestor walk for the form controls (a keydown can bubble from a wrapper
     // inside an editor); isContentEditable covers every editable state — true,
@@ -57,14 +46,6 @@ export function listKeyboardNav<T>({
         e.target.isContentEditable)
     )
       return;
-    if (horizontal) {
-      // Nothing active = nothing to collapse or step out of; the key stays the
-      // browser's (caret/scroll) rather than being swallowed.
-      if (activeIndex === -1) return;
-      e.preventDefault();
-      horizontal(items[activeIndex], activeIndex);
-      return;
-    }
     // Move the selection, not the scrollbar.
     e.preventDefault();
     const to =

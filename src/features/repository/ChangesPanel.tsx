@@ -604,19 +604,17 @@ export function ChangesPanel({
     }
   }
 
-  // List mode has no tree to walk, so Left/Right stay the browser's — one gate
-  // for both the hook and the focused-row wrapper below.
+  // List mode has no tree to walk, so Left/Right stay the browser's — the gate
+  // the focused-row wrapper below reads.
   const arrowLeft = treeMode ? onArrowLeft : undefined;
   const arrowRight = treeMode ? onArrowRight : undefined;
-  // Arrow keys walk the rows across both sections; Shift extends from the
-  // anchor, a plain arrow collapses to the single active row.
+  // Up/Down walk the rows across both sections; Shift extends from the anchor,
+  // a plain arrow collapses to the single active row.
   const navKeyDown = listKeyboardNav({
     items: navRows,
     activeIndex: navIndex,
     rowKey: rowKeyOf,
     onActivate: activateRow,
-    onArrowLeft: arrowLeft,
-    onArrowRight: arrowRight,
   });
 
   /** The navigable row DOM focus sits in, resolved from the DOM at use rather
@@ -634,13 +632,13 @@ export function ChangesPanel({
     return index === -1 ? null : { row: navRows[index], index };
   }
 
-  /** Left/Right fold and walk the tree, so they act on the row FOCUS is on: the
-   *  hook resolves from the cursor, which a bare Tab leaves behind (and with no
-   *  file selected it returns before the horizontal callbacks at all), so those
-   *  keys would fold the old selection's parent, or nothing. Up/Down keep
-   *  anchoring at the cursor — master's Tab behaviour, unchanged. A focused tree
-   *  region swallows both keys whether or not they moved anything, exactly as
-   *  the hook path does, so the list never scrolls sideways under them. */
+  /** Left/Right fold and walk the tree, so they act on the row FOCUS is on and
+   *  live here rather than in the shared hook, which resolves from the cursor: a
+   *  bare Tab leaves that behind, and those keys would fold the old selection's
+   *  parent, or nothing at all with no file selected. Up/Down stay the hook's and
+   *  keep anchoring at the cursor — master's Tab behaviour, unchanged. A focused
+   *  tree region swallows both keys whether or not they moved anything, so the
+   *  list never scrolls sideways under them. */
   function handleListKeyDown(e: KeyboardEvent) {
     let horizontal: typeof arrowLeft;
     if (e.key === "ArrowLeft") horizontal = arrowLeft;
@@ -1379,8 +1377,9 @@ export function ChangesPanel({
           role="option"
           aria-selected={false}
           // ARIA 1.2 gives `option` no expanded state, so the label carries
-          // what the caret shows.
-          aria-label={`${row.label} — ${row.count} ${
+          // what the caret shows — and the full directory path, because two
+          // compacted rows can share a display label.
+          aria-label={`${row.path} — ${row.count} ${
             row.count === 1 ? "file" : "files"
           }, ${row.collapsed ? "collapsed" : "expanded"}`}
           tabIndex={0}
