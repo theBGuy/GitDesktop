@@ -1255,15 +1255,11 @@ export function usePrReviewState(
     queryFn: () => api.forgePrReviewState(repo, state, limit, lens, filter),
     enabled,
     staleTime: 30_000,
-    // Unlike the list itself, the FILTER is an identity axis here (idx 6, alongside
-    // lens and state): this map decorates rows, so a stale filter's map must never
-    // group rows produced by a different query. Only `limit` stays free, so a
-    // "Load more" keeps the current grouping while the larger page loads.
-    placeholderData: keepPreviousDataForKeyAxes(repo, [
-      [3, lens],
-      [4, state],
-      [6, filterKey],
-    ]),
+    // No placeholderData, unlike the list: lens, state and FILTER are identity axes of
+    // this map, and a map retained across a "Load more" is no better — its walk may not
+    // reach the larger page's rows, where a number missing from `entries` reads as "not
+    // reviewed" and `truncated` was decided against the old page depth. Callers refuse
+    // placeholder maps regardless, per the standing gate rule.
   });
 }
 

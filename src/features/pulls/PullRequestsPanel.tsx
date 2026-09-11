@@ -376,19 +376,20 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     toggleReviewGroup,
   } = useCollapsedSections("pulls");
 
-  // The grouping needs its own answered page: a placeholder map describes the
-  // previous query's rows, and a truncated one can't say which bucket the rows it
-  // dropped belong to — both fall back to the flat list rather than guessing.
+  // The grouping needs its own answered page: a truncated map can't say which bucket
+  // the rows it dropped belong to, so it falls back to the flat list rather than
+  // guessing.
   const reviewPage = reviewState.data;
-  // Two gates, deliberately different: the GROUPING additionally refuses
-  // placeholder data (it would describe the previous query's rows), while the
-  // explanation keys only on the user having asked — an error that still serves a
-  // placeholder must not fall back to a flat list with nothing said.
+  // Two gates, deliberately different: the GROUPING additionally refuses stale rows
+  // and a failed map, while the explanation keys only on the user having asked —
+  // falling back to the flat list must never happen with nothing said.
   const groupingRequested =
     listFilter.groupByReview && canGroupByReview && stateFilter === "open";
-  // BOTH placeholder gates: a cached review map can be real while the LIST still
-  // serves the previous filter's placeholder rows — bucketing those against the
-  // incoming map would misfile rows outside it as "Not reviewed yet".
+  // The LIST's placeholder is the live gate: its rows can still be the previous
+  // filter's while this map is a real answer for the incoming one, and bucketing
+  // those rows against it would misfile the ones outside it as "Not reviewed yet".
+  // The map's own gate is the standing rule's guard — `usePrReviewState` serves no
+  // placeholder, and this keeps the grouping honest if one is ever reintroduced.
   // …and not on a failed refresh: react-query retains the previous map beside
   // isError, and grouping from it would contradict the note announcing the
   // flat-list fallback.

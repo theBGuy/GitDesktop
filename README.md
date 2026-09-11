@@ -413,11 +413,11 @@ in one click.
   repository** server-side — assigned to you, awaiting your review, by
   **author**, or by **label**, on **GitHub & GitLab**. **Needs review** also
   splits the open list into collapsible **Not reviewed yet**, **Updated since
-  my review**, and **Reviewed** groups, so a triage pass knows where to start
-  (GitHub, which is also where your **teams**' review requests can join the
-  filter). Your scope choice is remembered per repository, and a provider
-  that can't express an axis says so in the funnel rather than offering a
-  dead control.
+  my review**, and **Reviewed** groups, so a triage pass knows where to
+  start. The grouping is GitHub-only, and GitHub is also where your
+  **teams**' review requests can join the filter. Your scope choice is
+  remembered per repository, and a provider that can't express an axis says
+  so in the funnel rather than offering a dead control.
 - **Fork · Upstream lens**: on a GitHub fork (a repo with an `upstream`
   remote), a **Fork | Upstream** switch in the list toolbar points the
   remote PR list, and every PR you open under it (description, comments,
