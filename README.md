@@ -647,11 +647,13 @@ and a forge you haven't connected simply doesn't appear. Narrow it with
 the **All / Pull requests / Issues** tabs and a filter box that takes
 arrow keys and Enter, then press Enter on a row: an item from a
 repository you've added to GitDesktop usually opens right in the app, and
-the ↗ marks the rows that open on their host in your browser. A pull
-request usually lands in the **worktree** its head branch is checked out
-in (when GitDesktop can resolve that in time), so you arrive in the
-checkout the work lives in; **Shift+Enter** (or *Open in main workspace*
-on the row's right-click menu) takes you to the main workspace instead.
+the ↗ marks the rows GitDesktop already knows will open on their host in
+your browser — a row without it can still land there when its checkout
+can't be confirmed as you open it. A pull request usually lands in the
+**worktree** its head branch is checked out in (when GitDesktop can
+resolve that in time), so you arrive in the checkout the work lives in;
+**Shift+Enter** (or *Open in main workspace* on the row's right-click
+menu) takes you to the main workspace instead.
 Read-only, with a **Refresh** in the header, plus *Open on GitHub / GitLab /
 Bitbucket* and *Copy link* alongside. Reach it with `Ctrl`/`⌘`+`Shift`+`M`,
 from the welcome screen, or from the command palette (*My work*).

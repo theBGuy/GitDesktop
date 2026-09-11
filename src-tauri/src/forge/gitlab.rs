@@ -8874,7 +8874,7 @@ mod my_work_tests {
         assert_eq!(my_work_project_from_web_url("not a url"), None);
     }
 
-    /// The frontend's `matchLocalRepo` compares `repoOwner` against
+    /// The frontend's `matchLocalRepos` compares `repoOwner` against
     /// `RecentRepo.owner`, which `git::repo::parse_owner_host` fills. Called
     /// DIRECTLY here rather than asserted against a copied literal: a change to
     /// that function's owner rule would otherwise leave this side green while

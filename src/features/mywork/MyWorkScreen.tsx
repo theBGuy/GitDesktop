@@ -324,7 +324,7 @@ function openableMatches(
 }
 
 /**
- * [`openableMatches`] reduced to its yes/no, for the display sites — which ask
+ * `openableMatches` reduced to its yes/no, for the display sites — which ask
  * once per row per render and only ever read the answer, so this stops at the
  * first hit rather than materializing the filtered list. It reads the same
  * `matchLocalRepos` + `providerAgrees` pair, with no second copy of either rule,
