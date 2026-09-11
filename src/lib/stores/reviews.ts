@@ -1031,6 +1031,28 @@ export function registerAutomationRun(opts: {
   };
 }
 
+/**
+ * Whether an automation run for this PR is live IN THIS INSTANCE — running or
+ * queued, and carrying the `rerun` closure that marks a row as automation-owned
+ * (the same discriminator the dock's Stopped group uses; a manual panel run also
+ * reaches running/queued but never carries one). Read-only, synchronous: the
+ * Run-now path checks it before offering to start another.
+ */
+export function hasLiveAutomationRun(
+  repoPath: string,
+  kind: "remote" | "local",
+  ref: string,
+): boolean {
+  return Object.values(useReviewStore.getState().entries).some(
+    (e) =>
+      (e.phase === "running" || e.phase === "queued") &&
+      e.rerun !== undefined &&
+      e.target.repoPath === repoPath &&
+      e.target.kind === kind &&
+      e.target.ref === ref,
+  );
+}
+
 /** The runs the activity dock shows, newest first (dismissing removes them). */
 export function useReviewTasks(): ReviewTask[] {
   const entries = useReviewStore((s) => s.entries);

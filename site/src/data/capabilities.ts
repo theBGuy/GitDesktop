@@ -685,6 +685,12 @@ export const capabilities: Capability[] = [
   {
     group: "AI · generate & review",
     ai: true,
+    label:
+      "Automation history — a per-repo log of what ran, what was skipped & why, plus run an automation on demand",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
     label: "Resolve merge conflicts with AI — review the proposal, then accept",
   },
   {

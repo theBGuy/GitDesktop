@@ -126,7 +126,8 @@ export interface BranchNamePromptInput {
   globalInstructions: string;
 }
 
-export type ReviewMode = "general" | "security";
+export const REVIEW_MODES = ["general", "security"] as const;
+export type ReviewMode = (typeof REVIEW_MODES)[number];
 
 /** How the "changes since last review" delta relates to the prior review.
  *  `head-unchanged` is JS-only (the Rust command never returns it); the Rust

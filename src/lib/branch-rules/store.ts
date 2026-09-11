@@ -30,7 +30,11 @@ export function normalizeBranchRules(saved: unknown): BranchRulesConfig {
       blockDeletion: p.blockDeletion ?? false,
       blockForcePush: p.blockForcePush ?? false,
       requirePr: p.requirePr ?? false,
-      allowedMergeMethods: p.allowedMergeMethods ?? [...ALL_MERGE_METHODS],
+      allowedMergeMethods: Array.isArray(p.allowedMergeMethods)
+        ? p.allowedMergeMethods.filter((method) =>
+            ALL_MERGE_METHODS.includes(method),
+          )
+        : [...ALL_MERGE_METHODS],
     })),
     // Typed loosely because the shared file is hand-editable: anything but an
     // array of strings yields no promotion branches rather than throwing away

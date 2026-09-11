@@ -1,13 +1,15 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { toast } from "sonner";
-import type { ReviewMode } from "@/lib/ai/types";
+import { REVIEW_MODES, type ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
 import {
   type ActionConfig,
   type ActionId,
   type AutomationsConfigV2,
+  BRANCH_MATCH_MODES,
   type BranchConditions,
+  LIFECYCLE_EVENTS,
   type LifecycleConfig,
   type LifecycleEvent,
   type RepoActionOverride,
@@ -15,8 +17,8 @@ import {
   repoEntry,
 } from "./types";
 
-const LIFECYCLES: LifecycleEvent[] = ["commit", "pr-open", "pr-sync"];
-const ACTIONS: ActionId[] = ["general", "security"];
+const LIFECYCLES = LIFECYCLE_EVENTS;
+const ACTIONS = REVIEW_MODES;
 
 // Personal app-data — automation rules are the user's, never the repo's.
 let storePromise: Promise<Store> | null = null;
@@ -94,10 +96,10 @@ interface V1Config {
 }
 
 function isReviewMode(v: unknown): v is ReviewMode {
-  return v === "general" || v === "security";
+  return ACTIONS.some((action) => action === v);
 }
 function isLifecycle(v: unknown): v is LifecycleEvent {
-  return v === "commit" || v === "pr-open" || v === "pr-sync";
+  return LIFECYCLES.some((lifecycle) => lifecycle === v);
 }
 
 /** A stored value is v1 when it has a `global` array and isn't already v2. */
@@ -121,10 +123,7 @@ function normalizeConditions(v: unknown): BranchConditions | undefined {
   };
   const strArray = (a: unknown): string[] =>
     Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : [];
-  const match =
-    obj.match === "head" || obj.match === "base" || obj.match === "either"
-      ? obj.match
-      : "head";
+  const match = BRANCH_MATCH_MODES.find((mode) => mode === obj.match) ?? "head";
   return {
     include: strArray(obj.include),
     exclude: strArray(obj.exclude),

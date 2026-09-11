@@ -1,11 +1,14 @@
-import type { ReviewMode } from "@/lib/ai/types";
+import { REVIEW_MODES, type ReviewMode } from "@/lib/ai/types";
 import { matchesGlob } from "@/lib/branch-rules/match";
 
 /** The moments an automation can fire on. */
-export type LifecycleEvent = "commit" | "pr-open" | "pr-sync";
+export const LIFECYCLE_EVENTS = ["commit", "pr-open", "pr-sync"] as const;
+export type LifecycleEvent = (typeof LIFECYCLE_EVENTS)[number];
 
 /** What an automation runs — the same modes as the manual Review tab. */
-export type ActionId = ReviewMode; // "general" | "security"
+export type ActionId = ReviewMode;
+
+export const BRANCH_MATCH_MODES = ["head", "base", "either"] as const;
 
 /**
  * Which branches an action applies to. `include`/`exclude` are fnmatch-style
@@ -19,7 +22,7 @@ export interface BranchConditions {
   /** Globs; a matching exclude beats any include. */
   exclude: string[];
   /** PR events only; ignored for commit. */
-  match: "head" | "base" | "either";
+  match: (typeof BRANCH_MATCH_MODES)[number];
 }
 
 /** One action cell: whether it fires, and the branches it's scoped to. */
@@ -79,7 +82,7 @@ export const ACTION_LABELS: Record<ActionId, string> = {
 };
 
 /** The action ids in a stable display order. */
-export const ALL_ACTION_IDS: ActionId[] = ["general", "security"];
+export const ALL_ACTION_IDS: ActionId[] = [...REVIEW_MODES];
 
 /**
  * A repo's per-repo overrides, looked up by its worktree-stable identity with a

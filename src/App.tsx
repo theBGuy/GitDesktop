@@ -8,6 +8,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { ReconnectDialog } from "@/features/accounts/ReconnectDialog";
 import { ActivityStrip } from "@/features/activity/ActivityDock";
 import { useMacAppMenu } from "@/features/app-menu/useMacAppMenu";
+import { AutomationHistoryDialogHost } from "@/features/automations/AutomationHistoryDialog";
 import { AutomationResultDialog } from "@/features/automations/AutomationResultDialog";
 import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
@@ -259,6 +260,7 @@ function App() {
         <ActivityStrip />
       </div>
       <AutomationResultDialog />
+      <AutomationHistoryDialogHost />
       <CloneRepoDialog open={cloneOpen} onOpenChange={setCloneOpen} />
       <CreateRepoDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ConfirmDialogHost />

@@ -2586,7 +2586,31 @@ cancelling an auto re-review dismisses that commit so it won't run again on rest
 new commit still triggers. On pull request opened also catches up your own PRs opened outside the
 app (via the CLI, the web, or a bot) that never got their initial review — a non-draft PR of yours
 opened in the last two weeks and not yet reviewed gets one automatically on the next poll. Existing rules from the older flat list are migrated automatically on
-first load; any duplicates are merged and disclosed once with a toast.`,
+first load; any duplicates are merged and disclosed once with a toast.
+
+## Automation history
+
+**Automation history…** (the repo ⋮ menu, or the *Automation history* row at the bottom of
+the activity bell) is this repository's decision log. It opens on the repository's effective
+configuration, one line per moment, then lists every recorded decision, newest first.
+
+- **Skips are recorded too.** Each line names the action it belongs to and how it ended:
+  posted as a comment, review saved, skipped because branch conditions didn't match, already
+  reviewed, a draft while draft reviews are off, claimed by another review run, failed (with
+  the error), timed out, or cancelled. When a moment is switched off entirely, nothing is
+  recorded for it, and the configuration lines at the top say so.
+- **Repeats read as summaries.** A decision that recurred coalesces into one row with its
+  count — "Skipped 23 commits — branch conditions didn't match" for a run of commits, or
+  "(seen 4×)" for a pull request checked again.
+- **Pull request rows open their pull request** on click or Enter; commit rows and markers
+  are text. The arrow keys walk the whole list.
+- **Pausing is logged.** Turning **Hide AI** on records *Automations paused*, and turning it
+  off records *Automations resumed*, so a quiet stretch in the log carries its own reason.
+
+The command palette can also run your enabled automations against the pull request you
+currently have open, without waiting for the next trigger. It needs a pull request in view
+to have a target, and it confirms before starting, since the result posts as a comment on
+that pull request.`,
   },
   {
     id: "hooks",

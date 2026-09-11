@@ -1,6 +1,7 @@
 import {
   ArrowSquareOutIcon,
   ChartBarIcon,
+  ClockCounterClockwiseIcon,
   CodeIcon,
   CopyIcon,
   CubeIcon,
@@ -42,6 +43,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import { Spinner } from "@/components/ui/spinner";
+import { useAutomationHistoryDialog } from "@/features/automations/AutomationHistoryDialog";
 import { RepoAutomationsDialog } from "@/features/automations/RepoAutomationsDialog";
 import { BranchRulesDialog } from "@/features/branch-rules/BranchRulesDialog";
 import { HooksDialog } from "@/features/hooks/HooksDialog";
@@ -52,6 +54,12 @@ import type {
   RepoSettingsDialog as RepoSettingsDialogComponent,
   SectionId,
 } from "@/features/repo-settings/RepoSettingsDialog";
+import { useAutomations } from "@/lib/automations/queries";
+import { runAutomationNow } from "@/lib/automations/runner";
+import {
+  repoEntry as automationRepoEntry,
+  effectiveActions,
+} from "@/lib/automations/types";
 import { copyText } from "@/lib/clipboard";
 import {
   forgeRepoUrl,
@@ -68,6 +76,7 @@ import {
   useForgeStatus,
   useForkRepo,
   useRepoAdmin,
+  useRepoIdentity,
   useRepoStarStatus,
   useRepoStatus,
   useSetRepoStar,
@@ -126,10 +135,34 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const aiEnabled = useAiEnabled();
   const repoName = useUiStore((s) => s.repoName);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
+  const repoTab = useUiStore((s) => s.repoTab);
+  const selectedPr = useUiStore((s) => s.selectedPr);
   const fork = useForkRepo(repoPath);
   // The Fork item's verdict, sampled when the dropdown opens (see `canForkHere`).
   const [forkWhileOpen, setForkWhileOpen] = useState(false);
   const [automationsOpen, setAutomationsOpen] = useState(false);
+  // The history dialog is mounted once at the app root and opened by store flag,
+  // so it survives this menu closing under it.
+  const openAutomationHistory = useAutomationHistoryDialog((s) => s.open);
+  const automationsConfig = useAutomations().data;
+  const repoIdentity = useRepoIdentity(repoPath).data;
+  // Whether this repo's EFFECTIVE config enables any PR-lifecycle action — the
+  // same union Run-now executes, so the palette entry exists exactly when the
+  // action could start something.
+  const prAutomationConfigured =
+    automationsConfig !== undefined &&
+    (["pr-open", "pr-sync"] as const).some(
+      (lifecycle) =>
+        effectiveActions(
+          automationsConfig,
+          automationRepoEntry(
+            automationsConfig,
+            repoIdentity ?? repoPath,
+            repoPath,
+          ),
+          lifecycle,
+        ).length > 0,
+    );
   const [jiraOpen, setJiraOpen] = useState(false);
   const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
   // React's `lazy` suspends on its first element render even when the shared
@@ -425,6 +458,33 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("manage-files", () => openFiles("tracked"));
   useHotkeyAction("ai-excluded-files", () => openFiles("ai"), aiEnabled);
   useHotkeyAction("automations", () => setAutomationsOpen(true), aiEnabled);
+  useHotkeyAction(
+    "automation-history",
+    () => openAutomationHistory(repoPath),
+    aiEnabled,
+  );
+  // Run-now targets the PR open in the pulls tab, and only when this repo's
+  // effective config enables a PR-lifecycle action — a palette entry whose only
+  // possible outcome is a "nothing configured" toast would be worse than none.
+  useHotkeyAction(
+    "run-pr-automations",
+    () => {
+      // Fire-time re-read: the palette closes before dispatching, so the
+      // selection gating this render may have moved by the time this runs.
+      const pr = useUiStore.getState().selectedPr;
+      if (!pr) return;
+      runAutomationNow(
+        repoPath,
+        pr.kind === "remote"
+          ? { kind: "remote", number: Number(pr.id) }
+          : { kind: "local", id: pr.id },
+      );
+    },
+    aiEnabled &&
+      repoTab === "pulls" &&
+      selectedPr !== null &&
+      prAutomationConfigured,
+  );
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));
   useHotkeyAction("repository-settings", openRepoSettings, canOpenRepoSettings);
   useHotkeyAction("branch-rules", () => setBranchRulesOpen(true));
@@ -562,6 +622,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <DropdownMenuItem onClick={() => setAutomationsOpen(true)}>
             <LightningIcon />
             Automations…
+          </DropdownMenuItem>
+        )}
+        {aiEnabled && (
+          <DropdownMenuItem onClick={() => openAutomationHistory(repoPath)}>
+            <ClockCounterClockwiseIcon />
+            Automation history…
           </DropdownMenuItem>
         )}
         <DropdownMenuItem onClick={() => setJiraOpen(true)}>

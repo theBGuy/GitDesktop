@@ -369,6 +369,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "automation-history",
+    label: "Automation history",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "link-jira-project",
     label: "Link Jira project…",
     category: "Repository",
@@ -804,6 +810,12 @@ export const ACTIONS = [
   {
     id: "discard-pending-review",
     label: "Discard pending review",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "run-pr-automations",
+    label: "Run automations on this pull request",
     category: "Pull requests",
     defaultBinding: null,
   },

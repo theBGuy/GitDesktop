@@ -7,7 +7,8 @@
  */
 
 /** Allowed ways to integrate a head branch into a protected base. */
-export type MergeMethod = "merge" | "squash" | "rebase";
+export const ALL_MERGE_METHODS = ["merge", "squash", "rebase"] as const;
+export type MergeMethod = (typeof ALL_MERGE_METHODS)[number];
 
 /** A protection that applies to every branch whose name matches `pattern`. */
 export interface BranchProtection {
@@ -26,8 +27,6 @@ export interface BranchProtection {
    *  history. New protections default to all three. */
   allowedMergeMethods: MergeMethod[];
 }
-
-export const ALL_MERGE_METHODS: MergeMethod[] = ["merge", "squash", "rebase"];
 
 export const MERGE_METHOD_LABEL: Record<MergeMethod, string> = {
   merge: "Merge commit",

@@ -24,6 +24,7 @@ import type { AiSettings, PromptProvider, ReviewMode } from "@/lib/ai/types";
 import {
   forgePrComment,
   forgePrDiff,
+  forgePrView,
   forgeStatus,
   gitBranchDiff,
   gitBranches,
@@ -45,11 +46,13 @@ import {
 } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
 import { effectiveReviewAi, loadSettings } from "@/lib/settings/api";
+import { useConfirm } from "@/lib/stores/confirm";
 import {
   type NotificationTarget,
   pushNotification,
 } from "@/lib/stores/notifications";
 import {
+  hasLiveAutomationRun,
   type ReviewTarget,
   registerAutomationRun,
   resetReview,
@@ -61,10 +64,24 @@ import {
   getDismissedHeadMap,
   setDismissedHead,
 } from "./dismissals";
+import {
+  type AutomationOutcomeCode,
+  type AutomationTrigger,
+  recordAutomationActivity,
+  updateAutomationActivity,
+} from "./history";
 import { type AutomationRunResult, useAutomationResults } from "./results";
 import { loadAutomations, repoAutomationsFor } from "./store";
 import { sameSha } from "./sync";
-import { branchConditionsPass, effectiveActions } from "./types";
+import {
+  ACTION_LABELS,
+  type ActionId,
+  type AutomationsConfigV2,
+  branchConditionsPass,
+  effectiveActions,
+  type LifecycleEvent,
+  type RepoOverride,
+} from "./types";
 
 export type AutomationEvent =
   | {
@@ -233,49 +250,156 @@ function filesFromDiff(text: string): DiffStatEntry[] {
  * own progress toast; a failing rule never blocks the action that
  * triggered it or the remaining rules.
  */
-export function triggerAutomations(event: AutomationEvent): void {
-  void run(event).catch(() => undefined);
+export function triggerAutomations(
+  event: AutomationEvent,
+  trigger?: AutomationTrigger,
+): void {
+  void run(event, { trigger }).catch(() => undefined);
 }
+
+/** One action's decision in a {@link run} pass. Every code point below is reached
+ *  per action, so the action is always known here — unlike the action-less rows
+ *  `sync.ts` records before any action is considered. */
+type RunActionOutcome = {
+  action: ActionId;
+  code: AutomationOutcomeCode;
+  detail?: string;
+};
 
 /** What a {@link run} pass did, so a re-run can tell outcomes apart:
  *  - `matched`: rules that exist AND apply (past the `only` + branch gates). 0 = the rule
  *    no longer applies, or automations are paused (Hide AI, or cold start without opt-in).
  *  - `attempted`: runs actually started. `matched > 0 && attempted === 0` means a claim or
- *    an already-covered head blocked it — retryable. */
+ *    an already-covered head blocked it — retryable.
+ *  - `outcomes`: every decision the pass made, in the order it made them. */
 interface RunOutcome {
   matched: number;
   attempted: number;
+  outcomes: RunActionOutcome[];
+}
+
+/** Options for one {@link run} pass. An object rather than positionals: the three
+ *  optional knobs are independent, and two of them are booleans/strings a caller
+ *  could silently transpose. */
+interface RunOptions {
+  /** Scope the pass to a single mode (a stopped row's Re-run). */
+  only?: ReviewMode;
+  /** The stopped row a re-run replaces — removed the instant its replacement
+   *  registers, so the stopped row survives whenever nothing registers. */
+  replacesKey?: string;
+  /** Run-now: run every PR-lifecycle action regardless of the skip gates (the
+   *  claim still applies). See {@link runAutomationNow}. */
+  force?: boolean;
+  /** What set this pass in motion; defaults to the event's own lifecycle. */
+  trigger?: AutomationTrigger;
+}
+
+/** The PR-lifecycle actions a forced (Run-now) pass runs: the SET-union over both
+ *  PR lifecycles, deduped by action, so one click runs each mode exactly once
+ *  whichever lifecycle enabled it. Branch conditions ride along but are never
+ *  evaluated in force mode — the user named this PR explicitly. */
+function forcedActions(
+  config: AutomationsConfigV2,
+  repo: RepoOverride | undefined,
+): ReturnType<typeof effectiveActions> {
+  const seen = new Set<ActionId>();
+  const union: ReturnType<typeof effectiveActions> = [];
+  for (const lifecycle of ["pr-open", "pr-sync"] as const) {
+    for (const entry of effectiveActions(config, repo, lifecycle)) {
+      if (seen.has(entry.action)) continue;
+      seen.add(entry.action);
+      union.push(entry);
+    }
+  }
+  return union;
 }
 
 /**
  * Runs the automation rules matching `event`, unless AI features are hidden or this is
  * a cold-start instance without the automations opt-in — either pauses automations, so
- * it returns immediately with a zero outcome. `only` scopes a re-run to a single mode.
- * `replacesKey` is the stopped row a re-run replaces — removed the instant its
- * replacement registers, so the stopped row survives whenever nothing registers.
+ * it returns immediately with a zero outcome. See {@link RunOptions} for the knobs.
  * Returns a {@link RunOutcome} so a re-run can tell "rule gone" from "blocked" from
- * "started".
+ * "started", and so every decision it made lands in the history store.
  */
 async function run(
   event: AutomationEvent,
-  only?: ReviewMode,
-  replacesKey?: string,
+  opts: RunOptions = {},
 ): Promise<RunOutcome> {
+  const { only, replacesKey, force = false, trigger = event.kind } = opts;
   // Cold-start instances share the automation-claims dir with the real instance, so an
   // armed cold instance can win a claim meant for the real run and suppress it. First
-  // gate of all, so a gated tick reads no store at all and takes no claim.
-  if (COLD_START_AUTOMATIONS_OFF) return { matched: 0, attempted: 0 };
+  // gate of all, so a gated tick reads no store at all and takes no claim — including
+  // the history store, which is why neither this gate nor the next one records.
+  if (COLD_START_AUTOMATIONS_OFF)
+    return { matched: 0, attempted: 0, outcomes: [] };
   // Hiding AI features PAUSES automations: no NEW run starts while `hideAi` is set
   // (an in-flight run still completes and delivers — deliberate). Rules are kept and
-  // resume when AI is shown again.
+  // resume when AI is shown again. The paused/resumed markers cover this stretch.
   const settings = await loadSettings();
-  if (settings.hideAi) return { matched: 0, attempted: 0 };
+  if (settings.hideAi) return { matched: 0, attempted: 0, outcomes: [] };
   const config = await loadAutomations();
   const repo = await repoAutomationsFor(config, event.repoPath);
-  const actions = effectiveActions(config, repo, event.kind);
-  if (actions.length === 0) return { matched: 0, attempted: 0 };
+  // Whether this REPO has any automation at all, across every lifecycle — records
+  // happen only when it does, so a repo the user never configured accrues zero rows
+  // (its dialog's empty state teaches instead). Local literal rather than a shared
+  // constant: this list is the gate's own definition of "any lifecycle".
+  const lifecycles: LifecycleEvent[] = ["commit", "pr-open", "pr-sync"];
+  const recordingEnabled = lifecycles.some(
+    (lc) => effectiveActions(config, repo, lc).length > 0,
+  );
+  const actions = force
+    ? forcedActions(config, repo)
+    : effectiveActions(config, repo, event.kind);
+  // No enabled action for THIS lifecycle: records nothing by design — the dialog
+  // derives the config header from the live config, not from a row per tick.
+  if (actions.length === 0) return { matched: 0, attempted: 0, outcomes: [] };
   let matched = 0;
   let attempted = 0;
+  // The recorded entry's stable axes. A commit row keys on its BRANCH (the steady
+  // axis of a commit scoping decision); the specific commit rides `headSha`.
+  const recordTargetKind: "remote" | "local" | "commit" =
+    event.kind === "commit" ? "commit" : event.target.type;
+  const recordRef = event.kind === "commit" ? event.branch : targetRef(event);
+  const recordHeadSha =
+    event.kind === "commit" ? event.hash : (event.headSha ?? "");
+  // Skip decisions accumulated across the pass, and the terminal state of every
+  // action that actually ran. Both ride into the entry on each update, so one row
+  // tells the whole pass's story.
+  const skips: RunActionOutcome[] = [];
+  const settled: RunActionOutcome[] = [];
+  // The history entry this pass owns, minted at the first claim-win. Null until
+  // then — a pass that only skipped writes one coalescing row after the loop.
+  let entryId: string | null = null;
+  /** The outcome snapshot to store: everything decided so far, plus the action
+   *  currently in flight (if any). */
+  const snapshot = (running?: RunActionOutcome): RunActionOutcome[] =>
+    running ? [...skips, ...settled, running] : [...skips, ...settled];
+  /** Writes the pass's entry — minting it on the first call, updating in place
+   *  after. Swallows everything: history is evidence, and evidence must never be
+   *  able to affect the run it records. */
+  const recordProgress = async (running?: RunActionOutcome): Promise<void> => {
+    if (!recordingEnabled) return;
+    try {
+      if (entryId === null) {
+        entryId = await recordAutomationActivity(event.repoPath, {
+          trigger,
+          targetKind: recordTargetKind,
+          ref: recordRef,
+          title: event.title,
+          headSha: recordHeadSha,
+          outcomes: snapshot(running),
+        });
+      } else {
+        await updateAutomationActivity(
+          event.repoPath,
+          entryId,
+          snapshot(running),
+        );
+      }
+    } catch {
+      // best-effort — a history failure must never reach the run
+    }
+  };
   // Cleared once consumed so a second registering action can't double-remove
   // (harmless — resetReview no-ops on a missing key — but keeps intent explicit).
   let staleKey = replacesKey;
@@ -325,7 +449,10 @@ async function run(
   };
   for (const { action, conditions } of actions) {
     if (only && action !== only) continue;
+    // Force mode never evaluates conditions: the user named this PR explicitly, so
+    // a branch scope meant for unattended firing has nothing left to decide.
     if (
+      !force &&
       !branchConditionsPass(conditions, {
         kind: event.kind,
         branch,
@@ -333,6 +460,7 @@ async function run(
         base,
       })
     ) {
+      skips.push({ action, code: "branch-skip" });
       continue;
     }
     matched++;
@@ -340,21 +468,28 @@ async function run(
     // never for ANY head that mode covered — a poll can re-serve an older head after a
     // push, which isn't new work. Every retained record counts, so the flap window is
     // the history store's MAX_PER_GROUP per (kind, ref, mode).
-    if (event.kind === "pr-sync") {
+    // Split into three arms with the same `continue` (short-circuit order preserved,
+    // so the gating is unchanged): each skip is a different thing to tell the user.
+    if (!force && event.kind === "pr-sync") {
       const headSha = event.headSha ?? "";
       const { reviews, dismissed } = await gateState(event);
       const covered = reviews.filter((r) => r.mode === action);
       // A CANCELLED re-review persists the dismissed head, so a cancelled head doesn't
       // re-fire after an app relaunch — only a genuinely newer head does.
       const dismissedHead = dismissed[action];
+      if (covered.length === 0) {
+        skips.push({ action, code: "needs-first-review" });
+        continue;
+      }
       // sameSha (not `===`) so a short-vs-full sha for the SAME head (Bitbucket's
       // 12-char poll head vs a full-40 seed) counts as "already reviewed" and
       // doesn't re-fire a redundant review each poll tick.
-      if (
-        covered.length === 0 ||
-        covered.some((r) => sameSha(r.headSha, headSha)) ||
-        sameSha(dismissedHead ?? "", headSha)
-      ) {
+      if (covered.some((r) => sameSha(r.headSha, headSha))) {
+        skips.push({ action, code: "head-covered" });
+        continue;
+      }
+      if (sameSha(dismissedHead ?? "", headSha)) {
+        skips.push({ action, code: "head-dismissed" });
         continue;
       }
     }
@@ -362,14 +497,18 @@ async function run(
     // this PR (so real and catch-up-synthesized events are idempotent per mode), and skip
     // a head this mode already dismissed. Mirror of the pr-sync gate, inverted — pr-sync
     // requires a prior review, pr-open requires its absence.
-    if (event.kind === "pr-open") {
+    if (!force && event.kind === "pr-open") {
       const { reviews, dismissed } = await gateState(event);
       // The list is newest-first, so this mode's first entry IS its latest review — the
       // same record `getLatestReview` would return.
       const prior = reviews.find((r) => r.mode === action);
-      if (prior) continue;
+      if (prior) {
+        skips.push({ action, code: "already-reviewed" });
+        continue;
+      }
       const dismissedHead = dismissed[action];
       if (event.headSha && sameSha(dismissedHead ?? "", event.headSha)) {
+        skips.push({ action, code: "head-dismissed" });
         continue;
       }
     }
@@ -386,6 +525,35 @@ async function run(
     // release so both target the SAME claim file (releasing under the raw path would
     // miss it). Empty until a claim is actually taken.
     let claimKey = "";
+    // Run-now on a head a DELIVERED run already covers: a delivered run KEEPS its claim
+    // by design, so without this release the claim below loses to the record of its own
+    // last success and the user's explicit click becomes a silent no-op. Skipped while a
+    // run is live in this instance — that claim belongs to work still in flight.
+    // Accepted residual: the release is identity-keyed, not instance-keyed, so two
+    // windows clicking Run-now on the same delivered head inside one run window can
+    // both claim and both post.
+    if (force && event.kind !== "commit" && headSha) {
+      const { reviews } = await gateState(event);
+      const alreadyCovered = reviews.some(
+        (r) => r.mode === action && sameSha(r.headSha, headSha),
+      );
+      if (
+        alreadyCovered &&
+        !hasLiveAutomationRun(
+          event.repoPath,
+          event.target.type,
+          targetRef(event),
+        )
+      ) {
+        const repoKey = await repoIdentity(event.repoPath);
+        await invoke("release_automation_claim", {
+          repoKey,
+          target: claimTarget,
+          headSha,
+          action,
+        }).catch(() => undefined);
+      }
+    }
     if (headSha) {
       const repoKey = await repoIdentity(event.repoPath);
       let won = true;
@@ -399,7 +567,10 @@ async function run(
       } catch {
         // fail open — a claim-infrastructure error must not disable automations
       }
-      if (!won) continue; // another instance owns this run
+      if (!won) {
+        skips.push({ action, code: "claim-held" });
+        continue; // another instance owns this run
+      }
       claimKey = repoKey;
     }
     // Liveness heartbeat for the claim just won: refreshing the claim file's mtime makes
@@ -436,6 +607,10 @@ async function run(
     // Past every skip gate — counted so a Re-run that matches nothing can toast instead of
     // dying silently.
     attempted++;
+    // Record BEFORE the paid work: the longest operation must not be the one with zero
+    // trace. A process killed mid-stream leaves this "started" row behind, which the
+    // dialog reads as interrupted (against SESSION_START_MS) rather than in flight.
+    await recordProgress({ action, code: "started" });
     // Per-rule cancellation: HTTP providers stop via the AbortSignal, CLI providers by
     // killing the subprocess (`cancelAgentReview` once its id is known); both are driven
     // by the dock row's Cancel → `cancelReview`. `handle.isCancelled()` stays readable
@@ -517,11 +692,15 @@ async function run(
         // and deleted the control — do NOT settle/remove it here.
         releaseClaim();
         dismissOnCancel();
+        settled.push({ action, code: "cancelled" });
+        await recordProgress();
         toast.info(`AI ${label} cancelled.`, { duration: 4000 });
         continue;
       }
       if (result === null) {
         releaseClaim();
+        settled.push({ action, code: "empty-diff" });
+        await recordProgress();
         toast.info(`AI ${label} skipped — no changes to review.`);
         handle.settle(); // no-op run: remove the row as before
         continue;
@@ -575,6 +754,8 @@ async function run(
       }
       // Success: remove the dock row — a delivered review lands in Notifications.
       handle.settle();
+      settled.push({ action, code: "delivered" });
+      await recordProgress();
     } catch (e) {
       // Release the claim on every failure/cancel path so a transient error doesn't
       // permanently suppress this automation for this head across instances.
@@ -583,6 +764,8 @@ async function run(
         // Cancelled mid-stream: same as the post-generate cancel arm — the dock
         // already owns the "cancelled" row, so leave it (do not settle).
         dismissOnCancel();
+        settled.push({ action, code: "cancelled" });
+        await recordProgress();
         toast.info(`AI ${label} cancelled.`, { duration: 4000 });
         continue;
       }
@@ -712,6 +895,14 @@ async function run(
       }
       // Persist a "Failed" stopped row (keeping its Re-run) instead of removing it.
       handle.fail(message);
+      // A deadline kill and an outright failure look the same from the dock but not
+      // from the history: one is a budget to raise, the other a thing to fix.
+      settled.push({
+        action,
+        code: progress.timedOut ? "timed-out" : "failed",
+        detail: message,
+      });
+      await recordProgress();
     } finally {
       // Every terminal path lands here — including both `continue`s and the delivered
       // success path, which keeps its claim but must stop heartbeating it.
@@ -722,7 +913,24 @@ async function run(
       gateSnapshot = null;
     }
   }
-  return { matched, attempted };
+  // Nothing ran, but something was decided: one coalescing row. The steady upsert
+  // in the store is what keeps a poll tick over an unchanged repo from paying a
+  // whole-file parse and rewrite per minute.
+  if (entryId === null && skips.length > 0 && recordingEnabled) {
+    await recordAutomationActivity(event.repoPath, {
+      trigger,
+      targetKind: recordTargetKind,
+      ref: recordRef,
+      title: event.title,
+      headSha: recordHeadSha,
+      outcomes: skips,
+    }).catch(() => undefined);
+  }
+  // An action ran, so the entry exists — but the in-loop writes stop at each
+  // action's terminal, and a LATER action's skip lands in `skips` after the last
+  // one. Re-snapshot once so the row carries every decision the pass made.
+  if (entryId !== null) await recordProgress();
+  return { matched, attempted, outcomes: [...skips, ...settled] };
 }
 
 /**
@@ -770,7 +978,11 @@ export function rerunAutomation(
       }
       // The stopped row is removed inside run() only when a replacement registers —
       // so every non-registering outcome below keeps it as a retry target.
-      const { matched, attempted } = await run(event, only, staleKey);
+      const { matched, attempted } = await run(event, {
+        only,
+        replacesKey: staleKey,
+        trigger: "re-run",
+      });
       if (matched === 0) {
         // The rule genuinely no longer applies (disabled / conditions changed).
         toast.info(`Automated ${label} for this ${noun} is turned off.`);
@@ -786,6 +998,170 @@ export function rerunAutomation(
       // A throw before/inside the loop (loadAutomations, store I/O) must not be swallowed —
       // surface it; the stopped row stays.
       toast.error(`Couldn't re-run the ${label}: ${errorMessage(e)}`);
+    }
+  })();
+}
+
+/**
+ * PR targets a Run-now is starting for, keyed `repoPath|kind|ref` and held from the
+ * click to the run's `finally`. The cross-instance claim doesn't exist yet during the
+ * multi-second window this spends resolving the PR and waiting on a confirm, so
+ * without this latch palette spam would start two runs on the same PR.
+ */
+const runNowStarting = new Set<string>();
+
+/** Shared copy: a repo whose PR lifecycles have no enabled action has nothing to
+ *  run now, whether we learn that before the run or from its zero match. */
+const NO_PR_AUTOMATION_COPY =
+  "No automation is enabled for pull requests in this repository — set one up in Settings → Automations.";
+
+const CLOSED_PR_COPY =
+  "This pull request is closed — automations run on open pull requests.";
+
+const UNRESOLVED_HEAD_COPY =
+  "Couldn't resolve the pull request's current head — try refreshing.";
+
+/**
+ * Runs this repo's PR automations against one pull request right now — the explicit
+ * user action behind the Run-now command. Runs exactly what the lifecycle would run,
+ * bypassing only the gates that exist to stop AUTOMATIC re-fires (branch conditions,
+ * first-review/covered-head/dismissed-head); the cross-instance claim still applies,
+ * so two machines can't both post. Fire-and-forget, like {@link triggerAutomations}.
+ */
+export function runAutomationNow(
+  repoPath: string,
+  target: { kind: "remote"; number: number } | { kind: "local"; id: string },
+): void {
+  const ref = target.kind === "remote" ? String(target.number) : target.id;
+  const latchKey = `${repoPath}|${target.kind}|${ref}`;
+  if (runNowStarting.has(latchKey)) {
+    toast.info("Already starting for this pull request.");
+    return;
+  }
+  runNowStarting.add(latchKey);
+  void (async () => {
+    try {
+      // Same order as run()'s own pause gates, and for the same reason: a gated cold
+      // instance must read no store at all.
+      if (COLD_START_AUTOMATIONS_OFF) {
+        toast.info("Automations are off in cold-start test mode.");
+        return;
+      }
+      if ((await loadSettings()).hideAi) {
+        toast.info("Automations are paused while AI features are hidden.");
+        return;
+      }
+      // Resolved here as well as inside run() so the confirm can NAME the modes it
+      // is about to spend on.
+      const config = await loadAutomations();
+      const repo = await repoAutomationsFor(config, repoPath);
+      const modes = forcedActions(config, repo).map((a) => a.action);
+      if (modes.length === 0) {
+        toast.info(NO_PR_AUTOMATION_COPY);
+        return;
+      }
+      if (hasLiveAutomationRun(repoPath, target.kind, ref)) {
+        toast.info(
+          "An AI review of this pull request is already running — watch it in Activity.",
+        );
+        return;
+      }
+
+      let base: string;
+      let head: string;
+      let title: string;
+      let body: string;
+      let commitSubjects: string[];
+      let headSha: string;
+      if (target.kind === "remote") {
+        // Origin-pinned like every other store/forge touch on this path.
+        const pr = await forgePrView(repoPath, target.number, "origin");
+        if (pr.state !== "OPEN") {
+          toast.info(CLOSED_PR_COPY);
+          return;
+        }
+        base = pr.baseRefName;
+        head = pr.headRefName;
+        title = pr.title;
+        body = pr.body;
+        commitSubjects = pr.commits.map((c) => c.headline);
+        // The neutral commit list is oldest-first on every provider — GitLab and
+        // Bitbucket reverse their newest-first payloads to match GitHub's — so the
+        // PR head is the LAST entry (same read as RemotePrView's merge/review paths).
+        headSha = pr.commits.at(-1)?.oid ?? "";
+      } else {
+        const prs = await listLocalPrs(repoPath);
+        const pr = prs.find((p) => p.id === target.id);
+        // Deleted since the menu opened — a head to resolve was never the problem,
+        // so "try refreshing" would send the user looking for the wrong thing.
+        if (!pr) {
+          toast.error("This pull request no longer exists.");
+          return;
+        }
+        if (pr.status !== "open") {
+          toast.info(CLOSED_PR_COPY);
+          return;
+        }
+        base = pr.base;
+        head = pr.head;
+        title = pr.title;
+        body = pr.body;
+        // Local PRs carry no commit list; the branch diff is the source of truth.
+        commitSubjects = [];
+        const tips = await gitBranchTips(repoPath, [pr.head]);
+        headSha = tips[pr.head] ?? "";
+      }
+      // The claim keys on the head: running without one forfeits cross-instance
+      // dedup, so refuse rather than risk a duplicate paid review.
+      if (!headSha) {
+        toast.error(UNRESOLVED_HEAD_COPY);
+        return;
+      }
+
+      const reference =
+        target.kind === "remote" ? `#${target.number} · ${title}` : title;
+      const modeList = modes.map((m) => ACTION_LABELS[m]).join(" and ");
+      const ok = await useConfirm.getState().ask({
+        title: "Run automations on this pull request?",
+        body: `${reference} — runs ${modeList}. The result is posted as a comment on the pull request.`,
+        confirmLabel: "Run",
+      });
+      if (!ok) return;
+
+      const { matched, attempted } = await run(
+        {
+          kind: "pr-sync",
+          repoPath,
+          base,
+          head,
+          headSha,
+          title,
+          body,
+          commitSubjects,
+          target:
+            target.kind === "remote"
+              ? { type: "remote", number: target.number }
+              : { type: "local", id: target.id },
+        },
+        { force: true, trigger: "run-now" },
+      );
+      if (matched === 0) {
+        // The config changed between the confirm and the run.
+        toast.info(NO_PR_AUTOMATION_COPY);
+      } else if (attempted === 0) {
+        // The claim is identity-keyed, so this may be another worktree of this repo
+        // or another machine — say what is true, not where it is.
+        toast.info(
+          "This pull request's head is already claimed by a review run — it will post when that one finishes.",
+        );
+      }
+      // attempted > 0: the dock's live row is the feedback — no toast.
+    } catch (e) {
+      toast.error(
+        `Couldn't run automations on this pull request: ${errorMessage(e)}`,
+      );
+    } finally {
+      runNowStarting.delete(latchKey);
     }
   })();
 }
