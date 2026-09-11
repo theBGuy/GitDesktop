@@ -616,8 +616,8 @@ export function MyWorkScreen() {
   // predicate so they can't disagree: numbers appear once something is on screen
   // for them to describe — rows, or a forge that answered empty. Skeletons, "no
   // accounts connected" and the all-failed screen get none. Deliberately NOT
-  // gated on allSettled while rows show: totals grow with the visible list and
-  // the per-provider pending notice is the disclosure — hiding numbers above
+  // gated on allSettled while rows show: totals grow as legs land and the
+  // per-provider pending notice is the disclosure — hiding numbers above
   // rendered rows would desync the header from the list it describes.
   const showCounts =
     !loading && (items.length > 0 || (allSettled && answeredLegs.length > 0));

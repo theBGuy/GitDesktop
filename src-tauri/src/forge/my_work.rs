@@ -18,9 +18,9 @@ use crate::forge::model::Provider;
 /// `truncated` flag reports that to the frontend, so the number itself is not
 /// mirrored there and can change on its own.
 ///
-/// Per-leg caps: GitLab (100) and Bitbucket (50) report `capped` against their
-/// own API's page size; GitHub asks for exactly this number — its argv test pins
-/// the two together — and reports `capped` against it.
+/// Per-leg caps: GitLab reports `capped` when a leg fills its 100-item page,
+/// Bitbucket from its 50-item page's `next` link; GitHub asks for exactly this
+/// number — its argv test pins the two together — and reports `capped` against it.
 pub const MY_WORK_LIMIT: usize = 200;
 
 /// One open pull/merge request or issue in the inbox, flattened for the frontend.
