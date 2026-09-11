@@ -3358,14 +3358,14 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// Guards the read buffers staying off the future: every `run_capture_parts`
+    /// Guards the read buffers staying off the capture futures: every `run_capture_parts`
     /// caller is reachable from a `#[tauri::command]`, whose future is built on the
     /// WebView2 UI-thread stack in release builds, so inline arrays here would ride
     /// that stack. Building the future is enough to measure it; it is never polled.
     /// The composite `run_capture_parts` future is what a command actually holds, so
     /// it carries its own bound.
     #[test]
-    fn capture_capped_future_stays_small() {
+    fn capture_futures_stay_small() {
         let (mut o, mut e): (&[u8], &[u8]) = (b"", b"");
         let fut = capture_capped(&mut o, &mut e, 16);
         let size = std::mem::size_of_val(&fut);
