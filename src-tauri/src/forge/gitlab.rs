@@ -1045,13 +1045,12 @@ fn matches_client_axes(
 
 /// Whether a leg that just returned a FULL page is still worth deepening.
 ///
-/// Rows come back newest-created first (measured: a leg's `created_at` sequence is
-/// strictly descending), so everything on a deeper page is older than `page_oldest`.
-/// Deepening therefore pays only while the kept union is short of `limit`, or while
-/// `page_oldest` is still newer than the oldest row that would survive truncation —
-/// past that point a deeper page can only add rows the truncation would drop.
-/// An absent `limit` always deepens: the caller asked for everything the horizon
-/// allows. Pure.
+/// Deepening pays while the kept union is short of `limit`, and past that only while
+/// a deeper page could still displace the cutoff row. `order_by=created_at&sort=desc`
+/// documents no secondary key, so a deeper page is older-or-EQUAL at the boundary: a
+/// TIE keeps the leg walking (a same-timestamp row can outrank a kept one on the id
+/// tiebreak in [`sort_filtered_rows`]), and tie-heavy repos walk to the horizon and are
+/// refused by design. An absent `limit` always deepens. Pure.
 fn leg_needs_deeper(kept_created_at: &[&str], page_oldest: &str, limit: Option<u32>) -> bool {
     let Some(limit) = limit.map(|n| n as usize).filter(|n| *n > 0) else {
         return true;
@@ -1061,7 +1060,7 @@ fn leg_needs_deeper(kept_created_at: &[&str], page_oldest: &str, limit: Option<u
     }
     let mut times: Vec<&str> = kept_created_at.to_vec();
     times.sort_unstable_by(|a, b| b.cmp(a));
-    page_oldest > times[limit - 1]
+    page_oldest >= times[limit - 1]
 }
 
 /// Order a filtered page newest-created first. GitLab's `created_at` is a
@@ -1253,7 +1252,7 @@ where
 ///
 /// A cap-stop has neither proof, and not by accident: a leg only reaches a cap while
 /// `leg_needs_deeper` was still TRUE, which is exactly the state where a deeper page
-/// could still hold a row newer than the cutoff. The budget cap is blinder still — it
+/// could still hold a row that outranks the cutoff. The budget cap is blinder still — it
 /// abandons legs whose page was never read, so nothing at all is known about them.
 ///
 /// Filling `limit` is therefore NOT evidence of a correct page: one exhausted leg can
@@ -10210,13 +10209,15 @@ mod tests {
             "2026-04-15T00:00:00.000Z",
             Some(3)
         ));
-        // At `limit`, with this page's oldest row already at/older than the cutoff —
-        // everything deeper is older still, so it could only be truncated away.
-        assert!(!leg_needs_deeper(
+        // At `limit`, with this page's oldest row TYING the cutoff — a deeper row at
+        // the same instant can still outrank it on the id tiebreak.
+        assert!(leg_needs_deeper(
             &times(3),
             "2026-03-01T00:00:00.000Z",
             Some(3)
         ));
+        // Strictly older than the cutoff: everything deeper is older still, so it
+        // could only be truncated away.
         assert!(!leg_needs_deeper(
             &times(3),
             "2026-02-01T00:00:00.000Z",
@@ -10230,7 +10231,7 @@ mod tests {
         ];
         assert!(!leg_needs_deeper(
             &shuffled,
-            "2026-03-01T00:00:00.000Z",
+            "2026-02-15T00:00:00.000Z",
             Some(3)
         ));
         // No limit = walk the whole horizon; a zero limit can't define a cutoff.
@@ -10246,6 +10247,37 @@ mod tests {
         ));
         // An empty kept set is short of any limit.
         assert!(leg_needs_deeper(&[], "2026-01-01T00:00:00.000Z", Some(1)));
+    }
+
+    /// A `created_at` tie at the page boundary is not a stop. GitLab's list documents
+    /// no secondary key, so a tie group can straddle pages in any order, while the
+    /// merge ranks ties by id DESCENDING — an unread same-instant row with a higher iid
+    /// belongs ABOVE the kept one, and stopping there would ship a displaced page with
+    /// no truncation flag to warn about it.
+    #[test]
+    fn a_tie_with_the_cutoff_keeps_the_leg_walking() {
+        let tie = "2026-03-01T00:00:00.000Z";
+        // A full page that filled `limit`, oldest row tying the cutoff.
+        let page = vec![
+            leg_row(7, "octocat", &[], "2026-05-01T00:00:00.000Z"),
+            leg_row(8, "octocat", &[], "2026-04-01T00:00:00.000Z"),
+            leg_row(9, "octocat", &[], tie),
+        ];
+        let kept: Vec<&str> = page.iter().map(|p| p.created_at.as_str()).collect();
+        assert!(leg_needs_deeper(&kept, tie, Some(3)));
+        // Why it matters: MR 42 sits on the next page at the same instant, and the
+        // merged page ranks it above the row the leg already kept.
+        let f = filter_of(true, false, &[], &[]);
+        let p = plan("merge_requests", &["opened"], true, &f);
+        let mut rows = page;
+        rows.push(leg_row(42, "octocat", &[], tie));
+        assert_eq!(
+            merge_filtered_mrs(rows, &p, Some(3))
+                .iter()
+                .map(|p| p.number)
+                .collect::<Vec<_>>(),
+            vec![7, 8, 42]
+        );
     }
 
     #[test]

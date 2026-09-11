@@ -382,7 +382,8 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const reviewPage = reviewState.data;
   // Two gates, deliberately different: the GROUPING additionally refuses stale rows
   // and a failed map, while the explanation keys only on the user having asked —
-  // falling back to the flat list must never happen with nothing said.
+  // an error or a short map must never leave the list flat with nothing said. (A
+  // map still FETCHING is flat and silent by design; the note speaks for verdicts.)
   const groupingRequested =
     listFilter.groupByReview && canGroupByReview && stateFilter === "open";
   // The LIST's placeholder is the live gate: its rows can still be the previous
