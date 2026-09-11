@@ -157,6 +157,14 @@ type FlatRow =
 
 type FolderRow = Extract<FlatRow, { type: "folder" }>;
 
+/** Focus nobody owns: the document body, nothing at all, or a node a render has
+ *  detached. Every focus restore here gates on it — a live control's caret (the
+ *  filter input, the toggle button) is never ours to take. */
+function focusIsOrphaned(): boolean {
+  const focused = document.activeElement;
+  return !focused || focused === document.body || !focused.isConnected;
+}
+
 /** Drops the selection keys hidden under `collapsedKeys` (each `"<section>:<dir>"`,
  *  sharing the selection keys' `"<section>:<path>"` spelling). One rule for both
  *  ways a row can go hidden — collapsing a folder, and entering tree mode with
@@ -254,6 +262,7 @@ export function ChangesPanel({
   const [menuTarget, setMenuTarget] = useState<MenuTarget>(null);
   const filterRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLElement | null>(null);
+  const viewToggleRef = useRef<HTMLButtonElement>(null);
   // A cursor row a horizontal jump could not focus because the virtualizer had
   // not mounted it yet; claimed once the scroll brings it in.
   const pendingFocusKey = useRef<string | null>(null);
@@ -484,10 +493,7 @@ export function ChangesPanel({
       pendingFocusKey.current = null;
       return true;
     }
-    const focused = document.activeElement;
-    // Only an orphaned focus is ours to claim — never take a caret out of the
-    // filter input or any other live control.
-    if (focused && focused !== document.body && focused.isConnected) {
+    if (!focusIsOrphaned()) {
       pendingFocusKey.current = null;
       return true;
     }
@@ -737,6 +743,20 @@ export function ChangesPanel({
     // hide rows selected while they were flat — prune them as a collapse does.
     if (!treeMode)
       setSelectedKeys((prev) => pruneHiddenKeys(prev, collapsedFolders));
+    // Leaving tree mode unmounts the folder rows, so a cursor parked on one
+    // takes its focus with it — the palette route dispatches with focus still on
+    // the doomed row, and it lands on <body>. Hand focus to the file row the
+    // list keeps, or to the control that owns the swap.
+    if (treeMode && activeFolderKey !== null) {
+      const focused = document.activeElement;
+      const onDoomedRow =
+        focused instanceof HTMLElement &&
+        focused.getAttribute("data-row") === activeFolderKey;
+      if (onDoomedRow || focusIsOrphaned()) {
+        if (activeKey !== null) focusRow(activeKey);
+        else viewToggleRef.current?.focus();
+      }
+    }
     void saveSettings
       .mutateAsync({
         ...settings.data,
@@ -1300,6 +1320,7 @@ export function ChangesPanel({
               autoComplete="off"
             />
             <Button
+              ref={viewToggleRef}
               variant={treeMode ? "secondary" : "outline"}
               size="icon-sm"
               aria-pressed={treeMode}
