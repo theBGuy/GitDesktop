@@ -564,6 +564,21 @@ pub async fn owned_namespaces() -> AppResult<Vec<String>> {
 /// Page size for a My work repo query — Bitbucket's PR-list endpoint caps here.
 const BB_MY_WORK_PAGELEN: u32 = 50;
 
+/// How many recents resolve their origin remote at once.
+///
+/// The caller hands over every recent repo, and that list is capped at 200
+/// (`MAX_RECENT_REPOS`), so an unbounded fan-out is a 200-process storm — on
+/// Windows each `git` is a shim plus the real binary. The gated resource here is
+/// a SHORT-LIVED LOCAL spawn, not the rate-limited network probe
+/// `DISPATCH_PROBE_CONCURRENCY` (4) protects, so this batch is deliberately wider
+/// than that precedent: 16 keeps the round count down at the ceiling (13 batches
+/// rather than 25 at 8) while holding peak spawns an order of magnitude under the
+/// unbounded case.
+///
+/// This constant IS the guard — a concurrency bound has no seam a unit test can
+/// observe, so nothing but this note keeps a later edit from unrolling the batch.
+const REPO_RESOLVE_CONCURRENCY: usize = 16;
+
 /// The BBQL filter selecting the viewer's open PRs in one repo. `uuid` is the
 /// braced account UUID, escaped for the double-quoted literal like every other
 /// BBQL embed; the whole string is percent-encoded by the caller.
@@ -649,23 +664,28 @@ pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage>
     // gate is what actually keeps a github.com clone from resolving to a plausible
     // (workspace, slug) pair and spending a 404 leg on it.
     //
-    // Resolved CONCURRENTLY: each path bottoms out in a `git remote get-url` spawn
-    // whose TTL cache is cold on first open, so one-at-a-time would charge a git
-    // process per recent against the caller's grace budget before the first page
-    // is even requested. The `BTreeSet` dedupes and orders the survivors, so
-    // completion order can't reach the result.
-    let resolved = crate::forge::futures_join_all(repo_paths.iter().map(|path| async move {
-        if !matches!(
-            crate::forge::detect_non_github(path).await,
-            Some((Provider::Bitbucket, _))
-        ) {
-            return None;
-        }
-        workspace_slug(path).await.ok()
-    }))
-    .await;
-    let pairs: std::collections::BTreeSet<(String, String)> =
-        resolved.into_iter().flatten().collect();
+    // Resolved in BOUNDED batches ([`REPO_RESOLVE_CONCURRENCY`]) — neither
+    // serialized nor every recent at once. Each path bottoms out in a
+    // `git remote get-url` spawn and `REMOTE_URL_TTL` is 5s, so these reads are
+    // cold on open and cold again on every refetch: serializing would charge a
+    // git process per recent against the caller's grace budget, while an
+    // unbounded fan-out would spawn one per recent simultaneously. The `BTreeSet`
+    // dedupes and orders the survivors, so neither batch nor completion order can
+    // reach the result.
+    let mut pairs: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    for batch in repo_paths.chunks(REPO_RESOLVE_CONCURRENCY) {
+        let resolved = crate::forge::futures_join_all(batch.iter().map(|path| async move {
+            if !matches!(
+                crate::forge::detect_non_github(path).await,
+                Some((Provider::Bitbucket, _))
+            ) {
+                return None;
+            }
+            workspace_slug(path).await.ok()
+        }))
+        .await;
+        pairs.extend(resolved.into_iter().flatten());
+    }
     if pairs.is_empty() {
         return Ok(MyWorkPage::empty());
     }

@@ -3310,8 +3310,9 @@ const NO_MY_WORK_SOURCES: MyWorkSources = {
 };
 
 // Shared definition so the hook and the app-open prefetch can't drift. Honors
-// the cold-start test mode like `useForgeStatus`: the probe spawns the real CLIs
-// otherwise, and it now runs at app open rather than only when the inbox does.
+// the cold-start test mode like `useForgeStatus`: the real probe reads gh's and
+// glab's own configs, which in a cold-start run are still the developer's, so it
+// would report connected accounts the test is meant to be without.
 const myWorkSourcesOptions = () =>
   queryOptions({
     queryKey: MY_WORK_SOURCES_KEY,
@@ -3328,10 +3329,11 @@ export function useMyWorkSources(enabled: boolean) {
   return useQuery({ ...myWorkSourcesOptions(), enabled });
 }
 
-/** Warms that probe at app open. It spawns a CLI, so on a cold open it would
- *  otherwise serialize ahead of the inbox's first leg; welcome → My work is a
- *  common enough path to pay for it once, up front. prefetchQuery honors the
- *  staleTime, so an already-warm entry costs nothing. */
+/** Warms that probe at app open. Local reads, but still two CLI configs plus a
+ *  keyring lookup behind an IPC round trip, and on a cold open every leg waits on
+ *  its answer — welcome → My work is a common enough path to pay for it once, up
+ *  front. prefetchQuery honors the staleTime, so an already-warm entry costs
+ *  nothing. */
 export function usePrefetchMyWorkSources() {
   const queryClient = useQueryClient();
   useEffect(() => {
@@ -3357,9 +3359,10 @@ export function useForgeMyWork(
     enabled,
     staleTime: 60_000,
     retry: false,
-    // The repo-paths axis re-keys the Bitbucket leg whenever recents change (the
-    // owner probe backfilling `provider` onto a row does it), so keep the outgoing
-    // page instead of dropping its rows out of the merge until the new key lands.
+    // The repo-paths axis re-keys the Bitbucket leg whenever a recent is added or
+    // removed (only `path` is in the key, and the owner probe never rewrites it),
+    // so keep the outgoing page instead of dropping its rows out of the merge
+    // until the new key lands.
     // Pinned on the provider segment (index 1) and no further: another forge's
     // page is a different inbox, while another path set is the same forge's.
     // CALLER CONTRACT: gate on `!isPlaceholderData` before counting a leg as

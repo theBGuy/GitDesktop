@@ -148,8 +148,8 @@ function App() {
   useBackgroundPrSync();
 
   // Warm the work inbox's sources probe here rather than on its first render:
-  // the probe spawns a CLI, and paying for it at app open keeps it off the
-  // critical path of the welcome → My work jump.
+  // it reads two CLI configs plus the keyring over IPC, and paying for that at
+  // app open keeps it off the critical path of the welcome → My work jump.
   usePrefetchMyWorkSources();
 
   // The app-wide hotkey dispatcher plus the always-available actions.

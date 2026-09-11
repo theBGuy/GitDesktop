@@ -358,7 +358,7 @@ async fn known_hosts_from(paths: &[PathBuf], env_host: Option<&str>) -> Vec<Stri
             hosts.push(host);
         }
     }
-    hosts.retain(|h| h != "github.com" && h != "bitbucket.org");
+    hosts.retain(|h| is_gitlab_eligible_host(h));
     hosts
 }
 
@@ -387,6 +387,14 @@ const GLAB_TOKEN_VARS: &[&str] = &["GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH
 
 /// The host glab targets when nothing else names one.
 const GLAB_DEFAULT_HOST: &str = "gitlab.com";
+
+/// Whether a host may be claimed as GitLab at all. The canonical hosts of the
+/// other two providers never are, whatever a config key or env var says — shared
+/// by [`known_hosts_from`]'s filter and the token-target append so the two can't
+/// drift into disagreeing about what counts as a GitLab host.
+fn is_gitlab_eligible_host(host: &str) -> bool {
+    host != "github.com" && host != "bitbucket.org"
+}
 
 /// A non-empty token from the environment, or `None`. Examined for EMPTINESS
 /// only — the value never leaves this function.
@@ -471,27 +479,56 @@ fn default_host_from_config(text: &str) -> Option<String> {
 /// The env-free core, so every arm is testable without mutating process-global
 /// state.
 ///
-/// A saved host always wins — `GITLAB_HOST` already joins [`known_hosts`], so the
-/// only gap is a token with NO saved host, which glab authenticates against its
-/// default instance (measured on 1.105: with an empty config dir and any one of
-/// the three variables set, `glab api user --hostname gitlab.com` reaches
-/// gitlab.com and 401s on a placeholder token, where the same call with none set
-/// refuses before any request). That default is the config's own `host:` key when
-/// it names an addressable instance, and gitlab.com otherwise — glab's ultimate
-/// default, and the safe direction for an unusable value: a junk `host:` must not
-/// disable a source the user holds a working token for.
+/// A token's instance JOINS the saved hosts rather than replacing them: a user
+/// signed in to a self-managed instance who also exports a token for the cloud
+/// has work on BOTH, and enumerating only the saved list hides one of them
+/// silently. Saved hosts keep their order and come first, so the fold's
+/// "last error" stays deterministic; the default is appended once, never
+/// duplicating a host already saved. `GITLAB_HOST` continues to arrive through
+/// [`known_hosts`], so it lands in the saved half as before.
+///
+/// The token's target resolves in GLAB'S OWN routing precedence — `GITLAB_HOST`,
+/// then the config file's `host:` key, then gitlab.com — because the token is
+/// sent to wherever a bare glab call would go, and guessing a different host
+/// would mail the user's credential to an instance they never configured
+/// (measured on 1.105: a config naming `host: bogus-file.invalid` routes there,
+/// and adding `GITLAB_HOST=bogus-env.invalid` re-routes to the env host, so env
+/// beats file). `GITLAB_HOST` also joins [`known_hosts`], so when it is set the
+/// target is already saved and the append is a no-op — no third host is contacted.
+///
+/// gitlab.com is the last resort, and the safe direction for an unreadable config:
+/// a junk `host:` must not disable a source the user holds a working token for.
+/// Measured: with an empty config dir and any one of the three variables set,
+/// `glab api user --hostname gitlab.com` reaches gitlab.com and 401s on a
+/// placeholder token, where the same call with none set refuses before any
+/// request. A target that is another provider's canonical host is never appended
+/// ([`is_gitlab_eligible_host`]) — `known_hosts` already refuses to claim those,
+/// and re-introducing one here would send the token to it.
+///
+/// THE COST, so the trade is legible: an env token overrides the STORED
+/// credential for whichever host is addressed (measured — a placeholder
+/// `GITLAB_TOKEN` turns this machine's real, working gitlab.com read into a 401),
+/// so a token that doesn't match a saved host already breaks that host's fetch
+/// today, with or without this function. The only delta here is the appended
+/// default; when the token doesn't match it either, that host 401s, which the
+/// column isolates and reports through `truncated` — a quiet partial rather than
+/// a lost column, and strictly better than never asking at all.
 pub(crate) fn account_hosts_from(
     known: Vec<String>,
+    env_host: Option<&str>,
     config_default: Option<&str>,
     env_token: Option<&str>,
 ) -> Vec<String> {
-    if !known.is_empty() {
-        return known;
-    }
+    let mut hosts = known;
     if env_token.is_some_and(|t| !t.trim().is_empty()) {
-        return vec![config_default.unwrap_or(GLAB_DEFAULT_HOST).to_string()];
+        let target = env_host.or(config_default).unwrap_or(GLAB_DEFAULT_HOST);
+        // Every host here is lowercased at its source (`normalize_host`, and the
+        // constant), so a plain compare is the whole dedupe.
+        if is_gitlab_eligible_host(target) && !hosts.iter().any(|h| h == target) {
+            hosts.push(target.to_string());
+        }
     }
-    Vec::new()
+    hosts
 }
 
 /// The text of the first readable glab config, mirroring [`known_hosts_from`]'s
@@ -511,16 +548,27 @@ async fn read_config_text(paths: &[PathBuf]) -> Option<String> {
 pub async fn account_hosts() -> Vec<String> {
     let known = known_hosts().await;
     let token = env_token();
-    // Only the token-without-host path needs the config default, so an ordinary
-    // signed-in session never pays for the extra read.
-    let config_default = if known.is_empty() && token.is_some() {
+    // `GITLAB_HOST` outranks the config file for the token's target, and it is
+    // normalized exactly as `known_hosts_from` normalizes it so the dedupe can
+    // recognise the host it already added.
+    let env_host = std::env::var("GITLAB_HOST")
+        .ok()
+        .and_then(|h| normalize_host(&h));
+    // The file default is only consulted when a token exists AND no env host
+    // outranks it, so an ordinary session never pays for the read.
+    let config_default = if token.is_some() && env_host.is_none() {
         read_config_text(&glab_config_paths())
             .await
             .and_then(|text| default_host_from_config(&text))
     } else {
         None
     };
-    account_hosts_from(known, config_default.as_deref(), token.as_deref())
+    account_hosts_from(
+        known,
+        env_host.as_deref(),
+        config_default.as_deref(),
+        token.as_deref(),
+    )
 }
 
 /// Runs glab, treating any non-zero exit as an error carrying glab's stderr
@@ -645,37 +693,143 @@ mod account_hosts_tests {
     fn a_token_with_no_saved_host_enumerates_the_default_host() {
         // Config names a default → that instance, matching glab's own routing.
         assert_eq!(
-            account_hosts_from(Vec::new(), Some("gitlab.acme.dev"), Some("t")),
+            account_hosts_from(Vec::new(), None, Some("gitlab.acme.dev"), Some("t")),
             vec!["gitlab.acme.dev".to_string()],
         );
         // No default to read → glab's ultimate default.
         assert_eq!(
-            account_hosts_from(Vec::new(), None, Some("t")),
+            account_hosts_from(Vec::new(), None, None, Some("t")),
             vec!["gitlab.com".to_string()],
         );
     }
 
-    /// A saved host always wins, alone or alongside a token — `GITLAB_HOST`
-    /// already joins `known_hosts`, so neither default must ever be appended to a
-    /// list that already names where to look.
+    /// `GITLAB_HOST` names where a bare glab call routes, so it is where the
+    /// token goes — it outranks the config file, matching glab's own precedence.
+    ///
+    /// Without this the append lands on gitlab.com and the inherited company
+    /// token is mailed to an instance the user never named; the cloud 401 would
+    /// then mark an otherwise-complete inbox truncated. Because `GITLAB_HOST`
+    /// already joins `known_hosts`, the correct target is ALREADY saved and the
+    /// append is a no-op — no third host is contacted at all.
     #[test]
-    fn saved_hosts_are_unchanged_by_the_token_arm() {
-        let one = saved(&["gitlab.acme.dev"]);
-        assert_eq!(account_hosts_from(one.clone(), None, None), one);
-        assert_eq!(account_hosts_from(one.clone(), None, Some("t")), one);
+    fn gitlab_host_is_the_token_target_and_outranks_the_config_default() {
+        let env_saved = saved(&["gitlab.company.example"]);
+
+        let hosts = account_hosts_from(
+            env_saved.clone(),
+            Some("gitlab.company.example"),
+            None,
+            Some("t"),
+        );
         assert_eq!(
-            account_hosts_from(one.clone(), Some("gitlab.other.dev"), Some("t")),
+            hosts, env_saved,
+            "the env host is already saved — no append"
+        );
+        assert!(
+            !hosts.iter().any(|h| h == "gitlab.com"),
+            "the company token must never be sent to the cloud",
+        );
+
+        let hosts = account_hosts_from(
+            env_saved.clone(),
+            Some("gitlab.company.example"),
+            Some("gitlab.file.example"),
+            Some("t"),
+        );
+        assert_eq!(
+            hosts, env_saved,
+            "env host outranks the config-file default"
+        );
+        assert!(
+            !hosts.iter().any(|h| h == "gitlab.file.example"),
+            "the outranked file default must not be appended",
+        );
+    }
+
+    /// A target that is another provider's canonical host is never appended —
+    /// `known_hosts` already refuses to claim those, and re-introducing one here
+    /// would send the token to it.
+    #[test]
+    fn a_non_gitlab_target_is_never_appended() {
+        for canonical in ["github.com", "bitbucket.org"] {
+            assert!(
+                account_hosts_from(Vec::new(), Some(canonical), None, Some("t")).is_empty(),
+                "{canonical} must not be enumerated as GitLab",
+            );
+            let one = saved(&["gitlab.acme.dev"]);
+            assert_eq!(
+                account_hosts_from(one.clone(), None, Some(canonical), Some("t")),
+                one,
+                "{canonical} as a config default must not be appended either",
+            );
+        }
+    }
+
+    /// Without a token the saved list is returned untouched — the no-token
+    /// session must be bit-identical to what it always was.
+    #[test]
+    fn saved_hosts_alone_are_returned_unchanged() {
+        let one = saved(&["gitlab.acme.dev"]);
+        assert_eq!(account_hosts_from(one.clone(), None, None, None), one);
+        assert_eq!(
+            account_hosts_from(one.clone(), None, Some("gitlab.com"), None),
             one,
-            "a saved host outranks the config default",
+            "a config default is inert without a token to use it",
+        );
+        assert_eq!(
+            account_hosts_from(one.clone(), Some("gitlab.env.example"), None, None),
+            one,
+            "an env host is inert without a token to use it",
         );
 
         let many = saved(&["gitlab.acme.dev", "gitlab.other.dev"]);
-        assert_eq!(account_hosts_from(many.clone(), None, Some("t")), many);
-        assert!(
-            !account_hosts_from(many.clone(), None, Some("t"))
-                .iter()
-                .any(|h| h == "gitlab.com"),
-            "the default host must not be appended to a saved list",
+        assert_eq!(account_hosts_from(many.clone(), None, None, None), many);
+    }
+
+    /// The cell this closes: signed in to a self-managed instance AND holding a
+    /// token for another. Enumerating only the saved list hides the token's work
+    /// entirely — so the token's instance JOINS the list rather than being
+    /// skipped, saved hosts first so the fold's last-error stays deterministic.
+    #[test]
+    fn a_token_appends_its_instance_to_the_saved_hosts() {
+        assert_eq!(
+            account_hosts_from(saved(&["gitlab.acme.dev"]), None, None, Some("t")),
+            saved(&["gitlab.acme.dev", "gitlab.com"]),
+            "saved host kept and ordered first, token's default appended",
+        );
+        assert_eq!(
+            account_hosts_from(
+                saved(&["gitlab.acme.dev", "gitlab.other.dev"]),
+                None,
+                Some("gitlab.third.dev"),
+                Some("t"),
+            ),
+            saved(&["gitlab.acme.dev", "gitlab.other.dev", "gitlab.third.dev"]),
+            "the config default is what gets appended when one is readable",
+        );
+    }
+
+    /// Appended ONCE: a saved list that already names the token's instance must
+    /// not fetch it twice (the merge would dedupe the items, but the second fetch
+    /// is wasted and doubles that host's failure weight in the fold).
+    #[test]
+    fn the_default_is_never_duplicated_into_the_saved_hosts() {
+        let with_default = saved(&["gitlab.com", "gitlab.acme.dev"]);
+        assert_eq!(
+            account_hosts_from(with_default.clone(), None, None, Some("t")),
+            with_default,
+        );
+
+        let with_config_default = saved(&["gitlab.acme.dev", "gitlab.other.dev"]);
+        assert_eq!(
+            account_hosts_from(
+                with_config_default.clone(),
+                None,
+                Some("gitlab.other.dev"),
+                Some("t"),
+            ),
+            with_config_default,
+            "already-saved config default appends nothing",
         );
     }
 
@@ -684,16 +838,29 @@ mod account_hosts_tests {
     /// host to fetch from — not even when the config names a default.
     #[test]
     fn neither_source_enumerates_nothing() {
-        assert!(account_hosts_from(Vec::new(), None, None).is_empty());
-        assert!(account_hosts_from(Vec::new(), Some("gitlab.acme.dev"), None).is_empty());
+        assert!(account_hosts_from(Vec::new(), None, None, None).is_empty());
+        assert!(account_hosts_from(Vec::new(), None, Some("gitlab.acme.dev"), None).is_empty());
         for blank in ["", " ", "\t", "\n", "   \t "] {
             assert!(
-                account_hosts_from(Vec::new(), None, Some(blank)).is_empty(),
+                account_hosts_from(Vec::new(), None, None, Some(blank)).is_empty(),
                 "{blank:?} is not a token",
             );
             assert!(
-                account_hosts_from(Vec::new(), Some("gitlab.acme.dev"), Some(blank)).is_empty(),
+                account_hosts_from(Vec::new(), None, Some("gitlab.acme.dev"), Some(blank))
+                    .is_empty(),
                 "{blank:?} must not activate the config default either",
+            );
+            assert!(
+                account_hosts_from(Vec::new(), Some("gitlab.env.example"), None, Some(blank))
+                    .is_empty(),
+                "{blank:?} must not activate the env host either",
+            );
+            // …and must not append anything to a saved list either.
+            let one = saved(&["gitlab.acme.dev"]);
+            assert_eq!(
+                account_hosts_from(one.clone(), None, None, Some(blank)),
+                one,
+                "{blank:?} must not append the default to saved hosts",
             );
         }
     }

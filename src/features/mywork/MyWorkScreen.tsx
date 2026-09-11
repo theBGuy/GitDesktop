@@ -290,6 +290,20 @@ async function resolveTarget(
 }
 
 /**
+ * Whether a matched checkout's classification can support opening this row. Repo
+ * detection answers from glab's SAVED hosts, while the inbox enumerates account
+ * hosts as well — a token authenticates glab with no saved host at all — so a
+ * self-managed host known only by token classifies its clones as GitHub while
+ * its rows arrive as GitLab. Landing there would resolve the wrong integration,
+ * and the origin proof cannot see it: that compares namespaces, not providers.
+ * Absence is not disagreement — an unresolved `provider` keeps the row's own.
+ */
+function providerAgrees(recent: RecentRepo, item: MyWorkItem): boolean {
+  const stored = asForgeProvider(recent.provider);
+  return stored === null || stored === item.provider;
+}
+
+/**
  * Whether a row's local match could be the WRONG checkout. `matchLocalRepo` keys
  * on host + owner + name, and GitLab persists only the segment BEFORE the repo
  * name as the owner — so any two GitLab paths sharing their last two segments
@@ -466,8 +480,9 @@ export function MyWorkScreen() {
   // One leg per forge, each gated on the sources probe: a provider with no
   // sign-in behind it is never asked, so it can neither fail nor delay the rows
   // the others already have. Bitbucket has no account-wide search, so its leg
-  // takes EVERY recent path: `bitbucket_my_work` gates each on its own origin
-  // (one cached `git remote get-url` per recent, concurrent), and filtering on
+  // takes EVERY recent path: `bitbucket_my_work` gates each on its own origin,
+  // which costs a `git remote get-url` per recent on essentially every fetch
+  // (that cache's TTL is far shorter than the gap between opens). Filtering on
   // the stored `provider` here would instead hide Bitbucket work forever for
   // anyone who never opens the repo list that backfills it.
   const sources = useMyWorkSources(true);
@@ -540,10 +555,14 @@ export function MyWorkScreen() {
   const interactive = loading ? NO_ITEMS : visible;
   // Every page-derived total in the shell rides the body's paint gate together:
   // a partial number sitting above skeletons and then changing as the held-back
-  // legs land is one defect, not one per tab.
-  const counts = loading
-    ? { all: null, prs: null, issues: null }
-    : { all: items.length, prs: prCount, issues: items.length - prCount };
+  // legs land is one defect, not one per tab. Header and tab strip share the
+  // predicate so they can't disagree: numbers appear once something is on screen
+  // for them to describe — rows, or a forge that answered empty. Skeletons, "no
+  // accounts connected" and the all-failed screen get none.
+  const showCounts = !loading && (answeredLegs.length > 0 || items.length > 0);
+  const counts = showCounts
+    ? { all: items.length, prs: prCount, issues: items.length - prCount }
+    : { all: null, prs: null, issues: null };
   // Derived, never stored: a row the filter has hidden simply stops being
   // active, and arrow keys restart from the ends of the new visible set.
   const activeIndex = interactive.findIndex((i) => i.url === activeUrl);
@@ -558,7 +577,6 @@ export function MyWorkScreen() {
   // And only when there is nothing for it to replace: rows an earlier fetch or
   // another leg supplied outlive the failure, which drops to a notice line.
   const fatal = errors.length > 0 && items.length === 0;
-  const anyLoaded = answeredLegs.length > 0;
   const refreshing =
     sources.isFetching || enabledLegs.some((l) => l.query.isFetching);
   // Refetches the sources probe too: a sign-in that landed while the inbox was
@@ -610,7 +628,13 @@ export function MyWorkScreen() {
     const gen = ++openGen;
     const superseded = () =>
       gen !== openGen || useUiStore.getState().view !== "mywork";
-    const candidates = matchLocalRepos(item, recents);
+    // A checkout whose stored provider contradicts the row's is dropped before
+    // anything can land on it: classification that disagrees can't support the
+    // open, so it takes the browser like any other unproven match. Both open
+    // arms below start here, so PRs and issues are gated alike.
+    const candidates = matchLocalRepos(item, recents).filter((r) =>
+      providerAgrees(r, item),
+    );
     if (candidates.length === 0) {
       openUrl(item.url);
       return;
@@ -842,9 +866,7 @@ export function MyWorkScreen() {
           <ArrowLeftIcon />
         </Button>
         <span className="text-sm font-medium">My work</span>
-        {/* Same paint gate as the body: a count above skeletons would be a
-            partial total that then changes as the held-back legs land. */}
-        {!loading && anyLoaded && (
+        {showCounts && (
           <span className="text-xs tabular-nums text-muted-foreground">
             {items.length}
           </span>
