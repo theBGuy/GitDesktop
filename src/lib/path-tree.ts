@@ -27,8 +27,8 @@ export type PathTreeRow<T> = PathTreeFolderRow | PathTreeLeafRow<T>;
  * DISCARDS the prefix — splitting on "\" too would drop half of `foo\bar.ts` and
  * collide it with a real `bar.ts`. Truncating displays like `PathText` may treat
  * both as separators because they keep both sides. `checkout-copy.ts`'s
- * `baseName` is the other domain — OS worktree paths, where "\" IS a separator —
- * so the two must not be unified.
+ * `baseName` splits the same way for its own domain (git-reported worktree
+ * paths) — a shared spelling, not a shared contract, so keep them separate.
  */
 export function pathBasename(path: string): string {
   const cut = path.lastIndexOf("/");

@@ -2,9 +2,10 @@
 // base picker), so it lives apart from all three: hosting it in one of them
 // would make the other two import a component module to read copy.
 
-/** Last path segment (folder name), tolerating either separator. */
-export const baseName = (p: string) =>
-  p.split(/[/\\]/).filter(Boolean).pop() ?? p;
+/** Last path segment (folder name). Git reports worktree paths forward-slashed
+ *  on every platform (`UserWorktree.path`), and a backslash is a legal
+ *  character in a POSIX directory name, so splitting on one truncates it. */
+export const baseName = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
 
 /** How a branch row NAMES the checkout holding its branch — chip, tooltip, open
  *  item, after-the-fact toast, and the phrases that say a row is held because of

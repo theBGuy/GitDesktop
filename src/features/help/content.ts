@@ -478,9 +478,9 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
   Collapsing a folder drops its hidden files from a multi-selection, and the diff you
   have open stays open. Selection, staging, and filtering behave the same in both
   views; file rows keep their {{secondaryclick}} menu, while a folder row opens the
-  whole-list menu. Your choice is remembered for every repository. *Toggle directory tree view* in the command palette
-  ({{kbd:command-palette}}) flips it too (palette-only by default — bind a key in
-  **Settings → Keyboard**).
+  whole-list menu. Your choice is remembered for every repository. *Toggle
+  directory tree view* in the command palette ({{kbd:command-palette}}) flips it
+  too (palette-only by default — bind a key in **Settings → Keyboard**).
 - **Discard all changes…** clears the whole working tree after a confirm. It sits on the
   changes list's own {{secondaryclick}} menu (over the header or the empty space below
   the files), in the branch ⋮ menu beside **Stash all changes…**, and in the command

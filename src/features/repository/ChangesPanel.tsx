@@ -5,10 +5,11 @@ import {
   FunnelIcon,
   InfoIcon,
   StackIcon,
-  TreeStructureIcon,
+  TreeViewIcon,
 } from "@phosphor-icons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  type FocusEvent,
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
@@ -61,6 +62,7 @@ import { formatBinding } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { flattenPathTree } from "@/lib/path-tree";
+import { CHANGES_VIEW_MODES } from "@/lib/settings/api";
 import {
   useAiEnabled,
   useReviewConfigured,
@@ -284,6 +286,9 @@ export function ChangesPanel({
   const pendingFocusKey = useRef<string | null>(null);
   // The view mode a flip-armed claim waits for; null = claimable right away.
   const pendingFocusMode = useRef<"list" | "tree" | null>(null);
+  // The row focus sat in when that claim was armed; null = focus was not on a
+  // row (a background arm, with the caret in the filter or outside the list).
+  const pendingFocusSource = useRef<string | null>(null);
 
   const entries = status.data?.entries ?? [];
   const conflictedPaths = entries
@@ -508,6 +513,18 @@ export function ChangesPanel({
   function deferFocusRow(key: string, untilMode?: "list" | "tree") {
     pendingFocusKey.current = key;
     pendingFocusMode.current = untilMode ?? null;
+    // Where the gesture started, so the claim can tell focus that never moved
+    // from focus that belongs to somebody else. Null for the arms that fire
+    // while the caret is outside the list — they stay orphan-only.
+    const from = focusedNavRow();
+    pendingFocusSource.current = from ? rowKeyOf(from.row) : null;
+  }
+
+  /** A claim and its source row retire together — nothing reads one without the
+   *  other. */
+  function clearPendingFocus() {
+    pendingFocusKey.current = null;
+    pendingFocusSource.current = null;
   }
 
   /** Claims focus for a deferred row once the list has scrolled to it. Returns
@@ -528,18 +545,29 @@ export function ChangesPanel({
     pendingFocusMode.current = null;
     // A newer cursor move owns focus now, so this claim is stale.
     if (key !== cursorKey) {
-      pendingFocusKey.current = null;
+      clearPendingFocus();
       return true;
     }
-    if (!focusIsOrphaned()) {
-      pendingFocusKey.current = null;
+    // The orphan guard is what keeps a claim from stealing a live control's
+    // caret. Focus still sitting in the row the jump was armed from is the one
+    // sanctioned exception: it hasn't moved since the gesture, so the claim
+    // finishes that gesture instead of interrupting somebody. Without it a jump
+    // past the mounted window strands focus on the row the user left, and every
+    // later key reads that row instead of the one the cursor names.
+    const from = focusedNavRow();
+    const atSource =
+      pendingFocusSource.current !== null &&
+      from !== null &&
+      rowKeyOf(from.row) === pendingFocusSource.current;
+    if (!focusIsOrphaned() && !atSource) {
+      clearPendingFocus();
       return true;
     }
     const el = listRef.current?.querySelector<HTMLElement>(
       `[data-row="${CSS.escape(key)}"]`,
     );
     if (!el) return false;
-    pendingFocusKey.current = null;
+    clearPendingFocus();
     el.focus();
     return true;
   }
@@ -576,6 +604,10 @@ export function ChangesPanel({
     }
   }
 
+  // List mode has no tree to walk, so Left/Right stay the browser's — one gate
+  // for both the hook and the focused-row wrapper below.
+  const arrowLeft = treeMode ? onArrowLeft : undefined;
+  const arrowRight = treeMode ? onArrowRight : undefined;
   // Arrow keys walk the rows across both sections; Shift extends from the
   // anchor, a plain arrow collapses to the single active row.
   const navKeyDown = listKeyboardNav({
@@ -583,10 +615,46 @@ export function ChangesPanel({
     activeIndex: navIndex,
     rowKey: rowKeyOf,
     onActivate: activateRow,
-    // List mode has no tree to walk, so Left/Right stay the browser's.
-    onArrowLeft: treeMode ? onArrowLeft : undefined,
-    onArrowRight: treeMode ? onArrowRight : undefined,
+    onArrowLeft: arrowLeft,
+    onArrowRight: arrowRight,
   });
+
+  /** The navigable row DOM focus sits in, resolved from the DOM at use rather
+   *  than stored: a focused-row cursor of our own would re-mint the whole
+   *  stale-key family the folder-cursor reconciliation exists for. Null unless
+   *  focus is inside the list and inside a row (its own controls included). */
+  function focusedNavRow(): { row: FlatRow; index: number } | null {
+    const list = listRef.current;
+    const focused = document.activeElement;
+    if (!list || !(focused instanceof HTMLElement) || !list.contains(focused))
+      return null;
+    const key = focused.closest("[data-row]")?.getAttribute("data-row");
+    if (!key) return null;
+    const index = navRows.findIndex((r) => rowKeyOf(r) === key);
+    return index === -1 ? null : { row: navRows[index], index };
+  }
+
+  /** Left/Right fold and walk the tree, so they act on the row FOCUS is on: the
+   *  hook resolves from the cursor, which a bare Tab leaves behind (and with no
+   *  file selected it returns before the horizontal callbacks at all), so those
+   *  keys would fold the old selection's parent, or nothing. Up/Down keep
+   *  anchoring at the cursor — master's Tab behaviour, unchanged. A focused tree
+   *  region swallows both keys whether or not they moved anything, exactly as
+   *  the hook path does, so the list never scrolls sideways under them. */
+  function handleListKeyDown(e: KeyboardEvent) {
+    let horizontal: typeof arrowLeft;
+    if (e.key === "ArrowLeft") horizontal = arrowLeft;
+    else if (e.key === "ArrowRight") horizontal = arrowRight;
+    if (horizontal) {
+      const hit = focusedNavRow();
+      if (hit) {
+        e.preventDefault();
+        horizontal(hit.row, hit.index);
+        return;
+      }
+    }
+    navKeyDown(e);
+  }
   // The list element lives in the virtualized child, and every focus restore
   // queries through it — so it comes from the mount itself, never from an event
   // a mouse-only session would never fire. Stable identity: a fresh callback
@@ -634,7 +702,7 @@ export function ChangesPanel({
   // compaction, the toggles, any path added later; the toggle-site
   // reconciliations remain the synchronous fast path, which usually prevents the
   // orphan window entirely.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the cursor key stops resolving
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the cursor key stopped resolving
   useEffect(() => {
     if (activeFolderKey === null || navIndex !== -1) return;
     const parsed = FOLDER_ROW_KEY_RE.exec(activeFolderKey);
@@ -716,6 +784,22 @@ export function ChangesPanel({
     }
     setSelectedKeys(new Set([key]));
     setAnchorKey(key);
+  }
+
+  /** Keeps the folder cursor off a row focus has left — the arrow and view-flip
+   *  arms act on it. A folder row parks it (pure cursor state); a file row only
+   *  CLEARS it, because a file cursor IS the shown-diff selection and selecting
+   *  on focus would make Tab clobber the open diff. Delegated over the list, so
+   *  no row kind can miss it and a row's own controls count too (React's
+   *  `onFocus` is `focusin`, which bubbles); focus outside a row — the filter, a
+   *  palette dispatch — must leave the cursor where the flip arms read it. */
+  function handleRowFocus(e: FocusEvent) {
+    if (!(e.target instanceof HTMLElement)) return;
+    const key = e.target.closest("[data-row]")?.getAttribute("data-row");
+    if (!key || key === cursorKey) return;
+    const row = navRows.find((r) => rowKeyOf(r) === key);
+    if (!row) return;
+    setActiveFolderKey(row.type === "folder" ? key : null);
   }
 
   // Toggle one file's staged state — the row's +/- button and the single menu.
@@ -1294,10 +1378,8 @@ export function ChangesPanel({
           data-row={rowKeyOf(row)}
           role="option"
           aria-selected={false}
-          aria-expanded={!row.collapsed}
-          // ARIA 1.2 doesn't give `option` an expanded state, so the label
-          // carries what the caret shows; `aria-expanded` stays for the readers
-          // that do honour it.
+          // ARIA 1.2 gives `option` no expanded state, so the label carries
+          // what the caret shows.
           aria-label={`${row.label} — ${row.count} ${
             row.count === 1 ? "file" : "files"
           }, ${row.collapsed ? "collapsed" : "expanded"}`}
@@ -1442,7 +1524,7 @@ export function ChangesPanel({
               }
               onClick={toggleViewMode}
             >
-              <TreeStructureIcon />
+              <TreeViewIcon />
             </Button>
           </div>
 
@@ -1497,7 +1579,8 @@ export function ChangesPanel({
                 setFilterText("");
                 setActiveKinds(new Set());
               }}
-              onListKeyDown={navKeyDown}
+              onListKeyDown={handleListKeyDown}
+              onListFocus={handleRowFocus}
               onListEl={handleListEl}
               onContextMenuCapture={handleContextMenu}
               onCursorScrolled={claimPendingFocus}
@@ -1635,6 +1718,7 @@ function VirtualizedChangeList({
   nothingMatches,
   onClearFilter,
   onListKeyDown,
+  onListFocus,
   onListEl,
   onContextMenuCapture,
   onCursorScrolled,
@@ -1647,7 +1731,7 @@ function VirtualizedChangeList({
   text: string;
   activeKinds: Set<FilterKind>;
   /** A `getItemKey` identity input, not read directly. */
-  viewMode: string;
+  viewMode: (typeof CHANGES_VIEW_MODES)[number];
   /** A `getItemKey` identity input, not read directly. */
   collapsedFolders: Set<string>;
   /** The cursor row — a file or (tree mode) a folder — kept scrolled into view. */
@@ -1655,6 +1739,9 @@ function VirtualizedChangeList({
   nothingMatches: boolean;
   onClearFilter: () => void;
   onListKeyDown: (e: KeyboardEvent) => void;
+  /** Every focus inside the list, delegated: the panel keeps its folder cursor
+   *  in step with the row focus landed in. */
+  onListFocus: (e: FocusEvent) => void;
   /** Hands the mounted scroll container up to the panel, which queries rows
    *  through it. Must be referentially stable — it rides the element's ref. */
   onListEl: (el: HTMLDivElement | null) => void;
@@ -1763,6 +1850,7 @@ function VirtualizedChangeList({
           ref={setListEl}
           className="min-h-0 flex-1 overflow-y-auto"
           onKeyDown={onListKeyDown}
+          onFocus={onListFocus}
           onContextMenuCapture={onContextMenuCapture}
           role="listbox"
           aria-label="Changed files"
