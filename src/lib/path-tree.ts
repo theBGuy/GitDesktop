@@ -21,11 +21,17 @@ export interface PathTreeLeafRow<T> {
 
 export type PathTreeRow<T> = PathTreeFolderRow | PathTreeLeafRow<T>;
 
-/** Last path segment ("src/lib/x.ts" → "x.ts"). Both separators, so a name this
- *  abbreviates starts where `PathText` also splits it — git emits "/", but the
- *  two displays must not disagree on a path holding a literal "\". */
+/**
+ * Last path segment ("src/lib/x.ts" → "x.ts"). Splits on "/" ALONE: these are
+ * git repo paths, where "\" is a legal POSIX filename character, and this helper
+ * DISCARDS the prefix — splitting on "\" too would drop half of `foo\bar.ts` and
+ * collide it with a real `bar.ts`. Truncating displays like `PathText` may treat
+ * both as separators because they keep both sides. `checkout-copy.ts`'s
+ * `baseName` is the other domain — OS worktree paths, where "\" IS a separator —
+ * so the two must not be unified.
+ */
 export function pathBasename(path: string): string {
-  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const cut = path.lastIndexOf("/");
   return cut === -1 ? path : path.slice(cut + 1);
 }
 

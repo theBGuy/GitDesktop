@@ -165,6 +165,19 @@ function focusIsOrphaned(): boolean {
   return !focused || focused === document.body || !focused.isConnected;
 }
 
+/** Whether a restore may move focus away on behalf of the row `key` names: focus
+ *  sits on that row (still mounted, about to go) or on nobody. A view flip
+ *  dispatched from the palette leaves the doomed row focused, so orphan-only
+ *  would never fire — and a caret in a live control must still be left alone. */
+function focusLeavingRow(key: string): boolean {
+  const focused = document.activeElement;
+  return (
+    (focused instanceof HTMLElement &&
+      focused.getAttribute("data-row") === key) ||
+    focusIsOrphaned()
+  );
+}
+
 /** Drops the selection keys hidden under `collapsedKeys` (each `"<section>:<dir>"`,
  *  sharing the selection keys' `"<section>:<path>"` spelling). One rule for both
  *  ways a row can go hidden — collapsing a folder, and entering tree mode with
@@ -194,6 +207,9 @@ function rowKeyOf(row: FlatRow): string {
   if (row.type === "folder") return `folder:${row.section}:${row.path}`;
   return keyOf(row.entry.path, row.staged);
 }
+
+/** Splits a folder row key back into its section and directory path. */
+const FOLDER_ROW_KEY_RE = /^folder:(staged|unstaged):(.+)$/;
 
 /** The indent level a row sits at; headers and list-mode files are at the root. */
 function rowDepth(row: FlatRow): number {
@@ -266,6 +282,8 @@ export function ChangesPanel({
   // A cursor row a horizontal jump could not focus because the virtualizer had
   // not mounted it yet; claimed once the scroll brings it in.
   const pendingFocusKey = useRef<string | null>(null);
+  // The view mode a flip-armed claim waits for; null = claimable right away.
+  const pendingFocusMode = useRef<"list" | "tree" | null>(null);
 
   const entries = status.data?.entries ?? [];
   const conflictedPaths = entries
@@ -475,19 +493,39 @@ export function ChangesPanel({
       `[data-row="${CSS.escape(key)}"]`,
     );
     if (!el) {
-      pendingFocusKey.current = key;
+      deferFocusRow(key);
       return;
     }
     el.focus();
     el.scrollIntoView({ block: "nearest" });
   }
 
+  /** Arms the claim without trying the DOM — the one place that writes the
+   *  pending key. For a row mounted NOW that the coming re-render may carry out
+   *  of the virtualized window: `focusRow` would find it, re-focus the node that
+   *  already has focus, and arm nothing for the window exit. `untilMode` holds
+   *  the claim until that view mode is on screen (see {@link claimPendingFocus}). */
+  function deferFocusRow(key: string, untilMode?: "list" | "tree") {
+    pendingFocusKey.current = key;
+    pendingFocusMode.current = untilMode ?? null;
+  }
+
   /** Claims focus for a deferred row once the list has scrolled to it. Returns
-   *  false only while the row is still unmounted, so the caller can retry on a
-   *  later frame. */
+   *  false only while the claim cannot be settled yet, so the caller can retry on
+   *  a later frame. */
   function claimPendingFocus(): boolean {
     const key = pendingFocusKey.current;
     if (key === null) return true;
+    // A flip-armed claim survives until the flip RENDERS. The cursor moves at
+    // dispatch but the mode only changes once the settings write lands, so this
+    // runs first against the old layout, where "the row is mounted" and "focus
+    // is live" are pre-flip facts that must not settle — let alone clear — it.
+    if (
+      pendingFocusMode.current !== null &&
+      viewMode !== pendingFocusMode.current
+    )
+      return false;
+    pendingFocusMode.current = null;
     // A newer cursor move owns focus now, so this claim is stale.
     if (key !== cursorKey) {
       pendingFocusKey.current = null;
@@ -549,12 +587,13 @@ export function ChangesPanel({
     onArrowLeft: treeMode ? onArrowLeft : undefined,
     onArrowRight: treeMode ? onArrowRight : undefined,
   });
-  const onListKeyDown = (e: KeyboardEvent) => {
-    // The list element only exists in the virtualized child; take it from the
-    // event so the horizontal keys can focus the row they move to.
-    listRef.current = e.currentTarget as HTMLElement;
-    navKeyDown(e);
-  };
+  // The list element lives in the virtualized child, and every focus restore
+  // queries through it — so it comes from the mount itself, never from an event
+  // a mouse-only session would never fire. Stable identity: a fresh callback
+  // each render would detach and re-attach the node.
+  const handleListEl = useCallback((el: HTMLDivElement | null) => {
+    listRef.current = el;
+  }, []);
 
   // Drop the selection when the selected file leaves its section
   // (e.g. it was staged, committed, or reverted externally).
@@ -589,6 +628,33 @@ export function ChangesPanel({
     setCollapsedFolders(new Set());
     setActiveFolderKey(null);
   }, [repoPath]);
+  // The backstop for a folder cursor whose row was re-keyed: whenever
+  // `activeFolderKey` stops resolving, it is re-keyed to the surviving row or
+  // cleared. Every re-key source lands here — external status churn changing
+  // compaction, the toggles, any path added later; the toggle-site
+  // reconciliations remain the synchronous fast path, which usually prevents the
+  // orphan window entirely.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the cursor key stops resolving
+  useEffect(() => {
+    if (activeFolderKey === null || navIndex !== -1) return;
+    const parsed = FOLDER_ROW_KEY_RE.exec(activeFolderKey);
+    if (!parsed) return;
+    const section = parsed[1] as "staged" | "unstaged";
+    const dir = parsed[2];
+    // A re-key only ever extends the chain downward (a shortened chain keeps its
+    // key), so the survivor is the first row at or under the stale directory.
+    const nextKey = findFolderRowKey(
+      section,
+      collapsedIn(section),
+      (p) => p === dir || p.startsWith(`${dir}/`),
+    );
+    // Null = the folder's files are gone entirely; the cursor just clears.
+    setActiveFolderKey(nextKey);
+    // Post-commit the old row is already unmounted, so orphaned focus is the
+    // whole signal — a caret parked in the filter input during a background
+    // refresh must stay where it is.
+    if (nextKey !== null && focusIsOrphaned()) focusRow(nextKey);
+  }, [activeFolderKey, navIndex]);
   const mutating = stage.isPending || unstage.isPending;
   const onError = (e: unknown) => toastError(e);
 
@@ -664,31 +730,40 @@ export function ChangesPanel({
     void stage.mutateAsync([literalPathspec(entry.path)]).catch(onError);
   }
 
+  /** The key of the first folder row whose path satisfies `match` in `section`'s
+   *  tree under `collapsed`. The tree is pure, so a not-yet-rendered arrangement
+   *  can be asked directly; rows come in render order, so "first" is the
+   *  outermost match. Null = no such row. */
+  function findFolderRowKey(
+    section: "staged" | "unstaged",
+    collapsed: Set<string>,
+    match: (path: string) => boolean,
+  ): string | null {
+    const sectionEntries =
+      section === "staged" ? stagedEntries : unstagedEntries;
+    const row = flattenPathTree(sectionEntries, (e) => e.path, collapsed).find(
+      (r) => r.kind === "folder" && match(r.path),
+    );
+    return row && row.kind === "folder"
+      ? `folder:${section}:${row.path}`
+      : null;
+  }
+
   /** The row key `dirPath` carries once `nextCollapsed` applies. Expanding a
    *  node re-enables compaction THROUGH it, which re-keys its row to the deeper
-   *  compacted path; the tree is pure, so the post-toggle rows can be asked
-   *  directly. Null = no folder row names this directory any more. */
+   *  compacted path. Null = no folder row names this directory any more. */
   function folderKeyAfterToggle(
     section: "staged" | "unstaged",
     dirPath: string,
     nextCollapsed: Set<string>,
   ): string | null {
-    const sectionEntries =
-      section === "staged" ? stagedEntries : unstagedEntries;
     // The node's own row precedes every descendant, so the first row at or under
     // dirPath is the (possibly re-keyed) chain this directory now lives in.
-    const row = flattenPathTree(
-      sectionEntries,
-      (e) => e.path,
+    return findFolderRowKey(
+      section,
       nextCollapsed,
-    ).find(
-      (r) =>
-        r.kind === "folder" &&
-        (r.path === dirPath || r.path.startsWith(`${dirPath}/`)),
+      (path) => path === dirPath || path.startsWith(`${dirPath}/`),
     );
-    return row && row.kind === "folder"
-      ? `folder:${section}:${row.path}`
-      : null;
   }
 
   // Collapse or expand one directory. Collapsing drops the hidden descendants
@@ -737,31 +812,66 @@ export function ChangesPanel({
 
   function toggleViewMode() {
     if (!settings.data) return;
+    const nextMode = treeMode ? "list" : "tree";
     // The flat list has no folder rows for a parked cursor to name.
     setActiveFolderKey(null);
-    // Collapse state outlives list mode by design, so entering tree mode can
-    // hide rows selected while they were flat — prune them as a collapse does.
-    if (!treeMode)
-      setSelectedKeys((prev) => pruneHiddenKeys(prev, collapsedFolders));
-    // Leaving tree mode unmounts the folder rows, so a cursor parked on one
-    // takes its focus with it — the palette route dispatches with focus still on
-    // the doomed row, and it lands on <body>. Hand focus to the file row the
-    // list keeps, or to the control that owns the swap.
-    if (treeMode && activeFolderKey !== null) {
-      const focused = document.activeElement;
-      const onDoomedRow =
-        focused instanceof HTMLElement &&
-        focused.getAttribute("data-row") === activeFolderKey;
-      if (onDoomedRow || focusIsOrphaned()) {
-        if (activeKey !== null) focusRow(activeKey);
+    // A flip can unmount the focused row OR merely reorder it out of the
+    // virtualized window, and the palette route dispatches with focus still on
+    // it — either way focus lands on <body> and the arrow keys go dead. The arms
+    // route by cursor: a parked FOLDER cursor exists only leaving tree mode; a
+    // file cursor a collapse will swallow exists only entering it; every other
+    // surviving file cursor takes the deferred claim last.
+    let swallowedByCollapse = false;
+    if (treeMode) {
+      // Leaving tree mode: the folder rows go, so a cursor parked on one takes
+      // the file row the list keeps, or the control that owns the swap. The
+      // claim is DEFERRED: the file row is mounted in the old layout, but the
+      // flip's reorder can carry it out of the window — focusing it now would
+      // arm nothing for that exit.
+      if (activeFolderKey !== null && focusLeavingRow(activeFolderKey)) {
+        if (activeKey !== null) deferFocusRow(activeKey, nextMode);
         else viewToggleRef.current?.focus();
       }
+    } else {
+      // Collapse state outlives list mode by design, so entering tree mode can
+      // hide rows selected while they were flat — prune them as a collapse does.
+      setSelectedKeys((prev) => pruneHiddenKeys(prev, collapsedFolders));
+      // The same collapse can swallow the focused file row: park the cursor on
+      // the folder that now stands for it. That folder row cannot exist before
+      // the flip, so the claim is armed for it outright.
+      if (selectedFile && activeKey !== null) {
+        const section = selectedFile.staged ? "staged" : "unstaged";
+        const collapsed = collapsedIn(section);
+        swallowedByCollapse = [...collapsed].some((dir) =>
+          selectedFile.path.startsWith(`${dir}/`),
+        );
+        if (swallowedByCollapse && focusLeavingRow(activeKey)) {
+          const swallowing = findFolderRowKey(
+            section,
+            collapsed,
+            (path) =>
+              collapsed.has(path) && selectedFile.path.startsWith(`${path}/`),
+          );
+          if (swallowing !== null) {
+            setActiveFolderKey(swallowing);
+            deferFocusRow(swallowing, nextMode);
+          } else viewToggleRef.current?.focus();
+        }
+      }
     }
+    // Both directions re-sort the rows (tree mode puts folders first), so a file
+    // cursor whose row survives visible can still leave the window. Its row is
+    // mounted right now, so the claim is armed directly for the post-flip
+    // window; if the row never moves, focus survives and the claim no-ops.
+    if (
+      !swallowedByCollapse &&
+      activeFolderKey === null &&
+      activeKey !== null &&
+      focusLeavingRow(activeKey)
+    )
+      deferFocusRow(activeKey, nextMode);
     void saveSettings
-      .mutateAsync({
-        ...settings.data,
-        changesViewMode: treeMode ? "list" : "tree",
-      })
+      .mutateAsync({ ...settings.data, changesViewMode: nextMode })
       .catch(() => undefined);
   }
 
@@ -1387,7 +1497,8 @@ export function ChangesPanel({
                 setFilterText("");
                 setActiveKinds(new Set());
               }}
-              onListKeyDown={onListKeyDown}
+              onListKeyDown={navKeyDown}
+              onListEl={handleListEl}
               onContextMenuCapture={handleContextMenu}
               onCursorScrolled={claimPendingFocus}
               renderRow={renderRow}
@@ -1524,6 +1635,7 @@ function VirtualizedChangeList({
   nothingMatches,
   onClearFilter,
   onListKeyDown,
+  onListEl,
   onContextMenuCapture,
   onCursorScrolled,
   renderRow,
@@ -1543,6 +1655,9 @@ function VirtualizedChangeList({
   nothingMatches: boolean;
   onClearFilter: () => void;
   onListKeyDown: (e: KeyboardEvent) => void;
+  /** Hands the mounted scroll container up to the panel, which queries rows
+   *  through it. Must be referentially stable — it rides the element's ref. */
+  onListEl: (el: HTMLDivElement | null) => void;
   onContextMenuCapture: (e: MouseEvent) => void;
   /** Called a frame after the cursor row is scrolled to, so the panel can focus
    *  a row it could not reach while unmounted. False = still unmounted, retry. */
@@ -1552,6 +1667,16 @@ function VirtualizedChangeList({
   // State-backed (not a plain ref) so the virtualizer observes the scroll
   // element the instant it mounts — a plain ref would leave the first paint blank.
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  // Both sinks for that one element: the state write the virtualizer's mount
+  // contract needs, and the panel's handle for its focus restores. Stable, or
+  // React would detach and re-attach the node on every render.
+  const setListEl = useCallback(
+    (el: HTMLDivElement | null) => {
+      setScrollEl(el);
+      onListEl(el);
+    },
+    [onListEl],
+  );
   // The virtualizer keys its measurement projection on `getItemKey`'s IDENTITY,
   // so this is re-minted per row sequence rather than per render: a fresh closure
   // every render rebuilds all rows (1.7ms vs 0.019ms at 20k rows, measured on
@@ -1597,7 +1722,10 @@ function VirtualizedChangeList({
   // mounts on the virtualizer's own re-render, a frame or more after the scroll,
   // so the deferred focus claim gets a few frames before it gives up. Keyed on
   // the row IDENTITY too: an expand can re-key the cursor row at the SAME flat
-  // index, and the pending-focus claim must still run.
+  // index, and the pending-focus claim must still run — and on the view MODE,
+  // which is what a flip-armed claim waits for: the cursor's row can sit at the
+  // same index in both layouts (a root-level file above the section that held
+  // the folders), and that claim would then never be re-offered.
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on active change
   useEffect(() => {
     if (activeFlatIndex < 0) return;
@@ -1611,7 +1739,7 @@ function VirtualizedChangeList({
     };
     frame = requestAnimationFrame(claim);
     return () => cancelAnimationFrame(frame);
-  }, [activeFlatIndex, activeRowKey]);
+  }, [activeFlatIndex, activeRowKey, viewMode]);
   // Jump back to the top whenever the filter changes the visible set. Gated on
   // the filter actually changing: <Activity> replays effects on every tab show,
   // and an unguarded reset would drop the scroll position it preserves.
@@ -1632,7 +1760,7 @@ function VirtualizedChangeList({
         // `onContextMenuCapture` (capture phase, so it runs before the menu
         // opens) records which row/header was hit.
         <div
-          ref={setScrollEl}
+          ref={setListEl}
           className="min-h-0 flex-1 overflow-y-auto"
           onKeyDown={onListKeyDown}
           onContextMenuCapture={onContextMenuCapture}
