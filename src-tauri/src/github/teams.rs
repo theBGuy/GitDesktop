@@ -64,6 +64,14 @@ fn is_missing_org_scope(stderr: &str) -> bool {
     stderr.to_ascii_lowercase().contains("read:org")
 }
 
+/// Flatten `--paginate --slurp` output — an outer array of PAGES, each itself the
+/// endpoint's own array — into one list. Pure: `--slurp` nests one level deeper than
+/// an unpaginated body, so reading the outer array as the payload would drop every
+/// team. Mirrors `pr::flatten_slurped_pages`.
+fn flatten_slurped_pages(pages: Vec<Vec<RawTeam>>) -> Vec<RawTeam> {
+    pages.into_iter().flatten().collect()
+}
+
 /// Keep the teams whose organization is this repo's owner, qualified for the search.
 /// Pure, so the compose step — the whole reason this module exists — is pinned
 /// without a spawn. Org logins compare case-insensitively (GitHub's own comparison),
@@ -97,9 +105,14 @@ fn teams_in_org(raw: Vec<RawTeam>, owner: &str) -> Vec<TeamRef> {
 pub async fn my_teams(repo_path: &str, lens: Option<&str>) -> AppResult<MyTeams> {
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
     let owner = slug.split('/').next().unwrap_or_default().to_string();
+    // `--slurp` is what makes the pagination version-proof, not a shape preference:
+    // gh 2.94 concatenates a multi-page body into ONE array (measured across a real
+    // two-page walk), but older gh emitted one array PER page, which no single `Vec`
+    // can parse. `--slurp` (gh 2.44+) wraps the pages in an outer array on every
+    // version, so the flatten below reads the same either way.
     let out = match run_gh(
         Some(repo_path),
-        &["api", "user/teams", "--paginate"],
+        &["api", "user/teams", "--paginate", "--slurp"],
         GH_NETWORK_TIMEOUT,
     )
     .await
@@ -115,37 +128,73 @@ pub async fn my_teams(repo_path: &str, lens: Option<&str>) -> AppResult<MyTeams>
         }
         Err(e) => return Err(e),
     };
-    let raw: Vec<RawTeam> = serde_json::from_str(&out.stdout_lossy())
+    let pages: Vec<Vec<RawTeam>> = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| gh_unreadable("your teams", format!("could not parse user/teams: {e}")))?;
     Ok(MyTeams {
-        teams: teams_in_org(raw, &owner),
+        teams: teams_in_org(flatten_slurped_pages(pages), &owner),
         missing_scope: false,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_missing_org_scope, teams_in_org, MyTeams, RawTeam, TeamRef};
+    use super::{
+        flatten_slurped_pages, is_missing_org_scope, teams_in_org, MyTeams, RawTeam, TeamRef,
+    };
 
-    /// Captured verbatim from `gh api user/teams --paginate` (fields beyond these
-    /// four are ignored).
+    /// The `--paginate --slurp` shape: an outer array of PAGES. Captured from
+    /// `gh api "user/teams?per_page=2" --paginate --slurp`, whose real two-page walk
+    /// returned these four teams split 2/2 (fields beyond these three are ignored).
     const FIXTURE: &str = r#"[
-      {"name":"Developers","slug":"developers","organization":{"login":"EpicGames"}},
-      {"name":"admin","slug":"admin","organization":{"login":"blizzhackers"}},
-      {"name":"bh","slug":"bh","organization":{"login":"blizzhackers"}},
-      {"name":"YARB","slug":"yarb","organization":{"login":"blizzhackers"}}
+      [
+        {"name":"Developers","slug":"developers","organization":{"login":"EpicGames"}},
+        {"name":"admin","slug":"admin","organization":{"login":"blizzhackers"}}
+      ],
+      [
+        {"name":"bh","slug":"bh","organization":{"login":"blizzhackers"}},
+        {"name":"YARB","slug":"yarb","organization":{"login":"blizzhackers"}}
+      ]
     ]"#;
 
     fn parse() -> Vec<RawTeam> {
-        serde_json::from_str(FIXTURE).expect("fixture parses")
+        let pages: Vec<Vec<RawTeam>> = serde_json::from_str(FIXTURE).expect("fixture parses");
+        assert_eq!(
+            pages.len(),
+            2,
+            "the fixture must exercise a MULTI-page walk"
+        );
+        flatten_slurped_pages(pages)
+    }
+
+    /// The page boundary must be invisible downstream: a team on page 2 has to reach
+    /// the picker exactly like one on page 1. Reading the slurped outer array as the
+    /// payload would instead yield two "teams" with no slug and drop all four.
+    #[test]
+    fn slurped_pages_flatten_into_one_team_list() {
+        let flat = parse();
+        assert_eq!(flat.len(), 4);
+        let slugs: Vec<&str> = flat
+            .iter()
+            .map(|t| t.slug.as_deref().unwrap_or_default())
+            .collect();
+        assert_eq!(slugs, ["developers", "admin", "bh", "yarb"]);
+        // A single-page walk still slurps into an outer array of one.
+        let one: Vec<Vec<RawTeam>> =
+            serde_json::from_str(r#"[[{"slug":"solo","organization":{"login":"octo"}}]]"#)
+                .expect("parses");
+        assert_eq!(flatten_slurped_pages(one).len(), 1);
+        // An account in no teams slurps to an outer array holding one empty page.
+        let empty: Vec<Vec<RawTeam>> = serde_json::from_str("[[]]").expect("parses");
+        assert!(flatten_slurped_pages(empty).is_empty());
     }
 
     #[test]
     fn teams_are_org_qualified_for_the_search_qualifier() {
         let teams = teams_in_org(parse(), "blizzhackers");
         let slugs: Vec<&str> = teams.iter().map(|t| t.slug.as_str()).collect();
-        // The bare slug `user/teams` returns would match nothing; the qualified
-        // form is what the filter sends.
+        // `bh` and `yarb` live on page 2 of the fixture, so this also pins that the
+        // qualified form survives the page boundary. The bare slug `user/teams`
+        // returns would match nothing; the qualified form is what the filter sends.
         assert_eq!(
             slugs,
             ["blizzhackers/admin", "blizzhackers/bh", "blizzhackers/yarb"]

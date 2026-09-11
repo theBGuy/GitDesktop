@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
+use crate::forge::gitlab::null_to_default;
 use crate::forge::model::RemoteListFilter;
 use crate::github::gh_unreadable;
 use crate::github::issue::IssueInfo;
@@ -193,9 +194,13 @@ pub(crate) fn search_query(
 // carries user-supplied logins and labels, and a GraphQL document is not a place
 // to interpolate those.
 
-const PR_SEARCH_QUERY: &str = "query($q:String!,$first:Int!,$after:String){ search(query:$q, type: ISSUE_ADVANCED, first:$first, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ ... on PullRequest { number url title baseRefName headRefName isDraft state author{ login } labels(first:100){ nodes{ name } } createdAt isCrossRepository } } } }";
+// `author{ login __typename }`, not `author{ login }`: GraphQL returns a GitHub App's
+// BARE login (`dependabot`) where `gh pr list --json author` returns the `app/`-prefixed
+// form (`app/dependabot`) that gh's export layer adds for Bot actors. `__typename` is
+// what lets the mapping restore that prefix — see [`RawSearchAuthor::into_author`].
+const PR_SEARCH_QUERY: &str = "query($q:String!,$first:Int!,$after:String){ search(query:$q, type: ISSUE_ADVANCED, first:$first, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ ... on PullRequest { number url title baseRefName headRefName isDraft state author{ login __typename } labels(first:100){ nodes{ name } } createdAt isCrossRepository } } } }";
 
-const ISSUE_SEARCH_QUERY: &str = "query($q:String!,$first:Int!,$after:String){ search(query:$q, type: ISSUE_ADVANCED, first:$first, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ ... on Issue { number url title state author{ login } labels(first:100){ nodes{ name } } createdAt updatedAt } } } }";
+const ISSUE_SEARCH_QUERY: &str = "query($q:String!,$first:Int!,$after:String){ search(query:$q, type: ISSUE_ADVANCED, first:$first, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ ... on Issue { number url title state author{ login __typename } labels(first:100){ nodes{ name } } createdAt updatedAt } } } }";
 
 const MERGEABILITY_SEARCH_QUERY: &str = "query($q:String!,$first:Int!,$after:String){ search(query:$q, type: ISSUE_ADVANCED, first:$first, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ ... on PullRequest { number mergeable state } } } }";
 
@@ -204,7 +209,15 @@ const MERGEABILITY_SEARCH_QUERY: &str = "query($q:String!,$first:Int!,$after:Str
 /// so a PR the viewer demonstrably reviewed can come back with no review at all.
 /// `reviewed-by:@me` in the query and `reviews(author:)` in the selection are the
 /// complete pair.
-const REVIEW_STATE_QUERY: &str = "query($q:String!,$first:Int!,$after:String,$viewer:String!){ search(query:$q, type: ISSUE_ADVANCED, first:$first, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ ... on PullRequest { number updatedAt reviews(author:$viewer, last:1){ nodes{ submittedAt } } } } } }";
+///
+/// `states:` excludes PENDING, and its four members are the whole rest of
+/// `PullRequestReviewState` (verified by introspection). A PENDING review is one the
+/// viewer STARTED and never submitted — not yet a review — and it carries a null
+/// `submittedAt`; since `last: 1` takes the most RECENT review, an unsubmitted draft
+/// would otherwise displace the submitted one the grouping needs, and the null
+/// timestamp would then read as "not reviewed". This app's own pending-review
+/// workflow makes that state common.
+const REVIEW_STATE_QUERY: &str = "query($q:String!,$first:Int!,$after:String,$viewer:String!){ search(query:$q, type: ISSUE_ADVANCED, first:$first, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ ... on PullRequest { number updatedAt reviews(author:$viewer, states:[APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED], last:1){ nodes{ submittedAt } } } } } }";
 
 /// One page's argv. `$q`, `$after`, and `$viewer` ride `-f` (raw string): `-F`
 /// coerces an all-digit or `true`/`false`/`null`-shaped value to a JSON non-string,
@@ -269,6 +282,8 @@ enum Step {
 }
 
 /// The paginator's whole decision, pure so its arms are testable without a spawn.
+/// Each stop reason owns its own `truncated` verdict — the three are NOT
+/// interchangeable, and conflating them is how a short read poses as a complete one.
 ///
 /// Exhaustion always wins over the budgets: a walk that reached `target` on the LAST
 /// page is complete, not truncated — reporting truncation there would make the
@@ -282,15 +297,41 @@ fn advance(
     target: u32,
     max_pages: u32,
 ) -> Step {
-    // An empty page or a cursor the server declined to move also ends the walk, so a
-    // stuck cursor can't spin forever.
-    if !has_next || end_cursor.is_empty() || !got_nodes {
+    // A page that made NO progress — no rows, or a cursor the server declined to move —
+    // stops defensively so a stuck walk can't spin forever. Its verdict is the server's
+    // own claim: rows we never read may still exist exactly when another page was
+    // promised, and calling that complete would be the short read posing as the answer.
+    if end_cursor.is_empty() || !got_nodes {
+        return Step::Stop {
+            truncated: has_next,
+        };
+    }
+    // The server itself says there is nothing after this page.
+    if !has_next {
         return Step::Stop { truncated: false };
     }
+    // A budget we chose: rows remain on the server by construction.
     if nodes_len >= target || pages >= max_pages {
         return Step::Stop { truncated: true };
     }
     Step::Advance
+}
+
+/// One page's nodes out of a `search` connection. `nodes` is nullable, and GraphQL may
+/// spell an empty result set as an explicit `null` rather than omit the key or send
+/// `[]` — all three are the same empty page, and rejecting the null would fail a read
+/// the server answered. A list that IS present but unparseable still errors: that's a
+/// shape failure, never a silently short page. Pure, so both arms test without a spawn.
+fn parse_page_nodes<T: serde::de::DeserializeOwned>(
+    search: &serde_json::Value,
+) -> Result<Vec<Option<T>>, serde_json::Error> {
+    search
+        .get("nodes")
+        .filter(|v| !v.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 /// Walk the search connection until `target` nodes are collected, the server
@@ -331,13 +372,11 @@ async fn search_nodes<T: serde::de::DeserializeOwned>(
             )
         })?;
         // A parse failure propagates rather than yielding a silently short list.
-        let page_nodes: Vec<Option<T>> = search
-            .get("nodes")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| gh_unreadable(subject, format!("could not parse search: {e}")))?
-            .unwrap_or_default();
+        let page_nodes: Vec<Option<T>> = parse_page_nodes(search)
+            .map_err(|e| gh_unreadable(subject, format!("could not parse search: {e}")))?;
+        // An empty page — including a null `nodes` — ends the walk in `advance` so a
+        // server promising another page while returning no rows can't spin it, and is
+        // reported TRUNCATED when that promise stands, never as a complete read.
         let got_nodes = !page_nodes.is_empty();
         nodes.extend(page_nodes.into_iter().flatten());
         pages += 1;
@@ -368,9 +407,49 @@ async fn search_nodes<T: serde::de::DeserializeOwned>(
 
 // ── Raw parse trees ──────────────────────────────────────────────────────────
 //
-// Connection layers are doubly nullable (`nodes: [T]` — the list and each element),
-// and a `... on X` fragment over a node of another type yields an empty object, so
-// every node's identity field is an `Option` and a node without one is dropped.
+// Connection layers are independently nullable at three levels — the connection
+// object, its `nodes` list, and each element — and a nullable field can arrive as an
+// explicit `null` rather than an absent key, which `#[serde(default)]` alone rejects;
+// every such layer takes `null_to_default` so one sparse node can't fail the page.
+// A `... on X` fragment over a node of another type yields an empty object, so every
+// node's identity field is an `Option` and a node without one is dropped.
+
+/// A search node's author, carrying the actor TYPE alongside the login.
+///
+/// GraphQL and the gh CLI disagree on how a GitHub App author is spelled: GraphQL
+/// answers `dependabot`, `gh pr list --json author` answers `app/dependabot` (its
+/// export layer prefixes Bot-typed actors). Both shapes reach the same frontend, so
+/// the filtered list has to speak the CLI's — `displayLogin` only recognizes
+/// `app/<name>` / `<name>[bot]` as a bot, and a bare login would render a bot as an
+/// ordinary user AND round-trip into an author qualifier that silently matches
+/// nothing (`author:dependabot` → 0 hits; `author:app/dependabot` → 64, measured).
+#[derive(Deserialize)]
+struct RawSearchAuthor {
+    #[serde(default)]
+    login: String,
+    /// Actor type. Only `Bot` takes the prefix — a `User`, `Organization`, or
+    /// `Mannequin` login is already spelled the way the CLI spells it.
+    #[serde(default, rename = "__typename")]
+    typename: String,
+}
+
+impl RawSearchAuthor {
+    fn into_author(self) -> PrAuthor {
+        // Idempotent: GraphQL never sends the prefix today, so re-prefixing an
+        // already-prefixed login would be a silent `app/app/x` if that ever changes.
+        // An empty login passes through untouched — absence is the `Option` around
+        // this struct, never a synthesized name.
+        let login = if self.typename == "Bot"
+            && !self.login.is_empty()
+            && !self.login.starts_with("app/")
+        {
+            format!("app/{}", self.login)
+        } else {
+            self.login
+        };
+        PrAuthor { login }
+    }
+}
 
 #[derive(Deserialize)]
 struct RawLabelName {
@@ -380,7 +459,7 @@ struct RawLabelName {
 
 #[derive(Deserialize, Default)]
 struct RawLabels {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     nodes: Vec<Option<RawLabelName>>,
 }
 
@@ -411,8 +490,8 @@ struct RawPrSearchNode {
     #[serde(default)]
     state: String,
     #[serde(default)]
-    author: Option<PrAuthor>,
-    #[serde(default)]
+    author: Option<RawSearchAuthor>,
+    #[serde(default, deserialize_with = "null_to_default")]
     labels: RawLabels,
     #[serde(default)]
     created_at: String,
@@ -431,8 +510,8 @@ struct RawIssueSearchNode {
     #[serde(default)]
     state: String,
     #[serde(default)]
-    author: Option<PrAuthor>,
-    #[serde(default)]
+    author: Option<RawSearchAuthor>,
+    #[serde(default, deserialize_with = "null_to_default")]
     labels: RawLabels,
     #[serde(default)]
     created_at: String,
@@ -444,8 +523,9 @@ struct RawIssueSearchNode {
 #[serde(rename_all = "camelCase")]
 struct RawMergeabilityNode {
     number: Option<u64>,
-    /// `MergeableState` is nullable on the search connection, and an absent value
-    /// must read as "still computing", never as mergeable.
+    /// `Option` despite the schema marking this `MergeableState!` — deliberate
+    /// over-tolerance against schema drift and GHES variants. An absent or
+    /// unrecognized value must read as "still computing", never as mergeable.
     #[serde(default)]
     mergeable: Option<String>,
     #[serde(default)]
@@ -461,7 +541,7 @@ struct RawSubmittedAt {
 
 #[derive(Deserialize, Default)]
 struct RawReviewNodes {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     nodes: Vec<Option<RawSubmittedAt>>,
 }
 
@@ -471,7 +551,7 @@ struct RawReviewStateNode {
     number: Option<u64>,
     #[serde(default)]
     updated_at: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     reviews: RawReviewNodes,
 }
 
@@ -512,7 +592,7 @@ pub(crate) async fn filtered_pr_list(
                 head_ref_name: n.head_ref_name,
                 is_draft: n.is_draft,
                 state: n.state,
-                author: n.author,
+                author: n.author.map(RawSearchAuthor::into_author),
                 labels: n.labels.into_list(),
                 created_at: n.created_at,
                 head_sha: String::new(),
@@ -550,7 +630,7 @@ pub(crate) async fn filtered_issue_list(
                 state: n.state,
                 created_at: n.created_at,
                 updated_at: n.updated_at,
-                author: n.author,
+                author: n.author.map(RawSearchAuthor::into_author),
                 labels: n.labels.into_list(),
             })
         })
@@ -608,8 +688,9 @@ pub struct ReviewStatePage {
     /// viewer has not reviewed that PR; subtracting the map from the list is the
     /// caller's job.
     pub entries: HashMap<u64, ReviewStateEntry>,
-    /// The reviewed-by walk stopped with more rows on the server, so an absent
-    /// number may still have been reviewed.
+    /// The walk couldn't cover the list's own page, so an absent number may still have
+    /// been reviewed and the grouping can't be trusted. A capped walk alone does NOT
+    /// set this — see [`review_map_truncated`].
     pub truncated: bool,
 }
 
@@ -621,6 +702,22 @@ impl ReviewStatePage {
             truncated: false,
         }
     }
+}
+
+/// Whether the review-state map has to warn that it may be incomplete — which a capped
+/// walk alone does not prove.
+///
+/// The list and the reviewed-by search run the SAME scope under the SAME
+/// `sort:created-desc`, and the reviewed set is a SUBSET of that scope. So a reviewed
+/// row visible in the newest `page_depth` rows of the scope has at most
+/// `page_depth - 1` scope rows newer than it, hence at most that many REVIEWED rows
+/// newer than it — putting it inside the newest `page_depth` of the reviewed subset.
+/// A walk that fetched at least `page_depth` reviewed rows therefore holds every
+/// reviewed row on screen, and the grouping must NOT degrade to the flat list. Only a
+/// walk that stopped short of the page's own depth leaves a visible row unaccounted
+/// for.
+fn review_map_truncated(walk_truncated: bool, covered: u32, page_depth: u32) -> bool {
+    walk_truncated && covered < page_depth
 }
 
 /// The viewer's review state across the PR list the same `state` + `filter` would
@@ -664,7 +761,8 @@ async fn review_state(
         ));
     }
     let q = format!("{scope_query} reviewed-by:@me");
-    let target = target_rows(limit).max(SEARCH_PAGE_MAX * REVIEW_STATE_MAX_PAGES);
+    let page_depth = target_rows(limit);
+    let target = page_depth.max(SEARCH_PAGE_MAX * REVIEW_STATE_MAX_PAGES);
     let (nodes, truncated) = search_nodes::<RawReviewStateNode>(
         repo_path,
         REVIEW_STATE_QUERY,
@@ -675,6 +773,9 @@ async fn review_state(
         "pull requests",
     )
     .await?;
+    // How deep into the REVIEWED set the walk actually reached — counted before the
+    // mapping, because a node the mapping skips still proves the walk got that far.
+    let covered = nodes.len() as u32;
     let entries = nodes
         .into_iter()
         .filter_map(|n| {
@@ -698,15 +799,18 @@ async fn review_state(
             ))
         })
         .collect();
-    Ok(ReviewStatePage { entries, truncated })
+    Ok(ReviewStatePage {
+        entries,
+        truncated: review_map_truncated(truncated, covered, page_depth),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        advance, map_advanced_search_unsupported, search_args, search_query, ReviewStateEntry,
-        ReviewStatePage, Step, ISSUE_SEARCH_QUERY, MERGEABILITY_SEARCH_QUERY, PR_SEARCH_QUERY,
-        REVIEW_STATE_QUERY,
+        advance, map_advanced_search_unsupported, review_map_truncated, search_args, search_query,
+        target_rows, ReviewStateEntry, ReviewStatePage, Step, ISSUE_SEARCH_QUERY,
+        MERGEABILITY_SEARCH_QUERY, PR_SEARCH_QUERY, REVIEW_STATE_QUERY,
     };
     use crate::error::AppError;
     use crate::forge::model::RemoteListFilter;
@@ -930,10 +1034,32 @@ mod tests {
             // The search string is a variable, never document text.
             assert!(doc.contains("query:$q"), "{doc}");
         }
+        // Both LIST documents must ask for the actor type: without it every GitHub App
+        // author silently loses its `app/` prefix and stops reading as a bot.
+        for doc in [PR_SEARCH_QUERY, ISSUE_SEARCH_QUERY] {
+            assert!(doc.contains("author{ login __typename }"), "{doc}");
+        }
         // The review-state selection reads the viewer's OWN reviews, not the
         // sidebar-shaped `latestReviews`.
-        assert!(REVIEW_STATE_QUERY.contains("reviews(author:$viewer, last:1)"));
+        assert!(REVIEW_STATE_QUERY.contains(
+            "reviews(author:$viewer, states:[APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED], \
+             last:1)"
+        ));
         assert!(!REVIEW_STATE_QUERY.contains("latestReviews"));
+        // PENDING must never be selectable: `last: 1` takes the most recent review, so
+        // an unsubmitted draft would displace the submitted one AND carry a null
+        // `submittedAt` the mapper drops — the PR would read as "not reviewed yet"
+        // despite a real earlier review.
+        assert!(!REVIEW_STATE_QUERY.contains("PENDING"));
+        // The listed states are the complete remainder of `PullRequestReviewState`
+        // (PENDING, COMMENTED, APPROVED, CHANGES_REQUESTED, DISMISSED — introspected),
+        // so narrowing the connection drops nothing but the drafts.
+        for state in ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"] {
+            assert!(
+                REVIEW_STATE_QUERY.contains(state),
+                "{state} must stay selected"
+            );
+        }
     }
 
     #[test]
@@ -988,15 +1114,32 @@ mod tests {
             advance(42, 1, false, "cur", true, 300, 3),
             Step::Stop { truncated: false }
         );
-        // An empty page ends the walk rather than paging forever on a server that
-        // keeps promising more.
+        // An empty page ends the walk rather than paging forever on a server that keeps
+        // promising more — and because that promise stands, the walk is TRUNCATED: rows
+        // it never read may exist, so an unproven map must not pose as a complete one.
         assert_eq!(
             advance(100, 1, true, "cur", false, 300, 3),
-            Step::Stop { truncated: false }
+            Step::Stop { truncated: true }
         );
         // A cursor the server declined to move is the other stuck-walk shape.
         assert_eq!(
             advance(100, 1, true, "", true, 300, 3),
+            Step::Stop { truncated: true }
+        );
+        // The defensive stop takes its verdict from the server's own claim, so the same
+        // no-progress page with NO further page promised is complete, not truncated.
+        assert_eq!(
+            advance(0, 1, true, "cur", false, 300, 3),
+            Step::Stop { truncated: true },
+            "no rows read while the server still promises a page"
+        );
+        assert_eq!(
+            advance(0, 1, false, "cur", false, 300, 3),
+            Step::Stop { truncated: false },
+            "no rows and no further page is an honestly empty result"
+        );
+        assert_eq!(
+            advance(100, 1, false, "", true, 300, 3),
             Step::Stop { truncated: false }
         );
         // The list reads pass `max_pages: u32::MAX`, so only `target` can stop them.
@@ -1008,6 +1151,33 @@ mod tests {
             advance(29, 1, true, "cur", true, 30, u32::MAX),
             Step::Advance
         );
+    }
+
+    /// A capped reviewed-by walk is not the same as an uncovered page. Same scope, same
+    /// `sort:created-desc`, reviewed ⊆ scope — so once the walk has fetched as many
+    /// reviewed rows as the list's page is deep, every reviewed row on screen is in the
+    /// map and the grouping must stay up.
+    #[test]
+    fn a_capped_walk_only_reports_truncated_when_it_missed_the_visible_page() {
+        // The real default: 3 pages × 100 walked against a 30-row list page. Capped,
+        // but provably covering the screen — this is the case that used to drop the
+        // panel to the flat list for no reason.
+        assert!(!review_map_truncated(true, 300, target_rows(None)));
+        assert_eq!(target_rows(None), 30);
+        // Exactly at the page depth still covers it (the rank bound is `<`, not `<=`).
+        assert!(!review_map_truncated(true, 30, 30));
+        // One short of it does not.
+        assert!(review_map_truncated(true, 29, 30));
+        // A page deeper than the walk can reach: 3 pages cap at 300 reviewed rows, so a
+        // 1000-row list page is genuinely unproven.
+        assert!(review_map_truncated(true, 300, target_rows(Some(1000))));
+        assert_eq!(target_rows(Some(1000)), 1000);
+        // An UNCAPPED walk is complete by construction, whatever it fetched — including
+        // a viewer who has reviewed nothing in scope.
+        assert!(!review_map_truncated(false, 0, 30));
+        assert!(!review_map_truncated(false, 5, 1000));
+        // …and a capped walk that fetched nothing cannot vouch for a non-empty page.
+        assert!(review_map_truncated(true, 0, 30));
     }
 
     /// An older GitHub Enterprise Server schema has no `ISSUE_ADVANCED`; the raw
@@ -1085,13 +1255,21 @@ mod tests {
 
 #[cfg(test)]
 mod parse_tests {
-    use super::{RawIssueSearchNode, RawMergeabilityNode, RawPrSearchNode, RawReviewStateNode};
+    use super::{
+        advance, parse_page_nodes, RawIssueSearchNode, RawMergeabilityNode, RawPrSearchNode,
+        RawReviewStateNode, RawSearchAuthor, Step,
+    };
 
     /// Captured verbatim from `gh api graphql` against `repo:theBGuy/GitDesktop
     /// type:pr is:closed sort:created-desc` — the shape the parse tree must survive.
-    const PR_SEARCH_FIXTURE: &str = r#"{"data":{"search":{"pageInfo":{"hasNextPage":true,"endCursor":"Y3Vyc29yOjI="},"nodes":[{"number":336,"url":"https://github.com/theBGuy/GitDesktop/pull/336","title":"fix(agent): heap-allocate the capture read buffers","baseRefName":"master","headRefName":"fix/agent-capture-heap-buffers","isDraft":false,"state":"MERGED","author":{"login":"theBGuy"},"labels":{"nodes":[{"name":"bug"},{"name":"no-changelog"}]},"createdAt":"2026-09-10T23:20:15Z","isCrossRepository":false},{"number":335,"url":"https://github.com/theBGuy/GitDesktop/pull/335","title":"fix(about,health): spawn tool probes off the command future","baseRefName":"master","headRefName":"fix/about-health-stack-overflow","isDraft":false,"state":"MERGED","author":{"login":"theBGuy"},"labels":{"nodes":[{"name":"bug"}]},"createdAt":"2026-09-10T18:19:41Z","isCrossRepository":false}]}}}"#;
+    const PR_SEARCH_FIXTURE: &str = r#"{"data":{"search":{"pageInfo":{"hasNextPage":true,"endCursor":"Y3Vyc29yOjI="},"nodes":[{"number":336,"url":"https://github.com/theBGuy/GitDesktop/pull/336","title":"fix(agent): heap-allocate the capture read buffers","baseRefName":"master","headRefName":"fix/agent-capture-heap-buffers","isDraft":false,"state":"MERGED","author":{"login":"theBGuy","__typename":"User"},"labels":{"nodes":[{"name":"bug"},{"name":"no-changelog"}]},"createdAt":"2026-09-10T23:20:15Z","isCrossRepository":false},{"number":335,"url":"https://github.com/theBGuy/GitDesktop/pull/335","title":"fix(about,health): spawn tool probes off the command future","baseRefName":"master","headRefName":"fix/about-health-stack-overflow","isDraft":false,"state":"MERGED","author":{"login":"theBGuy","__typename":"User"},"labels":{"nodes":[{"name":"bug"}]},"createdAt":"2026-09-10T18:19:41Z","isCrossRepository":false}]}}}"#;
 
-    const ISSUE_SEARCH_FIXTURE: &str = r#"{"data":{"search":{"pageInfo":{"hasNextPage":true,"endCursor":"Y3Vyc29yOjI="},"nodes":[{"number":334,"url":"https://github.com/theBGuy/GitDesktop/issues/334","title":"bug: GitDesktop is crashing at menu Settings / About on Windows","state":"OPEN","author":{"login":"batagy"},"labels":{"nodes":[{"name":"bug"}]},"createdAt":"2026-09-10T11:32:52Z","updatedAt":"2026-09-10T22:06:34Z"},{"number":333,"url":"https://github.com/theBGuy/GitDesktop/issues/333","title":"feat: Make zooming possible in GUI","state":"OPEN","author":{"login":"batagy"},"labels":{"nodes":[{"name":"enhancement"}]},"createdAt":"2026-09-10T11:20:42Z","updatedAt":"2026-09-10T11:20:42Z"}]}}}"#;
+    /// A GitHub App author, captured verbatim from the same document over
+    /// `author:app/dependabot`. GraphQL spells the Bot's login BARE here; the CLI list
+    /// spells the identical PR's author `app/dependabot`.
+    const BOT_PR_FIXTURE: &str = r#"{"data":{"search":{"pageInfo":{"hasNextPage":true,"endCursor":"Y3Vyc29yOjE="},"nodes":[{"number":340,"url":"https://github.com/theBGuy/GitDesktop/pull/340","title":"chore(deps): bump motion from 12.43.0 to 13.1.0","baseRefName":"master","headRefName":"dependabot/npm_and_yarn/motion-13.1.0","isDraft":false,"state":"OPEN","author":{"login":"dependabot","__typename":"Bot"},"labels":{"nodes":[{"name":"dependencies"},{"name":"javascript"}]},"createdAt":"2026-09-11T11:23:00Z","isCrossRepository":false}]}}}"#;
+
+    const ISSUE_SEARCH_FIXTURE: &str = r#"{"data":{"search":{"pageInfo":{"hasNextPage":true,"endCursor":"Y3Vyc29yOjI="},"nodes":[{"number":334,"url":"https://github.com/theBGuy/GitDesktop/issues/334","title":"bug: GitDesktop is crashing at menu Settings / About on Windows","state":"OPEN","author":{"login":"batagy","__typename":"User"},"labels":{"nodes":[{"name":"bug"}]},"createdAt":"2026-09-10T11:32:52Z","updatedAt":"2026-09-10T22:06:34Z"},{"number":333,"url":"https://github.com/theBGuy/GitDesktop/issues/333","title":"feat: Make zooming possible in GUI","state":"OPEN","author":{"login":"batagy","__typename":"User"},"labels":{"nodes":[{"name":"enhancement"}]},"createdAt":"2026-09-10T11:20:42Z","updatedAt":"2026-09-10T11:20:42Z"}]}}}"#;
 
     const MERGEABILITY_FIXTURE: &str = r#"{"data":{"search":{"pageInfo":{"hasNextPage":false,"endCursor":"Y3Vyc29yOjM="},"nodes":[{"number":332,"mergeable":"MERGEABLE","state":"OPEN"},{"number":325,"mergeable":"MERGEABLE","state":"OPEN"},{"number":237,"mergeable":"MERGEABLE","state":"OPEN"}]}}}"#;
 
@@ -1166,6 +1344,54 @@ mod parse_tests {
         );
     }
 
+    /// A GitHub App author must reach the frontend spelled the way the CLI list spells
+    /// it. GraphQL says `dependabot`; `gh pr list --json author` says `app/dependabot`
+    /// for the same PR, and only the prefixed form is recognized as a bot downstream
+    /// (`displayLogin`) or accepted back as an author qualifier (`author:dependabot`
+    /// matched 0, `author:app/dependabot` matched 64 — measured).
+    #[test]
+    fn a_bot_author_is_normalized_to_the_cli_spelling() {
+        let bot: Vec<Option<RawPrSearchNode>> = nodes(BOT_PR_FIXTURE);
+        let row = bot.into_iter().flatten().next().expect("one bot row");
+        assert_eq!(row.number, Some(340));
+        // The raw node carries the BARE login…
+        let raw = row.author.expect("the bot author is present");
+        assert_eq!(raw.login, "dependabot");
+        assert_eq!(raw.typename, "Bot");
+        // …and the mapping restores the CLI's prefix.
+        assert_eq!(raw.into_author().login, "app/dependabot");
+
+        // A User-typed author is already spelled the CLI's way and must stay bare —
+        // prefixing a human would make `displayLogin` render them as `theBGuy[bot]`.
+        let user: Vec<Option<RawPrSearchNode>> = nodes(PR_SEARCH_FIXTURE);
+        let row = user.into_iter().flatten().next().expect("one user row");
+        let raw = row.author.expect("the user author is present");
+        assert_eq!(raw.typename, "User");
+        assert_eq!(raw.into_author().login, "theBGuy");
+
+        // Idempotent, so a future GraphQL that starts sending the prefix can't yield
+        // `app/app/dependabot`.
+        let prefixed = RawSearchAuthor {
+            login: "app/dependabot".to_string(),
+            typename: "Bot".to_string(),
+        };
+        assert_eq!(prefixed.into_author().login, "app/dependabot");
+        // Other actor types pass through untouched, and an absent login is never
+        // turned into a synthesized `app/` name.
+        for (login, typename, want) in [
+            ("github", "Organization", "github"),
+            ("ghost", "Mannequin", "ghost"),
+            ("", "Bot", ""),
+            ("someone", "", "someone"),
+        ] {
+            let a = RawSearchAuthor {
+                login: login.to_string(),
+                typename: typename.to_string(),
+            };
+            assert_eq!(a.into_author().login, want, "{typename}/{login}");
+        }
+    }
+
     /// A node of another type answers a `... on PullRequest` fragment with `{}`, and
     /// a connection's elements are nullable — neither may become a row numbered 0.
     #[test]
@@ -1178,7 +1404,7 @@ mod parse_tests {
             .filter_map(|n| n.number)
             .collect();
         assert_eq!(numbered, [7]);
-        // A null review connection and a review with no timestamp both survive the
+        // An empty review connection and a review with no timestamp both survive the
         // parse (the caller skips them).
         let reviews: Vec<Option<RawReviewStateNode>> = nodes(
             r#"{"data":{"search":{"nodes":[{"number":9,"updatedAt":"2026-01-01T00:00:00Z","reviews":{"nodes":[]}},{"number":10,"updatedAt":"2026-01-01T00:00:00Z","reviews":{"nodes":[{"submittedAt":null}]}}]}}}"#,
@@ -1188,5 +1414,115 @@ mod parse_tests {
         assert!(rows[1].reviews.nodes[0]
             .as_ref()
             .is_some_and(|r| r.submitted_at.is_none()));
+    }
+
+    /// `labels` is nullable on both search types, and GraphQL may spell an absent
+    /// connection as an explicit `null` — at the connection OR at its `nodes` list.
+    /// `#[serde(default)]` covers only a missing key, so without the null tolerance one
+    /// unlabelled PR would fail its element and reject the whole page.
+    #[test]
+    fn an_explicitly_null_pr_labels_connection_parses_as_no_labels() {
+        let parsed: Vec<Option<RawPrSearchNode>> = nodes(
+            r#"{"data":{"search":{"nodes":[{"number":1,"labels":null},{"number":2,"labels":{"nodes":null}},{"number":3,"labels":{"nodes":[{"name":"bug"}]}}]}}}"#,
+        );
+        let rows: Vec<RawPrSearchNode> = parsed.into_iter().flatten().collect();
+        assert_eq!(rows.len(), 3, "a sparse node must not blank the page");
+        // Read through `into_list`, the mapping the list read itself uses. The labelled
+        // sibling proves the tolerance absorbs the nulls rather than dropping labels.
+        let labels: Vec<Vec<String>> = rows
+            .into_iter()
+            .map(|r| r.labels.into_list().into_iter().map(|l| l.name).collect())
+            .collect();
+        assert_eq!(labels, [vec![], vec![], vec!["bug".to_string()]]);
+    }
+
+    #[test]
+    fn an_explicitly_null_issue_labels_connection_parses_as_no_labels() {
+        let parsed: Vec<Option<RawIssueSearchNode>> = nodes(
+            r#"{"data":{"search":{"nodes":[{"number":11,"labels":null},{"number":12,"labels":{"nodes":null}},{"number":13,"labels":{"nodes":[{"name":"enhancement"}]}}]}}}"#,
+        );
+        let rows: Vec<RawIssueSearchNode> = parsed.into_iter().flatten().collect();
+        assert_eq!(rows.len(), 3, "a sparse node must not blank the page");
+        let labels: Vec<Vec<String>> = rows
+            .into_iter()
+            .map(|r| r.labels.into_list().into_iter().map(|l| l.name).collect())
+            .collect();
+        assert_eq!(labels, [vec![], vec![], vec!["enhancement".to_string()]]);
+    }
+
+    /// An explicitly null review connection must read as NOT reviewed — the grouping's
+    /// absent-from-map meaning — rather than rejecting the page it shares with the rows
+    /// that do carry reviews.
+    #[test]
+    fn an_explicitly_null_reviews_connection_parses_as_not_reviewed() {
+        let parsed: Vec<Option<RawReviewStateNode>> = nodes(
+            r#"{"data":{"search":{"nodes":[{"number":21,"updatedAt":"2026-01-01T00:00:00Z","reviews":null},{"number":22,"updatedAt":"2026-01-01T00:00:00Z","reviews":{"nodes":null}},{"number":23,"updatedAt":"2026-01-01T00:00:00Z","reviews":{"nodes":[{"submittedAt":"2026-01-02T00:00:00Z"}]}}]}}}"#,
+        );
+        let rows: Vec<RawReviewStateNode> = parsed.into_iter().flatten().collect();
+        assert_eq!(rows.len(), 3, "a sparse node must not blank the page");
+        // The exact expression `review_state` uses to decide reviewed-vs-not.
+        let last_reviewed: Vec<Option<String>> = rows
+            .into_iter()
+            .map(|n| {
+                n.reviews
+                    .nodes
+                    .into_iter()
+                    .flatten()
+                    .find_map(|r| r.submitted_at)
+                    .filter(|s| !s.is_empty())
+            })
+            .collect();
+        assert_eq!(
+            last_reviewed,
+            [None, None, Some("2026-01-02T00:00:00Z".to_string())]
+        );
+    }
+
+    /// The connection's OWN `nodes` list is nullable too, one layer above the per-node
+    /// connections. A null there is an empty page, never a failed read — but a list
+    /// that's present and malformed must still propagate, or a broken response would
+    /// pose as an empty filter result.
+    #[test]
+    fn an_explicitly_null_nodes_list_reads_as_an_empty_page() {
+        let parse = |s: &str| -> Result<Vec<Option<RawPrSearchNode>>, serde_json::Error> {
+            parse_page_nodes(
+                &serde_json::from_str::<serde_json::Value>(s).expect("fixture is JSON"),
+            )
+        };
+        // All three spellings of "no rows" agree.
+        for empty in [
+            r#"{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":null}"#,
+            r#"{"pageInfo":{"hasNextPage":false,"endCursor":""}}"#,
+            r#"{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}"#,
+        ] {
+            assert!(
+                parse(empty)
+                    .expect("an empty page, not a failed read")
+                    .is_empty(),
+                "{empty}"
+            );
+        }
+        // A present-but-wrong list is still a SHAPE failure: the null tolerance must not
+        // have widened into swallowing every unreadable response.
+        for broken in [r#"{"nodes":{"not":"a list"}}"#, r#"{"nodes":7}"#] {
+            assert!(parse(broken).is_err(), "{broken}");
+        }
+        // A real page still reads through the same seam.
+        let real: serde_json::Value =
+            serde_json::from_str(PR_SEARCH_FIXTURE).expect("fixture is JSON");
+        let rows = parse_page_nodes::<RawPrSearchNode>(
+            real.pointer("/data/search").expect("search connection"),
+        )
+        .expect("the captured page parses");
+        assert_eq!(rows.len(), 2);
+
+        // The empty page must also END the walk: a degenerate payload that returns no
+        // rows while still promising another page would otherwise page forever on a
+        // cursor that can never yield anything — and it stops TRUNCATED, so the review
+        // grouping hedges rather than vouching for a map built from rows it never saw.
+        assert_eq!(
+            advance(0, 1, true, "cur", false, 300, 3),
+            Step::Stop { truncated: true }
+        );
     }
 }

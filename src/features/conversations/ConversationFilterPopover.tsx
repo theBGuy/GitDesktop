@@ -27,6 +27,7 @@ import {
   useDisabledReason,
 } from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
+import type { AxisCap } from "./useRemoteListFilter";
 
 /** A filter row is an Author or a Label, carried as an OBJECT (never a
  *  prefixed string like `"author:x"`) so Base UI's default contains-filter,
@@ -36,7 +37,11 @@ import { cn } from "@/lib/utils";
 type FilterItem = { kind: "author" | "label"; name: string; free?: boolean };
 /** A titled section of rows; the `value` is the group heading text. Empty
  *  groups are omitted before rendering so no header shows for a missing side. */
-type FilterGroup = { value: string; items: FilterItem[] };
+type FilterGroup = {
+  value: string;
+  kind: FilterItem["kind"];
+  items: FilterItem[];
+};
 
 /** The free-entry row's copy: the server filters by any name, not only the ones
  *  this page happened to load. */
@@ -108,6 +113,7 @@ export function ConversationFilterPopover({
   mine,
   review,
   authorReason,
+  axisCap,
 }: {
   authors: string[];
   labels: string[];
@@ -125,8 +131,12 @@ export function ConversationFilterPopover({
    *  free-entry row render disabled with it — the names still show, so the list
    *  says what it can't do instead of quietly dropping a whole axis. */
   authorReason?: string | null;
+  /** Ceiling on selections per axis, where the provider's filter fan-out has one.
+   *  Omit and selection is unbounded. */
+  axisCap?: AxisCap;
 }) {
   const authorReasonId = useId();
+  const capReasonId = useId();
   const [open, setOpen] = useState(false);
   // Controlled input so a selection doesn't wipe the query (Base UI clears the
   // input on item-press in multiple mode — see onInputValueChange below).
@@ -163,13 +173,21 @@ export function ConversationFilterPopover({
       names: string[],
       snapshot: Set<string>,
     ) => {
+      // The suppression's case rule mirrors the server's matching per axis:
+      // usernames are case-insensitive, but GitLab labels are case-SENSITIVE —
+      // folding labels would make a case-distinct label (`bug` under a loaded
+      // `Bug`) unreachable via free entry.
       const lower = query.toLowerCase();
+      const taken =
+        kind === "label"
+          ? (n: string) => n === query
+          : (n: string) => n.toLowerCase() === lower;
       const items: FilterItem[] = selectedFirst(names, snapshot).map(
         (name) => ({ kind, name }),
       );
-      if (query && !names.some((n) => n.toLowerCase() === lower))
+      if (query && !names.some(taken))
         items.push({ kind, name: query, free: true });
-      if (items.length > 0) g.push({ value, items });
+      if (items.length > 0) g.push({ value, kind, items });
     };
     addGroup("Author", "author", authors, selectedSnapshot.authors);
     addGroup("Label", "label", labels, selectedSnapshot.labels);
@@ -296,10 +314,16 @@ export function ConversationFilterPopover({
     >
       {trigger}
       {/* Explicit width: the anchor is a tiny icon button, so `--anchor-width`
-          would collapse the popup — w-64 gives it room. */}
+          would collapse the popup — w-64 gives it room.
+          `flex flex-col` is the CALL SITE's job: the vendored popup caps itself at
+          `--available-height` and clips with overflow-hidden, while its list caps at
+          available-height minus one input — a budget that can't know this call site
+          added static sections above it. Left alone, a short window clips the
+          author/label tail past the list's own scroll end. As a column, the static
+          region holds its size and the list absorbs whatever is left. */}
       <ComboboxContent
         align="end"
-        className="w-64"
+        className="flex w-64 flex-col"
         onKeyDown={cycleTabWithinPopup}
       >
         {mine && (
@@ -314,6 +338,7 @@ export function ConversationFilterPopover({
         )}
         {review && <StaticSection group={review} />}
         <ComboboxInput
+          className="shrink-0"
           showTrigger={false}
           placeholder="Filter authors and labels…"
         />
@@ -325,44 +350,76 @@ export function ConversationFilterPopover({
         ) : (
           <>
             <ComboboxEmpty>No matches</ComboboxEmpty>
-            <ComboboxList>
-              {(group: FilterGroup) => (
-                <ComboboxGroup key={group.value} items={group.items}>
-                  <ComboboxLabel>{group.value}</ComboboxLabel>
-                  {group.value === "Author" && authorReason && (
-                    <p
-                      id={authorReasonId}
-                      className="px-2 pb-1 text-[11px] text-muted-foreground"
-                    >
-                      {authorReason}
-                    </p>
-                  )}
-                  <ComboboxCollection>
-                    {(item: FilterItem) => (
-                      <FilterRow
-                        key={`${item.kind}:${item.free ? "free:" : ""}${item.name}`}
-                        item={item}
-                        checked={
+            {/* `max-h-none` drops the vendored available-height budget (it counts
+                only the input) and hands sizing to the flex column above; the
+                list keeps its own overflow-y-auto, so it still scrolls. */}
+            <ComboboxList className="max-h-none min-h-0 flex-1">
+              {(group: FilterGroup) => {
+                const blockedAxis = group.kind === "author" && !!authorReason;
+                // Capped at SELECTION time, never only where the server complains:
+                // with a "mine" axis on, this provider applies authors/labels
+                // client-side and the ceiling is slack, so an over-cap set would sit
+                // unnoticed until Mine is toggled off and promotes it into the
+                // server group — the request would then fail as a whole.
+                const capReached =
+                  axisCap != null &&
+                  (group.kind === "author"
+                    ? authorFilter.size
+                    : labelFilter.size) >= axisCap.max;
+                const groupCapId = `${capReasonId}-${group.kind}`;
+                // Whichever reason a held row in THIS group points at.
+                const heldReasonId = blockedAxis ? authorReasonId : groupCapId;
+                return (
+                  <ComboboxGroup key={group.value} items={group.items}>
+                    <ComboboxLabel>{group.value}</ComboboxLabel>
+                    {blockedAxis && (
+                      <p
+                        id={authorReasonId}
+                        className="px-2 pb-1 text-[11px] text-muted-foreground"
+                      >
+                        {authorReason}
+                      </p>
+                    )}
+                    {!blockedAxis && capReached && axisCap && (
+                      <p
+                        id={groupCapId}
+                        className="px-2 pb-1 text-[11px] text-muted-foreground"
+                      >
+                        {axisCap.reason}
+                      </p>
+                    )}
+                    <ComboboxCollection>
+                      {(item: FilterItem) => {
+                        const checked =
                           item.kind === "author"
                             ? authorFilter.has(item.name)
-                            : labelFilter.has(item.name)
-                        }
-                        count={
-                          item.kind === "author"
-                            ? authorCount(item.name)
-                            : labelCount(item.name)
-                        }
-                        disabled={item.kind === "author" && !!authorReason}
-                        describedBy={
-                          item.kind === "author" && authorReason
-                            ? authorReasonId
-                            : undefined
-                        }
-                      />
-                    )}
-                  </ComboboxCollection>
-                </ComboboxGroup>
-              )}
+                            : labelFilter.has(item.name);
+                        // A SELECTED row stays live under either hold: an enabled
+                        // checked row can only ever remove a constraint, while
+                        // disabling it would strand the pick — no way back under the
+                        // cap, and no way to clear an author picked before the forge
+                        // went unready. Only adding is blocked.
+                        const disabled =
+                          (blockedAxis || capReached) && !checked;
+                        return (
+                          <FilterRow
+                            key={`${item.kind}:${item.free ? "free:" : ""}${item.name}`}
+                            item={item}
+                            checked={checked}
+                            count={
+                              item.kind === "author"
+                                ? authorCount(item.name)
+                                : labelCount(item.name)
+                            }
+                            disabled={disabled}
+                            describedBy={disabled ? heldReasonId : undefined}
+                          />
+                        );
+                      }}
+                    </ComboboxCollection>
+                  </ComboboxGroup>
+                );
+              }}
             </ComboboxList>
           </>
         )}
@@ -499,7 +556,9 @@ function StaticSection({
     <div
       role="group"
       aria-labelledby={captionId}
-      className="border-b pt-1 pb-1.5"
+      // shrink-0: this region keeps its height in the popup's flex column so the
+      // combobox list below absorbs the shortfall instead of being clipped.
+      className="shrink-0 border-b pt-1 pb-1.5"
     >
       <p id={captionId} className="px-3 py-2 text-xs text-muted-foreground">
         {group.label}
@@ -578,27 +637,35 @@ function TeamsRow({
   inheritedReason: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
-  // Arrow-key focus over the chooser rows (the repo's same-change list invariant).
-  // Focus IS the position here — there's no selected row — so onActivate only
-  // records the index and listKeyboardNav moves focus via the data-row key.
-  const [navIndex, setNavIndex] = useState(-1);
   const reason = teams.disabledReason ?? inheritedReason;
   const { blockedReason, reasonId, wrapperTitle, describedBy, nativeProps } =
     useDisabledReason({
       disabled: !!reason,
       reason,
-      onClick: () =>
-        setExpanded((v) => {
-          if (v) setNavIndex(-1);
-          return !v;
-        }),
+      onClick: () => setExpanded((v) => !v),
     });
-  const onOptionsKeyDown = listKeyboardNav({
-    items: teams.options,
-    activeIndex: navIndex,
-    onActivate: (_team, to) => setNavIndex(to),
-    rowKey: (team) => team.slug,
-  });
+  /**
+   * Arrow-key nav over the chooser rows (the repo's same-change list invariant).
+   * `activeIndex` is read from the row that actually HAS focus, not from state:
+   * focus is this list's only notion of position, and the popup's Tab cycle, a
+   * pointer press, and the post-toggle refocus all move it without passing
+   * through here — a mirrored index would answer from wherever the last arrow
+   * left it. Nothing to store, so `onActivate` is empty; the helper still moves
+   * focus and scrolls the row into view off `rowKey`.
+   */
+  const onOptionsKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    const focused = document.activeElement;
+    const slug =
+      focused instanceof HTMLElement ? focused.dataset.row : undefined;
+    listKeyboardNav({
+      items: teams.options,
+      activeIndex: teams.options.findIndex((team) => team.slug === slug),
+      onActivate: () => {
+        // Intentionally empty: focus is the position, and `rowKey` moves it.
+      },
+      rowKey: (team) => team.slug,
+    })(e);
+  };
   // Every team toggle changes the chosen count, so one key covers both paths: an
   // option row survives its own toggle and takes focus back, while a removed chip
   // is gone by the next commit — that one hands focus to the disclosure button
@@ -634,7 +701,11 @@ function TeamsRow({
         )}
       </div>
       {teams.chosen.length > 0 && (
-        <ul className="mt-1 flex flex-wrap gap-1">
+        // Bounded like the options list below, and for the same reason: this strip
+        // sits in the popup's shrink-0 static region, so an uncapped wrap of many
+        // chips pushes the search input and Author/Label groups past the popup's
+        // overflow-hidden edge, where no scroller can reach them.
+        <ul className="mt-1 flex max-h-16 flex-wrap gap-1 overflow-y-auto overscroll-contain">
           {teams.chosen.map((slug) => (
             <li
               key={slug}
@@ -682,6 +753,10 @@ function TeamsRow({
             );
           }
           if (teams.options.length === 0) {
+            // A note below carries the reason membership is unreadable; "no teams"
+            // over it asserts as fact the one thing that couldn't be checked. Keyed
+            // on the note, not a cause — error and missing scope share the trap.
+            if (teams.note) return null;
             return (
               <p className="mt-1 text-[11px] text-muted-foreground">
                 No teams to choose from.
@@ -689,7 +764,15 @@ function TeamsRow({
             );
           }
           return (
-            <ul className="mt-1" onKeyDown={onOptionsKeyDown}>
+            // Bounded like the combobox list below it: this region sits OUTSIDE
+            // that scroller, and the popup clips with overflow-hidden, so a viewer
+            // in many teams would push the later teams and the Author/Label groups
+            // past the clip with nothing able to scroll them back. `overscroll-contain`
+            // keeps a wheel at either end from chaining out to the popup.
+            <ul
+              className="mt-1 max-h-40 overflow-y-auto overscroll-contain"
+              onKeyDown={onOptionsKeyDown}
+            >
               {teams.options.map((team) => {
                 const checked = teams.chosen.includes(team.slug);
                 return (

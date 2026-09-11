@@ -89,6 +89,9 @@ export function useRepoIdentity(repo: string) {
     queryFn: () => repoIdentity(repo),
     enabled: repo !== "",
     staleTime: Number.POSITIVE_INFINITY,
+    // Local git read: the default online mode PARKS it while the OS reports no
+    // connection, and everything keyed on the identity (per-repo prefs) wedges.
+    networkMode: "always",
   });
 }
 
@@ -1212,10 +1215,18 @@ export function usePrListMergeability(
  * review-state grouping sorts rows by. A number absent from `entries` is NOT
  * reviewed, so callers derive that bucket by subtraction against the visible rows.
  *
- * CALLER CONTRACT: `enabled = ghReady && groupingOn && implemented.reviewGrouping &&
- * state === "open" && !list.isPlaceholderData` — the grouping is open-PRs-only, and
- * idling this hook while the list serves placeholder rows keeps an intermediate
- * fetch from caching under the incoming key.
+ * CALLER CONTRACT: `enabled = onPullsTab && ghReady && groupingOn &&
+ * implemented.reviewGrouping && state === "open" && !list.isPlaceholderData` — the
+ * grouping is open-PRs-only; idling this hook while the list serves placeholder rows
+ * keeps an intermediate fetch from caching under the incoming key; and the tab gate
+ * is load-bearing: a `<TabPanel>`-hidden panel still fetches, and this is a 3-page
+ * walk that a repo invalidation would otherwise re-run off-screen.
+ *
+ * CO-INVALIDATION CONTRACT for mutation authors: any mutation that refreshes the PR
+ * list NARROWLY (`["repo", repo, "pr-list", lens]` rather than the whole `["repo",
+ * repo]` subtree) must invalidate `["repo", repo, "pr-review-state", lens]` alongside
+ * it — `updatedAt` here is what sorts a PR into "Updated since my review", and
+ * staleTime alone schedules no refetch.
  */
 export function usePrReviewState(
   repo: string,
@@ -1253,7 +1264,9 @@ export function usePrReviewState(
 
 /** The teams the viewer belongs to, for the team-review filter's picker. Membership
  *  changes rarely, so it caches for five minutes and doesn't retry — a token without
- *  the team scope answers `missingScope` rather than failing. */
+ *  the team scope answers `missingScope` rather than failing. `enabled` must carry
+ *  the active-tab gate (a `<TabPanel>`-hidden panel still fetches, and this is a
+ *  paginated `user/teams` walk); `useRemoteListFilter`'s `tabActive` opt does. */
 export function useMyTeams(repo: string, lens: RemoteLens, enabled: boolean) {
   return useQuery({
     queryKey: ["repo", repo, "my-teams", lens] as const,
@@ -5305,10 +5318,11 @@ export function useMergePr(repo: string, lens: RemoteLens) {
 }
 
 /** What an update-branch makes stale on the PR side: the PR subtree (details and its
- *  commits/files/checks rollup, mergeability, diff, review threads) plus the rows that
- *  carry PR state. Exported because the set has to run TWICE — once when the forge
- *  accepts the job, and again once the poll sees the head actually move, since the
- *  first pass reads a head that has not shifted yet. */
+ *  commits/files/checks rollup, mergeability, diff, review threads), the rows that
+ *  carry PR state, and the review-state map those rows group by (the new commit moves
+ *  this PR's `updatedAt`). Exported because the set has to run TWICE — once when the
+ *  forge accepts the job, and again once the poll sees the head actually move, since
+ *  the first pass reads a head that has not shifted yet. */
 export const prUpdateBranchKeys = (
   repo: string,
   number: number,
@@ -5317,6 +5331,7 @@ export const prUpdateBranchKeys = (
   [
     ["repo", repo, "pr", lens, number],
     ["repo", repo, "pr-list", lens],
+    ["repo", repo, "pr-review-state", lens],
     ["repo", repo, "prs", lens],
   ] as const;
 
@@ -6986,6 +7001,10 @@ export function useEditPrLabels(repo: string, lens: RemoteLens) {
         mr: (n) => [
           ["repo", repo, "pr", lens, n],
           ["repo", repo, "pr-list", lens],
+          // A label edit moves the PR's `updatedAt`, so the grouping map has to
+          // refresh with the rows (see usePrReviewState). Issues and discussions
+          // have no such sibling.
+          ["repo", repo, "pr-review-state", lens],
         ],
         discussion: (n) => [
           ["repo", repo, "discussion", n],

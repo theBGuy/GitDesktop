@@ -470,8 +470,9 @@ report, don't exceed scope.
 Help-content specifics: shortcuts are `{{kbd:action-id}}` / `{{key:…}}`
 tokens, never literal keys — but a `defaultBinding: null` (palette-only)
 action gets **no token at all** (it renders the literal word "palette" —
-HelpScreen's `PALETTE_ONLY` set); mention it as plain prose. AI-only content gated with `ai: true` +
-`{{ai}}…{{/ai}}`. Verify every claim against code; sweep stale "coming soon"
+HelpScreen's `PALETTE_ONLY` set); mention it as plain prose. AI-only content
+gated with `ai: true` + `{{ai}}…{{/ai}}`. Verify every claim against code;
+sweep stale "coming soon"
 mentions when a feature ships.
 
 ## Prevention standing rules (owner-adopted 2026-08-15)

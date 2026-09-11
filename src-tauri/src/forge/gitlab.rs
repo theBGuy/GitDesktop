@@ -835,7 +835,9 @@ fn mr_stack_from_rows(open: &[PrInfo], number: u64) -> (Option<PrStackInfo>, Vec
 //
 // The bound on that completeness is the paging horizon, not the union: each leg walks
 // up to MAX_LEG_PAGES pages of FILTER_PAGE_SIZE rows, so a filtered answer is
-// whole-repo complete up to 500 rows per leg and can omit older matches past it.
+// whole-repo complete up to 500 rows per leg. Hitting that horizon is REFUSED, never
+// absorbed — the walk returns a `truncated` flag and `refuse_truncated_walk` errors
+// rather than letting a page with no completeness proof pose as the answer.
 // `walk_filtered_legs` owns the walk and states the guarantee in full.
 
 /// Cap on the fanned group's MEMBER count. Deliberately not a cap on legs: states
@@ -991,11 +993,19 @@ fn plan_filtered_list(
     // Every leg reads FULL pages regardless of `limit`: the client predicates can
     // drop most of a leg's rows, so a `limit`-sized page would truncate the answer
     // before the filter had finished. `limit` narrows the merged result instead.
+    //
+    // `order_by`/`sort` are pinned rather than inherited: newest-created-first is what
+    // `leg_needs_deeper`'s displacement proof rests on, so it has to be a request the
+    // walk makes, not a GitLab default it happens to enjoy. (Measured equal to the
+    // default on both endpoints today; `sort=asc` flips both, so the params are live.)
     let endpoints = states
         .iter()
         .flat_map(|state| {
             legs.iter().map(move |leg| {
-                format!("projects/{enc}/{resource}?state={state}&per_page={FILTER_PAGE_SIZE}&{leg}")
+                format!(
+                    "projects/{enc}/{resource}?state={state}&per_page={FILTER_PAGE_SIZE}\
+                     &order_by=created_at&sort=desc&{leg}"
+                )
             })
         })
         .collect();
@@ -1131,19 +1141,30 @@ async fn filter_viewer(
     Ok(Some(username))
 }
 
-/// Walk every leg of a plan, page by page, and return the rows fetched (raw — the
-/// caller's merge applies the predicates, dedupe, ordering and truncation).
+/// Walk every leg of a plan, page by page. Returns the rows fetched (raw — the
+/// caller's merge applies the predicates, dedupe, ordering and truncation) and
+/// whether any leg stopped at a CAP with rows still unread behind it.
 ///
 /// Legs are walked BREADTH-first, one page deep across all of them before any
 /// second page: a leg's later pages hold only older rows, so starving another leg's
 /// page 1 would drop rows newer than the ones the depth bought.
 ///
-/// A leg stops when GitLab returns a short page (it's exhausted), when
-/// [`leg_needs_deeper`] says nothing deeper could enter the page, or when the leg's
-/// [`MAX_LEG_PAGES`] horizon is spent; [`MAX_FILTER_REQUESTS`] bounds the whole walk.
-/// So the completeness guarantee is honest but bounded: whole-repo complete up to
-/// [`MAX_LEG_PAGES`] × [`FILTER_PAGE_SIZE`] rows per leg, and past that horizon a
-/// filtered answer can omit older matches.
+/// That "later pages are older" premise is the whole displacement proof, so the plan's
+/// endpoints PIN `order_by=created_at&sort=desc` rather than inherit GitLab's default
+/// ordering — a default this walk merely happens to agree with could change and
+/// invalidate the proof silently.
+///
+/// Three ways a leg ends, and only the third is truncation:
+/// 1. a short page — the leg is exhausted, nothing behind it;
+/// 2. [`leg_needs_deeper`] says no — proven complete for this page, since everything
+///    deeper is older than rows the truncation would already drop;
+/// 3. the [`MAX_LEG_PAGES`] horizon or the [`MAX_FILTER_REQUESTS`] budget — rows
+///    remain unread, so the answer is a partial the caller must not pass off as
+///    whole-repo truth.
+///
+/// So the guarantee is bounded but knowable: whole-repo complete up to
+/// [`MAX_LEG_PAGES`] × [`FILTER_PAGE_SIZE`] rows per leg, and the flag says when that
+/// horizon actually bound.
 ///
 /// `row` reports each mapped row's `(id, created_at, author, labels)` — the id and
 /// timestamp feed the stop rule, and the author/labels let it count only rows that
@@ -1155,7 +1176,7 @@ async fn walk_filtered_legs<R, T>(
     parse_failure: &str,
     map: impl Fn(R) -> T,
     row: impl Fn(&T) -> (u64, &str, Option<&PrAuthor>, &[PrListLabel]),
-) -> AppResult<Vec<T>>
+) -> AppResult<(Vec<T>, bool)>
 where
     R: serde::de::DeserializeOwned,
 {
@@ -1165,6 +1186,7 @@ where
     let mut kept_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut kept_times: Vec<String> = Vec::new();
     let mut requests = 0usize;
+    let mut truncated = false;
     let mut active: Vec<&String> = plan.endpoints.iter().collect();
 
     for page in 1..=MAX_LEG_PAGES {
@@ -1172,8 +1194,13 @@ where
             break;
         }
         let mut deeper: Vec<&String> = Vec::new();
-        for endpoint in active {
+        let mut spent_budget = false;
+        for endpoint in active.iter().copied() {
             if requests >= MAX_FILTER_REQUESTS {
+                // A page we meant to read and didn't: every leg left in this round is
+                // unfinished, and the budget is global so no deeper round can run.
+                truncated = true;
+                spent_budget = true;
                 break;
             }
             let url = format!("{endpoint}&page={page}");
@@ -1207,9 +1234,47 @@ where
                 deeper.push(endpoint);
             }
         }
+        if spent_budget {
+            break;
+        }
         active = deeper;
     }
-    Ok(fetched)
+    // Legs still wanting a page when the horizon ran out are truncated by definition.
+    Ok((fetched, truncated || !active.is_empty()))
+}
+
+/// Refuse a walk that a cap cut short, whatever it managed to collect.
+///
+/// Only two of [`walk_filtered_legs`]' three leg endings prove a leg gave up
+/// everything it had. An EXHAUSTED leg has nothing behind it. A [`leg_needs_deeper`]
+/// stop proved its unread rows are all older than the page's cutoff — and that proof
+/// survives the rest of the walk, because the cutoff is the `limit`-th newest kept
+/// row and keeping more rows only moves it NEWER.
+///
+/// A cap-stop has neither proof, and not by accident: a leg only reaches a cap while
+/// `leg_needs_deeper` was still TRUE, which is exactly the state where a deeper page
+/// could still hold a row newer than the cutoff. The budget cap is blinder still — it
+/// abandons legs whose page was never read, so nothing at all is known about them.
+///
+/// Filling `limit` is therefore NOT evidence of a correct page: one exhausted leg can
+/// supply a full page of older matches while a capped leg's unread pages hold a newer
+/// match that belongs above them, and the rows returned would be the wrong ones in the
+/// wrong order — with the caller's more-to-come inference (a full page) reading as
+/// business as usual. Refusing is the only honest answer this signal can support.
+///
+/// Two better fixes, both out of scope here: carry `truncated` over the wire (a
+/// rows+flag struct through `forge_pr_list`) so the UI can present a partial honestly,
+/// and keep each unfinished leg's last-read timestamp so a page can be ACCEPTED when
+/// no unread leg could displace it — the per-leg boundary proof this refusal replaces.
+fn refuse_truncated_walk(truncated: bool) -> AppResult<()> {
+    if truncated {
+        return Err(AppError::Glab(format!(
+            "This filter needs more of GitLab's list than GitDesktop searches ({} rows \
+             per filter value). Narrow the filter to fewer values, or to more specific ones.",
+            FILTER_PAGE_SIZE * MAX_LEG_PAGES
+        )));
+    }
+    Ok(())
 }
 
 /// Run a plan's legs and merge them into one filtered MR page.
@@ -1218,7 +1283,7 @@ async fn filtered_mr_page(
     plan: &GlFilterPlan,
     limit: Option<u32>,
 ) -> AppResult<Vec<PrInfo>> {
-    let rows = walk_filtered_legs(
+    let (rows, truncated) = walk_filtered_legs(
         repo_path,
         plan,
         limit,
@@ -1234,6 +1299,7 @@ async fn filtered_mr_page(
         },
     )
     .await?;
+    refuse_truncated_walk(truncated)?;
     Ok(merge_filtered_mrs(rows, plan, limit))
 }
 
@@ -1243,7 +1309,7 @@ async fn filtered_issue_page(
     plan: &GlFilterPlan,
     limit: Option<u32>,
 ) -> AppResult<Vec<IssueInfo>> {
-    let rows = walk_filtered_legs(
+    let (rows, truncated) = walk_filtered_legs(
         repo_path,
         plan,
         limit,
@@ -1259,6 +1325,7 @@ async fn filtered_issue_page(
         },
     )
     .await?;
+    refuse_truncated_walk(truncated)?;
     Ok(merge_filtered_issues(rows, plan, limit))
 }
 
@@ -9876,8 +9943,8 @@ mod tests {
             plan("merge_requests", &["opened"], true, &f),
             GlFilterPlan {
                 endpoints: vec![
-                    "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&assignee_username[]=me".to_string(),
-                    "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&reviewer_username=me".to_string(),
+                    "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&assignee_username[]=me".to_string(),
+                    "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&reviewer_username=me".to_string(),
                 ],
                 authors: vec!["octocat".to_string()],
                 labels: vec!["bug".to_string()],
@@ -9887,7 +9954,7 @@ mod tests {
         let assignee_only = filter_of(true, false, &[], &[]);
         assert_eq!(
             plan("merge_requests", &["opened"], true, &assignee_only).endpoints,
-            ["projects/grp%2Fproj/merge_requests?state=opened&per_page=100&assignee_username[]=me"]
+            ["projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&assignee_username[]=me"]
         );
     }
 
@@ -9899,8 +9966,8 @@ mod tests {
         assert_eq!(
             p.endpoints,
             [
-                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&author_username=octocat",
-                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&author_username=dependabot",
+                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&author_username=octocat",
+                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&author_username=dependabot",
             ]
         );
         assert!(p.authors.is_empty());
@@ -9912,10 +9979,10 @@ mod tests {
         assert_eq!(
             p.endpoints,
             [
-                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&labels=bug",
+                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&labels=bug",
                 // A space must be percent-encoded: glab forwards the endpoint verbatim
                 // and GitLab answers a raw space with HTTP 400.
-                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&labels=needs%20triage",
+                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&labels=needs%20triage",
             ]
         );
         assert!(p.authors.is_empty() && p.labels.is_empty());
@@ -9927,10 +9994,10 @@ mod tests {
         assert_eq!(
             plan("merge_requests", &["closed", "merged"], true, &f).endpoints,
             [
-                "projects/grp%2Fproj/merge_requests?state=closed&per_page=100&author_username=octocat",
-                "projects/grp%2Fproj/merge_requests?state=closed&per_page=100&author_username=dependabot",
-                "projects/grp%2Fproj/merge_requests?state=merged&per_page=100&author_username=octocat",
-                "projects/grp%2Fproj/merge_requests?state=merged&per_page=100&author_username=dependabot",
+                "projects/grp%2Fproj/merge_requests?state=closed&per_page=100&order_by=created_at&sort=desc&author_username=octocat",
+                "projects/grp%2Fproj/merge_requests?state=closed&per_page=100&order_by=created_at&sort=desc&author_username=dependabot",
+                "projects/grp%2Fproj/merge_requests?state=merged&per_page=100&order_by=created_at&sort=desc&author_username=octocat",
+                "projects/grp%2Fproj/merge_requests?state=merged&per_page=100&order_by=created_at&sort=desc&author_username=dependabot",
             ]
         );
     }
@@ -9942,7 +10009,7 @@ mod tests {
         let f = filter_of(true, true, &[], &[]);
         assert_eq!(
             plan("issues", &["opened"], false, &f).endpoints,
-            ["projects/grp%2Fproj/issues?state=opened&per_page=100&assignee_username[]=me"]
+            ["projects/grp%2Fproj/issues?state=opened&per_page=100&order_by=created_at&sort=desc&assignee_username[]=me"]
         );
         // …and a review-only filter narrows nothing on issues, so the caller keeps
         // its unfiltered read instead of paying for an unnarrowed fan-out.
@@ -10199,7 +10266,41 @@ mod tests {
                 endpoint.contains(&format!("per_page={FILTER_PAGE_SIZE}")),
                 "{endpoint}"
             );
+            // Newest-first is PINNED, not inherited: `leg_needs_deeper`'s displacement
+            // proof reads "everything deeper is older", so a GitLab default change
+            // must not be able to invalidate it quietly.
+            assert!(endpoint.contains("&order_by=created_at"), "{endpoint}");
+            assert!(endpoint.contains("&sort=desc"), "{endpoint}");
         }
+    }
+
+    /// A cap-stopped walk has no completeness proof, so no page built from it can
+    /// claim newest-first correctness — INCLUDING one that fills `limit`, since a
+    /// capped leg only reached its cap while a deeper page could still have displaced
+    /// rows the page already holds. The row count is deliberately not an input.
+    #[test]
+    fn a_truncated_walk_is_refused_whatever_it_collected() {
+        match refuse_truncated_walk(true) {
+            Err(AppError::Glab(msg)) => {
+                // The copy has to name the bound and the remedy, or it leaves the user
+                // with no next move.
+                assert!(
+                    msg.contains(&(FILTER_PAGE_SIZE * MAX_LEG_PAGES).to_string()),
+                    "{msg}"
+                );
+                assert!(msg.contains("Narrow the filter"), "{msg}");
+                assert!(msg.contains("per filter value"), "{msg}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_untruncated_walk_is_never_refused() {
+        // Exhausted and proven-complete legs together ARE the whole repo, so zero
+        // matches is the answer — refusing here would turn an honest empty list into
+        // an error.
+        assert!(refuse_truncated_walk(false).is_ok());
     }
 
     #[test]

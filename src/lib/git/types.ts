@@ -1725,6 +1725,10 @@ export interface ReviewStateEntry {
  *  (callers derive "not reviewed" by subtraction against the visible rows). */
 export interface ReviewStatePage {
   entries: Record<number, ReviewStateEntry>;
+  /** The server walk couldn't cover the list's own page, so an absent number may still
+   *  have been reviewed. A capped walk alone does NOT set this: the list and the
+   *  reviewed-by search share a scope and a sort, so a walk at least as deep as the
+   *  page already holds every reviewed row on screen. */
   truncated: boolean;
 }
 

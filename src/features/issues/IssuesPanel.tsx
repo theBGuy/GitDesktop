@@ -17,7 +17,11 @@ import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
 import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
-import { useRemoteListFilter } from "@/features/conversations/useRemoteListFilter";
+import {
+  gitlabAxisCap,
+  useRemoteListFilter,
+} from "@/features/conversations/useRemoteListFilter";
+import { presentError } from "@/lib/error-summary";
 import type { IssueStateFilter } from "@/lib/git/api";
 import {
   forgeFeatureReady,
@@ -126,6 +130,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const [stateFilter, setStateFilter] = useState<IssueStateFilter>("open");
   // How many remote issues to load; "Load more" bumps it. A tab switch resets it.
   const [limit, setLimit] = useState(PAGE_SIZE);
+  const onIssuesTab = useUiStore((s) => s.repoTab) === "issues";
   // Issues carry the assignee axis only — no reviewers, no teams, no grouping.
   const listFilter = useRemoteListFilter({
     repoPath,
@@ -136,14 +141,20 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     canFilterAuthor,
     canFilterLabel,
     canGroupByReview: false,
+    tabActive: onIssuesTab,
   });
-  // `prefsReady` in the gate: a repo with a stored filter would otherwise fetch
-  // once unfiltered and again filtered, flashing rows the scope excludes. The
-  // wait is covered by the same skeletons a cold load already shows, and the
-  // prefs loader resolves to defaults on failure, so the gate always opens.
+  // `scopeReady` in the gate: a repo with a stored filter would otherwise fetch
+  // once unfiltered and again filtered, flashing rows the scope excludes. The wait
+  // is covered by the same skeletons a cold load already shows (a held query reports
+  // `isPending`, which is what `listPending` below renders).
+  // Here it reduces to "the prefs have been read": the gate's other leg waits on a
+  // saved TEAM choice to validate, and this panel passes `canFilterTeam: false`, so
+  // its chosen-teams list is always empty and that leg is always satisfied. The
+  // shared gate is used anyway rather than the narrower one, so the panels can't
+  // drift if issues ever gain an axis that needs validating.
   const issueList = useIssueList(
     repoPath,
-    ghReady && listFilter.prefsReady,
+    ghReady && listFilter.scopeReady,
     stateFilter,
     limit,
     lens,
@@ -199,9 +210,9 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   );
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));
   // Each scope action mirrors its toolbar segment's availability, and adds the
-  // tab: both panels stay mounted under <Activity>, so an ungated registration
-  // would rewrite this repo's issue filter from the Pull Requests tab unseen.
-  const onIssuesTab = useUiStore((s) => s.repoTab) === "issues";
+  // tab (`onIssuesTab`, hoisted above): both panels stay mounted under <Activity>,
+  // so an ungated registration would rewrite this repo's issue filter from the
+  // Pull Requests tab unseen.
   useHotkeyAction(
     "issue-preset-all",
     () => listFilter.setPreset("all"),
@@ -330,10 +341,19 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       return `${providerName} issues have no assignees to filter by`;
     return `Connect this repository to ${providerName} to filter by assignee`;
   })();
-  const authorReason =
-    canFilterAuthor || !implemented || implemented.listFilterAuthor
-      ? null
-      : `${providerName} can't filter issues by author here`;
+  // Same two-reason shape as mineReason above, and the order matters: the provider
+  // claim is only made where `implemented` actually refutes the axis, so a forge
+  // status that hasn't loaded — or one whose provider DOES support authors but
+  // isn't connected yet — falls to the connect line instead. Left null, the rows
+  // would stay live while the axis was dropped from the query, and a pick would
+  // silently empty the local section under a zero badge.
+  const authorReason = (() => {
+    if (canFilterAuthor) return null;
+    if (implemented && !implemented.listFilterAuthor)
+      return `${providerName} can't filter issues by author here`;
+    return `Connect this repository to ${providerName} to filter by author`;
+  })();
+  const axisCap = isGitLab ? gitlabAxisCap(providerName) : undefined;
 
   // The Bitbucket remote (host) section never has issues — its tracker is
   // retired. Unlinked, it invites linking a Jira project; linked, the Jira
@@ -406,6 +426,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
             authorCount={authorCount}
             labelCount={labelCount}
             authorReason={authorReason}
+            axisCap={axisCap}
             mine={{
               label: "Mine",
               disabledReason: mineReason,
@@ -488,6 +509,16 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
           ) : (
             <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
               <p>Couldn't load issues.</p>
+              {/* The filter refusals this panel can provoke — a fan-out too wide
+                  for the provider, a rejected author/label term, an advanced search
+                  the host doesn't offer — are PERMANENT, and each already carries
+                  the sentence that says how to get out of it. Retry stays for the
+                  transient half, which can't tell itself apart from here. */}
+              {issueList.error != null && (
+                <p className="text-[11px]">
+                  {presentError(issueList.error).summary}
+                </p>
+              )}
               <Button
                 variant="outline"
                 size="sm"
