@@ -1,44 +1,24 @@
-//! The cross-repo "My work" inbox: every open pull request and issue involving
-//! the signed-in GitHub user, in one call.
+//! The cross-repo "My work" inbox, GitHub arm: every open pull request and issue
+//! involving the signed-in GitHub user, in one call.
 //!
 //! Shells `gh search issues` and `gh search prs`, so it rides the user's gh CLI
 //! auth and never handles a token. Account-scoped — no repo path — because the
 //! whole point is the items that live OUTSIDE the checked-out repo.
 //!
 //! Two queries, because GitHub's `involves:` qualifier does NOT cover
-//! review-requested (see [`INVOLVES_ARGS`]); their results are merged into one
-//! page by [`merge_my_work`].
+//! review-requested (see [`INVOLVES_ARGS`]); their results ride the neutral
+//! [`merge_legs`] alongside the other providers'.
 
-use std::collections::HashSet;
-
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::AppResult;
+use crate::forge::model::Provider;
+use crate::forge::my_work::{
+    merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
+};
 use crate::github::gh_unreadable;
 use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT};
-
-/// One open pull request or issue in the inbox, flattened for the frontend.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MyWorkItem {
-    /// A repo-scoped counter, so it stays JS-number-safe as a `u64` — the
-    /// string-over-IPC rule targets snowflake ids, which these aren't.
-    pub number: u64,
-    pub title: String,
-    pub is_pull_request: bool,
-    /// `owner/name` exactly as GitHub reports it; the split halves follow.
-    pub repo_full_name: String,
-    pub repo_owner: String,
-    pub repo_name: String,
-    /// Parsed from `url`, so Enterprise items carry their own host. Empty when
-    /// the URL has no parseable authority (modelled absence, never a guess).
-    pub host: String,
-    pub url: String,
-    /// ISO-8601 as gh emits it; the frontend validates before formatting.
-    pub updated_at: String,
-    pub author_login: Option<String>,
-}
 
 /// The `repository` object on a search hit. gh emits `name` and `nameWithOwner`
 /// here; only the latter is taken (both wire halves split from it). Optional
@@ -85,12 +65,6 @@ struct GhSearchItem {
 /// The `--json` field set both legs request; identical so the two parse through
 /// the same intake shape.
 const MY_WORK_FIELDS: &str = "number,title,isPullRequest,repository,updatedAt,url,author";
-
-/// The whole page this surface fetches, per leg and after the merge. There is no
-/// pagination, so this is also the point where the inbox truncates — the wire
-/// envelope's `truncated` flag reports that to the frontend, so the number
-/// itself is not mirrored there and can change on its own.
-const MY_WORK_LIMIT: usize = 200;
 
 /// Leg 1. GitHub's `involves:` is author OR assignee OR mentions OR commenter —
 /// it does NOT cover review-requested, which is a separate qualifier
@@ -159,6 +133,7 @@ fn item_from_intake(raw: GhSearchItem, default_is_pull_request: bool) -> Option<
     // are spelled the same here as everywhere else in the app.
     let host = crate::forge::remote_host(&url).unwrap_or_default();
     Some(MyWorkItem {
+        provider: Provider::GitHub,
         number,
         title,
         is_pull_request: raw.is_pull_request.unwrap_or(default_is_pull_request),
@@ -167,18 +142,11 @@ fn item_from_intake(raw: GhSearchItem, default_is_pull_request: bool) -> Option<
         repo_name,
         host,
         url,
-        updated_at: raw.updated_at.unwrap_or_default(),
+        // gh emits Z-suffixed RFC 3339 already, but the merge compares these as
+        // strings ACROSS providers, so every arm folds through the one normalizer.
+        updated_at: normalize_updated_at(&raw.updated_at.unwrap_or_default()),
         author_login: raw.author.and_then(|a| a.login).filter(|l| !l.is_empty()),
     })
-}
-
-/// One leg's parsed result: its wire items, plus how many elements gh actually
-/// returned. The raw count is the leg's own truncation signal and cannot be
-/// recovered from `items` — dropped hits ([`item_from_intake`]) already shrank
-/// that.
-struct MyWorkLeg {
-    items: Vec<MyWorkItem>,
-    raw_len: usize,
 }
 
 /// Parse one leg's `gh search … --json` stdout into wire items. Per-hit
@@ -192,59 +160,18 @@ fn parse_my_work(stdout: &str, default_is_pull_request: bool) -> AppResult<MyWor
             format!("could not parse your GitHub work items: {e}"),
         )
     })?;
-    let raw_len = raw.len();
+    // A leg that came back with as many elements as it ASKED for may have had
+    // more on the server; dropped hits below already shrank `items`, so this is
+    // the last point that can see it.
+    let capped = raw.len() >= MY_WORK_LIMIT;
     Ok(MyWorkLeg {
         items: raw
             .into_iter()
             .filter_map(|v| serde_json::from_value::<GhSearchItem>(v).ok())
             .filter_map(|raw| item_from_intake(raw, default_is_pull_request))
             .collect(),
-        raw_len,
+        capped,
     })
-}
-
-/// One page of the inbox, and whether anything was left off it: `truncated` is
-/// true when either search leg hit its own server-side cap or the merged union
-/// overshot the page — so it can be true on a page that arrives short.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MyWorkPage {
-    pub items: Vec<MyWorkItem>,
-    pub truncated: bool,
-}
-
-/// Merge the two legs into one page: dedupe by URL (a PR can be both involving
-/// and review-requested), newest first, truncated to [`MY_WORK_LIMIT`] so the
-/// wire contract stays one page however much the union overshoots.
-///
-/// A leg that came back with as many elements as it ASKED for is itself a
-/// truncation: gh may have had more, and the page can still land short of the
-/// limit once dedupe and dropped hits take their cut, so the union's length
-/// alone can't see it. The reverse error — a leg holding exactly the limit with
-/// nothing more on the server — reports a cap that isn't there, and that is the
-/// safe direction: an inbox that hides items must never look complete.
-///
-/// The sort is a plain string compare because gh emits `updatedAt` as
-/// Z-suffixed RFC 3339 — fixed width, one offset, so lexical order IS
-/// chronological order. An item with no timestamp sorts last rather than
-/// claiming to be the newest.
-fn merge_my_work(involves: MyWorkLeg, review_requested: MyWorkLeg) -> MyWorkPage {
-    let leg_capped =
-        involves.raw_len >= MY_WORK_LIMIT || review_requested.raw_len >= MY_WORK_LIMIT;
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut merged: Vec<MyWorkItem> = Vec::new();
-    for item in involves.items.into_iter().chain(review_requested.items) {
-        if seen.insert(item.url.clone()) {
-            merged.push(item);
-        }
-    }
-    merged.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let truncated = leg_capped || merged.len() > MY_WORK_LIMIT;
-    merged.truncate(MY_WORK_LIMIT);
-    MyWorkPage {
-        items: merged,
-        truncated,
-    }
 }
 
 /// Every open pull request and issue involving the signed-in GitHub user,
@@ -259,16 +186,22 @@ pub async fn my_work() -> AppResult<MyWorkPage> {
     let review_requested = run_gh(None, REVIEW_REQUESTED_ARGS, GH_NETWORK_TIMEOUT).await?;
     // Leg 2 is `gh search prs`: an omitted `isPullRequest` still means PR.
     let review_requested = parse_my_work(&review_requested.stdout_lossy(), true)?;
-    Ok(merge_my_work(involves, review_requested))
+    Ok(merge_legs(vec![involves, review_requested], MY_WORK_LIMIT))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_my_work, parse_my_work, MyWorkItem, MyWorkLeg, MyWorkPage, INVOLVES_ARGS,
+        merge_legs, parse_my_work, MyWorkItem, MyWorkLeg, MyWorkPage, INVOLVES_ARGS,
         MY_WORK_FIELDS, MY_WORK_LIMIT, REVIEW_REQUESTED_ARGS,
     };
     use serde_json::{json, Value};
+
+    /// The two-leg merge as [`super::my_work`] performs it — the GitHub arm's
+    /// own shape over the neutral N-leg fold.
+    fn merge_my_work(involves: MyWorkLeg, review_requested: MyWorkLeg) -> MyWorkPage {
+        merge_legs(vec![involves, review_requested], MY_WORK_LIMIT)
+    }
 
     /// A real `gh search issues --include-prs --involves=@me --state=open
     /// --limit 3 --json …` response (gh 2.x), structure byte-faithful; the
@@ -330,6 +263,7 @@ mod tests {
                 "host",
                 "isPullRequest",
                 "number",
+                "provider",
                 "repoFullName",
                 "repoName",
                 "repoOwner",
@@ -341,6 +275,7 @@ mod tests {
         assert_eq!(
             wire,
             json!({
+                "provider": "github",
                 "number": 309,
                 "title": "feat(settings): accent colour and UI font appearance",
                 "isPullRequest": true,
@@ -349,7 +284,8 @@ mod tests {
                 "repoName": "GitDesktop",
                 "host": "github.com",
                 "url": "https://github.com/theBGuy/GitDesktop/pull/309",
-                "updatedAt": "2026-09-05T23:21:02Z",
+                // gh's `…SSZ` is zero-padded to the merge's fixed width.
+                "updatedAt": "2026-09-05T23:21:02.000Z",
                 "authorLogin": "octo-cat",
             })
         );
@@ -463,7 +399,7 @@ mod tests {
     fn my_work_distinguishes_an_empty_inbox_from_unreadable_output() {
         let empty = parse_my_work("[]", false).unwrap();
         assert!(empty.items.is_empty());
-        assert_eq!(empty.raw_len, 0);
+        assert!(!empty.capped);
         assert!(parse_my_work("not json", false).is_err());
         assert!(parse_my_work("{\"items\":[]}", false).is_err());
     }
@@ -535,8 +471,8 @@ mod tests {
 
         // Neither leg came near its cap, so nothing here is truncation.
         let leg = |items: Vec<MyWorkItem>| MyWorkLeg {
-            raw_len: items.len(),
             items,
+            capped: false,
         };
         let page = merge_my_work(leg(involves), leg(review_requested));
         assert_eq!(page.items.len(), 3, "the shared URL should appear once");
@@ -584,7 +520,7 @@ mod tests {
                 .all(|w| w[0].updated_at >= w[1].updated_at),
             "truncated page must still be newest-first",
         );
-        assert_eq!(page.items[0].updated_at, "2026-09-01T00:59:00Z");
+        assert_eq!(page.items[0].updated_at, "2026-09-01T00:59:00.000Z");
 
         // A leg that filled its own `--limit` IS the truncation event, even
         // though the page lands exactly on the cap and never overshoots it —

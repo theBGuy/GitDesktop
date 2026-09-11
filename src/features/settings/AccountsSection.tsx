@@ -21,6 +21,8 @@ import { copyText } from "@/lib/clipboard";
 import { useAppForm } from "@/lib/form";
 import { forgeBbClearAccount, forgeBbSetAccount } from "@/lib/git/api";
 import {
+  MY_WORK_SOURCES_KEY,
+  myWorkPageKey,
   useAccountsHealth,
   useBbAccount,
   useClearGitlabReviewToken,
@@ -664,7 +666,10 @@ function BitbucketAccount() {
 
   // The set/clear both invalidate the account query AND every repo's forge-status
   // so a connected Bitbucket repo lights up (or goes dark) without a restart. The
-  // settings key too, so the stored token-expiry date reflects immediately.
+  // settings key too, so the stored token-expiry date reflects immediately. And
+  // the work inbox: its sources probe is what gates the Bitbucket leg, on a
+  // 5-minute window, so without it a just-connected account reads as absent (and
+  // a disconnected one keeps fetching against a missing token) until that lapses.
   function invalidateAll() {
     queryClient.invalidateQueries({ queryKey: ["bb-account"] });
     queryClient.invalidateQueries({ queryKey: ["settings"] });
@@ -672,6 +677,8 @@ function BitbucketAccount() {
       predicate: (q) =>
         q.queryKey[0] === "repo" && q.queryKey[2] === "forge-status",
     });
+    queryClient.invalidateQueries({ queryKey: MY_WORK_SOURCES_KEY });
+    queryClient.invalidateQueries({ queryKey: myWorkPageKey("bitbucket") });
   }
 
   const form = useAppForm({

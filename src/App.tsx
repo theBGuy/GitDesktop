@@ -26,7 +26,7 @@ import { useRepoDrop } from "@/features/welcome/useRepoDrop";
 import { WelcomeScreen } from "@/features/welcome/WelcomeScreen";
 import { syncAnalytics, track } from "@/lib/analytics";
 import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
-import { useGitInstalled } from "@/lib/git/queries";
+import { useGitInstalled, usePrefetchMyWorkSources } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
 import { MCP_WRITABLE_STORES } from "@/lib/mcp-writable-stores";
@@ -146,6 +146,11 @@ function App() {
   // this catches pushes to repos you've switched away from. Always mounted (any
   // view, welcome included); no-op unless a recent repo carries a pr-sync rule.
   useBackgroundPrSync();
+
+  // Warm the work inbox's sources probe here rather than on its first render:
+  // it reads two CLI configs plus the keyring over IPC, and paying for that at
+  // app open keeps it off the critical path of the welcome → My work jump.
+  usePrefetchMyWorkSources();
 
   // The app-wide hotkey dispatcher plus the always-available actions.
   useHotkeysListener();

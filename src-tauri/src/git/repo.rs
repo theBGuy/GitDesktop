@@ -34,7 +34,12 @@ pub struct RepoOwner {
 /// Owner segment + host + repo name of a git remote URL — handles
 /// `https://host/owner/repo(.git)` and scp-style `git@host:owner/repo(.git)`.
 /// None per component if it can't be parsed.
-fn parse_owner_host(url: &str) -> (Option<String>, Option<String>, Option<String>) {
+///
+/// The owner is ONE segment — the one before the repo name — so a nested GitLab
+/// group yields `sub`, not `group/sub`. This is the spelling persisted on
+/// `RecentRepo.owner`, which the My work inbox's rows are matched against, so
+/// `forge::gitlab`'s mapper is pinned against this function directly.
+pub(crate) fn parse_owner_host(url: &str) -> (Option<String>, Option<String>, Option<String>) {
     let url = url.trim().trim_end_matches('/');
     let url = url.strip_suffix(".git").unwrap_or(url);
     // Split into host and the `owner/repo` path (scheme or scp form).
@@ -113,6 +118,95 @@ pub async fn git_repo_owners(repo_paths: Vec<String>) -> AppResult<Vec<RepoOwner
         });
     }
     Ok(out)
+}
+
+/// A checkout's origin identity, read LIVE from the remote — the four axes the
+/// open-time proof compares.
+#[derive(Serialize, Default, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoOrigin {
+    /// The origin's host, in `crate::forge::remote_host`'s spelling — lowercased,
+    /// PORT STRIPPED, a bracketed IPv6 literal keeping its brackets. That is the
+    /// same function the inbox item's own `host` comes from, so the two compare
+    /// without either side re-deriving it.
+    pub host: String,
+    /// The origin's full namespace path (`group/subgroup/name`, `.git` and
+    /// surrounding slashes trimmed).
+    pub path: String,
+    /// The origin's web authority — `host[:port]`, the port present only when it
+    /// is NOT the scheme's default (`crate::forge::web_authority`). `host` alone
+    /// can't separate two instances that share a hostname on different ports,
+    /// because it strips every port; this is the axis that can.
+    ///
+    /// Elision matches the browser `URL` spelling the caller parses the item's web
+    /// URL with, so the two sides agree without either re-normalizing: `:443` on
+    /// https and `:80` on http are dropped, any other web port is kept, and a
+    /// TRANSPORT port (`ssh://…:2222`) is dropped entirely — it says nothing about
+    /// where the web UI lives.
+    pub authority: String,
+    /// Which hosted integration a LANDING on this checkout would actually get —
+    /// `"github"` / `"gitlab"` / `"bitbucket"`, or `""` when the path has no
+    /// origin to classify.
+    ///
+    /// This answers "what would opening here resolve to", NOT "what forge is this
+    /// really". The two can disagree: `crate::forge::detect_non_github` classifies
+    /// from `glab`'s SAVED hosts, so a checkout on an instance implied only by a
+    /// token plus glab's config-file default is unclassifiable and resolves to
+    /// GitHub — the resilient default for an unknown host. Reporting that honestly
+    /// is the point: the row can then refuse a landing that would open with the
+    /// wrong integration, instead of the caller assuming agreement.
+    pub provider: String,
+}
+
+/// The origin remote's identity — open-time proof that a matched checkout really
+/// is the row's project, on all four axes.
+///
+/// Three of them are IDENTITY axes, each closing a distinct way the stored match
+/// lies.
+/// `parse_owner_host` keeps only ONE owner segment, so `team-a/sub/repo` and
+/// `team-b/sub/repo` are indistinguishable by owner+name+host — `path` settles
+/// that. The host in the match comes from the STORED `RecentRepo.host`, which
+/// goes stale the moment a remote is re-pointed, so identical namespaces on two
+/// different instances would pass a path-only proof — reading `host` live closes
+/// that window. And `host` itself strips every port, so two instances sharing a
+/// hostname on different ports still collide — `authority` is the axis that
+/// separates them.
+///
+/// `provider` is a different KIND of axis: not an identity to compare, but the
+/// integration a landing here would resolve to, so the caller can refuse an open
+/// that would arrive under the wrong one (see the field's own note).
+///
+/// `""` for any axis the origin won't yield (and for every axis when there is no
+/// origin at all): the caller reads an absent axis as UNPROVEN, never as a
+/// mismatch, so a hostless origin proves nothing rather than matching everything.
+///
+/// Cost: one `detect_non_github`, which re-reads the origin remote through its
+/// TTL cache — warm, since the line above just populated it for this same path —
+/// plus glab's known-hosts config read for a host that isn't canonically GitHub,
+/// GitLab or Bitbucket. Both are local and sit inside the caller's existing
+/// open-time deadline.
+#[tauri::command]
+pub async fn repo_origin_path(repo_path: String) -> AppResult<RepoOrigin> {
+    let Ok(url) =
+        crate::git::remote::git_remote_url(repo_path.clone(), "origin".to_string()).await
+    else {
+        return Ok(RepoOrigin::default());
+    };
+    // The LANDING's own classifier (`resolve_status` dispatches on exactly this),
+    // so the verdict is what the open will really get rather than a second
+    // opinion that could disagree with it. `None` is GitHub by the resilient
+    // default that keeps `gh` authoritative for Enterprise and unknown hosts.
+    let provider = match crate::forge::detect_non_github(&repo_path).await {
+        Some((crate::forge::model::Provider::GitLab, _)) => "gitlab",
+        Some((crate::forge::model::Provider::Bitbucket, _)) => "bitbucket",
+        Some((crate::forge::model::Provider::GitHub, _)) | None => "github",
+    };
+    Ok(RepoOrigin {
+        host: crate::forge::remote_host(&url).unwrap_or_default(),
+        path: crate::forge::remote_path(&url).unwrap_or_default(),
+        authority: crate::forge::web_authority(&url).unwrap_or_default(),
+        provider: provider.to_string(),
+    })
 }
 
 /// A repository's worktree-stable identity key: the absolute path of its common
@@ -598,5 +692,225 @@ mod owner_tests {
         keys.sort_unstable();
         assert_eq!(keys, ["host", "owner", "path", "provider", "repoName"]);
         assert_eq!(wire.get("repoName").and_then(|v| v.as_str()), Some("GitDesktop"));
+    }
+
+    /// The disambiguator itself: `parse_owner_host` folds two DIFFERENT nested
+    /// projects onto the same owner+name+host, which is what lets a work-inbox row
+    /// match the wrong checkout. `repo_origin_path` has to tell them apart.
+    #[test]
+    fn nested_namespaces_collide_on_owner_but_not_on_the_full_path() {
+        let a = parse_owner_host("https://gitlab.com/team-a/sub/repo.git");
+        let b = parse_owner_host("https://gitlab.com/team-b/sub/repo.git");
+        assert_eq!(a, b, "owner+host+name cannot separate these — the bug");
+        assert_ne!(
+            crate::forge::remote_path("https://gitlab.com/team-a/sub/repo.git"),
+            crate::forge::remote_path("https://gitlab.com/team-b/sub/repo.git"),
+            "the full origin path is what proves the match",
+        );
+    }
+}
+
+#[cfg(test)]
+mod origin_path_tests {
+    use super::{repo_origin_path, RepoOrigin};
+
+    /// Resolve `origin` against a real repo (temp_dir, git on PATH).
+    ///
+    /// A FRESH temp repo per remote form — `git_remote_url`'s TTL cache is keyed by
+    /// `(repo_path, name)`, and this test's raw `git remote add` bypasses the
+    /// app-side commands that invalidate it, so reusing one path across iterations
+    /// would serve the first remote's cached URL to every later assertion.
+    async fn origin_of(tag: &str, remote: Option<&str>) -> RepoOrigin {
+        async fn run(repo: &str, args: &[&str]) {
+            let _ =
+                crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+                    .await;
+        }
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-origin-path-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        run(&repo_s, &["init", "-q"]).await;
+        if let Some(url) = remote {
+            run(&repo_s, &["remote", "add", "origin", url]).await;
+        }
+        repo_origin_path(repo_s).await.unwrap()
+    }
+
+    fn origin(host: &str, path: &str, authority: &str, provider: &str) -> RepoOrigin {
+        RepoOrigin {
+            host: host.into(),
+            path: path.into(),
+            authority: authority.into(),
+            provider: provider.into(),
+        }
+    }
+
+    /// All four axes of the proof, across the forms the inbox meets.
+    #[tokio::test]
+    async fn origin_reports_the_host_and_the_whole_namespace() {
+        for (tag, remote, want) in [
+            // The namespace collision: the segment before the name is identical, so
+            // only the whole path separates these two projects.
+            (
+                "nested-a",
+                Some("https://gitlab.com/team-a/sub/repo.git"),
+                origin("gitlab.com", "team-a/sub/repo", "gitlab.com", "gitlab"),
+            ),
+            (
+                "nested-b",
+                Some("https://gitlab.com/team-b/sub/repo.git"),
+                origin("gitlab.com", "team-b/sub/repo", "gitlab.com", "gitlab"),
+            ),
+            (
+                "flat",
+                Some("https://github.com/theBGuy/GitDesktop.git"),
+                origin("github.com", "theBGuy/GitDesktop", "github.com", "github"),
+            ),
+            // scp-style ssh: that `:` opens the path, so there is no port to keep.
+            (
+                "scp",
+                Some("git@gitlab.com:group/sub/repo.git"),
+                origin("gitlab.com", "group/sub/repo", "gitlab.com", "gitlab"),
+            ),
+            // `host` strips the port — `remote_host`'s contract — while the
+            // authority KEEPS it, which is the whole point of the third axis. The
+            // acme hosts sit in nobody's glab config, so despite the gitlab-looking
+            // name their provider verdict is the honest resilient default.
+            (
+                "ported",
+                Some("https://gitlab.acme.corp:8443/team/svc.git"),
+                origin("gitlab.acme.corp", "team/svc", "gitlab.acme.corp:8443", "github"),
+            ),
+            // An explicit default port elides, matching the browser `URL` spelling
+            // the item side is parsed with — otherwise every default-port item
+            // would mismatch a checkout cloned with an explicit `:443`.
+            (
+                "explicit-default-port",
+                Some("https://gitlab.acme.corp:443/team/svc.git"),
+                origin("gitlab.acme.corp", "team/svc", "gitlab.acme.corp", "github"),
+            ),
+            // A TRANSPORT port is not the web port: ssh on 2222 beside a web UI on
+            // 443 is the common self-managed shape, so it must not reach the
+            // authority or the checkout would fail to match its own instance.
+            (
+                "ssh-nondefault-port",
+                Some("ssh://git@gitlab.acme.corp:2222/team/svc.git"),
+                origin("gitlab.acme.corp", "team/svc", "gitlab.acme.corp", "github"),
+            ),
+            // Mixed case lowercases on both host axes, again matching the item side.
+            (
+                "mixed-case",
+                Some("https://GitLab.ACME.corp/Team/Svc.git"),
+                origin("gitlab.acme.corp", "Team/Svc", "gitlab.acme.corp", "github"),
+            ),
+            // No `.git` suffix to strip, and a trailing slash to trim.
+            (
+                "bare",
+                Some("https://gitlab.com/group/sub/repo/"),
+                origin("gitlab.com", "group/sub/repo", "gitlab.com", "gitlab"),
+            ),
+            // No origin at all → every axis "" (unproven), never an error.
+            ("no-origin", None, RepoOrigin::default()),
+        ] {
+            assert_eq!(origin_of(tag, remote).await, want, "case: {tag}");
+        }
+    }
+
+    /// The gap this closes: the stored `RecentRepo.host` goes stale when a remote
+    /// is re-pointed, so a path-only proof passes for the SAME namespace on a
+    /// DIFFERENT instance and opens the wrong checkout. Reading the host live
+    /// separates them.
+    #[tokio::test]
+    async fn the_same_namespace_on_two_hosts_is_distinguishable() {
+        let cloud = origin_of("host-cloud", Some("https://gitlab.com/team/sub/repo.git")).await;
+        let corp = origin_of(
+            "host-corp",
+            Some("https://gitlab.acme.corp/team/sub/repo.git"),
+        )
+        .await;
+
+        assert_eq!(cloud.path, corp.path, "identical namespaces — the trap");
+        assert_ne!(cloud.host, corp.host, "…separated only by the live host");
+        assert_ne!(cloud, corp, "so the proof as a whole distinguishes them");
+    }
+
+    /// The third axis: SAME hostname, SAME namespace, different port — two
+    /// separate instances. `host` strips the port, so it cannot tell them apart
+    /// and neither can a host+path proof; only the authority can.
+    #[tokio::test]
+    async fn the_same_namespace_on_two_ports_is_distinguishable() {
+        let default_port =
+            origin_of("port-default", Some("https://gitlab.example/team/repo.git")).await;
+        let alt_port = origin_of(
+            "port-alt",
+            Some("https://gitlab.example:8443/team/repo.git"),
+        )
+        .await;
+
+        assert_eq!(default_port.path, alt_port.path, "identical namespaces");
+        assert_eq!(
+            default_port.host, alt_port.host,
+            "identical hosts — host+path alone would pass here, the defect",
+        );
+        assert_ne!(
+            default_port.authority, alt_port.authority,
+            "the authority is what separates the two instances",
+        );
+        assert_ne!(default_port, alt_port);
+    }
+
+    /// The wire shape the frontend mirrors, pinned rather than trusted to
+    /// `rename_all` — a key drift would read as `undefined` on the TS side and
+    /// silently turn every proof into "unproven".
+    #[test]
+    fn origin_serializes_to_the_camel_case_wire_shape() {
+        let wire = serde_json::to_value(origin(
+            "gitlab.example",
+            "team/sub/repo",
+            "gitlab.example:8443",
+            "gitlab",
+        ))
+        .unwrap();
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["authority", "host", "path", "provider"]);
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "host": "gitlab.example",
+                "path": "team/sub/repo",
+                "authority": "gitlab.example:8443",
+                "provider": "gitlab",
+            }),
+        );
+    }
+
+    /// A path that isn't a repo answers with EVERY axis empty — the full default —
+    /// rather than erroring: the caller's contract is "unproven", and a stale
+    /// recents row must not fail the open.
+    #[tokio::test]
+    async fn a_non_repo_path_is_unproven_not_an_error() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-origin-path-nonrepo-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = dir.path().to_string_lossy().into_owned();
+        let unproven = repo_origin_path(path).await.unwrap();
+        assert_eq!(unproven, RepoOrigin::default());
+        assert!(
+            unproven.host.is_empty()
+                && unproven.path.is_empty()
+                && unproven.authority.is_empty()
+                && unproven.provider.is_empty()
+        );
     }
 }

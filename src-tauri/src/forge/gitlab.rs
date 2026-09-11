@@ -12,11 +12,16 @@ use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
-use crate::forge::glab::{run_glab, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT};
+use crate::forge::glab::{
+    run_glab, run_glab_api_for_host, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT,
+};
 use crate::forge::model::{
     namespace_set, Capabilities, CompletedReviewerOut, ForgeForkActivity, ForgeForkEntry,
     ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
     ForgeTimelineEventOut, ForgeUserRef, Implemented, Provider, RemoteListFilter,
+};
+use crate::forge::my_work::{
+    merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
 };
 use crate::forge::{
     cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
@@ -27,9 +32,9 @@ use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
     ApprovalState, CommitCommentOut, DraftCommentIn, ExternalReviewItem, PrAuthor, PrCheckOut,
-    PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrInfo, PrListLabel, PrMergeability, PrPollInfo,
-    PrRef, PrStackInfo, PrStackMember, PrThreadOut, RepoLabel, ReviewSubmitOut, ReviewThreadOut,
-    STACKS_TIMEOUT,
+    PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrHeadRef, PrInfo, PrListLabel, PrMergeability,
+    PrPollInfo, PrRef, PrStackInfo, PrStackMember, PrThreadOut, RepoLabel, ReviewSubmitOut,
+    ReviewThreadOut, STACKS_TIMEOUT,
 };
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
 use crate::state::AppState;
@@ -186,6 +191,288 @@ pub async fn owned_namespaces() -> AppResult<Vec<String>> {
     // A GitLab username IS the personal namespace's full path. Groups you own are a
     // separate namespace and aren't resolved here, so Fork still shows on those.
     Ok(namespace_set([viewer_username().await]))
+}
+
+// ── My work (cross-repo inbox) ────────────────────────────────────────────────
+//
+// Account-scoped, across every host glab is signed in to. GitLab has no single
+// "involves me" qualifier, so the inbox is five REST scopes per host — three over
+// merge requests, two over issues — folded by the neutral merge.
+
+/// Per-leg page size for the My work scopes. GitLab's REST `per_page` maxes at
+/// 100, so a leg returning exactly this many is the leg's own truncation signal.
+const GITLAB_MY_WORK_PER_PAGE: usize = 100;
+
+/// The `--hostname` argv for a My work leg, or `None` when the host can't be
+/// addressed safely and must be SKIPPED.
+///
+/// EVERY host gets the flag, gitlab.com included: with no repo cwd, an omitted
+/// `--hostname` resolves to glab's CONFIGURED default — the top-level `host:` key
+/// or `GITLAB_HOST` — not to gitlab.com, whatever `glab api --help` claims
+/// (measured on glab 1.105: a config `host: bogus.invalid` made a bare
+/// `glab api user` dial `https://bogus.invalid/api/v4/user`). A self-managed
+/// default would otherwise silently return zero gitlab.com items and fetch the
+/// self-managed host twice.
+///
+/// A `hosts:` key is config-sourced and therefore untrusted argv, and the
+/// authority charset admits a leading `-` that glab would read as a flag. Such a
+/// key is a config artifact, not a reachable instance — `hosts_from_config`
+/// deliberately reports anchor and alias keys as hosts — so it is skipped rather
+/// than failing the arm, which stays reserved for FETCH errors against a host we
+/// really can address.
+///
+/// A PORTED value is skipped for the same reason: glab rejects it outright
+/// (measured on 1.105 — `--hostname host:8443` exits with "Error parsing
+/// --hostname: invalid hostname", scheme or no scheme), so it names nothing this
+/// arm can reach. Rarely hit — the enumeration's own sources keep ports out (saved
+/// keys are port-stripped, and a ported token target is refused rather than
+/// stripped) — but the gate, the doc and the test have to agree on what a ported
+/// host means, and `is_addressable_host` is the one place that rule lives, shared
+/// with the token-scoping decision so the two can't disagree about reachability.
+fn my_work_hostname(host: &str) -> Option<&str> {
+    crate::forge::glab::is_addressable_host(host).then_some(host)
+}
+
+/// The project full path, owner and name of a GitLab web URL — the segments
+/// before its `/-/` marker (`https://host/group/subgroup/proj/-/issues/5`).
+///
+/// `owner` is the segment immediately BEFORE the name, not the whole namespace:
+/// that is the spelling `git::repo::parse_owner_host` persists on `RecentRepo`,
+/// and the frontend's local-repo match compares the two. So on a nested group the
+/// full path is longer than `owner/name` rejoined, by design.
+fn my_work_project_from_web_url(web_url: &str) -> Option<(String, String, String)> {
+    let path = crate::forge::remote_path(web_url)?;
+    let (full_path, _) = path.split_once("/-/")?;
+    let segs: Vec<&str> = full_path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() < 2 {
+        return None;
+    }
+    Some((
+        full_path.to_string(),
+        segs[segs.len() - 2].to_string(),
+        segs[segs.len() - 1].to_string(),
+    ))
+}
+
+/// Narrow one raw scope element to a wire item, or `None` when it can't address
+/// anything — a record without iid, title, or a parseable project URL has no
+/// usable link, so it is skipped rather than sinking the leg.
+fn my_work_item_from_value(raw: &serde_json::Value, is_pull_request: bool) -> Option<MyWorkItem> {
+    let number = raw.get("iid").and_then(serde_json::Value::as_u64)?;
+    let title = raw
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .filter(|t| !t.is_empty())?
+        .to_string();
+    let url = raw
+        .get("web_url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|u| !u.is_empty())?
+        .to_string();
+    let (repo_full_name, repo_owner, repo_name) = my_work_project_from_web_url(&url)?;
+    Some(MyWorkItem {
+        provider: Provider::GitLab,
+        number,
+        title,
+        is_pull_request,
+        repo_full_name,
+        repo_owner,
+        repo_name,
+        // Always Some in practice — the project parse above already required a
+        // parseable authority — so this only models the field's stated absence.
+        host: crate::forge::remote_host(&url).unwrap_or_default(),
+        url,
+        updated_at: normalize_updated_at(
+            raw.get("updated_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        ),
+        author_login: raw
+            .pointer("/author/username")
+            .and_then(serde_json::Value::as_str)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string),
+    })
+}
+
+/// The `reviewer_username` value for the review scope, or an error when the
+/// identity read came back degenerate.
+///
+/// A BLANK filter is not a narrow filter — GitLab drops it and answers the
+/// unfiltered query (measured on gitlab.com: `scope=all&reviewer_username=` and
+/// `…=%20` each returned a full 100-item page, identical to sending no filter,
+/// where the real username returned 0). So an empty username would turn "awaiting
+/// my review" into "every open MR I can see" and pour a page of strangers' work
+/// into the inbox. `GlabUser.username` is a plain `String`, so `""` deserializes
+/// happily — this is the only thing standing between that payload and the query.
+fn reviewer_filter(username: &str) -> AppResult<String> {
+    if username.trim().is_empty() {
+        return Err(AppError::Glab(
+            "GitLab did not report your username, so the review filter can't be built.".into(),
+        ));
+    }
+    Ok(encode_query_value(username))
+}
+
+/// Fetch one My work scope and parse it into a leg. Tolerant per element (a
+/// malformed record is skipped, never blanking the page), but a top-level parse
+/// failure IS an error — an empty inbox and unreadable output must not look alike.
+async fn my_work_leg(
+    endpoint: &str,
+    hostname: &str,
+    is_pull_request: bool,
+) -> AppResult<MyWorkLeg> {
+    let out = run_glab_api_for_host(hostname, &[endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let raw: Vec<serde_json::Value> = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse your GitLab work items: {e}")))?;
+    let capped = raw.len() >= GITLAB_MY_WORK_PER_PAGE;
+    Ok(MyWorkLeg {
+        items: raw
+            .iter()
+            .filter_map(|v| my_work_item_from_value(v, is_pull_request))
+            .collect(),
+        capped,
+    })
+}
+
+/// Every open merge request and issue on ONE host: five scopes, since GitLab has
+/// no `involves:` equivalent — MRs authored / assigned / awaiting the user's
+/// review, and issues authored / assigned. The review scope needs the username
+/// because `scope=all` plus `reviewer_username` is the only filter GitLab offers
+/// for it.
+///
+/// All-or-error WITHIN the host: a half-fetched host is ambiguous in a way the
+/// user can't see, so any failing leg fails this host. Whether that sinks the
+/// whole column is [`gitlab_my_work`]'s call.
+async fn my_work_for_host(hostname: &str) -> AppResult<Vec<MyWorkLeg>> {
+    // Same network round trip as the legs below and fail-CLOSED (`?`), so it takes
+    // their timeout — not the short probe timeout `viewer_username` uses, which
+    // can afford to fail open.
+    let out = run_glab_api_for_host(hostname, &["user"], GLAB_NETWORK_TIMEOUT).await?;
+    let user: GlabUser = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not read your GitLab identity: {e}")))?;
+    // Fails this HOST rather than skipping it: the instance answered, so its items
+    // are real and their loss must show up as `truncated`, not vanish silently.
+    let reviewer = reviewer_filter(&user.username)?;
+    let per_page = GITLAB_MY_WORK_PER_PAGE;
+    // `order_by=updated_at&sort=desc` is required, not cosmetic: GitLab orders by
+    // `created_at` by default (measured — two orderings of one real account
+    // disagree), so a leg that fills `per_page` would drop the most recently
+    // updated items, which are exactly the ones this inbox exists to surface.
+    let scopes: [(String, bool); 5] = [
+        (format!("merge_requests?scope=created_by_me&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"), true),
+        (format!("merge_requests?scope=assigned_to_me&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"), true),
+        (
+            format!("merge_requests?scope=all&reviewer_username={reviewer}&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"),
+            true,
+        ),
+        (format!("issues?scope=created_by_me&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"), false),
+        (format!("issues?scope=assigned_to_me&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"), false),
+    ];
+    // Independent reads of one host — run them concurrently (no spawn, so they may
+    // borrow) and take the FIRST error in leg order.
+    let fetched = crate::forge::futures_join_all(
+        scopes
+            .iter()
+            .map(|(endpoint, is_pull_request)| my_work_leg(endpoint, hostname, *is_pull_request)),
+    )
+    .await;
+    fetched.into_iter().collect()
+}
+
+/// Every open merge request and issue involving the signed-in GitLab user, across
+/// every host glab is signed in to.
+///
+/// Hosts are ISOLATED from each other: one unreachable instance must not blank a
+/// healthy one's items, so a failing host is dropped and the page it would have
+/// contributed is reported through `truncated` — the same flag a capped leg
+/// raises, meaning "items are missing from this page". The column still errors
+/// when NO host answered, so a total failure can't read as an empty inbox.
+///
+/// A host whose `hosts:` key isn't an addressable authority is skipped WITHOUT
+/// marking truncation: such a key is a config artifact naming no reachable
+/// instance ([`my_work_hostname`]), so nothing was lost.
+pub async fn gitlab_my_work() -> AppResult<MyWorkPage> {
+    // `account_hosts`, not `known_hosts`: the availability probe reads the same
+    // enumeration, and it covers the token-only session that has no saved host.
+    let hosts = crate::forge::glab::account_hosts().await;
+    if hosts.is_empty() {
+        return Ok(MyWorkPage::empty());
+    }
+    // A skipped key contributes no outcome at all — it neither answered nor
+    // failed, so it can't tip either branch of the fold.
+    let addressable: Vec<&str> = hosts.iter().filter_map(|h| my_work_hostname(h)).collect();
+    // Isolation covers a host's FAILURE; concurrency covers its LATENCY. Serial
+    // hosts stack their timeouts, so one unreachable instance (VPN down) would
+    // hold every healthy host's rows behind two full network timeouts — the
+    // identity call and the legs stage. `futures_join_all` preserves input order,
+    // so the fold's last-error stays deterministic by host.
+    let outcomes =
+        crate::forge::futures_join_all(addressable.into_iter().map(my_work_for_host)).await;
+    my_work_column(outcomes)
+}
+
+/// Fold the per-host outcomes into the column's one answer. Pure, so the four
+/// branches are pinned by tests rather than by a live multi-host account:
+/// any host answering yields a page (marked `truncated` when another was lost),
+/// every ATTEMPTED host failing surfaces the last error, and no host attempted at
+/// all is the same benign empty page as no GitLab configured.
+fn my_work_column(outcomes: Vec<AppResult<Vec<MyWorkLeg>>>) -> AppResult<MyWorkPage> {
+    let mut legs: Vec<MyWorkLeg> = Vec::new();
+    let mut any_ok = false;
+    let mut last_err: Option<AppError> = None;
+    for outcome in outcomes {
+        match outcome {
+            Ok(host_legs) => {
+                any_ok = true;
+                legs.extend(host_legs);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if !any_ok {
+        return match last_err {
+            Some(e) => Err(e),
+            None => Ok(MyWorkPage::empty()),
+        };
+    }
+    let mut page = merge_legs(legs, MY_WORK_LIMIT);
+    // A lost host's items are missing from a page that would otherwise claim to be
+    // the whole inbox — the same thing `truncated` already means for a capped leg.
+    page.truncated |= last_err.is_some();
+    Ok(page)
+}
+
+/// The head branch of ONE merge request, plus the project that branch lives in.
+///
+/// glab resolves the host from the repo's own remote (cwd), so a self-managed
+/// instance needs no `--hostname` here. A FORK's source project yields `""` for
+/// the head repo rather than a guess: the caller's worktree gate declines on an
+/// unknown, which is the safe direction, and the source project's full path isn't
+/// in this payload.
+pub async fn pr_head_ref(repo_path: &str, number: u64) -> AppResult<PrHeadRef> {
+    let path = project_path(repo_path).await?;
+    let endpoint = format!("projects/{}/merge_requests/{number}", encode_project(&path));
+    let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse the MR head branch: {e}")))?;
+    let source = value
+        .get("source_project_id")
+        .and_then(serde_json::Value::as_u64);
+    let target = value
+        .get("target_project_id")
+        .and_then(serde_json::Value::as_u64);
+    Ok(PrHeadRef {
+        head_ref_name: value
+            .get("source_branch")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        head_repo_full_name: match (source, target) {
+            (Some(s), Some(t)) if s == t => path,
+            _ => String::new(),
+        },
+    })
 }
 
 /// The one-shot `git -c` credential entries that let a network op on a private
@@ -8945,6 +9232,308 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
         default_branch,
         forks,
     })
+}
+
+#[cfg(test)]
+mod my_work_tests {
+    use super::{
+        my_work_column, my_work_hostname, my_work_item_from_value, my_work_project_from_web_url,
+        reviewer_filter,
+    };
+    use crate::error::AppError;
+    use crate::forge::model::Provider;
+    use crate::forge::my_work::{MyWorkItem, MyWorkLeg};
+    use serde_json::json;
+
+    /// One host's legs, carrying a single item so the merge has something to fold.
+    fn host_legs(url: &str) -> Vec<MyWorkLeg> {
+        vec![MyWorkLeg {
+            items: vec![MyWorkItem {
+                provider: Provider::GitLab,
+                number: 1,
+                title: "t".into(),
+                is_pull_request: true,
+                repo_full_name: "g/p".into(),
+                repo_owner: "g".into(),
+                repo_name: "p".into(),
+                host: "gitlab.com".into(),
+                url: url.into(),
+                updated_at: "2026-09-05T00:00:00.000Z".into(),
+                author_login: None,
+            }],
+            capped: false,
+        }]
+    }
+
+    /// Hosts are isolated: a self-managed instance being down (or unaddressable
+    /// because its config key carries a port glab's `--hostname` rejects) must not
+    /// blank the gitlab.com items sitting right next to it.
+    #[test]
+    fn a_lost_host_keeps_the_others_and_marks_the_page_truncated() {
+        let page = my_work_column(vec![
+            Ok(host_legs("https://gitlab.com/g/p/-/merge_requests/1")),
+            Err(AppError::Glab("host is down".into())),
+        ])
+        .expect("one healthy host still answers");
+        assert_eq!(page.items.len(), 1, "the healthy host's items survive");
+        assert!(
+            page.truncated,
+            "a lost host means items are missing — the page must not read complete"
+        );
+
+        // Order-independent: the failure arriving first changes nothing.
+        let page = my_work_column(vec![
+            Err(AppError::Glab("host is down".into())),
+            Ok(host_legs("https://gitlab.com/g/p/-/merge_requests/1")),
+        ])
+        .expect("one healthy host still answers");
+        assert_eq!(page.items.len(), 1);
+        assert!(page.truncated);
+    }
+
+    /// The two arms that must NOT silently read as an empty inbox, and the one
+    /// that legitimately does.
+    #[test]
+    fn every_attempted_host_failing_is_an_error_but_none_attempted_is_empty() {
+        let all_failed = my_work_column(vec![
+            Err(AppError::Glab("first".into())),
+            Err(AppError::Glab("second".into())),
+        ]);
+        assert!(
+            matches!(all_failed, Err(AppError::Glab(ref m)) if m == "second"),
+            "no host answered → surface the failure, got {all_failed:?}",
+        );
+
+        // Every key was an unaddressable artifact, so nothing was ever attempted —
+        // indistinguishable from having no GitLab host configured.
+        let none_attempted = my_work_column(Vec::new()).expect("benign");
+        assert!(none_attempted.items.is_empty());
+        assert!(
+            !none_attempted.truncated,
+            "a skipped artifact key lost no items, so nothing is hidden"
+        );
+
+        // All healthy → the page is complete.
+        let clean = my_work_column(vec![
+            Ok(host_legs("https://gitlab.com/g/p/-/merge_requests/1")),
+            Ok(host_legs("https://gitlab.acme.dev/g/p/-/issues/2")),
+        ])
+        .expect("healthy");
+        assert_eq!(clean.items.len(), 2);
+        assert!(!clean.truncated);
+    }
+
+    #[test]
+    fn project_splits_a_web_url_at_the_dash_marker() {
+        // Flat namespace: full path, owner, name.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.com/group/proj/-/merge_requests/12"),
+            Some(("group/proj".into(), "group".into(), "proj".into()))
+        );
+        // Issues carry the same marker.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.com/group/proj/-/issues/5"),
+            Some(("group/proj".into(), "group".into(), "proj".into()))
+        );
+        // Self-managed, ported host — the path is unaffected.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.acme.dev:8443/g/p/-/merge_requests/1"),
+            Some(("g/p".into(), "g".into(), "p".into()))
+        );
+        // No marker, no project — an unrelated URL addresses nothing.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.com/group/proj"),
+            None
+        );
+        // A single-segment path has neither owner nor name.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.com/proj/-/issues/1"),
+            None
+        );
+        assert_eq!(my_work_project_from_web_url("not a url"), None);
+    }
+
+    /// The frontend's `matchLocalRepos` compares `repoOwner` against
+    /// `RecentRepo.owner`, which `git::repo::parse_owner_host` fills. Called
+    /// DIRECTLY here rather than asserted against a copied literal: a change to
+    /// that function's owner rule would otherwise leave this side green while
+    /// every nested-group GitLab row silently stopped matching its local clone.
+    #[test]
+    fn owner_and_name_agree_with_parse_owner_host() {
+        // The clone URL and the MR web URL of ONE project — the two spellings the
+        // match compares. Nested group first: the case where a whole-namespace
+        // owner would diverge.
+        for (clone_url, web_url) in [
+            (
+                "https://gitlab.com/group/sub/repo.git",
+                "https://gitlab.com/group/sub/repo/-/merge_requests/3",
+            ),
+            (
+                "https://gitlab.com/group/repo.git",
+                "https://gitlab.com/group/repo/-/issues/9",
+            ),
+            (
+                "git@gitlab.com:group/sub/deeper/repo.git",
+                "https://gitlab.com/group/sub/deeper/repo/-/merge_requests/1",
+            ),
+            (
+                "https://gitlab.acme.dev:8443/g/p.git",
+                "https://gitlab.acme.dev:8443/g/p/-/merge_requests/2",
+            ),
+        ] {
+            let (recent_owner, recent_host, recent_name) =
+                crate::git::repo::parse_owner_host(clone_url);
+            let (_, owner, name) =
+                my_work_project_from_web_url(web_url).expect("project URL resolves");
+            assert_eq!(
+                Some(owner),
+                recent_owner,
+                "owner spelling must agree for {clone_url}"
+            );
+            assert_eq!(
+                Some(name),
+                recent_name,
+                "repo name must agree for {clone_url}"
+            );
+            // The host halves are compared by the same match, so pin them too.
+            let item_host = crate::forge::remote_host(web_url);
+            assert_eq!(item_host, recent_host, "host must agree for {clone_url}");
+        }
+
+        // The full path stays the WHOLE namespace — the display spelling and what
+        // the head-ref gate compares — so it is longer than `owner/name` rejoined.
+        let (full_path, owner, name) =
+            my_work_project_from_web_url("https://gitlab.com/group/sub/repo/-/merge_requests/3")
+                .expect("resolves");
+        assert_eq!(full_path, "group/sub/repo");
+        assert_ne!(full_path, format!("{owner}/{name}"));
+    }
+
+    /// A degenerate identity must never widen the review scope. Measured on
+    /// gitlab.com: `scope=all&reviewer_username=` returns a FULL page (100 items),
+    /// exactly as if no filter were sent, while the real username returns 0 — so a
+    /// blank filter would present a page of unrelated MRs as the user's own work.
+    #[test]
+    fn an_empty_username_fails_the_host_rather_than_widening_the_review_scope() {
+        // A real username rides through; the encoder leaves the legal charset
+        // (alphanumerics, dot, dash, underscore) untouched.
+        assert_eq!(reviewer_filter("theBGuy").unwrap(), "theBGuy");
+        assert_eq!(reviewer_filter("a.b-c_d").unwrap(), "a.b-c_d");
+        // Anything query-significant is still encoded, never interpolated raw.
+        assert_eq!(reviewer_filter("a b&x=1").unwrap(), "a%20b%26x%3D1");
+
+        // The degenerate identities — including whitespace-only, which GitLab
+        // also treats as no filter (`…=%20` returned the same full page).
+        for degenerate in ["", " ", "   ", "\t", "\n", " \t\n "] {
+            assert!(
+                matches!(reviewer_filter(degenerate), Err(AppError::Glab(_))),
+                "{degenerate:?} must fail the host, not widen the query",
+            );
+        }
+    }
+
+    /// A `hosts:` key is config-sourced argv: the authority charset admits a
+    /// leading `-`, which glab would read as a flag. Such a key names no reachable
+    /// instance, so it is skipped — the arm's error posture is for FETCH failures.
+    /// gitlab.com is addressed EXPLICITLY like every other host, because an
+    /// omitted `--hostname` resolves to glab's configured default, not gitlab.com.
+    #[test]
+    fn hostname_skips_unaddressable_hosts_and_names_gitlab_com() {
+        assert_eq!(my_work_hostname("gitlab.com"), Some("gitlab.com"));
+        assert_eq!(my_work_hostname("gitlab.acme.dev"), Some("gitlab.acme.dev"));
+        // A bare bracketed IPv6 literal keeps the spelling `known_hosts` yields.
+        assert_eq!(
+            my_work_hostname("[2001:db8::1]"),
+            Some("[2001:db8::1]"),
+            "a literal's own colons are not a port"
+        );
+
+        // A PORT is unaddressable — glab refuses `--hostname host:8443` outright,
+        // so the value names no instance this arm can reach. Unreachable via
+        // `known_hosts` (it port-strips both config-key forms), so this pins the
+        // contract rather than a live path: the gate, its doc and this test have
+        // to agree on what a ported host means.
+        assert_eq!(my_work_hostname("gitlab.acme.dev:8443"), None);
+        assert_eq!(my_work_hostname("[2001:db8::1]:8443"), None);
+
+        for bad in [
+            "-oProxyCommand=evil",
+            "--hostname",
+            "gitlab.acme.dev;rm -rf /",
+            "gitlab acme dev",
+            "",
+        ] {
+            assert_eq!(my_work_hostname(bad), None, "{bad:?} must be skipped");
+        }
+    }
+
+    #[test]
+    fn maps_a_merge_request_payload() {
+        let raw = json!({
+            "iid": 42,
+            "title": "feat: nested groups",
+            "web_url": "https://gitlab.com/group/sub/proj/-/merge_requests/42",
+            "updated_at": "2026-09-05T23:21:02.987Z",
+            "author": {"username": "octo-cat"},
+            "draft": false,
+            "source_branch": "feat/x",
+            "references": {"full": "group/sub/proj!42"}
+        });
+        let item = my_work_item_from_value(&raw, true).expect("maps");
+        assert_eq!(item.provider, Provider::GitLab);
+        assert_eq!(item.number, 42);
+        assert!(item.is_pull_request);
+        assert_eq!(item.repo_full_name, "group/sub/proj");
+        assert_eq!(item.repo_owner, "sub");
+        assert_eq!(item.repo_name, "proj");
+        assert_eq!(item.host, "gitlab.com");
+        assert_eq!(item.author_login.as_deref(), Some("octo-cat"));
+        // GitLab's milliseconds survive the fold to the merge's fixed width —
+        // that precision is what breaks a same-second tie at the page cut.
+        assert_eq!(item.updated_at, "2026-09-05T23:21:02.987Z");
+
+        // The host comes from the item's own URL — a self-managed row keeps its
+        // own instance, and its port drops the way every other host spelling does.
+        let self_managed = json!({
+            "iid": 1, "title": "t",
+            "web_url": "https://gitlab.acme.dev:8443/g/p/-/issues/1",
+            "updated_at": "2026-09-05T23:21:02Z"
+        });
+        let item = my_work_item_from_value(&self_managed, false).expect("maps");
+        assert_eq!(item.host, "gitlab.acme.dev");
+        assert!(!item.is_pull_request);
+        // A missing author is absence, not a fabricated login.
+        assert_eq!(item.author_login, None);
+    }
+
+    /// One malformed record must never blank the page: each is judged on its own.
+    #[test]
+    fn skips_records_that_address_nothing() {
+        let good = json!({
+            "iid": 7, "title": "keeper",
+            "web_url": "https://gitlab.com/g/p/-/merge_requests/7",
+            "updated_at": "2026-09-05T00:00:00Z"
+        });
+        assert!(my_work_item_from_value(&good, true).is_some());
+        for bad in [
+            // No iid / title / web_url.
+            json!({"title": "t", "web_url": "https://gitlab.com/g/p/-/merge_requests/1"}),
+            json!({"iid": 1, "web_url": "https://gitlab.com/g/p/-/merge_requests/1"}),
+            json!({"iid": 1, "title": "t"}),
+            // Empty strings are absence too.
+            json!({"iid": 1, "title": "", "web_url": "https://gitlab.com/g/p/-/merge_requests/1"}),
+            json!({"iid": 1, "title": "t", "web_url": ""}),
+            // A URL with no `/-/` marker names no project.
+            json!({"iid": 1, "title": "t", "web_url": "https://gitlab.com/g/p"}),
+            // A wrong-typed iid.
+            json!({"iid": "seven", "title": "t", "web_url": "https://gitlab.com/g/p/-/issues/1"}),
+        ] {
+            assert!(
+                my_work_item_from_value(&bad, true).is_none(),
+                "should have skipped {bad}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

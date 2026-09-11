@@ -254,29 +254,42 @@ From here:
     label: "My work",
     body: `# My work
 
-**My work** is a cross-repo inbox: your open pull requests and issues on GitHub,
-newest first, without opening a repository to go looking. Open it with
-{{kbd:open-my-work}}, from the **My work** button on the welcome screen, or from the
-command palette (*My work*).
+**My work** is a cross-repo inbox: your open pull requests, merge requests, and
+issues from GitHub, GitLab, and Bitbucket, newest first, without opening a repository
+to go looking. Open it with {{kbd:open-my-work}}, from the **My work** button on the
+welcome screen, or from the command palette (*My work*).
 **Back** in the header, or Esc, closes the inbox and returns you to the screen
 underneath.
 
-It gathers anything you **authored**, are **assigned** to, were **mentioned** in, or
-**commented on**, together with anything **awaiting your review**. The search covers
-every repository your GitHub account can see, so items from repos you've never cloned
-sit alongside the ones you have. GitHub only for now.
+On **GitHub** it gathers anything you **authored**, are **assigned** to, were
+**mentioned** in, or **commented on**, together with anything **awaiting your
+review**, across every repository your account can see, so items from repos you've
+never cloned sit alongside the ones you have. **GitLab** contributes the merge
+requests you authored, are assigned to, or are asked to review, plus the issues
+you authored or are assigned to, from every host you're signed in to, and
+**Bitbucket** the pull requests from the Bitbucket repositories in your recents
+(Bitbucket has no account-wide search, so the inbox asks the checkouts it knows).
+
+Only a forge you're signed in to is asked, and each one answers on its own: the list
+paints once with everything your forges returned, waiting a moment for a slower one
+rather than reshuffling, and a forge you haven't connected is simply absent. One that
+still lags, or couldn't be reached, gets a muted line under the rows — what's already
+there stays put while it catches up.
 
 ## Reading the list
 
 Each row is a single line: a pull-request or issue glyph, the item's number, its
-title, the repository it lives in, and when it last changed. The number beside the
-title in the header is how many items came back, and each tab carries its own count.
+title, then the forge's mark beside the repository it lives in, and when it last
+changed. That mark is monochrome, drawn in the same ink as the rest of the row. The
+number beside the title in the header is how many items came back, and each tab
+carries its own count.
 
-Rows are ordered by **most recently updated**. The search fetches a single page of
-results, so a big inbox won't arrive whole. When there may be more than the page holds,
-a note says so at the bottom: *This view fetches one page of results. Filter to narrow
-the list.* You'll see it under the rows, and under **No items match** as well, since a
-filter that finds nothing is when an item off the page matters most.
+Rows are ordered by **most recently updated**, merged across the forges that answered.
+Each forge fetches a single page of results, so a big inbox won't arrive whole. When
+items may be missing (a page filled up, or part of a fetch didn't arrive), a note
+says so at the bottom: *This list may be missing items. Filter to narrow what's
+loaded.* You'll see it under the rows, and under **No items match** as well, since a
+filter that finds nothing is when a missing item matters most.
 
 ## Narrowing and opening
 
@@ -292,13 +305,13 @@ leaving it. Clicking a row does the same thing.
 Where a row opens depends on whether GitDesktop recognizes its repository as one of
 yours. An item from a repository you've added usually opens **in the app**: GitDesktop
 switches to that repository and lands on the pull request or issue. Everything else
-opens **on GitHub in your browser**. The match reads each repo's resolved owner, host,
-and the name its remote spells, so a clone sitting in a folder you renamed still counts
-as yours once GitDesktop has looked at it; one you added moments ago, before any of that
-is resolved, can still go to the browser. The **↗** on a row is the signal to trust: it
-marks every row that opens on GitHub, so you know which you're getting before you press
-Enter. The inbox itself changes nothing: it finds the item and hands you to the place
-where you can act on it.
+opens **on its own host in your browser**. The match reads each repo's resolved owner,
+host, and the name its remote spells, so a clone sitting in a folder you renamed still
+counts as yours once GitDesktop has looked at it; one you added moments ago, before any
+of that is resolved, can still go to the browser. The **↗** on a row marks the ones
+GitDesktop already knows open in the browser; a row without it can still land there
+when its checkout can't be confirmed at open time. The inbox itself changes nothing:
+it finds the item and hands you to the place where you can act on it.
 
 A pull request usually lands where its branch already is. When one of the repository's
 worktrees has that pull request's head branch checked out, GitDesktop opens it there
@@ -309,19 +322,27 @@ request from a fork, a branch that isn't checked out anywhere, a slow network. A
 shows a small spinner while GitDesktop works out where to open it. Issues skip the
 branch check and open in the main workspace.
 
-{{Secondaryclick}} a row for **Open on GitHub** and **Copy link**; on a pull request
-from a repository you've added, **Open in main workspace** heads the menu and skips
-the worktree for that one open. The menu opens from the keyboard too, with
-{{key:shift+f10}} or the Menu key on the highlighted row. {{key:shift+enter}} opens
-the main workspace directly, Shift-click from the pointer.
+{{Secondaryclick}} a row for **Open on GitHub / GitLab / Bitbucket** (whichever host
+the item lives on) and **Copy link**; on a pull request from a repository you've
+added, **Open in main workspace** heads the menu and skips the worktree for that one
+open. The menu opens from the keyboard too, with {{key:shift+f10}} or the Menu key on
+the highlighted row. {{key:shift+enter}} opens the main workspace directly,
+Shift-click from the pointer.
 
 ## Keeping it current
 
-**Refresh** in the header re-runs the search and spins while the fetch is in flight.
+**Refresh** in the header re-runs every connected forge and spins while the fetches
+are in flight. It re-checks which forges are connected too, so one you signed in to
+while the inbox was open joins the list on the next refresh.
 
-GitHub features here ride the GitHub CLI (\`gh\`). When it's missing, the screen names
-that and points at \`gh auth login\`; anything else that goes wrong shows the underlying
-error. Either way there's a **Retry**. See *Getting started* for the sign-in options.`,
+Each forge rides its own connection: GitHub the GitHub CLI (\`gh\`), GitLab the GitLab
+CLI (\`glab\`), and Bitbucket the Atlassian API token you saved. Set them up in
+**Settings → Accounts**, and see *Getting started* for the sign-in options. With none
+of them connected the screen says so and points you at the sign-in. When every
+connected forge fails with nothing to show, the screen reports it with a
+**Retry**, naming each forge that failed when more than one did. If your only
+connected forge failed for a missing CLI or token, the screen points you at
+that setup instead of the error behind it.`,
   },
   {
     id: "repo-settings",

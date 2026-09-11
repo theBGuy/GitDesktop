@@ -565,6 +565,27 @@ export interface PrPollInfo {
   createdAt: string;
 }
 
+/** A checkout's origin remote, split into the axes a work-inbox row has to match
+ *  before it may open locally. Any field is `""` when unknown, which the caller
+ *  reads as UNPROVEN rather than as a mismatch. All are needed: equal namespaces
+ *  on two hosts are different projects, and so are equal hostnames on two ports. */
+export interface RepoOrigin {
+  /** Hostname alone, ports stripped. */
+  host: string;
+  /** Hostname plus the WEB port, lowercased — the spelling a web URL's `URL.host`
+   *  yields. `:443` on https and `:80` on http are elided, any other web port is
+   *  kept, and a non-web scheme's transport port (`ssh://…:2222`) is dropped
+   *  entirely: it says nothing about where the web UI lives. */
+  authority: string;
+  /** The full namespace path the provider spells ("group/sub/repo"). */
+  path: string;
+  /** The checkout's detection verdict at proof time — the integration a landing
+   *  there would actually resolve. `"github"` covers the resilient default an
+   *  unrecognized host falls back to, so it is an answer, not an absence; `""`
+   *  means the path is not a repo at all. */
+  provider: string;
+}
+
 /** Where one PR's head branch lives — the targeted read behind opening a PR in
  *  the worktree that has it checked out. Both fields are "" when unknown (a
  *  deleted fork answers "" rather than failing), and a resolver must require
@@ -682,15 +703,28 @@ export interface MyWorkItem {
   url: string;
   updatedAt: string;
   authorLogin?: string | null;
+  /** Which forge the row came from. The rows of several providers merge into one
+   *  list, so the item carries its own provider rather than inheriting the
+   *  screen's — it drives the row glyph and the per-row open/link copy. */
+  provider: ForgeProvider;
 }
 
-/** One page of the work inbox. `truncated` is true when either search leg hit
- *  its own server-side cap or the merged union overshot the page, so it can be
- *  true on a page that arrives short — a leg's raw count is measured before
- *  unaddressable hits are dropped. */
+/** One page of the work inbox. `truncated` is true when a search leg hit its
+ *  own server-side cap, the merged union overshot the page, or a provider lost
+ *  part of its results (a host, a repo) — so it can be true on a page that
+ *  arrives short; it means "items may be missing", not "the page is full". */
 export interface MyWorkPage {
   items: MyWorkItem[];
   truncated: boolean;
+}
+
+/** Which forges the work inbox can fetch from right now — one flag per provider,
+ *  so a provider the user isn't signed in to is never asked and never contributes
+ *  a failure the other providers' rows would have to share a screen with. */
+export interface MyWorkSources {
+  github: boolean;
+  gitlab: boolean;
+  bitbucket: boolean;
 }
 
 export interface GhAccount {
