@@ -1399,7 +1399,11 @@ export function ChangesPanel({
           ) : (
             <CaretDownIcon className="size-3 shrink-0" />
           )}
-          <PathText path={row.label} className="min-w-0 flex-1" />
+          <PathText
+            path={row.label}
+            title={row.path}
+            className="min-w-0 flex-1"
+          />
           <span className="shrink-0 tabular-nums">({row.count})</span>
         </div>
       );
