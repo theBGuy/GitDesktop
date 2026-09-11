@@ -326,7 +326,8 @@ pub(crate) fn web_authority(url: &str) -> Option<String> {
     Some(
         authority
             .strip_suffix(default_port)
-            .map_or(authority.clone(), str::to_string),
+            .map(str::to_string)
+            .unwrap_or(authority),
     )
 }
 

@@ -324,19 +324,17 @@ function openableMatches(
 }
 
 /**
- * Whether a row's local match could be the WRONG checkout. `matchLocalRepos` keys
- * on host + owner + name, and GitLab persists only the segment BEFORE the repo
- * name as the owner — so any two GitLab paths sharing their last two segments
- * collide: `team-a/sub/repo` with `team-b/sub/repo`, and equally a flat
- * `sub/repo` with a nested `team/sub/repo`. The extra depth can sit entirely on
- * the CHECKOUT side, which the item cannot see, so the item's own path depth
- * proves nothing and every matched GitLab row pays the proof. GitHub and
- * Bitbucket are exempt because their namespaces are one segment on BOTH sides —
- * the key is the whole path for item and checkout alike, so equal keys are the
- * same repository.
+ * [`openableMatches`] reduced to its yes/no, for the display sites — which ask
+ * once per row per render and only ever read the answer, so this stops at the
+ * first hit rather than materializing the filtered list. It reads the same
+ * `matchLocalRepos` + `providerAgrees` pair, with no second copy of either rule,
+ * so a row's affordance can't come to disagree with the open's candidate set.
  */
-function matchNeedsOriginProof(item: MyWorkItem): boolean {
-  return item.provider === "gitlab";
+function hasOpenableMatch(
+  item: MyWorkItem,
+  recents: readonly RecentRepo[],
+): boolean {
+  return matchLocalRepos(item, recents).some((r) => providerAgrees(r, item));
 }
 
 /** The item's own authority: `URL.host` is the hostname plus any port the scheme
@@ -364,9 +362,9 @@ function itemAuthority(item: MyWorkItem): string | null {
  *
  * `provider` is the axis identity alone cannot supply: a checkout on a host only
  * a glab TOKEN knows is the right repository, yet detection can't recognise it
- * and its landing would resolve GitHub's resilient default. Only rows needing
- * the proof reach here (GitLab today), so this reads "the checkout must route to
- * the forge this row came from" — the live verdict `providerAgrees` can't see.
+ * and its landing would resolve GitHub's resilient default. Every row reaches
+ * here, so this reads "the checkout must route to the forge this row came from"
+ * — the live verdict `providerAgrees` can't see.
  *
  * Every unknown — a slow or failed read, a checkout with no origin, an
  * unparseable row URL, any field empty — answers false: an identity that can't
@@ -696,10 +694,13 @@ export function MyWorkScreen() {
       openUrl(item.url);
       return;
     }
-    // A GitLab key can name several checkouts, so the proof inside the budget
-    // picks which one is this row's; every other provider's key is identity, so
-    // the list is one entry and this stays the single-match path throughout.
-    const needsProof = matchNeedsOriginProof(item);
+    // EVERY row is proven below, whatever its provider: the key's host and owner
+    // are STORED values, so a re-pointed origin leaves any provider's key naming
+    // a checkout that is no longer this project. GitLab carries a second reason —
+    // it persists only the segment BEFORE the repo name, so `team-a/sub/repo` and
+    // `team-b/sub/repo` answer the same key and the candidates can be DIFFERENT
+    // projects. Elsewhere the key is identity, so several candidates are clones of
+    // the one right repository and the proof only has to find a live one.
     let match = candidates[0];
     // Recents rows outlive deleted and moved clones, so prove the path is still
     // a repo before navigating; the browser fallback keeps the row a working
@@ -708,10 +709,10 @@ export function MyWorkScreen() {
       await validateRepo(match.path);
     } catch (e) {
       if (superseded()) return;
-      // A stale FIRST candidate is not the end of an ambiguous row: the proof
-      // rejects a dead path anyway, so only a row with nowhere else to look
-      // reports it and gives up here.
-      if (!needsProof || candidates.length === 1) {
+      // A stale FIRST candidate is not the end of a multi-candidate row: the
+      // proof rejects a dead path anyway, so only a row with nowhere else to
+      // look reports it and gives up here.
+      if (candidates.length === 1) {
         openUrl(item.url);
         // Only a real notARepo earns the stale-path sentence — a missing CLI or
         // an IPC failure would be misdescribed by it, so it takes the generic
@@ -749,24 +750,21 @@ export function MyWorkScreen() {
       // One budget for the whole resolution, however many legs it takes.
       const deadline = Date.now() + WORKTREE_RESOLVE_BUDGET_MS;
       try {
-        // A GitLab match key can name a DIFFERENT project's checkout, so settle
-        // which candidate is this row's first in the budget — ahead of the
-        // optional worktree legs, which may spend the rest of it. None proven
-        // opens the browser: the row stays a working link, and no open lands on
-        // another project's #N.
-        if (needsProof) {
-          const proven = await provenCandidate(item, candidates, deadline);
-          if (superseded()) return;
-          if (!proven) {
-            openUrl(item.url);
-            return;
-          }
-          // Everything below resolves against the PROVEN checkout, not the key's
-          // first match.
-          match = proven;
-          targetPath = proven.path;
-          targetName = proven.name;
+        // Settle which candidate is really this row's first in the budget —
+        // ahead of the optional worktree legs, which may spend the rest of it.
+        // None proven opens the browser: the row stays a working link, and no
+        // open lands in a checkout that isn't this project's.
+        const proven = await provenCandidate(item, candidates, deadline);
+        if (superseded()) return;
+        if (!proven) {
+          openUrl(item.url);
+          return;
         }
+        // Everything below resolves against the PROVEN checkout, not the key's
+        // first match.
+        match = proven;
+        targetPath = proven.path;
+        targetName = proven.name;
         // Listed once and shared: both preferences read the same snapshot, and
         // this is the leg that can block.
         const worktrees = await withDeadline(
@@ -1228,7 +1226,7 @@ function MyWorkList({
                   >
                     <MyWorkRow
                       item={item}
-                      local={openableMatches(item, recents).length > 0}
+                      local={hasOpenableMatch(item, recents)}
                       active={v.index === activeIndex}
                       pending={item.url === pendingOpenUrl}
                       onSelect={onSelect}
@@ -1248,7 +1246,7 @@ function MyWorkList({
                   actually take — same set, so the entry can't promise a landing
                   the provider gate refuses. */}
               {menuItem.isPullRequest &&
-                openableMatches(menuItem, recents).length > 0 && (
+                hasOpenableMatch(menuItem, recents) && (
                   <ContextMenuItem
                     onClick={() => onOpen(menuItem, { preferWorktree: false })}
                   >

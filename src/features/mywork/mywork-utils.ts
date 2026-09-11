@@ -56,7 +56,7 @@ export function matchLocalRepos(
  * unparseable date sorts to the bottom rather than landing wherever a NaN
  * comparison drops it.
  */
-export function sortMyWork(items: readonly MyWorkItem[]): MyWorkItem[] {
+function sortMyWork(items: readonly MyWorkItem[]): MyWorkItem[] {
   return items.toSorted((a, b) => {
     const at = Date.parse(a.updatedAt);
     const bt = Date.parse(b.updatedAt);

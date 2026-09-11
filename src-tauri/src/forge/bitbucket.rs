@@ -564,7 +564,8 @@ pub async fn owned_namespaces() -> AppResult<Vec<String>> {
 /// Page size for a My work repo query — Bitbucket's PR-list endpoint caps here.
 const BB_MY_WORK_PAGELEN: u32 = 50;
 
-/// How many recents resolve their origin remote at once.
+/// How many recents resolve their origin remote at once — the bound on My work's
+/// local PRELUDE only; the API legs that follow take [`BB_MY_WORK_CONCURRENCY`].
 ///
 /// The caller hands over every recent repo, and that list is capped at 200
 /// (`MAX_RECENT_REPOS`), so an unbounded fan-out is a 200-process storm — on
@@ -578,6 +579,20 @@ const BB_MY_WORK_PAGELEN: u32 = 50;
 /// This constant IS the guard — a concurrency bound has no seam a unit test can
 /// observe, so nothing but this note keeps a later edit from unrolling the batch.
 const REPO_RESOLVE_CONCURRENCY: usize = 16;
+
+/// How many repos have their PR page in flight at once.
+///
+/// Every leg here is an authenticated API call, so the gated resource is the
+/// account's REQUEST BUDGET, not a local process: a user with 40 Bitbucket
+/// checkouts would otherwise open 40 simultaneous GETs, and the 429s that answers
+/// fold into `truncated` — rows quietly missing with nothing on screen to explain
+/// them. Sized to the network precedent (`DISPATCH_PROBE_CONCURRENCY`) rather than
+/// to [`REPO_RESOLVE_CONCURRENCY`], whose 16 is deliberately wide because its
+/// resource is a short-lived local spawn.
+///
+/// This constant IS the guard — a concurrency bound has no seam a unit test can
+/// observe, so nothing but this note keeps a later edit from unrolling the batch.
+const BB_MY_WORK_CONCURRENCY: usize = 4;
 
 /// The BBQL filter selecting the viewer's open PRs in one repo. `uuid` is the
 /// braced account UUID, escaped for the double-quoted literal like every other
@@ -648,13 +663,13 @@ fn my_work_item_from_value(raw: &serde_json::Value) -> Option<MyWorkItem> {
 /// Every open pull request the signed-in Bitbucket user authored or is a reviewer
 /// on, across the local repos in `repo_paths`.
 ///
-/// One page per repo, fetched concurrently. Best-effort per repo — one erroring
-/// doesn't sink the rest, mirroring [`search_repos`] — but a lost repo marks the
-/// page `truncated` ([`my_work_column`]) so a partial answer can't read as a
-/// complete one, and if EVERY repo fetch fails the last error surfaces rather
-/// than a misleading empty inbox. A path whose origin isn't a Bitbucket remote is
-/// skipped, never an error: the caller hands over every repo it knows about,
-/// whatever forge each one is on.
+/// One page per repo, fetched in bounded batches ([`BB_MY_WORK_CONCURRENCY`]).
+/// Best-effort per repo — one erroring doesn't sink the rest, mirroring
+/// [`search_repos`] — but a lost repo marks the page `truncated`
+/// ([`my_work_column`]) so a partial answer can't read as a complete one, and if
+/// EVERY repo fetch fails the last error surfaces rather than a misleading empty
+/// inbox. A path whose origin isn't a Bitbucket remote is skipped, never an error:
+/// the caller hands over every repo it knows about, whatever forge each one is on.
 pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage> {
     // Resolve the repos FIRST: with nothing to ask, the benign empty page must not
     // depend on a keyring read and a `/user` round trip that would answer
@@ -698,21 +713,30 @@ pub async fn bitbucket_my_work(repo_paths: Vec<String>) -> AppResult<MyWorkPage>
         .ok_or_else(|| AppError::Bitbucket("Bitbucket did not report your account id.".into()))?;
 
     let q_enc = encode_query_value(&my_work_query(&uuid));
-    let pages = crate::forge::futures_join_all(pairs.iter().map(|(ws, slug)| {
-        let creds = &creds;
-        let q_enc = &q_enc;
-        async move {
-            // `sort=-updated_on` pins the ordering the page cap depends on rather
-            // than trusting the endpoint's default, exactly as `poll_prs` does.
-            let path = format!(
-                "repositories/{}/{}/pullrequests?q={q_enc}&sort=-updated_on&pagelen={BB_MY_WORK_PAGELEN}",
-                encode_query_value(ws),
-                encode_query_value(slug),
-            );
-            http::bb_get_json::<BbPage<serde_json::Value>>(creds, &path, "pull requests").await
-        }
-    }))
-    .await;
+    // Batched like the prelude above, for the account's request budget rather than
+    // for process count ([`BB_MY_WORK_CONCURRENCY`]). The `BTreeSet`'s order carries
+    // into the Vec and batches are consumed in order, so the fold still sees its
+    // legs in one deterministic sequence and reports a stable last error.
+    let targets: Vec<(String, String)> = pairs.into_iter().collect();
+    let mut pages = Vec::with_capacity(targets.len());
+    for batch in targets.chunks(BB_MY_WORK_CONCURRENCY) {
+        let fetched = crate::forge::futures_join_all(batch.iter().map(|(ws, slug)| {
+            let creds = &creds;
+            let q_enc = &q_enc;
+            async move {
+                // `sort=-updated_on` pins the ordering the page cap depends on rather
+                // than trusting the endpoint's default, exactly as `poll_prs` does.
+                let path = format!(
+                    "repositories/{}/{}/pullrequests?q={q_enc}&sort=-updated_on&pagelen={BB_MY_WORK_PAGELEN}",
+                    encode_query_value(ws),
+                    encode_query_value(slug),
+                );
+                http::bb_get_json::<BbPage<serde_json::Value>>(creds, &path, "pull requests").await
+            }
+        }))
+        .await;
+        pages.extend(fetched);
+    }
 
     my_work_column(pages)
 }

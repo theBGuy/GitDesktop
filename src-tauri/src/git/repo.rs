@@ -120,7 +120,7 @@ pub async fn git_repo_owners(repo_paths: Vec<String>) -> AppResult<Vec<RepoOwner
     Ok(out)
 }
 
-/// A checkout's origin identity, read LIVE from the remote — both axes the
+/// A checkout's origin identity, read LIVE from the remote — the four axes the
 /// open-time proof compares.
 #[derive(Serialize, Default, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -159,9 +159,10 @@ pub struct RepoOrigin {
 }
 
 /// The origin remote's identity — open-time proof that a matched checkout really
-/// is the row's project, on BOTH axes.
+/// is the row's project, on all four axes.
 ///
-/// Three axes, because each closes a distinct way the stored match lies.
+/// Three of them are IDENTITY axes, each closing a distinct way the stored match
+/// lies.
 /// `parse_owner_host` keeps only ONE owner segment, so `team-a/sub/repo` and
 /// `team-b/sub/repo` are indistinguishable by owner+name+host — `path` settles
 /// that. The host in the match comes from the STORED `RecentRepo.host`, which
@@ -748,7 +749,7 @@ mod origin_path_tests {
         }
     }
 
-    /// Both halves of the proof, across the forms the inbox meets.
+    /// All four axes of the proof, across the forms the inbox meets.
     #[tokio::test]
     async fn origin_reports_the_host_and_the_whole_namespace() {
         for (tag, remote, want) in [
@@ -893,9 +894,9 @@ mod origin_path_tests {
         );
     }
 
-    /// A path that isn't a repo answers with BOTH halves empty rather than
-    /// erroring — the caller's contract is "unproven", and a stale recents row
-    /// must not fail the open.
+    /// A path that isn't a repo answers with EVERY axis empty — the full default —
+    /// rather than erroring: the caller's contract is "unproven", and a stale
+    /// recents row must not fail the open.
     #[tokio::test]
     async fn a_non_repo_path_is_unproven_not_an_error() {
         let dir = tempfile::Builder::new()
@@ -905,6 +906,11 @@ mod origin_path_tests {
         let path = dir.path().to_string_lossy().into_owned();
         let unproven = repo_origin_path(path).await.unwrap();
         assert_eq!(unproven, RepoOrigin::default());
-        assert!(unproven.host.is_empty() && unproven.path.is_empty());
+        assert!(
+            unproven.host.is_empty()
+                && unproven.path.is_empty()
+                && unproven.authority.is_empty()
+                && unproven.provider.is_empty()
+        );
     }
 }

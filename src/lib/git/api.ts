@@ -161,10 +161,11 @@ export const checkGitInstalled = () => invoke<GitInfo>("check_git_installed");
 export const validateRepo = (path: string) =>
   invoke<RepoInfo>("validate_repo", { path });
 
-/** The checkout's origin host and namespace path, each `""` when unreadable.
- *  Proves a checkout really is a given repository where a recents match key
- *  cannot: that key keeps only the segment before the repo name, and its host is
- *  a stored value that goes stale the moment a remote is re-pointed. */
+/** The checkout's origin host, namespace path, web authority and detection
+ *  verdict, each `""` when unknown. Proves a checkout really is a given
+ *  repository where a recents match key cannot: that key keeps only the segment
+ *  before the repo name, and its host is a stored value that goes stale the
+ *  moment a remote is re-pointed. */
 export const repoOriginPath = (repoPath: string) =>
   invoke<RepoOrigin>("repo_origin_path", { repoPath });
 

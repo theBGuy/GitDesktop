@@ -705,6 +705,13 @@ pub async fn account_hosts() -> Vec<String> {
 /// addressing `hostname` must not inherit. The config read is skipped whenever the
 /// decision is already settled without it — no token, or a `GITLAB_HOST` that
 /// outranks the file — so an ordinary session never pays for it.
+///
+/// A token session with no `GITLAB_HOST` does pay it PER CALL (six small local
+/// reads per host per fetch). Deliberate: resolving once per fan-out would have to
+/// thread the target through every leg, and a target passed in is one a caller can
+/// get wrong — deriving it here is what makes the argv and the scrub decision
+/// provably the same resolution, and the read sits behind a process spawn and a
+/// network round trip either way.
 async fn token_vars_to_strip_for(hostname: &str) -> &'static [&'static str] {
     let Some(token) = env_token() else {
         return &[];

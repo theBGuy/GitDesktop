@@ -572,8 +572,10 @@ export interface PrPollInfo {
 export interface RepoOrigin {
   /** Hostname alone, ports stripped. */
   host: string;
-  /** Hostname plus any port the scheme doesn't default (`:443`/`:80`/`:22`
-   *  elided), lowercased — the spelling a web URL's `URL.host` yields. */
+  /** Hostname plus the WEB port, lowercased — the spelling a web URL's `URL.host`
+   *  yields. `:443` on https and `:80` on http are elided, any other web port is
+   *  kept, and a non-web scheme's transport port (`ssh://…:2222`) is dropped
+   *  entirely: it says nothing about where the web UI lives. */
   authority: string;
   /** The full namespace path the provider spells ("group/sub/repo"). */
   path: string;
