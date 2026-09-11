@@ -93,7 +93,13 @@ export function flattenPathTree<T>(
     for (const [name, child] of dirs) {
       let folder = child;
       let label = name;
-      while (folder.leaves.length === 0 && folder.dirs.size === 1) {
+      // A collapsed node ends its chain: compacting THROUGH it would re-key the
+      // row to a deeper path, and the row would render expanded again.
+      while (
+        folder.leaves.length === 0 &&
+        folder.dirs.size === 1 &&
+        !collapsed.has(folder.path)
+      ) {
         const [onlyName, only] = [...folder.dirs.entries()][0];
         label = `${label}/${onlyName}`;
         folder = only;

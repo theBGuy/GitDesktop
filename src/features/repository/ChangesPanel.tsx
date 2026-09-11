@@ -437,6 +437,8 @@ export function ChangesPanel({
     select(row.entry, row.staged);
     if (shift && anchorKey) {
       const a = navRows.findIndex((r) => rowKeyOf(r) === anchorKey);
+      // An anchor that has gone hidden (collapsed away, committed away) leaves
+      // no range to extend; fall through and re-anchor on the landed row.
       if (a !== -1) {
         const [lo, hi] = a <= to ? [a, to] : [to, a];
         // Folder rows contribute no keys: a range spans the files it covers.
@@ -448,11 +450,11 @@ export function ChangesPanel({
               .map(rowKeyOf),
           ),
         );
+        return;
       }
-    } else {
-      setSelectedKeys(new Set([key]));
-      setAnchorKey(key);
     }
+    setSelectedKeys(new Set([key]));
+    setAnchorKey(key);
   }
 
   /** Focus + reveal a row the horizontal keys moved the cursor to (the vertical
