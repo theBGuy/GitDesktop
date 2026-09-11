@@ -57,6 +57,7 @@ import type {
   PrThreadOut,
   Reaction,
   RemoteLens,
+  RemoteListFilter,
   RepoOp,
   RepoRole,
   RepoSettingsInput,
@@ -68,6 +69,7 @@ import type {
   UnignoreRule,
   WebhookInput,
 } from "./types";
+import { remoteListFilterKey } from "./types";
 import {
   addUserWorktree,
   listUserWorktrees,
@@ -1068,16 +1070,27 @@ export function usePrList(
   state: api.PrStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "pr-list", lens, state, limit ?? null] as const,
-    queryFn: () => api.forgePrList(repo, state, limit, lens),
+    // The filter key is APPENDED (index 6) so the existing axis indices — and the
+    // positional axes list below — don't shift.
+    queryKey: [
+      "repo",
+      repo,
+      "pr-list",
+      lens,
+      state,
+      limit ?? null,
+      remoteListFilterKey(filter),
+    ] as const,
+    queryFn: () => api.forgePrList(repo, state, limit, lens, filter),
     enabled,
     staleTime: 30_000,
-    // State and limit stay free so a tab switch or "Load more" keeps the current rows
-    // instead of flashing skeletons, but lens must match: a fork numbers PRs
-    // independently of its parent, so another lens's rows misdescribe the list and a
-    // click on one navigates by number to a different PR.
+    // State, limit and filter stay free so a tab switch, "Load more" or a filter
+    // change keeps the current rows instead of flashing skeletons, but lens must
+    // match: a fork numbers PRs independently of its parent, so another lens's rows
+    // misdescribe the list and a click on one navigates by number to a different PR.
     placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
@@ -1144,8 +1157,15 @@ export function usePrListMergeability(
   limit: number | undefined,
   prs: PrInfo[] | undefined,
   lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
 ) {
   return useQuery({
+    // The filter key rides BEHIND the numbers digest: the digest pins which rows the
+    // map describes, the filter key pins which server query produced it — the backend
+    // re-runs the page from these args rather than taking the rows. Unlike the review
+    // state's, this filter axis stays FREE in the placeholder comparator below: a PR's
+    // mergeability is a property of the PR, identical whichever query surfaced it, and
+    // the numbers digest already refuses a map built for different rows.
     queryKey: [
       "repo",
       repo,
@@ -1154,9 +1174,16 @@ export function usePrListMergeability(
       state,
       limit ?? null,
       prs?.map((p) => p.number).join(",") ?? "",
+      remoteListFilterKey(filter),
     ] as const,
     queryFn: async () => {
-      const rows = await api.forgePrListMergeability(repo, state, limit, lens);
+      const rows = await api.forgePrListMergeability(
+        repo,
+        state,
+        limit,
+        lens,
+        filter,
+      );
       return new Map<number, PrMergeabilityState>(
         Object.entries(rows).map(([number, mergeState]) => [
           Number(number),
@@ -1176,6 +1203,63 @@ export function usePrListMergeability(
       [3, lens],
       [4, state],
     ]),
+  });
+}
+
+/**
+ * The viewer's review state for a PR-list page, keyed by number — what the
+ * review-state grouping sorts rows by. A number absent from `entries` is NOT
+ * reviewed, so callers derive that bucket by subtraction against the visible rows.
+ *
+ * CALLER CONTRACT: `enabled = ghReady && groupingOn && implemented.reviewGrouping &&
+ * state === "open" && !list.isPlaceholderData` — the grouping is open-PRs-only, and
+ * idling this hook while the list serves placeholder rows keeps an intermediate
+ * fetch from caching under the incoming key.
+ */
+export function usePrReviewState(
+  repo: string,
+  enabled: boolean,
+  state: api.PrStateFilter,
+  limit: number | undefined,
+  lens: RemoteLens,
+  filter: RemoteListFilter | null,
+) {
+  const filterKey = remoteListFilterKey(filter);
+  return useQuery({
+    queryKey: [
+      "repo",
+      repo,
+      "pr-review-state",
+      lens,
+      state,
+      limit ?? null,
+      filterKey,
+    ] as const,
+    queryFn: () => api.forgePrReviewState(repo, state, limit, lens, filter),
+    enabled,
+    staleTime: 30_000,
+    // Unlike the list itself, the FILTER is an identity axis here (idx 6, alongside
+    // lens and state): this map decorates rows, so a stale filter's map must never
+    // group rows produced by a different query. Only `limit` stays free, so a
+    // "Load more" keeps the current grouping while the larger page loads.
+    placeholderData: keepPreviousDataForKeyAxes(repo, [
+      [3, lens],
+      [4, state],
+      [6, filterKey],
+    ]),
+  });
+}
+
+/** The teams the viewer belongs to, for the team-review filter's picker. Membership
+ *  changes rarely, so it caches for five minutes and doesn't retry — a token without
+ *  the team scope answers `missingScope` rather than failing. */
+export function useMyTeams(repo: string, lens: RemoteLens, enabled: boolean) {
+  return useQuery({
+    queryKey: ["repo", repo, "my-teams", lens] as const,
+    queryFn: () => api.forgeMyTeams(repo, lens),
+    enabled,
+    staleTime: 300_000,
+    retry: false,
   });
 }
 
@@ -1900,19 +1984,30 @@ export function useIssueList(
   state: api.IssueStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "issue-list", lens, state, limit ?? null] as const,
-    queryFn: () => api.forgeIssueList(repo, state, limit, lens),
+    // The filter key is APPENDED (index 6) so the existing axis indices — and the
+    // positional axes list below — don't shift.
+    queryKey: [
+      "repo",
+      repo,
+      "issue-list",
+      lens,
+      state,
+      limit ?? null,
+      remoteListFilterKey(filter),
+    ] as const,
+    queryFn: () => api.forgeIssueList(repo, state, limit, lens, filter),
     enabled,
     staleTime: 30_000,
     // issuesDisabled is a permanent repo condition — retrying only delays the notice.
     retry: (failureCount, err) =>
       !(isAppError(err) && err.kind === "issuesDisabled") && failureCount < 1,
-    // State and limit stay free so a tab switch or "Load more" keeps the current rows
-    // instead of flashing skeletons, but lens must match: a fork numbers issues
-    // independently of its parent, so another lens's rows misdescribe the list and a
-    // click on one navigates by number to a different issue.
+    // State, limit and filter stay free so a tab switch, "Load more" or a filter
+    // change keeps the current rows instead of flashing skeletons, but lens must
+    // match: a fork numbers issues independently of its parent, so another lens's
+    // rows misdescribe the list and a click on one navigates to a different issue.
     placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
@@ -3177,6 +3272,10 @@ const NO_FORGE_STATUS: ForgeStatus = {
     mrDraftToggle: false,
     forkActivity: false,
     forkCompare: false,
+    listFilterMine: false,
+    listFilterTeam: false,
+    listFilterAuthor: false,
+    reviewGrouping: false,
   },
 };
 

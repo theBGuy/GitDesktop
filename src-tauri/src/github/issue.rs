@@ -149,17 +149,55 @@ pub struct IssueInfo {
 const ISSUE_LIST_FIELDS: &str =
     "number,url,title,state,author,labels,createdAt,updatedAt";
 
+/// What an EMPTY filtered issue page means, given the disabled-issues probe's result.
+/// A probe that succeeded proves the tracker exists, so the empty page is a real "no
+/// matches"; a probe that failed carries the reason, remapped to the typed variant the
+/// panel renders as a non-retryable state. Pure, so both arms are pinned without a
+/// spawn.
+fn empty_filtered_issues(probe: AppResult<()>) -> AppResult<Vec<IssueInfo>> {
+    match probe {
+        Ok(()) => Ok(Vec::new()),
+        Err(e) => Err(map_issues_disabled(e)),
+    }
+}
+
 /// Issues for the Issues list. `state` is "open" or "closed". `gh issue list`
 /// already excludes pull requests, so no extra filtering is needed.
+///
+/// A `filter` with an axis that applies to issues — assigned to me, author, label —
+/// narrows the list SERVER-side through `ISSUE_ADVANCED` search instead (see
+/// [`crate::github::pr_search`]); anything else keeps the `gh issue list` read below.
 pub async fn gh_issue_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<crate::forge::model::RemoteListFilter>,
 ) -> AppResult<Vec<IssueInfo>> {
     // Resolve the lens slug so a fork lists the chosen repo's issues (a bare
     // `gh issue list` on a fork auto-resolves to the upstream repo).
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    if let Some(q) = crate::github::pr_search::search_query(&slug, false, &state, filter.as_ref())? {
+        let rows = crate::github::pr_search::filtered_issue_list(&repo_path, &q, limit).await?;
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+        // An empty filtered page is AMBIGUOUS: search answers a repo whose issues are
+        // turned off with zero rows and no error, so "no matches" and "this repo has
+        // no tracker" look identical here. One narrow legacy read separates them —
+        // only ever on an empty page, and `state` is already known-valid because the
+        // query builder rejects anything else.
+        let probe = run_gh(
+            Some(&repo_path),
+            &[
+                "issue", "list", "--repo", &slug, "--state", &state, "--json", "number",
+                "--limit", "1",
+            ],
+            GH_TIMEOUT,
+        )
+        .await;
+        return empty_filtered_issues(probe.map(|_| ()));
+    }
     let mut args: Vec<&str> = match state.as_str() {
         "open" => vec![
             "issue", "list", "--repo", &slug, "--state", "open", "--json", ISSUE_LIST_FIELDS,
@@ -1474,8 +1512,35 @@ pub fn read_issue_templates(repo_path: String) -> AppResult<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_issues_disabled, issue_set_type_args, map_gh_too_old, ISSUE_TIMELINE_QUERY};
+    use super::{
+        empty_filtered_issues, is_issues_disabled, issue_set_type_args, map_gh_too_old,
+        ISSUE_TIMELINE_QUERY,
+    };
     use crate::error::AppError;
+
+    /// A `type:issue` search answers a repo with its tracker OFF with zero rows and no
+    /// error (measured), so an empty filtered page alone can't tell "no matches" from
+    /// "no tracker" — the probe's result is what decides, and a disabled tracker must
+    /// still reach the typed non-retryable state rather than rendering as empty.
+    #[test]
+    fn an_empty_filtered_page_defers_to_the_disabled_issues_probe() {
+        // Probe succeeded: the tracker exists, so empty really means no matches.
+        let ok = empty_filtered_issues(Ok(())).expect("a live tracker yields an empty list");
+        assert!(ok.is_empty());
+        // Probe failed with gh's disabled-issues line (verbatim shape) — the typed
+        // variant, not a raw Gh error the panel would show as a retryable failure.
+        let disabled = empty_filtered_issues(Err(AppError::Gh(
+            "the 'berkinory/GitDesktop' repository has disabled issues".into(),
+        )));
+        assert!(matches!(disabled, Err(AppError::IssuesDisabled)));
+        // Any other probe failure propagates unchanged — never swallowed into an
+        // empty list, and never relabelled as a disabled tracker.
+        match empty_filtered_issues(Err(AppError::Gh("HTTP 401: Bad credentials".into()))) {
+            Err(AppError::Gh(m)) => assert_eq!(m, "HTTP 401: Bad credentials"),
+            Err(e) => panic!("a non-disabled failure must ride through: {e:?}"),
+            Ok(_) => panic!("a failed probe must never yield an empty list"),
+        }
+    }
 
     /// `--type`/`--remove-type` are mutually exclusive on gh's grammar — a blank or
     /// absent name must switch the whole shape, never send an empty `--type` value

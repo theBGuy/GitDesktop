@@ -95,6 +95,7 @@ import type {
   IssueType,
   MergePreview,
   Milestone,
+  MyTeams,
   MyWorkPage,
   OpLogEntry,
   OrphanedStash,
@@ -117,6 +118,7 @@ import type {
   ReleaseInfo,
   RemoteBranch,
   RemoteLens,
+  RemoteListFilter,
   RepoDependencies,
   RepoInfo,
   RepoLabel,
@@ -129,6 +131,7 @@ import type {
   RepoStats,
   RepoStatus,
   RepoTraffic,
+  ReviewStatePage,
   ReviewSubmitOut,
   ReviewThreadOut,
   RewriteStep,
@@ -1776,13 +1779,40 @@ export const forgePrListMergeability = (
   state: PrStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
 ) =>
   invoke<Record<number, PrMergeabilityState>>("forge_pr_list_mergeability", {
     repoPath,
     state,
     limit,
     lens,
+    filter,
   });
+
+/** The viewer's review state for a PR-list page, keyed by number — the review-state
+ *  grouping. Like {@link forgePrListMergeability} it takes no row list: the backend
+ *  re-queries the page from these same filter args. Numbers the backend couldn't
+ *  answer for are absent from `entries` — never defaulted to "not reviewed". */
+export const forgePrReviewState = (
+  repoPath: string,
+  state: PrStateFilter,
+  limit: number | undefined,
+  lens: RemoteLens,
+  filter: RemoteListFilter | null,
+) =>
+  invoke<ReviewStatePage>("forge_pr_review_state", {
+    repoPath,
+    state,
+    limit,
+    lens,
+    filter,
+  });
+
+/** The teams the viewer belongs to, for the team-review filter's picker. GitHub-only
+ *  (`implemented.listFilterTeam`); a token without the team-read scope answers with
+ *  `missingScope` rather than failing. */
+export const forgeMyTeams = (repoPath: string, lens: RemoteLens) =>
+  invoke<MyTeams>("forge_my_teams", { repoPath, lens });
 
 /** A PR's activity timeline (force-pushes, label changes, review requests, state
  *  changes, approvals) for the Conversation tab. Provider-neutral — the backend
@@ -1818,7 +1848,9 @@ export const forgePrList = (
   state: PrStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
-) => invoke<PrInfo[]>("forge_pr_list", { repoPath, state, limit, lens });
+  filter: RemoteListFilter | null = null,
+) =>
+  invoke<PrInfo[]>("forge_pr_list", { repoPath, state, limit, lens, filter });
 
 export const forgePrView = (
   repoPath: string,
@@ -1938,7 +1970,15 @@ export const forgeIssueList = (
   state: IssueStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
-) => invoke<IssueInfo[]>("forge_issue_list", { repoPath, state, limit, lens });
+  filter: RemoteListFilter | null = null,
+) =>
+  invoke<IssueInfo[]>("forge_issue_list", {
+    repoPath,
+    state,
+    limit,
+    lens,
+    filter,
+  });
 
 export const forgeIssueView = (
   repoPath: string,

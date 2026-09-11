@@ -960,6 +960,21 @@ export interface ForgeImplemented {
   /** On-demand ahead/behind between one fork's branch and this repo's base
    *  branch. GitHub's compare API only, so false elsewhere. */
   forkCompare: boolean;
+  /** The whole-repo "mine" list filters (assigned to me, review requested from me)
+   *  on the PR/issue panels — a shared control for GitHub and GitLab, both of which
+   *  express the axis server-side; false for Bitbucket, which isn't wired. */
+  listFilterMine: boolean;
+  /** Filtering the PR list by a team whose review was requested — GitHub-only
+   *  (teams are a GitHub concept), so false elsewhere. */
+  listFilterTeam: boolean;
+  /** Server-side author filtering on the PR/issue panels. False for Bitbucket,
+   *  whose API filters on account ids rather than the display names the app
+   *  shows, so no author the user can pick is a term it would accept. */
+  listFilterAuthor: boolean;
+  /** Grouping the PR list by the viewer's review state (reviewed / needs another
+   *  look / not reviewed), which needs the per-PR review timestamps
+   *  `forge_pr_review_state` returns — GitHub-only, so false elsewhere. */
+  reviewGrouping: boolean;
 }
 
 /** One pull-request task (Bitbucket's PR checklist). `id`/`commentId` are numeric
@@ -1621,6 +1636,78 @@ export interface PrRef {
  *  itself ("origin") or its parent ("upstream"). GitHub-only — GitLab/Bitbucket
  *  arms ignore it, so the frontend gates the lens UI to GitHub forks. */
 export type RemoteLens = "origin" | "upstream";
+
+/** Server-side list filter for the PR/issue panels. Axes AND-combine; values within
+ *  an axis OR-combine. Absent/empty axis = no constraint. The three "mine" members
+ *  form ONE OR-union group (assigned OR review-requested OR team-review-requested). */
+export interface RemoteListFilter {
+  assignedToMe?: boolean;
+  reviewRequestedMe?: boolean;
+  /** Org-qualified team slugs ("org/slug"), pre-validated against useMyTeams. */
+  teams?: string[];
+  authors?: string[];
+  labels?: string[];
+}
+
+/** The boolean axes of {@link RemoteListFilter}, in canonical key order. */
+const REMOTE_LIST_FILTER_FLAGS = ["assignedToMe", "reviewRequestedMe"] as const;
+/** The list-valued axes of {@link RemoteListFilter}, in canonical key order. */
+const REMOTE_LIST_FILTER_LISTS = ["teams", "authors", "labels"] as const;
+
+/**
+ * Canonical cache-key form: "" when the filter is empty/null, else a stable string —
+ * sorted arrays, dropped empty axes — so two equal filters serialize identically.
+ * INVARIANT: a `false` flag and an absent flag are the same filter, as are an empty
+ * array and an absent array; both normalize away before serializing.
+ */
+export function remoteListFilterKey(
+  f: RemoteListFilter | null | undefined,
+): string {
+  if (!f) return "";
+  const parts: string[] = [];
+  for (const flag of REMOTE_LIST_FILTER_FLAGS) {
+    if (f[flag] === true) parts.push(flag);
+  }
+  for (const axis of REMOTE_LIST_FILTER_LISTS) {
+    const values = f[axis];
+    if (!values || values.length === 0) continue;
+    // JSON-encoded rather than joined, over a COPY (never sort the caller's array):
+    // label names and logins may contain the separator, so a plain join would let
+    // `["x,y"]` and `["x","y"]` — different server queries — share one cache key.
+    parts.push(`${axis}:${JSON.stringify([...values].sort())}`);
+  }
+  return parts.join("|");
+}
+
+/** When the viewer last reviewed a PR, against when the PR last changed — the
+ *  review-state grouping compares the two to split "reviewed" from "needs another
+ *  look". Both are ISO-8601. */
+export interface ReviewStateEntry {
+  lastReviewedAt: string;
+  updatedAt: string;
+}
+
+/** PR number → the viewer's review state; a number ABSENT from entries = not reviewed
+ *  (callers derive "not reviewed" by subtraction against the visible rows). */
+export interface ReviewStatePage {
+  entries: Record<number, ReviewStateEntry>;
+  truncated: boolean;
+}
+
+/** One team the viewer belongs to. `slug` is org-qualified ("org/slug") — the form
+ *  {@link RemoteListFilter.teams} carries; `name` is the display label. */
+export interface TeamRef {
+  slug: string;
+  name: string;
+}
+
+/** The viewer's teams for the team-review filter. `missingScope` true means the
+ *  token can't read team membership, so `teams` is empty for want of permission
+ *  rather than membership — the UI says so instead of showing an empty picker. */
+export interface MyTeams {
+  teams: TeamRef[];
+  missingScope: boolean;
+}
 
 /** A PR's membership in a stack — a linear chain where each PR targets the one
  *  below it. Absent/null means unstacked. Provenance differs per forge and `id`

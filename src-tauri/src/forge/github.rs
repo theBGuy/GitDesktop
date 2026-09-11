@@ -101,8 +101,29 @@ pub async fn list_prs(
     state: &str,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<crate::forge::model::RemoteListFilter>,
 ) -> AppResult<Vec<crate::github::pr::PrInfo>> {
-    crate::github::pr::gh_pr_list(repo_path.to_string(), state.to_string(), limit, lens).await
+    crate::github::pr::gh_pr_list(repo_path.to_string(), state.to_string(), limit, lens, filter)
+        .await
+}
+
+/// The viewer's own review state across the PR list, for the review-state grouping.
+pub async fn pr_review_state(
+    repo_path: &str,
+    state: &str,
+    limit: Option<u32>,
+    lens: Option<&str>,
+    filter: Option<&crate::forge::model::RemoteListFilter>,
+) -> AppResult<crate::github::pr_search::ReviewStatePage> {
+    crate::github::pr_search::gh_pr_review_state(repo_path, state, limit, lens, filter).await
+}
+
+/// The viewer's teams in this repo's org, for the team-review-request filter.
+pub async fn my_teams(
+    repo_path: &str,
+    lens: Option<&str>,
+) -> AppResult<crate::github::teams::MyTeams> {
+    crate::github::teams::my_teams(repo_path, lens).await
 }
 
 pub async fn list_ci(
@@ -136,8 +157,9 @@ pub async fn list_mergeability(
     state: &str,
     limit: Option<u32>,
     lens: Option<&str>,
+    filter: Option<&crate::forge::model::RemoteListFilter>,
 ) -> AppResult<std::collections::HashMap<u64, String>> {
-    crate::github::pr::gh_pr_list_mergeability(repo_path, state, limit, lens).await
+    crate::github::pr::gh_pr_list_mergeability(repo_path, state, limit, lens, filter).await
 }
 
 pub async fn pr_timeline(
@@ -338,8 +360,16 @@ pub async fn list_issues(
     state: &str,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<crate::forge::model::RemoteListFilter>,
 ) -> AppResult<Vec<crate::github::issue::IssueInfo>> {
-    crate::github::issue::gh_issue_list(repo_path.to_string(), state.to_string(), limit, lens).await
+    crate::github::issue::gh_issue_list(
+        repo_path.to_string(),
+        state.to_string(),
+        limit,
+        lens,
+        filter,
+    )
+    .await
 }
 
 pub async fn view_issue(

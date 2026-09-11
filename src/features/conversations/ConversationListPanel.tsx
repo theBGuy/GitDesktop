@@ -52,17 +52,31 @@ function SectionHeader(props: {
   collapsed: boolean;
   onToggle: () => void;
   /** Shown only when collapsed and non-null (omitted while a remote section is
-   *  pending/not-ready, where the count would be wrong). */
+   *  pending/not-ready, where the count would be wrong) — unless `showCount` is
+   *  "always", which the review-state subsections use so an empty group still
+   *  reads "(0)" rather than looking like a header with a missing body. */
   count?: number;
+  showCount?: "collapsed" | "always";
+  /** Hover text explaining a header whose label can't carry its own meaning. */
+  title?: string;
   className?: string;
 }) {
-  const { label, collapsed, onToggle, count, className } = props;
+  const {
+    label,
+    collapsed,
+    onToggle,
+    count,
+    showCount = "collapsed",
+    title,
+    className,
+  } = props;
   const Caret = collapsed ? CaretRightIcon : CaretDownIcon;
   return (
     <button
       type="button"
       onClick={onToggle}
       aria-expanded={!collapsed}
+      title={title}
       className={cn(
         "flex w-full cursor-pointer items-center gap-1 px-3 text-xs text-muted-foreground hover:text-foreground",
         className,
@@ -70,7 +84,7 @@ function SectionHeader(props: {
     >
       <Caret className="size-3 shrink-0" />
       <span>{label}</span>
-      {collapsed && count != null && (
+      {(collapsed || showCount === "always") && count != null && (
         <span className="tabular-nums">({count})</span>
       )}
     </button>
@@ -93,6 +107,10 @@ export function ConversationListPanel<L, R, J = never>(props: {
   onStateFilter: (s: "open" | "closed") => void;
   newMenu: NewMenuConfig;
   filterSlot: ReactNode;
+  /** Optional All | Mine | … scope switch, rendered in the toolbar between the
+   *  state filter and the lens switch. Omit (the default) and nothing renders,
+   *  so a provider without server-side scope filters keeps the old toolbar. */
+  presetControl?: ReactNode;
   /** Optional Fork | Upstream lens switch, rendered in the toolbar after the
    *  state filter (before the New menu). Omit (the default) and nothing renders,
    *  so panels without a lens are unaffected. */
@@ -155,6 +173,24 @@ export function ConversationListPanel<L, R, J = never>(props: {
   remoteError?: boolean;
   /** Rendered in place of the remote list on error (e.g. a Retry prompt). */
   remoteErrorSlot?: ReactNode;
+  /** A muted line under the remote header, above its rows — e.g. why a requested
+   *  grouping couldn't be applied. Omit (the default) and nothing renders. */
+  remoteNote?: ReactNode;
+  /** Splits the remote rows into collapsible subsections, rendered in array order
+   *  in place of the flat list. Omit (the default) and the flat list renders
+   *  exactly as before. Every row keeps its `data-row` key, so the caller's
+   *  arrow-key registry must span the VISIBLE groups in this same order — a
+   *  collapsed group's body is unmounted and its rows must leave the registry. */
+  remoteGroups?: {
+    key: string;
+    label: string;
+    /** Hover text for the header, where the label alone can't carry it. */
+    title?: string;
+    count: number;
+    collapsed: boolean;
+    onToggle: () => void;
+    items: R[];
+  }[];
   // empty-state nouns
   localNoun: string;
   remoteNoun: string;
@@ -198,6 +234,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
     onStateFilter,
     newMenu,
     filterSlot,
+    presetControl,
     lensControl,
     filterRef,
     filterText,
@@ -235,6 +272,8 @@ export function ConversationListPanel<L, R, J = never>(props: {
     skeletonRowLines = 2,
     remoteError,
     remoteErrorSlot,
+    remoteNote,
+    remoteGroups,
     localNoun,
     remoteNoun,
     jira,
@@ -244,6 +283,38 @@ export function ConversationListPanel<L, R, J = never>(props: {
     remoteCount,
     children,
   } = props;
+
+  const remoteRow = (item: R) => (
+    <button
+      type="button"
+      key={remoteKey(item)}
+      data-row={`remote:${remoteKey(item)}`}
+      className={rowClass(isRemoteActive(item))}
+      onClick={() => onSelectRemote(item)}
+      onMouseEnter={() => onRemoteHover(item)}
+    >
+      {renderRemoteRow(item)}
+    </button>
+  );
+
+  // Subsection headers indent one step under the provider header; the rows keep
+  // the flat list's chrome so a grouped and an ungrouped list read the same.
+  const remoteBody = remoteGroups
+    ? remoteGroups.map((group) => (
+        <Fragment key={group.key}>
+          <SectionHeader
+            label={group.label}
+            title={group.title}
+            collapsed={group.collapsed}
+            onToggle={group.onToggle}
+            count={group.count}
+            showCount="always"
+            className="pt-2 pb-1 pl-6"
+          />
+          {!group.collapsed && group.items.map(remoteRow)}
+        </Fragment>
+      ))
+    : visibleRemote.map(remoteRow);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -259,6 +330,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
             {s === "open" ? "Open" : "Closed"}
           </Button>
         ))}
+        {presetControl}
         {lensControl}
         <DropdownMenu>
           <DropdownMenuTrigger
@@ -373,6 +445,11 @@ export function ConversationListPanel<L, R, J = never>(props: {
             }
             className="pt-3 pb-1"
           />
+          {!remoteCollapsed && remoteNote && (
+            <p className="px-3 pb-1 text-[11px] text-muted-foreground">
+              {remoteNote}
+            </p>
+          )}
           {!remoteCollapsed &&
             (ghPending ? (
               <ListRowSkeletons
@@ -403,18 +480,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
                   : `No ${stateFilter} ${remoteNoun}.`}
               </p>
             ) : (
-              visibleRemote.map((item) => (
-                <button
-                  type="button"
-                  key={remoteKey(item)}
-                  data-row={`remote:${remoteKey(item)}`}
-                  className={rowClass(isRemoteActive(item))}
-                  onClick={() => onSelectRemote(item)}
-                  onMouseEnter={() => onRemoteHover(item)}
-                >
-                  {renderRemoteRow(item)}
-                </button>
-              ))
+              remoteBody
             ))}
 
           {jira && (

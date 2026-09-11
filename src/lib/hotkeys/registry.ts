@@ -320,6 +320,20 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  // The issue list's scope switches sit in its own toolbar, so they ship
+  // palette-only rather than spending a chord.
+  {
+    id: "issue-preset-all",
+    label: "Show all issues",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "issue-preset-mine",
+    label: "Filter issues: assigned to me",
+    category: "Repository",
+    defaultBinding: null,
+  },
   {
     id: "create-discussion",
     label: "Create discussion",
@@ -780,6 +794,32 @@ export const ACTIONS = [
   {
     id: "pr-delete",
     label: "Delete pull request",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  // The PR list's scope switches sit in its own toolbar, so they ship
+  // palette-only rather than spending a chord.
+  {
+    id: "pr-preset-all",
+    label: "Show all pull requests",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "pr-preset-mine",
+    label: "Filter pull requests: mine",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "pr-preset-needs-review",
+    label: "Filter pull requests: needs my review",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "pr-group-review",
+    label: "Toggle grouping by my review",
     category: "Pull requests",
     defaultBinding: null,
   },

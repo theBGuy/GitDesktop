@@ -1392,9 +1392,15 @@ impl GitDesktopMcp {
         // The open-issue page (origin-pinned, like the labels fetch: `lens = None`).
         // On any error (incl. Bitbucket's issues-disabled), there are no candidates.
         let open_page: Vec<crate::github::issue::IssueInfo> =
-            crate::forge::forge_issue_list(self.repo.clone(), "open".to_string(), Some(50), None)
-                .await
-                .unwrap_or_default();
+            crate::forge::forge_issue_list(
+                self.repo.clone(),
+                "open".to_string(),
+                Some(50),
+                None,
+                None,
+            )
+            .await
+            .unwrap_or_default();
 
         let mut out: Vec<IssueCandidate> = Vec::new();
         let mut included: std::collections::HashSet<u64> = std::collections::HashSet::new();

@@ -12,10 +12,12 @@ import { Button } from "@/components/ui/button";
 import { SessionExpiryNotice } from "@/features/accounts/SessionExpiryNotice";
 import { ConversationFilterPopover } from "@/features/conversations/ConversationFilterPopover";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
+import { ConversationPresetSwitcher } from "@/features/conversations/ConversationPresetSwitcher";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
 import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
+import { useRemoteListFilter } from "@/features/conversations/useRemoteListFilter";
 import type { IssueStateFilter } from "@/lib/git/api";
 import {
   forgeFeatureReady,
@@ -113,10 +115,40 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   // provider), while a not-ready repo gets a disabled item with the reason.
   const ghReady = forgeFeatureReady(gh.data, "issues");
   const canCreateGh = forgeFeatureReady(gh.data, "issueCreate");
+  // The provider's own capability, read separately from `forgeFeatureReady` so a
+  // not-yet-connected repo never gets told its PROVIDER lacks assignee filtering.
+  const implemented = gh.data?.implemented;
+  const canFilterMine = forgeFeatureReady(gh.data, "listFilterMine");
+  const canFilterAuthor = forgeFeatureReady(gh.data, "listFilterAuthor");
+  // Borrowed from the label-editing flag: a provider with no issue labels has
+  // nothing for the forge to filter by — the pick runs client-side there.
+  const canFilterLabel = forgeFeatureReady(gh.data, "issueLabels");
   const [stateFilter, setStateFilter] = useState<IssueStateFilter>("open");
   // How many remote issues to load; "Load more" bumps it. A tab switch resets it.
   const [limit, setLimit] = useState(PAGE_SIZE);
-  const issueList = useIssueList(repoPath, ghReady, stateFilter, limit, lens);
+  // Issues carry the assignee axis only — no reviewers, no teams, no grouping.
+  const listFilter = useRemoteListFilter({
+    repoPath,
+    feature: "issues",
+    lens,
+    canFilterMine,
+    canFilterTeam: false,
+    canFilterAuthor,
+    canFilterLabel,
+    canGroupByReview: false,
+  });
+  // `prefsReady` in the gate: a repo with a stored filter would otherwise fetch
+  // once unfiltered and again filtered, flashing rows the scope excludes. The
+  // wait is covered by the same skeletons a cold load already shows, and the
+  // prefs loader resolves to defaults on failure, so the gate always opens.
+  const issueList = useIssueList(
+    repoPath,
+    ghReady && listFilter.prefsReady,
+    stateFilter,
+    limit,
+    lens,
+    listFilter.filter,
+  );
   // A fork (issues off by default on GitHub) surfaces a typed error here. It's a
   // permanent repo condition, not a transient fetch failure, so the section shows
   // an informative notice with no Retry — and issue creation is offered as
@@ -166,6 +198,20 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     canCreateJira,
   );
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));
+  // Each scope action mirrors its toolbar segment's availability, and adds the
+  // tab: both panels stay mounted under <Activity>, so an ungated registration
+  // would rewrite this repo's issue filter from the Pull Requests tab unseen.
+  const onIssuesTab = useUiStore((s) => s.repoTab) === "issues";
+  useHotkeyAction(
+    "issue-preset-all",
+    () => listFilter.setPreset("all"),
+    onIssuesTab && canFilterMine,
+  );
+  useHotkeyAction(
+    "issue-preset-mine",
+    () => listFilter.setPreset("mine"),
+    onIssuesTab && canFilterMine,
+  );
 
   // "Reference in new issue" / "Duplicate issue" seeds + opens the create dialog.
   // Re-check the gate (like the PR panel): the seeder's own gate can lag this
@@ -201,14 +247,10 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const {
     filterText,
     setFilterText,
-    authorFilter,
-    labelFilter,
-    toggle,
     showArchived,
     setShowArchived,
     authors,
     labels,
-    activeFilterCount,
     stateLocal,
     stateRemote: issues,
     visibleLocal,
@@ -220,16 +262,26 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     locals: localIssues.data ?? [],
     remotes: issueList.data ?? [],
     stateFilter,
+    authorFilter: listFilter.authorFilter,
+    labelFilter: listFilter.labelFilter,
+    mineActive: listFilter.mineActive,
+    labelsServerSide: listFilter.labelsServerSide,
+    // `useIssueList`'s key up to the state axis: every cached page for this lens
+    // and state feeds the author/label options and counts, whatever limit or
+    // filter produced it, so they don't collapse to the active filter.
+    optionSourcePrefix: ["repo", repoPath, "issue-list", lens, stateFilter],
   });
 
   // Jira issues aren't part of the local/remote filter hook (their author/label
   // vocabulary is Jira's, not the repo host's); apply just the free-text search
-  // so the shared search box narrows them too. An author-filter selection has no
-  // Jira analogue, so it excludes the whole section (matching how it excludes
-  // locals).
+  // so the shared search box narrows them too. An author, label or assignee
+  // selection has no Jira analogue, so it excludes the whole section (matching
+  // how it excludes locals).
   const jiraQuery = filterText.trim().toLowerCase();
   const visibleJira =
-    authorFilter.size > 0 || labelFilter.size > 0
+    listFilter.authorFilter.size > 0 ||
+    listFilter.labelFilter.size > 0 ||
+    listFilter.assignedToMe
       ? []
       : (jiraIssues.data ?? []).filter(
           (i) =>
@@ -270,6 +322,19 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
 
   const RowIcon = stateFilter === "open" ? CircleDashedIcon : CheckCircleIcon;
 
+  // Held "Mine" rows say which of the two reasons holds them: the provider can't
+  // express the axis, or this repo isn't connected yet.
+  const mineReason = (() => {
+    if (canFilterMine) return null;
+    if (implemented && !implemented.listFilterMine)
+      return `${providerName} issues have no assignees to filter by`;
+    return `Connect this repository to ${providerName} to filter by assignee`;
+  })();
+  const authorReason =
+    canFilterAuthor || !implemented || implemented.listFilterAuthor
+      ? null
+      : `${providerName} can't filter issues by author here`;
+
   // The Bitbucket remote (host) section never has issues — its tracker is
   // retired. Unlinked, it invites linking a Jira project; linked, the Jira
   // section below IS the content, so the host section collapses to a one-line
@@ -294,6 +359,15 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         remoteLabel={remoteLabel}
         stateFilter={stateFilter}
         onStateFilter={onStateFilter}
+        presetControl={
+          <ConversationPresetSwitcher
+            feature="issues"
+            preset={listFilter.preset}
+            onPreset={listFilter.setPreset}
+            canFilterMine={canFilterMine}
+            canGroupByReview={false}
+          />
+        }
         lensControl={<RepoLensSwitcher repoPath={repoPath} />}
         newMenu={{
           ghLabel: NEW_ISSUE_LABEL[provider ?? "github"],
@@ -325,12 +399,25 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
           <ConversationFilterPopover
             authors={authors}
             labels={labels}
-            authorFilter={authorFilter}
-            labelFilter={labelFilter}
-            toggle={toggle}
-            activeFilterCount={activeFilterCount}
+            authorFilter={listFilter.authorFilter}
+            labelFilter={listFilter.labelFilter}
+            toggle={listFilter.toggleValue}
+            activeFilterCount={listFilter.activeFilterCount}
             authorCount={authorCount}
             labelCount={labelCount}
+            authorReason={authorReason}
+            mine={{
+              label: "Mine",
+              disabledReason: mineReason,
+              rows: [
+                {
+                  key: "assigned",
+                  label: "Assigned to me",
+                  checked: listFilter.assignedToMe,
+                  onToggle: listFilter.setAssignedToMe,
+                },
+              ],
+            }}
           />
         }
         filterRef={filterRef}

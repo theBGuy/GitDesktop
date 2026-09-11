@@ -14,6 +14,43 @@ pub enum Provider {
     Bitbucket,
 }
 
+/// The whole-repo, server-side narrowing a PR/issue list asks for. Every axis is
+/// optional and defaults to "off", so an absent `filter` argument deserializes into
+/// the unfiltered value and the list takes its legacy path unchanged.
+///
+/// Axes AND together; values within one axis OR together. The values arrive from UI
+/// state and end up inside a provider search qualifier, so each arm grammar-checks
+/// them before they reach argv (see `github::pr_search::search_query`).
+#[derive(Deserialize, Clone, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteListFilter {
+    #[serde(default)]
+    pub assigned_to_me: bool,
+    #[serde(default)]
+    pub review_requested_me: bool,
+    /// Org-qualified team slugs ("org/slug"), already validated against the viewer's
+    /// teams. A slug GitHub can't resolve zeroes the ENTIRE OR group it sits in rather
+    /// than contributing nothing (measured on `team-review-requested:` — 62 hits drop
+    /// to 0), so callers must offer only teams `forge_my_teams` reported.
+    #[serde(default)]
+    pub teams: Vec<String>,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+impl RemoteListFilter {
+    /// No axis set — the caller keeps its legacy, unfiltered read.
+    pub fn is_empty(&self) -> bool {
+        !self.assigned_to_me
+            && !self.review_requested_me
+            && self.teams.is_empty()
+            && self.authors.is_empty()
+            && self.labels.is_empty()
+    }
+}
+
 /// What a provider (and this repo on it) actually supports, so the UI shows only the
 /// controls that work instead of erroring. The platforms are NOT feature-identical —
 /// Bitbucket Cloud has no labels/milestones/stars, GitLab has no Discussions — so
@@ -309,6 +346,22 @@ pub struct Implemented {
     /// compare returns the full commit+diff payload and Bitbucket has no cross-repo
     /// compare endpoint.
     pub fork_compare: bool,
+    /// The viewer-centric PR/issue list filters — assigned to me, review requested of
+    /// me — plus the label axis that rides the same filtered read. GitHub answers them
+    /// from a search; GitLab's own arm covers its assignee/reviewer legs.
+    pub list_filter_mine: bool,
+    /// Narrowing the list by AUTHOR. Its own flag because Bitbucket can't do it: BBQL
+    /// rejects `author.display_name` outright (HTTP 400, "does not support filtering"),
+    /// and the only filterable identity — `nickname` — diverges from the display name
+    /// the app shows, so a picker there would filter on a value the user never saw.
+    pub list_filter_author: bool,
+    /// Narrowing the PR list to review requests aimed at one of the viewer's TEAMS.
+    /// GitHub-only: `team-review-requested:` has no GitLab or Bitbucket analogue.
+    pub list_filter_team: bool,
+    /// Grouping the PR list by the viewer's own review state (not reviewed / updated
+    /// since my review / reviewed). GitHub-only — it rests on the `reviewed-by:`
+    /// search qualifier.
+    pub review_grouping: bool,
 }
 
 impl Implemented {
@@ -377,6 +430,10 @@ impl Implemented {
             repo_readme: true,
             fork_activity: true,
             fork_compare: true,
+            list_filter_mine: true,
+            list_filter_author: true,
+            list_filter_team: true,
+            review_grouping: true,
         }
     }
 
@@ -441,6 +498,10 @@ impl Implemented {
             repo_readme: false,
             fork_activity: false,
             fork_compare: false,
+            list_filter_mine: false,
+            list_filter_author: false,
+            list_filter_team: false,
+            review_grouping: false,
         }
     }
 
@@ -534,6 +595,14 @@ impl Implemented {
                 // stays GitHub-only (see the field's note).
                 fork_activity: true,
                 fork_compare: false,
+                // List filters: the assignee / reviewer / author / label legs map onto
+                // GitLab's own list params (`author_username` for the author axis).
+                // Team review requests and the reviewed-by grouping have no GitLab
+                // analogue.
+                list_filter_mine: true,
+                list_filter_author: true,
+                list_filter_team: false,
+                review_grouping: false,
             },
             // Bitbucket Cloud: PRs, pipelines, repo actions, publish, the repo-settings
             // surface, and the PR-write set are wired over direct HTTP — the flags below
@@ -586,7 +655,10 @@ impl Implemented {
                 repo_readme: true,
                 // Fork activity reads `repositories/{ws}/{slug}/forks`;
                 // `fork_compare` stays false via `..Self::none()` — Bitbucket has no
-                // cross-repo compare endpoint.
+                // cross-repo compare endpoint. The `list_filter_*` / `review_grouping`
+                // flags stay false the same way: no filtered PR read is wired for
+                // Bitbucket, and its author axis is unbuildable (see
+                // `list_filter_author`).
                 fork_activity: true,
                 ..Self::none()
             },
@@ -1351,5 +1423,79 @@ mod tests {
         // star is NOT (Bitbucket Cloud has no stars).
         assert!(bb.repo_search && bb.repo_fork_by_name && bb.repo_readme);
         assert!(!bb.repo_star);
+        // No filtered PR read is wired for Bitbucket — every list-filter flag stays
+        // off (they reach the struct through `..Self::none()`). The author axis is
+        // doubly unavailable: BBQL refuses to filter on the display name the app
+        // shows, so it could not be built even with a filtered read.
+        assert!(!bb.list_filter_mine && !bb.list_filter_team && !bb.review_grouping);
+        assert!(!bb.list_filter_author);
+    }
+
+    /// The four filter gates per provider, and their camelCase wire names — the
+    /// frontend reads `listFilterMine` / `listFilterAuthor` / `listFilterTeam` /
+    /// `reviewGrouping` off `implemented` to decide which filter controls render.
+    #[test]
+    fn list_filter_flags_ride_the_implemented_profile() {
+        let gh = Implemented::for_provider(Provider::GitHub);
+        assert!(gh.list_filter_mine && gh.list_filter_team && gh.review_grouping);
+        assert!(gh.list_filter_author);
+        // GitLab wires the assignee/reviewer legs plus `author_username`; the team
+        // and reviewed-by axes have no analogue there.
+        let gl = Implemented::for_provider(Provider::GitLab);
+        assert!(gl.list_filter_mine && !gl.list_filter_team && !gl.review_grouping);
+        assert!(gl.list_filter_author);
+        // Bitbucket is the one provider whose author axis is off while another
+        // provider's is on — the flag exists to carry exactly that split.
+        let bb = Implemented::for_provider(Provider::Bitbucket);
+        assert!(!bb.list_filter_author);
+        let none = Implemented::none();
+        assert!(!none.list_filter_mine && !none.list_filter_team && !none.review_grouping);
+        assert!(!none.list_filter_author);
+        let value = serde_json::to_value(gh).expect("Implemented serializes");
+        assert_eq!(value["listFilterMine"], true);
+        assert_eq!(value["listFilterAuthor"], true);
+        assert_eq!(value["listFilterTeam"], true);
+        assert_eq!(value["reviewGrouping"], true);
+        // The GitLab row is what proves the wire name carries a per-provider split
+        // rather than tracking `listFilterMine`.
+        let gl_wire = serde_json::to_value(gl).expect("Implemented serializes");
+        assert_eq!(gl_wire["listFilterAuthor"], true);
+        let bb_wire = serde_json::to_value(bb).expect("Implemented serializes");
+        assert_eq!(bb_wire["listFilterAuthor"], false);
+    }
+
+    /// An absent `filter` argument must deserialize into the unfiltered value, and
+    /// every axis name must match the TS mirror exactly — a renamed field would read
+    /// as "off" and silently drop the user's filter.
+    #[test]
+    fn remote_list_filter_defaults_to_empty_and_reads_camel_case() {
+        let empty: RemoteListFilter =
+            serde_json::from_value(serde_json::json!({})).expect("empty object parses");
+        assert!(empty.is_empty());
+        assert!(RemoteListFilter::default().is_empty());
+        let full: RemoteListFilter = serde_json::from_value(serde_json::json!({
+            "assignedToMe": true,
+            "reviewRequestedMe": true,
+            "teams": ["octo/reviewers"],
+            "authors": ["octocat"],
+            "labels": ["bug"],
+        }))
+        .expect("full filter parses");
+        assert!(!full.is_empty());
+        assert!(full.assigned_to_me && full.review_requested_me);
+        assert_eq!(full.teams, ["octo/reviewers"]);
+        assert_eq!(full.authors, ["octocat"]);
+        assert_eq!(full.labels, ["bug"]);
+        // One axis alone is still non-empty (each must independently reach search).
+        for axis in [
+            serde_json::json!({"assignedToMe": true}),
+            serde_json::json!({"reviewRequestedMe": true}),
+            serde_json::json!({"teams": ["octo/reviewers"]}),
+            serde_json::json!({"authors": ["octocat"]}),
+            serde_json::json!({"labels": ["bug"]}),
+        ] {
+            let one: RemoteListFilter = serde_json::from_value(axis).expect("axis parses");
+            assert!(!one.is_empty());
+        }
     }
 }

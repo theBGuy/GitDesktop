@@ -1157,17 +1157,81 @@ pub async fn forge_clone(
 /// Bitbucket deliberately don't receive it (the frontend gates the lens UI to GitHub),
 /// so a stray upstream lens there simply reads as origin. This note stands for every
 /// `forge_*` PR/issue dispatcher below.
+///
+/// `filter` narrows the list whole-repo, server-side. Each provider answers it from
+/// its own arm — GitHub from a search, GitLab from a fan-out over its single-valued
+/// list params. Bitbucket's author axis is NOT wired: its PR rows expose an author
+/// display name, which BBQL cannot filter on (`author.display_name` answers HTTP 400
+/// "does not support filtering"), and the filterable `author.nickname` is a different
+/// field that diverges from it. An empty or absent filter leaves every arm on its
+/// legacy read. The `listFilterMine` / `listFilterTeam` [`model::Implemented`] flags
+/// are what tell the frontend which filter controls a provider can offer. This note
+/// likewise stands for every filtered `forge_*` dispatcher below.
 #[tauri::command]
 pub async fn forge_pr_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
 ) -> AppResult<Vec<crate::github::pr::PrInfo>> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::list_prs(&repo_path, &state, limit).await,
+        Some((Provider::GitLab, _)) => {
+            gitlab::list_prs(&repo_path, &state, limit, filter.as_ref()).await
+        }
         Some((Provider::Bitbucket, _)) => bitbucket::list_prs(&repo_path, &state, limit).await,
-        _ => github::list_prs(&repo_path, &state, limit, lens).await,
+        _ => github::list_prs(&repo_path, &state, limit, lens, filter).await,
+    }
+}
+
+/// The viewer's own review state for the PRs a [`forge_pr_list`] call with the same
+/// arguments would return — the input to the list's "not reviewed / updated since my
+/// review / reviewed" grouping. A number ABSENT from the map means NOT reviewed, so
+/// the caller subtracts rather than expecting a row per PR.
+///
+/// Short-circuits to an empty page for any non-open state and for every non-GitHub
+/// provider, before any call: a closed PR's review state drives no grouping, and the
+/// map rests on GitHub's `reviewed-by:` search qualifier, which has no GitLab or
+/// Bitbucket analogue (`reviewGrouping` is false there).
+#[tauri::command]
+pub async fn forge_pr_review_state(
+    repo_path: String,
+    state: String,
+    limit: Option<u32>,
+    lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
+) -> AppResult<crate::github::pr_search::ReviewStatePage> {
+    if state != "open" {
+        return Ok(crate::github::pr_search::ReviewStatePage::empty());
+    }
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab | Provider::Bitbucket, _)) => {
+            Ok(crate::github::pr_search::ReviewStatePage::empty())
+        }
+        _ => {
+            github::pr_review_state(&repo_path, &state, limit, lens.as_deref(), filter.as_ref())
+                .await
+        }
+    }
+}
+
+/// The viewer's teams in this repo's organization, org-qualified for the PR list's
+/// team-review-request filter. GitHub-only: `team-review-requested:` has no GitLab or
+/// Bitbucket analogue, so those arms error rather than returning an empty list a
+/// caller could read as "you're in no teams" (the `forge_my_work` precedent).
+#[tauri::command]
+pub async fn forge_my_teams(
+    repo_path: String,
+    lens: Option<String>,
+) -> AppResult<crate::github::teams::MyTeams> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
+            "Team filters aren't supported for GitLab yet.".into(),
+        )),
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Team filters aren't supported for Bitbucket yet.".into(),
+        )),
+        _ => github::my_teams(&repo_path, lens.as_deref()).await,
     }
 }
 
@@ -1289,14 +1353,20 @@ pub async fn forge_pr_list_mergeability(
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
 ) -> AppResult<std::collections::HashMap<u64, String>> {
     if state != "open" {
         return Ok(std::collections::HashMap::new());
     }
     match detect_non_github(&repo_path).await {
+        // Unfiltered by design: this reads the first 100 open MRs, so a filtered row
+        // outside that page gets no conflict chip — chip absence is no claim.
         Some((Provider::GitLab, _)) => gitlab::mr_list_mergeability(&repo_path, &state).await,
         Some((Provider::Bitbucket, _)) => Ok(std::collections::HashMap::new()),
-        _ => github::list_mergeability(&repo_path, &state, limit, lens.as_deref()).await,
+        _ => {
+            github::list_mergeability(&repo_path, &state, limit, lens.as_deref(), filter.as_ref())
+                .await
+        }
     }
 }
 
@@ -2075,13 +2145,16 @@ pub async fn forge_issue_list(
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
 ) -> AppResult<Vec<crate::github::issue::IssueInfo>> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::list_issues(&repo_path, &state, limit).await,
+        Some((Provider::GitLab, _)) => {
+            gitlab::list_issues(&repo_path, &state, limit, filter.as_ref()).await
+        }
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::list_issues(&repo_path, &state, limit, lens).await,
+        _ => github::list_issues(&repo_path, &state, limit, lens, filter).await,
     }
 }
 

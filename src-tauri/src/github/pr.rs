@@ -2372,15 +2372,23 @@ const PR_LIST_FIELDS: &str = "number,url,title,baseRefName,headRefName,isDraft,s
 /// PRs for the Pull Requests list. `state` is "open" or "closed"; closed
 /// uses the search qualifier so merged PRs are included, matching the
 /// semantics of GitHub's own Closed tab.
+///
+/// A non-empty `filter` narrows the list SERVER-side through `ISSUE_ADVANCED`
+/// search instead (see [`crate::github::pr_search`]); an absent or empty one keeps
+/// the `gh pr list` read below unchanged. Both paths get the same stack join.
 pub async fn gh_pr_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<crate::forge::model::RemoteListFilter>,
 ) -> AppResult<Vec<PrInfo>> {
     // Resolve the lens slug so a fork lists the chosen repo's PRs (a bare
     // `gh pr list` on a fork auto-resolves to the upstream repo).
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    if let Some(q) = crate::github::pr_search::search_query(&slug, true, &state, filter.as_ref())? {
+        return gh_pr_list_filtered(&repo_path, &slug, &state, limit, &q).await;
+    }
     let mut args: Vec<&str> = match state.as_str() {
         "open" => vec![
             "pr", "list", "--repo", &slug, "--state", "open", "--json", PR_LIST_FIELDS,
@@ -2431,6 +2439,33 @@ pub async fn gh_pr_list(
     });
     let mut prs: Vec<PrInfo> = serde_json::from_str(&out?.stdout_lossy())
         .map_err(|e| gh_unreadable("pull requests", format!("could not parse gh pr list: {e}")))?;
+    apply_stack_join(&mut prs, stacks.as_ref());
+    Ok(prs)
+}
+
+/// The filtered PR list: the search read, joined with stack membership exactly as
+/// [`gh_pr_list`] joins it — same bound, same unknown-on-timeout semantics — so a
+/// filtered row is decorated no differently from an unfiltered one.
+async fn gh_pr_list_filtered(
+    repo_path: &str,
+    slug: &str,
+    state: &str,
+    limit: Option<u32>,
+    q: &str,
+) -> AppResult<Vec<PrInfo>> {
+    let want_stacks = state == "open";
+    let (prs, stacks) = tokio::join!(
+        crate::github::pr_search::filtered_pr_list(repo_path, q, limit),
+        async {
+            if !want_stacks {
+                return Some(std::collections::HashMap::new());
+            }
+            tokio::time::timeout(STACKS_TIMEOUT, gh_open_stack_memberships(repo_path, slug))
+                .await
+                .unwrap_or_default()
+        }
+    );
+    let mut prs = prs?;
     apply_stack_join(&mut prs, stacks.as_ref());
     Ok(prs)
 }
@@ -3348,7 +3383,11 @@ impl PrMergeability {
 /// shape. A non-OPEN PR has no live mergeability, and anything outside
 /// MERGEABLE/CONFLICTING (i.e. UNKNOWN) means GitHub is still computing — never a
 /// false "mergeable".
-fn map_gh_mergeability(state: &str, mergeable: &str, merge_state_status: &str) -> PrMergeability {
+pub(crate) fn map_gh_mergeability(
+    state: &str,
+    mergeable: &str,
+    merge_state_status: &str,
+) -> PrMergeability {
     let detail = (!merge_state_status.is_empty()).then(|| merge_state_status.to_string());
     if !state.eq_ignore_ascii_case("OPEN") {
         // No detail: "unavailable" means there is no server truth to be had, so a
@@ -3425,11 +3464,16 @@ pub async fn gh_pr_mergeability(
 /// Mergeability for a whole PR-list page, keyed by number. Its own `gh pr list`
 /// call by design: adding `mergeable` to [`PR_LIST_FIELDS`] measured 3–5s of extra
 /// latency on large repos, so the list never waits on it.
+///
+/// A non-empty `filter` re-runs the LIST's search rather than the unfiltered page:
+/// the unfiltered page's first rows can miss every filtered row, which would leave
+/// the on-screen PRs with no chip at all.
 pub async fn gh_pr_list_mergeability(
     repo_path: &str,
     state: &str,
     limit: Option<u32>,
     lens: Option<&str>,
+    filter: Option<&crate::forge::model::RemoteListFilter>,
 ) -> AppResult<std::collections::HashMap<u64, String>> {
     const FIELDS: &str = "number,mergeable,state";
     // Only "open" reaches any provider — `forge_pr_list_mergeability` short-circuits
@@ -3437,6 +3481,9 @@ pub async fn gh_pr_list_mergeability(
     // mergeability to report.
     debug_assert_eq!(state, "open", "only the open filter reaches the providers");
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
+    if let Some(q) = crate::github::pr_search::search_query(&slug, true, state, filter)? {
+        return crate::github::pr_search::filtered_mergeability(repo_path, &q, limit).await;
+    }
     let mut args: Vec<&str> = vec![
         "pr", "list", "--repo", &slug, "--state", "open", "--json", FIELDS,
     ];

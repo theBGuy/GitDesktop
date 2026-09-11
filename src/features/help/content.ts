@@ -1039,9 +1039,32 @@ An open pull request gets a **Projects** picker alongside its **labels**, **assi
 **reviewers**: chips for the **GitHub Projects** it belongs to, and a popup to link or
 unlink it (see *Issues*).
 
-The list toolbar's **funnel** filters the list by **author or label** — type in its search
-box to narrow both groups at once, toggle any number of options (each shows its match
-count), and long author lists scroll inside the popup.
+The list toolbar's **All | Mine | Needs review** switch scopes the list in one click:
+**Mine** is everything assigned to you or awaiting your review, and **Needs review** is
+that same set split by how far you've got with each one. **All** clears the funnel along
+with it, author and label picks included. The **funnel** beside it holds those axes one
+by one (**Assigned to me**, **Review requested: me**, **My teams**) alongside searchable
+**author** and **label** rows, each showing how many of the loaded rows it covers, with
+long lists scrolling inside the popup. The filtering happens on the server, across the
+whole repository you're currently viewing, so type any author or label name and the
+funnel offers to filter by exactly that, whether or not the list has shown it. Several
+picks within one group widen the list (any of them matches), while picks in different
+groups narrow it. The **Mine** rows are remembered per repository; author and label picks
+last for the session.
+
+**Group by my review**, the funnel's last row and what **Needs review** turns on, splits
+the open list into **Not reviewed yet**, **Updated since my review**, and **Reviewed**,
+each collapsible and carrying its count; *updated* means any activity after your last
+review, including commits, comments, and labels. Past a few hundred reviewed pull
+requests it says so and leaves the list flat. The command palette carries every scope:
+**Show all pull requests**, **Filter pull requests: mine**, **Filter pull requests: needs
+my review**, and **Toggle grouping by my review**. The assignee, reviewer, author, and
+label axes work on **GitHub** and **GitLab**; **My teams** and the review grouping are
+GitHub-only, and on GitLab those two rows say so. On **Bitbucket** the switch doesn't
+appear, and the funnel's **Mine** and **Author** rows name what it can't filter by:
+assignees, review requests, and authors. A GitHub token without **read:org** can't list
+your teams, so the **My teams** row says so and hands you the
+\`gh auth refresh -s read:org\` that fixes it.
 
 The Conversation tab is a single **date-sorted activity feed** — reviews, comments,
 pushed commits, and events all interleaved oldest-to-newest. Every entry carries a
@@ -1651,8 +1674,14 @@ GitLab actions are available.)
 ## GitHub issues
 
 Browse, filter, and open issues in a full view: body, comments, labels, assignees,
-milestone, and reactions. The **funnel** filter is the same searchable author/label
-popup as the PR list. **Create** an issue, comment with the Markdown editor, edit,
+milestone, and reactions. An **All | Mine** switch in the toolbar scopes the list to the
+issues **assigned to you** (**All** clears the funnel along with it), and the **funnel**
+beside it is the same popup as the PR list: an **Assigned to me** row over searchable
+author and label rows, applied on the server across the whole repository you're currently
+viewing — see *Pull requests* for how the axes combine. Both scopes are in the command
+palette as **Show all issues** and **Filter issues: assigned to me**, and both work on
+**GitHub** and **GitLab**.
+**Create** an issue, comment with the Markdown editor, edit,
 add labels, **close / reopen** (closing asks first; either way your drafted comment posts
 alongside), **lock**, and **transfer** an issue to another repo.
 The comment box sits at the bottom of the issue,

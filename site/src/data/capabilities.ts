@@ -247,6 +247,12 @@ export const capabilities: Capability[] = [
     label:
       "Unfinished-review notice — a review you started on GitHub surfaces on the PR, to finish or discard",
   },
+  {
+    group: "Pull requests & review",
+    label:
+      "Triage the PR list — All | Mine | Needs review presets and whole-repo filters (GitHub & GitLab), with grouping by your review state (GitHub)",
+    highlight: true,
+  },
 
   // — Forges & trackers —
   {
@@ -301,6 +307,11 @@ export const capabilities: Capability[] = [
     group: "Issues & discussions",
     label:
       "Issue types, sub-issues & dependencies on GitHub; related issues on GitLab",
+  },
+  {
+    group: "Issues & discussions",
+    label:
+      "Issue list filters — All | Mine, plus author & label across the whole repository (GitHub & GitLab)",
   },
   {
     group: "Issues & discussions",

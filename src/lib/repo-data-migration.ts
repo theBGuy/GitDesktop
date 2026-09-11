@@ -85,6 +85,7 @@ const IDENTITY_STORES: IdentityStore[] = [
   { file: "own-comments-digest.json", merge: "inner-key" },
   { file: "jira-links.json", merge: "keep-new" },
   { file: "repo-lens.json", merge: "keep-new" },
+  { file: "conversation-filters.json", merge: "keep-new" },
   { file: "branch-rules.json", merge: "keep-new" },
   {
     file: "automations.json",

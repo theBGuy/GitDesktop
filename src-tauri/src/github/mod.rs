@@ -10,6 +10,7 @@ pub mod mcp_search;
 pub mod my_work;
 pub mod pages;
 pub mod pr;
+pub mod pr_search;
 pub mod project;
 pub mod release;
 pub mod repo_settings;
@@ -18,6 +19,7 @@ pub mod runner;
 pub mod secrets;
 pub mod security;
 pub mod security_findings;
+pub mod teams;
 
 use crate::error::{AppError, AppResult};
 

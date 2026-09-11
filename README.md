@@ -407,6 +407,16 @@ in one click.
   Separately, the **Edit** dialog can **retarget a PR's base branch** on
   GitHub, GitLab, and Bitbucket; on a stacked GitHub PR the picker asks you
   to dissolve the stack first.
+- **Scope the list to your work**: a one-click **All | Mine | Needs review**
+  switch in the list toolbar, over a funnel that filters the **whole
+  repository** server-side — assigned to you, awaiting your review, by
+  **author**, or by **label**, on **GitHub & GitLab**. **Needs review** also
+  splits the open list into collapsible **Not reviewed yet**, **Updated since
+  my review**, and **Reviewed** groups, so a triage pass knows where to start
+  (GitHub, which is also where your **teams**' review requests can join the
+  filter). Your scope choice is remembered per repository, and a provider
+  that can't express an axis says so in the funnel rather than offering a
+  dead control.
 - **Fork · Upstream lens**: on a GitHub fork (a repo with an `upstream`
   remote), a **Fork | Upstream** switch in the list toolbar points the
   remote PR list, and every PR you open under it (description, comments,
@@ -510,7 +520,9 @@ GitLab), pin/unpin (GitHub), lock/unlock, or delete. On a **fork**, the
 same **Fork | Upstream** lens as the PR tab browses the parent repository's
 issues (creating one under the Upstream lens opens it **on the parent**),
 and a fork with issues turned off offers a one-click switch to Upstream
-instead of a dead end.
+instead of a dead end. An **All | Mine** switch in the list toolbar scopes
+the list to the issues **assigned to you**, and the funnel beside it narrows
+the whole repository's issues by **author** or **label** (GitHub & GitLab).
 
 **Activity feed**: an issue's timeline events interleave with its comments,
 date-sorted oldest-to-newest — labels, assignees, milestones, title renames,
