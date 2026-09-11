@@ -1574,7 +1574,9 @@ function VirtualizedChangeList({
   // Keep the active row scrolled into view as the selection moves — under
   // virtualization its DOM node may not be mounted, so scroll by index. The row
   // mounts on the virtualizer's own re-render, a frame or more after the scroll,
-  // so the deferred focus claim gets a few frames before it gives up.
+  // so the deferred focus claim gets a few frames before it gives up. Keyed on
+  // the row IDENTITY too: an expand can re-key the cursor row at the SAME flat
+  // index, and the pending-focus claim must still run.
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on active change
   useEffect(() => {
     if (activeFlatIndex < 0) return;
@@ -1588,7 +1590,7 @@ function VirtualizedChangeList({
     };
     frame = requestAnimationFrame(claim);
     return () => cancelAnimationFrame(frame);
-  }, [activeFlatIndex]);
+  }, [activeFlatIndex, activeRowKey]);
   // Jump back to the top whenever the filter changes the visible set. Gated on
   // the filter actually changing: <Activity> replays effects on every tab show,
   // and an unguarded reset would drop the scroll position it preserves.
