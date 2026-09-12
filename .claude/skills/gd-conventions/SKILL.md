@@ -428,6 +428,13 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   `src/features/pulls/usePrCapabilities.ts`.
 - A server-constrained field in a shared PATCH rejects the whole request when
   ineligible — model as `Option` + eligibility check; hide/omit when ineligible.
+- **A Tauri package's two halves move together:** the crate
+  (`src-tauri/Cargo.toml` → `Cargo.lock`) and its npm half (`package.json` →
+  `pnpm-lock.yaml`) must agree on major.minor or `tauri build` refuses the
+  pair. An npm bump already reddens appimage-check (its paths filter lists
+  `package.json`); the blind spots are a crate-only bump and a lockfile-only
+  drift inside a caret range, both gated by check-tauri-plugin-parity.mjs on
+  every PR. A Dependabot group can't span ecosystems, so the two PRs combine.
 
 ## Code comments
 

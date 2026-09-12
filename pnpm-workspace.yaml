@@ -1,9 +1,9 @@
 packages:
   - "site"
 
-# Don't install versions published less than 7 days ago (10080 minutes),
-# a supply-chain safety delay mirrored by Dependabot's cooldown in
-# .github/dependabot.yml.
+# Don't install versions published less than 3 days ago (4320 minutes), a
+# supply-chain safety delay. Dependabot's cooldown in .github/dependabot.yml
+# is the same idea on its own longer schedule — the two are not kept in step.
 # minimumReleaseAge: 10080
 # changed to 3 days
 minimumReleaseAge: 4320

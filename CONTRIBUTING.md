@@ -105,27 +105,33 @@ this standard in passing is welcome.
 
 ### Convention checks
 
-Three dependency-free Node scripts guard convention classes a past audit already
+Five dependency-free Node scripts guard convention classes a past audit already
 paid to close once. Run them before pushing:
 
 ```sh
-pnpm run checks   # banned patterns · Rust invariants · IPC surface drift · guard self-tests
+# banned patterns · Rust invariants · IPC surface drift ·
+# rule-mirror drift · Tauri npm/crate parity · guard self-tests
+pnpm run checks
 ```
 
 They run as the `guards` job in [`quality.yml`](.github/workflows/quality.yml),
-which is meant to be registered as a required check on master once it lands
-there. The checks cover banned frontend UI and state patterns (hover-revealed
-row actions, hand-rolled modifier keys, `setQueryData(key, undefined)`, bare
-`.mutate(` calls in the converted trees, inline clip-measured tooltips), the
-Rust refspec-argv and sync-`#[tauri::command]` invariants, and Tauri IPC drift —
-every registered command needs a caller, every `invoke()` a registration.
+a required check on master. Between them they cover banned frontend UI
+and state patterns — hover-revealed row actions, hand-rolled modifier
+keys, `setQueryData(key, undefined)`, bare `.mutate(` calls in the
+converted trees, inline clip-measured tooltips — the Rust refspec-argv and
+sync-`#[tauri::command]` invariants, Tauri IPC drift (every registered command
+needs a caller, every `invoke()` a registration), drift between the files that
+restate the git-whitelist hard rule, and the major.minor parity of each Tauri
+package's npm and crate halves.
 
-Each check carries an allowlist, and it ratchets one way. Adding an entry is a
-reviewed change like any other: it needs an inline rationale naming what makes
-that site safe, and it isn't the way to quiet a fresh violation. The ratchet is
-enforced, not just documented — an entry that no longer suppresses anything
-(its site gone, or its command back in live use) fails the gate as a stale
-allowlist entry, so the PR that removes the site removes its entry too.
+The pattern and surface checks carry allowlists, and they ratchet one way
+(rule-mirror drift and Tauri parity carry none — there is nothing to exempt).
+Adding an entry is a reviewed change like any other: it needs an inline
+rationale naming what makes that site safe, and it isn't the way to quiet a
+fresh violation. The ratchet is enforced, not just documented — an entry that
+no longer suppresses anything (its site gone, or its command back in live use)
+fails the gate as a stale allowlist entry, so the PR that removes the site
+removes its entry too.
 
 `knip` and `jscpd` run in the same workflow's `advisory` job — non-blocking on
 purpose. The job publishes unused-export and duplicate-code reports to the run

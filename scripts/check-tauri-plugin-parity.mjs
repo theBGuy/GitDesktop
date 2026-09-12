@@ -9,9 +9,12 @@
 // Comparison is major.minor on the RESOLVED versions, mirroring tauri-cli's own
 // InstalledPackages::mismatched(): patch drift between the halves is legal.
 //
-// Only pairs where BOTH halves exist are compared — crate-only plugins
-// (tauri-plugin-fs, tauri-plugin-window-state, the tauri-* build crates) and
-// npm-only packages (@tauri-apps/cli) have no counterpart to disagree with.
+// Only pairs where BOTH halves exist HERE are compared: the build crates
+// (tauri-build, tauri-codegen, tauri-utils) ship no npm half at all, while
+// plugins this app uses from Rust alone (tauri-plugin-fs,
+// tauri-plugin-window-state) do publish a JS API — they are simply not
+// installed in package.json, so there is nothing to compare. @tauri-apps/cli
+// is the mirror case, an npm package with no crate dependency here.
 //
 // Run: node scripts/check-tauri-plugin-parity.mjs
 // GD_TAURI_PARITY_ROOT points the check at a copy of the tree, for an ad-hoc
@@ -26,6 +29,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const CARGO_LOCK = "src-tauri/Cargo.lock";
 export const PNPM_LOCK = "pnpm-lock.yaml";
+export const PACKAGE_JSON = "package.json";
 
 // The `\r?` is required: a Windows checkout materializes Cargo.lock with
 // CRLF under core.autocrlf, and an LF-only pattern would parse zero packages —
@@ -40,6 +44,36 @@ export function parseCrateVersions(cargoLockText) {
     versions.set(name, version);
   }
   return versions;
+}
+
+/**
+ * Crate names carrying more than one block. A lockfile holding two versions of
+ * a name is ordinary (58 names do here today), but for a PAIRED crate the map
+ * above keeps whichever came last, so the comparison may describe a version the
+ * app does not link — not comparable, rather than comparable-and-fine.
+ */
+export function duplicateCrateNames(cargoLockText) {
+  const seen = new Set();
+  const duplicated = new Set();
+  for (const [, name] of cargoLockText.matchAll(CRATE_BLOCK)) {
+    if (seen.has(name)) duplicated.add(name);
+    seen.add(name);
+  }
+  return duplicated;
+}
+
+/**
+ * The `@tauri-apps/*` packages package.json declares. This is the robust half
+ * of the expectation — real JSON, against a lockfile scan that depends on an
+ * indentation-sensitive format — so it is what says how many comparisons the
+ * gate owes.
+ */
+export function declaredNpmPackages(packageJsonText) {
+  const pkg = JSON.parse(packageJsonText);
+  return [
+    ...Object.keys(pkg.dependencies ?? {}),
+    ...Object.keys(pkg.devDependencies ?? {}),
+  ].filter((name) => name.startsWith("@tauri-apps/"));
 }
 
 /**
@@ -85,9 +119,16 @@ export const CORE_CRATE = "tauri";
 
 /** The npm half of a crate, or null when the crate has no npm counterpart. */
 export function npmNameFor(crateName) {
-  if (crateName === "tauri") return "@tauri-apps/api";
+  if (crateName === CORE_CRATE) return "@tauri-apps/api";
   const plugin = /^tauri-plugin-(.+)$/.exec(crateName);
   return plugin ? `@tauri-apps/plugin-${plugin[1]}` : null;
+}
+
+/** The crate half of an npm package — the inverse of `npmNameFor`. */
+export function crateNameFor(npmName) {
+  if (npmName === "@tauri-apps/api") return CORE_CRATE;
+  const plugin = /^@tauri-apps\/plugin-(.+)$/.exec(npmName);
+  return plugin ? `tauri-plugin-${plugin[1]}` : null;
 }
 
 const majorMinor = (version) => version.split(".").slice(0, 2).join(".");
@@ -114,17 +155,28 @@ export function mismatchedPairs(crates, npm) {
 
 /**
  * The whole decision, so the CLI only renders it and every branch stays
- * reachable from a fixture. `empty` and `missingCore` are the fail-CLOSED arms:
- * a parser that stops matching — wholly, or far enough to lose the core pair —
- * would otherwise print OK over comparisons it never made.
+ * reachable from a fixture. Everything but `mismatched` is a fail-CLOSED arm
+ * against a comparison that never happened: a parse that yields nothing, one
+ * that loses the core pair, a duplicated crate whose kept version is arbitrary,
+ * and a package.json-declared half that produced no comparison at all.
  */
-export function verdict(crates, npm) {
+export function verdict(
+  crates,
+  npm,
+  { duplicates = new Set(), declared = [] } = {},
+) {
   const pairs = pairedVersions(crates, npm);
+  const paired = new Set(pairs.map((p) => p.crate));
   return {
     pairs,
     mismatched: mismatchedPairs(crates, npm),
     empty: pairs.length === 0,
-    missingCore: !pairs.some((p) => p.crate === CORE_CRATE),
+    missingCore: !paired.has(CORE_CRATE),
+    duplicated: [...duplicates].filter((name) => paired.has(name)).sort(),
+    unpaired: declared.filter((name) => {
+      const crate = crateNameFor(name);
+      return crate !== null && crates.has(crate) && !paired.has(crate);
+    }),
   };
 }
 
@@ -135,17 +187,23 @@ function main() {
 
   let crates;
   let npm;
+  let duplicates;
+  let declared;
   try {
-    crates = parseCrateVersions(readFileSync(join(root, CARGO_LOCK), "utf8"));
+    const cargoLock = readFileSync(join(root, CARGO_LOCK), "utf8");
+    crates = parseCrateVersions(cargoLock);
+    duplicates = duplicateCrateNames(cargoLock);
     npm = parseNpmVersions(readFileSync(join(root, PNPM_LOCK), "utf8"));
+    declared = declaredNpmPackages(readFileSync(join(root, PACKAGE_JSON), "utf8"));
   } catch (err) {
-    process.stderr.write("tauri-parity: FAIL — cannot read a lockfile\n");
+    process.stderr.write("tauri-parity: FAIL — cannot read a manifest\n");
     process.stderr.write(`    ${err.message}\n`);
     process.exitCode = 1;
     return;
   }
 
-  const { pairs, mismatched, empty, missingCore } = verdict(crates, npm);
+  const { pairs, mismatched, empty, missingCore, duplicated, unpaired } =
+    verdict(crates, npm, { duplicates, declared });
   if (empty) {
     process.stderr.write(
       "tauri-parity: FAIL — no tauri npm/crate pairs found in the lockfiles\n",
@@ -162,6 +220,36 @@ function main() {
     );
     process.stderr.write(
       "    a partial parse skips real comparisons silently; confirm both halves are still declared, then check the block shapes this gate reads\n",
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (duplicated.length > 0) {
+    process.stderr.write(
+      `tauri-parity: FAIL — ${duplicated.length} paired crate(s) carry more than one block in ${CARGO_LOCK}\n`,
+    );
+    for (const name of duplicated) {
+      process.stderr.write(
+        `  ${name} — which version the app links is ambiguous here, so the pair is not comparable\n`,
+      );
+    }
+    process.stderr.write(
+      "    unify the versions (a single block per paired crate) before this gate can speak to the pair\n",
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (unpaired.length > 0) {
+    process.stderr.write(
+      `tauri-parity: FAIL — ${unpaired.length} declared package(s) have a crate half but produced no comparison\n`,
+    );
+    for (const name of unpaired) {
+      process.stderr.write(
+        `  ${name} (${PACKAGE_JSON}) <-> ${crateNameFor(name)} (${CARGO_LOCK}) — the ${PNPM_LOCK} half is missing\n`,
+      );
+    }
+    process.stderr.write(
+      `    re-lock if the dependency is genuinely gone; otherwise the root-importer block shape this gate reads has changed\n`,
     );
     process.exitCode = 1;
     return;

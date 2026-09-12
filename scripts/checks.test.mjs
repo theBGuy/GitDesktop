@@ -45,6 +45,9 @@ import {
   staleAllowlistEntries,
 } from "./check-rust-invariants.mjs";
 import {
+  crateNameFor,
+  declaredNpmPackages,
+  duplicateCrateNames,
   mismatchedPairs,
   npmNameFor,
   parseCrateVersions,
@@ -2201,11 +2204,98 @@ test("verdict clears only when the core pair is present and aligned", () => {
       ["@tauri-apps/api", "2.11.1"],
       ["@tauri-apps/plugin-http", "2.6.0"],
     ]),
+    { declared: ["@tauri-apps/api", "@tauri-apps/plugin-http"] },
   );
   assert.equal(clean.empty, false);
   assert.equal(clean.missingCore, false);
   assert.deepEqual(clean.mismatched, []);
+  assert.deepEqual(clean.duplicated, []);
+  assert.deepEqual(clean.unpaired, []);
   assert.equal(clean.pairs.length, 2);
+});
+
+test("duplicateCrateNames names only the crates carrying two blocks", () => {
+  const lock = cargoLock([
+    ["tauri", "2.11.5"],
+    ["windows-sys", "0.59.0"],
+    ["windows-sys", "0.60.2"],
+    ["tauri-plugin-http", "2.6.0"],
+  ]);
+  assert.deepEqual([...duplicateCrateNames(lock)], ["windows-sys"]);
+});
+
+test("verdict fails closed on a duplicated PAIRED crate only", () => {
+  const crates = new Map([
+    ["tauri", "2.11.5"],
+    ["tauri-plugin-http", "2.6.0"],
+  ]);
+  const npm = new Map([
+    ["@tauri-apps/api", "2.11.1"],
+    ["@tauri-apps/plugin-http", "2.6.0"],
+  ]);
+  // Two blocks for a compared crate: the parse kept one version arbitrarily, so
+  // the pair it reports may not be the one the app links.
+  assert.deepEqual(
+    verdict(crates, npm, { duplicates: new Set(["tauri-plugin-http"]) })
+      .duplicated,
+    ["tauri-plugin-http"],
+  );
+  // Duplication is ordinary for the crates this gate never compares.
+  assert.deepEqual(
+    verdict(crates, npm, {
+      duplicates: new Set(["windows-sys", "tauri-plugin-fs"]),
+    }).duplicated,
+    [],
+  );
+});
+
+test("declaredNpmPackages reads both dependency blocks, scoped to @tauri-apps", () => {
+  const pkg = JSON.stringify({
+    dependencies: { "@tauri-apps/api": "^2.11.1", zustand: "^5.0.15" },
+    devDependencies: { "@tauri-apps/cli": "^2.11.4", vite: "^8.2.1" },
+  });
+  assert.deepEqual(declaredNpmPackages(pkg), [
+    "@tauri-apps/api",
+    "@tauri-apps/cli",
+  ]);
+  // A manifest with neither block is not a crash — the arm simply expects
+  // nothing.
+  assert.deepEqual(declaredNpmPackages("{}"), []);
+});
+
+test("crateNameFor inverts the pairing and stops at the npm-only package", () => {
+  assert.equal(crateNameFor("@tauri-apps/api"), "tauri");
+  assert.equal(crateNameFor("@tauri-apps/plugin-store"), "tauri-plugin-store");
+  assert.equal(crateNameFor("@tauri-apps/cli"), null);
+  assert.equal(crateNameFor("zustand"), null);
+});
+
+test("verdict fails closed on a declared package that produced no comparison", () => {
+  const crates = new Map([
+    ["tauri", "2.11.5"],
+    ["tauri-plugin-http", "2.6.0"],
+  ]);
+  // The lockfile half lost one entry — a shape a format change makes, and one
+  // the pair COUNT cannot see: the remaining pairs still look healthy.
+  const degraded = verdict(crates, new Map([["@tauri-apps/api", "2.11.1"]]), {
+    declared: [
+      "@tauri-apps/api",
+      "@tauri-apps/plugin-http",
+      "@tauri-apps/cli",
+    ],
+  });
+  assert.equal(degraded.empty, false);
+  assert.equal(degraded.missingCore, false);
+  // @tauri-apps/cli has no crate half at all, so it is skipped, not flagged.
+  assert.deepEqual(degraded.unpaired, ["@tauri-apps/plugin-http"]);
+  // A declared package whose crate half is genuinely absent from Cargo.lock is
+  // also skipped: there is no comparison owed.
+  assert.deepEqual(
+    verdict(crates, new Map([["@tauri-apps/api", "2.11.1"]]), {
+      declared: ["@tauri-apps/api", "@tauri-apps/plugin-dialog"],
+    }).unpaired,
+    [],
+  );
 });
 
 test("mismatchedPairs skips a half with no counterpart", () => {

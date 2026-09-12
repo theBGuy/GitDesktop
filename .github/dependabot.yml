@@ -14,8 +14,9 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
-    # Hold off on freshly-published releases (supply-chain safety),
-    # mirroring pnpm's minimumReleaseAge in pnpm-workspace.yaml.
+    # Hold off on freshly-published releases (supply-chain safety). pnpm's
+    # minimumReleaseAge in pnpm-workspace.yaml is the same idea for direct
+    # installs, on its own shorter delay — the two are not kept in step.
     cooldown:
       default-days: 7
       semver-major-days: 30
@@ -26,9 +27,11 @@ updates:
       prefix-development: "chore(deps-dev)"
     groups:
       # Tauri's npm and crate halves must reach master in ONE commit: a group
-      # cannot span ecosystems, and the parity guard is a required check, so
-      # each half alone reddens its own merge ref — combine this PR and its
-      # cargo twin onto one branch. Declared FIRST: first matching group wins.
+      # cannot span ecosystems, so combine this PR with its cargo twin — on a
+      # MINOR bump the parity guard (a required check) reddens each half alone,
+      # while a patch-only split passes by design. A package with no
+      # counterpart (@tauri-apps/cli here, tauri-build there) opens and merges
+      # solo. Declared FIRST: first matching group wins.
       tauri:
         patterns:
           - "@tauri-apps/*"
@@ -61,8 +64,9 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     groups:
-      # The crate half of the npm `tauri` group above — a separate PR only
-      # because groups cannot span ecosystems; it merges combined with that one.
+      # The crate half of the npm `tauri` group above — separate only because
+      # groups cannot span ecosystems; combine the two unless this PR carries
+      # only crates with no npm counterpart (tauri-build).
       tauri:
         patterns:
           - "tauri"

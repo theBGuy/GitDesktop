@@ -2,10 +2,9 @@ name: quality
 
 # Two jobs with deliberately opposite contracts.
 #
-# `guards` runs the mechanical convention checks and is meant to be registered
-# as a required status check on master's ruleset once this workflow lands there
-# — so it carries NO paths filter, because a paths-skipped required check sits
-# stuck "Expected" forever (GitHub required-checks docs).
+# `guards` runs the mechanical convention checks and IS a required status check
+# on master's ruleset — so it carries NO paths filter, because a paths-skipped
+# required check sits stuck "Expected" forever (GitHub required-checks docs).
 # The path-unfiltered push:master leg is the backstop re-validating the true
 # merged tree, since a PR green against a stale base merges stale-green.
 #
