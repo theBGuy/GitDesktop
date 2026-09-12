@@ -21,10 +21,12 @@ import { fileURLToPath } from "node:url";
 // every real anchor pair had lost its whitespace.
 export const INLINE_GAP = /<\/a>\s+<a[\s>]/;
 
-// `<footer(?=\s|>)` and not `<footer`: the bare form also starts inside a custom
-// element like <footer-links>, so a gapped pair there could satisfy the gate
-// while the real footer stayed compressed.
-/** The footer element's markup, or null when the page has no footer. */
+/**
+ * The footer element's markup, or null when the page has no footer. Matched as
+ * `<footer(?=\s|>)` and not `<footer`: the bare form also starts inside a custom
+ * element like <footer-links>, so a gapped pair there could satisfy the gate
+ * while the real footer stayed compressed.
+ */
 export function footerOf(html) {
   const m = html.match(/<footer(?=\s|>)[\s\S]*?<\/footer\s*>/i);
   return m ? m[0] : null;
@@ -69,7 +71,7 @@ function main() {
     if (footerOf(html) === null) {
       annotate(
         ".github/workflows/site.yml",
-        `No <footer> found in ${page} -- this guard reads the footer link row; move its target.`,
+        `No <footer> found in ${page} -- point this step at a page that renders SiteLayout's footer, or restore the footer.`,
       );
       continue;
     }
