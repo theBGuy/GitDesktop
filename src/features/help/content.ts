@@ -2604,8 +2604,9 @@ configuration, one line per moment, then lists every recorded decision, newest f
   "(seen 4×)" for a pull request checked again.
 - **Pull request rows open their pull request** on click or Enter; commit rows and markers
   are text. The arrow keys walk the whole list.
-- **Pausing is logged.** Turning **Hide AI** on records *Automations paused*, and turning it
-  off records *Automations resumed*, so a quiet stretch in the log carries its own reason.
+- **Pausing is logged.** Once you have an automation enabled, turning **Hide AI** on
+  records *Automations paused*, and turning it off records *Automations resumed*, so a
+  quiet stretch in the log carries its own reason.
 
 The command palette can also run your enabled automations against the pull request you
 currently have open, without waiting for the next trigger. It needs a pull request in view

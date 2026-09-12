@@ -7,8 +7,26 @@ import {
   type BranchProtection,
   type BranchRulesConfig,
   EMPTY_BRANCH_RULES,
+  type MergeMethod,
   type NamingPolicy,
 } from "./types";
+
+/**
+ * Heals a hand-edited `allowedMergeMethods`: absent = unrestricted (the documented
+ * default), an array keeps only real methods, and ANY other shape allows NONE. Junk
+ * fails CLOSED because a protection must never heal toward permissiveness — a bare
+ * string like `"squash"` restricted by accident before this normalizer ran (the
+ * matcher's `includes` was reading it as a substring test), so widening it to all
+ * three would unblock merges the file asked to block.
+ */
+function healMergeMethods(value: unknown): MergeMethod[] {
+  if (value == null) return [...ALL_MERGE_METHODS];
+  if (!Array.isArray(value)) return [];
+  const known: readonly string[] = ALL_MERGE_METHODS;
+  return value.filter(
+    (m): m is MergeMethod => typeof m === "string" && known.includes(m),
+  );
+}
 
 /**
  * Coerces a loosely-typed (possibly older or hand-edited) config into a full
@@ -30,11 +48,7 @@ export function normalizeBranchRules(saved: unknown): BranchRulesConfig {
       blockDeletion: p.blockDeletion ?? false,
       blockForcePush: p.blockForcePush ?? false,
       requirePr: p.requirePr ?? false,
-      allowedMergeMethods: Array.isArray(p.allowedMergeMethods)
-        ? p.allowedMergeMethods.filter((method) =>
-            ALL_MERGE_METHODS.includes(method),
-          )
-        : [...ALL_MERGE_METHODS],
+      allowedMergeMethods: healMergeMethods(p.allowedMergeMethods),
     })),
     // Typed loosely because the shared file is hand-editable: anything but an
     // array of strings yields no promotion branches rather than throwing away

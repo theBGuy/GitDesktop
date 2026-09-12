@@ -1168,7 +1168,9 @@ export function runAutomationNow(
 
       /** This target's state right now, or null when it can't run — the refusal
        *  toast is already shown by the time null comes back. */
-      const resolveTarget = async (): Promise<ResolvedRunTarget | null> => {
+      const resolveTarget = async (
+        pollHead: boolean,
+      ): Promise<ResolvedRunTarget | null> => {
         let resolved: ResolvedRunTarget;
         if (target.kind === "remote") {
           // Origin-pinned like every other store/forge touch on this path.
@@ -1177,20 +1179,16 @@ export function runAutomationNow(
             toast.info(CLOSED_PR_COPY);
             return null;
           }
-          // The head-OID poll is the authority here — it is provider-neutral and its
-          // `headSha` is the very value pr-sync detection keys on, so Run-now claims
-          // and persists the same head the lifecycle would. The commits list alone
-          // can't be trusted for this: `gh_pr_view` completes a >100-commit PR from
-          // the paginated REST endpoint and falls back to the TRUNCATED 100-entry
-          // GraphQL list when that read fails, and the last entry of a truncated list
-          // is not the head. Best-effort — a poll hiccup shouldn't refuse a run the
-          // commits list can serve, so it falls back to the oldest-first list's last
-          // entry (GitLab and Bitbucket reverse their newest-first payloads to match
-          // GitHub's; same read as RemotePrView's merge/review paths). The
-          // empty-headSha refusal below is the final backstop.
-          const polledHead = await forgePrPoll(repoPath)
-            .then((prs) => prs.find((p) => p.number === target.number)?.headSha)
-            .catch(() => undefined);
+          // The poll's `headSha` is the value pr-sync detection keys on; `gh_pr_view`'s
+          // commit list truncates at 100, so its last entry may not be the head. The
+          // preview pass skips it — its head only has to prove resolvable.
+          const polledHead = pollHead
+            ? await forgePrPoll(repoPath)
+                .then(
+                  (prs) => prs.find((p) => p.number === target.number)?.headSha,
+                )
+                .catch(() => undefined)
+            : undefined;
           resolved = {
             base: pr.baseRefName,
             head: pr.headRefName,
@@ -1239,7 +1237,7 @@ export function runAutomationNow(
 
       // Read once to name the PR in the confirm — and to refuse a closed or
       // unresolvable PR before spending a prompt on it.
-      const preview = await resolveTarget();
+      const preview = await resolveTarget(false);
       if (!preview) return;
 
       const reference =
@@ -1262,7 +1260,7 @@ export function runAutomationNow(
       // past the open-state check entirely. Re-read; the SECOND read is what runs.
       // Both arms read through to their source, so the only remaining window is the
       // milliseconds between here and the claim inside run().
-      const current = await resolveTarget();
+      const current = await resolveTarget(true);
       if (!current) return;
 
       const { matched, attempted, outcomes } = await run(
