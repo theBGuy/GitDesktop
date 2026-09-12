@@ -323,8 +323,6 @@ export function ProjectFieldValues({
         return (
           <span className="inline-flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
             {presentError(values.error).summary}
-            {/* Named in full: on the issue rail this block carries no field label
-                for a reader to fall back on. */}
             <button
               type="button"
               aria-label={`Retry loading ${FIELD_LABEL.toLowerCase()}`}

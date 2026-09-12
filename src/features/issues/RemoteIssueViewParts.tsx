@@ -281,6 +281,7 @@ export function IssueSidebar({
     },
     {
       key: "project-fields",
+      heading: "Project fields",
       when: canWrite,
       render: () => (
         <ProjectFieldValues
