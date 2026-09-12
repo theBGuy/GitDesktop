@@ -270,14 +270,18 @@
 }
 
 /* The diff line-selection highlight (drag-to-stage individual lines). We paint
-   the `gd-line-selected` class on selected rows ourselves (StagingDiffView), so
-   fill those cells with a clear accent. The inset-shadow trick tints over the
-   cell's own add/del background. */
-.diff-tailwindcss-wrapper tr.gd-line-selected td {
+   the `gd-line-selected` class ourselves (StagingDiffView), so fill those cells
+   with a clear accent. The inset-shadow trick tints over the cell's own add/del
+   background. Unified paints whole rows; split paints the number + content cells
+   of the selected SIDE, so the tint says which half of a change is selected. */
+.diff-tailwindcss-wrapper tr.gd-line-selected td,
+.diff-tailwindcss-wrapper td.gd-line-selected {
   box-shadow: inset 0 0 0 9999px
     color-mix(in oklch, var(--ring) 24%, transparent) !important;
 }
-.diff-tailwindcss-wrapper tr.gd-line-selected td:first-child {
+.diff-tailwindcss-wrapper tr.gd-line-selected td:first-child,
+.diff-tailwindcss-wrapper td.diff-line-old-num.gd-line-selected,
+.diff-tailwindcss-wrapper td.diff-line-new-num.gd-line-selected {
   box-shadow:
     inset 3px 0 0 0 var(--ring),
     inset 0 0 0 9999px color-mix(in oklch, var(--ring) 24%, transparent) !important;

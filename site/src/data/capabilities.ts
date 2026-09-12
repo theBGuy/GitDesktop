@@ -43,7 +43,7 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
-      "Line, hunk & file staging — drag the line numbers or use a keybind; in the unified view one drag picks up added and removed lines together",
+      "Line, hunk & file staging — drag the line numbers or use a keybind; one drag picks up added and removed lines together in unified or split view, with Shift to take one side",
   },
   {
     group: "Diffs & staging",
