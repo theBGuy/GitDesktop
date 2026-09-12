@@ -10,6 +10,8 @@ name: site
 # the root pnpm-lock.yaml is a trigger path here. The content collection makes this
 # gate load-bearing: a zod schema violation, a duplicate route, a missing hero
 # image, or an uncoercible date in a blog post are all build-time failures.
+# The job also carries assertions about the BUILT output, for regressions a
+# successful build cannot express on its own — see the whitespace step below.
 
 on:
   pull_request:
@@ -55,21 +57,34 @@ jobs:
       - name: Build the marketing site
         run: pnpm --filter site build
 
-      # compressHTML: true in site/astro.config.mjs is the only thing holding back
-      # Astro 7's "jsx" default, which strips whitespace BETWEEN inline elements
-      # and ran prose together on all 39 pages when measured. A build exits 0
-      # either way, so assert the whitespace instead: adjacent anchors separated
-      # by whitespace, which the header nav puts on every page. Deliberately
-      # structural, not a copy match — body prose gets reworded, nav adjacency
-      # does not. Verified to go red against a compressHTML:"jsx" build.
+      # Astro 7's compressHTML default ("jsx") strips whitespace BETWEEN inline
+      # elements; site/astro.config.mjs pins it to true, and a regression there
+      # still exits 0 — so assert the whitespace itself. The FOOTER link row
+      # emits the adjacent-anchor gap on every page (the header nav's mapped
+      # spokes emit none), which is why this is structural rather than a copy
+      # match. Verified to go red against a compressHTML:"jsx" build. PR gate
+      # only: Cloudflare Pages builds production from its own copy.
       - name: Assert inline whitespace survived HTML compression
         run: |
           node -e '
             const fs = require("fs");
             const files = ["site/dist/index.html", "site/dist/about/index.html"];
+            const gone = files.filter((f) => !fs.existsSync(f));
+            if (gone.length) {
+              console.log(
+                "::error file=.github/workflows/site.yml::Guard target missing" +
+                  " from the build: " + gone.join(", ") +
+                  " -- update this step page list.",
+              );
+              process.exit(1);
+            }
             const bad = files.filter((f) => !/<\/a>\s+<a/.test(fs.readFileSync(f, "utf8")));
             if (bad.length) {
-              console.error("::error file=site/astro.config.mjs::Whitespace between inline elements was stripped from " + bad.join(", ") + " -- compressHTML must stay true.");
+              console.log(
+                "::error file=site/astro.config.mjs::Whitespace between inline" +
+                  " elements was stripped from " + bad.join(", ") +
+                  " -- check compressHTML, then the footer link markup.",
+              );
               process.exit(1);
             }
             console.log("inline whitespace intact in " + files.length + " page(s)");
