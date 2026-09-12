@@ -705,10 +705,13 @@ function HistoryRow({
   const count = asCount(entry.count);
   const stamp = stampMs(entry.ts) !== null ? entry.ts : null;
   // Only a pull request has somewhere to go; a commit or marker row would give
-  // Enter nothing to do, and a button that no-ops is worse than plain text.
+  // Enter nothing to do, and a button that no-ops is worse than plain text. A
+  // REMOTE ref must be numeric to be addressable — a hand-edited junk ref would
+  // navigate to a NaN PR number — while local ids are opaque strings.
   const navigable =
-    (entry.targetKind === "remote" || entry.targetKind === "local") &&
-    asText(entry.ref) !== "";
+    entry.targetKind === "local"
+      ? asText(entry.ref) !== ""
+      : entry.targetKind === "remote" && /^\d+$/.test(asText(entry.ref));
   // The catch-up poller latches per (PR, head), so an anomalous outcome there
   // is the end of the line until a push or a relaunch.
   const latched =

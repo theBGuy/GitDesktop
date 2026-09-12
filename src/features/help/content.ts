@@ -2608,10 +2608,10 @@ configuration, one line per moment, then lists every recorded decision, newest f
   records *Automations paused*, and turning it off records *Automations resumed*, so a
   quiet stretch in the log carries its own reason.
 
-The command palette can also run your enabled automations against the pull request you
-currently have open, without waiting for the next trigger. It needs a pull request in view
-to have a target, and it confirms before starting, since the result posts as a comment on
-that pull request.`,
+The command palette ({{kbd:command-palette}}) can also run your enabled automations
+against the pull request you currently have open, without waiting for the next trigger.
+It needs a pull request in view to have a target, and it confirms before starting, since
+the result posts as a comment on that pull request.`,
   },
   {
     id: "hooks",

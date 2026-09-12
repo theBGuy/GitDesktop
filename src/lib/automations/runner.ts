@@ -1131,6 +1131,16 @@ export function runAutomationNow(
   repoPath: string,
   target: { kind: "remote"; number: number } | { kind: "local"; id: string },
 ): void {
+  // A remote number can arrive derived from an untrusted store ref (a history
+  // row's hand-editable value) — refuse junk HERE, where every other refusal
+  // toast on this path lives, so any future entry point is covered for free.
+  if (
+    target.kind === "remote" &&
+    (!Number.isInteger(target.number) || target.number <= 0)
+  ) {
+    toast.error("This pull request has no usable number.");
+    return;
+  }
   const ref = target.kind === "remote" ? String(target.number) : target.id;
   const latchKey = `${repoPath}|${target.kind}|${ref}`;
   if (runNowStarting.has(latchKey)) {
