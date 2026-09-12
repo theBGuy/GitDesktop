@@ -57,38 +57,15 @@ jobs:
       - name: Build the marketing site
         run: pnpm --filter site build
 
-      # Astro 7's compressHTML default ("jsx") strips whitespace BETWEEN inline
-      # elements; site/astro.config.mjs pins it to true, and a regression there
-      # still exits 0 — so assert the whitespace itself. The FOOTER link row
-      # emits the adjacent-anchor gap on every page (the header nav's mapped
-      # spokes emit none), which is why this is structural rather than a copy
-      # match. Verified to go red against a compressHTML:"jsx" build. PR gate
-      # only: Cloudflare Pages builds production from its own copy.
+      # The predicate lives in scripts/ with the other guards so its fixtures run
+      # in quality.yml — a scanner's worst failure is a silent fail-open. It is
+      # invoked here rather than from the `checks` alias because it reads a built
+      # site/dist. PR gate only: Cloudflare Pages builds production from its own
+      # copy, so a direct push to master ships unguarded.
       - name: Assert inline whitespace survived HTML compression
         run: |
-          node -e '
-            const fs = require("fs");
-            const files = ["site/dist/index.html", "site/dist/about/index.html"];
-            const gone = files.filter((f) => !fs.existsSync(f));
-            if (gone.length) {
-              console.log(
-                "::error file=.github/workflows/site.yml::Guard target missing" +
-                  " from the build: " + gone.join(", ") +
-                  " -- update this step page list.",
-              );
-              process.exit(1);
-            }
-            const bad = files.filter((f) => !/<\/a>\s+<a/.test(fs.readFileSync(f, "utf8")));
-            if (bad.length) {
-              console.log(
-                "::error file=site/astro.config.mjs::Whitespace between inline" +
-                  " elements was stripped from " + bad.join(", ") +
-                  " -- check compressHTML, then the footer link markup.",
-              );
-              process.exit(1);
-            }
-            console.log("inline whitespace intact in " + files.length + " page(s)");
-          '
+          node scripts/check-built-whitespace.mjs \
+            site/dist/index.html site/dist/about/index.html
 
       # A second build with unpublished posts (drafts + future-dated) visible,
       # so a scheduled post's own route renders BEFORE its publication day —

@@ -278,6 +278,10 @@ const toggleScript = `
           <img src={`${base}app-icon.svg`} alt="" width="18" height="18" />
           © 2026 theBGuy · Apache-2.0
         </p>
+        {/* One anchor per line, not a .map() like the header nav above: the
+            whitespace between these anchors is what
+            scripts/check-built-whitespace.mjs asserts survived HTML
+            compression. A .map() emits no gap and turns that gate red. */}
         <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
           <a href={`${base}integrations/`} class="transition-colors hover:text-ink">Integrations</a>
           <a data-view="ai" href={`${base}ai/`} class="transition-colors hover:text-ink">AI</a>
