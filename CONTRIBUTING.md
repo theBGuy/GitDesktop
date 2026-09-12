@@ -121,7 +121,8 @@ in the converted trees, `setQueryData(key, undefined)`, inline clip-measured
 tooltips), the Rust refspec-argv and sync-`#[tauri::command]` invariants,
 Tauri IPC drift (every registered command needs a caller, every `invoke()`
 a registration), drift between the files that restate the git-whitelist hard
-rule, and the major.minor parity of each Tauri package's npm and crate halves.
+rule, and the major.minor parity of each Tauri package's npm and crate halves,
+each declared npm half needing a crate half to compare against.
 
 The pattern, Rust-invariant, and surface checks carry allowlists, and they
 ratchet one way (rule-mirror drift and Tauri parity carry none — there is

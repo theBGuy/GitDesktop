@@ -258,7 +258,7 @@ function main() {
       );
     }
     process.stderr.write(
-      `    supply the missing half, or drop the declaration if the dependency is genuinely gone; a half that IS present means the block shape this gate reads has changed\n`,
+      "    supply the missing half, or drop the declaration if the dependency is genuinely gone; a half that IS present means the block shape this gate reads has changed\n",
     );
     process.exitCode = 1;
     return;
