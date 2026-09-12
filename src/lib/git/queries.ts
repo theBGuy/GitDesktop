@@ -3198,9 +3198,9 @@ export function useAccountsHealth() {
  *  token scopes (a reconnect can grant new ones), and the repo-settings lists a
  *  scope hint sends users here from — secrets, variables and webhooks all fail
  *  closed on a missing scope, so their error cards must retry the call themselves,
- *  as do the three GitHub Projects reads — catalog, memberships and field values —
- *  (a granted `project` scope has to light the picker and the rail's field lines up
- *  without a restart), and the work inbox's sources probe plus its pages
+ *  as do the three GitHub Projects reads (catalog, memberships and field values): a
+ *  granted `project` scope has to light the picker and the rail's field lines up
+ *  without a restart, and the work inbox's sources probe plus its pages
  *  (a `login` mode reconnect is how a forge becomes a source in the first place).
  *  Call from a reconnect's `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {

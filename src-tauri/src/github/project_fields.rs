@@ -78,7 +78,7 @@ pub struct SelectOptionRef {
 }
 
 const FIELDS_SCOPE_HINT: &str =
-    "GitHub project fields need the read:project scope. Run:  gh auth refresh -s project";
+    "GitHub project fields need the read:project (or project) scope. Run:  gh auth refresh -s project";
 
 fn map_scope_error(e: AppError) -> AppError {
     if let AppError::Gh(ref msg) = e {

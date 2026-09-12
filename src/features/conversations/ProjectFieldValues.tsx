@@ -136,7 +136,12 @@ function fieldValueNode(value: ProjectFieldValue): ReactNode {
       );
     }
     case "number":
-      return Number.isFinite(value.number) ? value.number : null;
+      // Locale-grouped, so a number field doesn't read as raw output beside the
+      // locale-formatted dates on the same line. The fraction cap is explicit:
+      // the default rounds to 3 digits, rendering 0.0001 as 0.
+      return Number.isFinite(value.number)
+        ? value.number.toLocaleString(undefined, { maximumFractionDigits: 20 })
+        : null;
     case "date":
       return value.date === "" ? null : formatFieldDate(value.date);
     case "iteration": {
@@ -164,6 +169,8 @@ function renderableParts(entry: ItemProjectFieldValues): FieldPart[] {
   for (const value of entry.values) {
     const node = fieldValueNode(value);
     if (node === null) continue;
+    // `unknown` is the only arm without a `fieldId`, and it always renders null —
+    // the guard is here because TS can't narrow the union through that filter.
     const id = "fieldId" in value ? value.fieldId : value.fieldName;
     parts.push({ key: `${value.kind}-${id}`, name: value.fieldName, node });
   }
@@ -247,22 +254,50 @@ export function ProjectFieldValues({
   // Same key as the picker's own read, so this shares that cache rather than
   // paying a second fetch to learn whether the item is on any board at all.
   const memberships = useItemProjects(repoPath, kind, number, canRead, lens);
-  const values = useItemFieldValues(repoPath, kind, number, canRead, lens);
+  // Cached memberships are what prove a board exists — a read that has never
+  // produced data (pending, or failed) leaves this whole block silent, the picker
+  // above owning that failure's wording and its Retry. Boardless is the common
+  // case, so gating the values query here is also what keeps it from spawning a
+  // `gh` call per issue nobody has put on a board.
+  const boardsKnown = (memberships.data?.length ?? 0) > 0;
+  const values = useItemFieldValues(
+    repoPath,
+    kind,
+    number,
+    canRead && boardsKnown,
+    lens,
+  );
 
-  const settled = values.isSuccess;
-  const entries = settled ? (values.data ?? []) : [];
+  // Keyed on CACHED DATA, never on query status, matching the chips above: a
+  // failed background refetch flips the status to error while the data it already
+  // served is still good, and lines that vanish under a gh hiccup would leave the
+  // chips standing over an empty rail.
+  //
+  // Filtered by the picker's memberships, which are the truth for WHICH boards
+  // exist: an unlink empties them optimistically, and unlinking the LAST one
+  // disables this query — an invalidate neither refetches nor clears a disabled
+  // query, so its cache outlives the boards it describes. Lines render only for
+  // boards the item is still on, which also drops a partial unlink's stale line
+  // ahead of the refetch rather than after it.
+  const membershipIds = new Set(
+    (memberships.data ?? []).map((item) => item.project.id),
+  );
+  const entries = (values.data ?? []).filter((entry) =>
+    membershipIds.has(entry.project.id),
+  );
   const lines = entries
     .map((entry) => ({ entry, parts: renderableParts(entry) }))
     .filter((line) => line.parts.length > 0);
-  // One entry per board membership, so this counts BOARDS, not lines: an item on
-  // three boards where only one has set fields still needs that line named.
+  // Counts LIVE boards, not lines: an item on three boards where only one has set
+  // fields still needs that line named, and an unlinked board stops counting the
+  // moment its chip goes.
   const showTitles = entries.length > 1;
-  const loading = canRead && !settled && values.error === null;
-  // Both the skeleton and the error line are claims that a line is coming, so both
-  // wait on PROVEN boards. A pending memberships read would flash either one onto
-  // a boardless item; a failed one belongs to the picker above, which owns that
-  // error's wording and its Retry.
-  const boardsKnown = memberships.isSuccess && memberships.data.length > 0;
+  // A disabled query is not loading — it is the resolved "no boards" answer.
+  const loading =
+    canRead &&
+    boardsKnown &&
+    values.data === undefined &&
+    values.error === null;
 
   const content = (() => {
     switch (true) {
@@ -272,15 +307,19 @@ export function ProjectFieldValues({
             {lines.map(({ entry, parts }) => (
               <ProjectFieldLine
                 key={entry.itemId}
+                // A board GitHub reports with no title arrives as `""`, which as a
+                // prefix is an empty span and a leading middot.
+                showTitle={showTitles && entry.project.title !== ""}
                 title={entry.project.title}
-                showTitle={showTitles}
                 parts={parts}
               />
             ))}
           </div>
         );
-      case loading && boardsKnown:
+      case loading:
         return <Skeleton className="h-4 w-40" aria-hidden />;
+      // Still board-gated: a disabled query keeps whatever error it last cached,
+      // and an item whose boards have since gone stays silent.
       case values.error !== null && boardsKnown:
         return (
           <span className="inline-flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
