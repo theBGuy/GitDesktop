@@ -23,6 +23,7 @@ import {
   useItemProjects,
 } from "@/lib/git/queries";
 import type {
+  GhScopes,
   ProjectItemRemove,
   ProjectV2Ref,
   RemoteLens,
@@ -41,6 +42,20 @@ const DISCARDED_NOTICE =
 
 function sameIds(a: Set<string>, b: Set<string>): boolean {
   return a.size === b.size && [...a].every((id) => b.has(id));
+}
+
+/** Whether the signed-in GitHub token provably can't read Projects, which gates
+ *  every Projects read. Only a classic token has readable scopes; a
+ *  fine-grained/App token reports none, so an absent `project` there is
+ *  unknowable, not missing — those fire the reads and let the backend's own scope
+ *  hint speak if it really is absent. Shared so no Projects surface can drift into
+ *  firing reads another one withholds. */
+export function projectScopeMissing(scopes: GhScopes | undefined): boolean {
+  return (
+    scopes?.classic === true &&
+    !scopes.scopes.includes("project") &&
+    !scopes.scopes.includes("read:project")
+  );
 }
 
 /** A closed board still holds items, so its rows and chips stay — the state rides
@@ -90,13 +105,7 @@ export function ProjectsPopover({
   const host = useActiveGhHost();
   const scopes = useGhScopes(host);
   const openReconnect = useUiStore((s) => s.openReconnect);
-  // Only a classic token has readable scopes; a fine-grained/App token reports
-  // none, so an absent `project` there is unknowable, not missing — fire the
-  // reads and let the backend's own scope hint speak if it really is absent.
-  const classicMissing =
-    scopes.data?.classic === true &&
-    !scopes.data.scopes.includes("project") &&
-    !scopes.data.scopes.includes("read:project");
+  const classicMissing = projectScopeMissing(scopes.data);
   // Read-only classic token: the reads work, every write 403s. Hold the rows
   // rather than letting each toggle round-trip to a rollback + toast.
   const readOnlyScope =

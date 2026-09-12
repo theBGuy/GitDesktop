@@ -325,6 +325,11 @@ export const capabilities: Capability[] = [
   {
     group: "Issues & discussions",
     label:
+      "Project field values — Status, Priority, Iteration & dates on issues and PRs",
+  },
+  {
+    group: "Issues & discussions",
+    label:
       "Issue activity timeline — labels, assignees, milestones, renames, linked PRs, mentions & state changes, with actor avatars",
   },
   {

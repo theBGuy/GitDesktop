@@ -12,6 +12,7 @@ pub mod pages;
 pub mod pr;
 pub mod pr_search;
 pub mod project;
+pub mod project_fields;
 pub mod release;
 pub mod repo_settings;
 pub mod rulesets;

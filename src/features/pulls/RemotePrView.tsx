@@ -61,6 +61,7 @@ import {
   useEditTitleBody,
 } from "@/features/conversations/EditTitleBodyDialog";
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
+import { ProjectFieldValues } from "@/features/conversations/ProjectFieldValues";
 import { ProjectsPopover } from "@/features/conversations/ProjectsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
@@ -2468,6 +2469,19 @@ export function RemotePrView({
         contentId={pr.id}
         lens={lens}
         disabledReason={pickerReason}
+      />,
+    );
+    // Read-only field values under the picker, on the same gate: they come from
+    // the same boards, so wherever the chips are, the fields belong.
+    metaCells.push(
+      <ProjectFieldValues
+        key={`project-fields-${entityKey}`}
+        cells
+        repoPath={repoPath}
+        enabled
+        kind="pr"
+        number={number}
+        lens={lens}
       />,
     );
   }

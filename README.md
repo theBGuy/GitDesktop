@@ -306,7 +306,8 @@ in one click.
   the browser. Labels and assignees on GitHub & GitLab (set them when you
   open a PR/MR or any time after), request reviewers across GitHub, GitLab &
   Bitbucket, see, link, and unlink an open PR's **GitHub Projects** in its
-  header, flip a PR between **draft and ready for review** either way on all
+  header alongside each board's **Status**, **Priority**, and **Iteration**
+  values, flip a PR between **draft and ready for review** either way on all
   three, and **create new PRs as drafts by default** (Settings → General).
 - **Linked issues**: link related issues when you open *or* edit a PR, as
   chips **auto-detected** from your branch name and commits (a `fix/123-…`
@@ -515,7 +516,9 @@ remote needed; publishable to GitHub, GitLab, or linked Jira in one click).
 Browse, create, and edit (drafting with AI from your repo's issue
 templates), react with emoji, and manage the shared metadata: labels,
 assignees, and milestones. On GitHub, add **projects** (GitHub Projects,
-repo and owner level), issue type, sub-issues, dependencies (blocked-by /
+repo and owner level) and read each board's **Status**, **Priority**,
+**Iteration**, dates and custom fields, a line per board under the chips.
+Also on GitHub: issue type, sub-issues, dependencies (blocked-by /
 blocking), and development links (linked and closing PRs and branches, plus
 create-a-branch); on GitLab, related issues. Close or reopen with a comment
 you've drafted posted alongside; duplicate, transfer (called *move* on

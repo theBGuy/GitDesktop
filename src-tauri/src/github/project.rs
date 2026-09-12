@@ -65,9 +65,11 @@ fn map_scope_error(e: AppError) -> AppError {
     e
 }
 
-/// A `ProjectV2` node, skipped entirely when it carries no id (the one field the
-/// mutations can't work without); the rest default rather than fail the read.
-fn project_ref(node: &Value) -> Option<ProjectV2Ref> {
+/// A `ProjectV2` node, skipped entirely when it carries no id (the one field
+/// every caller keys on: mutations address a board by it, and the rail matches
+/// its field lines to the memberships by it); the rest default rather than fail
+/// the read.
+pub(super) fn project_ref(node: &Value) -> Option<ProjectV2Ref> {
     Some(ProjectV2Ref {
         id: node.get("id")?.as_str()?.to_string(),
         title: node
@@ -84,7 +86,7 @@ fn project_ref(node: &Value) -> Option<ProjectV2Ref> {
     })
 }
 
-const PROJECT_FIELDS: &str = "id title number closed viewerCanUpdate";
+pub(super) const PROJECT_FIELDS: &str = "id title number closed viewerCanUpdate";
 
 /// `repositoryOwner` resolves a User or an Organization and both implement
 /// `ProjectV2Owner`, so one inline fragment covers owner-level projects for either.
