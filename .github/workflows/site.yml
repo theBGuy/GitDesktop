@@ -55,6 +55,26 @@ jobs:
       - name: Build the marketing site
         run: pnpm --filter site build
 
+      # compressHTML: true in site/astro.config.mjs is the only thing holding back
+      # Astro 7's "jsx" default, which strips whitespace BETWEEN inline elements
+      # and ran prose together on all 39 pages when measured. A build exits 0
+      # either way, so assert the whitespace instead: adjacent anchors separated
+      # by whitespace, which the header nav puts on every page. Deliberately
+      # structural, not a copy match — body prose gets reworded, nav adjacency
+      # does not. Verified to go red against a compressHTML:"jsx" build.
+      - name: Assert inline whitespace survived HTML compression
+        run: |
+          node -e '
+            const fs = require("fs");
+            const files = ["site/dist/index.html", "site/dist/about/index.html"];
+            const bad = files.filter((f) => !/<\/a>\s+<a/.test(fs.readFileSync(f, "utf8")));
+            if (bad.length) {
+              console.error("::error file=site/astro.config.mjs::Whitespace between inline elements was stripped from " + bad.join(", ") + " -- compressHTML must stay true.");
+              process.exit(1);
+            }
+            console.log("inline whitespace intact in " + files.length + " page(s)");
+          '
+
       # A second build with unpublished posts (drafts + future-dated) visible,
       # so a scheduled post's own route renders BEFORE its publication day —
       # the cron publish is unattended, and this is the only pre-merge render

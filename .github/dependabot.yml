@@ -24,6 +24,12 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # The npm updater converges on ONE version per dependency name across the
+    # whole pnpm workspace and rewrites every manifest to it. That is harmless
+    # only while root and site/ agree on a major: site's vite must track the one
+    # astro depends on directly. If the majors ever diverge again, restore a
+    # name-only `ignore` for vite (never `versions: ["<N"]` — that inverts the
+    # bug into writing the wrong major into site/) and bump both by hand.
 
   # Rust backend (Cargo).
   - package-ecosystem: "cargo"

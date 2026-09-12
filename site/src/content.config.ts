@@ -1,7 +1,8 @@
 import { defineCollection } from "astro:content";
 import { glob } from "astro/loaders";
-// NOT `import { z } from "astro:content"` — that re-export is gone. Verified
-// against the installed astro@7.3.2, whose package exports map "./zod".
+// `astro:content` still re-exports `z`, but astro 7.3.2 marks it @deprecated and
+// slates removal for Astro 8 (astro/types/content.d.ts) — importing from
+// astro/zod makes that bump a no-op here.
 import { z } from "astro/zod";
 
 const PILLARS = [
