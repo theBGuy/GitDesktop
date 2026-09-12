@@ -226,8 +226,6 @@ const LATCHING_CODES = new Set<string>([
   "claim-held",
 ]);
 
-const LIFECYCLES = LIFECYCLE_EVENTS;
-
 /** Every field below is read back from a JSON file a user can hand-edit, so a
  *  non-string reaches JSX as an object React refuses to render. */
 function asText(value: unknown): string {
@@ -452,7 +450,7 @@ function AutomationHistoryBody({
   );
 
   const config = automations.data;
-  const lifecycleRows = LIFECYCLES.map((lifecycle) => ({
+  const lifecycleRows = LIFECYCLE_EVENTS.map((lifecycle) => ({
     lifecycle,
     actions: config
       ? effectiveActions(

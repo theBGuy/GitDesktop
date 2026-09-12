@@ -480,6 +480,13 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
       // selection gating this render may have moved by the time this runs.
       const pr = useUiStore.getState().selectedPr;
       if (!pr) return;
+      // A remote selection's id can arrive from untrusted stores (a history
+      // row's hand-editable ref) — refuse junk here rather than sending NaN
+      // over IPC and surfacing an opaque invoke error.
+      if (pr.kind === "remote" && !/^\d+$/.test(pr.id)) {
+        toast.error("This pull request has no usable number.");
+        return;
+      }
       runAutomationNow(
         repoPath,
         pr.kind === "remote"

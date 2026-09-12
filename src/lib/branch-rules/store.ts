@@ -30,9 +30,11 @@ function healMergeMethods(value: unknown): MergeMethod[] {
 
 /**
  * Coerces a loosely-typed (possibly older or hand-edited) config into a full
- * BranchRulesConfig, filling in per-field defaults so partial data never
- * suddenly restricts — or fails to restrict. Shared by the personal store and
- * the repo-committed `.gitdesktop/branch-rules.json` file.
+ * BranchRulesConfig, filling in per-field defaults so partial data never fails
+ * to restrict. The one field that can GAIN a restriction from malformed input
+ * is `allowedMergeMethods`, which fails closed — see {@link healMergeMethods}.
+ * Shared by the personal store and the repo-committed
+ * `.gitdesktop/branch-rules.json` file.
  */
 export function normalizeBranchRules(saved: unknown): BranchRulesConfig {
   const obj = (saved ?? {}) as {

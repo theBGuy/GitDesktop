@@ -71,12 +71,6 @@ export interface AutomationOutcome {
   detail?: string;
 }
 
-/**
- * One recorded automation decision — the evidence a user whose review didn't fire
- * can read. `ref` is the PR number (as a string) or local PR id; for commit-target
- * rows it is the BRANCH name (the branch is the steady axis of a commit scoping
- * decision, and the specific commit rides `headSha`); "" for the global markers.
- */
 /** What a row describes. The value list and the type derive from one another, so the
  *  guard's membership check below can't drift from the union it validates. */
 export const AUTOMATION_TARGET_KINDS = [
@@ -88,6 +82,12 @@ export const AUTOMATION_TARGET_KINDS = [
 
 export type AutomationTargetKind = (typeof AUTOMATION_TARGET_KINDS)[number];
 
+/**
+ * One recorded automation decision — the evidence a user whose review didn't fire
+ * can read. `ref` is the PR number (as a string) or local PR id; for commit-target
+ * rows it is the BRANCH name (the branch is the steady axis of a commit scoping
+ * decision, and the specific commit rides `headSha`); "" for the global markers.
+ */
 export interface AutomationHistoryEntry {
   schemaVersion: 1;
   id: string;
