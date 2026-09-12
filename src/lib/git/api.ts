@@ -93,6 +93,7 @@ import type {
   IssueRelation,
   IssueRelations,
   IssueType,
+  ItemProjectFieldValues,
   MergePreview,
   Milestone,
   MyTeams,
@@ -2493,6 +2494,22 @@ export const ghItemProjects = (
   lens: RemoteLens,
 ) =>
   invoke<ProjectItemRef[]>("gh_item_projects", {
+    repoPath,
+    kind,
+    number,
+    lens,
+  });
+
+/** One issue/PR's project field values, one entry per board it belongs to. Same
+ *  scope need as the memberships read, and the same per-board shape, so the two
+ *  line up membership-for-membership. */
+export const ghItemFieldValues = (
+  repoPath: string,
+  kind: "issue" | "pr",
+  number: number,
+  lens: RemoteLens,
+) =>
+  invoke<ItemProjectFieldValues[]>("gh_item_field_values", {
     repoPath,
     kind,
     number,

@@ -2481,6 +2481,35 @@ export function useItemProjects(
   });
 }
 
+const itemFieldValuesKey = (
+  repo: string,
+  lens: RemoteLens,
+  kind: "issue" | "pr",
+  number: number,
+) => ["repo", repo, "item-field-values", lens, kind, number] as const;
+
+/** One issue/PR's project field values, per board. Same axes, staleTime and
+ *  `retry: false` as {@link useItemProjects} — it reads the same boards through the
+ *  same token scope, so a missing `project` scope fails both the same way and no
+ *  retry fixes it. No `placeholderData` either: the rail can't show one item's
+ *  fields under another's, so a retained set would have to be suppressed on
+ *  arrival, leaving only the stale copy it pins in cache. */
+export function useItemFieldValues(
+  repo: string,
+  kind: "issue" | "pr",
+  number: number,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
+  return useQuery({
+    queryKey: itemFieldValuesKey(repo, lens, kind, number),
+    queryFn: () => api.ghItemFieldValues(repo, kind, number, lens),
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
 /** The picker's batched link/unlink, with an optimistic patch of the memberships
  *  cache. Adds land as `pending:`-prefixed placeholder item ids — the real item id
  *  only exists once GitHub creates the item, and `onSettled`'s refetch supplies
@@ -2493,6 +2522,7 @@ export function useEditItemProjects(
 ) {
   const queryClient = useQueryClient();
   const key = itemProjectsKey(repo, lens, kind, number);
+  const fieldsKey = itemFieldValuesKey(repo, lens, kind, number);
   return useMutation({
     mutationFn: (args: {
       contentId: string;
@@ -2540,8 +2570,14 @@ export function useEditItemProjects(
     // settles, which is what lets the picker's trigger stay held across the
     // refetch rather than freeing while the cache still holds `pending:` ids.
     // `invalidateQueries` resolves even when the refetch errors, so there is no
-    // stuck-trigger mode.
-    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+    // stuck-trigger mode. The field values hang off the memberships this just
+    // changed, so an unlinked board's line must go with its chip rather than
+    // outliving it for the rest of that cache's staleTime.
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: key }),
+        queryClient.invalidateQueries({ queryKey: fieldsKey }),
+      ]),
   });
 }
 
@@ -3162,8 +3198,9 @@ export function useAccountsHealth() {
  *  token scopes (a reconnect can grant new ones), and the repo-settings lists a
  *  scope hint sends users here from — secrets, variables and webhooks all fail
  *  closed on a missing scope, so their error cards must retry the call themselves,
- *  as do the two GitHub Projects reads (a granted `project` scope has to light the
- *  picker up without a restart), and the work inbox's sources probe plus its pages
+ *  as do the three GitHub Projects reads — catalog, memberships and field values —
+ *  (a granted `project` scope has to light the picker and the rail's field lines up
+ *  without a restart), and the work inbox's sources probe plus its pages
  *  (a `login` mode reconnect is how a forge becomes a source in the first place).
  *  Call from a reconnect's `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {
@@ -3183,7 +3220,8 @@ export function useInvalidateAfterReconnect() {
           q.queryKey[2] === "variables" ||
           q.queryKey[2] === "webhooks" ||
           q.queryKey[2] === "projects-available" ||
-          q.queryKey[2] === "item-projects"),
+          q.queryKey[2] === "item-projects" ||
+          q.queryKey[2] === "item-field-values"),
     });
     // A `login` here is a real source change for the work inbox — its probe gates
     // each forge's leg on a 5-minute window, so without this a session signed in

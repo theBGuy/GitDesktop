@@ -84,7 +84,7 @@ fn project_ref(node: &Value) -> Option<ProjectV2Ref> {
     })
 }
 
-const PROJECT_FIELDS: &str = "id title number closed viewerCanUpdate";
+pub(super) const PROJECT_FIELDS: &str = "id title number closed viewerCanUpdate";
 
 /// `repositoryOwner` resolves a User or an Organization and both implement
 /// `ProjectV2Owner`, so one inline fragment covers owner-level projects for either.

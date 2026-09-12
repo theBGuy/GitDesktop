@@ -1,0 +1,315 @@
+import type { ReactNode } from "react";
+import { MetaFieldLabel, MetaValueCell } from "@/components/meta-field-cells";
+import { Skeleton } from "@/components/ui/skeleton";
+import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
+import { presentError } from "@/lib/error-summary";
+import { useActiveGhHost } from "@/lib/git/host";
+import {
+  useGhScopes,
+  useItemFieldValues,
+  useItemProjects,
+} from "@/lib/git/queries";
+import type {
+  ItemProjectFieldValues,
+  ProjectFieldValue,
+  RemoteLens,
+} from "@/lib/git/types";
+import { parseableDate } from "@/lib/time";
+import { projectScopeMissing } from "./ProjectsPopover";
+
+const FIELD_LABEL = "Project fields";
+
+/** GitHub select-option color NAMES → a dot hex. Data colours in a rail that has
+ *  to stay quiet, so they sit well under the semantic state tokens' chroma; an
+ *  unmapped name takes the neutral dot, and the option's name renders beside every
+ *  one of them. */
+const OPTION_COLORS: Record<string, string> = {
+  GRAY: "#8b8b93",
+  BLUE: "#6a8fc0",
+  GREEN: "#5f9c78",
+  YELLOW: "#b09a4e",
+  ORANGE: "#bd8353",
+  RED: "#bd6c6c",
+  PINK: "#b9739a",
+  PURPLE: "#8d80ba",
+};
+
+/** GitHub's Date scalar, which carries no zone. */
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+function optionColor(color: string): string {
+  return OPTION_COLORS[color?.toUpperCase()] ?? OPTION_COLORS.GRAY;
+}
+
+/** A project date field as a LOCAL date: a bare `YYYY-MM-DD` parses as UTC
+ *  midnight, which renders a day early everywhere west of Greenwich. */
+function parseFieldDate(date: string): Date | null {
+  const iso = DATE_ONLY.test(date) ? `${date}T00:00:00` : date;
+  return parseableDate(iso) ? new Date(iso) : null;
+}
+
+/** A date field in the user's locale, falling back to the raw forge string when it
+ *  can't be read — never "Invalid Date". */
+function formatFieldDate(date: string): string {
+  const parsed = parseFieldDate(date);
+  if (parsed === null) return date;
+  return parsed.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function shortDay(date: Date, withYear: boolean): string {
+  const options: Intl.DateTimeFormatOptions = {
+    month: "short",
+    day: "numeric",
+  };
+  if (withYear) options.year = "numeric";
+  return date.toLocaleDateString(undefined, options);
+}
+
+/** An iteration's span, start through its last day. `""` when the start can't be
+ *  read or the duration isn't a usable day count — the title alone still names it.
+ *  A span crossing New Year carries the year on BOTH ends: "Dec 28 – Jan 10" reads
+ *  backwards without it. */
+function iterationRange(startDate: string, duration: number): string {
+  const start = parseFieldDate(startDate);
+  if (start === null || !Number.isFinite(duration) || duration < 1) return "";
+  const end = new Date(start);
+  end.setDate(end.getDate() + Math.round(duration) - 1);
+  const spansYears = start.getFullYear() !== end.getFullYear();
+  return `${shortDay(start, spansYears)} – ${shortDay(end, spansYears)}`;
+}
+
+/** One select option. The dot is decorative and the name carries the value, so
+ *  nothing here rests on the colour. */
+function OptionValue({ name, color }: { name: string; color: string }) {
+  return (
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1">
+      <span
+        aria-hidden
+        className="size-1.5 shrink-0 rounded-full"
+        style={{ backgroundColor: optionColor(color) }}
+      />
+      <span className="truncate" onMouseEnter={clipTitleFromText}>
+        {name}
+      </span>
+    </span>
+  );
+}
+
+/** One field's value, or `null` when there's nothing to show — an unset field, or
+ *  a kind this build has no rendering for. A name with no value beside it reads as
+ *  a broken render, so both cases drop the whole entry rather than the value. */
+function fieldValueNode(value: ProjectFieldValue): ReactNode {
+  switch (value.kind) {
+    case "singleSelect":
+      return value.name ? (
+        <OptionValue name={value.name} color={value.color} />
+      ) : null;
+    case "multiSelect": {
+      const options = value.options.filter((option) => option.name);
+      return options.length === 0 ? null : (
+        <span className="inline-flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+          {options.map((option) => (
+            <OptionValue
+              key={option.id}
+              name={option.name}
+              color={option.color}
+            />
+          ))}
+        </span>
+      );
+    }
+    case "text": {
+      const text = value.text.trim();
+      return text === "" ? null : (
+        // Capped rather than free-flowing: one long note would otherwise set the
+        // whole line's width and push every other field off it.
+        <span
+          className="inline-block max-w-40 truncate align-bottom"
+          onMouseEnter={clipTitle(text)}
+        >
+          {text}
+        </span>
+      );
+    }
+    case "number":
+      return Number.isFinite(value.number) ? value.number : null;
+    case "date":
+      return value.date === "" ? null : formatFieldDate(value.date);
+    case "iteration": {
+      const range = iterationRange(value.startDate, value.duration);
+      if (value.title === "" && range === "") return null;
+      return (
+        <>
+          {value.title}
+          {range === "" ? null : (
+            <span className="text-muted-foreground"> ({range})</span>
+          )}
+        </>
+      );
+    }
+    // `unknown`, and any kind a later backend adds: silent rather than guessed at.
+    default:
+      return null;
+  }
+}
+
+type FieldPart = { key: string; name: string; node: ReactNode };
+
+function renderableParts(entry: ItemProjectFieldValues): FieldPart[] {
+  const parts: FieldPart[] = [];
+  for (const value of entry.values) {
+    const node = fieldValueNode(value);
+    if (node === null) continue;
+    const id = "fieldId" in value ? value.fieldId : value.fieldName;
+    parts.push({ key: `${value.kind}-${id}`, name: value.fieldName, node });
+  }
+  return parts;
+}
+
+/** One board's set fields, as a single line: muted field name, then its value,
+ *  middot-separated. The project's own title prefixes the line only when the item
+ *  sits on more than one board — with one, the Projects chips above already named
+ *  it. */
+function ProjectFieldLine({
+  title,
+  showTitle,
+  parts,
+}: {
+  title: string;
+  showTitle: boolean;
+  parts: FieldPart[];
+}) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[11px]">
+      {showTitle ? (
+        <span
+          className="min-w-0 max-w-full truncate font-medium"
+          onMouseEnter={clipTitle(title)}
+        >
+          {title}
+        </span>
+      ) : null}
+      {parts.map((part, i) => (
+        <span
+          key={part.key}
+          className="inline-flex min-w-0 max-w-full items-center gap-x-1.5"
+        >
+          {/* Separates the previous field from this one; the gap already reads as
+              a break for a screen reader, so the glyph itself is decorative. */}
+          {i > 0 || showTitle ? (
+            <span aria-hidden className="text-muted-foreground/60">
+              ·
+            </span>
+          ) : null}
+          <span className="text-muted-foreground">{part.name}</span>
+          <span className="min-w-0">{part.node}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The read-only view of an item's GitHub Projects field values — one line per
+ * board, under the Projects picker on both the issue rail and the PR header grid.
+ * Nothing renders until there is something to say: no memberships, no set fields,
+ * or no GitHub, and the block is absent entirely rather than showing empty chrome.
+ * Reads only — the picker above owns the memberships, and the fields themselves
+ * aren't editable here.
+ */
+export function ProjectFieldValues({
+  repoPath,
+  enabled,
+  kind,
+  number,
+  lens,
+  cells = false,
+}: {
+  repoPath: string;
+  /** Gates the reads, matching the Projects picker's own gate — the real gate is
+   *  upstream and deliberately forgiving about a not-yet-identified provider. */
+  enabled: boolean;
+  kind: "issue" | "pr";
+  number: number;
+  /** The origin|upstream lens the parent PR/issue surface resolved. */
+  lens: RemoteLens;
+  /** Emit a label cell and a value cell as two SIBLING elements for a caller's
+   *  label/value grid. Default renders the bare block. */
+  cells?: boolean;
+}) {
+  const host = useActiveGhHost();
+  const scopes = useGhScopes(host);
+  const canRead = enabled && !projectScopeMissing(scopes.data);
+  // Same key as the picker's own read, so this shares that cache rather than
+  // paying a second fetch to learn whether the item is on any board at all.
+  const memberships = useItemProjects(repoPath, kind, number, canRead, lens);
+  const values = useItemFieldValues(repoPath, kind, number, canRead, lens);
+
+  const settled = values.isSuccess;
+  const entries = settled ? (values.data ?? []) : [];
+  const lines = entries
+    .map((entry) => ({ entry, parts: renderableParts(entry) }))
+    .filter((line) => line.parts.length > 0);
+  // One entry per board membership, so this counts BOARDS, not lines: an item on
+  // three boards where only one has set fields still needs that line named.
+  const showTitles = entries.length > 1;
+  const loading = canRead && !settled && values.error === null;
+  // Both the skeleton and the error line are claims that a line is coming, so both
+  // wait on PROVEN boards. A pending memberships read would flash either one onto
+  // a boardless item; a failed one belongs to the picker above, which owns that
+  // error's wording and its Retry.
+  const boardsKnown = memberships.isSuccess && memberships.data.length > 0;
+
+  const content = (() => {
+    switch (true) {
+      case lines.length > 0:
+        return (
+          <div className="flex w-full min-w-0 flex-col gap-0.5">
+            {lines.map(({ entry, parts }) => (
+              <ProjectFieldLine
+                key={entry.itemId}
+                title={entry.project.title}
+                showTitle={showTitles}
+                parts={parts}
+              />
+            ))}
+          </div>
+        );
+      case loading && boardsKnown:
+        return <Skeleton className="h-4 w-40" aria-hidden />;
+      case values.error !== null && boardsKnown:
+        return (
+          <span className="inline-flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
+            {presentError(values.error).summary}
+            {/* Named in full: on the issue rail this block carries no field label
+                for a reader to fall back on. */}
+            <button
+              type="button"
+              aria-label={`Retry loading ${FIELD_LABEL.toLowerCase()}`}
+              className="cursor-pointer underline hover:text-foreground"
+              onClick={() => values.refetch()}
+            >
+              Retry
+            </button>
+          </span>
+        );
+      default:
+        return null;
+    }
+  })();
+
+  if (content === null) return null;
+  if (!cells) return content;
+  return (
+    <>
+      <MetaFieldLabel>{FIELD_LABEL}</MetaFieldLabel>
+      <MetaValueCell label={FIELD_LABEL} busy={lines.length === 0 && loading}>
+        {content}
+      </MetaValueCell>
+    </>
+  );
+}

@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
+import { ProjectFieldValues } from "@/features/conversations/ProjectFieldValues";
 import { ProjectsPopover } from "@/features/conversations/ProjectsPopover";
 import { AuthorAvatar, LabelChip } from "@/features/conversations/Thread";
 import {
@@ -275,6 +276,19 @@ export function IssueSidebar({
           contentId={issue.id}
           lens={lens}
           disabledReason={pickerDisabledReason}
+        />
+      ),
+    },
+    {
+      key: "project-fields",
+      when: canWrite,
+      render: () => (
+        <ProjectFieldValues
+          repoPath={repoPath}
+          enabled
+          kind="issue"
+          number={number}
+          lens={lens}
         />
       ),
     },

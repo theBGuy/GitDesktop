@@ -2320,6 +2320,71 @@ export interface ProjectItemRemove {
   itemId: string;
 }
 
+/** One project field's value on an item, tagged by the field's kind. `isIssueField`
+ *  marks a value GitHub owns on the issue/PR itself (assignees, labels, milestone,
+ *  …) rather than a board-defined field — it rides the wire for the editor, which
+ *  can't write those here. A kind this build doesn't know arrives as `unknown`,
+ *  carrying only the name it was given. */
+export type ProjectFieldValue =
+  | {
+      kind: "singleSelect";
+      fieldId: string;
+      fieldName: string;
+      optionId: string;
+      name: string;
+      /** GitHub color NAME (GRAY/BLUE/GREEN/YELLOW/ORANGE/RED/PINK/PURPLE). */
+      color: string;
+      isIssueField: boolean;
+    }
+  | {
+      kind: "multiSelect";
+      fieldId: string;
+      fieldName: string;
+      options: { id: string; name: string; color: string }[];
+      isIssueField: boolean;
+    }
+  | {
+      kind: "text";
+      fieldId: string;
+      fieldName: string;
+      text: string;
+      isIssueField: boolean;
+    }
+  | {
+      kind: "number";
+      fieldId: string;
+      fieldName: string;
+      number: number;
+      isIssueField: boolean;
+    }
+  | {
+      kind: "date";
+      fieldId: string;
+      fieldName: string;
+      /** A bare `YYYY-MM-DD` as GitHub's Date scalar sends it — no zone. */
+      date: string;
+      isIssueField: boolean;
+    }
+  | {
+      kind: "iteration";
+      fieldId: string;
+      fieldName: string;
+      title: string;
+      startDate: string;
+      /** Length in DAYS, so the last day is `startDate + duration - 1`. */
+      duration: number;
+      isIssueField: boolean;
+    }
+  | { kind: "unknown"; fieldName: string };
+
+/** One board's field values for an item. `itemId` addresses the membership the
+ *  values hang off, which is what a write would target. */
+export interface ItemProjectFieldValues {
+  itemId: string;
+  project: ProjectV2Ref;
+  values: ProjectFieldValue[];
+}
+
 export interface Reaction {
   /** GitHub ReactionContent enum value (THUMBS_UP, HEART, ROCKET, …). */
   content: string;
