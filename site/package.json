@@ -9,13 +9,14 @@
     "preview": "astro preview"
   },
   "dependencies": {
+    "@astrojs/markdown-remark": "^7.3.1",
     "@astrojs/rss": "^4.0.19",
     "@astrojs/sitemap": "^3.7.4",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@tailwindcss/vite": "^4.3.3",
-    "astro": "^6.4.8",
+    "astro": "^7.3.2",
     "tailwindcss": "^4.3.3",
-    "vite": "^7.3.5"
+    "vite": "^8.2.1"
   },
   "devDependencies": {
     "sharp": "^0.35.4"

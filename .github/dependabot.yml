@@ -24,18 +24,6 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    # vite is INTENTIONALLY split across majors (root ^8 — @vitejs/plugin-react@6
-    # peers on vite ^8; site ^7 — astro 6 hard-caps vite below 8). Dependabot's
-    # npm updater converges on ONE version per dependency name across the whole
-    # pnpm workspace and rewrites every manifest to it, so site's legitimate
-    # vite patches kept downgrading root 8 -> 7 (PRs #59/#62). Name-only ignore
-    # on purpose — NOT `versions: ["<8"]`, which plausibly inverts the bug into
-    # writing ^8 into site/. vite is bumped MANUALLY in both manifests; security
-    # ALERTS still fire (only update PRs are suppressed).
-    # SUNSET: remove this when site/ migrates to astro 7 (vite 8 everywhere —
-    # the convergence becomes harmless).
-    ignore:
-      - dependency-name: "vite"
 
   # Rust backend (Cargo).
   - package-ecosystem: "cargo"

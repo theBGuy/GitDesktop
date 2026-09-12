@@ -78,9 +78,9 @@ const ogImageUrl = /^https?:/i.test(ogImage)
   ? ogImage
   : new URL(withBase(ogImage), site).href;
 
-// Endpoints with a file extension 404 on a trailing slash in Astro 6, and
-// Cloudflare only ADDS slashes to extension-less paths — so these two must stay
-// slash-less even though every page route carries one.
+// Endpoints carrying a file extension are emitted as real files and 404 on a
+// trailing slash, and Cloudflare only ADDS slashes to extension-less paths — so
+// these two must stay slash-less even though every page route carries one.
 const sitemapUrl = new URL(withBase("/sitemap-index.xml"), site).href;
 const feedUrl = new URL(withBase("/rss.xml"), site).href;
 

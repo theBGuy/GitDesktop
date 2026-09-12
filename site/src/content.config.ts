@@ -1,7 +1,7 @@
 import { defineCollection } from "astro:content";
 import { glob } from "astro/loaders";
 // NOT `import { z } from "astro:content"` — that re-export is gone. Verified
-// against the installed astro@6.4.7, whose package exports map "./zod".
+// against the installed astro@7.3.2, whose package exports map "./zod".
 import { z } from "astro/zod";
 
 const PILLARS = [
