@@ -67,32 +67,42 @@ export function duplicateCrateNames(cargoLockText) {
 // pnpm installs all three of these; peerDependencies is deliberately absent,
 // because an app does not install its peers by default and flagging one would
 // redden a required check over a package that was never meant to be present.
-const DECLARED_BLOCKS = ["dependencies", "devDependencies", "optionalDependencies"];
+const DECLARED_BLOCKS = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+];
 
 // An npm: alias carries the real package name in the VALUE, so the key alone
-// cannot answer what is installed: `"x": "npm:@tauri-apps/plugin-store@^2.4.4"`.
+// cannot answer what is installed: `"x": "npm:@tauri-apps/plugin-store@^2.4"`.
 const ALIASED_NAME = /^npm:(@tauri-apps\/[^@]+)/;
 
 /**
- * Declared `@tauri-apps/*` name → the package.json key it is declared under
- * (itself, unless an npm: alias renamed it). A declared package that never
- * reaches this map is a comparison the gate skips in silence, so both the key
- * and the value are read.
+ * What package.json declares, read from the key AND the value: the
+ * `@tauri-apps/*` names, plus every alias that renames one. A declared package
+ * that never reaches this result is a comparison the gate skips in silence,
+ * and the two lists stay separate because one package can be declared both
+ * directly and under an alias — collapsing them would let the pair the direct
+ * declaration forms hide the alias.
  */
 function tauriEntries(packageJsonText) {
   const pkg = JSON.parse(packageJsonText);
-  const entries = new Map();
+  const declared = new Set();
+  const aliases = [];
   for (const block of DECLARED_BLOCKS) {
     for (const [key, value] of Object.entries(pkg[block] ?? {})) {
       if (key.startsWith("@tauri-apps/")) {
-        entries.set(key, key);
+        declared.add(key);
         continue;
       }
-      const aliased = typeof value === "string" ? ALIASED_NAME.exec(value) : null;
-      if (aliased) entries.set(aliased[1], key);
+      const aliased =
+        typeof value === "string" ? ALIASED_NAME.exec(value) : null;
+      if (!aliased) continue;
+      declared.add(aliased[1]);
+      aliases.push([aliased[1], key]);
     }
   }
-  return entries;
+  return { declared: [...declared], aliases };
 }
 
 /**
@@ -102,18 +112,18 @@ function tauriEntries(packageJsonText) {
  * gate owes.
  */
 export function declaredNpmPackages(packageJsonText) {
-  return [...tauriEntries(packageJsonText).keys()];
+  return tauriEntries(packageJsonText).declared;
 }
 
 /**
- * Declared packages an npm: alias renamed, real name → alias key. The alias is
- * what the lockfile's root importer keys, so no pair can form for one — the
- * gate cannot version-verify an aliased Tauri package and says so.
+ * Declared packages an npm: alias renames, as [real name, alias key] pairs.
+ * The lockfile's root importer keys an aliased install by its alias, so no
+ * comparison can reach it — reported on its own, independent of the pairing,
+ * because a second DIRECT declaration of the same package would otherwise pair
+ * cleanly and leave the aliased copy unverified in silence.
  */
 export function declaredNpmAliases(packageJsonText) {
-  return new Map(
-    [...tauriEntries(packageJsonText)].filter(([name, key]) => name !== key),
-  );
+  return tauriEntries(packageJsonText).aliases;
 }
 
 /**
@@ -198,12 +208,13 @@ export function mismatchedPairs(crates, npm) {
  * reachable from a fixture. Everything but `mismatched` is a fail-CLOSED arm
  * against a comparison that never happened: a parse that yields nothing, one
  * that loses the core pair, a duplicated crate whose kept version is arbitrary,
- * and a package.json-declared half that produced no comparison at all.
+ * an aliased declaration no comparison can reach, and a package.json-declared
+ * half that produced no comparison at all.
  */
 export function verdict(
   crates,
   npm,
-  { duplicates = new Set(), declared = [] } = {},
+  { duplicates = new Set(), declared = [], aliases = [] } = {},
 ) {
   const pairs = pairedVersions(crates, npm);
   const paired = new Set(pairs.map((p) => p.crate));
@@ -213,6 +224,10 @@ export function verdict(
     empty: pairs.length === 0,
     missingCore: !paired.has(CORE_CRATE),
     duplicated: [...duplicates].filter((name) => paired.has(name)).sort(),
+    // Deliberately independent of `paired`: an alias is unverifiable whether or
+    // not the same package is also declared directly, and the pair that direct
+    // declaration forms is exactly what would otherwise mask it.
+    aliased: [...aliases],
     // `paired` already requires both halves, so this covers a lost lockfile
     // entry and a crate that was never declared at all. `crate !== null` is the
     // only exemption: an npm package with no crate name owes no comparison.
@@ -248,8 +263,15 @@ function main() {
     return;
   }
 
-  const { pairs, mismatched, empty, missingCore, duplicated, unpaired } =
-    verdict(crates, npm, { duplicates, declared });
+  const {
+    pairs,
+    mismatched,
+    empty,
+    missingCore,
+    duplicated,
+    aliased,
+    unpaired,
+  } = verdict(crates, npm, { duplicates, declared, aliases });
   if (empty) {
     process.stderr.write(
       "tauri-parity: FAIL — no tauri npm/crate pairs found in the lockfiles\n",
@@ -285,26 +307,36 @@ function main() {
     process.exitCode = 1;
     return;
   }
+  if (aliased.length > 0) {
+    process.stderr.write(
+      `tauri-parity: FAIL — ${aliased.length} Tauri package(s) declared under an npm: alias\n`,
+    );
+    for (const [name, key] of aliased) {
+      process.stderr.write(
+        `  ${name} is installed as \`${key}\`, the name ${PNPM_LOCK} keys it by, so no comparison can reach it\n`,
+      );
+    }
+    process.stderr.write(
+      `    declare an aliased Tauri package under its real name in ${PACKAGE_JSON}; a direct declaration alongside the alias does not cover it\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   if (unpaired.length > 0) {
     process.stderr.write(
       `tauri-parity: FAIL — ${unpaired.length} declared package(s) produced no comparison\n`,
     );
     for (const name of unpaired) {
       const crate = crateNameFor(name);
-      let missing;
-      if (aliases.has(name)) {
-        missing = `installed under the alias \`${aliases.get(name)}\`, which no version comparison can reach`;
-      } else if (crates.has(crate)) {
-        missing = `${PNPM_LOCK} carries no root-importer entry for it`;
-      } else {
-        missing = `${CARGO_LOCK} carries no \`${crate}\` block`;
-      }
+      const missing = crates.has(crate)
+        ? `${PNPM_LOCK} carries no root-importer entry for it`
+        : `${CARGO_LOCK} carries no \`${crate}\` block`;
       process.stderr.write(
         `  ${name} (${PACKAGE_JSON}) <-> ${crate} — ${missing}\n`,
       );
     }
     process.stderr.write(
-      "    supply the missing half, drop the declaration if the dependency is genuinely gone, or declare an aliased package under its real name; a half that IS present means the block shape this gate reads has changed\n",
+      "    supply the missing half, or drop the declaration if the dependency is genuinely gone; a half that IS present means the block shape this gate reads has changed\n",
     );
     process.exitCode = 1;
     return;

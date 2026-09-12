@@ -2328,6 +2328,47 @@ test("declaredNpmPackages resolves an npm: alias to the real package name", () =
   assert.deepEqual([...declaredNpmAliases(forked)], []);
 });
 
+test("a direct declaration cannot mask an alias of the same package", () => {
+  // Both forms resolve, and pnpm keys the importer by each — the direct name
+  // and the alias. The pair the direct declaration forms is exactly what would
+  // swallow the alias if the two lists were one map.
+  const pkg = JSON.stringify({
+    dependencies: {
+      "@tauri-apps/api": "^2.11.1",
+      "@tauri-apps/plugin-store": "^2.4.4",
+      "store-alias": "npm:@tauri-apps/plugin-store@2.4.4",
+    },
+  });
+  assert.deepEqual(declaredNpmPackages(pkg), [
+    "@tauri-apps/api",
+    "@tauri-apps/plugin-store",
+  ]);
+  assert.deepEqual(declaredNpmAliases(pkg), [
+    ["@tauri-apps/plugin-store", "store-alias"],
+  ]);
+  const decided = verdict(
+    new Map([
+      ["tauri", "2.11.5"],
+      ["tauri-plugin-store", "2.4.4"],
+    ]),
+    new Map([
+      ["@tauri-apps/api", "2.11.1"],
+      ["@tauri-apps/plugin-store", "2.4.4"],
+      ["store-alias", "2.4.4"],
+    ]),
+    { declared: declaredNpmPackages(pkg), aliases: declaredNpmAliases(pkg) },
+  );
+  // Every other arm is clean — the direct half pairs and matches — so `aliased`
+  // is the only thing standing between this tree and a green gate.
+  assert.deepEqual(decided.mismatched, []);
+  assert.deepEqual(decided.unpaired, []);
+  assert.equal(decided.empty, false);
+  assert.equal(decided.missingCore, false);
+  assert.deepEqual(decided.aliased, [
+    ["@tauri-apps/plugin-store", "store-alias"],
+  ]);
+});
+
 test("an aliased declaration reaches the unpaired arm", () => {
   // The end of the chain both cells feed: the name is declared, the crate is
   // there, no pair can form under the alias — so the gate reports rather than
@@ -2348,9 +2389,14 @@ test("an aliased declaration reaches the unpaired arm", () => {
       ["@tauri-apps/api", "2.11.1"],
       ["tauri-store-alias", "2.4.4"],
     ]),
-    { declared: declaredNpmPackages(pkg) },
+    { declared: declaredNpmPackages(pkg), aliases: declaredNpmAliases(pkg) },
   );
   assert.deepEqual(decided.unpaired, ["@tauri-apps/plugin-store"]);
+  // Both arms see an alias-only declaration; the CLI renders `aliased` first
+  // because it names the cause rather than the symptom.
+  assert.deepEqual(decided.aliased, [
+    ["@tauri-apps/plugin-store", "tauri-store-alias"],
+  ]);
 });
 
 test("crateNameFor inverts the pairing and stops at the npm-only package", () => {

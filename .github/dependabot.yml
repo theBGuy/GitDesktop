@@ -16,7 +16,7 @@ updates:
     open-pull-requests-limit: 10
     # Hold off on freshly-published releases (supply-chain safety). pnpm's
     # minimumReleaseAge in pnpm-workspace.yaml is the same idea for direct
-    # installs, on its own shorter delay — the two are not kept in step.
+    # installs, on its own never-longer delay, not kept in step with these.
     cooldown:
       default-days: 7
       semver-major-days: 30
