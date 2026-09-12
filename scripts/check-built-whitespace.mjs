@@ -21,13 +21,19 @@ import { fileURLToPath } from "node:url";
 // every real anchor pair had lost its whitespace.
 export const INLINE_GAP = /<\/a>\s+<a[\s>]/;
 
+// `<footer(?=\s|>)` and not `<footer`: the bare form also starts inside a custom
+// element like <footer-links>, so a gapped pair there could satisfy the gate
+// while the real footer stayed compressed.
 /** The footer element's markup, or null when the page has no footer. */
 export function footerOf(html) {
-  const m = html.match(/<footer[\s\S]*?<\/footer>/i);
+  const m = html.match(/<footer(?=\s|>)[\s\S]*?<\/footer\s*>/i);
   return m ? m[0] : null;
 }
 
-/** Whether the page's footer still separates adjacent anchors with whitespace. */
+/**
+ * Whether the page's footer still separates adjacent anchors with whitespace;
+ * false when the page has no footer (fail-closed).
+ */
 export function hasInlineGap(html) {
   const footer = footerOf(html);
   return footer === null ? false : INLINE_GAP.test(footer);
@@ -51,10 +57,12 @@ function main() {
     let html;
     try {
       html = readFileSync(page, "utf8");
-    } catch {
+    } catch (err) {
+      // The code is carried because EISDIR/EACCES are not stale-page-list bugs
+      // and the fix instruction below would send the reader the wrong way.
       annotate(
         ".github/workflows/site.yml",
-        `Guard target missing from the build: ${page} -- update the page list in this step.`,
+        `Could not read guard target ${page} (${err.code ?? err.message}) -- if it no longer exists, update the page list in this step.`,
       );
       continue;
     }

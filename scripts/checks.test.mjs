@@ -1,4 +1,4 @@
-// Negative controls for the four guard scanners. Their worst failure mode is
+// Negative controls for the guard scanners. Their worst failure mode is
 // silent fail-open — a pattern that stops matching still prints "OK" — so every
 // predicate keeps a fixture that MUST hit and a fixture that must not. The
 // scripts export their predicates and gate their CLI body on a main-module path
@@ -1991,4 +1991,19 @@ test("a block-level tag starting with 'a' does not satisfy the gate", () => {
 test("a page with no footer is not treated as passing", () => {
   assert.equal(footerOf("<main><p>no footer here</p></main>"), null);
   assert.equal(hasInlineGap("<main><p>no footer here</p></main>"), false);
+});
+
+test("a custom element whose name starts with 'footer' is not the footer", () => {
+  // `<footer` unbounded also starts inside <footer-links>, so a gapped pair
+  // there could carry the gate while the real footer stayed compressed.
+  const page = `<footer-links><a href="/a/">A</a> <a href="/b/">B</a></footer-links>${footerCompressed}`;
+  assert.equal(hasInlineGap(page), false);
+  assert.ok(footerOf(page).startsWith("<footer>"));
+});
+
+test("a footer close tag with trailing space still delimits the element", () => {
+  assert.equal(
+    hasInlineGap(footerWithGap.replace("</footer>", "</footer >")),
+    true,
+  );
 });

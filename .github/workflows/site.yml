@@ -23,6 +23,10 @@ on:
       - "pnpm-workspace.yaml"
       - "biome.json"
       - ".github/workflows/site.yml"
+      # The guard script is a trigger path for the same reason this workflow
+      # lists itself: quality.yml's fixtures cover its exported predicate, but
+      # only a run here exercises its CLI against a real build.
+      - "scripts/check-built-whitespace.mjs"
 
 permissions:
   contents: read
