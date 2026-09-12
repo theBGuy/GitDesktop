@@ -2,6 +2,7 @@ import { CopyIcon } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -11,7 +12,11 @@ import { DiffContent, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { copyText } from "@/lib/clipboard";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
-import { useCommitComments, usePrCommitDiff } from "@/lib/git/queries";
+import {
+  useCommitComments,
+  useObjectsPresent,
+  usePrCommitDiff,
+} from "@/lib/git/queries";
 import type { PrCommitOut, RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { parseableDate } from "@/lib/time";
@@ -72,6 +77,9 @@ export function PrCommitDetail({
 }: PrCommitDetailProps) {
   const diff = usePrCommitDiff(repoPath, number, commit.oid, lens);
   const comments = useCommitComments(repoPath, commit.oid, lens);
+  // Markdown preview reads the file at this commit, so it's offered only once
+  // the commit is a local object (after a Check out PR or a fetch).
+  const commitPresent = useObjectsPresent(repoPath, [commit.oid]);
 
   const sections = useMemo(
     () => splitUnifiedDiff(diff.data ?? ""),
@@ -240,11 +248,8 @@ export function PrCommitDetail({
                         : "hover:bg-muted/60",
                     )}
                     onClick={() => setSelectedPath(file.path)}
-                    title={file.path}
                   >
-                    <span className="min-w-0 flex-1 truncate font-mono">
-                      {file.path}
-                    </span>
+                    <PathText path={file.path} className="flex-1 font-mono" />
                     <DiffStat
                       added={file.added}
                       deleted={file.deleted}
@@ -263,6 +268,10 @@ export function PrCommitDetail({
                   data={fileDiff}
                   isPending={false}
                   isError={false}
+                  repoPath={repoPath}
+                  previewRev={
+                    commitPresent.data === true ? commit.oid : undefined
+                  }
                   lineAnchors={lineAnchors}
                   lineWidget={lineWidget}
                 />

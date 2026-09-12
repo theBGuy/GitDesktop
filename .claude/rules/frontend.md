@@ -17,9 +17,11 @@ paths:
 - Destructive paths confirm via the shared `useConfirm`/`ConfirmDialogHost` primitive;
   commit-level prompts share wording through `src/features/history/commit-confirms.ts`.
 - Disabled actions explain why: `DisabledReasonButton`, or `useDisabledReason` +
-  `ARIA_DISABLED_CLASS` on raw-button sites — never hide, never a bare `disabled`.
+  `ARIA_DISABLED_CLASS` on raw-button and form-wrapped-Button (`form.SubmitButton`)
+  sites — never hide, never a bare `disabled`.
 - Truncated user/repo content: `clipTitle`/`clipTitleFromText` only-when-clipped; Base UI
-  Select rows via `SelectClipText` as the row's SOLE child.
+  Select rows via `SelectClipText` as the row's SOLE child; file/directory paths
+  middle-truncate via `PathText` (`src/components/path-text.tsx`), never hand-rolled.
 - Semantic state tokens (`--success`, `--warning`, `--info`, `--merged`, `--destructive`)
   — no hardcoded green/amber/red classes; never meaning by color alone.
 - Per-variant copy/labels/glyphs are `Record` lookups, never ternary chains.

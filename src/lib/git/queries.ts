@@ -48,6 +48,7 @@ import type {
   IssueReactions,
   IssueRelation,
   IssueType,
+  MyWorkSources,
   PrDetails,
   PrInfo,
   PrMergeabilityState,
@@ -57,6 +58,7 @@ import type {
   PrThreadOut,
   Reaction,
   RemoteLens,
+  RemoteListFilter,
   RepoOp,
   RepoRole,
   RepoSettingsInput,
@@ -68,6 +70,7 @@ import type {
   UnignoreRule,
   WebhookInput,
 } from "./types";
+import { remoteListFilterKey } from "./types";
 import {
   addUserWorktree,
   listUserWorktrees,
@@ -86,6 +89,9 @@ export function useRepoIdentity(repo: string) {
     queryFn: () => repoIdentity(repo),
     enabled: repo !== "",
     staleTime: Number.POSITIVE_INFINITY,
+    // Local git read: the default online mode PARKS it while the OS reports no
+    // connection, and everything keyed on the identity (per-repo prefs) wedges.
+    networkMode: "always",
   });
 }
 
@@ -154,6 +160,10 @@ export const repoKeys = {
     ["repo", repo, "compare", base, compare, "files"] as const,
   branchFileDiff: (repo: string, base: string, compare: string, file: string) =>
     ["repo", repo, "compare", base, compare, "diff", file] as const,
+  mergeBase: (repo: string, base: string, compare: string) =>
+    ["repo", repo, "compare", base, compare, "merge-base"] as const,
+  objectsPresent: (repo: string, oidsKey: string) =>
+    ["repo", repo, "objects-present", oidsKey] as const,
 };
 
 /**
@@ -962,6 +972,39 @@ export function useBranchFileDiff(
   });
 }
 
+/** The fork point the three-dot compare diffs against — the old side whole-file
+ *  reads must use. Same enabled gate and placeholder policy as
+ *  {@link useBranchDiffFiles}, so callers can pair the two on one
+ *  `isPlaceholderData` check. */
+export function useMergeBase(
+  repo: string,
+  base: string | null,
+  compare: string | null,
+) {
+  return useQuery({
+    queryKey: repoKeys.mergeBase(repo, base ?? "", compare ?? ""),
+    queryFn: () => api.gitMergeBase(repo, base ?? "", compare ?? ""),
+    enabled: base !== null && compare !== null && base !== compare,
+    placeholderData: keepPreviousDataForRepo(repo),
+  });
+}
+
+/** Whether every SHA is a local commit object. Deliberately no
+ *  `keepPreviousData`: a verdict belongs to the exact set it was measured on, and
+ *  one PR's "present" must never stand in for the next one's. The key sits under
+ *  the repo subtree so checkout/fetch's whole-repo invalidation re-measures it,
+ *  and `refetchOnMount: "always"` covers any narrower writer — the probe is a
+ *  millisecond-class `git rev-parse`. */
+export function useObjectsPresent(repo: string | null, oids: string[]) {
+  const joined = oids.join(",");
+  return useQuery({
+    queryKey: repoKeys.objectsPresent(repo ?? "", joined),
+    queryFn: () => api.gitObjectsPresent(repo ?? "", oids),
+    enabled: repo !== null && oids.length > 0,
+    refetchOnMount: "always",
+  });
+}
+
 export function useRemotes(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "remotes"] as const,
@@ -1031,16 +1074,32 @@ export function usePrList(
   state: api.PrStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "pr-list", lens, state, limit ?? null] as const,
-    queryFn: () => api.forgePrList(repo, state, limit, lens),
+    // The filter key is APPENDED (index 6) so the existing axis indices — and the
+    // positional axes list below — don't shift.
+    queryKey: [
+      "repo",
+      repo,
+      "pr-list",
+      lens,
+      state,
+      limit ?? null,
+      remoteListFilterKey(filter),
+    ] as const,
+    queryFn: () => api.forgePrList(repo, state, limit, lens, filter),
     enabled,
     staleTime: 30_000,
-    // State and limit stay free so a tab switch or "Load more" keeps the current rows
-    // instead of flashing skeletons, but lens must match: a fork numbers PRs
-    // independently of its parent, so another lens's rows misdescribe the list and a
-    // click on one navigates by number to a different PR.
+    // invalidArgument marks a refusal that is deterministic for this scope — the filter
+    // caps, the magic values, and GitLab's walk horizon — so a retry only re-spends the
+    // walk (up to 30 `glab` calls) to reach the same answer.
+    retry: (failureCount, err) =>
+      !(isAppError(err) && err.kind === "invalidArgument") && failureCount < 1,
+    // State, limit and filter stay free so a tab switch, "Load more" or a filter
+    // change keeps the current rows instead of flashing skeletons, but lens must
+    // match: a fork numbers PRs independently of its parent, so another lens's rows
+    // misdescribe the list and a click on one navigates by number to a different PR.
     placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
@@ -1107,8 +1166,15 @@ export function usePrListMergeability(
   limit: number | undefined,
   prs: PrInfo[] | undefined,
   lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
 ) {
   return useQuery({
+    // The filter key rides BEHIND the numbers digest: the digest pins which rows the
+    // map describes, the filter key pins which server query produced it — the backend
+    // re-runs the page from these args rather than taking the rows. Unlike the review
+    // state's, this filter axis stays FREE in the placeholder comparator below: a PR's
+    // mergeability is a property of the PR, identical whichever query surfaced it, and
+    // the numbers digest already refuses a map built for different rows.
     queryKey: [
       "repo",
       repo,
@@ -1117,9 +1183,16 @@ export function usePrListMergeability(
       state,
       limit ?? null,
       prs?.map((p) => p.number).join(",") ?? "",
+      remoteListFilterKey(filter),
     ] as const,
     queryFn: async () => {
-      const rows = await api.forgePrListMergeability(repo, state, limit, lens);
+      const rows = await api.forgePrListMergeability(
+        repo,
+        state,
+        limit,
+        lens,
+        filter,
+      );
       return new Map<number, PrMergeabilityState>(
         Object.entries(rows).map(([number, mergeState]) => [
           Number(number),
@@ -1139,6 +1212,69 @@ export function usePrListMergeability(
       [3, lens],
       [4, state],
     ]),
+  });
+}
+
+/**
+ * The viewer's review state for a PR-list page, keyed by number — what the
+ * review-state grouping sorts rows by. A number absent from `entries` is NOT
+ * reviewed, so callers derive that bucket by subtraction against the visible rows.
+ *
+ * CALLER CONTRACT: `enabled = onPullsTab && ghReady && groupingOn &&
+ * implemented.reviewGrouping && state === "open" && !list.isPlaceholderData` — the
+ * grouping is open-PRs-only; idling this hook while the list serves placeholder rows
+ * keeps an intermediate fetch from caching under the incoming key; and the tab gate
+ * is load-bearing: a `<TabPanel>`-hidden panel still fetches, and this is a 3-page
+ * walk that a repo invalidation would otherwise re-run off-screen.
+ *
+ * CO-INVALIDATION CONTRACT for mutation authors: any mutation that refreshes the PR
+ * list NARROWLY (`["repo", repo, "pr-list", lens]` rather than the whole `["repo",
+ * repo]` subtree) must invalidate `["repo", repo, "pr-review-state", lens]` alongside
+ * it — `updatedAt` here is what sorts a PR into "Updated since my review", and
+ * staleTime alone schedules no refetch.
+ */
+export function usePrReviewState(
+  repo: string,
+  enabled: boolean,
+  state: api.PrStateFilter,
+  limit: number | undefined,
+  lens: RemoteLens,
+  filter: RemoteListFilter | null,
+) {
+  const filterKey = remoteListFilterKey(filter);
+  return useQuery({
+    queryKey: [
+      "repo",
+      repo,
+      "pr-review-state",
+      lens,
+      state,
+      limit ?? null,
+      filterKey,
+    ] as const,
+    queryFn: () => api.forgePrReviewState(repo, state, limit, lens, filter),
+    enabled,
+    staleTime: 30_000,
+    // No placeholderData, unlike the list: lens, state and FILTER are identity axes of
+    // this map, and a map retained across a "Load more" is no better — its walk may not
+    // reach the larger page's rows, where a number missing from `entries` reads as "not
+    // reviewed" and `truncated` was decided against the old page depth. Callers refuse
+    // placeholder maps regardless, per the standing gate rule.
+  });
+}
+
+/** The teams the viewer belongs to, for the team-review filter's picker. Membership
+ *  changes rarely, so it caches for five minutes and doesn't retry — a token without
+ *  the team scope answers `missingScope` rather than failing. `enabled` must carry
+ *  the active-tab gate (a `<TabPanel>`-hidden panel still fetches, and this is a
+ *  paginated `user/teams` walk); `useRemoteListFilter`'s `tabActive` opt does. */
+export function useMyTeams(repo: string, lens: RemoteLens, enabled: boolean) {
+  return useQuery({
+    queryKey: ["repo", repo, "my-teams", lens] as const,
+    queryFn: () => api.forgeMyTeams(repo, lens),
+    enabled,
+    staleTime: 300_000,
+    retry: false,
   });
 }
 
@@ -1863,19 +1999,35 @@ export function useIssueList(
   state: api.IssueStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "issue-list", lens, state, limit ?? null] as const,
-    queryFn: () => api.forgeIssueList(repo, state, limit, lens),
+    // The filter key is APPENDED (index 6) so the existing axis indices — and the
+    // positional axes list below — don't shift.
+    queryKey: [
+      "repo",
+      repo,
+      "issue-list",
+      lens,
+      state,
+      limit ?? null,
+      remoteListFilterKey(filter),
+    ] as const,
+    queryFn: () => api.forgeIssueList(repo, state, limit, lens, filter),
     enabled,
     staleTime: 30_000,
     // issuesDisabled is a permanent repo condition — retrying only delays the notice.
+    // invalidArgument is the same story per scope (filter caps, magic values, GitLab's
+    // walk horizon): the second walk reaches the same refusal at the same cost.
     retry: (failureCount, err) =>
-      !(isAppError(err) && err.kind === "issuesDisabled") && failureCount < 1,
-    // State and limit stay free so a tab switch or "Load more" keeps the current rows
-    // instead of flashing skeletons, but lens must match: a fork numbers issues
-    // independently of its parent, so another lens's rows misdescribe the list and a
-    // click on one navigates by number to a different issue.
+      !(
+        isAppError(err) &&
+        (err.kind === "issuesDisabled" || err.kind === "invalidArgument")
+      ) && failureCount < 1,
+    // State, limit and filter stay free so a tab switch, "Load more" or a filter
+    // change keeps the current rows instead of flashing skeletons, but lens must
+    // match: a fork numbers issues independently of its parent, so another lens's
+    // rows misdescribe the list and a click on one navigates to a different issue.
     placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }
@@ -1990,6 +2142,9 @@ function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
   lens: RemoteLens,
   mutationFn: (args: TArgs) => Promise<TData>,
   patch: (issue: IssueDetails, args: TArgs) => IssueDetails,
+  /** Keys beyond the issue's own detail subtree, for the fields a LIST filter can
+   *  key on — membership is server-evaluated, so those lists must refetch. */
+  extraKeys: QueryKey[] = [],
 ) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -2024,11 +2179,15 @@ function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
       toastError(e);
     },
     // Narrow reconciliation: only the one issue's detail subtree (not repo-wide),
-    // scoped to the lens the mutation ran under.
+    // scoped to the lens the mutation ran under, plus whatever list surface the
+    // caller says this field decides membership on.
     onSettled: (_d, _e, args) =>
-      void queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "issue", lens, args.number],
-      }),
+      void Promise.all(
+        [
+          ["repo", repo, "issue", lens, args.number] as QueryKey,
+          ...extraKeys,
+        ].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+      ),
   });
 }
 
@@ -2044,6 +2203,10 @@ export function useSetIssueAssignees(repo: string, lens: RemoteLens) {
         lens,
       ),
     (issue, args) => ({ ...issue, assignees: args.assignees }),
+    // Assignee is a filter axis of the issue list ("Assigned to me"), and the server
+    // decides membership — a detail-only reconcile leaves a filtered list showing a
+    // row the next fetch would drop. No review-state sibling on the issue side.
+    [["repo", repo, "issue-list", lens]],
   );
 }
 
@@ -3000,7 +3163,8 @@ export function useAccountsHealth() {
  *  scope hint sends users here from — secrets, variables and webhooks all fail
  *  closed on a missing scope, so their error cards must retry the call themselves,
  *  as do the two GitHub Projects reads (a granted `project` scope has to light the
- *  picker up without a restart).
+ *  picker up without a restart), and the work inbox's sources probe plus its pages
+ *  (a `login` mode reconnect is how a forge becomes a source in the first place).
  *  Call from a reconnect's `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {
   const queryClient = useQueryClient();
@@ -3021,6 +3185,12 @@ export function useInvalidateAfterReconnect() {
           q.queryKey[2] === "projects-available" ||
           q.queryKey[2] === "item-projects"),
     });
+    // A `login` here is a real source change for the work inbox — its probe gates
+    // each forge's leg on a 5-minute window, so without this a session signed in
+    // from the dialog reads as "not connected" until the window lapses. The pages
+    // follow: what a leg returns depends on the session that fetched it.
+    queryClient.invalidateQueries({ queryKey: MY_WORK_SOURCES_KEY });
+    queryClient.invalidateQueries({ queryKey: MY_WORK_PAGES_KEY });
   }, [queryClient]);
 }
 
@@ -3140,6 +3310,10 @@ const NO_FORGE_STATUS: ForgeStatus = {
     mrDraftToggle: false,
     forkActivity: false,
     forkCompare: false,
+    listFilterMine: false,
+    listFilterTeam: false,
+    listFilterAuthor: false,
+    reviewGrouping: false,
   },
 };
 
@@ -3280,18 +3454,86 @@ export function useForgeOwnedNamespaces(
   });
 }
 
+/** The inbox's sources-probe key, exported so anything that changes a forge
+ *  sign-in invalidates the probe without restating the literal. Its 5-minute
+ *  window is otherwise how long a just-connected account stays invisible. */
+export const MY_WORK_SOURCES_KEY = ["my-work-sources"] as const;
+
+/** Every inbox page, as a key prefix: one entry per provider, each carrying a
+ *  repo-paths axis after it. */
+export const MY_WORK_PAGES_KEY = ["forge-my-work"] as const;
+
+/** One provider's inbox page prefix — the sorted repo-paths axis follows it, so
+ *  this is what an invalidation targets. */
+export const myWorkPageKey = (provider: ForgeProvider) =>
+  [...MY_WORK_PAGES_KEY, provider] as const;
+
+/** The "no forge connected" answer cold-start test mode forces. */
+const NO_MY_WORK_SOURCES: MyWorkSources = {
+  github: false,
+  gitlab: false,
+  bitbucket: false,
+};
+
+// Shared definition so the hook and the app-open prefetch can't drift. Honors
+// the cold-start test mode like `useForgeStatus`: the real probe reads gh's and
+// glab's own configs, which in a cold-start run are still the developer's, so it
+// would report connected accounts the test is meant to be without.
+const myWorkSourcesOptions = () =>
+  queryOptions({
+    queryKey: MY_WORK_SOURCES_KEY,
+    queryFn: COLD_START_NO_GH
+      ? (): Promise<MyWorkSources> => Promise.resolve(NO_MY_WORK_SOURCES)
+      : () => api.forgeMyWorkSources(),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+
+/** Which providers the work inbox can fetch from, probed once when it opens so
+ *  each provider's leg is asked for only when there is a sign-in behind it. */
+export function useMyWorkSources(enabled: boolean) {
+  return useQuery({ ...myWorkSourcesOptions(), enabled });
+}
+
+/** Warms that probe at app open. Local reads, but still two CLI configs plus a
+ *  keyring lookup behind an IPC round trip, and on a cold open every leg waits on
+ *  its answer — welcome → My work is a common enough path to pay for it once, up
+ *  front. prefetchQuery honors the staleTime, so an already-warm entry costs
+ *  nothing. */
+export function usePrefetchMyWorkSources() {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    void queryClient.prefetchQuery(myWorkSourcesOptions());
+  }, [queryClient]);
+}
+
 /** The viewer's work items across every repository on a provider, for the
  *  cross-repo inbox. Resolves the whole `MyWorkPage` envelope, not a bare array,
  *  so consumers can read its `truncated` flag. The key carries no host/account
  *  axis, same as `["forge-repos", provider]` — one ambient account per provider
- *  today. */
-export function useForgeMyWork(provider: ForgeProvider, enabled: boolean) {
+ *  today. `repoPaths` scopes providers that can't search account-wide; it is
+ *  sorted into the key so caller order can't fork the cache. */
+export function useForgeMyWork(
+  provider: ForgeProvider,
+  enabled: boolean,
+  repoPaths?: string[],
+) {
+  const paths = repoPaths ? [...repoPaths].sort() : null;
   return useQuery({
-    queryKey: ["forge-my-work", provider] as const,
-    queryFn: () => api.forgeMyWork(provider),
+    queryKey: [...myWorkPageKey(provider), paths] as const,
+    queryFn: () => api.forgeMyWork(provider, paths ?? undefined),
     enabled,
     staleTime: 60_000,
     retry: false,
+    // The repo-paths axis re-keys the Bitbucket leg whenever a recent is added or
+    // removed (only `path` is in the key, and the owner probe never rewrites it),
+    // so keep the outgoing page instead of dropping its rows out of the merge
+    // until the new key lands.
+    // Pinned on the provider segment (index 1) and no further: another forge's
+    // page is a different inbox, while another path set is the same forge's.
+    // CALLER CONTRACT: gate on `!isPlaceholderData` before counting a leg as
+    // ANSWERED — placeholder rows belong to the previous key.
+    placeholderData: keepPreviousDataForRepo(provider, 1),
   });
 }
 
@@ -5009,10 +5251,19 @@ export function useSetPrReviewers(repo: string, lens: RemoteLens) {
         cur ? { ...cur, reviewers: prevReviewers } : cur,
       );
     },
+    // The list pair rides along because a mine-axis filter (assigned/review
+    // requested/teams) is evaluated SERVER-side and `updatedAt` feeds the review
+    // buckets, so a detail-only reconcile leaves both surfaces describing a PR the
+    // next fetch would sort or drop differently. Same reasoning at every mutation
+    // below that touches those fields.
     onSettled: (_d, _e, args) =>
-      queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "pr", lens, args.number],
-      }),
+      Promise.all(
+        [
+          ["repo", repo, "pr", lens, args.number],
+          ["repo", repo, "pr-list", lens],
+          ["repo", repo, "pr-review-state", lens],
+        ].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+      ),
   });
 }
 
@@ -5049,10 +5300,15 @@ export function useSetPrAssignees(repo: string, lens: RemoteLens) {
         cur ? { ...cur, assignees: prevAssignees } : cur,
       );
     },
+    // Assignees are a filter axis; see useSetPrReviewers's settle note.
     onSettled: (_d, _e, args) =>
-      queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "pr", lens, args.number],
-      }),
+      Promise.all(
+        [
+          ["repo", repo, "pr", lens, args.number],
+          ["repo", repo, "pr-list", lens],
+          ["repo", repo, "pr-review-state", lens],
+        ].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+      ),
   });
 }
 
@@ -5093,10 +5349,11 @@ export function useMergePr(repo: string, lens: RemoteLens) {
 }
 
 /** What an update-branch makes stale on the PR side: the PR subtree (details and its
- *  commits/files/checks rollup, mergeability, diff, review threads) plus the rows that
- *  carry PR state. Exported because the set has to run TWICE — once when the forge
- *  accepts the job, and again once the poll sees the head actually move, since the
- *  first pass reads a head that has not shifted yet. */
+ *  commits/files/checks rollup, mergeability, diff, review threads), the rows that
+ *  carry PR state, and the review-state map those rows group by (the new commit moves
+ *  this PR's `updatedAt`). Exported because the set has to run TWICE — once when the
+ *  forge accepts the job, and again once the poll sees the head actually move, since
+ *  the first pass reads a head that has not shifted yet. */
 export const prUpdateBranchKeys = (
   repo: string,
   number: number,
@@ -5105,6 +5362,7 @@ export const prUpdateBranchKeys = (
   [
     ["repo", repo, "pr", lens, number],
     ["repo", repo, "pr-list", lens],
+    ["repo", repo, "pr-review-state", lens],
     ["repo", repo, "prs", lens],
   ] as const;
 
@@ -6774,6 +7032,10 @@ export function useEditPrLabels(repo: string, lens: RemoteLens) {
         mr: (n) => [
           ["repo", repo, "pr", lens, n],
           ["repo", repo, "pr-list", lens],
+          // A label edit moves the PR's `updatedAt`, so the grouping map has to
+          // refresh with the rows (see usePrReviewState). Issues and discussions
+          // have no such sibling.
+          ["repo", repo, "pr-review-state", lens],
         ],
         discussion: (n) => [
           ["repo", repo, "discussion", n],

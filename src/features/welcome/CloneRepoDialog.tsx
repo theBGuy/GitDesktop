@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { PathText } from "@/components/path-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -40,6 +41,10 @@ import { useAddRecentRepo, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage, isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { nameFromUrl, parentDir } from "./clone-utils";
@@ -200,6 +205,20 @@ export function CloneRepoDialog({
   const canClone =
     values.destination.trim().length > 0 &&
     (tab === "url" ? values.url.trim().length > 0 : selected !== null);
+  const cloneDisabledReason = (() => {
+    switch (true) {
+      case canClone:
+        return undefined;
+      case !values.destination.trim():
+        return "Choose a local path to clone into";
+      case tab === "url":
+        return "Enter a repository URL to clone";
+      default:
+        return "Select a repository to clone";
+    }
+  })();
+  const { blockedReason, reasonId, wrapperTitle, describedBy } =
+    useDisabledReason({ disabled: !canClone, reason: cloneDisabledReason });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -311,13 +330,15 @@ export function CloneRepoDialog({
               </Button>
             </div>
             {values.destination.trim() && finalName && (
-              <p className="truncate text-[11px] text-muted-foreground">
-                Clones into{" "}
-                <span className="font-mono">
-                  {values.destination.trim().replace(/[\\/]$/, "")}
-                  {values.destination.includes("/") ? "/" : "\\"}
-                  {finalName}
-                </span>
+              // gap-1, not a trailing label space — flex line boxes trim those.
+              <p className="flex min-w-0 gap-1 text-[11px] text-muted-foreground">
+                <span className="shrink-0">Clones into</span>
+                <PathText
+                  path={`${values.destination.trim().replace(/[\\/]$/, "")}${
+                    values.destination.includes("/") ? "/" : "\\"
+                  }${finalName}`}
+                  className="font-mono"
+                />
               </p>
             )}
           </div>
@@ -346,24 +367,26 @@ export function CloneRepoDialog({
               Cancel
             </Button>
             <form.AppForm>
-              {/* Wrap so the disabled reason still shows on hover — a
-                  native-disabled button swallows its `title` (vendored Button's
-                  pointer-events-none). */}
               <span
-                className="inline-flex"
-                title={
-                  canClone
-                    ? undefined
-                    : !values.destination.trim()
-                      ? "Choose a local path to clone into"
-                      : tab === "url"
-                        ? "Enter a repository URL to clone"
-                        : "Select a repository to clone"
-                }
+                className={cn(
+                  "inline-flex",
+                  blockedReason && "cursor-not-allowed",
+                )}
+                title={wrapperTitle}
               >
-                <form.SubmitButton disabled={!canClone}>
+                <form.SubmitButton
+                  focusableWhenDisabled={!!blockedReason}
+                  disabled={!canClone}
+                  aria-describedby={describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
                   Clone
                 </form.SubmitButton>
+                {blockedReason ? (
+                  <span id={reasonId} className="sr-only">
+                    {blockedReason}
+                  </span>
+                ) : null}
               </span>
             </form.AppForm>
           </DialogFooter>

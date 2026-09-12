@@ -95,7 +95,9 @@ import type {
   IssueType,
   MergePreview,
   Milestone,
+  MyTeams,
   MyWorkPage,
+  MyWorkSources,
   OpLogEntry,
   OrphanedStash,
   PagesInfo,
@@ -117,11 +119,13 @@ import type {
   ReleaseInfo,
   RemoteBranch,
   RemoteLens,
+  RemoteListFilter,
   RepoDependencies,
   RepoInfo,
   RepoLabel,
   RepoOp,
   RepoOpState,
+  RepoOrigin,
   RepoOwner,
   RepoRole,
   RepoSettings,
@@ -129,6 +133,7 @@ import type {
   RepoStats,
   RepoStatus,
   RepoTraffic,
+  ReviewStatePage,
   ReviewSubmitOut,
   ReviewThreadOut,
   RewriteStep,
@@ -158,6 +163,14 @@ export const checkGitInstalled = () => invoke<GitInfo>("check_git_installed");
 
 export const validateRepo = (path: string) =>
   invoke<RepoInfo>("validate_repo", { path });
+
+/** The checkout's origin host, namespace path, web authority and detection
+ *  verdict, each `""` when unknown. Proves a checkout really is a given
+ *  repository where a recents match key cannot: that key keeps only the segment
+ *  before the repo name, and its host is a stored value that goes stale the
+ *  moment a remote is re-pointed. */
+export const repoOriginPath = (repoPath: string) =>
+  invoke<RepoOrigin>("repo_origin_path", { repoPath });
 
 export const cloneRepo = (
   url: string,
@@ -1413,6 +1426,16 @@ export const gitBranchFileDiff = (
     filePath,
   });
 
+/** The fork point of two refs. The compare surfaces diff three-dot, so their old
+ *  side must be read from this commit rather than from `base`. */
+export const gitMergeBase = (repoPath: string, base: string, compare: string) =>
+  invoke<string>("git_merge_base", { repoPath, base, compare });
+
+/** Whether every SHA is already a local commit object (no network). Gates reads
+ *  that need a remote PR's commits to exist in this checkout. */
+export const gitObjectsPresent = (repoPath: string, oids: string[]) =>
+  invoke<boolean>("git_objects_present", { repoPath, oids });
+
 /** Three-dot `base...compare` diff. `exclude` takes gitignore-style patterns the
  *  backend filters out of the text and file list (counting them in
  *  `excludedFiles`); generation callers pass the user's AI-ignore patterns here.
@@ -1519,11 +1542,21 @@ export const forgeListRepos = (provider: ForgeProvider) =>
 export const forgeOwnedNamespaces = (provider: ForgeProvider) =>
   invoke<string[]>("forge_owned_namespaces", { provider });
 
-/** The viewer's work items across every repository on a provider — the cross-repo
- *  inbox's one fetch. Provider-scoped rather than repo-scoped: each row names the
- *  repository it came from. */
-export const forgeMyWork = (provider: ForgeProvider) =>
-  invoke<MyWorkPage>("forge_my_work", { provider });
+/** The viewer's work items across every repository on a provider — one leg of the
+ *  cross-repo inbox. Provider-scoped rather than repo-scoped: each row names the
+ *  repository it came from. `repoPaths` scopes the search to specific local
+ *  checkouts for a provider whose API can't answer account-wide (Bitbucket); null
+ *  asks the provider for everything involving the viewer. */
+export const forgeMyWork = (provider: ForgeProvider, repoPaths?: string[]) =>
+  invoke<MyWorkPage>("forge_my_work", {
+    provider,
+    repoPaths: repoPaths ?? null,
+  });
+
+/** Which providers have a usable sign-in for the work inbox — its gate for which
+ *  legs to fetch at all. */
+export const forgeMyWorkSources = () =>
+  invoke<MyWorkSources>("forge_my_work_sources");
 
 // ── Explore: search / browse / fork / star / README ──────────────────────────
 //
@@ -1766,13 +1799,40 @@ export const forgePrListMergeability = (
   state: PrStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
 ) =>
   invoke<Record<number, PrMergeabilityState>>("forge_pr_list_mergeability", {
     repoPath,
     state,
     limit,
     lens,
+    filter,
   });
+
+/** The viewer's review state for a PR-list page, keyed by number — the review-state
+ *  grouping. Like {@link forgePrListMergeability} it takes no row list: the backend
+ *  re-queries the page from these same filter args. Numbers the backend couldn't
+ *  answer for are absent from `entries` — never defaulted to "not reviewed". */
+export const forgePrReviewState = (
+  repoPath: string,
+  state: PrStateFilter,
+  limit: number | undefined,
+  lens: RemoteLens,
+  filter: RemoteListFilter | null,
+) =>
+  invoke<ReviewStatePage>("forge_pr_review_state", {
+    repoPath,
+    state,
+    limit,
+    lens,
+    filter,
+  });
+
+/** The teams the viewer belongs to, for the team-review filter's picker. GitHub-only
+ *  (`implemented.listFilterTeam`); a token without the team-read scope answers with
+ *  `missingScope` rather than failing. */
+export const forgeMyTeams = (repoPath: string, lens: RemoteLens) =>
+  invoke<MyTeams>("forge_my_teams", { repoPath, lens });
 
 /** A PR's activity timeline (force-pushes, label changes, review requests, state
  *  changes, approvals) for the Conversation tab. Provider-neutral — the backend
@@ -1808,7 +1868,9 @@ export const forgePrList = (
   state: PrStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
-) => invoke<PrInfo[]>("forge_pr_list", { repoPath, state, limit, lens });
+  filter: RemoteListFilter | null = null,
+) =>
+  invoke<PrInfo[]>("forge_pr_list", { repoPath, state, limit, lens, filter });
 
 export const forgePrView = (
   repoPath: string,
@@ -1928,7 +1990,15 @@ export const forgeIssueList = (
   state: IssueStateFilter,
   limit: number | undefined,
   lens: RemoteLens,
-) => invoke<IssueInfo[]>("forge_issue_list", { repoPath, state, limit, lens });
+  filter: RemoteListFilter | null = null,
+) =>
+  invoke<IssueInfo[]>("forge_issue_list", {
+    repoPath,
+    state,
+    limit,
+    lens,
+    filter,
+  });
 
 export const forgeIssueView = (
   repoPath: string,
@@ -2824,9 +2894,13 @@ export const ghPrBaseDivergence = (
   invoke<PrBaseDivergence>("gh_pr_base_divergence", { repoPath, number, lens });
 
 /** Where one PR's head branch lives, by number. Targeted rather than a scan of
- *  the poll list, so it answers for a PR outside the poll's window. */
-export const ghPrHeadRef = (repoPath: string, number: number) =>
-  invoke<PrHeadRef>("gh_pr_head_ref", { repoPath, number });
+ *  the poll list, so it answers for a PR outside the poll's window. Takes the
+ *  provider explicitly: the inbox asks about repositories it has not opened. */
+export const forgePrHeadRef = (
+  provider: ForgeProvider,
+  repoPath: string,
+  number: number,
+) => invoke<PrHeadRef>("forge_pr_head_ref", { provider, repoPath, number });
 
 /** The open fork PR whose head `branch` already contains, or null. Advisory —
  *  a forge outage answers null rather than failing. */

@@ -19,6 +19,7 @@ export type NotificationTone =
  *  kind minted by an older build. */
 export type NotificationKind =
   | "review-ready"
+  | "review-posted"
   | "review-failed"
   | "review-requested"
   | "checks-passed"
@@ -43,6 +44,7 @@ export type NotificationKind =
 export const AI_NOTIFICATION_KINDS: ReadonlySet<string> =
   new Set<NotificationKind>([
     "review-ready",
+    "review-posted",
     "review-failed",
     "agent-done",
     "research-done",

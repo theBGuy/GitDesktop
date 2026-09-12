@@ -2235,6 +2235,64 @@ remote: mirror repository is read-only
 fatal: unable to access 'http://192.168.1.10:99xx/gituser1/GitDesktop/': The requested URL returned error: 403
 ";
 
+    /// A push dry-run against an archived GitLab project — measured against
+    /// gitlab.com on git 2.51.1.windows.1, 2026-09 (`theBGuy/gitdesktop-gitlab-demo`,
+    /// archived via the API for this capture and unarchived immediately after).
+    /// GitLab's wording carries neither "read-only" nor "repository", so it needs
+    /// its own marker rather than widening the generic one.
+    const GITLAB_ARCHIVED_STDERR: &str = "\
+remote: You can't push code to an archived project.
+fatal: unable to access 'https://gitlab.com/theBGuy/gitdesktop-gitlab-demo.git/': The requested URL returned error: 403
+";
+
+    /// git asked for a username with prompting disabled and nothing in the
+    /// credential helper — measured against gitlab.com, same provenance as the
+    /// GitHub fixture above. Same `fatal:` shape: this is git's own wording, not
+    /// the host's.
+    const GITLAB_NO_CREDENTIALS_STDERR: &str = "\
+fatal: could not read Username for 'https://gitlab.com': terminal prompts disabled
+";
+
+    /// The Bitbucket counterpart, from a remote URL carrying an embedded username
+    /// (`https://user@bitbucket.org/...` — this app's own Bitbucket remotes are
+    /// shaped this way, see `strip_https_userinfo`). Git already has a username, so
+    /// it asks for the missing half instead: "Password", not "Username". Measured
+    /// against bitbucket.org, same provenance; the account name itself is
+    /// immaterial to the shape, so it's swapped for a placeholder here.
+    const BITBUCKET_NO_CREDENTIALS_STDERR: &str = "\
+fatal: could not read Password for 'https://user@bitbucket.org': terminal prompts disabled
+";
+
+    /// Credentials gitlab.com refused, same provenance as the GitHub fixture. The
+    /// sideband wording differs by host; the `fatal:` line the frontend anchors on
+    /// does not.
+    const GITLAB_REJECTED_CREDENTIALS_STDERR: &str = "\
+remote: HTTP Basic: Access denied. If a password was provided for Git authentication, the password was incorrect or you're required to use a token instead of a password. If a token was provided, it was either incorrect, expired, or improperly scoped. See https://gitlab.com/help/topics/git/troubleshooting_git.md#error-on-git-fetch-http-basic-access-denied
+fatal: Authentication failed for 'https://gitlab.com/theBGuy/gitdesktop-gitlab-demo.git/'
+";
+
+    /// The Bitbucket counterpart, same provenance.
+    const BITBUCKET_REJECTED_CREDENTIALS_STDERR: &str = "\
+remote: You may not have access to this repository or it no longer exists in this workspace. If you think this repository exists and you have access, make sure you are authenticated.
+fatal: Authentication failed for 'https://bitbucket.org/thebguy1/dispatch-demo.git/'
+";
+
+    /// A push to a GitLab project the authenticated account cannot write
+    /// (`gitlab-org/gitlab`, a real project this account has read-only access to),
+    /// same provenance as the GitHub fixture.
+    const GITLAB_FORBIDDEN_STDERR: &str = "\
+remote: You are not allowed to push code to this project.
+fatal: unable to access 'https://gitlab.com/gitlab-org/gitlab.git/': The requested URL returned error: 403
+";
+
+    /// The Bitbucket counterpart, against a repository this account cannot write.
+    /// Bitbucket returns the same 403 shape for "no access" and "doesn't exist" —
+    /// deliberately, so a probe can't distinguish a private repo from a missing one.
+    const BITBUCKET_FORBIDDEN_STDERR: &str = "\
+remote: The requested repository either does not exist or you do not have access. If you believe this repository exists and you have access, make sure you're authenticated.
+fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/': The requested URL returned error: 403
+";
+
     /// The chunks the frontend's `/m` regexes see as lines. JS `.` refuses every
     /// LineTerminator and `^` re-anchors after each, while `str::lines` splits on
     /// `\n` alone — and git's sideband re-emits `remote: ` after a BARE `\r` when
@@ -2280,17 +2338,33 @@ fatal: unable to access 'http://192.168.1.10:99xx/gituser1/GitDesktop/': The req
         })
     }
 
-    /// Entry two. Line-anchored with no indent tolerance, exactly like the regex.
-    fn marks_missing_credentials(report: &str) -> bool {
-        js_lines(report).any(|l| l.starts_with("fatal: could not read Username for "))
+    /// Entry two: GitLab's archived-project refusal. Plain substring, not a word
+    /// scan — GitLab's own wording is fixed copy, unlike the generic entry above
+    /// which has to tolerate a repository name or state description around it.
+    fn marks_gitlab_archived_project(report: &str) -> bool {
+        js_lines(report).any(|l| {
+            l.trim_start_matches([' ', '\t'])
+                .starts_with("remote: You can't push code to an archived project.")
+        })
     }
 
-    /// Entry three, anchored the same way.
+    /// Entry three. Line-anchored with no indent tolerance, exactly like the
+    /// regex. Covers both halves of git's credential-fill prompt: "Username" when
+    /// the remote URL carries none, "Password" when it already has one embedded
+    /// (this app's own Bitbucket remotes are shaped that way).
+    fn marks_missing_credentials(report: &str) -> bool {
+        js_lines(report).any(|l| {
+            l.starts_with("fatal: could not read Username for ")
+                || l.starts_with("fatal: could not read Password for ")
+        })
+    }
+
+    /// Entry four, anchored the same way.
     fn marks_rejected_credentials(report: &str) -> bool {
         js_lines(report).any(|l| l.starts_with("fatal: Authentication failed for "))
     }
 
-    /// Entry four: git's curl-level 403. The regex's `[^'\n]*` cannot cross a
+    /// Entry five: git's curl-level 403. The regex's `[^'\n]*` cannot cross a
     /// quote, so the URL runs to the FIRST `'` on the line and the tail has to
     /// follow immediately. A bare `\r` inside the quotes ends the chunk here while
     /// JS would keep reading — stricter than the frontend, the safe direction.
@@ -2306,22 +2380,28 @@ fatal: unable to access 'http://192.168.1.10:99xx/gituser1/GitDesktop/': The req
 
     /// Rust mirrors of `REMOTE_ACCESS_SUMMARIES` (src/lib/error-summary.ts), in
     /// the frontend's table order.
-    const REMOTE_ACCESS_MARKERS: [fn(&str) -> bool; 4] = [
+    const REMOTE_ACCESS_MARKERS: [fn(&str) -> bool; 5] = [
         marks_read_only_repository,
+        marks_gitlab_archived_project,
         marks_missing_credentials,
         marks_rejected_credentials,
         marks_forbidden_403,
     ];
 
-    /// Positions in [`REMOTE_ACCESS_MARKERS`], named for the verdict each entry
-    /// produces in the toast.
+    /// Positions in [`REMOTE_ACCESS_MARKERS`], named for the pattern each entry
+    /// matches — not a 1:1 verdict: `READ_ONLY` and `GITLAB_ARCHIVED` are
+    /// different patterns that both resolve to the same toast text
+    /// (`READ_ONLY_REPOSITORY_SUMMARY`, error-summary.ts), since GitLab's
+    /// archived-project wording is exactly the case that summary describes.
     const READ_ONLY: usize = 0;
-    const NO_CREDENTIALS: usize = 1;
-    const REJECTED_CREDENTIALS: usize = 2;
-    const FORBIDDEN_403: usize = 3;
+    const GITLAB_ARCHIVED: usize = 1;
+    const NO_CREDENTIALS: usize = 2;
+    const REJECTED_CREDENTIALS: usize = 3;
+    const FORBIDDEN_403: usize = 4;
 
     /// The entry `remoteAccessSummary` would pick: the FIRST match in table order,
-    /// mirroring its `.find()`. The index IS the verdict, so order is precedence.
+    /// mirroring its `.find()`. The index is the table POSITION, so order is
+    /// precedence — not a unique verdict, since two positions can share one.
     fn first_remote_access_match(report: &str) -> Option<usize> {
         REMOTE_ACCESS_MARKERS.iter().position(|m| m(report))
     }
@@ -2332,20 +2412,57 @@ fatal: unable to access 'http://192.168.1.10:99xx/gituser1/GitDesktop/': The req
     /// entry whose wording was written for them, so the blobs and Rust mirrors of
     /// `REMOTE_ACCESS_SUMMARIES` are pinned together here. Keep the two lists in
     /// step, ORDER INCLUDED — the table's order is precedence, not just layout.
-    /// GitLab and Bitbucket sideband wording is absent on purpose: the table grows
-    /// from captured stderr, never from guessed regexes.
+    /// GitLab's credential/permission/archived shapes and Bitbucket's
+    /// credential/permission shapes are measured live (gitlab.com, bitbucket.org,
+    /// 2026-09); Bitbucket's read-only wording stays absent on purpose — grown
+    /// from captured stderr when it's reachable, never from a guess.
     #[test]
     fn remote_access_stderr_still_matches_the_frontend_markers() {
         for (stderr, entry, what) in [
             (NO_CREDENTIALS_STDERR, NO_CREDENTIALS, "no stored credentials"),
             (
+                GITLAB_NO_CREDENTIALS_STDERR,
+                NO_CREDENTIALS,
+                "no stored credentials, on GitLab",
+            ),
+            (
+                BITBUCKET_NO_CREDENTIALS_STDERR,
+                NO_CREDENTIALS,
+                "no stored password, on a Bitbucket remote with an embedded username",
+            ),
+            (
                 REJECTED_CREDENTIALS_STDERR,
                 REJECTED_CREDENTIALS,
                 "rejected credentials",
             ),
+            (
+                GITLAB_REJECTED_CREDENTIALS_STDERR,
+                REJECTED_CREDENTIALS,
+                "rejected credentials, on GitLab",
+            ),
+            (
+                BITBUCKET_REJECTED_CREDENTIALS_STDERR,
+                REJECTED_CREDENTIALS,
+                "rejected credentials, on Bitbucket",
+            ),
             (FORBIDDEN_STDERR, FORBIDDEN_403, "a permission refusal"),
+            (
+                GITLAB_FORBIDDEN_STDERR,
+                FORBIDDEN_403,
+                "a permission refusal, on GitLab",
+            ),
+            (
+                BITBUCKET_FORBIDDEN_STDERR,
+                FORBIDDEN_403,
+                "a permission refusal, on Bitbucket",
+            ),
             (ARCHIVED_STDERR, READ_ONLY, "an archived repository"),
             (GITEA_MIRROR_STDERR, READ_ONLY, "a read-only mirror"),
+            (
+                GITLAB_ARCHIVED_STDERR,
+                GITLAB_ARCHIVED,
+                "an archived GitLab project",
+            ),
         ] {
             assert_eq!(
                 first_remote_access_match(stderr),
@@ -2355,9 +2472,22 @@ fatal: unable to access 'http://192.168.1.10:99xx/gituser1/GitDesktop/': The req
             );
         }
 
-        // Both read-only blobs also carry git's generic 403 line, so the read-only
-        // verdict above rests on the table's ORDER rather than on exclusivity.
-        for stderr in [ARCHIVED_STDERR, GITEA_MIRROR_STDERR] {
+        // The TS regex has no `$` anchor, so it matches a line carrying trailing
+        // text after the period too (a version banner, a self-managed instance's
+        // appended hint) — the Rust mirror must match the SAME set, not a
+        // stricter one, or the canary could pass while under-approximating what
+        // the frontend actually classifies.
+        assert!(
+            REMOTE_ACCESS_MARKERS[GITLAB_ARCHIVED](
+                "remote: You can't push code to an archived project. Contact an admin.\n"
+            ),
+            "a trailing-text variant of the archived-project line must still match"
+        );
+
+        // All three read-only-family blobs also carry git's generic 403 line, so
+        // the read-only/archived verdicts above rest on the table's ORDER rather
+        // than on exclusivity.
+        for stderr in [ARCHIVED_STDERR, GITEA_MIRROR_STDERR, GITLAB_ARCHIVED_STDERR] {
             assert!(
                 REMOTE_ACCESS_MARKERS[FORBIDDEN_403](stderr),
                 "a read-only blob lost its 403 line — the fixture no longer exercises \
@@ -2365,9 +2495,9 @@ fatal: unable to access 'http://192.168.1.10:99xx/gituser1/GitDesktop/': The req
             );
         }
 
-        // The permission blob reaches entry four on its own merits: its `remote:`
-        // line reports no repository state, and no credential entry claims it.
-        for earlier in [READ_ONLY, NO_CREDENTIALS, REJECTED_CREDENTIALS] {
+        // The permission blob reaches entry five on its own merits: its `remote:`
+        // line reports no repository state, and no earlier entry claims it.
+        for earlier in [READ_ONLY, GITLAB_ARCHIVED, NO_CREDENTIALS, REJECTED_CREDENTIALS] {
             assert!(
                 !REMOTE_ACCESS_MARKERS[earlier](FORBIDDEN_STDERR),
                 "entry {earlier} claimed a plain permission refusal, which has its own \
@@ -2375,9 +2505,9 @@ fatal: unable to access 'http://192.168.1.10:99xx/gituser1/GitDesktop/': The req
             );
         }
 
-        // Shapes the line anchor and word boundaries refuse. Looser matching here
-        // would let the canary pass stderr the frontend leaves raw, which is the one
-        // direction it must not be loose in.
+        // Shapes the line anchor, word boundaries, and exact wording refuse.
+        // Looser matching here would let the canary pass stderr the frontend
+        // leaves raw, which is the one direction it must not be loose in.
         for line in [
             "Add read-only repository guard",          // a commit subject echoed back
             "remote: repository is readonly",          // no hyphen
@@ -2386,11 +2516,14 @@ fatal: unable to access 'http://192.168.1.10:99xx/gituser1/GitDesktop/': The req
             // Two sideband chunks a bare `\r` separates: neither carries both
             // tokens, and JS `.` cannot span the `\r` to join them.
             "remote: repository access\rremote: mirror is read-only\n",
-            // Entry two is anchored at the line start with no indent tolerance.
+            // Entry three is anchored at the line start with no indent tolerance.
             "  fatal: could not read Username for 'https://x'",
-            // Entry four's quoted run stops at the first `'`, so the tail has to
+            // Entry five's quoted run stops at the first `'`, so the tail has to
             // follow that quote and not a later one.
             "fatal: unable to access 'a': 'b': The requested URL returned error: 403",
+            // Entry two's wording is GitLab's exact copy — a paraphrase must not
+            // borrow its verdict.
+            "remote: You cannot push code to an archived project.",
         ] {
             assert_eq!(
                 first_remote_access_match(line),

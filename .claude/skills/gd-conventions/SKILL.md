@@ -133,6 +133,15 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   an item-level handler is dead once the row span self-bounds (the
   `select-item-clip-title` guard fails on both); the closed field takes
   `onMouseEnter={clipTitleFromText}` on its `SelectValue`.
+- File/directory paths middle-truncate through `PathText`
+  (`src/components/path-text.tsx`) — head context and the filename both
+  survive. It owns its only-when-clipped tooltip (allowlisted in
+  `inline-clip-title`: the outer span it titles never overflows itself). A
+  new path display hand-rolling `truncate` re-mints the inconsistency this
+  fixed. Label composites (`Saved to <PathText/>`) space via `gap-*` on the
+  flex row, never a trailing space in the label — flex line boxes trim it.
+  Non-flex-item text is exempt: the absolutely-positioned `sr-only` badge
+  spans keep their trailing announcement space.
 - A `SelectControl`/`SelectField` `items` Record silently reorders integer-like
   keys to the front (JS object semantics) — any picker whose option values are
   user-supplied identifiers that can be all-digits (logins, slugs) must pass
@@ -152,7 +161,12 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   explain via the field's `warning` hint. Raw-`<button>` sites the vendored
   Button can't size (reaction chips, the discussion upvote chip) take the SAME
   contract from the shared `useDisabledReason` hook + `ARIA_DISABLED_CLASS`
-  (`src/lib/use-disabled-reason.ts`) — never hand-rolled.
+  (`src/lib/use-disabled-reason.ts`) — never hand-rolled. A vendored Button the
+  render composition can't reach because a form component wraps it
+  (`form.SubmitButton`, which forwards props but isn't itself a Trigger) takes
+  the same hook directly: `focusableWhenDisabled`/`aria-describedby`/
+  `wrapperTitle` passed straight through, plus its own sr-only reason span
+  alongside (`src/features/welcome/CloneRepoDialog.tsx` is the reference).
 - A conversation surface's own actions sit before the submit button via
   `CommentComposer`'s `leadingActions` slot when submit is the row's last
   action (the issue views); a surface whose right-slot action is itself a
@@ -360,6 +374,19 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   querying it.
 - **Sync Tauri commands run on the main thread** — take the value under the
   lock, drop the guard, then block; prefer `try_wait`-style non-blocking.
+- **Command futures stay small:** the invoke handler CONSTRUCTS a
+  `#[tauri::command]`'s future on the WebView2 UI-thread stack before the
+  runtime polls it on a worker — a large command future overflows that stack
+  in release builds (dev never reproduced it: the debug-profile future
+  measured 123,000 B against a ~721 KB release handler frame, and debug
+  `Box::pin`s command futures at the IPC boundary; on Windows dev IPC uses
+  the same custom protocol). The trigger is per-future stack footprint, not join
+  arity: sub-futures holding capture buffers or nested async chains get
+  spawned (`tauri::async_runtime::spawn`) or `Box::pin`ned before a `join!`.
+  A 7-way inline join of process-spawning probes shipped a stack-overflow
+  crash (v0.12.1 About page). (guard: `system_health_future_stays_small`,
+  src-tauri/src/health.rs — per-command by choice; a new command joining
+  capture-buffer futures adds its own.)
 - **Untrusted JSON** (CLI output, forge APIs): TS derivers `typeof`/shape-guard
   each field with `try/catch` per item; Rust uses tolerant serde (`Option<T>`,
   null-tolerant defaults) over strict shapes. Grammar-validate command/URL
@@ -442,10 +469,10 @@ report, don't exceed scope.
 
 Help-content specifics: shortcuts are `{{kbd:action-id}}` / `{{key:…}}`
 tokens, never literal keys — but a `defaultBinding: null` (palette-only)
-action gets **no token at all** (it renders the literal word "unbound");
-mention it as plain prose. AI-only content gated with `ai: true` +
-`{{ai}}…{{/ai}}`. Verify every claim against code; sweep stale "coming soon"
-mentions when a feature ships.
+action gets **no token at all** (it renders the literal word "palette" —
+HelpScreen's `PALETTE_ONLY` set); mention it as plain prose. AI-only content
+gated with `ai: true` + `{{ai}}…{{/ai}}`. Verify every claim against code;
+sweep stale "coming soon" mentions when a feature ships.
 
 ## Prevention standing rules (owner-adopted 2026-08-15)
 

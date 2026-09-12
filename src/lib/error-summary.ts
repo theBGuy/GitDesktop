@@ -183,26 +183,46 @@ function pushRejectionSummary(text: string): string | null {
   return PUSH_REJECTION_SUMMARIES.find(([m]) => m.test(text))?.[1] ?? null;
 }
 
+/** The read-only/archived-repository summary, shared by every sideband shape that
+ *  means the same thing in different words — GitHub and Gitea say "read-only"
+ *  outright; GitLab's archived-project refusal (below) does not, so it gets its
+ *  own pattern pointed at the same text rather than a guessed generic regex. */
+const READ_ONLY_REPOSITORY_SUMMARY =
+  "The remote reports this repository as read-only (usually a mirror or an archived repository), so different credentials won't change the answer. If it mirrors another repository, push there instead.";
+
 /** Transport and sideband refusals — the remote answering the connection rather
  *  than rejecting a ref, so they are deliberately separate from the per-ref
  *  `! [rejected]` family above. Every pattern is line-anchored, since the same
  *  blob echoes URLs, paths, and commit subjects. ORDER IS PRECEDENCE: a
  *  repository-state refusal carries git's generic 403 line in the same blob, so
- *  it must be read before that line's own entry. The read-only line must also
- *  name a repository: that token is what keeps the summary's claim scoped to
- *  the whole repository. Shapes measured verbatim against github.com on git
- *  2.51.1.windows.1, 2026-09; the mirror line is a Gitea server's, from a user
- *  report. Paired with the Rust canary
- *  `remote_access_stderr_still_matches_the_frontend_markers` (git/remote.rs),
- *  which pins measured stderr against Rust mirrors of these patterns — keep
- *  the two lists in step, ORDER INCLUDED. */
+ *  both read-only-family entries must be read before that line's own entry. The
+ *  generic read-only line must also name a repository: that token is what keeps
+ *  the summary's claim scoped to the whole repository. Shapes measured verbatim
+ *  against git 2.51.1.windows.1, 2026-09: github.com and a Gitea server's mirror
+ *  line (user report) for the generic entry; GitLab's archived-project wording
+ *  against gitlab.com; the credential/permission entries against github.com,
+ *  gitlab.com, and bitbucket.org (all three land on the same fatal: lines — git's
+ *  own wording, not the host's — except a Bitbucket https remote with an embedded
+ *  username, which asks for "Password" rather than "Username"). Paired with the
+ *  Rust canary `remote_access_stderr_still_matches_the_frontend_markers`
+ *  (git/remote.rs), which pins measured stderr against Rust mirrors of these
+ *  patterns — keep the two lists in step, ORDER INCLUDED.
+ *
+ *  Bitbucket's read-only/archived wording is UNMEASURED — Bitbucket Cloud has no
+ *  project-archive feature to reproduce it against, and its branch-restriction
+ *  API needs a workspace token this session had no safe way to obtain. Add it
+ *  from captured stderr when it's reachable, not from a guess. */
 const REMOTE_ACCESS_SUMMARIES: readonly (readonly [RegExp, string])[] = [
   [
     /^[ \t]*remote: (?=.*\b[Rr]epositor(?:y|ies)\b).*\b[Rr]ead-only\b/m,
-    "The remote reports this repository as read-only (usually a mirror or an archived repository), so different credentials won't change the answer. If it mirrors another repository, push there instead.",
+    READ_ONLY_REPOSITORY_SUMMARY,
   ],
   [
-    /^fatal: could not read Username for /m,
+    /^[ \t]*remote: You can't push code to an archived project\./m,
+    READ_ONLY_REPOSITORY_SUMMARY,
+  ],
+  [
+    /^fatal: could not read (?:Username|Password) for /m,
     "No credentials are stored for this remote, and GitDesktop never lets Git prompt for them. Add them to your Git credential helper, then try again.",
   ],
   [

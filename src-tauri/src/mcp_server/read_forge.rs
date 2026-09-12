@@ -155,6 +155,8 @@ impl GitDesktopMcp {
             // always answers for the fork itself. Documented gap, tracked for a later
             // pass. Same for every `None` lens below.
             None,
+            // The MCP tool surface exposes no list filter; the list is unfiltered.
+            None,
         )
         .await
         .map_err(app_err)?;
@@ -288,6 +290,7 @@ impl GitDesktopMcp {
             self.repo.clone(),
             args.state.unwrap_or_else(|| "open".to_string()),
             args.limit,
+            None,
             None,
         )
         .await

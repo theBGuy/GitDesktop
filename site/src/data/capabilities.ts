@@ -43,7 +43,7 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
-      "Line, hunk & file staging — drag the line numbers or use a keybind, mixing added and removed lines in one selection",
+      "Line, hunk & file staging — drag the line numbers or use a keybind; one drag picks up added and removed lines together in unified or split view, with Shift to take one side",
   },
   {
     group: "Diffs & staging",
@@ -62,6 +62,11 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label: "Filter the changes list by path or category",
+  },
+  {
+    group: "Diffs & staging",
+    label:
+      "Flat list ⇄ compacted directory tree in the Changes panel — collapsible folders, keyboard-first",
   },
   {
     group: "Diffs & staging",
@@ -247,6 +252,12 @@ export const capabilities: Capability[] = [
     label:
       "Unfinished-review notice — a review you started on GitHub surfaces on the PR, to finish or discard",
   },
+  {
+    group: "Pull requests & review",
+    label:
+      "Triage the PR list — All | Mine | Needs review presets and whole-repo filters (GitHub & GitLab), with grouping by your review state (GitHub)",
+    highlight: true,
+  },
 
   // — Forges & trackers —
   {
@@ -301,6 +312,11 @@ export const capabilities: Capability[] = [
     group: "Issues & discussions",
     label:
       "Issue types, sub-issues & dependencies on GitHub; related issues on GitLab",
+  },
+  {
+    group: "Issues & discussions",
+    label:
+      "Issue list filters — All | Mine, plus author & label across the whole repository (GitHub & GitLab)",
   },
   {
     group: "Issues & discussions",
@@ -373,7 +389,7 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "My work — your open GitHub PRs and issues, across every repo, newest first",
+      "My work — one cross-repo inbox of your open GitHub PRs and issues, GitLab MRs and issues, and Bitbucket PRs",
     ai: false,
     highlight: true,
   },
@@ -681,6 +697,12 @@ export const capabilities: Capability[] = [
     group: "AI · generate & review",
     ai: true,
     label: "Automations — review or audit on commit, PR open, or new commits",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
+    label:
+      "Automation history — a per-repo log of what ran, what was skipped & why, plus run an automation on demand",
   },
   {
     group: "AI · generate & review",

@@ -32,6 +32,7 @@ import type {
 } from "@/lib/ai/types";
 import { track } from "@/lib/analytics";
 import { readRepoInstructions } from "@/lib/git/api";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import type { DiffStatEntry, RemoteLens } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
 import {
@@ -1029,6 +1030,42 @@ export function registerAutomationRun(opts: {
       if (controls.get(key) === control) controls.delete(key);
     },
   };
+}
+
+/**
+ * Whether an automation run for this PR is live IN THIS INSTANCE — running or
+ * queued, and carrying the `rerun` closure that marks a row as automation-owned
+ * (the same discriminator the dock's Stopped group uses; a manual panel run also
+ * reaches running/queued but never carries one). Read-only.
+ *
+ * Matched on the repo's worktree-stable IDENTITY, not the checkout path a row was
+ * registered under: a linked worktree and its main checkout are different paths but
+ * the same repo, and a path compare would report "nothing live" for a run started
+ * from the other one — which is exactly when a second start is most dangerous (the
+ * caller may release that live run's identity-keyed claim). Async for the identity
+ * resolution; the cheap discriminators filter first, so a store with no candidate
+ * row resolves nothing at all.
+ */
+export async function hasLiveAutomationRun(
+  repoPath: string,
+  kind: "remote" | "local",
+  ref: string,
+): Promise<boolean> {
+  const candidates = Object.values(useReviewStore.getState().entries).filter(
+    (e) =>
+      (e.phase === "running" || e.phase === "queued") &&
+      e.rerun !== undefined &&
+      e.target.kind === kind &&
+      e.target.ref === ref,
+  );
+  if (candidates.length === 0) return false;
+  // `repoIdentity` memoizes per path and falls back to the raw path when git can't
+  // resolve one, so this is a map lookup after the first call and never rejects.
+  const [identity, rowIdentities] = await Promise.all([
+    repoIdentity(repoPath),
+    Promise.all(candidates.map((e) => repoIdentity(e.target.repoPath))),
+  ]);
+  return rowIdentities.includes(identity);
 }
 
 /** The runs the activity dock shows, newest first (dismissing removes them). */

@@ -190,9 +190,57 @@ pub async fn gh_release_view(
     })
 }
 
+/// The `gh release create` argv: `--title`/`--notes`/`--target` append only when
+/// non-empty (empty and unset both mean "let gh decide", so there is nothing to
+/// send). Owned `Vec<String>` for the same reason its sibling `release_edit_args`
+/// needs one — `--prerelease=`/`--draft=` there are locally-computed `format!`
+/// strings that can't outlive a borrowed return — even though every value here
+/// happens to come from a caller-owned `&str` that could borrow. Pure, so the
+/// shape is pinned without a spawn.
+#[allow(clippy::too_many_arguments)]
+fn release_create_args(
+    slug: &str,
+    tag: &str,
+    title: &str,
+    notes: &str,
+    target: &str,
+    prerelease: bool,
+    draft: bool,
+    latest: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "release".to_string(),
+        "create".to_string(),
+        tag.to_string(),
+        "--repo".to_string(),
+        slug.to_string(),
+    ];
+    if !title.is_empty() {
+        args.push("--title".to_string());
+        args.push(title.to_string());
+    }
+    if !notes.is_empty() {
+        args.push("--notes".to_string());
+        args.push(notes.to_string());
+    }
+    if !target.is_empty() {
+        args.push("--target".to_string());
+        args.push(target.to_string());
+    }
+    if prerelease {
+        args.push("--prerelease".to_string());
+    }
+    if draft {
+        args.push("--draft".to_string());
+    }
+    if latest {
+        args.push("--latest".to_string());
+    }
+    args
+}
+
 /// Creates a release for `tag` (gh creates the tag off `target` if it doesn't
-/// exist). `generate_notes` adds GitHub's auto commit-based notes; an explicit
-/// `notes` body is included too. Returns the new release's URL.
+/// exist). Returns the new release's URL.
 #[allow(clippy::too_many_arguments)]
 pub async fn gh_release_create(
     repo_path: String,
@@ -206,33 +254,60 @@ pub async fn gh_release_create(
 ) -> AppResult<String> {
     validate_tag(&tag)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let title = title.trim();
-    let notes = notes.trim();
-    let target = target.trim();
-    let mut args: Vec<&str> = vec!["release", "create", &tag, "--repo", &slug];
+    let args = release_create_args(
+        &slug,
+        &tag,
+        title.trim(),
+        notes.trim(),
+        target.trim(),
+        prerelease,
+        draft,
+        latest,
+    );
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+    Ok(out.stdout_lossy().trim().to_string())
+}
+
+/// The `gh release edit` argv. `--prerelease`/`--draft` ALWAYS carry an explicit
+/// `=true`/`=false` — both are draft-legal to flip either way, so the bare flag
+/// (which would only ever mean "on") is never correct here. `--latest` is
+/// tri-state: only sent on a real caller intent (`Some`), omitted entirely on
+/// `None` so GitHub decides it natively. Forcing `--latest=false` on every
+/// draft-publish (`None` folded to `false`) was the v0.4.0 bug: it overrode
+/// GitHub's own default of marking a newly published stable release Latest, so
+/// publishing a draft silently stripped Latest. Pure, so the shape — and that
+/// history — is pinned without a spawn.
+fn release_edit_args(
+    slug: &str,
+    tag: &str,
+    title: &str,
+    notes: &str,
+    prerelease: bool,
+    draft: bool,
+    latest: Option<bool>,
+) -> Vec<String> {
+    let mut args = vec![
+        "release".to_string(),
+        "edit".to_string(),
+        tag.to_string(),
+        "--repo".to_string(),
+        slug.to_string(),
+        format!("--prerelease={prerelease}"),
+        format!("--draft={draft}"),
+    ];
+    if let Some(latest) = latest {
+        args.push(format!("--latest={latest}"));
+    }
     if !title.is_empty() {
-        args.push("--title");
-        args.push(title);
+        args.push("--title".to_string());
+        args.push(title.to_string());
     }
     if !notes.is_empty() {
-        args.push("--notes");
-        args.push(notes);
+        args.push("--notes".to_string());
+        args.push(notes.to_string());
     }
-    if !target.is_empty() {
-        args.push("--target");
-        args.push(target);
-    }
-    if prerelease {
-        args.push("--prerelease");
-    }
-    if draft {
-        args.push("--draft");
-    }
-    if latest {
-        args.push("--latest");
-    }
-    let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
-    Ok(out.stdout_lossy().trim().to_string())
+    args
 }
 
 /// Edits a release's title/notes/flags. `draft=false` on a draft publishes it.
@@ -247,41 +322,17 @@ pub async fn gh_release_edit(
 ) -> AppResult<()> {
     validate_tag(&tag)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    // `--prerelease`/`--draft` take an explicit value so they can be turned off too;
-    // both are draft-legal, so the explicit form is always correct for them.
-    //
-    // `--latest` is tri-state: only send it when we have a real intent (`Some`), and
-    // omit it entirely on `None`. A draft's Latest is structurally false (GitHub only
-    // computes Latest among published stable releases), so forcing `--latest=false`
-    // when publishing would override GitHub's own default of marking a newly published
-    // stable release Latest — the v0.4.0 bug where publishing a draft stripped Latest.
-    // Omitting the flag = gh sends nothing, so GitHub keeps/decides Latest natively.
-    let prerelease_flag = format!("--prerelease={prerelease}");
-    let draft_flag = format!("--draft={draft}");
-    let latest_flag = latest.map(|l| format!("--latest={l}"));
-    let title = title.trim();
-    let notes = notes.trim();
-    let mut args: Vec<&str> = vec![
-        "release",
-        "edit",
-        &tag,
-        "--repo",
+    let args = release_edit_args(
         &slug,
-        &prerelease_flag,
-        &draft_flag,
-    ];
-    if let Some(latest_flag) = latest_flag.as_ref() {
-        args.push(latest_flag);
-    }
-    if !title.is_empty() {
-        args.push("--title");
-        args.push(title);
-    }
-    if !notes.is_empty() {
-        args.push("--notes");
-        args.push(notes);
-    }
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+        &tag,
+        title.trim(),
+        notes.trim(),
+        prerelease,
+        draft,
+        latest,
+    );
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
     Ok(())
 }
 
@@ -347,6 +398,16 @@ pub async fn gh_release_generate_notes(
     })
 }
 
+/// The `gh release delete` argv: `--cleanup-tag` appends only when asked. Pure, so
+/// the shape is pinned without a spawn.
+fn release_delete_args<'a>(slug: &'a str, tag: &'a str, cleanup_tag: bool) -> Vec<&'a str> {
+    let mut args = vec!["release", "delete", tag, "--repo", slug, "--yes"];
+    if cleanup_tag {
+        args.push("--cleanup-tag");
+    }
+    args
+}
+
 /// Deletes a release. `cleanup_tag` also deletes the underlying git tag.
 pub async fn gh_release_delete(
     repo_path: String,
@@ -355,10 +416,7 @@ pub async fn gh_release_delete(
 ) -> AppResult<()> {
     validate_tag(&tag)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let mut args: Vec<&str> = vec!["release", "delete", &tag, "--repo", &slug, "--yes"];
-    if cleanup_tag {
-        args.push("--cleanup-tag");
-    }
+    let args = release_delete_args(&slug, &tag, cleanup_tag);
     run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
     Ok(())
 }
@@ -592,6 +650,70 @@ pub async fn gh_release_download_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every optional flag appends only when its value is non-empty/true; a fully
+    /// bare call carries none of them.
+    #[test]
+    fn release_create_args_appends_optional_flags_only_when_given() {
+        let bare = release_create_args("o/r", "v1.0.0", "", "", "", false, false, false);
+        assert_eq!(bare, ["release", "create", "v1.0.0", "--repo", "o/r"]);
+
+        let full = release_create_args(
+            "o/r", "v1.0.0", "Title", "Notes", "main", true, true, true,
+        );
+        assert_eq!(
+            full,
+            [
+                "release", "create", "v1.0.0", "--repo", "o/r",
+                "--title", "Title", "--notes", "Notes", "--target", "main",
+                "--prerelease", "--draft", "--latest",
+            ]
+        );
+    }
+
+    #[test]
+    fn release_delete_args_appends_cleanup_tag_only_when_asked() {
+        let plain = release_delete_args("o/r", "v1.0.0", false);
+        assert_eq!(plain, ["release", "delete", "v1.0.0", "--repo", "o/r", "--yes"]);
+
+        let cleanup = release_delete_args("o/r", "v1.0.0", true);
+        assert_eq!(cleanup[..plain.len()], plain[..]);
+        assert_eq!(cleanup[plain.len()..], ["--cleanup-tag"]);
+    }
+
+    /// The v0.4.0 regression, pinned: `--prerelease`/`--draft` always carry an
+    /// explicit value (never a bare flag), and `--latest` is either absent
+    /// (`None`) or an explicit `=true`/`=false` — never synthesized from `None`.
+    #[test]
+    fn release_edit_args_keeps_latest_tri_state_and_flags_explicit() {
+        let no_intent = release_edit_args("o/r", "v1.0.0", "", "", false, true, None);
+        assert_eq!(
+            no_intent,
+            ["release", "edit", "v1.0.0", "--repo", "o/r", "--prerelease=false", "--draft=true"]
+        );
+        assert!(
+            !no_intent.iter().any(|a| a.starts_with("--latest")),
+            "None must add no --latest flag at all: {no_intent:?}"
+        );
+
+        let publish_as_latest = release_edit_args("o/r", "v1.0.0", "", "", false, false, Some(true));
+        assert!(publish_as_latest.contains(&"--latest=true".to_string()));
+
+        let publish_not_latest =
+            release_edit_args("o/r", "v1.0.0", "", "", false, false, Some(false));
+        assert!(publish_not_latest.contains(&"--latest=false".to_string()));
+
+        // Neither `--prerelease` nor `--draft` ever appears as a bare flag.
+        for args in [&no_intent, &publish_as_latest, &publish_not_latest] {
+            assert!(!args.iter().any(|a| a == "--prerelease" || a == "--draft"), "{args:?}");
+        }
+
+        let titled = release_edit_args("o/r", "v1.0.0", "New Title", "New Notes", false, false, None);
+        assert_eq!(
+            titled[titled.len() - 4..],
+            ["--title", "New Title", "--notes", "New Notes"]
+        );
+    }
 
     const MANIFEST: &str = r#"{
       "version": "0.6.0",

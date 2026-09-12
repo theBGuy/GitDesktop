@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 export type LocalRemoteState = "open" | "closed";
@@ -20,10 +21,11 @@ export interface RemoteLike {
 }
 
 /**
- * The search + author/label + archived filtering shared by the PR and issue
- * list panels (they were ~95% identical). Owns the filter UI state; `stateFilter`
- * stays caller-owned because it drives the data query. Exposes the visible
- * local/remote lists plus the per-author/per-label counts the popover needs.
+ * The search + archived filtering shared by the PR and issue list panels, plus the
+ * author/label option lists and counts the filter popover renders. `stateFilter`
+ * stays caller-owned because it drives the data query, and so do the author/label
+ * selections themselves — the server applies those now (see `useRemoteListFilter`),
+ * so this hook only reports which options exist and how many rows each covers.
  *
  * Note: `labelCount` counts BOTH remote and local labels (the PR panel already
  * did; the issue panel previously undercounted local-only labels — this unifies
@@ -32,12 +34,39 @@ export interface RemoteLike {
 export function useLocalRemoteFilter<
   L extends LocalLike,
   R extends RemoteLike,
->(opts: { locals: L[]; remotes: R[]; stateFilter: LocalRemoteState }) {
-  const { locals, remotes, stateFilter } = opts;
+>(opts: {
+  locals: L[];
+  remotes: R[];
+  stateFilter: LocalRemoteState;
+  /** The server-side author selection — excludes the local section wholesale. */
+  authorFilter: Set<string>;
+  /** The server-side label selection; still applied client-side to LOCAL rows,
+   *  which the forge query never saw. */
+  labelFilter: Set<string>;
+  /** Any "mine" axis (assigned / review-requested / team) is active. */
+  mineActive: boolean;
+  /** The forge applied `labelFilter` to the remote rows itself. False and this hook
+   *  applies it here instead — see the predicate in `visibleRemote`. */
+  labelsServerSide: boolean;
+  /** Key PREFIX of this list's query family — everything up to and including the
+   *  state axis, so every cached page (any limit, any filter) matches. Used to keep
+   *  the option lists and counts whole while a filter is active. Omit to derive
+   *  them from the visible rows alone. */
+  optionSourcePrefix?: readonly unknown[];
+}) {
+  const {
+    locals,
+    remotes,
+    stateFilter,
+    authorFilter,
+    labelFilter,
+    mineActive,
+    labelsServerSide,
+    optionSourcePrefix,
+  } = opts;
   const [filterText, setFilterText] = useState("");
-  const [authorFilter, setAuthorFilter] = useState<Set<string>>(new Set());
-  const [labelFilter, setLabelFilter] = useState<Set<string>>(new Set());
   const [showArchived, setShowArchived] = useState(false);
+  const queryClient = useQueryClient();
 
   const stateLocal = locals.filter((l) =>
     stateFilter === "open" ? l.status === "open" : l.status !== "open",
@@ -45,30 +74,43 @@ export function useLocalRemoteFilter<
   // The query already returns only the active-state remotes.
   const stateRemote = remotes;
 
-  // Filter options come from everything in the current state tab.
+  // Options and counts read a UNION of the rows on screen, EVERY cached page of
+  // this list family, and the current selection. Deriving them from the filtered
+  // rows alone would collapse the option list to whatever is already selected and
+  // report (0) beside every other name — a one-way door out of a filter. The match
+  // is a key PREFIX, not one pinned key: a limit bump, a state tab, or a lens
+  // switch mints a new key, and a single-key read would miss every page under it.
+  // The read sits INSIDE this expression on purpose — lifted to its own binding the
+  // compiler would memoize it on the prefix alone, so a page landing later than the
+  // first read would never be picked up.
+  const optionRows = ((): R[] => {
+    if (!optionSourcePrefix) return stateRemote;
+    const pages = queryClient.getQueriesData<R[]>({
+      predicate: (q) =>
+        optionSourcePrefix.every((part, i) => q.queryKey[i] === part),
+    });
+    let rows = stateRemote;
+    for (const [, page] of pages) {
+      if (page && page !== rows) rows = mergeRows(rows, page);
+    }
+    return rows;
+  })();
+
   const authors = [
-    ...new Set(stateRemote.flatMap((r) => (r.author ? [r.author.login] : []))),
+    ...new Set([
+      ...optionRows.flatMap((r) => (r.author ? [r.author.login] : [])),
+      ...authorFilter,
+    ]),
   ].sort();
   const labels = [
     ...new Set([
-      ...stateRemote.flatMap((r) => r.labels.map((l) => l.name)),
+      ...optionRows.flatMap((r) => r.labels.map((l) => l.name)),
       ...stateLocal.flatMap((l) => l.labels),
+      ...labelFilter,
     ]),
   ].sort();
 
   const query = filterText.trim().toLowerCase();
-
-  // Intersect the persisted filter Sets with the CURRENT option lists at every
-  // consumption point below. State switches (Open↔Closed, Fork↔Upstream) change
-  // which authors/labels exist without pruning the Sets, so a Set can hold an
-  // entry absent from `authors`/`labels`; left live it would filter the list and
-  // inflate the badge with no checkable row to clear it. Intersection makes such
-  // out-of-scope entries INERT while leaving the state Set intact — an author who
-  // vanishes on Open→Closed and returns on switching back is still selected.
-  const activeAuthorFilter = new Set(
-    authors.filter((a) => authorFilter.has(a)),
-  );
-  const activeLabelFilter = new Set(labels.filter((l) => labelFilter.has(l)));
 
   function matchesLocal(l: L): boolean {
     if (
@@ -78,12 +120,11 @@ export function useLocalRemoteFilter<
     ) {
       return false;
     }
-    // Local items have no GitHub author — an author filter excludes them.
-    if (activeAuthorFilter.size > 0) return false;
-    if (
-      activeLabelFilter.size > 0 &&
-      !l.labels.some((x) => activeLabelFilter.has(x))
-    ) {
+    // Local items have no forge author, assignee or requested reviewer, so an
+    // author selection or any active "mine" axis excludes the whole local section
+    // rather than showing rows the scope can't describe.
+    if (authorFilter.size > 0 || mineActive) return false;
+    if (labelFilter.size > 0 && !l.labels.some((x) => labelFilter.has(x))) {
       return false;
     }
     return true;
@@ -93,61 +134,43 @@ export function useLocalRemoteFilter<
   const visibleLocal = matchingLocal.filter((l) => showArchived || !l.archived);
   const archivedLocalCount = matchingLocal.filter((l) => l.archived).length;
 
+  // Author narrowing happens server-side, so it isn't re-applied here — that would
+  // hide rows the forge deliberately matched (on a label the page payload doesn't
+  // carry, say). Labels are the exception a provider can force: where the forge
+  // can't filter by them, the pick lands here instead, so a provider whose PRs
+  // carry no labels shows an EMPTY remote section under a label pick rather than
+  // an unfiltered one under an active badge.
   const visibleRemote = stateRemote.filter((r) => {
+    if (
+      !labelsServerSide &&
+      labelFilter.size > 0 &&
+      !r.labels.some((l) => labelFilter.has(l.name))
+    ) {
+      return false;
+    }
+    if (!query) return true;
     const author = r.author?.login ?? "";
-    if (
-      query &&
-      !r.title.toLowerCase().includes(query) &&
-      !`#${r.number}`.includes(query) &&
-      !author.toLowerCase().includes(query) &&
-      !r.labels.some((l) => l.name.toLowerCase().includes(query))
-    ) {
-      return false;
-    }
-    if (activeAuthorFilter.size > 0 && !activeAuthorFilter.has(author))
-      return false;
-    if (
-      activeLabelFilter.size > 0 &&
-      !r.labels.some((l) => activeLabelFilter.has(l.name))
-    ) {
-      return false;
-    }
-    return true;
+    return (
+      r.title.toLowerCase().includes(query) ||
+      `#${r.number}`.includes(query) ||
+      author.toLowerCase().includes(query) ||
+      r.labels.some((l) => l.name.toLowerCase().includes(query))
+    );
   });
 
-  const activeFilterCount = activeAuthorFilter.size + activeLabelFilter.size;
-
-  function toggle(which: "author" | "label", value: string, on: boolean) {
-    const update = which === "author" ? setAuthorFilter : setLabelFilter;
-    // Functional update: several toggles fired in one event batch must each
-    // build on the previous one — cloning the render-time Set here would
-    // silently drop all but the last (latent until a "clear all"-style
-    // affordance emits multi-toggle batches).
-    update((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(value);
-      else next.delete(value);
-      return next;
-    });
-  }
-
   const authorCount = (a: string) =>
-    stateRemote.filter((r) => r.author?.login === a).length;
+    optionRows.filter((r) => r.author?.login === a).length;
   const labelCount = (l: string) =>
-    stateRemote.filter((r) => r.labels.some((x) => x.name === l)).length +
+    optionRows.filter((r) => r.labels.some((x) => x.name === l)).length +
     stateLocal.filter((x) => x.labels.includes(l)).length;
 
   return {
     filterText,
     setFilterText,
-    authorFilter,
-    labelFilter,
-    toggle,
     showArchived,
     setShowArchived,
     authors,
     labels,
-    activeFilterCount,
     stateLocal,
     stateRemote,
     visibleLocal,
@@ -156,4 +179,11 @@ export function useLocalRemoteFilter<
     authorCount,
     labelCount,
   };
+}
+
+/** Visible rows first, then whatever the unfiltered page adds — deduped by number
+ *  so a row present in both counts once. */
+function mergeRows<R extends RemoteLike>(visible: R[], extra: R[]): R[] {
+  const seen = new Set(visible.map((r) => r.number));
+  return [...visible, ...extra.filter((r) => !seen.has(r.number))];
 }

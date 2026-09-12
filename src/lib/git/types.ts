@@ -565,6 +565,27 @@ export interface PrPollInfo {
   createdAt: string;
 }
 
+/** A checkout's origin remote, split into the axes a work-inbox row has to match
+ *  before it may open locally. Any field is `""` when unknown, which the caller
+ *  reads as UNPROVEN rather than as a mismatch. All are needed: equal namespaces
+ *  on two hosts are different projects, and so are equal hostnames on two ports. */
+export interface RepoOrigin {
+  /** Hostname alone, ports stripped. */
+  host: string;
+  /** Hostname plus the WEB port, lowercased — the spelling a web URL's `URL.host`
+   *  yields. `:443` on https and `:80` on http are elided, any other web port is
+   *  kept, and a non-web scheme's transport port (`ssh://…:2222`) is dropped
+   *  entirely: it says nothing about where the web UI lives. */
+  authority: string;
+  /** The full namespace path the provider spells ("group/sub/repo"). */
+  path: string;
+  /** The checkout's detection verdict at proof time — the integration a landing
+   *  there would actually resolve. `"github"` covers the resilient default an
+   *  unrecognized host falls back to, so it is an answer, not an absence; `""`
+   *  means the path is not a repo at all. */
+  provider: string;
+}
+
 /** Where one PR's head branch lives — the targeted read behind opening a PR in
  *  the worktree that has it checked out. Both fields are "" when unknown (a
  *  deleted fork answers "" rather than failing), and a resolver must require
@@ -682,15 +703,28 @@ export interface MyWorkItem {
   url: string;
   updatedAt: string;
   authorLogin?: string | null;
+  /** Which forge the row came from. The rows of several providers merge into one
+   *  list, so the item carries its own provider rather than inheriting the
+   *  screen's — it drives the row glyph and the per-row open/link copy. */
+  provider: ForgeProvider;
 }
 
-/** One page of the work inbox. `truncated` is true when either search leg hit
- *  its own server-side cap or the merged union overshot the page, so it can be
- *  true on a page that arrives short — a leg's raw count is measured before
- *  unaddressable hits are dropped. */
+/** One page of the work inbox. `truncated` is true when a search leg hit its
+ *  own server-side cap, the merged union overshot the page, or a provider lost
+ *  part of its results (a host, a repo) — so it can be true on a page that
+ *  arrives short; it means "items may be missing", not "the page is full". */
 export interface MyWorkPage {
   items: MyWorkItem[];
   truncated: boolean;
+}
+
+/** Which forges the work inbox can fetch from right now — one flag per provider,
+ *  so a provider the user isn't signed in to is never asked and never contributes
+ *  a failure the other providers' rows would have to share a screen with. */
+export interface MyWorkSources {
+  github: boolean;
+  gitlab: boolean;
+  bitbucket: boolean;
 }
 
 export interface GhAccount {
@@ -960,6 +994,21 @@ export interface ForgeImplemented {
   /** On-demand ahead/behind between one fork's branch and this repo's base
    *  branch. GitHub's compare API only, so false elsewhere. */
   forkCompare: boolean;
+  /** The whole-repo "mine" list filters (assigned to me, review requested from me)
+   *  on the PR/issue panels — a shared control for GitHub and GitLab, both of which
+   *  express the axis server-side; false for Bitbucket, which isn't wired. */
+  listFilterMine: boolean;
+  /** Filtering the PR list by a team whose review was requested — GitHub-only
+   *  (teams are a GitHub concept), so false elsewhere. */
+  listFilterTeam: boolean;
+  /** Server-side author filtering on the PR/issue panels. False for Bitbucket,
+   *  whose API filters on account ids rather than the display names the app
+   *  shows, so no author the user can pick is a term it would accept. */
+  listFilterAuthor: boolean;
+  /** Grouping the PR list by the viewer's review state (reviewed / needs another
+   *  look / not reviewed), which needs the per-PR review timestamps
+   *  `forge_pr_review_state` returns — GitHub-only, so false elsewhere. */
+  reviewGrouping: boolean;
 }
 
 /** One pull-request task (Bitbucket's PR checklist). `id`/`commentId` are numeric
@@ -1621,6 +1670,82 @@ export interface PrRef {
  *  itself ("origin") or its parent ("upstream"). GitHub-only — GitLab/Bitbucket
  *  arms ignore it, so the frontend gates the lens UI to GitHub forks. */
 export type RemoteLens = "origin" | "upstream";
+
+/** Server-side list filter for the PR/issue panels. Axes AND-combine; values within
+ *  an axis OR-combine. Absent/empty axis = no constraint. The three "mine" members
+ *  form ONE OR-union group (assigned OR review-requested OR team-review-requested). */
+export interface RemoteListFilter {
+  assignedToMe?: boolean;
+  reviewRequestedMe?: boolean;
+  /** Org-qualified team slugs ("org/slug"), pre-validated against useMyTeams. */
+  teams?: string[];
+  authors?: string[];
+  labels?: string[];
+}
+
+/** The boolean axes of {@link RemoteListFilter}, in canonical key order. */
+const REMOTE_LIST_FILTER_FLAGS = ["assignedToMe", "reviewRequestedMe"] as const;
+/** The list-valued axes of {@link RemoteListFilter}, in canonical key order. */
+const REMOTE_LIST_FILTER_LISTS = ["teams", "authors", "labels"] as const;
+
+/**
+ * Canonical cache-key form: "" when the filter is empty/null, else a stable string —
+ * sorted arrays, dropped empty axes — so two equal filters serialize identically.
+ * INVARIANT: a `false` flag and an absent flag are the same filter, as are an empty
+ * array and an absent array; both normalize away before serializing.
+ */
+export function remoteListFilterKey(
+  f: RemoteListFilter | null | undefined,
+): string {
+  if (!f) return "";
+  const parts: string[] = [];
+  for (const flag of REMOTE_LIST_FILTER_FLAGS) {
+    if (f[flag] === true) parts.push(flag);
+  }
+  for (const axis of REMOTE_LIST_FILTER_LISTS) {
+    const values = f[axis];
+    if (!values || values.length === 0) continue;
+    // JSON-encoded rather than joined, over a COPY (never sort the caller's array):
+    // label names and logins may contain the separator, so a plain join would let
+    // `["x,y"]` and `["x","y"]` — different server queries — share one cache key.
+    parts.push(`${axis}:${JSON.stringify([...values].sort())}`);
+  }
+  return parts.join("|");
+}
+
+/** When the viewer last reviewed a PR, against when the PR last changed — the
+ *  review-state grouping compares the two to split "reviewed" from "needs another
+ *  look". Both are ISO-8601. */
+export interface ReviewStateEntry {
+  lastReviewedAt: string;
+  updatedAt: string;
+}
+
+/** PR number → the viewer's review state; a number ABSENT from entries = not reviewed
+ *  (callers derive "not reviewed" by subtraction against the visible rows). */
+export interface ReviewStatePage {
+  entries: Record<number, ReviewStateEntry>;
+  /** The server walk couldn't cover the list's own page, so an absent number may still
+   *  have been reviewed. A capped walk alone does NOT set this: the list and the
+   *  reviewed-by search share a scope and a sort, so a walk at least as deep as the
+   *  page already holds every reviewed row on screen. */
+  truncated: boolean;
+}
+
+/** One team the viewer belongs to. `slug` is org-qualified ("org/slug") — the form
+ *  {@link RemoteListFilter.teams} carries; `name` is the display label. */
+export interface TeamRef {
+  slug: string;
+  name: string;
+}
+
+/** The viewer's teams for the team-review filter. `missingScope` true means the
+ *  token can't read team membership, so `teams` is empty for want of permission
+ *  rather than membership — the UI says so instead of showing an empty picker. */
+export interface MyTeams {
+  teams: TeamRef[];
+  missingScope: boolean;
+}
 
 /** A PR's membership in a stack — a linear chain where each PR targets the one
  *  below it. Absent/null means unstacked. Provenance differs per forge and `id`

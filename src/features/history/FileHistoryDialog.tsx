@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import {
   Dialog,
@@ -65,8 +66,8 @@ export function FileHistoryDialog({
       <DialogContent className="flex h-[80vh] flex-col sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle className="truncate">History of {name}</DialogTitle>
-          <DialogDescription className="truncate font-mono">
-            {path}
+          <DialogDescription>
+            <PathText path={path} className="font-mono" />
           </DialogDescription>
         </DialogHeader>
 
@@ -131,7 +132,16 @@ export function FileHistoryDialog({
 
           <div className="min-h-0 flex-1 overflow-hidden border">
             {activeHash ? (
-              <DiffSurface filePath={path} diff={diff} repoPath={repoPath} />
+              <DiffSurface
+                filePath={path}
+                diff={diff}
+                repoPath={repoPath}
+                imageRevs={{ old: `${activeHash}~1`, new: activeHash }}
+                contentRevs={{
+                  oldRev: `${activeHash}~1`,
+                  newRev: activeHash,
+                }}
+              />
             ) : (
               <DiffPlaceholder message="Select a commit" />
             )}

@@ -49,17 +49,23 @@ fn system_info() -> SystemInfo {
     }
 }
 
+/// The "we know nothing about this tool" status: it isn't installed, or its
+/// probe didn't complete.
+fn undetected(id: &str) -> ToolStatus {
+    ToolStatus {
+        id: id.to_string(),
+        found: false,
+        path: None,
+        version: None,
+        authed: AuthStatus::Unknown,
+    }
+}
+
 /// Detect one CLI: resolve it, read `--version`, and (when it has a login) its
 /// auth state. `auth_args` is `None` for tools without a login concept (git).
 async fn detect(id: &str, names: &[&str], auth_args: Option<&[&str]>) -> ToolStatus {
     let Some(binary) = resolve_named(names, None).await else {
-        return ToolStatus {
-            id: id.to_string(),
-            found: false,
-            path: None,
-            version: None,
-            authed: AuthStatus::Unknown,
-        };
+        return undetected(id);
     };
 
     let version = run_capture(&binary, &["--version"], DETECT_TIMEOUT)
@@ -89,23 +95,77 @@ async fn detect(id: &str, names: &[&str], auth_args: Option<&[&str]>) -> ToolSta
     }
 }
 
+/// One tool detection: id, candidate binary names, and the auth-status args for
+/// tools that have a login (`None` for tools without one).
+type Probe = (
+    &'static str,
+    &'static [&'static str],
+    Option<&'static [&'static str]>,
+);
+
+/// Every CLI the About screen reports on, in the order it displays them. Copilot
+/// has no non-interactive auth-status command (it authenticates via the OS
+/// credential store / a token env var), so its login state stays Unknown.
+static PROBES: [Probe; 7] = [
+    ("git", &["git"], None),
+    ("gh", &["gh"], Some(&["auth", "status"])),
+    ("glab", &["glab"], Some(&["auth", "status"])),
+    ("claude", &["claude"], Some(&["auth", "status"])),
+    ("codex", &["codex"], Some(&["login", "status"])),
+    ("copilot", &["copilot"], None),
+    ("opencode", &["opencode"], None),
+];
+
 /// OS/app info + the status of every external CLI, for Settings → About. The
 /// per-tool detections (each spawns subprocesses) run concurrently.
 #[tauri::command]
 pub async fn system_health() -> AppResult<SystemHealth> {
-    // Copilot has no non-interactive auth-status command (it authenticates via the
-    // OS credential store / a token env var), so its login state stays Unknown.
-    let (git, gh, glab, claude, codex, copilot, opencode) = tokio::join!(
-        detect("git", &["git"], None),
-        detect("gh", &["gh"], Some(&["auth", "status"])),
-        detect("glab", &["glab"], Some(&["auth", "status"])),
-        detect("claude", &["claude"], Some(&["auth", "status"])),
-        detect("codex", &["codex"], Some(&["login", "status"])),
-        detect("copilot", &["copilot"], None),
-        detect("opencode", &["opencode"], None),
-    );
+    // Each detection runs as its own task to keep this command's future tiny:
+    // the invoke handler CONSTRUCTS a command future on the WebView2 UI-thread
+    // stack before tauri's runtime polls it on a worker, and the seven detect
+    // futures inlined here overflowed that stack in release builds (~721 KB
+    // handler frame, v0.12.1 crash dump; the same future was 123,000 B in
+    // debug and fit — why dev never crashed).
+    let handles: Vec<_> = PROBES
+        .iter()
+        .map(|&(id, names, auth_args)| {
+            let handle = tauri::async_runtime::spawn(detect(id, names, auth_args));
+            (id, handle)
+        })
+        // collect() drives every spawn before the first await below; awaiting
+        // inside one loop would serialize seven probes, each up to three 20 s
+        // subprocess legs (resolve + two captures).
+        .collect();
+
+    let mut tools = Vec::with_capacity(handles.len());
+    for (id, handle) in handles {
+        // A panicked or cancelled probe degrades to that one tool being unknown;
+        // an advisory panel must not go blank over it.
+        tools.push(handle.await.unwrap_or_else(|_| undetected(id)));
+    }
+
     Ok(SystemHealth {
         system: system_info(),
-        tools: vec![git, gh, glab, claude, codex, copilot, opencode],
+        tools,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guards the fix in `system_health`: the command future is constructed on
+    /// the WebView2 UI-thread stack (see the comment there), so it must stay
+    /// small. Pre-fix, the inline 7-way join measured 123,000 bytes in this
+    /// (debug) profile and ~721 KB in the release handler frame. Building the
+    /// future is enough to measure it; it is never polled here.
+    #[test]
+    fn system_health_future_stays_small() {
+        let fut = system_health();
+        let size = std::mem::size_of_val(&fut);
+        assert!(
+            size < 16 * 1024,
+            "system_health() future is {size} bytes (debug layout); keep per-tool detections spawned so it stays under 16 KiB"
+        );
+    }
 }

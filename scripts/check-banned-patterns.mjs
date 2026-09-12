@@ -228,14 +228,11 @@ const INLINE_CLIP_TITLE_RE = new RegExp(
 // a same-tag [^>] bound, because prop expressions carry `=>` arrows; the
 // tempered `(?!</SelectItem\b)` step stops each scan at the item's closing
 // tag, so an adjacent picker's trigger handler can never pair across items.
-// Known false positive left open: a legal SELF-BOUNDED clip span inside an
-// item (TaskDialog's `max-w-64 truncate` interpreter-path sub-span — its own
-// width bound keeps the handler live) sits ~2× outside the window today; a
-// compacted row would fire loudly, with the allowlist as remedy. Accepted
-// evasions: an aliased or wrapped handler, a reordered/interleaved class
-// string, a wrapper component around SelectItem — and a bare text child with
-// no affordance at all, the shape most converted sites had, which no arm can
-// see.
+// Accepted evasions: an aliased or wrapped handler, a reordered/interleaved
+// class string, a wrapper component around SelectItem, and a bare text child
+// with no affordance at all, the shape most converted sites had, which no arm
+// can see. The only in-item path row now routes through PathText, whose
+// classes live in path-text.tsx and are invisible to these patterns.
 const SELECT_ITEM_CLIP_TITLE_RE = new RegExp(
   `<SelectItem\\b(?:(?!</SelectItem\\b)[\\s\\S]){0,${PAIR_GAP}}?\\bclipTitle`,
   "g",
@@ -304,17 +301,19 @@ const CONTEXT_MENU_SUPPRESS_RE =
 // room for a tooltip), so neither is ever wrapped in one. Sub/Submenu triggers
 // are excluded by name as well, pinning that idiom rather than resting on the
 // absence of a wrapper. Discriminating on a `Reason`-suffixed value instead
-// would miss the live sites whose hint is a bare conditional string rather than
-// a named reason (the discussions category menu, the branch trigger).
+// would have missed sites whose hint was a bare conditional string rather
+// than a named reason (the discussions category menu and the branch trigger,
+// both since converted).
 // The tempered `(?!</)` steps hold the match inside one unclosed element chain,
 // so a titled span that already closed cannot pair with a later sibling's
 // trigger; the `DisabledReasonButton` step makes the FIXED composition
 // unmatchable even where a wrapper survives to carry layout classes. Both
 // windows are PAIR_GAP with ~1.4x headroom: across the live sites the widest
-// title→trigger run measures 113 normalized chars, the widest trigger→disabled
-// 84. Accepted evasions, all zero-instance today: a hint delivered by something
-// other than `title`, a wrapper that is a component rather than a tag, and a
-// `disabled` computed too far from the tag.
+// title→trigger run measured 113 normalized chars, the widest trigger→disabled
+// 84 (measured at #305, before those sites converted). Accepted evasions, all
+// zero-instance today: a hint delivered by something other than `title`, a
+// wrapper that is a component rather than a tag, and a `disabled` computed
+// too far from the tag.
 const TITLED_TRIGGER_DISABLED_RE = new RegExp(
   `title\\s*=(?:(?!</|DisabledReasonButton)[\\s\\S]){0,${PAIR_GAP}}?` +
     `<(?![A-Za-z][\\w.]*Sub(?:menu)?Trigger\\b)[A-Za-z][\\w.]*Trigger\\b` +
@@ -520,7 +519,12 @@ export const CHECKS = [
     appliesTo: (file) =>
       file !== "src/lib/clip-title.ts" && notVendoredUi(file),
     scan: perFile(INLINE_CLIP_TITLE_RE),
-    allowlist: [],
+    allowlist: [
+      // PathText measures its two inner spans and titles the outer one, which
+      // never overflows itself — clipTitle can't serve that shape. It keeps
+      // the helper's remove-don't-blank contract.
+      "src/components/path-text.tsx",
+    ],
     message:
       "clip-measured tooltips route through clipTitle/clipTitleFromText (src/lib/clip-title.ts) — an inline rewrite re-opens the blank-title ancestor-suppression class; if the pairing is a false positive, add an allowlist entry with rationale",
   },
@@ -788,28 +792,14 @@ export const CHECKS = [
     name: "titled-disabled-trigger",
     appliesTo: notVendoredUi,
     scan: perFile(TITLED_TRIGGER_DISABLED_RE),
-    // DEFERRED, not exempt: every entry is a residual site of the class the
-    // pickers were converted out of, held back because each needs its own live
-    // keyboard pass. The gate blocks NEW sites; these come off the list as they
-    // convert, and the stale-entry rule turns each conversion into a required
-    // edit here.
-    allowlist: [
-      // The projects picker — the direct twin of the converted labels picker.
-      "src/features/conversations/ProjectsPopover.tsx",
-      // Category menu; its hint is a bare sign-in string rather than a reason
-      // prop, so the conversion has to introduce the reason first.
-      "src/features/discussions/DiscussionsPanel.tsx",
-      // Two menus (close options, more actions) whose `disabled` sits inside the
-      // render Button rather than on the trigger.
-      "src/features/issues/RemoteIssueView.tsx",
-      // Merge menus: the wrapper is what refuses the click a disabled Button
-      // drops, so converting them wants the live merge-gate pass.
-      "src/features/pulls/LocalPrView.tsx",
-      "src/features/pulls/RemotePrView.tsx",
-      // The branch trigger's wrapper also owns the header shrink cascade, so a
-      // conversion has to move those classes to wrapperClassName.
-      "src/features/repository/BranchSwitcher.tsx",
-    ],
+    // Every residual site of the class the pickers were converted out of has
+    // now converted too — the allowlist is empty on purpose, not pruned away:
+    // a fresh violation here is a NEW instance of the class, not a returning
+    // one. The regex's own blind spot still stands, though: a disabled branch
+    // that swaps out the whole trigger for a plain non-`*Trigger` element (the
+    // shape `PrMergeabilityBanner`'s update-branch caret used to take) carries
+    // no `*Trigger` tag for the pattern to anchor on.
+    allowlist: [],
     message:
       "a menu/popover trigger that carries its disabled reason on a titled wrapper is hover-only — a natively disabled trigger leaves the tab order, so keyboard and screen-reader users reach neither the control nor the reason; compose `<Trigger render={<DisabledReasonButton disabled reason/>}>` instead (src/components/disabled-reason-button.tsx), which holds the reason on a focusable aria-disabled button whose own useButton swallows activation; a site that genuinely cannot take the primitive needs an allowlist entry with rationale",
   },

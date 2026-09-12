@@ -1,7 +1,23 @@
 import { listReviews } from "@/lib/pulls/reviews-history";
+import { errorMessage } from "@/lib/tauri/invoke";
 import { getDismissedHeadMap } from "./dismissals";
+import {
+  type AutomationOutcome,
+  type AutomationOutcomeCode,
+  type AutomationTrigger,
+  recordAutomationActivity,
+} from "./history";
 import { triggerAutomations } from "./runner";
-import { ALL_ACTION_IDS } from "./types";
+import { loadAutomations, repoAutomationsFor } from "./store";
+import { type ActionId, ALL_ACTION_IDS, effectiveActions } from "./types";
+
+/** Why one mode didn't need a first review — the two genuine-false axes, kept apart
+ *  because they are different facts: a cancel writes a dismissal with no review at
+ *  all, so "already reviewed" would be a lie about a PR that has zero reviews. */
+interface BlockedMode {
+  action: ActionId;
+  code: "already-reviewed" | "head-dismissed";
+}
 
 /**
  * Per-`(kind, repo, ref)` EVERY head already fired for, `sameSha`-matched — an
@@ -129,43 +145,141 @@ export function maybeCatchUpMissedOpen(
   if (!viewerLogin) return;
 
   const now = Date.now();
+  // Decisions worth durable evidence, collected DURING the synchronous pre-filter
+  // and recorded afterwards — the author gate runs first, so a foreign PR (the
+  // poll's majority) can never reach the store and evict the user's own rows.
+  const skipped: {
+    candidate: CatchUpCandidate;
+    code: AutomationOutcomeCode;
+    detail?: string;
+  }[] = [];
   // Synchronous pre-filter: mine, has a head, opened recently, drafts only when
   // `reviewDrafts` is on, and not already attempted this session.
   const eligible = candidates
     .filter((c) => {
       if (!c.currentHeadSha) return false;
       if (c.author !== viewerLogin) return false;
-      if (c.isDraft && !reviewDrafts) return false;
+      if (c.isDraft && !reviewDrafts) {
+        skipped.push({ candidate: c, code: "draft-skipped" });
+        return false;
+      }
       const opened = Date.parse(c.createdAt);
-      if (Number.isNaN(opened)) return false;
-      if (now - opened > CATCH_UP_WINDOW_MS) return false;
+      if (Number.isNaN(opened)) {
+        // Shares the fail-closed code with a genuine window miss, but carries its
+        // own reason: the age this code usually implies was never measured here.
+        skipped.push({
+          candidate: c,
+          code: "too-old",
+          detail: "Skipped — couldn't read when this pull request was opened",
+        });
+        return false;
+      }
+      if (now - opened > CATCH_UP_WINDOW_MS) {
+        skipped.push({ candidate: c, code: "too-old" });
+        return false;
+      }
+      // Already attempted this session: self-resolving, so it records nothing.
       return !catchUpAttempted.has(`${repoPath}#${c.ref}@${c.currentHeadSha}`);
     })
     // Oldest first (lowest number) so the backlog drains in order, one per tick.
     .sort((a, b) => Number(a.ref) - Number(b.ref));
 
   const pick = eligible[0];
+  // Fire-and-forget (no await here), so the mark below still precedes every await
+  // in this function. Runs even when nothing was picked — a skipped PR's evidence
+  // doesn't depend on another PR being caught up. Candidates that are eligible but
+  // merely NOT PICKED record nothing: that deferral resolves within minutes by
+  // construction, so a durable row would be a stale lie.
+  void recordCatchUpSkips(repoPath, skipped).catch(() => undefined);
   if (!pick) return;
 
   // Mark BEFORE any await so a concurrent tick can't also claim this PR.
   catchUpAttempted.add(`${repoPath}#${pick.ref}@${pick.currentHeadSha}`);
 
-  void catchUpEligible(repoPath, pick).then((ok) => {
-    if (!ok) return;
-    triggerAutomations({
-      kind: "pr-open",
-      repoPath,
-      base: pick.base,
-      head: pick.head,
-      headSha: pick.currentHeadSha,
-      title: pick.title,
-      // The poll payload carries no body/commit subjects; the PR diff is the
-      // source of truth (pr-sync already fires them empty the same way).
-      body: "",
-      commitSubjects: [],
-      target: { type: "remote", number: Number(pick.ref) },
-    });
+  void catchUpEligible(repoPath, pick).then(
+    ({ eligible: ok, error, blocked }) => {
+      if (!ok) {
+        // An eligibility ERROR is recorded inside the core (it knows the reason); a
+        // genuine false is recorded here, one outcome PER MODE — "already reviewed"
+        // and "this head was dismissed" are different facts, and a cancelled run
+        // writes a dismissal with no review at all.
+        if (error === undefined && blocked && blocked.length > 0) {
+          void recordCatchUpDecision(repoPath, pick, blocked, "catch-up").catch(
+            () => undefined,
+          );
+        }
+        return;
+      }
+      triggerAutomations(
+        {
+          kind: "pr-open",
+          repoPath,
+          base: pick.base,
+          head: pick.head,
+          headSha: pick.currentHeadSha,
+          title: pick.title,
+          // The poll payload carries no body/commit subjects; the PR diff is the
+          // source of truth (pr-sync already fires them empty the same way).
+          body: "",
+          commitSubjects: [],
+          target: { type: "remote", number: Number(pick.ref) },
+        },
+        "catch-up",
+      );
+    },
+  );
+}
+
+/** Whether this repo has any effective `pr-open` action — the gate on every row
+ *  this module records, so a repo with no pr-open automation accrues none at all
+ *  (its dialog's empty state teaches instead). */
+async function prOpenAutomationEnabled(repoPath: string): Promise<boolean> {
+  const config = await loadAutomations();
+  const repo = await repoAutomationsFor(config, repoPath);
+  return effectiveActions(config, repo, "pr-open").length > 0;
+}
+
+/** One action-less catch-up row for a remote PR. Best-effort by construction —
+ *  `recordAutomationActivity` resolves null rather than rejecting. */
+async function recordCatchUpDecision(
+  repoPath: string,
+  row: { ref: string; title: string; currentHeadSha: string },
+  outcomes: AutomationOutcome[],
+  trigger: AutomationTrigger,
+): Promise<void> {
+  if (!(await prOpenAutomationEnabled(repoPath))) return;
+  await recordAutomationActivity(repoPath, {
+    trigger,
+    targetKind: "remote",
+    ref: row.ref,
+    title: row.title,
+    headSha: row.currentHeadSha,
+    outcomes,
   });
+}
+
+/** The pre-filter's skipped candidates, gated ONCE per call. Sequential so the
+ *  store's own queue takes them in order; the steady upsert coalesces repeats. */
+async function recordCatchUpSkips(
+  repoPath: string,
+  skipped: {
+    candidate: CatchUpCandidate;
+    code: AutomationOutcomeCode;
+    detail?: string;
+  }[],
+): Promise<void> {
+  if (skipped.length === 0) return;
+  if (!(await prOpenAutomationEnabled(repoPath))) return;
+  for (const { candidate, code, detail } of skipped) {
+    await recordAutomationActivity(repoPath, {
+      trigger: "catch-up",
+      targetKind: "remote",
+      ref: candidate.ref,
+      title: candidate.title,
+      headSha: candidate.currentHeadSha,
+      outcomes: [{ action: null, code, ...(detail ? { detail } : {}) }],
+    });
+  }
 }
 
 /**
@@ -185,7 +299,35 @@ export async function prOpenEligible(
   repoPath: string,
   ref: string,
   currentHeadSha: string,
+  trigger: AutomationTrigger = "pr-open",
 ): Promise<boolean> {
+  const { eligible } = await prOpenEligibleDetailed(
+    repoPath,
+    ref,
+    currentHeadSha,
+    trigger,
+  );
+  return eligible;
+}
+
+/**
+ * The eligibility core {@link prOpenEligible} maps to a boolean, distinguishing a
+ * genuine "every mode already reviewed" from a store failure that failed CLOSED —
+ * the pair reads identically at the call sites, and only this layer can tell them
+ * apart, so this is where the fail-closed trap leaves its evidence.
+ */
+async function prOpenEligibleDetailed(
+  repoPath: string,
+  ref: string,
+  currentHeadSha: string,
+  trigger: AutomationTrigger,
+): Promise<{
+  eligible: boolean;
+  error?: string;
+  /** Present on a GENUINE false: the axis that blocked each mode. Absent when the
+   *  verdict came from the fail-closed catch, where nothing is known. */
+  blocked?: BlockedMode[];
+}> {
   try {
     // One fresh read of each store for the whole PR instead of one per mode, and the two
     // concurrently — separate stores, independent queues. `fresh` reloads from disk and
@@ -197,29 +339,75 @@ export async function prOpenEligible(
       listReviews(repoPath, "origin", "remote", ref, { fresh: true }),
       getDismissedHeadMap(repoPath, "origin", "remote", ref, { fresh: true }),
     ]);
+    // The loop already knows which arm each mode hits, so keep it rather than
+    // re-deriving a reason at the log site from a bare boolean.
+    const blocked: BlockedMode[] = [];
     for (const mode of ALL_ACTION_IDS) {
       // Newest-first, so this mode's first entry is the latest review for it.
       const prior = reviews.find((r) => r.mode === mode);
-      if (prior) continue; // this mode already reviewed — no need on its account
+      if (prior) {
+        // this mode already reviewed — no need on its account
+        blocked.push({ action: mode, code: "already-reviewed" });
+        continue;
+      }
       const dismissed = dismissedByMode[mode];
       // A dismissed head matching the current head means this mode was deliberately
       // skipped for this head — it doesn't need a review either.
-      if (dismissed && sameSha(dismissed, currentHeadSha)) continue;
-      return true;
+      if (dismissed && sameSha(dismissed, currentHeadSha)) {
+        blocked.push({ action: mode, code: "head-dismissed" });
+        continue;
+      }
+      return { eligible: true };
     }
-    return false;
-  } catch {
-    return false;
+    return { eligible: false, blocked };
+  } catch (e) {
+    const detail = errorMessage(e);
+    // Fire-and-forget with its own catch, so the recording attempt is structurally
+    // incapable of changing the verdict below. This placement is what gives the
+    // Mark-ready call site (RemotePrView) evidence too.
+    void recordEligibilityError(
+      repoPath,
+      ref,
+      currentHeadSha,
+      trigger,
+      detail,
+    ).catch(() => undefined);
+    return { eligible: false, error: detail };
   }
 }
 
+/** The eligibility-error row, gated on this repo actually having a pr-open
+ *  automation (an error nobody's automation would have acted on is not evidence). */
+async function recordEligibilityError(
+  repoPath: string,
+  ref: string,
+  currentHeadSha: string,
+  trigger: AutomationTrigger,
+  detail: string,
+): Promise<void> {
+  if (!(await prOpenAutomationEnabled(repoPath))) return;
+  await recordAutomationActivity(repoPath, {
+    trigger,
+    targetKind: "remote",
+    ref,
+    title: "",
+    headSha: currentHeadSha,
+    outcomes: [{ action: null, code: "eligibility-error", detail }],
+  });
+}
+
 /**
- * Catch-up wrapper over {@link prOpenEligible}. Runs after the synchronous
+ * Catch-up wrapper over {@link prOpenEligibleDetailed}. Runs after the synchronous
  * attempt-mark, so a failure here won't re-enter the same PR this session.
  */
 async function catchUpEligible(
   repoPath: string,
   pick: CatchUpCandidate,
-): Promise<boolean> {
-  return prOpenEligible(repoPath, pick.ref, pick.currentHeadSha);
+): Promise<{ eligible: boolean; error?: string; blocked?: BlockedMode[] }> {
+  return prOpenEligibleDetailed(
+    repoPath,
+    pick.ref,
+    pick.currentHeadSha,
+    "catch-up",
+  );
 }

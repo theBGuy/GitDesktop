@@ -1,5 +1,6 @@
 import {
   BellIcon,
+  CaretRightIcon,
   CaretUpIcon,
   ChatCircleIcon,
   CheckCircleIcon,
@@ -26,6 +27,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
+import { useAutomationHistoryDialog } from "@/features/automations/AutomationHistoryDialog";
 import { openAutomationResult } from "@/lib/automations/results";
 import { displayLogin } from "@/lib/git/bot-login";
 import type { RemoteLens } from "@/lib/git/types";
@@ -202,6 +204,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   const openPr = useUiStore((s) => s.openPr);
   const openRun = useUiStore((s) => s.openRun);
   const openAgentTab = useUiStore((s) => s.openAgentTab);
+  const openHistory = useAutomationHistoryDialog((s) => s.open);
   const aiEnabled = useAiEnabled();
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -384,6 +387,26 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
             />
           ))}
         </div>
+      )}
+
+      {/* The dock's one way into the automation decision log. Needs a current
+          repo: the strip variant renders on welcome/settings/help, where a
+          repo-scoped dialog would have nothing to open. */}
+      {aiEnabled && repoPath && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full justify-between border-t px-3 text-muted-foreground"
+          onClick={() => {
+            // Close FIRST: Base UI returns focus to the popover's trigger as it
+            // unwinds, which would steal it from a dialog opened before that.
+            onClose();
+            openHistory(repoPath);
+          }}
+        >
+          Automation history
+          <CaretRightIcon />
+        </Button>
       )}
     </>
   );
@@ -650,6 +673,7 @@ const TONE_CLASS: Record<NotificationTone, string> = {
  *  (e.g. `ci-run`, whose success/failure lives in the tone). */
 const KIND_GLYPH: Partial<Record<NotificationKind, typeof CheckCircleIcon>> = {
   "review-ready": SparkleIcon,
+  "review-posted": SparkleIcon,
   "review-failed": SparkleIcon,
   "checks-passed": CheckCircleIcon,
   "checks-failed": XCircleIcon,
@@ -672,10 +696,14 @@ const KIND_GLYPH: Partial<Record<NotificationKind, typeof CheckCircleIcon>> = {
  *  is therefore already on screen from every section. A `review-failed` from an
  *  *automation* still points at Review even though the panel shows idle: those
  *  runs use a separate `auto:<n>` key namespace, but Review is where the Run
- *  button lives. Read with a row's plain-string kind — a hydrated row can carry
- *  a kind from an older build, so a lookup must miss, never fail. */
+ *  button lives. `review-posted` means the automation already posted the review
+ *  as a PR comment, so it lives in the Conversation timeline; `review-ready` is
+ *  saved to the review panel un-posted, so Review is its landing. Read with a
+ *  row's plain-string kind — a hydrated row can carry a kind from an older
+ *  build, so a lookup must miss, never fail. */
 const KIND_SECTION: Partial<Record<NotificationKind, PrSection>> = {
   "review-ready": "review",
+  "review-posted": "conversation",
   "review-failed": "review",
   "pr-opened": "conversation",
   "pr-merged": "conversation",

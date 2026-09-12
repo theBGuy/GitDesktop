@@ -254,29 +254,42 @@ From here:
     label: "My work",
     body: `# My work
 
-**My work** is a cross-repo inbox: your open pull requests and issues on GitHub,
-newest first, without opening a repository to go looking. Open it with
-{{kbd:open-my-work}}, from the **My work** button on the welcome screen, or from the
-command palette (*My work*).
+**My work** is a cross-repo inbox: your open pull requests, merge requests, and
+issues from GitHub, GitLab, and Bitbucket, newest first, without opening a repository
+to go looking. Open it with {{kbd:open-my-work}}, from the **My work** button on the
+welcome screen, or from the command palette (*My work*).
 **Back** in the header, or Esc, closes the inbox and returns you to the screen
 underneath.
 
-It gathers anything you **authored**, are **assigned** to, were **mentioned** in, or
-**commented on**, together with anything **awaiting your review**. The search covers
-every repository your GitHub account can see, so items from repos you've never cloned
-sit alongside the ones you have. GitHub only for now.
+On **GitHub** it gathers anything you **authored**, are **assigned** to, were
+**mentioned** in, or **commented on**, together with anything **awaiting your
+review**, across every repository your account can see, so items from repos you've
+never cloned sit alongside the ones you have. **GitLab** contributes the merge
+requests you authored, are assigned to, or are asked to review, plus the issues
+you authored or are assigned to, from every host you're signed in to, and
+**Bitbucket** the pull requests from the Bitbucket repositories in your recents
+(Bitbucket has no account-wide search, so the inbox asks the checkouts it knows).
+
+Only a forge you're signed in to is asked, and each one answers on its own: the list
+paints once with everything your forges returned, waiting a moment for a slower one
+rather than reshuffling, and a forge you haven't connected is simply absent. One that
+still lags, or couldn't be reached, gets a muted line under the rows — what's already
+there stays put while it catches up.
 
 ## Reading the list
 
 Each row is a single line: a pull-request or issue glyph, the item's number, its
-title, the repository it lives in, and when it last changed. The number beside the
-title in the header is how many items came back, and each tab carries its own count.
+title, then the forge's mark beside the repository it lives in, and when it last
+changed. That mark is monochrome, drawn in the same ink as the rest of the row. The
+number beside the title in the header is how many items came back, and each tab
+carries its own count.
 
-Rows are ordered by **most recently updated**. The search fetches a single page of
-results, so a big inbox won't arrive whole. When there may be more than the page holds,
-a note says so at the bottom: *This view fetches one page of results. Filter to narrow
-the list.* You'll see it under the rows, and under **No items match** as well, since a
-filter that finds nothing is when an item off the page matters most.
+Rows are ordered by **most recently updated**, merged across the forges that answered.
+Each forge fetches a single page of results, so a big inbox won't arrive whole. When
+items may be missing (a page filled up, or part of a fetch didn't arrive), a note
+says so at the bottom: *This list may be missing items. Filter to narrow what's
+loaded.* You'll see it under the rows, and under **No items match** as well, since a
+filter that finds nothing is when a missing item matters most.
 
 ## Narrowing and opening
 
@@ -292,13 +305,13 @@ leaving it. Clicking a row does the same thing.
 Where a row opens depends on whether GitDesktop recognizes its repository as one of
 yours. An item from a repository you've added usually opens **in the app**: GitDesktop
 switches to that repository and lands on the pull request or issue. Everything else
-opens **on GitHub in your browser**. The match reads each repo's resolved owner, host,
-and the name its remote spells, so a clone sitting in a folder you renamed still counts
-as yours once GitDesktop has looked at it; one you added moments ago, before any of that
-is resolved, can still go to the browser. The **↗** on a row is the signal to trust: it
-marks every row that opens on GitHub, so you know which you're getting before you press
-Enter. The inbox itself changes nothing: it finds the item and hands you to the place
-where you can act on it.
+opens **on its own host in your browser**. The match reads each repo's resolved owner,
+host, and the name its remote spells, so a clone sitting in a folder you renamed still
+counts as yours once GitDesktop has looked at it; one you added moments ago, before any
+of that is resolved, can still go to the browser. The **↗** on a row marks the ones
+GitDesktop already knows open in the browser; a row without it can still land there
+when its checkout can't be confirmed at open time. The inbox itself changes nothing:
+it finds the item and hands you to the place where you can act on it.
 
 A pull request usually lands where its branch already is. When one of the repository's
 worktrees has that pull request's head branch checked out, GitDesktop opens it there
@@ -309,19 +322,27 @@ request from a fork, a branch that isn't checked out anywhere, a slow network. A
 shows a small spinner while GitDesktop works out where to open it. Issues skip the
 branch check and open in the main workspace.
 
-{{Secondaryclick}} a row for **Open on GitHub** and **Copy link**; on a pull request
-from a repository you've added, **Open in main workspace** heads the menu and skips
-the worktree for that one open. The menu opens from the keyboard too, with
-{{key:shift+f10}} or the Menu key on the highlighted row. {{key:shift+enter}} opens
-the main workspace directly, Shift-click from the pointer.
+{{Secondaryclick}} a row for **Open on GitHub / GitLab / Bitbucket** (whichever host
+the item lives on) and **Copy link**; on a pull request from a repository you've
+added, **Open in main workspace** heads the menu and skips the worktree for that one
+open. The menu opens from the keyboard too, with {{key:shift+f10}} or the Menu key on
+the highlighted row. {{key:shift+enter}} opens the main workspace directly,
+Shift-click from the pointer.
 
 ## Keeping it current
 
-**Refresh** in the header re-runs the search and spins while the fetch is in flight.
+**Refresh** in the header re-runs every connected forge and spins while the fetches
+are in flight. It re-checks which forges are connected too, so one you signed in to
+while the inbox was open joins the list on the next refresh.
 
-GitHub features here ride the GitHub CLI (\`gh\`). When it's missing, the screen names
-that and points at \`gh auth login\`; anything else that goes wrong shows the underlying
-error. Either way there's a **Retry**. See *Getting started* for the sign-in options.`,
+Each forge rides its own connection: GitHub the GitHub CLI (\`gh\`), GitLab the GitLab
+CLI (\`glab\`), and Bitbucket the Atlassian API token you saved. Set them up in
+**Settings → Accounts**, and see *Getting started* for the sign-in options. With none
+of them connected the screen says so and points you at the sign-in. When every
+connected forge fails with nothing to show, the screen reports it with a
+**Retry**, naming each forge that failed when more than one did. If your only
+connected forge failed for a missing CLI or token, the screen points you at
+that setup instead of the error behind it.`,
   },
   {
     id: "repo-settings",
@@ -458,9 +479,11 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 - **Hunk-level staging** — in a file's diff, each hunk has its own Stage / Unstage /
   Discard buttons.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,
-  then stage or discard just those. Hold {{key:mod}} while dragging and the new run joins
-  the selection instead of replacing it, so one selection can mix added and removed lines
-  across as many hunks as you like; a plain drag starts a fresh one.
+  spanning as many hunks as you like, then stage or discard just those. In both the
+  unified and the split view a drag picks up every changed line it crosses, added and
+  removed alike; hold Shift while dragging to take one side of a change on its own.
+  Hold {{key:mod}} while dragging and the new run joins the selection instead of
+  replacing it; a plain drag starts a fresh one.
   {{kbd:stage-selected-lines}} stages the selection (or unstages it, on a staged file's
   diff) without reaching for the button, and the command palette offers **Clear line
   selection**.
@@ -469,6 +492,17 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
   palette ({{kbd:command-palette}}) for Stage / Unstage selected files.
 - Filter the list by path, or by category (new / modified / deleted, included /
   excluded) with the funnel button.
+- The **Directory tree view** button in the filter row swaps the flat list for a
+  compacted directory tree: single-child folder chains merge into one row, and shared
+  prefixes roll up. Click a folder to collapse or expand it (Enter or Space does the
+  same); from the keyboard ↑ and ↓ walk folders and files alike, ← folds the folder
+  you're on or jumps to its parent, and → unfolds a folder or steps inside it.
+  Collapsing a folder drops its hidden files from a multi-selection, and the diff you
+  have open stays open. Selection, staging, and filtering behave the same in both
+  views; file rows keep their {{secondaryclick}} menu, while a folder row opens the
+  whole-list menu. Your choice is remembered for every repository. *Toggle
+  directory tree view* in the command palette ({{kbd:command-palette}}) flips it
+  too (palette-only by default — bind a key in **Settings → Keyboard**).
 - **Discard all changes…** clears the whole working tree after a confirm. It sits on the
   changes list's own {{secondaryclick}} menu (over the header or the empty space below
   the files), in the branch ⋮ menu beside **Stash all changes…**, and in the command
@@ -496,12 +530,15 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will
-  ship; a deleted file previews its last version instead, and frontmatter (an unbroken
-  leading \`---\` or \`+++\` block) stays out of the render. MDX renders approximately:
-  components and expressions appear as plain text. **Raw** stays the default for
-  every file. The toggle appears on the working tree, commit details, stashes, and an
-  agent session's worktree changes; a pull request's **Files** tab, which reads from
-  the remote, doesn't offer it. *Toggle Markdown preview* in the command palette
+  ship, and frontmatter (an unbroken leading \`---\` or \`+++\` block) stays out of the
+  render. MDX renders approximately: components and expressions appear as plain text.
+  **Raw** stays the default for every file. The toggle appears on the working tree,
+  commit details, stashes, an agent session's worktree changes, a file's history, and
+  branch compare — on those a deleted file previews its last version instead. A pull
+  request's **Files** tab (and a commit drilled into from its **Commits** tab) offers it
+  once the PR's commits are available locally, after **Checkout** or a fetch that brought
+  them in; those read the new version alone, so a file the PR deletes shows
+  **Nothing to preview**. *Toggle Markdown preview* in the command palette
   (palette-only by default — bind a key in **Settings → Keyboard**) flips it too.
 - Very large diffs are capped (with a **Show full diff** escape hatch) so a huge file
   never freezes the view.
@@ -1035,9 +1072,35 @@ An open pull request gets a **Projects** picker alongside its **labels**, **assi
 **reviewers**: chips for the **GitHub Projects** it belongs to, and a popup to link or
 unlink it (see *Issues*).
 
-The list toolbar's **funnel** filters the list by **author or label** — type in its search
-box to narrow both groups at once, toggle any number of options (each shows its match
-count), and long author lists scroll inside the popup.
+The list toolbar's **All | Mine | Needs review** switch scopes the list in one click:
+**Mine** is everything assigned to you or awaiting your review, and **Needs review** is
+that same set split by how far you've got with each one. **All** clears the funnel along
+with it, author and label picks included. The **funnel** beside it holds those axes one
+by one (**Assigned to me**, **Review requested: me**, **My teams**) alongside searchable
+**author** and **label** rows, each showing how many of the loaded rows it covers, with
+long lists scrolling inside the popup. On **GitHub** and **GitLab** the filtering happens
+on the server, across the whole repository you're currently viewing. On a very large
+GitLab repository a filter can need more of the list than GitDesktop searches, and the
+list says so rather than guessing. Type any author or label name and the funnel offers to
+filter by exactly that, whether or not the list has shown it. Several picks within one
+group widen the list (any of them matches), while picks in different groups narrow it.
+The **Mine** rows are remembered per repository; author and label picks last for the
+session.
+
+**Group by my review**, the funnel's last row and what **Needs review** turns on, splits
+the open list into **Not reviewed yet**, **Updated since my review**, and **Reviewed**,
+each collapsible and carrying its count; *updated* means any activity after your last
+review, including commits, comments, and labels. The grouping covers the list as it
+stands; a list grown past a few hundred rows can outrun the review check, and then it
+says so and leaves the list flat. The command palette carries every scope:
+**Show all pull requests**, **Filter pull requests: mine**, **Filter pull requests: needs
+my review**, and **Toggle grouping by my review**. The assignee, reviewer, author, and
+label axes work on **GitHub** and **GitLab**; **My teams** and the review grouping are
+GitHub-only, and on GitLab those two rows say so. On **Bitbucket** the switch doesn't
+appear, the funnel's **Mine** and **Author** rows name what it can't filter by
+(assignees, review requests, and authors), and a label pick narrows the pull requests
+already loaded. A GitHub token without **read:org** can't list your teams, so the
+**My teams** row says so and hands you the \`gh auth refresh -s read:org\` that fixes it.
 
 The Conversation tab is a single **date-sorted activity feed** — reviews, comments,
 pushed commits, and events all interleaved oldest-to-newest. Every entry carries a
@@ -1647,8 +1710,14 @@ GitLab actions are available.)
 ## GitHub issues
 
 Browse, filter, and open issues in a full view: body, comments, labels, assignees,
-milestone, and reactions. The **funnel** filter is the same searchable author/label
-popup as the PR list. **Create** an issue, comment with the Markdown editor, edit,
+milestone, and reactions. An **All | Mine** switch in the toolbar scopes the list to the
+issues **assigned to you** (**All** clears the funnel along with it), and the **funnel**
+beside it is the same popup as the PR list: an **Assigned to me** row over searchable
+author and label rows. On **GitHub** and **GitLab** those axes are applied on the server,
+across the whole repository you're currently viewing — see *Pull requests* for how they
+combine. Both scopes are in the command palette as **Show all issues** and **Filter
+issues: assigned to me**.
+**Create** an issue, comment with the Markdown editor, edit,
 add labels, **close / reopen** (closing asks first; either way your drafted comment posts
 alongside), **lock**, and **transfer** an issue to another repo.
 The comment box sits at the bottom of the issue,
@@ -2561,7 +2630,32 @@ cancelling an auto re-review dismisses that commit so it won't run again on rest
 new commit still triggers. On pull request opened also catches up your own PRs opened outside the
 app (via the CLI, the web, or a bot) that never got their initial review — a non-draft PR of yours
 opened in the last two weeks and not yet reviewed gets one automatically on the next poll. Existing rules from the older flat list are migrated automatically on
-first load; any duplicates are merged and disclosed once with a toast.`,
+first load; any duplicates are merged and disclosed once with a toast.
+
+## Automation history
+
+**Automation history…** (the repo ⋮ menu, or the *Automation history* row at the bottom of
+the activity bell) is this repository's decision log. It opens on the repository's effective
+configuration, one line per moment, then lists every recorded decision, newest first.
+
+- **Skips are recorded too.** Each line names the action it belongs to and how it ended:
+  posted as a comment, review saved, skipped because branch conditions didn't match, already
+  reviewed, a draft while draft reviews are off, claimed by another review run, failed (with
+  the error), timed out, or cancelled. When a moment is switched off entirely, nothing is
+  recorded for it, and the configuration lines at the top say so.
+- **Repeats read as summaries.** A decision that recurred coalesces into one row with its
+  count — "Skipped 23 commits — branch conditions didn't match" for a run of commits, or
+  "(seen 4×)" for a pull request checked again.
+- **Pull request rows open their pull request** on click or Enter; commit rows and markers
+  are text. The arrow keys walk the whole list.
+- **Pausing is logged.** Once you have an automation enabled, turning **Hide AI** on
+  records *Automations paused*, and turning it off records *Automations resumed*, so a
+  quiet stretch in the log carries its own reason.
+
+The command palette ({{kbd:command-palette}}) can also run your enabled automations
+against the pull request you currently have open, without waiting for the next trigger.
+It needs a pull request in view to have a target, and it confirms before starting, since
+the result posts as a comment on that pull request.`,
   },
   {
     id: "hooks",

@@ -12,6 +12,95 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-09-10
+
+### Changed
+
+- The markdown Raw / Preview toggle now covers a file's history, branch compare, and pull request files whose commits are available locally (for example after checking out the PR). File History and branch compare also gain whole-file syntax highlighting, and File History gains image comparisons.
+- In the unified diff view, dragging across the line numbers now selects every
+  changed line the drag crosses — added and removed lines land in one
+  selection, ready to stage, unstage, or discard together.
+
+### Fixed
+
+- Settings → About opens reliably, reporting your system details and the
+  status of every command-line tool GitDesktop uses.
+- Branch compare's image diffs now show the old side as of the branches' fork point, matching what the text diff compares against.
+- Whole-file syntax highlighting now waits for the selected commit's or stash's diff to load instead of briefly pairing with the previous selection's.
+
+## [0.12.1] - 2026-09-09
+
+### Changed
+
+- An AI draft you start in a create dialog keeps running after you close the
+  dialog: reopen it and the whole draft is waiting, or press **View** on the
+  toast that announces it. Repository-settings description generations survive
+  closing settings the same way, and Enter submits a dialog exactly when its
+  submit button would.
+- Cleaning up many branches at once is faster.
+- File and directory paths now truncate in the middle: the filename and its
+  leading context stay visible when space runs short, across the Changes list,
+  diff headers, worktree rows, and dozens of other path displays.
+- The sidebar collapse control stays in the tab row when expanded and sits at the top
+  of the icon rail, above the tab icons, when collapsed.
+- When bringing uncommitted changes to another branch isn't possible, the stash
+  offer that follows now leads with **Stash and switch** and comes with **Reapply
+  after switching** already ticked for that switch (unless you unticked it
+  yourself), so your changes still land on the new branch. Your saved preference
+  stays as you set it.
+- Opening a linked worktree keeps the repository's name in the header, with the
+  worktree named beneath it, so you can always see which repository you're in — and
+  the repo switcher highlights the main workspace's entry while you're in one of its
+  worktrees.
+
+### Fixed
+
+- Posting an AI review now warns when the text carries `#N`-style references
+  that will link and notify other threads, and asks before publishing. Automated
+  runs, where there's no one to ask, post those references as plain text where
+  the format allows and name in the comment any that stay live.
+- The diffs AI features read, and the file lists agent tools see, now match ignore rules against names exactly as git records them, so files with unusual names follow your rules instead of being hidden outright.
+- Amending a pushed commit now waits for branch protection rules to finish
+  loading before offering the force-push, and re-checks them when you confirm
+  it.
+- Every finished automated review lands in Notifications with a click-through:
+  a pull request review opens its PR, a commit review opens the review text.
+- Automated reviews of a remote pull request cover the PR's real changes even
+  when the local copies of its branches are behind the remote.
+- Committing, cleaning up branches, and editing branch rules keep working while
+  you're offline — branch rules load from disk without waiting for a connection.
+- Automated commit reviews are kept between sessions, so the review text
+  (including partial output from a run that hit its timeout) is still there
+  after a restart and reopens from its notification.
+- The Projects picker, the discussions category filter and New-discussion
+  button, issue close and more-actions menus, pull-request merge and review
+  controls, the branch-update options caret, the branch switcher, and the
+  clone dialog's Clone button now explain why they're unavailable to keyboard
+  and screen-reader users too: the disabled control stays focusable,
+  announces its reason, and shows it on hover. A held pull-request merge and
+  the discussions controls now name what's actually holding them.
+- Errors from GitHub reads now lead with what couldn't be loaded in plain language; the technical detail sits one click away under Details.
+- File paths in a session transcript stay clickable for the life of the message,
+  and middle-clicking one opens it in your editor just like a left click.
+- Promotion branches (from **Branch rules**) keep their direction of travel:
+  **Update from the default branch** is withheld on them, menu items and shortcut
+  alike, with the reason on the label. Updating one from its own upstream still works.
+- Push failures explain themselves on GitLab and Bitbucket too: a push to an
+  archived GitLab project reads as such, and a Bitbucket remote with no
+  password stored reads the same as a missing credential anywhere else.
+- **View on GitHub / GitLab / Bitbucket** and its shortcut are ready as a repository
+  opens, using the host GitDesktop already knows for it.
+- **View on GitHub / GitLab** works without a signed-in CLI. It now resolves the
+  repository's web address straight from the remote, the same way **View on
+  Bitbucket** always has — including GitLab's self-managed instances and
+  subgroups, and SSH remotes on either host.
+- Long lists stay cleanly laid out while you filter them — the clone and Explore
+  repository browsers, **Repository files**, and **Code TODOs** keep every row at its
+  own height as results narrow, and switching provider or file tabs brings that list
+  back in at the top.
+- The **Delete worktree** dialog says when the worktree's branch is already archived, and
+  the completion message matches the removal exactly.
+
 ## [0.12.0] - 2026-09-07
 
 ### Added
@@ -3814,7 +3903,9 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/theBGuy/GitDesktop/compare/v0.12.1...v0.12.2
+[0.12.1]: https://github.com/theBGuy/GitDesktop/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/theBGuy/GitDesktop/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/theBGuy/GitDesktop/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/theBGuy/GitDesktop/compare/v0.10.0...v0.11.0

@@ -12,11 +12,16 @@ use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
-use crate::forge::glab::{run_glab, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT};
+use crate::forge::glab::{
+    run_glab, run_glab_api_for_host, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT,
+};
 use crate::forge::model::{
     namespace_set, Capabilities, CompletedReviewerOut, ForgeForkActivity, ForgeForkEntry,
     ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
-    ForgeTimelineEventOut, ForgeUserRef, Implemented, Provider,
+    ForgeTimelineEventOut, ForgeUserRef, Implemented, Provider, RemoteListFilter,
+};
+use crate::forge::my_work::{
+    merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
 };
 use crate::forge::{
     cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
@@ -27,9 +32,9 @@ use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
     ApprovalState, CommitCommentOut, DraftCommentIn, ExternalReviewItem, PrAuthor, PrCheckOut,
-    PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrInfo, PrListLabel, PrMergeability, PrPollInfo,
-    PrRef, PrStackInfo, PrStackMember, PrThreadOut, RepoLabel, ReviewSubmitOut, ReviewThreadOut,
-    STACKS_TIMEOUT,
+    PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrHeadRef, PrInfo, PrListLabel, PrMergeability,
+    PrPollInfo, PrRef, PrStackInfo, PrStackMember, PrThreadOut, RepoLabel, ReviewSubmitOut,
+    ReviewThreadOut, STACKS_TIMEOUT,
 };
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
 use crate::state::AppState;
@@ -186,6 +191,288 @@ pub async fn owned_namespaces() -> AppResult<Vec<String>> {
     // A GitLab username IS the personal namespace's full path. Groups you own are a
     // separate namespace and aren't resolved here, so Fork still shows on those.
     Ok(namespace_set([viewer_username().await]))
+}
+
+// ── My work (cross-repo inbox) ────────────────────────────────────────────────
+//
+// Account-scoped, across every host glab is signed in to. GitLab has no single
+// "involves me" qualifier, so the inbox is five REST scopes per host — three over
+// merge requests, two over issues — folded by the neutral merge.
+
+/// Per-leg page size for the My work scopes. GitLab's REST `per_page` maxes at
+/// 100, so a leg returning exactly this many is the leg's own truncation signal.
+const GITLAB_MY_WORK_PER_PAGE: usize = 100;
+
+/// The `--hostname` argv for a My work leg, or `None` when the host can't be
+/// addressed safely and must be SKIPPED.
+///
+/// EVERY host gets the flag, gitlab.com included: with no repo cwd, an omitted
+/// `--hostname` resolves to glab's CONFIGURED default — the top-level `host:` key
+/// or `GITLAB_HOST` — not to gitlab.com, whatever `glab api --help` claims
+/// (measured on glab 1.105: a config `host: bogus.invalid` made a bare
+/// `glab api user` dial `https://bogus.invalid/api/v4/user`). A self-managed
+/// default would otherwise silently return zero gitlab.com items and fetch the
+/// self-managed host twice.
+///
+/// A `hosts:` key is config-sourced and therefore untrusted argv, and the
+/// authority charset admits a leading `-` that glab would read as a flag. Such a
+/// key is a config artifact, not a reachable instance — `hosts_from_config`
+/// deliberately reports anchor and alias keys as hosts — so it is skipped rather
+/// than failing the arm, which stays reserved for FETCH errors against a host we
+/// really can address.
+///
+/// A PORTED value is skipped for the same reason: glab rejects it outright
+/// (measured on 1.105 — `--hostname host:8443` exits with "Error parsing
+/// --hostname: invalid hostname", scheme or no scheme), so it names nothing this
+/// arm can reach. Rarely hit — the enumeration's own sources keep ports out (saved
+/// keys are port-stripped, and a ported token target is refused rather than
+/// stripped) — but the gate, the doc and the test have to agree on what a ported
+/// host means, and `is_addressable_host` is the one place that rule lives, shared
+/// with the token-scoping decision so the two can't disagree about reachability.
+fn my_work_hostname(host: &str) -> Option<&str> {
+    crate::forge::glab::is_addressable_host(host).then_some(host)
+}
+
+/// The project full path, owner and name of a GitLab web URL — the segments
+/// before its `/-/` marker (`https://host/group/subgroup/proj/-/issues/5`).
+///
+/// `owner` is the segment immediately BEFORE the name, not the whole namespace:
+/// that is the spelling `git::repo::parse_owner_host` persists on `RecentRepo`,
+/// and the frontend's local-repo match compares the two. So on a nested group the
+/// full path is longer than `owner/name` rejoined, by design.
+fn my_work_project_from_web_url(web_url: &str) -> Option<(String, String, String)> {
+    let path = crate::forge::remote_path(web_url)?;
+    let (full_path, _) = path.split_once("/-/")?;
+    let segs: Vec<&str> = full_path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() < 2 {
+        return None;
+    }
+    Some((
+        full_path.to_string(),
+        segs[segs.len() - 2].to_string(),
+        segs[segs.len() - 1].to_string(),
+    ))
+}
+
+/// Narrow one raw scope element to a wire item, or `None` when it can't address
+/// anything — a record without iid, title, or a parseable project URL has no
+/// usable link, so it is skipped rather than sinking the leg.
+fn my_work_item_from_value(raw: &serde_json::Value, is_pull_request: bool) -> Option<MyWorkItem> {
+    let number = raw.get("iid").and_then(serde_json::Value::as_u64)?;
+    let title = raw
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .filter(|t| !t.is_empty())?
+        .to_string();
+    let url = raw
+        .get("web_url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|u| !u.is_empty())?
+        .to_string();
+    let (repo_full_name, repo_owner, repo_name) = my_work_project_from_web_url(&url)?;
+    Some(MyWorkItem {
+        provider: Provider::GitLab,
+        number,
+        title,
+        is_pull_request,
+        repo_full_name,
+        repo_owner,
+        repo_name,
+        // Always Some in practice — the project parse above already required a
+        // parseable authority — so this only models the field's stated absence.
+        host: crate::forge::remote_host(&url).unwrap_or_default(),
+        url,
+        updated_at: normalize_updated_at(
+            raw.get("updated_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        ),
+        author_login: raw
+            .pointer("/author/username")
+            .and_then(serde_json::Value::as_str)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string),
+    })
+}
+
+/// The `reviewer_username` value for the review scope, or an error when the
+/// identity read came back degenerate.
+///
+/// A BLANK filter is not a narrow filter — GitLab drops it and answers the
+/// unfiltered query (measured on gitlab.com: `scope=all&reviewer_username=` and
+/// `…=%20` each returned a full 100-item page, identical to sending no filter,
+/// where the real username returned 0). So an empty username would turn "awaiting
+/// my review" into "every open MR I can see" and pour a page of strangers' work
+/// into the inbox. `GlabUser.username` is a plain `String`, so `""` deserializes
+/// happily — this is the only thing standing between that payload and the query.
+fn reviewer_filter(username: &str) -> AppResult<String> {
+    if username.trim().is_empty() {
+        return Err(AppError::Glab(
+            "GitLab did not report your username, so the review filter can't be built.".into(),
+        ));
+    }
+    Ok(encode_query_value(username))
+}
+
+/// Fetch one My work scope and parse it into a leg. Tolerant per element (a
+/// malformed record is skipped, never blanking the page), but a top-level parse
+/// failure IS an error — an empty inbox and unreadable output must not look alike.
+async fn my_work_leg(
+    endpoint: &str,
+    hostname: &str,
+    is_pull_request: bool,
+) -> AppResult<MyWorkLeg> {
+    let out = run_glab_api_for_host(hostname, &[endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let raw: Vec<serde_json::Value> = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse your GitLab work items: {e}")))?;
+    let capped = raw.len() >= GITLAB_MY_WORK_PER_PAGE;
+    Ok(MyWorkLeg {
+        items: raw
+            .iter()
+            .filter_map(|v| my_work_item_from_value(v, is_pull_request))
+            .collect(),
+        capped,
+    })
+}
+
+/// Every open merge request and issue on ONE host: five scopes, since GitLab has
+/// no `involves:` equivalent — MRs authored / assigned / awaiting the user's
+/// review, and issues authored / assigned. The review scope needs the username
+/// because `scope=all` plus `reviewer_username` is the only filter GitLab offers
+/// for it.
+///
+/// All-or-error WITHIN the host: a half-fetched host is ambiguous in a way the
+/// user can't see, so any failing leg fails this host. Whether that sinks the
+/// whole column is [`gitlab_my_work`]'s call.
+async fn my_work_for_host(hostname: &str) -> AppResult<Vec<MyWorkLeg>> {
+    // Same network round trip as the legs below and fail-CLOSED (`?`), so it takes
+    // their timeout — not the short probe timeout `viewer_username` uses, which
+    // can afford to fail open.
+    let out = run_glab_api_for_host(hostname, &["user"], GLAB_NETWORK_TIMEOUT).await?;
+    let user: GlabUser = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not read your GitLab identity: {e}")))?;
+    // Fails this HOST rather than skipping it: the instance answered, so its items
+    // are real and their loss must show up as `truncated`, not vanish silently.
+    let reviewer = reviewer_filter(&user.username)?;
+    let per_page = GITLAB_MY_WORK_PER_PAGE;
+    // `order_by=updated_at&sort=desc` is required, not cosmetic: GitLab orders by
+    // `created_at` by default (measured — two orderings of one real account
+    // disagree), so a leg that fills `per_page` would drop the most recently
+    // updated items, which are exactly the ones this inbox exists to surface.
+    let scopes: [(String, bool); 5] = [
+        (format!("merge_requests?scope=created_by_me&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"), true),
+        (format!("merge_requests?scope=assigned_to_me&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"), true),
+        (
+            format!("merge_requests?scope=all&reviewer_username={reviewer}&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"),
+            true,
+        ),
+        (format!("issues?scope=created_by_me&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"), false),
+        (format!("issues?scope=assigned_to_me&state=opened&order_by=updated_at&sort=desc&per_page={per_page}"), false),
+    ];
+    // Independent reads of one host — run them concurrently (no spawn, so they may
+    // borrow) and take the FIRST error in leg order.
+    let fetched = crate::forge::futures_join_all(
+        scopes
+            .iter()
+            .map(|(endpoint, is_pull_request)| my_work_leg(endpoint, hostname, *is_pull_request)),
+    )
+    .await;
+    fetched.into_iter().collect()
+}
+
+/// Every open merge request and issue involving the signed-in GitLab user, across
+/// every host glab is signed in to.
+///
+/// Hosts are ISOLATED from each other: one unreachable instance must not blank a
+/// healthy one's items, so a failing host is dropped and the page it would have
+/// contributed is reported through `truncated` — the same flag a capped leg
+/// raises, meaning "items are missing from this page". The column still errors
+/// when NO host answered, so a total failure can't read as an empty inbox.
+///
+/// A host whose `hosts:` key isn't an addressable authority is skipped WITHOUT
+/// marking truncation: such a key is a config artifact naming no reachable
+/// instance ([`my_work_hostname`]), so nothing was lost.
+pub async fn gitlab_my_work() -> AppResult<MyWorkPage> {
+    // `account_hosts`, not `known_hosts`: the availability probe reads the same
+    // enumeration, and it covers the token-only session that has no saved host.
+    let hosts = crate::forge::glab::account_hosts().await;
+    if hosts.is_empty() {
+        return Ok(MyWorkPage::empty());
+    }
+    // A skipped key contributes no outcome at all — it neither answered nor
+    // failed, so it can't tip either branch of the fold.
+    let addressable: Vec<&str> = hosts.iter().filter_map(|h| my_work_hostname(h)).collect();
+    // Isolation covers a host's FAILURE; concurrency covers its LATENCY. Serial
+    // hosts stack their timeouts, so one unreachable instance (VPN down) would
+    // hold every healthy host's rows behind two full network timeouts — the
+    // identity call and the legs stage. `futures_join_all` preserves input order,
+    // so the fold's last-error stays deterministic by host.
+    let outcomes =
+        crate::forge::futures_join_all(addressable.into_iter().map(my_work_for_host)).await;
+    my_work_column(outcomes)
+}
+
+/// Fold the per-host outcomes into the column's one answer. Pure, so the four
+/// branches are pinned by tests rather than by a live multi-host account:
+/// any host answering yields a page (marked `truncated` when another was lost),
+/// every ATTEMPTED host failing surfaces the last error, and no host attempted at
+/// all is the same benign empty page as no GitLab configured.
+fn my_work_column(outcomes: Vec<AppResult<Vec<MyWorkLeg>>>) -> AppResult<MyWorkPage> {
+    let mut legs: Vec<MyWorkLeg> = Vec::new();
+    let mut any_ok = false;
+    let mut last_err: Option<AppError> = None;
+    for outcome in outcomes {
+        match outcome {
+            Ok(host_legs) => {
+                any_ok = true;
+                legs.extend(host_legs);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if !any_ok {
+        return match last_err {
+            Some(e) => Err(e),
+            None => Ok(MyWorkPage::empty()),
+        };
+    }
+    let mut page = merge_legs(legs, MY_WORK_LIMIT);
+    // A lost host's items are missing from a page that would otherwise claim to be
+    // the whole inbox — the same thing `truncated` already means for a capped leg.
+    page.truncated |= last_err.is_some();
+    Ok(page)
+}
+
+/// The head branch of ONE merge request, plus the project that branch lives in.
+///
+/// glab resolves the host from the repo's own remote (cwd), so a self-managed
+/// instance needs no `--hostname` here. A FORK's source project yields `""` for
+/// the head repo rather than a guess: the caller's worktree gate declines on an
+/// unknown, which is the safe direction, and the source project's full path isn't
+/// in this payload.
+pub async fn pr_head_ref(repo_path: &str, number: u64) -> AppResult<PrHeadRef> {
+    let path = project_path(repo_path).await?;
+    let endpoint = format!("projects/{}/merge_requests/{number}", encode_project(&path));
+    let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| AppError::Glab(format!("could not parse the MR head branch: {e}")))?;
+    let source = value
+        .get("source_project_id")
+        .and_then(serde_json::Value::as_u64);
+    let target = value
+        .get("target_project_id")
+        .and_then(serde_json::Value::as_u64);
+    Ok(PrHeadRef {
+        head_ref_name: value
+            .get("source_branch")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        head_repo_full_name: match (source, target) {
+            (Some(s), Some(t)) if s == t => path,
+            _ => String::new(),
+        },
+    })
 }
 
 /// The one-shot `git -c` credential entries that let a network op on a private
@@ -536,12 +823,544 @@ fn mr_stack_from_rows(open: &[PrInfo], number: u64) -> (Option<PrStackInfo>, Vec
     (Some(stack.clone()), members)
 }
 
+// ── Server-side list filters ──────────────────────────────────────────────────
+//
+// GitLab's list params take one value each (`assignee_username`, `reviewer_username`,
+// `author_username`) and `labels=` is an AND-of-all csv — measured on
+// `merge_requests?labels=bug,nosuchlabel`, which returns nothing — so no single
+// request can express an OR. A filtered list fans ONE axis group out over a leg per
+// member, unions the legs, and applies the remaining groups as client-side AND
+// predicates. The union argument holds: a row satisfying every group necessarily
+// satisfies the fanned one, so it is in the union.
+//
+// The bound on that completeness is the paging horizon, not the union: each leg walks
+// up to MAX_LEG_PAGES pages of FILTER_PAGE_SIZE rows, so a filtered answer is
+// whole-repo complete up to 500 rows per leg. Hitting that horizon is REFUSED, never
+// absorbed — the walk returns a `truncated` flag and `refuse_truncated_walk` errors
+// rather than letting a page with no completeness proof pose as the answer.
+// `walk_filtered_legs` owns the walk and states the guarantee in full.
+
+/// Cap on the fanned group's MEMBER count. Deliberately not a cap on legs: states
+/// multiply inside this budget rather than against it, so the same filter behaves
+/// identically on the Open tab (one state) and the Closed tab (two). The popover
+/// can't offer this many authors or labels at once — it's a runaway guard, not a
+/// product limit.
+const MAX_FILTER_MEMBERS: usize = 6;
+
+/// Rows one leg requests per page (GitLab's `per_page` ceiling).
+const FILTER_PAGE_SIZE: u32 = 100;
+
+/// Pages one leg may walk before its horizon truncates. 5 × [`FILTER_PAGE_SIZE`] =
+/// 500 rows per leg; past that a filtered answer is honestly incomplete rather than
+/// unboundedly expensive.
+const MAX_LEG_PAGES: u32 = 5;
+
+/// Requests one filtered list may spend across all its legs. Below the theoretical
+/// worst case (6 members × 2 states × 5 pages = 60) on purpose: the horizon rule
+/// below normally stops long before this, and this is the ceiling that bounds the
+/// pathological read.
+const MAX_FILTER_REQUESTS: usize = 30;
+
+/// One filtered list read: per-leg endpoint prefixes whose rows union into the page
+/// (the walker appends `&page=N`), plus the axes left CLIENT-side that must then be
+/// AND-ed over that union.
+#[derive(Debug, PartialEq, Eq)]
+struct GlFilterPlan {
+    endpoints: Vec<String>,
+    /// Author usernames, OR-ed together; empty means this axis isn't a predicate.
+    authors: Vec<String>,
+    /// Label names, OR-ed together; empty means this axis isn't a predicate.
+    labels: Vec<String>,
+}
+
+/// GitLab reads these two values as MAGIC on a `labels=` filter — "no labels at all"
+/// and "any label at all" — so a repo label literally named `None` or `Any` would
+/// filter to the wrong rows with no error. Matched case-INSENSITIVELY because GitLab
+/// does: measured on `gitdesktop-gitlab-demo`, `labels=None` and `labels=none` both
+/// returned only the unlabelled MR (!13), `labels=Any` and `labels=any` both only the
+/// labelled one (!1). LABELS ONLY: the username params treat these as ordinary
+/// usernames (measured: `assignee_username[]=None` returned `[]`, not the unassigned
+/// rows the magic would select), so guarding them would refuse a real user's name.
+const GL_MAGIC_FILTER_VALUES: [&str; 2] = ["none", "any"];
+
+/// Reject a label GitLab would read as a magic filter rather than as itself. Refusing
+/// is the whole guard: the value comes from UI state, and one GitLab silently
+/// reinterprets must be an error, never a quietly wrong list.
+fn reject_magic_filter_value(axis: &str, value: &str) -> AppResult<()> {
+    if GL_MAGIC_FILTER_VALUES
+        .iter()
+        .any(|magic| value.eq_ignore_ascii_case(magic))
+    {
+        return Err(AppError::InvalidArgument(format!(
+            "GitLab reads {value:?} as a special {axis} filter (\"none\" / \"any\"), \
+             so it can't be filtered on by that name"
+        )));
+    }
+    Ok(())
+}
+
+/// Plan a filtered list read. `resource` is `merge_requests` or `issues`, `states`
+/// are GitLab's own state values (the closed PR filter spans two, doubling the
+/// legs), and `viewer` is the signed-in username — required only when a "mine" axis
+/// is active.
+///
+/// The fanned group is the first ACTIVE one by priority — mine, then authors, then
+/// labels — and every other active group becomes a client predicate. Priority is a
+/// cost choice, not a correctness one.
+///
+/// `Ok(None)` means the filter narrows nothing on this surface (a review-request
+/// axis on issues, say), so the caller keeps its unfiltered read. Every value is
+/// percent-encoded: glab forwards an endpoint verbatim, so a raw space is an HTTP
+/// 400 and a raw `&` would silently append a param. Pure.
+fn plan_filtered_list(
+    enc: &str,
+    resource: &str,
+    states: &[&str],
+    is_pr: bool,
+    viewer: Option<&str>,
+    filter: &RemoteListFilter,
+) -> AppResult<Option<GlFilterPlan>> {
+    // An empty value would encode to an empty param, which GitLab reads as no
+    // filter — a silent widening under an active filter badge.
+    if filter
+        .authors
+        .iter()
+        .chain(filter.labels.iter())
+        .any(String::is_empty)
+    {
+        return Err(AppError::InvalidArgument(
+            "empty author or label filter value".into(),
+        ));
+    }
+    for label in &filter.labels {
+        reject_magic_filter_value("label", label)?;
+    }
+    let mut mine: Vec<String> = Vec::new();
+    // Issues have no reviewers, and GitLab IGNORES `reviewer_username` there rather
+    // than erroring (measured: the param returns the whole list), so that leg would
+    // read as no filter at all.
+    let wants_mine = filter.assigned_to_me || (is_pr && filter.review_requested_me);
+    if wants_mine {
+        let Some(viewer) = viewer.filter(|v| !v.is_empty()) else {
+            return Err(AppError::Glab(
+                "could not determine the signed-in GitLab user".into(),
+            ));
+        };
+        let user = encode_query_value(viewer);
+        if filter.assigned_to_me {
+            // The documented ARRAY spelling. Measured equivalent to the scalar
+            // `assignee_username=` on both endpoints against `gitdesktop-gitlab-demo`:
+            // open MRs {!13, !1} → [!1] (only !1 is assigned), closed issues
+            // {#11, #10, #4, #3} → [#4] (only #4 is assigned), and an unassigned user
+            // → [] on both. Documented form wins on a tie.
+            mine.push(format!("assignee_username[]={user}"));
+        }
+        if is_pr && filter.review_requested_me {
+            mine.push(format!("reviewer_username={user}"));
+        }
+    }
+    let authors: Vec<String> = filter
+        .authors
+        .iter()
+        .map(|a| format!("author_username={}", encode_query_value(a)))
+        .collect();
+    // One label per leg — a csv would intersect the values the UI unions.
+    let labels: Vec<String> = filter
+        .labels
+        .iter()
+        .map(|l| format!("labels={}", encode_query_value(l)))
+        .collect();
+
+    let (legs, client_authors, client_labels) = if !mine.is_empty() {
+        (mine, filter.authors.clone(), filter.labels.clone())
+    } else if !authors.is_empty() {
+        (authors, Vec::new(), filter.labels.clone())
+    } else if !labels.is_empty() {
+        (labels, Vec::new(), Vec::new())
+    } else {
+        return Ok(None);
+    };
+
+    // Counted per STATE, so the Open tab and the Closed tab accept exactly the same
+    // filters — a legs×states cap would pass a 7-author filter on Open and reject it
+    // on Closed.
+    if legs.len() > MAX_FILTER_MEMBERS {
+        return Err(AppError::InvalidArgument(format!(
+            "too many filter values: {} in one group, and the limit is {MAX_FILTER_MEMBERS}",
+            legs.len()
+        )));
+    }
+    // Every leg reads FULL pages regardless of `limit`: the client predicates can
+    // drop most of a leg's rows, so a `limit`-sized page would truncate the answer
+    // before the filter had finished. `limit` narrows the merged result instead.
+    //
+    // `order_by`/`sort` are pinned rather than inherited: newest-created-first is what
+    // `leg_needs_deeper`'s displacement proof rests on, so it has to be a request the
+    // walk makes, not a GitLab default it happens to enjoy. (Measured equal to the
+    // default on both endpoints today; `sort=asc` flips both, so the params are live.)
+    let endpoints = states
+        .iter()
+        .flat_map(|state| {
+            legs.iter().map(move |leg| {
+                format!(
+                    "projects/{enc}/{resource}?state={state}&per_page={FILTER_PAGE_SIZE}\
+                     &order_by=created_at&sort=desc&{leg}"
+                )
+            })
+        })
+        .collect();
+    Ok(Some(GlFilterPlan {
+        endpoints,
+        authors: client_authors,
+        labels: client_labels,
+    }))
+}
+
+/// Whether a row satisfies the axes the plan left client-side. Each is an OR over
+/// its own values, AND-ed with the other — the same shape the fanned group has.
+///
+/// The two comparisons are deliberately ASYMMETRIC, because a client predicate has
+/// to reproduce what the server leg would have done: GitLab usernames are
+/// case-insensitive, so the author compare folds case, while label matching is
+/// name-exact, so the label compare stays byte-exact.
+fn matches_client_axes(
+    plan: &GlFilterPlan,
+    author: Option<&PrAuthor>,
+    labels: &[PrListLabel],
+) -> bool {
+    if !plan.authors.is_empty()
+        && !author.is_some_and(|a| {
+            plan.authors
+                .iter()
+                .any(|want| want.eq_ignore_ascii_case(&a.login))
+        })
+    {
+        return false;
+    }
+    if !plan.labels.is_empty() && !labels.iter().any(|l| plan.labels.contains(&l.name)) {
+        return false;
+    }
+    true
+}
+
+/// Whether a leg that just returned a FULL page is still worth deepening.
+///
+/// Deepening pays while the kept union is short of `limit`, and past that only while
+/// a deeper page could still displace the cutoff row. `order_by=created_at&sort=desc`
+/// documents no secondary key, so a deeper page is older-or-EQUAL at the boundary: a
+/// TIE keeps the leg walking (a same-timestamp row can outrank a kept one on the id
+/// tiebreak in [`sort_filtered_rows`]), and tie-heavy repos walk to the horizon and are
+/// refused by design. An absent `limit` always deepens. Pure.
+fn leg_needs_deeper(kept_created_at: &[&str], page_oldest: &str, limit: Option<u32>) -> bool {
+    let Some(limit) = limit.map(|n| n as usize).filter(|n| *n > 0) else {
+        return true;
+    };
+    if kept_created_at.len() < limit {
+        return true;
+    }
+    let mut times: Vec<&str> = kept_created_at.to_vec();
+    times.sort_unstable_by(|a, b| b.cmp(a));
+    page_oldest >= times[limit - 1]
+}
+
+/// [`leg_needs_deeper`] over a page's REPORTED oldest timestamp, which the wire may not
+/// supply: `created_at` is `#[serde(default)]` on both list shapes, so a payload omitting
+/// it arrives as `""` — a value that sorts below every real cutoff and would stop the leg
+/// while vouching for it. Missing or empty deepens instead, and the leg ends at the
+/// horizon where [`refuse_truncated_walk`] refuses: the only honest end for a page whose
+/// ordering can't be read. Pure.
+fn leg_wants_deeper(page_oldest: Option<&str>, kept: &[&str], limit: Option<u32>) -> bool {
+    page_oldest
+        .filter(|oldest| !oldest.is_empty())
+        .is_none_or(|oldest| leg_needs_deeper(kept, oldest, limit))
+}
+
+/// Order a filtered page newest-created first. GitLab's `created_at` is a
+/// fixed-width ISO-8601 UTC string, so a lexicographic compare orders it
+/// chronologically; the id breaks ties, so the order never depends on which leg
+/// returned a row first.
+fn sort_filtered_rows<T>(rows: &mut [T], key: impl Fn(&T) -> (&str, u64)) {
+    rows.sort_by(|a, b| {
+        let ((a_time, a_id), (b_time, b_id)) = (key(a), key(b));
+        b_time.cmp(a_time).then_with(|| b_id.cmp(&a_id))
+    });
+}
+
+/// Merge the legs' rows into one filtered MR page: drop rows failing the client
+/// axes, dedupe by iid (the mine legs overlap whenever the viewer is both assignee
+/// and reviewer), order newest-first, and truncate to `limit`.
+///
+/// Every surviving row is marked `stack_unknown`: chain inference reads the WHOLE
+/// open list (see [`apply_mr_stacks`]) and would mis-position rows over a filtered
+/// subset, so the decoration is unfetched rather than absent. Pure.
+fn merge_filtered_mrs(rows: Vec<PrInfo>, plan: &GlFilterPlan, limit: Option<u32>) -> Vec<PrInfo> {
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut out: Vec<PrInfo> = rows
+        .into_iter()
+        .filter(|p| matches_client_axes(plan, p.author.as_ref(), &p.labels))
+        .filter(|p| seen.insert(p.number))
+        .map(|mut p| {
+            p.stack = None;
+            p.stack_unknown = true;
+            p
+        })
+        .collect();
+    sort_filtered_rows(&mut out, |p| (p.created_at.as_str(), p.number));
+    if let Some(n) = limit {
+        out.truncate(n as usize);
+    }
+    out
+}
+
+/// [`merge_filtered_mrs`] for issues — same dedupe/predicate/order/truncate, minus
+/// the stack decoration issues don't carry. Pure.
+fn merge_filtered_issues(
+    rows: Vec<IssueInfo>,
+    plan: &GlFilterPlan,
+    limit: Option<u32>,
+) -> Vec<IssueInfo> {
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut out: Vec<IssueInfo> = rows
+        .into_iter()
+        .filter(|i| matches_client_axes(plan, i.author.as_ref(), &i.labels))
+        .filter(|i| seen.insert(i.number))
+        .collect();
+    sort_filtered_rows(&mut out, |i| (i.created_at.as_str(), i.number));
+    if let Some(n) = limit {
+        out.truncate(n as usize);
+    }
+    out
+}
+
+/// The signed-in username, fetched only when a "mine" axis needs it. Unlike the
+/// read views' tolerant [`current_user_login`], an unresolvable user is an ERROR:
+/// the alternative is an unnarrowed or empty list under an active filter badge.
+async fn filter_viewer(
+    repo_path: &str,
+    filter: &RemoteListFilter,
+    is_pr: bool,
+) -> AppResult<Option<String>> {
+    if !(filter.assigned_to_me || (is_pr && filter.review_requested_me)) {
+        return Ok(None);
+    }
+    let username = current_user(repo_path).await?.username;
+    if username.is_empty() {
+        return Err(AppError::Glab(
+            "could not determine the signed-in GitLab user".into(),
+        ));
+    }
+    Ok(Some(username))
+}
+
+/// Walk every leg of a plan, page by page. Returns the rows fetched (raw — the
+/// caller's merge applies the predicates, dedupe, ordering and truncation) and
+/// whether any leg stopped at a CAP with rows still unread behind it.
+///
+/// Legs are walked BREADTH-first, one page deep across all of them before any
+/// second page: a leg's later pages hold no NEWER rows, so starving another leg's
+/// page 1 would drop rows newer than the ones the depth bought.
+///
+/// That "later pages are never newer" premise (ties included — see [`leg_needs_deeper`])
+/// is the whole displacement proof, so the plan's endpoints PIN
+/// `order_by=created_at&sort=desc` rather than inherit GitLab's default ordering: a
+/// default this walk merely happens to agree with could change and invalidate the proof
+/// silently.
+///
+/// Three ways a leg ends, and only the third is truncation:
+/// 1. a short page — the leg is exhausted, nothing behind it;
+/// 2. [`leg_needs_deeper`] says no — proven complete for this page, since everything
+///    deeper is older than rows the truncation would already drop;
+/// 3. the [`MAX_LEG_PAGES`] horizon or the [`MAX_FILTER_REQUESTS`] budget — rows
+///    remain unread, so the answer is a partial the caller must not pass off as
+///    whole-repo truth.
+///
+/// So the guarantee is bounded but knowable: whole-repo complete up to
+/// [`MAX_LEG_PAGES`] × [`FILTER_PAGE_SIZE`] rows per leg, and the flag says when that
+/// horizon actually bound.
+///
+/// `row` reports each mapped row's `(id, created_at, author, labels)` — the id and
+/// timestamp feed the stop rule, and the author/labels let it count only rows that
+/// actually survive the client axes.
+async fn walk_filtered_legs<R, T>(
+    repo_path: &str,
+    plan: &GlFilterPlan,
+    limit: Option<u32>,
+    parse_failure: &str,
+    map: impl Fn(R) -> T,
+    row: impl Fn(&T) -> (u64, &str, Option<&PrAuthor>, &[PrListLabel]),
+) -> AppResult<(Vec<T>, bool)>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let mut fetched: Vec<T> = Vec::new();
+    // Rows that would survive the client axes, tracked alongside the raw fetch so the
+    // stop rule counts real matches rather than raw hits.
+    let mut kept_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut kept_times: Vec<String> = Vec::new();
+    let mut requests = 0usize;
+    let mut truncated = false;
+    let mut active: Vec<&String> = plan.endpoints.iter().collect();
+
+    for page in 1..=MAX_LEG_PAGES {
+        if active.is_empty() {
+            break;
+        }
+        let mut deeper: Vec<&String> = Vec::new();
+        let mut spent_budget = false;
+        for endpoint in active.iter().copied() {
+            if requests >= MAX_FILTER_REQUESTS {
+                // A page we meant to read and didn't: every leg left in this round is
+                // unfinished, and the budget is global so no deeper round can run.
+                truncated = true;
+                spent_budget = true;
+                break;
+            }
+            let url = format!("{endpoint}&page={page}");
+            let out = run_glab(
+                Some(repo_path),
+                &["api", url.as_str()],
+                GLAB_NETWORK_TIMEOUT,
+            )
+            .await?;
+            requests += 1;
+            let raw: Vec<R> = serde_json::from_str(&out.stdout_lossy())
+                .map_err(|e| AppError::Glab(format!("{parse_failure}: {e}")))?;
+            let exhausted = (raw.len() as u32) < FILTER_PAGE_SIZE;
+            let start = fetched.len();
+            fetched.extend(raw.into_iter().map(&map));
+            let mut page_oldest: Option<&str> = None;
+            for item in &fetched[start..] {
+                let (id, created_at, author, labels) = row(item);
+                page_oldest = Some(created_at);
+                if matches_client_axes(plan, author, labels) && kept_ids.insert(id) {
+                    kept_times.push(created_at.to_string());
+                }
+            }
+            if exhausted {
+                continue;
+            }
+            let kept: Vec<&str> = kept_times.iter().map(String::as_str).collect();
+            // `None` is unreachable behind the exhausted-guard — a non-exhausted page
+            // mapped at least FILTER_PAGE_SIZE rows, so it has a last row — but that
+            // row's timestamp can still be EMPTY; leg_wants_deeper walks on both.
+            if leg_wants_deeper(page_oldest, &kept, limit) {
+                deeper.push(endpoint);
+            }
+        }
+        if spent_budget {
+            break;
+        }
+        active = deeper;
+    }
+    // Legs still wanting a page when the horizon ran out are truncated by definition.
+    Ok((fetched, truncated || !active.is_empty()))
+}
+
+/// Refuse a walk that a cap cut short, whatever it managed to collect.
+///
+/// Only two of [`walk_filtered_legs`]' three leg endings prove a leg gave up
+/// everything it had. An EXHAUSTED leg has nothing behind it. A [`leg_needs_deeper`]
+/// stop proved its unread rows are all older than the page's cutoff — and that proof
+/// survives the rest of the walk, because the cutoff is the `limit`-th newest kept
+/// row and keeping more rows only moves it NEWER.
+///
+/// A cap-stop has neither proof, and not by accident: a leg only reaches a cap while
+/// `leg_needs_deeper` was still TRUE, which is exactly the state where a deeper page
+/// could still hold a row that outranks the cutoff. The budget cap is blinder still — it
+/// abandons legs whose page was never read, so nothing at all is known about them.
+///
+/// Filling `limit` is therefore NOT evidence of a correct page: one exhausted leg can
+/// supply a full page of older matches while a capped leg's unread pages hold a newer
+/// match that belongs above them, and the rows returned would be the wrong ones in the
+/// wrong order — with the caller's more-to-come inference (a full page) reading as
+/// business as usual. Refusing is the only honest answer this signal can support.
+///
+/// Two better fixes, both out of scope here: carry `truncated` over the wire (a
+/// rows+flag struct through `forge_pr_list`) so the UI can present a partial honestly,
+/// and keep each unfinished leg's last-read timestamp so a page can be ACCEPTED when
+/// no unread leg could displace it — the per-leg boundary proof this refusal replaces.
+fn refuse_truncated_walk(truncated: bool) -> AppResult<()> {
+    if truncated {
+        // InvalidArgument, not Glab: the refusal is deterministic for this scope, and the
+        // frontend's list retry keys on the kind to skip a re-walk that would only spend
+        // another round of `glab` calls reaching the same horizon.
+        return Err(AppError::InvalidArgument(format!(
+            "This filter needs more of GitLab's list than GitDesktop searches ({} rows \
+             per filter value). Narrow the filter to fewer values, or to more specific \
+             ones, or drop one of the combined filters.",
+            FILTER_PAGE_SIZE * MAX_LEG_PAGES
+        )));
+    }
+    Ok(())
+}
+
+/// Run a plan's legs and merge them into one filtered MR page.
+async fn filtered_mr_page(
+    repo_path: &str,
+    plan: &GlFilterPlan,
+    limit: Option<u32>,
+) -> AppResult<Vec<PrInfo>> {
+    let (rows, truncated) = walk_filtered_legs(
+        repo_path,
+        plan,
+        limit,
+        "could not parse GitLab merge requests",
+        from_glab_mr,
+        |p: &PrInfo| {
+            (
+                p.number,
+                p.created_at.as_str(),
+                p.author.as_ref(),
+                p.labels.as_slice(),
+            )
+        },
+    )
+    .await?;
+    refuse_truncated_walk(truncated)?;
+    Ok(merge_filtered_mrs(rows, plan, limit))
+}
+
+/// Run a plan's legs and merge them into one filtered issue page.
+async fn filtered_issue_page(
+    repo_path: &str,
+    plan: &GlFilterPlan,
+    limit: Option<u32>,
+) -> AppResult<Vec<IssueInfo>> {
+    let (rows, truncated) = walk_filtered_legs(
+        repo_path,
+        plan,
+        limit,
+        "could not parse GitLab issues",
+        from_glab_issue,
+        |i: &IssueInfo| {
+            (
+                i.number,
+                i.created_at.as_str(),
+                i.author.as_ref(),
+                i.labels.as_slice(),
+            )
+        },
+    )
+    .await?;
+    refuse_truncated_walk(truncated)?;
+    Ok(merge_filtered_issues(rows, plan, limit))
+}
+
 /// The signed-in user's merge requests for this repo. `state` is `"open"` or
 /// `"closed"`; the Closed tab shows closed **and** merged (matching the GitHub
 /// panel). GitLab splits those into separate server states, so we fetch each on
 /// its own `per_page` budget and concatenate — never one `state=all` page where
 /// open MRs would dilute (and silently truncate) the closed/merged ones.
-pub async fn list_prs(repo_path: &str, state: &str, limit: Option<u32>) -> AppResult<Vec<PrInfo>> {
+///
+/// A non-empty `filter` narrows the list SERVER-side instead, through the leg fan-out
+/// described above [`plan_filtered_list`]; an absent, empty, or GitLab-inexpressible
+/// one keeps the unfiltered read below unchanged.
+pub async fn list_prs(
+    repo_path: &str,
+    state: &str,
+    limit: Option<u32>,
+    filter: Option<&RemoteListFilter>,
+) -> AppResult<Vec<PrInfo>> {
     let enc = encode_project(&project_path(repo_path).await?);
     let states: &[&str] = match state {
         "open" => &["opened"],
@@ -552,6 +1371,19 @@ pub async fn list_prs(repo_path: &str, state: &str, limit: Option<u32>) -> AppRe
             )));
         }
     };
+    if let Some(filter) = filter.filter(|f| !f.is_empty()) {
+        let viewer = filter_viewer(repo_path, filter, true).await?;
+        if let Some(plan) = plan_filtered_list(
+            &enc,
+            "merge_requests",
+            states,
+            true,
+            viewer.as_deref(),
+            filter,
+        )? {
+            return filtered_mr_page(repo_path, &plan, limit).await;
+        }
+    }
     // GitLab pages at `per_page` (max 100). The OPEN set always requests a full page
     // regardless of `limit`: stack inference reads the whole open list, and a
     // server-side truncation would hide a chain's bottom and mis-position the rows
@@ -1159,7 +1991,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // decoration must never gate the MR view for that long. Elapsing falls back
         // to no chain, exactly like an errored list.
         async {
-            tokio::time::timeout(STACKS_TIMEOUT, list_prs(repo_path, "open", None))
+            tokio::time::timeout(STACKS_TIMEOUT, list_prs(repo_path, "open", None, None))
                 .await
                 .unwrap_or_else(|_| Ok(Vec::new()))
                 .unwrap_or_default()
@@ -3400,10 +4232,15 @@ struct GlabIssueDetail {
 /// GitLab issue state is a single `opened`/`closed` axis (no `merged`), so unlike
 /// `list_prs` this is one fetch. GitLab's `/issues` endpoint already excludes merge
 /// requests, so no extra filtering is needed.
+///
+/// A `filter` with an axis that applies to issues — assigned to me, author, label —
+/// narrows the list SERVER-side through the same leg fan-out [`list_prs`] uses;
+/// anything else keeps the unfiltered read below.
 pub async fn list_issues(
     repo_path: &str,
     state: &str,
     limit: Option<u32>,
+    filter: Option<&RemoteListFilter>,
 ) -> AppResult<Vec<IssueInfo>> {
     let enc = encode_project(&project_path(repo_path).await?);
     let gl_state = match state {
@@ -3415,6 +4252,19 @@ pub async fn list_issues(
             )));
         }
     };
+    if let Some(filter) = filter.filter(|f| !f.is_empty()) {
+        let viewer = filter_viewer(repo_path, filter, false).await?;
+        if let Some(plan) = plan_filtered_list(
+            &enc,
+            "issues",
+            &[gl_state],
+            false,
+            viewer.as_deref(),
+            filter,
+        )? {
+            return filtered_issue_page(repo_path, &plan, limit).await;
+        }
+    }
     // GitLab pages at `per_page` (max 100); default to a full page, or cap it to `limit`.
     let per_page = limit.map_or(100, |n| n.clamp(1, 100));
     let endpoint = format!("projects/{enc}/issues?state={gl_state}&per_page={per_page}");
@@ -5118,18 +5968,15 @@ struct GlabProjectRef {
     http_url_to_repo: String,
 }
 
-/// The repo's web URL (project home) for "View on GitLab".
+/// The repo's web URL (project home) for "View on GitLab" — derived from the
+/// `origin` remote alone, no `glab` call, so it resolves signed out too (mirrors
+/// Bitbucket's `repo_url`, which has always worked this way).
 pub async fn repo_url(repo_path: &str) -> AppResult<String> {
-    let enc = encode_project(&project_path(repo_path).await?);
-    let out = run_glab(
-        Some(repo_path),
-        &["api", &format!("projects/{enc}")],
-        GLAB_NETWORK_TIMEOUT,
-    )
-    .await?;
-    let p: GlabProjectRef = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab project: {e}")))?;
-    Ok(p.web_url)
+    let url =
+        crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
+    crate::forge::web_repo_url(&url).ok_or_else(|| {
+        AppError::Glab("could not determine the repository's web URL from the origin remote".into())
+    })
 }
 
 /// The project's visibility (`public` / `internal` / `private`, already
@@ -8472,8 +9319,351 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
 }
 
 #[cfg(test)]
+mod my_work_tests {
+    use super::{
+        my_work_column, my_work_hostname, my_work_item_from_value, my_work_project_from_web_url,
+        reviewer_filter,
+    };
+    use crate::error::AppError;
+    use crate::forge::model::Provider;
+    use crate::forge::my_work::{MyWorkItem, MyWorkLeg};
+    use serde_json::json;
+
+    /// One host's legs, carrying a single item so the merge has something to fold.
+    fn host_legs(url: &str) -> Vec<MyWorkLeg> {
+        vec![MyWorkLeg {
+            items: vec![MyWorkItem {
+                provider: Provider::GitLab,
+                number: 1,
+                title: "t".into(),
+                is_pull_request: true,
+                repo_full_name: "g/p".into(),
+                repo_owner: "g".into(),
+                repo_name: "p".into(),
+                host: "gitlab.com".into(),
+                url: url.into(),
+                updated_at: "2026-09-05T00:00:00.000Z".into(),
+                author_login: None,
+            }],
+            capped: false,
+        }]
+    }
+
+    /// Hosts are isolated: a self-managed instance being down (or unaddressable
+    /// because its config key carries a port glab's `--hostname` rejects) must not
+    /// blank the gitlab.com items sitting right next to it.
+    #[test]
+    fn a_lost_host_keeps_the_others_and_marks_the_page_truncated() {
+        let page = my_work_column(vec![
+            Ok(host_legs("https://gitlab.com/g/p/-/merge_requests/1")),
+            Err(AppError::Glab("host is down".into())),
+        ])
+        .expect("one healthy host still answers");
+        assert_eq!(page.items.len(), 1, "the healthy host's items survive");
+        assert!(
+            page.truncated,
+            "a lost host means items are missing — the page must not read complete"
+        );
+
+        // Order-independent: the failure arriving first changes nothing.
+        let page = my_work_column(vec![
+            Err(AppError::Glab("host is down".into())),
+            Ok(host_legs("https://gitlab.com/g/p/-/merge_requests/1")),
+        ])
+        .expect("one healthy host still answers");
+        assert_eq!(page.items.len(), 1);
+        assert!(page.truncated);
+    }
+
+    /// The two arms that must NOT silently read as an empty inbox, and the one
+    /// that legitimately does.
+    #[test]
+    fn every_attempted_host_failing_is_an_error_but_none_attempted_is_empty() {
+        let all_failed = my_work_column(vec![
+            Err(AppError::Glab("first".into())),
+            Err(AppError::Glab("second".into())),
+        ]);
+        assert!(
+            matches!(all_failed, Err(AppError::Glab(ref m)) if m == "second"),
+            "no host answered → surface the failure, got {all_failed:?}",
+        );
+
+        // Every key was an unaddressable artifact, so nothing was ever attempted —
+        // indistinguishable from having no GitLab host configured.
+        let none_attempted = my_work_column(Vec::new()).expect("benign");
+        assert!(none_attempted.items.is_empty());
+        assert!(
+            !none_attempted.truncated,
+            "a skipped artifact key lost no items, so nothing is hidden"
+        );
+
+        // All healthy → the page is complete.
+        let clean = my_work_column(vec![
+            Ok(host_legs("https://gitlab.com/g/p/-/merge_requests/1")),
+            Ok(host_legs("https://gitlab.acme.dev/g/p/-/issues/2")),
+        ])
+        .expect("healthy");
+        assert_eq!(clean.items.len(), 2);
+        assert!(!clean.truncated);
+    }
+
+    #[test]
+    fn project_splits_a_web_url_at_the_dash_marker() {
+        // Flat namespace: full path, owner, name.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.com/group/proj/-/merge_requests/12"),
+            Some(("group/proj".into(), "group".into(), "proj".into()))
+        );
+        // Issues carry the same marker.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.com/group/proj/-/issues/5"),
+            Some(("group/proj".into(), "group".into(), "proj".into()))
+        );
+        // Self-managed, ported host — the path is unaffected.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.acme.dev:8443/g/p/-/merge_requests/1"),
+            Some(("g/p".into(), "g".into(), "p".into()))
+        );
+        // No marker, no project — an unrelated URL addresses nothing.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.com/group/proj"),
+            None
+        );
+        // A single-segment path has neither owner nor name.
+        assert_eq!(
+            my_work_project_from_web_url("https://gitlab.com/proj/-/issues/1"),
+            None
+        );
+        assert_eq!(my_work_project_from_web_url("not a url"), None);
+    }
+
+    /// The frontend's `matchLocalRepos` compares `repoOwner` against
+    /// `RecentRepo.owner`, which `git::repo::parse_owner_host` fills. Called
+    /// DIRECTLY here rather than asserted against a copied literal: a change to
+    /// that function's owner rule would otherwise leave this side green while
+    /// every nested-group GitLab row silently stopped matching its local clone.
+    #[test]
+    fn owner_and_name_agree_with_parse_owner_host() {
+        // The clone URL and the MR web URL of ONE project — the two spellings the
+        // match compares. Nested group first: the case where a whole-namespace
+        // owner would diverge.
+        for (clone_url, web_url) in [
+            (
+                "https://gitlab.com/group/sub/repo.git",
+                "https://gitlab.com/group/sub/repo/-/merge_requests/3",
+            ),
+            (
+                "https://gitlab.com/group/repo.git",
+                "https://gitlab.com/group/repo/-/issues/9",
+            ),
+            (
+                "git@gitlab.com:group/sub/deeper/repo.git",
+                "https://gitlab.com/group/sub/deeper/repo/-/merge_requests/1",
+            ),
+            (
+                "https://gitlab.acme.dev:8443/g/p.git",
+                "https://gitlab.acme.dev:8443/g/p/-/merge_requests/2",
+            ),
+        ] {
+            let (recent_owner, recent_host, recent_name) =
+                crate::git::repo::parse_owner_host(clone_url);
+            let (_, owner, name) =
+                my_work_project_from_web_url(web_url).expect("project URL resolves");
+            assert_eq!(
+                Some(owner),
+                recent_owner,
+                "owner spelling must agree for {clone_url}"
+            );
+            assert_eq!(
+                Some(name),
+                recent_name,
+                "repo name must agree for {clone_url}"
+            );
+            // The host halves are compared by the same match, so pin them too.
+            let item_host = crate::forge::remote_host(web_url);
+            assert_eq!(item_host, recent_host, "host must agree for {clone_url}");
+        }
+
+        // The full path stays the WHOLE namespace — the display spelling and what
+        // the head-ref gate compares — so it is longer than `owner/name` rejoined.
+        let (full_path, owner, name) =
+            my_work_project_from_web_url("https://gitlab.com/group/sub/repo/-/merge_requests/3")
+                .expect("resolves");
+        assert_eq!(full_path, "group/sub/repo");
+        assert_ne!(full_path, format!("{owner}/{name}"));
+    }
+
+    /// A degenerate identity must never widen the review scope. Measured on
+    /// gitlab.com: `scope=all&reviewer_username=` returns a FULL page (100 items),
+    /// exactly as if no filter were sent, while the real username returns 0 — so a
+    /// blank filter would present a page of unrelated MRs as the user's own work.
+    #[test]
+    fn an_empty_username_fails_the_host_rather_than_widening_the_review_scope() {
+        // A real username rides through; the encoder leaves the legal charset
+        // (alphanumerics, dot, dash, underscore) untouched.
+        assert_eq!(reviewer_filter("theBGuy").unwrap(), "theBGuy");
+        assert_eq!(reviewer_filter("a.b-c_d").unwrap(), "a.b-c_d");
+        // Anything query-significant is still encoded, never interpolated raw.
+        assert_eq!(reviewer_filter("a b&x=1").unwrap(), "a%20b%26x%3D1");
+
+        // The degenerate identities — including whitespace-only, which GitLab
+        // also treats as no filter (`…=%20` returned the same full page).
+        for degenerate in ["", " ", "   ", "\t", "\n", " \t\n "] {
+            assert!(
+                matches!(reviewer_filter(degenerate), Err(AppError::Glab(_))),
+                "{degenerate:?} must fail the host, not widen the query",
+            );
+        }
+    }
+
+    /// A `hosts:` key is config-sourced argv: the authority charset admits a
+    /// leading `-`, which glab would read as a flag. Such a key names no reachable
+    /// instance, so it is skipped — the arm's error posture is for FETCH failures.
+    /// gitlab.com is addressed EXPLICITLY like every other host, because an
+    /// omitted `--hostname` resolves to glab's configured default, not gitlab.com.
+    #[test]
+    fn hostname_skips_unaddressable_hosts_and_names_gitlab_com() {
+        assert_eq!(my_work_hostname("gitlab.com"), Some("gitlab.com"));
+        assert_eq!(my_work_hostname("gitlab.acme.dev"), Some("gitlab.acme.dev"));
+        // A bare bracketed IPv6 literal keeps the spelling `known_hosts` yields.
+        assert_eq!(
+            my_work_hostname("[2001:db8::1]"),
+            Some("[2001:db8::1]"),
+            "a literal's own colons are not a port"
+        );
+
+        // A PORT is unaddressable — glab refuses `--hostname host:8443` outright,
+        // so the value names no instance this arm can reach. Unreachable via
+        // `known_hosts` (it port-strips both config-key forms), so this pins the
+        // contract rather than a live path: the gate, its doc and this test have
+        // to agree on what a ported host means.
+        assert_eq!(my_work_hostname("gitlab.acme.dev:8443"), None);
+        assert_eq!(my_work_hostname("[2001:db8::1]:8443"), None);
+
+        for bad in [
+            "-oProxyCommand=evil",
+            "--hostname",
+            "gitlab.acme.dev;rm -rf /",
+            "gitlab acme dev",
+            "",
+        ] {
+            assert_eq!(my_work_hostname(bad), None, "{bad:?} must be skipped");
+        }
+    }
+
+    #[test]
+    fn maps_a_merge_request_payload() {
+        let raw = json!({
+            "iid": 42,
+            "title": "feat: nested groups",
+            "web_url": "https://gitlab.com/group/sub/proj/-/merge_requests/42",
+            "updated_at": "2026-09-05T23:21:02.987Z",
+            "author": {"username": "octo-cat"},
+            "draft": false,
+            "source_branch": "feat/x",
+            "references": {"full": "group/sub/proj!42"}
+        });
+        let item = my_work_item_from_value(&raw, true).expect("maps");
+        assert_eq!(item.provider, Provider::GitLab);
+        assert_eq!(item.number, 42);
+        assert!(item.is_pull_request);
+        assert_eq!(item.repo_full_name, "group/sub/proj");
+        assert_eq!(item.repo_owner, "sub");
+        assert_eq!(item.repo_name, "proj");
+        assert_eq!(item.host, "gitlab.com");
+        assert_eq!(item.author_login.as_deref(), Some("octo-cat"));
+        // GitLab's milliseconds survive the fold to the merge's fixed width —
+        // that precision is what breaks a same-second tie at the page cut.
+        assert_eq!(item.updated_at, "2026-09-05T23:21:02.987Z");
+
+        // The host comes from the item's own URL — a self-managed row keeps its
+        // own instance, and its port drops the way every other host spelling does.
+        let self_managed = json!({
+            "iid": 1, "title": "t",
+            "web_url": "https://gitlab.acme.dev:8443/g/p/-/issues/1",
+            "updated_at": "2026-09-05T23:21:02Z"
+        });
+        let item = my_work_item_from_value(&self_managed, false).expect("maps");
+        assert_eq!(item.host, "gitlab.acme.dev");
+        assert!(!item.is_pull_request);
+        // A missing author is absence, not a fabricated login.
+        assert_eq!(item.author_login, None);
+    }
+
+    /// One malformed record must never blank the page: each is judged on its own.
+    #[test]
+    fn skips_records_that_address_nothing() {
+        let good = json!({
+            "iid": 7, "title": "keeper",
+            "web_url": "https://gitlab.com/g/p/-/merge_requests/7",
+            "updated_at": "2026-09-05T00:00:00Z"
+        });
+        assert!(my_work_item_from_value(&good, true).is_some());
+        for bad in [
+            // No iid / title / web_url.
+            json!({"title": "t", "web_url": "https://gitlab.com/g/p/-/merge_requests/1"}),
+            json!({"iid": 1, "web_url": "https://gitlab.com/g/p/-/merge_requests/1"}),
+            json!({"iid": 1, "title": "t"}),
+            // Empty strings are absence too.
+            json!({"iid": 1, "title": "", "web_url": "https://gitlab.com/g/p/-/merge_requests/1"}),
+            json!({"iid": 1, "title": "t", "web_url": ""}),
+            // A URL with no `/-/` marker names no project.
+            json!({"iid": 1, "title": "t", "web_url": "https://gitlab.com/g/p"}),
+            // A wrong-typed iid.
+            json!({"iid": "seven", "title": "t", "web_url": "https://gitlab.com/g/p/-/issues/1"}),
+        ] {
+            assert!(
+                my_work_item_from_value(&bad, true).is_none(),
+                "should have skipped {bad}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The web URL resolves purely from `origin` — no `glab` spawn — for https,
+    /// scp-style ssh, and a self-managed host with a subgroup path and a port (real
+    /// repo, temp_dir, git on PATH).
+    ///
+    /// A FRESH temp repo per remote form — `git_remote_url`'s TTL cache is keyed by
+    /// `(repo_path, name)`, and this test's raw `git remote add` bypasses the
+    /// app-side commands that invalidate it, so reusing one path across iterations
+    /// would serve the first remote's cached URL to every later assertion.
+    #[tokio::test]
+    async fn repo_url_resolves_from_origin_without_glab() {
+        async fn run(repo: &str, args: &[&str]) {
+            let _ = crate::git::runner::run_git(
+                Some(repo),
+                args,
+                crate::git::runner::DEFAULT_TIMEOUT,
+            )
+            .await;
+        }
+
+        for (tag, remote, want) in [
+            ("https", "https://gitlab.com/group/sub/repo.git", "https://gitlab.com/group/sub/repo"),
+            ("scp", "git@gitlab.com:group/sub/repo.git", "https://gitlab.com/group/sub/repo"),
+            (
+                "self-managed",
+                "https://gitlab.acme.corp:8443/team/svc.git",
+                "https://gitlab.acme.corp:8443/team/svc",
+            ),
+        ] {
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("gd-gitlab-repo-url-{tag}-"))
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let repo_s = repo.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q"]).await;
+            run(&repo_s, &["remote", "add", "origin", remote]).await;
+            assert_eq!(repo_url(&repo_s).await.unwrap(), want);
+        }
+    }
 
     /// The MR edit PUT sends `target_branch` only when retargeting — the no-base
     /// form must stay byte-identical to the title/description-only request.
@@ -8730,6 +9920,624 @@ mod tests {
         assert!(mr_stack_from_rows(&open, 9).0.is_none());
         assert!(mr_stack_from_rows(&open, 9).1.is_empty());
         assert!(mr_stack_from_rows(&open, 404).0.is_none());
+    }
+
+    // ── Server-side list filters ──────────────────────────────────────────────
+
+    fn filter_of(
+        assigned_to_me: bool,
+        review_requested_me: bool,
+        authors: &[&str],
+        labels: &[&str],
+    ) -> RemoteListFilter {
+        let own = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect();
+        RemoteListFilter {
+            assigned_to_me,
+            review_requested_me,
+            teams: Vec::new(),
+            authors: own(authors),
+            labels: own(labels),
+        }
+    }
+
+    fn plan(
+        resource: &str,
+        states: &[&str],
+        is_pr: bool,
+        filter: &RemoteListFilter,
+    ) -> GlFilterPlan {
+        plan_filtered_list("grp%2Fproj", resource, states, is_pr, Some("me"), filter)
+            .expect("valid filter")
+            .expect("an expressible filter yields a plan")
+    }
+
+    #[test]
+    fn the_mine_group_fans_out_first_and_the_rest_stay_client_side() {
+        // All three groups active: mine wins the server side, authors and labels
+        // come back as client predicates over the union.
+        let f = filter_of(true, true, &["octocat"], &["bug"]);
+        assert_eq!(
+            plan("merge_requests", &["opened"], true, &f),
+            GlFilterPlan {
+                endpoints: vec![
+                    "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&assignee_username[]=me".to_string(),
+                    "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&reviewer_username=me".to_string(),
+                ],
+                authors: vec!["octocat".to_string()],
+                labels: vec!["bug".to_string()],
+            }
+        );
+        // Only the TRUE mine members get a leg.
+        let assignee_only = filter_of(true, false, &[], &[]);
+        assert_eq!(
+            plan("merge_requests", &["opened"], true, &assignee_only).endpoints,
+            ["projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&assignee_username[]=me"]
+        );
+    }
+
+    #[test]
+    fn authors_then_labels_take_the_server_side_when_mine_is_off() {
+        // Authors fan out, labels remain the client predicate.
+        let f = filter_of(false, false, &["octocat", "dependabot"], &["bug"]);
+        let p = plan("merge_requests", &["opened"], true, &f);
+        assert_eq!(
+            p.endpoints,
+            [
+                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&author_username=octocat",
+                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&author_username=dependabot",
+            ]
+        );
+        assert!(p.authors.is_empty());
+        assert_eq!(p.labels, ["bug"]);
+        // Labels alone fan out ONE label per leg — `labels=` is AND-of-all, so a csv
+        // would intersect the values the UI unions.
+        let labels_only = filter_of(false, false, &[], &["bug", "needs triage"]);
+        let p = plan("merge_requests", &["opened"], true, &labels_only);
+        assert_eq!(
+            p.endpoints,
+            [
+                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&labels=bug",
+                // A space must be percent-encoded: glab forwards the endpoint verbatim
+                // and GitLab answers a raw space with HTTP 400.
+                "projects/grp%2Fproj/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc&labels=needs%20triage",
+            ]
+        );
+        assert!(p.authors.is_empty() && p.labels.is_empty());
+    }
+
+    #[test]
+    fn the_closed_pr_filter_doubles_every_leg_across_both_states() {
+        let f = filter_of(false, false, &["octocat", "dependabot"], &[]);
+        assert_eq!(
+            plan("merge_requests", &["closed", "merged"], true, &f).endpoints,
+            [
+                "projects/grp%2Fproj/merge_requests?state=closed&per_page=100&order_by=created_at&sort=desc&author_username=octocat",
+                "projects/grp%2Fproj/merge_requests?state=closed&per_page=100&order_by=created_at&sort=desc&author_username=dependabot",
+                "projects/grp%2Fproj/merge_requests?state=merged&per_page=100&order_by=created_at&sort=desc&author_username=octocat",
+                "projects/grp%2Fproj/merge_requests?state=merged&per_page=100&order_by=created_at&sort=desc&author_username=dependabot",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_issue_surface_drops_the_reviewer_leg() {
+        // GitLab IGNORES `reviewer_username` on /issues rather than erroring, so a
+        // review-request axis there must contribute nothing…
+        let f = filter_of(true, true, &[], &[]);
+        assert_eq!(
+            plan("issues", &["opened"], false, &f).endpoints,
+            ["projects/grp%2Fproj/issues?state=opened&per_page=100&order_by=created_at&sort=desc&assignee_username[]=me"]
+        );
+        // …and a review-only filter narrows nothing on issues, so the caller keeps
+        // its unfiltered read instead of paying for an unnarrowed fan-out.
+        let review_only = filter_of(false, true, &[], &[]);
+        assert!(plan_filtered_list(
+            "grp%2Fproj",
+            "issues",
+            &["opened"],
+            false,
+            Some("me"),
+            &review_only
+        )
+        .unwrap()
+        .is_none());
+        // The same filter DOES narrow the PR surface.
+        assert!(plan_filtered_list(
+            "grp%2Fproj",
+            "merge_requests",
+            &["opened"],
+            true,
+            Some("me"),
+            &review_only
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    #[test]
+    fn a_filter_with_no_gitlab_axis_keeps_the_unfiltered_read() {
+        // Teams are GitHub-only; a teams-only filter is non-empty yet expresses
+        // nothing here.
+        let teams_only = RemoteListFilter {
+            teams: vec!["octo/reviewers".to_string()],
+            ..RemoteListFilter::default()
+        };
+        assert!(plan_filtered_list(
+            "grp%2Fproj",
+            "merge_requests",
+            &["opened"],
+            true,
+            None,
+            &teams_only
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn the_member_cap_rejects_the_same_filter_on_both_tabs() {
+        let many: Vec<String> = (0..=MAX_FILTER_MEMBERS)
+            .map(|i| format!("user{i}"))
+            .collect();
+        let under = RemoteListFilter {
+            authors: many[..MAX_FILTER_MEMBERS].to_vec(),
+            ..RemoteListFilter::default()
+        };
+        // At the cap: accepted on BOTH tabs, and the closed tab simply doubles the
+        // legs inside the same budget rather than against it.
+        assert_eq!(
+            plan("merge_requests", &["opened"], true, &under)
+                .endpoints
+                .len(),
+            MAX_FILTER_MEMBERS
+        );
+        assert_eq!(
+            plan("merge_requests", &["closed", "merged"], true, &under)
+                .endpoints
+                .len(),
+            MAX_FILTER_MEMBERS * 2
+        );
+        // One over the cap: rejected on BOTH tabs identically — a legs×states cap
+        // would have passed this on Open and failed it on Closed.
+        let over = RemoteListFilter {
+            authors: many,
+            ..RemoteListFilter::default()
+        };
+        for states in [&["opened"][..], &["closed", "merged"][..]] {
+            match plan_filtered_list("grp%2Fproj", "merge_requests", states, true, None, &over) {
+                Err(AppError::InvalidArgument(msg)) => {
+                    assert!(msg.contains("7 in one group"), "{msg}");
+                    assert!(msg.contains(&MAX_FILTER_MEMBERS.to_string()), "{msg}");
+                }
+                other => panic!("expected an InvalidArgument rejection, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn gitlab_magic_filter_values_are_rejected_on_labels_only() {
+        // `labels=None` / `labels=Any` mean "unlabelled" / "labelled" server-side —
+        // measured case-INSENSITIVELY on gitdesktop-gitlab-demo, so the guard folds
+        // case too, or a repo label named `none` would still misfire.
+        for magic in ["None", "Any", "none", "any", "NONE", "aNy"] {
+            let f = filter_of(false, false, &[], &[magic]);
+            match plan_filtered_list(
+                "grp%2Fproj",
+                "merge_requests",
+                &["opened"],
+                true,
+                Some("me"),
+                &f,
+            ) {
+                Err(AppError::InvalidArgument(msg)) => {
+                    assert!(msg.contains("special"), "{magic}: {msg}");
+                }
+                other => panic!("{magic} should be rejected, got {other:?}"),
+            }
+            // The username params carry NO such magic (measured: `=None` returned [],
+            // not the unassigned rows), so an author or viewer actually named `None`
+            // or `Any` keeps their filter — guarding them would refuse a real name.
+            let by_author = filter_of(false, false, &[magic], &[]);
+            assert!(plan("merge_requests", &["opened"], true, &by_author)
+                .endpoints
+                .iter()
+                .any(|e| e.ends_with(&format!("author_username={magic}"))));
+            let mine = filter_of(true, false, &[], &[]);
+            let p = plan_filtered_list(
+                "grp%2Fproj",
+                "merge_requests",
+                &["opened"],
+                true,
+                Some(magic),
+                &mine,
+            )
+            .expect("a viewer named after a magic word is a legitimate filter")
+            .expect("the mine axis narrows this surface");
+            assert!(p
+                .endpoints
+                .iter()
+                .any(|e| e.ends_with(&format!("assignee_username[]={magic}"))));
+        }
+        // Names that merely CONTAIN a magic word stay filterable.
+        for ok in ["nonexistent", "anything", "none-of-the-above"] {
+            let f = filter_of(false, false, &[], &[ok]);
+            assert!(plan("merge_requests", &["opened"], true, &f)
+                .endpoints
+                .iter()
+                .any(|e| e.ends_with(&format!("labels={ok}"))));
+        }
+    }
+
+    #[test]
+    fn the_client_author_compare_folds_case_and_the_label_compare_does_not() {
+        // GitLab usernames are case-insensitive, so a client-side author predicate
+        // must match what the server leg would have matched.
+        let f = filter_of(true, false, &["OctoCat"], &[]);
+        let p = plan("merge_requests", &["opened"], true, &f);
+        let kept = merge_filtered_mrs(
+            vec![leg_row(1, "octocat", &[], "2026-01-01T00:00:00.000Z")],
+            &p,
+            None,
+        );
+        assert_eq!(kept.len(), 1);
+        // Label matching is name-exact on GitLab, so the client side stays exact.
+        let f = filter_of(true, false, &[], &["Bug"]);
+        let p = plan("merge_requests", &["opened"], true, &f);
+        assert!(merge_filtered_mrs(
+            vec![leg_row(1, "octocat", &["bug"], "2026-01-01T00:00:00.000Z")],
+            &p,
+            None,
+        )
+        .is_empty());
+        assert_eq!(
+            merge_filtered_mrs(
+                vec![leg_row(1, "octocat", &["Bug"], "2026-01-01T00:00:00.000Z")],
+                &p,
+                None,
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_leg_deepens_while_a_deeper_page_could_still_enter_the_result() {
+        let times = |n: usize| -> Vec<&'static str> {
+            [
+                "2026-05-01T00:00:00.000Z",
+                "2026-04-01T00:00:00.000Z",
+                "2026-03-01T00:00:00.000Z",
+            ][..n]
+                .to_vec()
+        };
+        // Short of `limit`: always deepen, whatever the page's oldest row was.
+        assert!(leg_needs_deeper(
+            &times(2),
+            "2026-01-01T00:00:00.000Z",
+            Some(3)
+        ));
+        // At `limit`, with this page's oldest row still NEWER than the cutoff (the
+        // 3rd-newest kept) — a deeper page can still beat it.
+        assert!(leg_needs_deeper(
+            &times(3),
+            "2026-04-15T00:00:00.000Z",
+            Some(3)
+        ));
+        // At `limit`, with this page's oldest row TYING the cutoff — a deeper row at
+        // the same instant can still outrank it on the id tiebreak.
+        assert!(leg_needs_deeper(
+            &times(3),
+            "2026-03-01T00:00:00.000Z",
+            Some(3)
+        ));
+        // Strictly older than the cutoff: everything deeper is older still, so it
+        // could only be truncated away.
+        assert!(!leg_needs_deeper(
+            &times(3),
+            "2026-02-01T00:00:00.000Z",
+            Some(3)
+        ));
+        // Kept order must not matter — the rule sorts before reading the cutoff.
+        let shuffled = vec![
+            "2026-03-01T00:00:00.000Z",
+            "2026-05-01T00:00:00.000Z",
+            "2026-04-01T00:00:00.000Z",
+        ];
+        assert!(!leg_needs_deeper(
+            &shuffled,
+            "2026-02-15T00:00:00.000Z",
+            Some(3)
+        ));
+        // No limit = walk the whole horizon; a zero limit can't define a cutoff.
+        assert!(leg_needs_deeper(
+            &times(3),
+            "2020-01-01T00:00:00.000Z",
+            None
+        ));
+        assert!(leg_needs_deeper(
+            &times(3),
+            "2020-01-01T00:00:00.000Z",
+            Some(0)
+        ));
+        // An empty kept set is short of any limit.
+        assert!(leg_needs_deeper(&[], "2026-01-01T00:00:00.000Z", Some(1)));
+    }
+
+    /// A page whose oldest timestamp the wire never supplied reads as `""`, which sorts
+    /// below every real cutoff — vouching on it would stop a leg exactly where nothing
+    /// is known about the rows behind it, so both unknown spellings deepen instead.
+    #[test]
+    fn an_unreadable_page_oldest_deepens_instead_of_vouching() {
+        let full = [
+            "2026-05-01T00:00:00.000Z",
+            "2026-04-01T00:00:00.000Z",
+            "2026-03-01T00:00:00.000Z",
+        ];
+        assert!(leg_wants_deeper(None, &full, Some(3)));
+        assert!(leg_wants_deeper(Some(""), &full, Some(3)));
+        // A readable timestamp delegates to the stop rule, both ways.
+        assert!(leg_wants_deeper(
+            Some("2026-03-01T00:00:00.000Z"),
+            &full,
+            Some(3)
+        ));
+        assert!(!leg_wants_deeper(
+            Some("2026-02-01T00:00:00.000Z"),
+            &full,
+            Some(3)
+        ));
+    }
+
+    /// A `created_at` tie at the page boundary is not a stop. GitLab's list documents
+    /// no secondary key, so a tie group can straddle pages in any order, while the
+    /// merge ranks ties by id DESCENDING — an unread same-instant row with a higher iid
+    /// belongs ABOVE the kept one, and stopping there would ship a displaced page with
+    /// no truncation flag to warn about it.
+    #[test]
+    fn a_tie_with_the_cutoff_keeps_the_leg_walking() {
+        let tie = "2026-03-01T00:00:00.000Z";
+        // A full page that filled `limit`, oldest row tying the cutoff.
+        let page = vec![
+            leg_row(7, "octocat", &[], "2026-05-01T00:00:00.000Z"),
+            leg_row(8, "octocat", &[], "2026-04-01T00:00:00.000Z"),
+            leg_row(9, "octocat", &[], tie),
+        ];
+        let kept: Vec<&str> = page.iter().map(|p| p.created_at.as_str()).collect();
+        assert!(leg_needs_deeper(&kept, tie, Some(3)));
+        // Why it matters: MR 42 sits on the next page at the same instant, and the
+        // merged page ranks it above the row the leg already kept.
+        let f = filter_of(true, false, &[], &[]);
+        let p = plan("merge_requests", &["opened"], true, &f);
+        let mut rows = page;
+        rows.push(leg_row(42, "octocat", &[], tie));
+        assert_eq!(
+            merge_filtered_mrs(rows, &p, Some(3))
+                .iter()
+                .map(|p| p.number)
+                .collect::<Vec<_>>(),
+            vec![7, 8, 42]
+        );
+    }
+
+    #[test]
+    fn the_paging_horizon_is_the_documented_bound() {
+        // The completeness claim in the module comment rests on these three, so a
+        // change to any of them is a change to what the UI may promise.
+        assert_eq!(FILTER_PAGE_SIZE, 100);
+        assert_eq!(MAX_LEG_PAGES, 5);
+        assert_eq!(FILTER_PAGE_SIZE * MAX_LEG_PAGES, 500);
+        // The request budget must bind before the theoretical worst case does,
+        // otherwise it isn't a guard at all.
+        assert!(MAX_FILTER_REQUESTS < MAX_FILTER_MEMBERS * 2 * MAX_LEG_PAGES as usize);
+        // Every plan endpoint must be a `&page=N`-appendable prefix.
+        let f = filter_of(false, false, &["octocat"], &[]);
+        for endpoint in plan("merge_requests", &["opened"], true, &f).endpoints {
+            // No page of its own yet — the walker owns `&page=N`.
+            assert!(
+                endpoint.contains('?') && !endpoint.contains("&page="),
+                "{endpoint}"
+            );
+            assert!(
+                endpoint.contains(&format!("per_page={FILTER_PAGE_SIZE}")),
+                "{endpoint}"
+            );
+            // Newest-first is PINNED, not inherited: `leg_needs_deeper`'s displacement
+            // proof reads "everything deeper is older", so a GitLab default change
+            // must not be able to invalidate it quietly.
+            assert!(endpoint.contains("&order_by=created_at"), "{endpoint}");
+            assert!(endpoint.contains("&sort=desc"), "{endpoint}");
+        }
+    }
+
+    /// A cap-stopped walk has no completeness proof, so no page built from it can
+    /// claim newest-first correctness — INCLUDING one that fills `limit`, since a
+    /// capped leg only reached its cap while a deeper page could still have displaced
+    /// rows the page already holds. The row count is deliberately not an input.
+    #[test]
+    fn a_truncated_walk_is_refused_whatever_it_collected() {
+        // The kind is part of the contract: the frontend's list retry skips a re-walk on
+        // InvalidArgument, and a transient-looking Glab would spend another round of
+        // `glab` calls reaching the same horizon.
+        match refuse_truncated_walk(true) {
+            Err(AppError::InvalidArgument(msg)) => {
+                // The copy has to name the bound and the remedy, or it leaves the user
+                // with no next move. A narrow filter can hit the horizon too, so dropping
+                // one of the combined filters has to be offered alongside narrowing.
+                assert!(
+                    msg.contains(&(FILTER_PAGE_SIZE * MAX_LEG_PAGES).to_string()),
+                    "{msg}"
+                );
+                assert!(msg.contains("Narrow the filter"), "{msg}");
+                assert!(msg.contains("per filter value"), "{msg}");
+                assert!(msg.contains("drop one of the combined filters"), "{msg}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_untruncated_walk_is_never_refused() {
+        // Exhausted and proven-complete legs together ARE the whole repo, so zero
+        // matches is the answer — refusing here would turn an honest empty list into
+        // an error.
+        assert!(refuse_truncated_walk(false).is_ok());
+    }
+
+    #[test]
+    fn an_empty_value_and_an_unresolvable_viewer_are_typed_errors() {
+        // An empty value would encode to an empty param GitLab reads as no filter.
+        for empty in [
+            filter_of(false, false, &[""], &[]),
+            filter_of(false, false, &[], &[""]),
+        ] {
+            assert!(matches!(
+                plan_filtered_list(
+                    "grp%2Fproj",
+                    "merge_requests",
+                    &["opened"],
+                    true,
+                    None,
+                    &empty
+                ),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
+        // A "mine" axis without a resolved viewer errors rather than listing
+        // unnarrowed under an active filter badge.
+        let mine = filter_of(true, false, &[], &[]);
+        for viewer in [None, Some("")] {
+            assert!(matches!(
+                plan_filtered_list(
+                    "grp%2Fproj",
+                    "merge_requests",
+                    &["opened"],
+                    true,
+                    viewer,
+                    &mine
+                ),
+                Err(AppError::Glab(_))
+            ));
+        }
+    }
+
+    /// Rows as the legs return them, with the author/label/created_at fields the
+    /// client predicates and the ordering read.
+    fn leg_row(number: u64, author: &str, labels: &[&str], created_at: &str) -> PrInfo {
+        PrInfo {
+            author: Some(PrAuthor {
+                login: author.to_string(),
+            }),
+            labels: labels
+                .iter()
+                .map(|name| PrListLabel {
+                    name: (*name).to_string(),
+                })
+                .collect(),
+            created_at: created_at.to_string(),
+            ..row(number, "head", "main", None)
+        }
+    }
+
+    #[test]
+    fn the_merge_dedupes_applies_the_client_axes_orders_and_truncates() {
+        let f = filter_of(true, true, &["octocat"], &["bug"]);
+        let p = plan("merge_requests", &["opened"], true, &f);
+        let rows = vec![
+            // Assignee leg.
+            leg_row(1, "octocat", &["bug"], "2026-01-01T00:00:00.000Z"),
+            leg_row(2, "someone-else", &["bug"], "2026-03-01T00:00:00.000Z"),
+            // Reviewer leg — MR 1 again (viewer is assignee AND reviewer), plus one
+            // carrying the right author but the wrong label.
+            leg_row(1, "octocat", &["bug"], "2026-01-01T00:00:00.000Z"),
+            leg_row(3, "octocat", &["chore"], "2026-02-01T00:00:00.000Z"),
+            leg_row(4, "octocat", &["chore", "bug"], "2026-04-01T00:00:00.000Z"),
+        ];
+        let merged = merge_filtered_mrs(rows, &p, None);
+        // Wrong author (2) and wrong label (3) are dropped; 1 appears once; newest
+        // created first.
+        assert_eq!(
+            merged.iter().map(|m| m.number).collect::<Vec<_>>(),
+            vec![4, 1]
+        );
+        // `limit` narrows the MERGED page, after the predicates have run.
+        let one = merge_filtered_mrs(
+            vec![
+                leg_row(4, "octocat", &["bug"], "2026-04-01T00:00:00.000Z"),
+                leg_row(1, "octocat", &["bug"], "2026-01-01T00:00:00.000Z"),
+            ],
+            &p,
+            Some(1),
+        );
+        assert_eq!(one.iter().map(|m| m.number).collect::<Vec<_>>(), vec![4]);
+    }
+
+    #[test]
+    fn a_filtered_mr_page_reports_its_stack_membership_unknown() {
+        // Chain inference reads the WHOLE open list, so a filtered subset can't
+        // position rows — the decoration is unfetched, not absent.
+        let f = filter_of(false, false, &["octocat"], &[]);
+        let p = plan("merge_requests", &["opened"], true, &f);
+        let mut stacked = leg_row(7, "octocat", &[], "2026-01-01T00:00:00.000Z");
+        stacked.stack = Some(PrStackInfo {
+            id: "mr-7".to_string(),
+            position: 1,
+            size: 2,
+        });
+        let merged = merge_filtered_mrs(vec![stacked], &p, None);
+        assert!(merged[0].stack.is_none());
+        assert!(merged[0].stack_unknown);
+    }
+
+    #[test]
+    fn a_row_with_no_author_fails_an_active_author_predicate() {
+        let f = filter_of(true, false, &["octocat"], &[]);
+        let p = plan("merge_requests", &["opened"], true, &f);
+        let mut anonymous = leg_row(5, "octocat", &[], "2026-01-01T00:00:00.000Z");
+        anonymous.author = None;
+        assert!(merge_filtered_mrs(vec![anonymous], &p, None).is_empty());
+        // With no author predicate, the same row survives.
+        let mine = filter_of(true, false, &[], &[]);
+        let p = plan("merge_requests", &["opened"], true, &mine);
+        let mut anonymous = leg_row(5, "octocat", &[], "2026-01-01T00:00:00.000Z");
+        anonymous.author = None;
+        assert_eq!(merge_filtered_mrs(vec![anonymous], &p, None).len(), 1);
+    }
+
+    #[test]
+    fn the_issue_merge_shares_the_predicates_and_ordering() {
+        let f = filter_of(true, false, &["octocat"], &["bug"]);
+        let p = plan("issues", &["opened"], false, &f);
+        let issue = |number: u64, author: &str, labels: &[&str], created_at: &str| IssueInfo {
+            number,
+            url: String::new(),
+            title: format!("issue {number}"),
+            state: "OPEN".to_string(),
+            created_at: created_at.to_string(),
+            updated_at: String::new(),
+            author: Some(PrAuthor {
+                login: author.to_string(),
+            }),
+            labels: labels
+                .iter()
+                .map(|name| PrListLabel {
+                    name: (*name).to_string(),
+                })
+                .collect(),
+        };
+        let merged = merge_filtered_issues(
+            vec![
+                issue(1, "octocat", &["bug"], "2026-01-01T00:00:00.000Z"),
+                issue(1, "octocat", &["bug"], "2026-01-01T00:00:00.000Z"),
+                issue(2, "someone-else", &["bug"], "2026-05-01T00:00:00.000Z"),
+                issue(3, "octocat", &["bug"], "2026-03-01T00:00:00.000Z"),
+            ],
+            &p,
+            None,
+        );
+        assert_eq!(
+            merged.iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![3, 1]
+        );
     }
 
     #[test]

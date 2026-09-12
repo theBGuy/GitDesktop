@@ -512,13 +512,45 @@ pub async fn gh_publish_owners() -> AppResult<GithubPublishOwners> {
     parse_publish_owners(&out.stdout_lossy())
 }
 
+/// Whether `url`'s host is the literal, canonical `github.com` — the ONE host
+/// GitDesktop can trust as a real web address without a network round-trip. An
+/// SSH-config alias (`Host github.com-work` in `~/.ssh/config`, the standard
+/// multi-account pattern) or a `.gitconfig` `insteadOf` rewrite (`gh:owner/repo`)
+/// both leave a DIFFERENT string in `git remote get-url` — one that resolves only
+/// inside the user's own SSH client, never in a browser — so both correctly fail
+/// this and fall back to `gh repo view`'s canonical resolution. GitHub Enterprise
+/// hosts fail it too: unlike the literal `github.com` spelling, there is no way to
+/// confirm an arbitrary domain is really a GHE instance without asking `gh`. Pure.
+fn is_canonical_github_remote(url: &str) -> bool {
+    crate::forge::remote_host(url).as_deref() == Some("github.com")
+}
+
 /// The repository's web URL (works for github.com and GitHub Enterprise).
 /// Append paths like `/issues/new` for specific pages.
 ///
 /// `lens` picks WHICH remote's repo answers: `None`/`Some("origin")` is the fork
 /// itself, `Some("upstream")` the parent. A body rendered under the upstream lens
 /// resolves its relative links against the parent, where those paths actually live.
+///
+/// The origin lens resolves purely from the `origin` remote — no `gh` call, so it
+/// works signed out (mirrors Bitbucket's `repo_url`, always a local parse, and
+/// GitLab's no-lens arm, moved the same day) — but ONLY for the literal `github.com`
+/// host ([`is_canonical_github_remote`]); anything else (Enterprise, an SSH alias,
+/// an `insteadOf` rewrite) keeps the `gh repo view` round-trip, same as the
+/// upstream lens, since resolving a fork's parent is likewise a real API question
+/// this app doesn't answer from local remote config alone.
 pub async fn gh_repo_url(repo_path: String, lens: Option<String>) -> AppResult<String> {
+    if matches!(lens.as_deref(), None | Some("origin")) {
+        let url =
+            crate::git::remote::git_remote_url(repo_path.clone(), "origin".to_string()).await?;
+        if is_canonical_github_remote(&url) {
+            return crate::forge::web_repo_url(&url).ok_or_else(|| {
+                AppError::Gh(
+                    "could not determine the repository's web URL from the origin remote".into(),
+                )
+            });
+        }
+    }
     // Pin the slug positionally (`gh repo view <slug>` — the `repo` family has no
     // `-R` flag): a bare `gh repo view` on a fork with an `upstream` remote
     // auto-resolves to the PARENT, so the lens would never be what decides.
@@ -2340,15 +2372,23 @@ const PR_LIST_FIELDS: &str = "number,url,title,baseRefName,headRefName,isDraft,s
 /// PRs for the Pull Requests list. `state` is "open" or "closed"; closed
 /// uses the search qualifier so merged PRs are included, matching the
 /// semantics of GitHub's own Closed tab.
+///
+/// A non-empty `filter` narrows the list SERVER-side through `ISSUE_ADVANCED`
+/// search instead (see [`crate::github::pr_search`]); an absent or empty one keeps
+/// the `gh pr list` read below unchanged. Both paths get the same stack join.
 pub async fn gh_pr_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<crate::forge::model::RemoteListFilter>,
 ) -> AppResult<Vec<PrInfo>> {
     // Resolve the lens slug so a fork lists the chosen repo's PRs (a bare
     // `gh pr list` on a fork auto-resolves to the upstream repo).
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    if let Some(q) = crate::github::pr_search::search_query(&slug, true, &state, filter.as_ref())? {
+        return gh_pr_list_filtered(&repo_path, &slug, &state, limit, &q).await;
+    }
     let mut args: Vec<&str> = match state.as_str() {
         "open" => vec![
             "pr", "list", "--repo", &slug, "--state", "open", "--json", PR_LIST_FIELDS,
@@ -2399,6 +2439,33 @@ pub async fn gh_pr_list(
     });
     let mut prs: Vec<PrInfo> = serde_json::from_str(&out?.stdout_lossy())
         .map_err(|e| gh_unreadable("pull requests", format!("could not parse gh pr list: {e}")))?;
+    apply_stack_join(&mut prs, stacks.as_ref());
+    Ok(prs)
+}
+
+/// The filtered PR list: the search read, joined with stack membership exactly as
+/// [`gh_pr_list`] joins it — same bound, same unknown-on-timeout semantics — so a
+/// filtered row is decorated no differently from an unfiltered one.
+async fn gh_pr_list_filtered(
+    repo_path: &str,
+    slug: &str,
+    state: &str,
+    limit: Option<u32>,
+    q: &str,
+) -> AppResult<Vec<PrInfo>> {
+    let want_stacks = state == "open";
+    let (prs, stacks) = tokio::join!(
+        crate::github::pr_search::filtered_pr_list(repo_path, q, limit),
+        async {
+            if !want_stacks {
+                return Some(std::collections::HashMap::new());
+            }
+            tokio::time::timeout(STACKS_TIMEOUT, gh_open_stack_memberships(repo_path, slug))
+                .await
+                .unwrap_or_default()
+        }
+    );
+    let mut prs = prs?;
     apply_stack_join(&mut prs, stacks.as_ref());
     Ok(prs)
 }
@@ -2995,7 +3062,9 @@ fn pr_head_ref_from_value(value: &serde_json::Value) -> PrHeadRef {
 /// Pins the origin slug like [`gh_pr_poll`]: an unpinned `gh repo view` on a fork
 /// with an `upstream` remote auto-resolves to the PARENT, which would answer for
 /// the upstream's PR of the same number.
-#[tauri::command]
+///
+/// Not a command: the frontend reaches this through `forge_pr_head_ref`, which
+/// dispatches on the item's provider — a My work row can name any repo.
 pub async fn gh_pr_head_ref(repo_path: String, number: u64) -> AppResult<PrHeadRef> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let Some((owner, name)) = slug.split_once('/') else {
@@ -3316,7 +3385,11 @@ impl PrMergeability {
 /// shape. A non-OPEN PR has no live mergeability, and anything outside
 /// MERGEABLE/CONFLICTING (i.e. UNKNOWN) means GitHub is still computing — never a
 /// false "mergeable".
-fn map_gh_mergeability(state: &str, mergeable: &str, merge_state_status: &str) -> PrMergeability {
+pub(crate) fn map_gh_mergeability(
+    state: &str,
+    mergeable: &str,
+    merge_state_status: &str,
+) -> PrMergeability {
     let detail = (!merge_state_status.is_empty()).then(|| merge_state_status.to_string());
     if !state.eq_ignore_ascii_case("OPEN") {
         // No detail: "unavailable" means there is no server truth to be had, so a
@@ -3393,11 +3466,16 @@ pub async fn gh_pr_mergeability(
 /// Mergeability for a whole PR-list page, keyed by number. Its own `gh pr list`
 /// call by design: adding `mergeable` to [`PR_LIST_FIELDS`] measured 3–5s of extra
 /// latency on large repos, so the list never waits on it.
+///
+/// A non-empty `filter` re-runs the LIST's search rather than the unfiltered page:
+/// the unfiltered page's first rows can miss every filtered row, which would leave
+/// the on-screen PRs with no chip at all.
 pub async fn gh_pr_list_mergeability(
     repo_path: &str,
     state: &str,
     limit: Option<u32>,
     lens: Option<&str>,
+    filter: Option<&crate::forge::model::RemoteListFilter>,
 ) -> AppResult<std::collections::HashMap<u64, String>> {
     const FIELDS: &str = "number,mergeable,state";
     // Only "open" reaches any provider — `forge_pr_list_mergeability` short-circuits
@@ -3405,6 +3483,9 @@ pub async fn gh_pr_list_mergeability(
     // mergeability to report.
     debug_assert_eq!(state, "open", "only the open filter reaches the providers");
     let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
+    if let Some(q) = crate::github::pr_search::search_query(&slug, true, state, filter)? {
+        return crate::github::pr_search::filtered_mergeability(repo_path, &q, limit).await;
+    }
     let mut args: Vec<&str> = vec![
         "pr", "list", "--repo", &slug, "--state", "open", "--json", FIELDS,
     ];
@@ -4225,9 +4306,9 @@ pub async fn gh_pr_reactions(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -4469,9 +4550,9 @@ pub async fn pr_timeline(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -6141,7 +6222,7 @@ mod tests {
         apply_stack_join, classify_gh_merge_refusal, classify_merge_async,
         external_items_from_thread_nodes,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message,
-        gh_pr_discard_pending_review, host_from_url,
+        gh_pr_discard_pending_review, gh_repo_url, host_from_url, is_canonical_github_remote,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
         parse_auth_accounts, parse_pr_url_repo, parse_publish_owners, pr_edit_args,
         pr_head_ref_from_value, pr_head_ref_query, pr_poll_query,
@@ -7166,6 +7247,92 @@ mod tests {
         )
         .await;
         assert!(!oid_outside_origin_graph(&repo_s, &local_oid).await);
+    }
+
+    /// The no-lens arm resolves purely from `origin` — real repo, no `gh` spawn —
+    /// for https and scp-style ssh. The upstream lens is untouched: with no
+    /// `upstream` remote configured it still fails, proving the split didn't
+    /// accidentally widen origin's derivation onto it.
+    ///
+    /// A FRESH temp repo per remote form — `git_remote_url`'s TTL cache is keyed by
+    /// `(repo_path, name)`, and this test's raw `git remote add` bypasses the
+    /// app-side commands that invalidate it, so reusing one path across iterations
+    /// would serve the first remote's cached URL to every later assertion.
+    #[tokio::test]
+    async fn repo_url_no_lens_arm_resolves_from_origin_without_gh() {
+        async fn run(repo: &str, args: &[&str]) {
+            let _ = run_git(Some(repo), args, DEFAULT_TIMEOUT).await;
+        }
+
+        async fn repo_with_origin(tag: &str, remote: &str) -> (tempfile::TempDir, String) {
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("gd-pr-repo-url-{tag}-"))
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let repo_s = repo.to_string_lossy().into_owned();
+            run(&repo_s, &["init", "-q"]).await;
+            run(&repo_s, &["remote", "add", "origin", remote]).await;
+            (dir, repo_s)
+        }
+
+        // GitHub Enterprise is deliberately NOT a local-success case here — see
+        // `is_canonical_github_remote_admits_only_the_literal_host` below, which
+        // pins that it takes the OTHER branch without needing a live `gh` call.
+        for (tag, remote, want) in [
+            ("https", "https://github.com/theBGuy/biome.git", "https://github.com/theBGuy/biome"),
+            ("scp", "git@github.com:theBGuy/biome.git", "https://github.com/theBGuy/biome"),
+        ] {
+            let (_dir, repo_s) = repo_with_origin(tag, remote).await;
+            assert_eq!(gh_repo_url(repo_s.clone(), None).await.unwrap(), want);
+            assert_eq!(
+                gh_repo_url(repo_s.clone(), Some("origin".into())).await.unwrap(),
+                want
+            );
+        }
+
+        // No `upstream` remote exists — the lens arm still goes through
+        // `gh_lens_slug`, which resolves the remote via `git remote get-url` first;
+        // that fails (AppError::Git) before any `gh` spawn.
+        let (_dir, repo_s) = repo_with_origin("no-upstream", "https://github.com/theBGuy/biome.git").await;
+        let err = gh_repo_url(repo_s.clone(), Some("upstream".into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Git { .. }));
+    }
+
+    /// The exact regression an app-review round caught: an SSH-config alias
+    /// (`Host github.com-work` in `~/.ssh/config`, the standard multi-account
+    /// pattern) or a `.gitconfig` `insteadOf` rewrite (`gh:owner/repo`) both
+    /// leave a non-`github.com` string in `git remote get-url` — a host that
+    /// resolves only inside the user's own SSH client or git config, never in a
+    /// browser. Deriving a browser URL locally from either would open a dead
+    /// page; only the literal canonical host is safe to resolve without asking
+    /// `gh`. No live `gh` call needed to prove this — the point is exactly that
+    /// these forms must NOT take the local-success path at all.
+    #[test]
+    fn is_canonical_github_remote_admits_only_the_literal_host() {
+        for remote in [
+            "https://github.com/theBGuy/biome.git",
+            "git@github.com:theBGuy/biome.git",
+            "ssh://git@github.com/theBGuy/biome.git",
+        ] {
+            assert!(is_canonical_github_remote(remote), "{remote} should be canonical");
+        }
+        for remote in [
+            // GitHub Enterprise — cannot be confirmed as GHE without asking `gh`.
+            "https://github.example.com/team/svc.git",
+            "https://github.example.com:8443/team/svc.git",
+            // SSH-config alias (`Host github.com-work`), the multi-account pattern.
+            "git@github.com-work:theBGuy/biome.git",
+            "ssh://git@github.com-work/theBGuy/biome.git",
+            // `.gitconfig` `insteadOf` rewrite (`url."git@github.com:".insteadOf =
+            // "gh:"`) — `git remote get-url` returns the UNREWRITTEN value.
+            "gh:theBGuy/biome",
+        ] {
+            assert!(!is_canonical_github_remote(remote), "{remote} should NOT be canonical");
+        }
     }
 
     /// The detail view's mergeability rides the SAME `gh pr view` call, so the

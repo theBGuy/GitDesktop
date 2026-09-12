@@ -6,6 +6,7 @@ import {
 } from "@phosphor-icons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -339,10 +340,10 @@ export function CodeTodosPanel({
                           ) : (
                             <CaretDownIcon className="size-3 shrink-0" />
                           )}
-                          <span className="truncate font-mono" title={row.path}>
-                            {row.path}
+                          <PathText path={row.path} className="font-mono" />
+                          <span className="shrink-0 tabular-nums">
+                            ({row.count})
                           </span>
-                          <span className="tabular-nums">({row.count})</span>
                         </button>
                       ) : (
                         <TodoRow

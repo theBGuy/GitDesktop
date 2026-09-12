@@ -52,9 +52,10 @@ instead, see [Development](#development).
   [Bitbucket Cloud](#bitbucket-cloud), each with PRs/MRs, CI, and project
   settings in the same panels; [issues in-app](#issues-and-to-dos) on GitHub
   and GitLab, or via [Jira](#jira-cloud-issues) on Bitbucket.
-- **[My work](#my-work), one inbox across repos**: your open pull
-  requests, review requests, and issues from every repository you've
-  added, with Enter opening each right where the work lives.
+- **[My work](#my-work), one inbox across repos and forges**: your open
+  pull requests, merge requests, review requests, and issues from
+  GitHub, GitLab, and Bitbucket, with Enter opening each right where
+  the work lives.
 - **A [GitHub Actions cockpit](#github-actions)**: runs, jobs, steps,
   re-run / cancel / dispatch (from the run or a right-click on its row),
   failed-step logs, and AI debugging.
@@ -71,8 +72,8 @@ instead, see [Development](#development).
   [merge prediction](#branches), lost-stash recovery, a worktree manager, and
   bulk branch cleanup.
 - **[Markdown, previewed in the diff](#changes-and-commits)**: a
-  Raw / Preview toggle renders markdown and MDX changes anywhere you
-  review local diffs.
+  Raw / Preview toggle renders markdown and MDX changes anywhere the app
+  can read the file locally.
 - **Keyboard-first, privacy-first**: rebindable shortcuts, a command palette,
   keys in the OS keychain, and one switch that
   [hides every AI surface](#ai-configuration).
@@ -127,22 +128,26 @@ delete), and deep links to the settings GitHub keeps browser-only.
 
 A unified or split diff with syntax highlighting, collapsible surrounding
 context, and image diffing. Filter the changes list by path or category, and
-read a file's `+added -deleted` line counts without opening it. The
+read a file's `+added -deleted` line counts without opening it. Show that
+list flat or as a compacted directory tree: collapsible folders, single-child
+folder chains merged into one row, and arrow keys that walk and fold it. The
 working-tree diff is one whole-file view with hunk- and line-level staging
-and discarding (drag across the line numbers; hold Ctrl, or Cmd on macOS, to
-add to a selection, so one selection can mix added and removed lines across
-hunks), including committing or discarding only part of a brand-new
-(untracked) file. Stage or unstage a drag-made selection with
-`Ctrl`/`⌘`+`Shift`+`Enter`, without reaching for the button. Stage, unstage,
-or discard single files or a multi-selection from the context menu (staging
-and unstaging a selection sit in the command palette too); discarding a
-whole untracked file goes to the recycle bin. Commit with title + body,
-co-authors suggested from history, amend, undo, reset, and revert.
+and discarding (drag across the line numbers, spanning hunks freely — a drag
+picks up added and removed lines together in either view, Shift keeps it to
+one side, and Ctrl, or Cmd on macOS, adds to a selection), including
+committing or discarding only part of a brand-new (untracked) file. Stage or
+unstage a drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`, without
+reaching for the button. Stage, unstage, or discard single files or a
+multi-selection from the context menu (staging and unstaging a selection sit
+in the command palette too); discarding a whole untracked file goes to the
+recycle bin. Commit with title + body, co-authors suggested from history,
+amend, undo, reset, and revert.
 
 Markdown and MDX files add a Raw / Preview toggle to the diff, so you can
 read a doc change as rendered prose (headings, tables, and code blocks) on
-the working tree, commit details, stashes, and an agent session's worktree
-changes.
+the working tree, commit details, stashes, an agent session's worktree
+changes, a file's history, branch compare, and pull request files when the
+PR's commits are available locally.
 
 ### Branches
 
@@ -405,6 +410,16 @@ in one click.
   Separately, the **Edit** dialog can **retarget a PR's base branch** on
   GitHub, GitLab, and Bitbucket; on a stacked GitHub PR the picker asks you
   to dissolve the stack first.
+- **Scope the list to your work**: a one-click **All | Mine | Needs review**
+  switch in the list toolbar, over a funnel that filters the **whole
+  repository** server-side — assigned to you, awaiting your review, by
+  **author**, or by **label**, on **GitHub & GitLab**. **Needs review** also
+  splits the open list into collapsible **Not reviewed yet**, **Updated since
+  my review**, and **Reviewed** groups, so a triage pass knows where to
+  start. The grouping is GitHub-only, and GitHub is also where your
+  **teams**' review requests can join the filter. Your scope choice is
+  remembered per repository, and a provider that can't express an axis says
+  so in the funnel rather than offering a dead control.
 - **Fork · Upstream lens**: on a GitHub fork (a repo with an `upstream`
   remote), a **Fork | Upstream** switch in the list toolbar points the
   remote PR list, and every PR you open under it (description, comments,
@@ -508,7 +523,9 @@ GitLab), pin/unpin (GitHub), lock/unlock, or delete. On a **fork**, the
 same **Fork | Upstream** lens as the PR tab browses the parent repository's
 issues (creating one under the Upstream lens opens it **on the parent**),
 and a fork with issues turned off offers a one-click switch to Upstream
-instead of a dead end.
+instead of a dead end. An **All | Mine** switch in the list toolbar scopes
+the list to the issues **assigned to you**, and the funnel beside it narrows
+the whole repository's issues by **author** or **label** (GitHub & GitLab).
 
 **Activity feed**: an issue's timeline events interleave with its comments,
 date-sorted oldest-to-newest — labels, assignees, milestones, title renames,
@@ -634,19 +651,27 @@ it doesn't normally appear. Fully keyboard-navigable.
 
 ### My work
 
-A cross-repo inbox of your open **GitHub** pull requests and issues:
-anything you authored, were assigned, were mentioned in, or commented on,
-plus anything awaiting your review. Newest first, so what's waiting on you
-is one screen away instead of one repository at a time. Narrow it with the
-**All / Pull requests / Issues** tabs and a filter box that takes arrow
-keys and Enter, then press Enter on a row: an item from a repository
-you've added to GitDesktop usually opens right in the app, and the ↗ marks
-the rows that will open on GitHub instead. A pull request usually lands in the
+A cross-repo inbox of the open work that involves you, across all three
+forges. On **GitHub** it collects every pull request and issue you
+authored, were assigned, were mentioned in, or commented on, plus
+anything awaiting your review; **GitLab** adds the merge requests and
+issues from each host you're signed in to, and **Bitbucket** the pull
+requests from your recent repositories. Newest first, so what's waiting
+on you is one screen away instead of one repository at a time. Every row
+carries the mark of the forge it came from, each forge loads on its own,
+and a forge you haven't connected simply doesn't appear. Narrow it with
+the **All / Pull requests / Issues** tabs and a filter box that takes
+arrow keys and Enter, then press Enter on a row: an item from a
+repository you've added to GitDesktop usually opens right in the app, and
+the ↗ marks the rows GitDesktop already knows will open on their host in
+your browser — a row without it can still land there when its checkout
+can't be confirmed as you open it. A pull request usually lands in the
 **worktree** its head branch is checked out in (when GitDesktop can
-resolve that in time), so you arrive in the checkout the work lives in; **Shift+Enter** (or *Open in
-main workspace* on the row's right-click menu) takes you to the main
-workspace instead. Read-only, with a **Refresh** in the header and *Open
-on GitHub* / *Copy link* alongside. Reach it with `Ctrl`/`⌘`+`Shift`+`M`,
+resolve that in time), so you arrive in the checkout the work lives in;
+**Shift+Enter** (or *Open in main workspace* on the row's right-click
+menu) takes you to the main workspace instead.
+Read-only, with a **Refresh** in the header, plus *Open on GitHub / GitLab /
+Bitbucket* and *Copy link* alongside. Reach it with `Ctrl`/`⌘`+`Shift`+`M`,
 from the welcome screen, or from the command palette (*My work*).
 
 ### GitLab
@@ -980,6 +1005,12 @@ review via its subscription login. The full list is under
   commits to a reviewed PR) that runs AI review or security audit
   automatically, with per-action branch conditions, Save/Discard drafts,
   global defaults, and per-repo overrides (paused while **Hide AI** is on).
+- **Automation history**: every decision a repository's automations made,
+  in one read-only log — what ran, what was skipped, and the reason for
+  each, with the repo's effective configuration at the top. Open it from
+  the activity bell or the repo ⋮ menu. **Run automations on this pull
+  request** (command palette) runs the configured reviews on demand,
+  confirming the modes and the posted comment before spending a model call.
 - **Integrations**: open in any editor or terminal (auto-detected, point at
   any executable, or set a full custom command with a `{path}` placeholder),
   and tunable OS notifications for PR activity, checks, and CI runs.

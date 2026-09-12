@@ -77,7 +77,6 @@ import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
-import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
 import { PROMOTION_REASON, type PromotionKind } from "./PrMergeabilityBanner";
@@ -654,15 +653,26 @@ export function LocalPrView({
     );
   }
 
-  // The Merge control's state. Hoisted because the refusal has to sit on the
-  // wrapping span while `disabled` sits on the trigger — a disabled trigger is
-  // what actually keeps the menu shut.
+  // The Merge control's state. `disabled`/`reason` land on the rendered
+  // DisabledReasonButton, never the trigger — its own inner useButton swallows
+  // activation while blocked, which is what actually keeps the menu shut.
   const mergeBlocked = !canMerge || merge.isPending || dirtyBlocks;
-  const mergeReason = !canMerge
-    ? "Approve the PR before merging"
-    : dirtyBlocks
-      ? "Commit or stash your changes before merging into the current branch"
-      : `Merge ${pr.head} into ${pr.base}`;
+  // This same string doubles as the hover title while nothing blocks. The
+  // active merge outranks `dirtyBlocks`: a merge already in flight can't be
+  // unblocked by committing or stashing, so a dirty tree that shows up mid-merge
+  // must not override "Merging…" with a remedy that doesn't apply.
+  const mergeReason = (() => {
+    switch (true) {
+      case !canMerge:
+        return "Approve the PR before merging";
+      case merge.isPending:
+        return "Merging…";
+      case dirtyBlocks:
+        return "Commit or stash your changes before merging into the current branch";
+      default:
+        return `Merge ${pr.head} into ${pr.base}`;
+    }
+  })();
 
   return (
     <div className="flex h-full flex-col">
@@ -1135,6 +1145,10 @@ export function LocalPrView({
                 }
                 reason={(() => {
                   switch (true) {
+                    case updateBranchFrom.isPending:
+                      return "Updating this branch…";
+                    case recovery.pending:
+                      return "Another git operation is running.";
                     case defaultBranch.isPending:
                       return "Checking which branch is the default…";
                     case rulesSettling:
@@ -1151,26 +1165,20 @@ export function LocalPrView({
               </DisabledReasonButton>
             )}
             <DropdownMenu>
-              {/* A natively-disabled Button swallows `title`, so the refusal
-                  rides a wrapping span (house idiom) — outside the trigger,
-                  which carries `disabled` itself so a blocked merge can't open
-                  the menu. */}
-              <span
-                title={mergeReason}
-                className={cn(
-                  "inline-flex",
-                  mergeBlocked && "cursor-not-allowed",
-                )}
+              <DropdownMenuTrigger
+                render={
+                  <DisabledReasonButton
+                    size="sm"
+                    disabled={mergeBlocked}
+                    reason={mergeReason}
+                    title={mergeReason}
+                  />
+                }
               >
-                <DropdownMenuTrigger
-                  disabled={mergeBlocked}
-                  render={<Button size="sm" />}
-                >
-                  <GitMergeIcon data-icon="inline-start" />
-                  Merge
-                  <CaretDownIcon data-icon="inline-end" />
-                </DropdownMenuTrigger>
-              </span>
+                <GitMergeIcon data-icon="inline-start" />
+                Merge
+                <CaretDownIcon data-icon="inline-end" />
+              </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuItem
                   disabled={

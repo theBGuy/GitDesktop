@@ -14,6 +14,7 @@ import {
 } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useState } from "react";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
@@ -126,21 +127,28 @@ function ToolRow({ tool }: { tool: ToolStatus }) {
           </span>
           {meta.auth && tool.found && <AuthState authed={tool.authed} />}
         </p>
-        <p className="truncate text-[11px] text-muted-foreground">
-          {tool.found ? (
-            <>
+        {tool.found ? (
+          // Flex row, not one truncating line: PathText is a flex box, so the
+          // version has to be a sibling item rather than inline text. Spacing
+          // rides `gap-1` because a flex line box trims a collapsible space,
+          // and both text items shrink so a long version banner truncates
+          // rather than pushing the path out of the row.
+          <p className="flex min-w-0 gap-1 text-[11px] text-muted-foreground">
+            <span className="min-w-0 truncate">
               {tool.version ?? "version unknown"}
-              {tool.path ? (
-                <>
-                  {" · "}
-                  <span className="font-mono">{tool.path}</span>
-                </>
-              ) : null}
-            </>
-          ) : (
-            meta.role
-          )}
-        </p>
+            </span>
+            {tool.path ? (
+              <>
+                <span className="shrink-0">·</span>
+                <PathText path={tool.path} className="font-mono" />
+              </>
+            ) : null}
+          </p>
+        ) : (
+          <p className="truncate text-[11px] text-muted-foreground">
+            {meta.role}
+          </p>
+        )}
         {floorWarning ? (
           <p className="text-[11px] text-warning">{floorWarning}</p>
         ) : null}

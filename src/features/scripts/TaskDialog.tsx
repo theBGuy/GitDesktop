@@ -4,6 +4,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -23,7 +24,6 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { clipTitle } from "@/lib/clip-title";
 import { isMac, isWindows } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import {
@@ -318,8 +318,8 @@ export function TaskDialog({
               {/* Wider than the trigger: the popup defaults to the trigger's
                   width (w-(--anchor-width)) and hard-clips overflow, which cut
                   the detected interpreter paths mid-character. 320px gives the
-                  paths room; anything longer still ellipsizes inside the span
-                  (max-w-64) with the clipped-title tooltip. */}
+                  paths room; anything longer still middle-truncates inside the
+                  span (max-w-64) with its clipped-only tooltip. */}
               <SelectContent className="w-80">
                 {options.map((i) => {
                   // The selected interpreter reflects the login-shell confirm (what
@@ -344,12 +344,13 @@ export function TaskDialog({
                           )}
                         </span>
                         {found ? (
-                          <span
-                            className="max-w-64 truncate font-mono text-[10px] text-muted-foreground"
-                            onMouseEnter={clipTitle(found)}
-                          >
-                            {found}
-                          </span>
+                          // max-w-64 self-bounds the row against ItemText's
+                          // `min-width: auto` floor, which no truncate inside a
+                          // Select popup engages without.
+                          <PathText
+                            path={found}
+                            className="max-w-64 font-mono text-[10px] text-muted-foreground"
+                          />
                         ) : isSelected && selectedResolving ? (
                           <span className="text-[11px] text-muted-foreground">
                             Checking your shell…

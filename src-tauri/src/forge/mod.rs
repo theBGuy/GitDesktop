@@ -15,6 +15,7 @@ pub mod glab;
 pub mod http;
 pub mod jira;
 pub mod model;
+pub mod my_work;
 pub mod session;
 
 use crate::error::{AppError, AppResult};
@@ -241,6 +242,93 @@ pub(crate) fn remote_path(url: &str) -> Option<String> {
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     (!path.is_empty()).then(|| path.to_string())
+}
+
+/// A remote's web (browser) URL — `{scheme}://{authority}/{path}`. `None` when the
+/// remote has no parseable host+path.
+///
+/// The scheme is preserved for an explicit `http://` origin — a self-managed
+/// instance without TLS termination (the plain-HTTP Gitea case
+/// [[push-failure-classification-task]] already handles) serves its web UI over
+/// `http`, and forcing `https` would point the browser at a listener that never
+/// answers there. Every other form — `https://`, any non-http(s) scheme, and
+/// scp-style `git@host:path` (no scheme to read at all) — defaults to `https`: a
+/// non-http(s) transport (`ssh://`, `git://`, `git+ssh://`, …) carries no
+/// information about the web UI's scheme, so `https` is the reasonable
+/// assumption, and matches what `https://` origins already say.
+///
+/// A non-http(s) scheme also carries its OWN transport port — a self-managed host
+/// commonly exposes git-over-SSH on a non-default port (2222 is the standard
+/// workaround when the host OS already owns 22) or git-daemon on 9418, while the
+/// web UI stays on 443, so that port is dropped rather than reused as a bogus web
+/// port ([`remote_host`], bare). The `http`/`https` schemes are the ONLY ones whose
+/// port IS the web port: a self-managed instance conventionally serves
+/// git-over-http(s) and the web UI on the SAME port ([`remote_authority`], kept).
+/// scp-style `git@host:path` structurally carries no port to begin with, so which
+/// branch it takes doesn't matter.
+///
+/// The authority is gated through [`is_safe_authority`]: unlike [`remote_path`]'s
+/// callers (git argv, API path segments the CLI itself validates), this string is
+/// handed to the OS URL opener, and neither `remote_host` nor `remote_authority`
+/// charset-checks the host — only a malformed port falls back to the bare host. A
+/// crafted origin (`https://evil.com;rm -rf /path`) would otherwise reach the opener
+/// verbatim.
+pub(crate) fn web_repo_url(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim_start();
+    let is_plain_http = trimmed.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("http://"));
+    let is_https = trimmed.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+    let has_non_web_scheme = !is_plain_http && !is_https && trimmed.contains("://");
+    let scheme = if is_plain_http { "http" } else { "https" };
+    let authority = if has_non_web_scheme {
+        remote_host(remote_url)
+    } else {
+        remote_authority(remote_url)
+    }
+    .filter(|a| is_safe_authority(a))?;
+    let path = remote_path(remote_url)?;
+    Some(format!("{scheme}://{authority}/{path}"))
+}
+
+/// A remote's WEB authority — `host[:port]` as the provider's own web URL would
+/// spell it, lowercased, or `None` when there's no parseable host. The axis that
+/// distinguishes two instances sharing a hostname on different ports, which
+/// [`remote_host`] cannot see (it strips every port) and [`remote_authority`]
+/// over-reports (it keeps `:443`, deliberately, for credential keys).
+///
+/// The port rules follow the scheme, matching [`web_repo_url`]'s reasoning:
+///  - `https://` — `:443` elided, any other port kept.
+///  - `http://` — `:80` elided, any other port kept.
+///  - scp-style `git@host:path` — carries no port at all; that `:` opens the path.
+///  - ANY other scheme (`ssh://`, `git://`, …) — the port is DROPPED, not kept: it
+///    is a transport port, never the web port. A self-managed host commonly serves
+///    git-over-SSH on 2222 while its web UI stays on 443, so carrying `:2222` here
+///    would make that checkout fail to match its own instance's items.
+///
+/// The elision is what keeps this comparable with the FRONTEND's spelling: the
+/// item side parses a provider web URL with the browser's `URL`, whose `host`
+/// natively elides a scheme-default port (measured: `https://h:443/x` → `h`,
+/// `https://h:8443/x` → `h:8443`). An un-elided `:443` here would mismatch every
+/// default-port item.
+pub(crate) fn web_authority(url: &str) -> Option<String> {
+    let trimmed = url.trim_start();
+    let is_plain_http = trimmed
+        .get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("http://"));
+    let is_https = trimmed
+        .get(..8)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+    // A non-web scheme's port belongs to its transport, so only the host survives.
+    if !is_plain_http && !is_https && trimmed.contains("://") {
+        return remote_host(url);
+    }
+    let authority = remote_authority(url)?;
+    let default_port = if is_plain_http { ":80" } else { ":443" };
+    Some(
+        authority
+            .strip_suffix(default_port)
+            .map(str::to_string)
+            .unwrap_or(authority),
+    )
 }
 
 /// Percent-encode a value for an API query string (RFC-3986 unreserved kept,
@@ -924,24 +1012,84 @@ pub async fn forge_owned_namespaces(provider: Provider) -> AppResult<Vec<String>
     }
 }
 
-/// Every open pull request and issue involving the signed-in user, across all the
-/// repos they can see — the "My work" inbox's single cross-repo read. Account-scoped
-/// (no repo path), so it dispatches on an explicit `provider` like the clone browser.
+/// Every open pull/merge request and issue involving the signed-in user — the "My
+/// work" inbox's single cross-repo read. Account-scoped (no repo path), so it
+/// dispatches on an explicit `provider` like the clone browser.
 ///
-/// GitHub only for now: the other arms error rather than returning an empty list, so
-/// a caller can't read "not wired up" as "you have no open work".
+/// `repo_paths` serves the Bitbucket arm alone: Bitbucket retired every
+/// account-scoped listing, so its inbox has to name the repos to ask. GitHub and
+/// GitLab answer for the whole account and ignore it.
 #[tauri::command]
 pub async fn forge_my_work(
     provider: Provider,
-) -> AppResult<crate::github::my_work::MyWorkPage> {
+    repo_paths: Option<Vec<String>>,
+) -> AppResult<my_work::MyWorkPage> {
     match provider {
         Provider::GitHub => crate::github::my_work::my_work().await,
-        Provider::GitLab => Err(AppError::InvalidArgument(
-            "My work isn't supported for GitLab yet.".into(),
-        )),
-        Provider::Bitbucket => Err(AppError::InvalidArgument(
-            "My work isn't supported for Bitbucket yet.".into(),
-        )),
+        Provider::GitLab => gitlab::gitlab_my_work().await,
+        Provider::Bitbucket => bitbucket::bitbucket_my_work(repo_paths.unwrap_or_default()).await,
+    }
+}
+
+/// Which providers the "My work" inbox can currently ask — its availability
+/// signal, kept out of `Implemented` because those flags are per-repo/per-provider
+/// FEATURE support while this is about whether an ACCOUNT is configured at all.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyWorkSources {
+    pub github: bool,
+    pub gitlab: bool,
+    pub bitbucket: bool,
+}
+
+/// Probe all three providers' account configuration concurrently. This command
+/// never errors: each arm folds its OWN failure to `false`, so a broken probe
+/// reads as "not configured" and the inbox simply doesn't offer that source —
+/// safer than failing the whole picker over one provider.
+///
+/// Every arm is LOCAL — a config read, an env read, or a keyring read; no spawn
+/// and no network. The results are returned together and the frontend gates its
+/// first paint on them, so one slow arm would delay every provider's rows: the
+/// GitHub arm reads gh's own config and token variables rather than running
+/// `gh auth status`, which validates the token over the network behind a 30s
+/// timeout. Each arm therefore answers "an account is configured", not "the
+/// credential still works" — the fetch that follows reports a dead credential as
+/// the error it is, where a probe that timed out would have silently hidden the
+/// source instead.
+#[tauri::command]
+pub async fn forge_my_work_sources() -> AppResult<MyWorkSources> {
+    let (github, gitlab, bitbucket) = tokio::join!(
+        crate::github::auth::gh_has_configured_host(),
+        // The SAME enumeration the GitLab fetch walks — a probe reading a
+        // different set could offer a source that then answers empty.
+        async { !glab::account_hosts().await.is_empty() },
+        async { http::load_credentials().await.is_ok() },
+    );
+    Ok(MyWorkSources {
+        github,
+        gitlab,
+        bitbucket,
+    })
+}
+
+/// The head branch of ONE pull/merge request, plus the repo that branch lives in —
+/// what the inbox's open path needs to prefer the worktree already holding that
+/// branch. Dispatches on an explicit `provider` (the row carries it) rather than
+/// re-detecting from `repo_path`, which the caller has already matched.
+///
+/// Every arm answers `""` for what its provider can't supply rather than erroring:
+/// the caller's question is "which branch, on which repo", and the gate declines
+/// on an unknown — a usable answer where a failed call is not.
+#[tauri::command]
+pub async fn forge_pr_head_ref(
+    provider: Provider,
+    repo_path: String,
+    number: u64,
+) -> AppResult<crate::github::pr::PrHeadRef> {
+    match provider {
+        Provider::GitHub => crate::github::pr::gh_pr_head_ref(repo_path, number).await,
+        Provider::GitLab => gitlab::pr_head_ref(&repo_path, number).await,
+        Provider::Bitbucket => bitbucket::pr_head_ref(&repo_path, number).await,
     }
 }
 
@@ -1112,17 +1260,81 @@ pub async fn forge_clone(
 /// Bitbucket deliberately don't receive it (the frontend gates the lens UI to GitHub),
 /// so a stray upstream lens there simply reads as origin. This note stands for every
 /// `forge_*` PR/issue dispatcher below.
+///
+/// `filter` narrows the list whole-repo, server-side. Each provider answers it from
+/// its own arm — GitHub from a search, GitLab from a fan-out over its single-valued
+/// list params. Bitbucket's author axis is NOT wired: its PR rows expose an author
+/// display name, which BBQL cannot filter on (`author.display_name` answers HTTP 400
+/// "does not support filtering"), and the filterable `author.nickname` is a different
+/// field that diverges from it. An empty or absent filter leaves every arm on its
+/// legacy read. The `listFilterMine` / `listFilterTeam` [`model::Implemented`] flags
+/// are what tell the frontend which filter controls a provider can offer. This note
+/// likewise stands for every filtered `forge_*` dispatcher below.
 #[tauri::command]
 pub async fn forge_pr_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
 ) -> AppResult<Vec<crate::github::pr::PrInfo>> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::list_prs(&repo_path, &state, limit).await,
+        Some((Provider::GitLab, _)) => {
+            gitlab::list_prs(&repo_path, &state, limit, filter.as_ref()).await
+        }
         Some((Provider::Bitbucket, _)) => bitbucket::list_prs(&repo_path, &state, limit).await,
-        _ => github::list_prs(&repo_path, &state, limit, lens).await,
+        _ => github::list_prs(&repo_path, &state, limit, lens, filter).await,
+    }
+}
+
+/// The viewer's own review state for the PRs a [`forge_pr_list`] call with the same
+/// arguments would return — the input to the list's "not reviewed / updated since my
+/// review / reviewed" grouping. A number ABSENT from the map means NOT reviewed, so
+/// the caller subtracts rather than expecting a row per PR.
+///
+/// Short-circuits to an empty page for any non-open state and for every non-GitHub
+/// provider, before any call: a closed PR's review state drives no grouping, and the
+/// map rests on GitHub's `reviewed-by:` search qualifier, which has no GitLab or
+/// Bitbucket analogue (`reviewGrouping` is false there).
+#[tauri::command]
+pub async fn forge_pr_review_state(
+    repo_path: String,
+    state: String,
+    limit: Option<u32>,
+    lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
+) -> AppResult<crate::github::pr_search::ReviewStatePage> {
+    if state != "open" {
+        return Ok(crate::github::pr_search::ReviewStatePage::empty());
+    }
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab | Provider::Bitbucket, _)) => {
+            Ok(crate::github::pr_search::ReviewStatePage::empty())
+        }
+        _ => {
+            github::pr_review_state(&repo_path, &state, limit, lens.as_deref(), filter.as_ref())
+                .await
+        }
+    }
+}
+
+/// The viewer's teams in this repo's organization, org-qualified for the PR list's
+/// team-review-request filter. GitHub-only: `team-review-requested:` has no GitLab or
+/// Bitbucket analogue, so those arms error rather than returning an empty list a
+/// caller could read as "you're in no teams" (the `forge_my_work` precedent).
+#[tauri::command]
+pub async fn forge_my_teams(
+    repo_path: String,
+    lens: Option<String>,
+) -> AppResult<crate::github::teams::MyTeams> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => Err(AppError::InvalidArgument(
+            "Team filters aren't supported for GitLab yet.".into(),
+        )),
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Team filters aren't supported for Bitbucket yet.".into(),
+        )),
+        _ => github::my_teams(&repo_path, lens.as_deref()).await,
     }
 }
 
@@ -1244,14 +1456,20 @@ pub async fn forge_pr_list_mergeability(
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
 ) -> AppResult<std::collections::HashMap<u64, String>> {
     if state != "open" {
         return Ok(std::collections::HashMap::new());
     }
     match detect_non_github(&repo_path).await {
+        // Unfiltered by design: this reads the first 100 open MRs, so a filtered row
+        // outside that page gets no conflict chip — chip absence is no claim.
         Some((Provider::GitLab, _)) => gitlab::mr_list_mergeability(&repo_path, &state).await,
         Some((Provider::Bitbucket, _)) => Ok(std::collections::HashMap::new()),
-        _ => github::list_mergeability(&repo_path, &state, limit, lens.as_deref()).await,
+        _ => {
+            github::list_mergeability(&repo_path, &state, limit, lens.as_deref(), filter.as_ref())
+                .await
+        }
     }
 }
 
@@ -2030,13 +2248,16 @@ pub async fn forge_issue_list(
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
 ) -> AppResult<Vec<crate::github::issue::IssueInfo>> {
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::list_issues(&repo_path, &state, limit).await,
+        Some((Provider::GitLab, _)) => {
+            gitlab::list_issues(&repo_path, &state, limit, filter.as_ref()).await
+        }
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::list_issues(&repo_path, &state, limit, lens).await,
+        _ => github::list_issues(&repo_path, &state, limit, lens, filter).await,
     }
 }
 
@@ -4470,6 +4691,57 @@ mod tests {
         assert!(!is_safe_authority("[2001:db8::1]:443.helper=!evil #"));
     }
 
+    /// The web authority's port rules, including the elision that has to agree
+    /// with the browser `URL` spelling the item side is parsed with.
+    #[test]
+    fn web_authority_elides_only_the_scheme_default_web_port() {
+        let a = |u: &str| web_authority(u).unwrap_or_default();
+
+        // https: the default elides, anything else is the instance's identity.
+        assert_eq!(a("https://gitlab.example/team/repo"), "gitlab.example");
+        assert_eq!(a("https://gitlab.example:443/team/repo"), "gitlab.example");
+        assert_eq!(
+            a("https://gitlab.example:8443/team/repo"),
+            "gitlab.example:8443"
+        );
+        // http keeps its own default.
+        assert_eq!(a("http://gitea.example:80/team/repo"), "gitea.example");
+        assert_eq!(
+            a("http://gitea.example:8080/team/repo"),
+            "gitea.example:8080"
+        );
+        // Case folds, so the two sides compare without either re-normalizing.
+        assert_eq!(a("https://GitLab.EXAMPLE/team/repo"), "gitlab.example");
+
+        // scp-style carries no port — that `:` opens the path.
+        assert_eq!(a("git@gitlab.example:team/repo.git"), "gitlab.example");
+
+        // A TRANSPORT port is dropped, never carried: ssh on 2222 beside a web UI
+        // on 443 is the common self-managed shape, and keeping it would make the
+        // checkout fail to match its own instance's items.
+        assert_eq!(a("ssh://git@gitlab.example:22/team/repo"), "gitlab.example");
+        assert_eq!(
+            a("ssh://git@gitlab.example:2222/team/repo"),
+            "gitlab.example"
+        );
+        assert_eq!(a("git://gitlab.example:9418/team/repo"), "gitlab.example");
+
+        // A bracketed IPv6 literal keeps its brackets, and its default elides.
+        assert_eq!(a("https://[2001:db8::1]:443/team/repo"), "[2001:db8::1]");
+        assert_eq!(
+            a("https://[2001:db8::1]:8443/team/repo"),
+            "[2001:db8::1]:8443"
+        );
+
+        // No parseable host → unproven.
+        assert_eq!(web_authority(""), None);
+        assert_eq!(web_authority("   "), None);
+        // A Windows drive-path remote reads as host "c" here, exactly as
+        // `remote_host`/`remote_authority` already spell it — harmless for an
+        // identity proof, since no provider item can present that authority.
+        assert_eq!(a("C:/local/path"), "c");
+    }
+
     #[test]
     fn is_https_remote_distinguishes_https_from_ssh() {
         assert!(is_https_remote("https://github.com/o/r.git"));
@@ -4554,6 +4826,103 @@ mod tests {
         // The gate also refuses an EMPTY authority, so a file:// remote no longer
         // yields its filesystem path as a bogus owner/repo slug.
         assert_eq!(remote_path("file:///srv/repos/x"), None);
+    }
+
+    #[test]
+    fn web_repo_url_derives_a_browser_link_from_any_remote_form() {
+        // https, with and without `.git`.
+        assert_eq!(
+            web_repo_url("https://github.com/theBGuy/biome.git").as_deref(),
+            Some("https://github.com/theBGuy/biome"),
+        );
+        assert_eq!(
+            web_repo_url("https://github.com/theBGuy/biome").as_deref(),
+            Some("https://github.com/theBGuy/biome"),
+        );
+        // scp-style ssh.
+        assert_eq!(
+            web_repo_url("git@github.com:theBGuy/biome.git").as_deref(),
+            Some("https://github.com/theBGuy/biome"),
+        );
+        // `ssh://` scheme.
+        assert_eq!(
+            web_repo_url("ssh://git@gitlab.com/group/repo.git").as_deref(),
+            Some("https://gitlab.com/group/repo"),
+        );
+        // GitLab subgroup — no per-provider path knowledge needed, `remote_path`
+        // already keeps the whole nested path.
+        assert_eq!(
+            web_repo_url("https://gitlab.com/group/sub/repo.git").as_deref(),
+            Some("https://gitlab.com/group/sub/repo"),
+        );
+        // Self-managed host with a port, both https and scp form.
+        assert_eq!(
+            web_repo_url("https://gitlab.acme.com:8443/g/r.git").as_deref(),
+            Some("https://gitlab.acme.com:8443/g/r"),
+        );
+        assert_eq!(
+            web_repo_url("git@git.corp.internal:team/svc.git").as_deref(),
+            Some("https://git.corp.internal/team/svc"),
+        );
+        // Host-only (no path) → nothing to open.
+        assert_eq!(web_repo_url("https://github.com"), None);
+        // A host string carrying config/shell-injection characters is refused by
+        // the safety gate rather than handed to the OS URL opener.
+        assert_eq!(web_repo_url("https://evil.com;rm -rf /path"), None);
+        // `ssh://` on a NON-default port is a transport port, not a web port — a
+        // self-managed host commonly runs git-over-SSH on 2222 (the standard move
+        // when the OS already owns 22) while the web UI stays on 443. Keeping the
+        // port here would send "View on Host" to the SSH listener.
+        assert_eq!(
+            web_repo_url("ssh://git@gitlab.acme.com:2222/group/repo.git").as_deref(),
+            Some("https://gitlab.acme.com/group/repo"),
+        );
+        // The https-scheme sibling of the same host+port DOES keep the port: a
+        // self-managed instance conventionally serves git-over-https and the web UI
+        // on the same port, unlike SSH.
+        assert_eq!(
+            web_repo_url("https://gitlab.acme.com:2222/group/repo.git").as_deref(),
+            Some("https://gitlab.acme.com:2222/group/repo"),
+        );
+        // An explicit `http://` origin (a self-managed instance with no TLS
+        // termination, the plain-HTTP Gitea shape) keeps its scheme — forcing
+        // `https` would point the browser at a listener that never answers there.
+        assert_eq!(
+            web_repo_url("http://gitea.internal:3000/group/repo.git").as_deref(),
+            Some("http://gitea.internal:3000/group/repo"),
+        );
+        // `ssh://` still defaults to `https` (no web-scheme information in an SSH
+        // transport URL) even though it's checked in the same branch as `http://`.
+        assert_eq!(
+            web_repo_url("ssh://git@gitea.internal/group/repo.git").as_deref(),
+            Some("https://gitea.internal/group/repo"),
+        );
+        // The port-dropping branch is keyed on "any non-http(s) scheme", not on a
+        // literal `ssh://` allowlist — `git+ssh://` and ported `git://`
+        // (git-daemon's default 9418) are transport ports too, and must drop them
+        // the same way `ssh://` does.
+        assert_eq!(
+            web_repo_url("git+ssh://git@gitea.internal:2222/group/repo.git").as_deref(),
+            Some("https://gitea.internal/group/repo"),
+        );
+        assert_eq!(
+            web_repo_url("git://gitea.internal:9418/group/repo.git").as_deref(),
+            Some("https://gitea.internal/group/repo"),
+        );
+        // Userinfo never reaches the OS URL opener — this app's own Bitbucket
+        // remotes embed a username (`strip_https_userinfo`'s reason for
+        // existing), and a GitLab PAT-in-URL remote is a real shape too. Both
+        // rely on `remote_authority`/`remote_path`'s own `rsplit_once('@')`
+        // stripping userinfo before the authority is read; pinned here since
+        // this is the one consumer that hands the result to a browser.
+        assert_eq!(
+            web_repo_url("https://user@bitbucket.org/ws/repo.git").as_deref(),
+            Some("https://bitbucket.org/ws/repo"),
+        );
+        assert_eq!(
+            web_repo_url("https://oauth2:glpat-fake@gitlab.com/g/r.git").as_deref(),
+            Some("https://gitlab.com/g/r"),
+        );
     }
 
     #[test]
@@ -4690,17 +5059,88 @@ mod tests {
         assert!(matches!(zero_page, Err(AppError::InvalidArgument(_))));
     }
 
-    /// The unsupported arms must fail typed, before any CLI spawn — this test
-    /// would hang or shell out if either arm fell through to the gh path.
+    /// The one dispatch outcome reachable without a CLI or network: the Bitbucket
+    /// arm with no repos to ask answers a benign empty page rather than erroring
+    /// or spending a credential read. The GitHub and GitLab arms shell out, so
+    /// their dispatch is covered by their own modules' tests, not here.
     #[tokio::test]
-    async fn my_work_refuses_the_unimplemented_providers() {
-        for provider in [Provider::GitLab, Provider::Bitbucket] {
-            let refused = forge_my_work(provider).await;
-            assert!(
-                matches!(refused, Err(AppError::InvalidArgument(_))),
-                "{provider:?} should be refused, got {refused:?}",
-            );
+    async fn my_work_bitbucket_with_no_repos_is_a_benign_empty_page() {
+        let empty = forge_my_work(Provider::Bitbucket, None).await;
+        let page = empty.expect("no repo paths is a benign empty page, not an error");
+        assert!(page.items.is_empty());
+        assert!(!page.truncated);
+        assert!(
+            forge_my_work(Provider::Bitbucket, Some(Vec::new()))
+                .await
+                .is_ok(),
+            "an explicitly empty repo list is the same benign case",
+        );
+    }
+
+    /// `futures_join_all`'s ORDER contract. Both `my_work` folds report the LAST
+    /// error of a set of concurrent fetches, so input order is what makes that
+    /// error deterministic rather than a race — and the primitive has five call
+    /// sites, so the contract is pinned here rather than at each of them.
+    #[tokio::test]
+    async fn futures_join_all_returns_input_order_not_completion_order() {
+        use std::cell::RefCell;
+
+        // Ready after `yields` re-polls, recording the order the futures ACTUALLY
+        // finish in. `yield_now` wakes the task itself, so that order is
+        // deterministic without betting on a timer.
+        async fn ready_after(yields: usize, value: usize, done: &RefCell<Vec<usize>>) -> usize {
+            for _ in 0..yields {
+                tokio::task::yield_now().await;
+            }
+            done.borrow_mut().push(value);
+            value
         }
+
+        let done = RefCell::new(Vec::new());
+        let out = futures_join_all([
+            ready_after(4, 0, &done),
+            ready_after(0, 1, &done),
+            ready_after(2, 2, &done),
+        ])
+        .await;
+        // Recorded first, so the assertion below can't pass vacuously: the two
+        // orders provably differ, and only one of them is the contract.
+        assert_eq!(
+            done.into_inner(),
+            [1, 2, 0],
+            "the futures really do finish out of order"
+        );
+        assert_eq!(out, [0, 1, 2], "yet results must follow INPUT order");
+
+        // A future that is already ready must not cause a slower sibling to be
+        // dropped — every input produces exactly one output.
+        let done = RefCell::new(Vec::new());
+        let out = futures_join_all([ready_after(0, 10, &done), ready_after(3, 11, &done)]).await;
+        assert_eq!(out, [10, 11]);
+        assert_eq!(done.into_inner().len(), 2, "both futures ran to completion");
+
+        // Empty input yields empty output rather than tripping the
+        // `expect("all futures ready")` arm.
+        let done = RefCell::new(Vec::new());
+        let none: Vec<_> = (0..0).map(|i| ready_after(0, i, &done)).collect();
+        assert!(futures_join_all(none).await.is_empty());
+    }
+
+    /// The picker keys each source by name, so the wire shape is pinned here
+    /// rather than trusted to the `rename_all` attribute. (The command itself
+    /// probes gh, glab and the keyring — machine state, not a unit test.)
+    #[test]
+    fn my_work_sources_serializes_one_flag_per_provider() {
+        let wire = serde_json::to_value(MyWorkSources {
+            github: true,
+            gitlab: false,
+            bitbucket: true,
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"github": true, "gitlab": false, "bitbucket": true})
+        );
     }
 
     #[test]

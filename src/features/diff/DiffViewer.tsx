@@ -12,6 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -410,12 +411,10 @@ function WorkingTreeDiff({
           selection && "bg-primary/10",
         )}
       >
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
-          title={file.path}
-        >
-          {file.path}
-        </span>
+        <PathText
+          path={file.path}
+          className="flex-1 font-mono text-xs text-muted-foreground"
+        />
         {/* min-h-7 pins the cluster to the language picker's h-7 trigger: the
             xs (h-6) selection buttons — and an extensionless file, where the
             picker renders nothing — would otherwise shrink the row by 4px.
@@ -576,9 +575,9 @@ function WorkingTreeDiff({
                 <InfoIcon className="size-3.5 shrink-0" />
                 <span className="flex-1 leading-snug">
                   Drag across the line numbers to{" "}
-                  {file.staged ? "unstage" : "stage"} just those lines. Hold{" "}
-                  {ADDITIVE_MODIFIER} while dragging to add to the selection, so
-                  one selection can mix added and removed lines.
+                  {file.staged ? "unstage" : "stage"} just those lines, added
+                  and removed alike. Hold Shift while dragging to take one side
+                  of a change, or {ADDITIVE_MODIFIER} to add to the selection.
                   {selectionBinding !== null && (
                     <>
                       {" "}
@@ -676,18 +675,75 @@ const SELECT_CLASS = "gd-line-selected";
 const ADDITIVE_MODIFIER = formatBinding("mod");
 const isAdditiveDrag = (e: MouseEvent) => (isMac ? e.metaKey : e.ctrlKey);
 
-/** The diff row for a line. Unified mode tags the number span with
- *  `data-line-{new,old}-num`; split mode uses a generic `data-line-num` inside a
- *  cell marked `data-side`. Try both so either view works. */
-function rowForLine(container: HTMLElement, side: "old" | "new", line: number) {
+// The gutter cells the selection manager starts a drag from: unified's single
+// number column, and split's two per-side ones. What the anchor latch checks.
+const GUTTER_CELL = ".diff-line-num, .diff-line-old-num, .diff-line-new-num";
+
+/** A drag's anchor rows plus the sides it takes: `null` = both sides of every
+ *  crossed row (a plain drag), a side = only that one (a split Shift drag). */
+interface DragAnchors {
+  startRow: HTMLTableRowElement;
+  endRow: HTMLTableRowElement;
+  side: "old" | "new" | null;
+}
+
+/** The number span for a line. Unified mode tags it `data-line-{new,old}-num`;
+ *  split mode uses a generic `data-line-num` inside a cell marked `data-side`.
+ *  Try both so either view works; a caller that knows it is in split passes
+ *  `split` to skip the unified probe, which can never match there. A placeholder
+ *  (a split row's empty side) carries no such span, so it can never resolve.
+ *  PRECONDITION: only the wrap-mode split renderer puts `data-side` on the
+ *  CELLS (the normal one puts it on the row and splits the sides across two
+ *  tables), so the split arm here and in `splitRowSpans` requires the view's
+ *  `diffViewWrap`. */
+function numSpanForLine(
+  container: HTMLElement,
+  side: "old" | "new",
+  line: number,
+  split = false,
+) {
   const unifiedAttr =
     side === "new" ? "data-line-new-num" : "data-line-old-num";
-  const span =
-    container.querySelector(`span[${unifiedAttr}="${line}"]`) ??
+  return (
+    (split
+      ? null
+      : container.querySelector(`span[${unifiedAttr}="${line}"]`)) ??
     container.querySelector(
       `td[data-side="${side}"] span[data-line-num="${line}"]`,
-    );
-  return span?.closest("tr") ?? null;
+    )
+  );
+}
+
+/** The diff row for a line, in either view. */
+function rowForLine(container: HTMLElement, side: "old" | "new", line: number) {
+  return numSpanForLine(container, side, line)?.closest("tr") ?? null;
+}
+
+/** The old/new number spans a split (wrap-mode) row carries. Absent where that
+ *  side is a placeholder (the empty half of a pure add or delete) or the row is
+ *  a `@@` separator, expand control, or widget — none of which hold a number. */
+function splitRowSpans(row: Element) {
+  return {
+    old: row.querySelector('td[data-side="old"] span[data-line-num]'),
+    new: row.querySelector('td[data-side="new"] span[data-line-num]'),
+  };
+}
+
+/** The number a split row's `data-line-num` span holds. */
+function spanLineNum(span: Element | null): number | undefined {
+  const raw = span?.getAttribute("data-line-num");
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isNaN(n) ? undefined : n;
+}
+
+/** Paint one side of a split row: the number cell the span lives in and the
+ *  content cell beside it. Reaching them through the span is what keeps a
+ *  placeholder side untinted. */
+function paintSide(span: Element) {
+  const numCell = span.closest("td");
+  if (!numCell) return;
+  numCell.classList.add(SELECT_CLASS);
+  numCell.nextElementSibling?.classList.add(SELECT_CLASS);
 }
 
 function clearPaint(container: HTMLElement) {
@@ -696,17 +752,32 @@ function clearPaint(container: HTMLElement) {
     .forEach((el) => el.classList.remove(SELECT_CLASS));
 }
 
-/** Highlight exactly these changed lines. */
-function paintLines(container: HTMLElement, lines: SelectedLine[]) {
+/** Highlight exactly these changed lines — whole rows in unified, and in split
+ *  only the cells of each line's own side, so a one-sided selection reads as
+ *  one-sided. */
+function paintLines(
+  container: HTMLElement,
+  lines: SelectedLine[],
+  split: boolean,
+) {
   clearPaint(container);
   for (const { side, line } of lines) {
-    rowForLine(container, side, line)?.classList.add(SELECT_CLASS);
+    if (split) {
+      const span = numSpanForLine(container, side, line, split);
+      if (span) paintSide(span);
+    } else {
+      rowForLine(container, side, line)?.classList.add(SELECT_CLASS);
+    }
   }
 }
 
-/** Highlight an in-progress drag range for live feedback (includes context),
- *  over `base` — the lines an additive drag is merging into, which would
- *  otherwise vanish on the next mousemove (this repaints from scratch). */
+/** Highlight the library-reported drag range for live feedback (includes
+ *  context), over `base` — the lines an additive drag is merging into, which
+ *  would otherwise vanish on the next mousemove (this repaints from scratch).
+ *  The unified Shift drag's painter; every other drag reaches it only with no
+ *  anchors — a cleared (null) range, an unresolvable start row, or no live
+ *  primary gutter press (one already released, or a non-primary-button
+ *  drag) — otherwise `paintRowSpan`. */
 function paintRange(
   container: HTMLElement,
   range: {
@@ -715,19 +786,126 @@ function paintRange(
     endLineNumber: number;
   } | null,
   base: SelectedLine[],
+  split: boolean,
 ) {
-  paintLines(container, base);
+  paintLines(container, base, split);
   if (!range) return;
   const lo = Math.min(range.startLineNumber, range.endLineNumber);
   const hi = Math.max(range.startLineNumber, range.endLineNumber);
   for (let n = lo; n <= hi; n++) {
-    rowForLine(container, range.side, n)?.classList.add(SELECT_CLASS);
+    if (split) {
+      const span = numSpanForLine(container, range.side, n, split);
+      if (span) paintSide(span);
+    } else {
+      rowForLine(container, range.side, n)?.classList.add(SELECT_CLASS);
+    }
   }
 }
 
+/** The old/new numbers a row carries; neither = a `@@` separator, expand
+ *  control, or widget, in both views. Unified: both = context, one = added or
+ *  removed. Split: a row pairs the sides, so a modification carries both
+ *  numbers too and only the diff's changed sets tell the shapes apart
+ *  (`splitLinesForRows` classifies). An unparseable number counts as absent,
+ *  matching the library's own validity test. */
+function rowLineNumbers(
+  row: Element,
+  split: boolean,
+): { old?: number; new?: number } {
+  if (split) {
+    const spans = splitRowSpans(row);
+    return { old: spanLineNum(spans.old), new: spanLineNum(spans.new) };
+  }
+  const read = (attr: string) => {
+    const raw = row
+      .querySelector(`.diff-line-num span[${attr}]`)
+      ?.getAttribute(attr);
+    const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+    return Number.isNaN(n) ? undefined : n;
+  };
+  return { old: read("data-line-old-num"), new: read("data-line-new-num") };
+}
+
+/** The rows a drag crossed, inclusive and in document order (either drag
+ *  direction). Empty when an anchor has left the DOM — the signal callers
+ *  use to fall back to the library's own range. */
+function rowsBetween(
+  container: HTMLElement,
+  startRow: HTMLTableRowElement,
+  endRow: HTMLTableRowElement,
+): HTMLTableRowElement[] {
+  const rows = Array.from(
+    container.querySelectorAll<HTMLTableRowElement>("tr"),
+  );
+  const a = rows.indexOf(startRow);
+  const b = rows.indexOf(endRow);
+  if (a < 0 || b < 0) return [];
+  return rows.slice(Math.min(a, b), Math.max(a, b) + 1);
+}
+
+/** Highlight an anchored drag's crossed rows over `base` (same additive base as
+ *  `paintRange`). Context rows in the span tint for live feedback and numberless
+ *  rows never do; split tints the drag's sides on every row that has them. The
+ *  commit keeps only the changed lines among them — context drops via the sets. */
+function paintRowSpan(
+  container: HTMLElement,
+  drag: DragAnchors,
+  base: SelectedLine[],
+  split: boolean,
+) {
+  paintLines(container, base, split);
+  for (const row of rowsBetween(container, drag.startRow, drag.endRow)) {
+    if (split) {
+      const spans = splitRowSpans(row);
+      if (drag.side !== "new" && spans.old) paintSide(spans.old);
+      if (drag.side !== "old" && spans.new) paintSide(spans.new);
+      continue;
+    }
+    const { old: oldNum, new: newNum } = rowLineNumbers(row, false);
+    if (oldNum !== undefined || newNum !== undefined)
+      row.classList.add(SELECT_CLASS);
+  }
+}
+
+/** The changed lines of a unified crossed-row span — a row with both numbers is
+ *  context and one with neither is a separator, so both drop out. */
+function linesForRows(rows: HTMLTableRowElement[]): SelectedLine[] {
+  const out: SelectedLine[] = [];
+  for (const row of rows) {
+    const { old: oldNum, new: newNum } = rowLineNumbers(row, false);
+    if (oldNum !== undefined && newNum !== undefined) continue;
+    if (oldNum !== undefined) out.push({ side: "old", line: oldNum });
+    else if (newNum !== undefined) out.push({ side: "new", line: newNum });
+  }
+  return out;
+}
+
+/** The changed lines of a split crossed-row span, restricted to `side` (null =
+ *  both). A split row pairs the two sides, so each side's number is classified
+ *  against the diff's own `-`/`+` sets rather than the row's shape: context and
+ *  expanded context sit in neither set and drop out, while a paired
+ *  modification contributes both. */
+function splitLinesForRows(
+  rows: HTMLTableRowElement[],
+  changed: ChangedLines,
+  side: "old" | "new" | null,
+): SelectedLine[] {
+  const out: SelectedLine[] = [];
+  for (const row of rows) {
+    const spans = splitRowSpans(row);
+    const oldNum = side === "new" ? undefined : spanLineNum(spans.old);
+    const newNum = side === "old" ? undefined : spanLineNum(spans.new);
+    if (oldNum !== undefined && changed.deleted.has(oldNum))
+      out.push({ side: "old", line: oldNum });
+    if (newNum !== undefined && changed.added.has(newNum))
+      out.push({ side: "new", line: newNum });
+  }
+  return out;
+}
+
 /** Union of two line selections, deduped by side+line — an additive drag adds
- *  to the committed selection instead of replacing it, and the two can overlap
- *  or (unlike one library-reported drag) span both sides. */
+ *  to the committed selection instead of replacing it, and the two can
+ *  overlap. */
 function mergeSelection(
   base: SelectedLine[] | null,
   added: SelectedLine[],
@@ -749,18 +927,54 @@ function hunkStart(hunk: DiffHunk, side: "old" | "new"): number {
   return m ? Number(side === "new" ? m[2] : m[1]) : 1;
 }
 
-/** The new-side line numbers of a hunk's added (`+`) lines, walking its body
- *  from the header's new start. Used to discard a new file's lines by number;
- *  for an all-additions (untracked) hunk this is every body line. */
-function hunkAddedNewLines(hunk: DiffHunk): number[] {
-  let n = hunkStart(hunk, "new");
-  const out: number[] = [];
+/** A hunk's changed line numbers per side, walking its body from the header's
+ *  two starts: added (`+`) new-side numbers and deleted (`-`) old-side ones.
+ *  Context advances both sides; an addition advances only the new side and a
+ *  deletion only the old. */
+function hunkChangedLines(hunk: DiffHunk): {
+  added: number[];
+  deleted: number[];
+} {
+  let oldNum = hunkStart(hunk, "old");
+  let newNum = hunkStart(hunk, "new");
+  const added: number[] = [];
+  const deleted: number[] = [];
   for (const line of hunk.text.split("\n").slice(1)) {
     if (line === "" || line.startsWith("\\")) continue; // split artifact / "\ No newline"
-    if (line.startsWith("+")) out.push(n++);
-    else if (!line.startsWith("-")) n++; // context advances the new side; "-" doesn't
+    if (line.startsWith("+")) added.push(newNum++);
+    else if (line.startsWith("-")) deleted.push(oldNum++);
+    else {
+      oldNum++;
+      newNum++;
+    }
   }
-  return out;
+  return { added, deleted };
+}
+
+/** The new-side line numbers of a hunk's added (`+`) lines. Used to discard a
+ *  new file's lines by number; for an all-additions (untracked) hunk this is
+ *  every body line. */
+function hunkAddedNewLines(hunk: DiffHunk): number[] {
+  return hunkChangedLines(hunk).added;
+}
+
+/** The selectable line numbers of a whole diff, by side — the `-` lines' old
+ *  numbers and the `+` lines' new ones. A split row is classified against these
+ *  rather than its own DOM state, which the library owns. */
+interface ChangedLines {
+  added: Set<number>;
+  deleted: Set<number>;
+}
+
+function changedLinesOf(diffText: string): ChangedLines {
+  const added = new Set<number>();
+  const deleted = new Set<number>();
+  for (const hunk of parseHunks(diffText).hunks) {
+    const lines = hunkChangedLines(hunk);
+    for (const n of lines.added) added.add(n);
+    for (const n of lines.deleted) deleted.add(n);
+  }
+  return { added, deleted };
 }
 
 interface HunkActionProps {
@@ -806,8 +1020,11 @@ function HunkActionButtons({
  * collapsible expand, drag the line-number gutter to select lines to stage
  * across the whole file, and per-hunk Stage/Unstage/Discard buttons OVERLAID on
  * each hunk header (the library exposes no hunk-header slot). The library's
- * selection manager handles the drag; we paint the `gd-line-selected` highlight
- * ourselves (its own class doesn't apply in this standalone setup).
+ * selection manager drives the drag, but the selection comes from our own row
+ * anchors (its range is single-sided by model, and in split can retarget across
+ * panes); only a unified Shift drag, which its range already models exactly,
+ * rides it. We paint the `gd-line-selected` highlight ourselves — its own class
+ * doesn't apply in this standalone setup.
  */
 function StagingDiffView({
   repoPath,
@@ -927,52 +1144,165 @@ function StagingDiffView({
   // carry no event, so it's captured from the container's own mousedown on the
   // CAPTURE phase — the manager listens on the same element, bubble phase.
   const additiveRef = useRef(false);
+  const split = viewMode === "split";
+  // A split drag crosses whole rows, so each side of a crossed row is classified
+  // against the diff's own `-`/`+` numbers: context and expanded context sit in
+  // neither set. Keyed on `deferredText`, which classifies identically to the
+  // `displayText` the rows are built from (shortenLongLines only truncates long
+  // lines, preserving line count and numbering; capDiffText, which drops lines,
+  // is not on this path). The parent's `hunks` prop tracks the LIVE text, which
+  // can lead the deferred rows, so reusing it would misclassify in that window.
+  const changed = useMemo(() => changedLinesOf(deferredText), [deferredText]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !diffFile) return;
+    // The drag's two anchor rows. The library's range is pinned to the side the
+    // drag started on and its end sticks at the last row bearing a number there,
+    // so the end anchor is tracked below instead. Effect-scoped: the drag dies
+    // with the manager it belongs to.
+    let drag: DragAnchors | null = null;
+    // The latch that licenses anchor minting. Gutter ancestry is what lets
+    // the manager start a selection at all; the primary-button clause then
+    // scopes the two-sided span deliberately — a non-primary gutter drag
+    // keeps the library's single-sided range. Absent the latch a mint is
+    // declined: either that non-primary drag, or a stranded drag's range
+    // still emitting after a lost mouseup.
+    let pressed = false;
+    // Shift scopes a drag to the side it started on. Unified hands that to the
+    // library's own range; split must anchor instead, because the library's
+    // split mouseover reads the line number from whichever PANE the cursor is
+    // over while keeping the start side, so a drift across the gutter would
+    // extend the range with the other pane's numbering. Read at mousedown
+    // alongside the additive modifier: mid-drag key changes are ignored.
+    let shifted = false;
     const onMouseDownCapture = (e: MouseEvent) => {
       additiveRef.current = isAdditiveDrag(e);
+      shifted = e.shiftKey;
+      // A mouseup lost to a focus steal would strand the last drag's anchors;
+      // capture precedes the manager's mousedown, so every press re-anchors.
+      drag = null;
+      pressed =
+        e.button === 0 &&
+        e.target instanceof Element &&
+        !!e.target.closest(GUTTER_CELL);
     };
     container.addEventListener("mousedown", onMouseDownCapture, true);
     // An additive drag paints over the committed selection; a plain one replaces
     // it, so its base is empty (the pre-additive behavior).
     const paintBase = () =>
       additiveRef.current ? (selectedRef.current ?? []) : [];
+    const onMouseOver = (e: MouseEvent) => {
+      if (!(e.target instanceof Element)) return;
+      // No button held: drop the latch, and if a stranded drag left its span
+      // painted, restore the committed paint — this stops OUR two-sided span
+      // from following the cursor or re-anchoring; the library's own stranded
+      // range still repaints single-sided via paintRange (pre-existing).
+      if ((e.buttons & 1) === 0) {
+        if (drag) {
+          drag = null;
+          paintLines(container, selectedRef.current ?? [], split);
+        }
+        pressed = false;
+        return;
+      }
+      if (!drag) return;
+      // A unified row keeps both numbers in the one gutter cell, so only that
+      // cell identifies the row under the cursor. A split row splits them across
+      // four cells and shows a placeholder where a side is empty, so any cell of
+      // the row serves — a gutter-only test would stall the span on a pure
+      // addition or deletion.
+      const row = split
+        ? e.target.closest("tr")
+        : e.target.closest(".diff-line-num")?.closest("tr");
+      if (!row) return;
+      // mouseover fires per descendant entered (the gutter cell and its number
+      // spans fire separately), so same-row is the common case — skip its repaint.
+      if (row === drag.endRow) return;
+      const { old: oldNum, new: newNum } = rowLineNumbers(row, split);
+      if (oldNum === undefined && newNum === undefined) return; // separator row
+      drag.endRow = row;
+      paintRowSpan(container, drag, paintBase(), split);
+    };
+    container.addEventListener("mouseover", onMouseOver);
     const manager = createDiffMultiSelectManager(container, diffFile, {
-      isUnifiedMode: viewMode !== "split",
-      onSelectionChange: (range) => paintRange(container, range, paintBase()),
+      isUnifiedMode: !split,
+      onSelectionChange: (range) => {
+        // A null range is the manager clearing itself (teardown). Anchors mint
+        // only under a live press — a stranded drag's library range keeps
+        // emitting after a lost mouseup and must not re-create what the hover
+        // guard cleared — and only where they beat that range: everywhere but a
+        // unified Shift drag, whose mouseover refuses rows without a start-side
+        // number and so can't retarget. The range's side at mint time is the
+        // side pressed, which is what a Shift drag scopes itself to.
+        if (!range) drag = null;
+        else if (!drag && pressed && (!shifted || split)) {
+          const row = rowForLine(container, range.side, range.startLineNumber);
+          if (row)
+            drag = {
+              startRow: row,
+              endRow: row,
+              side: shifted ? range.side : null,
+            };
+        }
+        if (drag) {
+          paintRowSpan(container, drag, paintBase(), split);
+          return;
+        }
+        paintRange(container, range, paintBase(), split);
+      },
       onSelectionComplete: (result) => {
-        // One drag is single-sided by library contract; the union across drags
-        // is what lets a selection carry added AND deleted lines.
-        const lines = (result?.lines ?? [])
-          .filter((l) => l.isAdd || l.isDelete)
-          .map(
-            (l): SelectedLine => ({
-              side: l.isAdd ? "new" : "old",
-              line: l.lineNumber,
-            }),
-          );
+        // Anchors give the rows the drag actually crossed, and both their sides
+        // unless Shift scoped it — the library's range is single-sided by model,
+        // so it drops the opposite side's lines. It stands in where no anchors
+        // exist: a unified Shift drag, a non-primary one, or a drag whose anchor
+        // has left the DOM.
+        const rows = drag
+          ? rowsBetween(container, drag.startRow, drag.endRow)
+          : [];
+        const dragSide = drag?.side ?? null;
+        drag = null;
+        pressed = false;
+        let lines: SelectedLine[];
+        if (rows.length) {
+          lines = split
+            ? splitLinesForRows(rows, changed, dragSide)
+            : linesForRows(rows);
+        } else {
+          lines = (result?.lines ?? [])
+            .filter((l) => l.isAdd || l.isDelete)
+            .map(
+              (l): SelectedLine => ({
+                side: l.isAdd ? "new" : "old",
+                line: l.lineNumber,
+              }),
+            );
+        }
         const next = additiveRef.current
           ? mergeSelection(selectedRef.current, lines)
           : lines;
+        // Paint the outcome now — a null commit over an already-null selection
+        // re-renders nothing and would strand the drag tint. If the text moved
+        // mid-drag this tints briefly; the manager effect's re-run clears it.
+        paintLines(container, next, split);
         // Stamp against the text these rows were BUILT from — the live
         // diff.data.text can already be newer while the deferred render lags.
         onSelectRef.current(next.length ? next : null, deferredText);
       },
     });
-    paintLines(container, selectedRef.current ?? []); // re-assert after (re)mount
+    paintLines(container, selectedRef.current ?? [], split); // re-assert after (re)mount
     return () => {
       container.removeEventListener("mousedown", onMouseDownCapture, true);
+      container.removeEventListener("mouseover", onMouseOver);
       manager.destroy();
     };
-  }, [diffFile, viewMode, deferredText]);
+  }, [diffFile, split, deferredText, changed]);
 
   // Paint the committed selection from state (incl. cleared → []).
   useEffect(() => {
     const container = containerRef.current;
-    if (container) paintLines(container, selection ?? []);
-  }, [selection]);
+    if (container) paintLines(container, selection ?? [], split);
+  }, [selection, split]);
 
   // Position each hunk's action overlay by anchoring to that hunk's OWN first
   // row (found by line number), NOT to the Nth `@@` marker row: in content mode

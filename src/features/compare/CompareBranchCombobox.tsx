@@ -15,6 +15,7 @@ import {
   ComboboxTrigger,
   ComboboxValue,
 } from "@/components/ui/combobox";
+import { rowCheckoutCopy } from "@/features/repository/checkout-copy";
 import { clipTitle } from "@/lib/clip-title";
 import { normPath } from "@/lib/git/path";
 import { useBranchDivergence, useUserWorktrees } from "@/lib/git/queries";
@@ -68,16 +69,18 @@ export function CompareBranchCombobox({
     [divergence.data],
   );
 
-  // Branches checked out in *another* worktree → that worktree's path. Git
-  // forbids the same branch in two worktrees; the active repo's own checkout is
-  // excluded (that's just the current branch). Fetched only while open.
+  // Branches checked out in *another* checkout → that checkout. Git forbids the
+  // same branch in two worktrees; the active repo's own checkout is excluded
+  // (that's just the current branch). The main workspace stays IN — git counts
+  // it as a worktree, and `isMain` is what lets the row name it properly.
+  // Fetched only while open.
   const userWorktrees = useUserWorktrees(repoPath, open);
   const activeNorm = normPath(repoPath);
   const worktreeByBranch = useMemo(() => {
-    const map = new Map<string, string>();
+    const map = new Map<string, { path: string; isMain: boolean }>();
     for (const w of userWorktrees.data ?? []) {
       if (w.branch && normPath(w.path) !== activeNorm)
-        map.set(w.branch, w.path);
+        map.set(w.branch, { path: w.path, isMain: w.isMain });
     }
     return map;
   }, [userWorktrees.data, activeNorm]);
@@ -139,7 +142,7 @@ export function CompareBranchCombobox({
               defaultName={defaultName}
               currentName={currentName}
               div={divByName.get(name)}
-              worktreePath={worktreeByBranch.get(name)}
+              worktree={worktreeByBranch.get(name)}
             />
           )}
         </ComboboxList>
@@ -160,15 +163,20 @@ function BranchRow({
   defaultName,
   currentName,
   div,
-  worktreePath,
+  worktree,
 }: {
   name: string;
   branch: Branch | undefined;
   defaultName: string | null;
   currentName: string;
   div: BranchDivergence | undefined;
-  worktreePath: string | undefined;
+  /** The other checkout holding this branch, when any. */
+  worktree: { path: string; isMain: boolean } | undefined;
 }) {
+  // Names the holding checkout the way every branch row does. The record's
+  // `title` arm is deliberately not used: its "this row opens it" clause is true
+  // in the branch dropdown, while this row selects a compare base.
+  const copy = rowCheckoutCopy(worktree?.isMain);
   return (
     <ComboboxItem value={name}>
       <span className="min-w-0 flex-1 truncate" onMouseEnter={clipTitle(name)}>
@@ -179,13 +187,13 @@ function BranchRow({
           </span>
         )}
       </span>
-      {worktreePath && (
+      {worktree && (
         <span
           className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
-          title={`Checked out in another worktree (${worktreePath})`}
+          title={copy.blockedTitle(worktree.path)}
         >
           <TreeStructureIcon className="size-3" weight="bold" />
-          worktree
+          {copy.noun}
         </span>
       )}
       {/* ↑/↓ describe THIS row's branch vs `currentName` (the app-wide row-badge

@@ -1,13 +1,15 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { toast } from "sonner";
-import type { ReviewMode } from "@/lib/ai/types";
+import { REVIEW_MODES, type ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { storeName } from "@/lib/test-mode";
 import {
   type ActionConfig,
   type ActionId,
   type AutomationsConfigV2,
+  BRANCH_MATCH_MODES,
   type BranchConditions,
+  LIFECYCLE_EVENTS,
   type LifecycleConfig,
   type LifecycleEvent,
   type RepoActionOverride,
@@ -15,8 +17,8 @@ import {
   repoEntry,
 } from "./types";
 
-const LIFECYCLES: LifecycleEvent[] = ["commit", "pr-open", "pr-sync"];
-const ACTIONS: ActionId[] = ["general", "security"];
+const LIFECYCLES = LIFECYCLE_EVENTS;
+const ACTIONS = REVIEW_MODES;
 
 // Personal app-data — automation rules are the user's, never the repo's.
 let storePromise: Promise<Store> | null = null;
@@ -94,10 +96,10 @@ interface V1Config {
 }
 
 function isReviewMode(v: unknown): v is ReviewMode {
-  return v === "general" || v === "security";
+  return ACTIONS.some((action) => action === v);
 }
 function isLifecycle(v: unknown): v is LifecycleEvent {
-  return v === "commit" || v === "pr-open" || v === "pr-sync";
+  return LIFECYCLES.some((lifecycle) => lifecycle === v);
 }
 
 /** A stored value is v1 when it has a `global` array and isn't already v2. */
@@ -121,10 +123,7 @@ function normalizeConditions(v: unknown): BranchConditions | undefined {
   };
   const strArray = (a: unknown): string[] =>
     Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : [];
-  const match =
-    obj.match === "head" || obj.match === "base" || obj.match === "either"
-      ? obj.match
-      : "head";
+  const match = BRANCH_MATCH_MODES.find((mode) => mode === obj.match) ?? "head";
   return {
     include: strArray(obj.include),
     exclude: strArray(obj.exclude),
@@ -355,6 +354,25 @@ export async function loadAutomations(): Promise<AutomationsConfigV2> {
     return config;
   }
   return normalizeAutomations(saved);
+}
+
+/**
+ * {@link loadAutomations}, re-reading disk first — for the callers that must not
+ * decide on this process's snapshot, since a mode another instance disabled stays
+ * invisible to the memoized store until something reloads it. Same idea as
+ * `listReviews`' `{ fresh: true }`: cheap enough for a user-initiated gate, too
+ * expensive for a poll tick.
+ *
+ * A separate export rather than an option on {@link loadAutomations}: that one is
+ * handed to react-query as a BARE `queryFn` reference (`automations/queries.ts`),
+ * which would pass its own context object into any leading parameter.
+ */
+export async function loadAutomationsFresh(): Promise<AutomationsConfigV2> {
+  const store = await getStore();
+  // Inside the serialized queue so the reload can't land between a concurrent
+  // mutation's set and its flush.
+  await serialize(() => reloadRaw(store));
+  return loadAutomations();
 }
 
 /**

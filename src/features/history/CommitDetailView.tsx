@@ -5,6 +5,7 @@ import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import type { MarkdownRefs } from "@/components/markdown/markdown-refs";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -448,11 +449,8 @@ export function CommitDetailView({
                   onMouseEnter={() =>
                     hoverPrefetch(() => prefetchFileDiff(hash, file.path))
                   }
-                  title={file.path}
                 >
-                  <span className="min-w-0 flex-1 truncate font-mono">
-                    {file.path}
-                  </span>
+                  <PathText path={file.path} className="flex-1 font-mono" />
                   <DiffStat
                     added={file.added}
                     deleted={file.deleted}

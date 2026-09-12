@@ -296,6 +296,11 @@ function isServerMergeDisabled(pr: PrDetails, s: MergeStrategy): boolean {
   return SERVER_MERGE_FLAG[s](pr) === false;
 }
 
+/** Defensive fallback for a `busy` hold whose term `composerReason` doesn't
+ *  (yet) name — coverage holds today, but this keeps the four sites that
+ *  guard against it in step rather than re-typing the sentence. */
+const BUSY_HOLD_FALLBACK_REASON = "Another operation is in progress";
+
 export function RemotePrView({
   repoPath,
   number,
@@ -2345,9 +2350,10 @@ export function RemotePrView({
     );
   }
 
-  // The Merge control's state. Hoisted because the refusal has to sit on the
-  // wrapping span while `disabled` sits on the trigger — a disabled trigger is
-  // what actually keeps the menu (and with it an unguarded merge) shut.
+  // The Merge control's state. `disabled`/`reason` land on the rendered
+  // DisabledReasonButton, never the trigger — its own inner useButton swallows
+  // activation while blocked, which is what actually keeps an unguarded merge
+  // from firing.
   const mergeBlocked =
     busy ||
     writeBlocked ||
@@ -2356,18 +2362,28 @@ export function RemotePrView({
     allMergeMethodsBlocked;
   // Permission outranks the availability hints: a viewer who can't push can't
   // act on any of them. The wait outranks them in turn — every hint below reads
-  // the RENDERED pr, which through a switch is the previous one, so each would
-  // describe a pull request the viewer didn't pick.
-  const mergeReason =
-    writeReason ??
-    staleReason ??
-    (pr.isDraft
-      ? `Mark the ${prNoun} ready before merging`
-      : mergeGuardMissing
-        ? "Reload to merge — couldn't load the head commit to guard the merge"
-        : allMergeMethodsBlocked
-          ? "No merge method is enabled by both this repository's settings and its branch rules"
-          : `Merge this ${prNoun}`);
+  // the RENDERED pr, which through a switch is the previous one. `busy` also
+  // outranks the static hints: `pr.isDraft` and the rest can stay true while a
+  // term of `busy` is in flight for this same PR, and `composerReason` names
+  // it — this same string doubles as the hover title while nothing blocks.
+  const mergeReason = (() => {
+    switch (true) {
+      case writeReason !== undefined:
+        return writeReason;
+      case staleReason !== undefined:
+        return staleReason;
+      case busy:
+        return composerReason ?? BUSY_HOLD_FALLBACK_REASON;
+      case pr.isDraft:
+        return `Mark the ${prNoun} ready before merging`;
+      case mergeGuardMissing:
+        return "Reload to merge — couldn't load the head commit to guard the merge";
+      case allMergeMethodsBlocked:
+        return "No merge method is enabled by both this repository's settings and its branch rules";
+      default:
+        return `Merge this ${prNoun}`;
+    }
+  })();
 
   // The header's meta fields, row-major, as label/value pairs for the grid
   // below: an editable field emits its trigger as the label cell and its chips
@@ -3063,9 +3079,10 @@ export function RemotePrView({
                       size="sm"
                       disabled={busy}
                       // `busy` folds in the placeholder window, where the review
-                      // would open against the previously rendered PR. The pending
-                      // arms carry no reason here, as on the neighbours.
-                      reason={staleReason}
+                      // would open against the previously rendered PR;
+                      // `composerReason` names whichever term is in flight so the
+                      // hold is never mute.
+                      reason={composerReason ?? BUSY_HOLD_FALLBACK_REASON}
                       onClick={() => setSubmitOpen(true)}
                       title="Submit a review (verdict, summary, and any pending comments)"
                     >
@@ -3082,14 +3099,25 @@ export function RemotePrView({
                         // Approve that would fire the wrong direction on click. The
                         // failed read has no other surface, so it rides `reason` —
                         // hoverable and announced while the button is unavailable.
+                        // Every term of `disabled` gets words this way, `busy`'s via
+                        // `composerReason`, so the hold is never mute.
                         disabled={
                           busy || approvals.isPending || approvals.isError
                         }
-                        reason={
-                          approvals.isError
-                            ? "Couldn't load approval state"
-                            : staleReason
-                        }
+                        reason={(() => {
+                          switch (true) {
+                            case approvals.isError:
+                              return "Couldn't load approval state";
+                            case busy:
+                              return (
+                                composerReason ?? BUSY_HOLD_FALLBACK_REASON
+                              );
+                            case approvals.isPending:
+                              return "Checking approval state…";
+                            default:
+                              return undefined;
+                          }
+                        })()}
                         // Unknown state is announced as unknown: a failed read
                         // must not claim "not pressed" while the reason says the
                         // state couldn't be loaded.
@@ -3137,15 +3165,23 @@ export function RemotePrView({
                       // posture as the approve toggle: `reason` carries the read
                       // failure nothing else reports, and DisabledReasonButton keeps
                       // the disabled button focusable so that reason is announced
-                      // rather than lost.
+                      // rather than lost. Every term of `disabled` gets words this
+                      // way, `busy`'s via `composerReason`.
                       disabled={
                         busy || approvals.isPending || approvals.isError
                       }
-                      reason={
-                        approvals.isError
-                          ? "Couldn't load review state"
-                          : staleReason
-                      }
+                      reason={(() => {
+                        switch (true) {
+                          case approvals.isError:
+                            return "Couldn't load review state";
+                          case busy:
+                            return composerReason ?? BUSY_HOLD_FALLBACK_REASON;
+                          case approvals.isPending:
+                            return "Checking review state…";
+                          default:
+                            return undefined;
+                        }
+                      })()}
                       // Unknown state is announced as unknown (same as approve).
                       aria-pressed={
                         approvals.isError
@@ -3283,7 +3319,7 @@ export function RemotePrView({
               variant="outline"
               size="sm"
               disabled={busy || writeBlocked}
-              reason={writeReason ?? staleReason}
+              reason={writeReason ?? composerReason}
               onClick={() => void markReadyForReview()}
             >
               Ready for review
@@ -3294,7 +3330,7 @@ export function RemotePrView({
               variant="ghost"
               size="sm"
               disabled={busy || writeBlocked}
-              reason={writeReason ?? staleReason}
+              reason={writeReason ?? composerReason}
               title="Turn this pull request back into a draft"
               onClick={() => void convertToDraft()}
             >
@@ -3338,7 +3374,7 @@ export function RemotePrView({
                 variant="outline"
                 size="sm"
                 disabled={busy || writeBlocked}
-                reason={writeReason ?? staleReason}
+                reason={writeReason ?? composerReason}
                 onClick={() => void doCancelAutoMerge()}
               >
                 Cancel auto-merge
@@ -3353,7 +3389,7 @@ export function RemotePrView({
               variant="outline"
               size="sm"
               disabled={busy || triageBlocked}
-              reason={triageReason ?? staleReason}
+              reason={triageReason ?? composerReason}
               onClick={doClose}
               title={
                 draftRidesStateChange
@@ -3366,27 +3402,20 @@ export function RemotePrView({
           )}
           {canMerge && (
             <DropdownMenu>
-              {/* A natively-disabled Button swallows `title`, so the hint rides a
-                  wrapping span (house idiom). The span stays OUTSIDE the trigger:
-                  as the trigger it would take the click the disabled button
-                  refuses and open the menu anyway — merging past every gate,
-                  including GitLab's stale-head guard. */}
-              <span
-                title={mergeReason}
-                className={cn(
-                  "inline-flex",
-                  mergeBlocked && "cursor-not-allowed",
-                )}
+              <DropdownMenuTrigger
+                render={
+                  <DisabledReasonButton
+                    size="sm"
+                    disabled={mergeBlocked}
+                    reason={mergeReason}
+                    title={mergeReason}
+                  />
+                }
               >
-                <DropdownMenuTrigger
-                  disabled={mergeBlocked}
-                  render={<Button size="sm" />}
-                >
-                  <GitMergeIcon data-icon="inline-start" />
-                  Merge
-                  <CaretDownIcon data-icon="inline-end" />
-                </DropdownMenuTrigger>
-              </span>
+                <GitMergeIcon data-icon="inline-start" />
+                Merge
+                <CaretDownIcon data-icon="inline-end" />
+              </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 {/* Branch-rule gating is GitHub branch-protection data, so it
                     never applies to GitLab/Bitbucket. */}
@@ -3460,7 +3489,7 @@ export function RemotePrView({
             variant="outline"
             size="sm"
             disabled={busy || triageBlocked}
-            reason={triageReason ?? staleReason}
+            reason={triageReason ?? composerReason}
             onClick={doReopen}
             title={
               draftRidesStateChange

@@ -13,6 +13,7 @@ import {
 import type { UseQueryResult } from "@tanstack/react-query";
 import { type ComponentType, useState } from "react";
 import { Markdown } from "@/components/markdown/markdown";
+import { PathText } from "@/components/path-text";
 import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import type { AgentToolKind, TranscriptSegment } from "@/lib/ai/agent";
@@ -80,17 +81,32 @@ function ToolStep({
   const Glyph = meta.icon;
   const shown = target && meta.file ? relativize(target, baseDir) : target;
   return (
-    <div className="flex items-center gap-1.5 bg-muted/40 px-2 py-1 text-[11px] leading-relaxed">
+    // A file row renders the path relative to the run's base dir, so the row
+    // carries the absolute one for hovers beside the path, and the title prop
+    // makes the path's own clipped tooltip show the same absolute form.
+    <div
+      className="flex items-center gap-1.5 bg-muted/40 px-2 py-1 text-[11px] leading-relaxed"
+      title={meta.file && target ? target : undefined}
+    >
       <Glyph className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="shrink-0 text-muted-foreground">{meta.verb}</span>
-      {shown && (
-        <span
-          className="min-w-0 truncate font-mono text-foreground/75"
-          title={target ?? undefined}
-        >
-          {shown}
-        </span>
-      )}
+      {shown &&
+        // `meta.file` is what makes the target a path; every other tool's
+        // target is a command or URL, which has no filename to protect.
+        (meta.file ? (
+          <PathText
+            path={shown}
+            title={target ?? undefined}
+            className="font-mono text-foreground/75"
+          />
+        ) : (
+          <span
+            className="min-w-0 truncate font-mono text-foreground/75"
+            title={target ?? undefined}
+          >
+            {shown}
+          </span>
+        ))}
     </div>
   );
 }
@@ -227,6 +243,10 @@ function EditDiffStep({
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
+        // The row renders the path relative to the run's base dir, so the
+        // button carries the absolute one for hovers beside the path, and the
+        // title prop makes the path's clipped tooltip show the same absolute.
+        title={target}
         className="flex items-center gap-1.5 px-2 py-1 text-left text-[11px] leading-relaxed hover:bg-muted/70 focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
       >
         <CaretRightIcon
@@ -237,12 +257,11 @@ function EditDiffStep({
         />
         <Glyph className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="shrink-0 text-muted-foreground">{meta.verb}</span>
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-foreground/75"
+        <PathText
+          path={relPath}
           title={target}
-        >
-          {relPath}
-        </span>
+          className="flex-1 font-mono text-foreground/75"
+        />
       </button>
       {open && <InlineDiff filePath={relPath} repoPath={baseDir} diff={diff} />}
     </div>

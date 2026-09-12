@@ -2,9 +2,11 @@ import { MinusIcon, PlusIcon } from "@phosphor-icons/react";
 import { memo } from "react";
 import { DiffStat } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { PathText } from "@/components/path-text";
 import { KIND_BADGE } from "@/lib/git/change-kind-badge";
 import { reservedDeviceName } from "@/lib/git/reserved-device-name";
 import type { ChangeKind, DiffStatEntry, FileEntry } from "@/lib/git/types";
+import { pathBasename } from "@/lib/path-tree";
 import { cn } from "@/lib/utils";
 
 /**
@@ -22,6 +24,8 @@ export const FileRow = memo(function FileRow({
   active,
   disabled,
   stat,
+  treeDisplay,
+  indentPx,
   onSelect,
   onToggle,
 }: {
@@ -36,6 +40,10 @@ export const FileRow = memo(function FileRow({
   /** This row's OWN side of the diff (staged rows: index vs HEAD; unstaged:
    *  working tree vs index). Absent = no counts to show. */
   stat?: DiffStatEntry;
+  /** Tree mode: render only the basename(s); the row carries a static full-path title. */
+  treeDisplay?: boolean;
+  /** Tree mode: depth indent in px, applied as style paddingLeft on top of the row's base. */
+  indentPx?: number;
   onSelect: (
     entry: FileEntry,
     staged: boolean,
@@ -50,10 +58,45 @@ export const FileRow = memo(function FileRow({
   // Staging is the only direction that reads the working-tree file, so only it
   // hits the device; unstaging works on such a path as on any other.
   const reservedName = staged ? null : reservedDeviceName(entry.path);
+  // The name cell. A rename is two paths and an arrow, and tree mode shows
+  // basenames (the folder row above carries the directory): the wrapper's title
+  // only wins while nothing is clipped, so each PathText also carries the full
+  // path it stands for as its own only-when-clipped tooltip.
+  let nameCell = <PathText path={entry.path} className="flex-1" />;
+  if (entry.origPath) {
+    nameCell = (
+      <span
+        aria-hidden={treeDisplay || undefined}
+        className="flex min-w-0 flex-1 items-center gap-1"
+        title={label}
+      >
+        <PathText
+          path={treeDisplay ? pathBasename(entry.origPath) : entry.origPath}
+          title={label}
+        />
+        <span className="shrink-0">→</span>
+        <PathText
+          path={treeDisplay ? pathBasename(entry.path) : entry.path}
+          title={label}
+        />
+      </span>
+    );
+  } else if (treeDisplay) {
+    nameCell = (
+      <span aria-hidden className="flex min-w-0 flex-1" title={label}>
+        <PathText
+          path={pathBasename(entry.path)}
+          title={entry.path}
+          className="min-w-0 flex-1"
+        />
+      </span>
+    );
+  }
 
   return (
     <div
       data-row={`${staged ? "staged" : "unstaged"}:${entry.path}`}
+      style={indentPx === undefined ? undefined : { paddingLeft: 8 + indentPx }}
       className={cn(
         "group flex w-full cursor-pointer items-center gap-2 px-2 py-1 text-left text-xs",
         selected ? "bg-accent text-accent-foreground" : "hover:bg-muted/60",
@@ -87,11 +130,14 @@ export const FileRow = memo(function FileRow({
       {/* The status letter carries no meaning for assistive tech; the name span
           sits ahead of the path so the kind is announced first, and `sr-only`
           is absolutely positioned so it never becomes a flex item here. The
-          trailing space keeps the name from fusing with the path text. */}
-      <span className="sr-only">{badge.label} </span>
-      <span className="min-w-0 flex-1 truncate" title={label}>
-        {label}
+          trailing space keeps the name from fusing with the path text. Tree
+          mode's visible cell shows basenames, so the full path(s) ride here
+          instead and that cell is `aria-hidden` — otherwise the basename is
+          announced twice and same-named files in different folders alike. */}
+      <span className="sr-only">
+        {treeDisplay ? `${badge.label} ${label} ` : `${badge.label} `}
       </span>
+      {nameCell}
       {stat ? (
         <DiffStat
           added={stat.added}

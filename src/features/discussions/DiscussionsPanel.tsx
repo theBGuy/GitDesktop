@@ -5,7 +5,6 @@ import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -46,6 +45,31 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
   const meta = useDiscussionMeta(repoPath, ghReady && supportsDiscussions);
   const enabled = meta.data?.hasDiscussionsEnabled ?? false;
   const listEnabled = ghReady && supportsDiscussions && enabled;
+  // `listEnabled` folds four distinct states into one boolean; each control's
+  // reason has to name the one that's actually true, in the same order the
+  // body below checks them, or it reads as a permanent "sign in" hint even
+  // for a GitLab host, a discussions-off repo, or a still-loading probe.
+  // `meta` is gated on `ghReady && supportsDiscussions`, so its query stays
+  // permanently "pending" while disabled — checking it before those two would
+  // read every not-ready/unsupported state as "loading" instead. The sign-in
+  // sentence is the only part that differs between callers (each names its
+  // own action), so it's the one parameter.
+  const discussionsDisabledReason = (signedOutReason: string) => {
+    switch (true) {
+      case gh.isPending:
+        return "Loading discussions…";
+      case !ghReady:
+        return signedOutReason;
+      case !supportsDiscussions:
+        return "Discussions aren't available on this repository's host";
+      case meta.isPending:
+        return "Loading discussions…";
+      case meta.isError:
+        return "Couldn't load discussions for this repository";
+      default:
+        return "Discussions aren't enabled for this repository";
+    }
+  };
   const [categoryId, setCategoryId] = useState<string | null>(null);
   // How many discussions to load; "Load more" bumps it by PAGE_SIZE. A category
   // switch resets it so a filtered view starts from the first page again.
@@ -119,25 +143,25 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-1 border-b p-2">
         <DropdownMenu>
-          {/* A trigger can't take the disabled-reason primitive — a `render`
-              target can't carry its wrapper — so the reason rides a span around
-              the trigger, whose own `disabled` keeps the button inert. */}
-          <span
-            className={cn("inline-flex", !listEnabled && "cursor-not-allowed")}
-            title={
-              listEnabled
-                ? undefined
-                : "Sign in to GitHub to browse discussions"
+          <DropdownMenuTrigger
+            render={
+              <DisabledReasonButton
+                variant="outline"
+                size="xs"
+                disabled={!listEnabled}
+                reason={
+                  listEnabled
+                    ? undefined
+                    : discussionsDisabledReason(
+                        "Sign in to GitHub to browse discussions",
+                      )
+                }
+              />
             }
           >
-            <DropdownMenuTrigger
-              disabled={!listEnabled}
-              render={<Button variant="outline" size="xs" />}
-            >
-              {categoryLabel}
-              <CaretDownIcon data-icon="inline-end" />
-            </DropdownMenuTrigger>
-          </span>
+            {categoryLabel}
+            <CaretDownIcon data-icon="inline-end" />
+          </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="min-w-52">
             <DropdownMenuItem
               onClick={() => chooseCategory(null)}
@@ -166,7 +190,13 @@ export function DiscussionsPanel({ repoPath }: { repoPath: string }) {
           size="xs"
           wrapperClassName="ml-auto"
           disabled={!listEnabled}
-          reason="Sign in to GitHub to start a discussion"
+          reason={
+            listEnabled
+              ? undefined
+              : discussionsDisabledReason(
+                  "Sign in to GitHub to start a discussion",
+                )
+          }
           title="New discussion"
           onClick={() => setCreateOpen(true)}
         >

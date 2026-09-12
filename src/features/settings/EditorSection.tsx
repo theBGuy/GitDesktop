@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useState } from "react";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -123,9 +124,10 @@ export const EditorSection = withForm({
             <p className="text-xs text-muted-foreground">Detecting editors…</p>
           )}
           {!showCustom && matched && (
-            <p className="truncate font-mono text-xs text-muted-foreground">
-              {matched.path}
-            </p>
+            <PathText
+              path={matched.path}
+              className="font-mono text-xs text-muted-foreground"
+            />
           )}
         </div>
         {showCustom && (

@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import { lazy, Suspense } from "react";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { clipTitle } from "@/lib/clip-title";
@@ -53,12 +54,10 @@ export function TaskRunView() {
       <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2 text-xs">
         <span className="shrink-0 truncate font-medium">{task.name}</span>
         {task.source.kind === "file" && (
-          <span
-            className="min-w-0 truncate font-mono text-[10px] text-muted-foreground"
-            onMouseEnter={clipTitle(task.source.path)}
-          >
-            {task.source.path}
-          </span>
+          <PathText
+            path={task.source.path}
+            className="font-mono text-[10px] text-muted-foreground"
+          />
         )}
         {args !== "" && (
           <span

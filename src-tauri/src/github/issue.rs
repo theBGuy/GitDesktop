@@ -149,17 +149,55 @@ pub struct IssueInfo {
 const ISSUE_LIST_FIELDS: &str =
     "number,url,title,state,author,labels,createdAt,updatedAt";
 
+/// What an EMPTY filtered issue page means, given the disabled-issues probe's result.
+/// A probe that succeeded proves the tracker exists, so the empty page is a real "no
+/// matches"; a probe that failed carries the reason, remapped to the typed variant the
+/// panel renders as a non-retryable state. Pure, so both arms are pinned without a
+/// spawn.
+fn empty_filtered_issues(probe: AppResult<()>) -> AppResult<Vec<IssueInfo>> {
+    match probe {
+        Ok(()) => Ok(Vec::new()),
+        Err(e) => Err(map_issues_disabled(e)),
+    }
+}
+
 /// Issues for the Issues list. `state` is "open" or "closed". `gh issue list`
 /// already excludes pull requests, so no extra filtering is needed.
+///
+/// A `filter` with an axis that applies to issues — assigned to me, author, label —
+/// narrows the list SERVER-side through `ISSUE_ADVANCED` search instead (see
+/// [`crate::github::pr_search`]); anything else keeps the `gh issue list` read below.
 pub async fn gh_issue_list(
     repo_path: String,
     state: String,
     limit: Option<u32>,
     lens: Option<String>,
+    filter: Option<crate::forge::model::RemoteListFilter>,
 ) -> AppResult<Vec<IssueInfo>> {
     // Resolve the lens slug so a fork lists the chosen repo's issues (a bare
     // `gh issue list` on a fork auto-resolves to the upstream repo).
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    if let Some(q) = crate::github::pr_search::search_query(&slug, false, &state, filter.as_ref())? {
+        let rows = crate::github::pr_search::filtered_issue_list(&repo_path, &q, limit).await?;
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+        // An empty filtered page is AMBIGUOUS: search answers a repo whose issues are
+        // turned off with zero rows and no error, so "no matches" and "this repo has
+        // no tracker" look identical here. One narrow legacy read separates them —
+        // only ever on an empty page, and `state` is already known-valid because the
+        // query builder rejects anything else.
+        let probe = run_gh(
+            Some(&repo_path),
+            &[
+                "issue", "list", "--repo", &slug, "--state", &state, "--json", "number",
+                "--limit", "1",
+            ],
+            GH_TIMEOUT,
+        )
+        .await;
+        return empty_filtered_issues(probe.map(|_| ()));
+    }
     let mut args: Vec<&str> = match state.as_str() {
         "open" => vec![
             "issue", "list", "--repo", &slug, "--state", "open", "--json", ISSUE_LIST_FIELDS,
@@ -535,9 +573,9 @@ pub async fn gh_issue_types(repo_path: String, lens: Option<String>) -> AppResul
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-f",
             &format!("query={query}"),
@@ -579,6 +617,19 @@ pub async fn gh_issue_types(repo_path: String, lens: Option<String>) -> AppResul
     Ok(types)
 }
 
+/// The `gh issue edit` argv for setting/clearing an issue's type: `--type <t>` and
+/// `--remove-type` are mutually exclusive on gh's own grammar, so a blank or absent
+/// name must switch the WHOLE shape to `--remove-type` rather than sending both or
+/// an empty `--type`. Pure, so the shape is pinned without a spawn.
+fn issue_set_type_args<'a>(slug: &'a str, n: &'a str, type_name: Option<&'a str>) -> Vec<&'a str> {
+    match type_name {
+        Some(t) if !t.trim().is_empty() => {
+            vec!["issue", "edit", n, "--repo", slug, "--type", t]
+        }
+        _ => vec!["issue", "edit", n, "--repo", slug, "--remove-type"],
+    }
+}
+
 /// Sets (or, with `None`, clears) an issue's type by name (`gh issue edit`).
 #[tauri::command]
 pub async fn gh_issue_set_type(
@@ -589,12 +640,7 @@ pub async fn gh_issue_set_type(
 ) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    let args: Vec<&str> = match type_name.as_deref() {
-        Some(t) if !t.trim().is_empty() => {
-            vec!["issue", "edit", &n, "--repo", &slug, "--type", t]
-        }
-        _ => vec!["issue", "edit", &n, "--repo", &slug, "--remove-type"],
-    };
+    let args = issue_set_type_args(&slug, &n, type_name.as_deref());
     run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
     Ok(())
 }
@@ -787,9 +833,9 @@ pub async fn gh_issue_reactions(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -974,9 +1020,9 @@ pub async fn gh_issue_relations(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -1124,9 +1170,9 @@ pub async fn gh_issue_dependencies(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -1230,9 +1276,9 @@ pub async fn gh_issue_timeline(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -1284,9 +1330,9 @@ pub async fn gh_issue_development(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -1356,9 +1402,9 @@ pub async fn gh_issue_create_linked_branch(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={repo_name}"),
             "-f",
             &format!("query={oid_query}"),
@@ -1466,8 +1512,49 @@ pub fn read_issue_templates(repo_path: String) -> AppResult<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_issues_disabled, map_gh_too_old, ISSUE_TIMELINE_QUERY};
+    use super::{
+        empty_filtered_issues, is_issues_disabled, issue_set_type_args, map_gh_too_old,
+        ISSUE_TIMELINE_QUERY,
+    };
     use crate::error::AppError;
+
+    /// A `type:issue` search answers a repo with its tracker OFF with zero rows and no
+    /// error (measured), so an empty filtered page alone can't tell "no matches" from
+    /// "no tracker" — the probe's result is what decides, and a disabled tracker must
+    /// still reach the typed non-retryable state rather than rendering as empty.
+    #[test]
+    fn an_empty_filtered_page_defers_to_the_disabled_issues_probe() {
+        // Probe succeeded: the tracker exists, so empty really means no matches.
+        let ok = empty_filtered_issues(Ok(())).expect("a live tracker yields an empty list");
+        assert!(ok.is_empty());
+        // Probe failed with gh's disabled-issues line (verbatim shape) — the typed
+        // variant, not a raw Gh error the panel would show as a retryable failure.
+        let disabled = empty_filtered_issues(Err(AppError::Gh(
+            "the 'berkinory/GitDesktop' repository has disabled issues".into(),
+        )));
+        assert!(matches!(disabled, Err(AppError::IssuesDisabled)));
+        // Any other probe failure propagates unchanged — never swallowed into an
+        // empty list, and never relabelled as a disabled tracker.
+        match empty_filtered_issues(Err(AppError::Gh("HTTP 401: Bad credentials".into()))) {
+            Err(AppError::Gh(m)) => assert_eq!(m, "HTTP 401: Bad credentials"),
+            Err(e) => panic!("a non-disabled failure must ride through: {e:?}"),
+            Ok(_) => panic!("a failed probe must never yield an empty list"),
+        }
+    }
+
+    /// `--type`/`--remove-type` are mutually exclusive on gh's grammar — a blank or
+    /// absent name must switch the whole shape, never send an empty `--type` value
+    /// alongside `--remove-type`.
+    #[test]
+    fn issue_set_type_args_switches_shape_never_sends_both() {
+        let typed = issue_set_type_args("o/r", "7", Some("bug"));
+        assert_eq!(typed, ["issue", "edit", "7", "--repo", "o/r", "--type", "bug"]);
+
+        for cleared in [None, Some(""), Some("   ")] {
+            let args = issue_set_type_args("o/r", "7", cleared);
+            assert_eq!(args, ["issue", "edit", "7", "--repo", "o/r", "--remove-type"]);
+        }
+    }
 
     #[test]
     fn detects_the_disabled_issues_signature() {

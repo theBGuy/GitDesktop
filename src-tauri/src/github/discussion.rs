@@ -97,9 +97,9 @@ pub async fn gh_discussion_categories(repo_path: String) -> AppResult<Discussion
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-f",
             &format!("query={META_QUERY}"),
@@ -215,6 +215,57 @@ struct RawDiscussionNode {
     labels: RawLabels,
 }
 
+/// The `gh api graphql` argv for one page of [`gh_discussion_list`]. Every field
+/// but `first` rides `-f` (raw string), never `-F` (gh's typed form): `-F` coerces
+/// an all-digit or `true`/`false`/`null`-shaped value to a JSON non-string, which
+/// a `String!`/`ID` GraphQL variable rejects (measured: `gh api --help` — "literal
+/// values `true`, `false`, `null`, and integer numbers get converted to
+/// appropriate JSON types") — a real GitHub repo literally named `2048` would
+/// break `-F name=2048`. `owner`/`name` are pre-validated slugs (`valid_github_slug`
+/// gates them before reaching here, so `-f`'s leading-`@` exposure doesn't apply),
+/// but `-f` is still the correct flag for their `$owner:String!`/`$name:String!`
+/// types. `first` is the one field that must stay `-F`: `$first:Int!` needs the
+/// typed coercion, and it can only ever format to digits, so the magic-`@` risk
+/// never applies to it either. `category` additionally crosses a genuinely
+/// untrusted boundary the others don't: the MCP `list_discussions` tool forwards
+/// its caller's `category` argument here verbatim (`mcp_server/read_forge.rs`),
+/// and an MCP client can be an LLM agent steered by a prompt-injected repo — `-f`
+/// there closes the leading-`@` file-read magic `-F` would otherwise expose. Pure,
+/// so the shape is pinned without a spawn.
+fn discussion_list_args(
+    owner: &str,
+    name: &str,
+    page: u32,
+    category: Option<&str>,
+    cursor: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("owner={owner}"),
+        "-f".to_string(),
+        format!("name={name}"),
+        "-F".to_string(),
+        format!("first={page}"),
+    ];
+    // Only pass categoryId when filtering; absent leaves the variable null.
+    if let Some(cat) = category.filter(|c| !c.is_empty()) {
+        args.push("-f".to_string());
+        args.push(format!("category={cat}"));
+    }
+    // The `after` cursor is server-opaque text, so it travels as a String
+    // variable; omitted on the first request (a missing GraphQL variable is
+    // null → the first page).
+    if let Some(c) = cursor {
+        args.push("-f".to_string());
+        args.push(format!("after={c}"));
+    }
+    args.push("-f".to_string());
+    args.push(format!("query={LIST_QUERY}"));
+    args
+}
+
 /// Discussions for the list, newest-updated first. `category` is a category
 /// node id to filter by, or empty for all categories. (Discussions have no
 /// open/closed tabs — they're filtered by category; `closed`/`stateReason`
@@ -237,30 +288,13 @@ pub async fn gh_discussion_list(
         // Ask for only what's still needed, capped at GraphQL's per-page max.
         let remaining = target.saturating_sub(raw_nodes.len() as u32);
         let page = remaining.min(DISCUSSION_PAGE_MAX);
-        let mut args = vec![
-            "api".to_string(),
-            "graphql".to_string(),
-            "-F".to_string(),
-            format!("owner={owner}"),
-            "-F".to_string(),
-            format!("name={name}"),
-            "-F".to_string(),
-            format!("first={page}"),
-        ];
-        // Only pass categoryId when filtering; absent leaves the variable null.
-        if let Some(cat) = category.as_deref().filter(|c| !c.is_empty()) {
-            args.push("-F".to_string());
-            args.push(format!("category={cat}"));
-        }
-        // The `after` cursor is server-opaque text, so it travels as a String
-        // variable; omitted on the first request (a missing GraphQL variable is
-        // null → the first page).
-        if let Some(c) = &cursor {
-            args.push("-f".to_string());
-            args.push(format!("after={c}"));
-        }
-        args.push("-f".to_string());
-        args.push(format!("query={LIST_QUERY}"));
+        let args = discussion_list_args(
+            &owner,
+            &name,
+            page,
+            category.as_deref(),
+            cursor.as_deref(),
+        );
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
         let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
@@ -504,9 +538,9 @@ pub async fn gh_discussion_view(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -820,9 +854,9 @@ pub async fn gh_discussion_reactions(
         &[
             "api",
             "graphql",
-            "-F",
+            "-f",
             &format!("owner={owner}"),
-            "-F",
+            "-f",
             &format!("name={name}"),
             "-F",
             &format!("number={number}"),
@@ -1029,5 +1063,63 @@ mod tests {
             map_scope_error(AppError::InvalidArgument("write:discussion".into())),
             AppError::InvalidArgument(_)
         ));
+    }
+
+    /// `category` — the one field here sourced from an untrusted boundary (MCP's
+    /// `list_discussions` forwards it verbatim) — must ride `-f`, never `-F`: a
+    /// leading `@` on `-F`'s value reads a host file and sends its contents to
+    /// GitHub's API. `owner`/`name`/`first`/`after` are pre-validated or
+    /// programmatically formatted, so their `-F`/`-f` choice is fixed by their
+    /// GraphQL type instead.
+    #[test]
+    fn discussion_list_args_pins_every_field_flag() {
+        let args = discussion_list_args("o", "r", 50, Some("DIC_kwABC"), None);
+        let cat = args.iter().position(|a| a == "category=DIC_kwABC").expect("category present");
+        assert_eq!(args[cat - 1], "-f", "category must ride -f: {args:?}");
+        assert!(
+            !args.windows(2).any(|w| w[0] == "-F" && w[1].starts_with("category=")),
+            "category must never ride -F (magic-@ file-read): {args:?}"
+        );
+
+        // Absent/empty category adds no field at all — the GraphQL variable stays
+        // null, not an empty-string filter.
+        for absent in [None, Some("")] {
+            let args = discussion_list_args("o", "r", 50, absent, None);
+            assert!(
+                !args.iter().any(|a| a.starts_with("category=")),
+                "{absent:?} must add no category field: {args:?}"
+            );
+        }
+
+        // The cursor is likewise `-f` (server-opaque text) and absent on the first page.
+        let paged = discussion_list_args("o", "r", 50, None, Some("cursor123"));
+        let after = paged.iter().position(|a| a == "after=cursor123").expect("after present");
+        assert_eq!(paged[after - 1], "-f", "after must ride -f: {paged:?}");
+        assert!(!discussion_list_args("o", "r", 50, None, None)
+            .iter()
+            .any(|a| a.starts_with("after=")));
+
+        // `first` is the one field that must stay `-F` — `$first:Int!` needs the
+        // typed coercion. `owner`/`name` ride `-f`: they're `String!`, and `-F`'s
+        // magic type conversion would coerce an all-digit or true/false/null-shaped
+        // value into a non-string JSON type, which `String!` rejects.
+        let args = discussion_list_args("o", "r", 50, None, None);
+        for (field, want) in [("owner=o", "-f"), ("name=r", "-f"), ("first=50", "-F")] {
+            let i = args.iter().position(|a| a == field).unwrap_or_else(|| panic!("{field} present"));
+            assert_eq!(args[i - 1], want, "{field}: {args:?}");
+        }
+
+        // A real GitHub repo can be named entirely in digits (`gabrielecirulli/2048`)
+        // or a magic-word owner/name — `-F` would coerce these into a JSON number
+        // or boolean, which `$owner:String!`/`$name:String!` refuses. `-f` sends
+        // them as JSON strings regardless of shape.
+        let digit_named = discussion_list_args("gabrielecirulli", "2048", 50, None, None);
+        for field in ["owner=gabrielecirulli", "name=2048"] {
+            let i = digit_named
+                .iter()
+                .position(|a| a == field)
+                .unwrap_or_else(|| panic!("{field} present"));
+            assert_eq!(digit_named[i - 1], "-f", "{field}: {digit_named:?}");
+        }
     }
 }

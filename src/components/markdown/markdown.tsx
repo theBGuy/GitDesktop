@@ -716,9 +716,10 @@ export function Markdown({
       const { user } = target;
       setResolving(true);
       try {
-        // Origin off the repo's server-truth web URL, so GitHub Enterprise and a
-        // self-managed GitLab at a host root need no host table. An instance
-        // served under a path prefix loses that prefix here.
+        // Origin off the repo's web URL, so this needs no separate host table —
+        // github.com and GitLab (including self-managed) resolve from the origin
+        // remote directly; GitHub Enterprise still round-trips through `gh`. An
+        // instance served under a path prefix loses that prefix here.
         const origin = new URL(await forgeRepoUrl(repoPath)).origin;
         await openUrl(`${origin}/${encodeURIComponent(user)}`);
       } catch (e) {
@@ -797,11 +798,12 @@ export function Markdown({
   }
 
   /** Open a repository-relative href on the forge. The base is built at click
-   *  time off the repo's server-truth web URL, so GitHub Enterprise and a
-   *  self-managed GitLab need no host table. The origin gate is a backstop under
-   *  the classifier, not a duplicate: only a URL still on the repo's own host is
-   *  opened, and the scheme test rides with it because opaque origins compare
-   *  equal. */
+   *  time off the repo's web URL — a local `origin`-remote parse for github.com
+   *  and GitLab (including self-managed), a `gh` round-trip for GitHub
+   *  Enterprise and the `upstream` lens — so this needs no separate host table.
+   *  The origin gate is a backstop under the classifier, not a duplicate: only a
+   *  URL still on the repo's own host is opened, and the scheme test rides with
+   *  it because opaque origins compare equal. */
   async function openRepoFile(path: string) {
     if (!refs) return;
     const { repoPath, provider, lens } = refs;

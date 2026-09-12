@@ -491,14 +491,22 @@ pub async fn gh_run_view(repo_path: String, run_id: u64) -> AppResult<RunDetail>
     })
 }
 
+/// The `gh run rerun` argv: `--failed` appends only when asked, never as an
+/// explicit `--failed=false` — gh's rerun command has no such form, unlike
+/// `release edit`'s tri-state flags. Pure, so the shape is pinned without a spawn.
+fn run_rerun_args<'a>(slug: &'a str, id: &'a str, failed: bool) -> Vec<&'a str> {
+    let mut args = vec!["run", "rerun", "-R", slug, id];
+    if failed {
+        args.push("--failed");
+    }
+    args
+}
+
 /// Re-runs a completed run — all jobs, or only the failed ones.
 pub async fn gh_run_rerun(repo_path: String, run_id: u64, failed: bool) -> AppResult<()> {
     let id = run_id.to_string();
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let mut args = vec!["run", "rerun", "-R", slug.as_str(), id.as_str()];
-    if failed {
-        args.push("--failed");
-    }
+    let args = run_rerun_args(&slug, &id, failed);
     run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
     Ok(())
 }
@@ -1520,6 +1528,18 @@ mod tests {
             .position(|a| a == "branch=feat/x")
             .unwrap_or_else(|| panic!("{scoped:?}"));
         assert_eq!(scoped[at - 1], "-f", "{scoped:?}");
+    }
+
+    /// `--failed` appends only when asked; the plain rerun must stay byte-identical
+    /// to the base positional+flag shape, mirroring `pr_edit_args_append_base_only_when_given`.
+    #[test]
+    fn run_rerun_args_appends_failed_only_when_asked() {
+        let plain = run_rerun_args("o/r", "42", false);
+        assert_eq!(plain, vec!["run", "rerun", "-R", "o/r", "42"]);
+
+        let failed_only = run_rerun_args("o/r", "42", true);
+        assert_eq!(failed_only[..plain.len()], plain[..]);
+        assert_eq!(failed_only[plain.len()..], ["--failed"]);
     }
 
     #[test]

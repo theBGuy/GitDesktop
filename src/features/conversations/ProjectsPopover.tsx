@@ -2,6 +2,7 @@ import { Popover } from "@base-ui/react/popover";
 import { CopyIcon, KanbanIcon } from "@phosphor-icons/react";
 import { type ReactNode, useEffect, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MetaValueCell } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
@@ -271,32 +272,29 @@ export function ProjectsPopover({
     }
   }
 
-  // Trigger first, so it never shifts as chips come and go. A natively disabled
-  // button swallows `title`, so the reason rides a wrapping span.
+  // Trigger first, so it never shifts as chips come and go.
   const trigger = (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
-      <span
-        title={heldReason}
-        className={
-          heldReason ? "inline-flex cursor-not-allowed" : "inline-flex"
+      <Popover.Trigger
+        render={
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            aria-label="Edit projects"
+            disabled={!!heldReason}
+            reason={heldReason}
+          />
         }
       >
-        <Popover.Trigger
-          disabled={!!heldReason}
-          render={
-            <Button variant="ghost" size="xs" aria-label="Edit projects" />
-          }
-        >
-          {/* size-3 explicitly: the Button's own icon rule skips a sized
-              element, and a 16px swap would widen the label column mid-write. */}
-          {editProjects.isPending ? (
-            <Spinner className="size-3" data-icon="inline-start" />
-          ) : (
-            <KanbanIcon data-icon="inline-start" />
-          )}
-          Projects
-        </Popover.Trigger>
-      </span>
+        {/* size-3 explicitly: the Button's own icon rule skips a sized
+            element, and a 16px swap would widen the label column mid-write. */}
+        {editProjects.isPending ? (
+          <Spinner className="size-3" data-icon="inline-start" />
+        ) : (
+          <KanbanIcon data-icon="inline-start" />
+        )}
+        Projects
+      </Popover.Trigger>
       <Popover.Portal container={portalContainer}>
         <Popover.Positioner
           align="start"

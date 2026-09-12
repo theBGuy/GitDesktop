@@ -1,6 +1,7 @@
 import { SparkleIcon } from "@phosphor-icons/react";
 import { useMemo } from "react";
 import { toast } from "sonner";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
@@ -420,11 +421,10 @@ export function ConflictFileView({
     <div className="ph-no-capture flex h-full flex-col">
       {/* Header toolbar — calm, neutral; whole-file + AI actions */}
       <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
-        <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate font-mono text-xs text-muted-foreground">
-            {path}
-          </span>
-        </span>
+        <PathText
+          path={path}
+          className="font-mono text-xs text-muted-foreground"
+        />
         <span className="flex shrink-0 items-center gap-1.5">
           <Button size="xs" variant="ghost" onClick={openInEditor}>
             Open in editor

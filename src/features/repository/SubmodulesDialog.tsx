@@ -12,6 +12,7 @@ import type { ComponentProps } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { PathText } from "@/components/path-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -506,9 +507,7 @@ function SubmoduleRow({
             clipped it on sight. Snug leading keeps the three lines one unit,
             and the line is dropped entirely when there is no URL. */}
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-mono text-xs font-medium">
-            {path}
-          </span>
+          <PathText path={path} className="font-mono text-xs font-medium" />
           <span
             className="mt-0.5 block truncate text-[11px] leading-snug text-muted-foreground"
             onMouseEnter={clipTitle(detail)}

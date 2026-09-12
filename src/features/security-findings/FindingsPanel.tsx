@@ -15,6 +15,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -383,22 +384,17 @@ function SectionHeader({ title }: { title: string }) {
   );
 }
 
-/** `path:line`, truncated from the *start* so the filename — the part that
- *  identifies the finding — survives. `dir="rtl"` moves the ellipsis to the
- *  leading edge; the `<bdi>` keeps the path itself reading left-to-right. */
+/** `path:line`, right-aligned in the row, middle-truncated so the filename —
+ *  the part that identifies the finding — survives. */
 function PathLabel({ path, line }: { path: string; line: number | null }) {
   // A tolerated alert can arrive with no path at all; a line number hung off the
   // placeholder would read as a location, so it's dropped with the path.
-  const text = path
-    ? line === null
-      ? path
-      : `${path}:${line}`
-    : "No file path";
-  return (
-    <span dir="rtl" className="ml-auto min-w-0 truncate font-mono" title={text}>
-      <bdi>{text}</bdi>
-    </span>
-  );
+  if (!path) {
+    return (
+      <span className="ml-auto min-w-0 truncate font-mono">No file path</span>
+    );
+  }
+  return <PathText path={path} line={line} className="ml-auto font-mono" />;
 }
 
 // `name` per call site: several sections load independently and can all be

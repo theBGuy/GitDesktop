@@ -1,6 +1,7 @@
 import { InfoIcon, SparkleIcon } from "@phosphor-icons/react";
 import { DiffStat } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,7 +15,6 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
-import { clipTitle } from "@/lib/clip-title";
 import { KIND_BADGE } from "@/lib/git/change-kind-badge";
 import { useWorkingLineStats } from "@/lib/git/queries";
 import type { FileEntry } from "@/lib/git/types";
@@ -216,12 +216,21 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
                           announced first, and its trailing space keeps the two
                           from fusing. */}
                       <span className="sr-only">{badge.label} </span>
-                      <span
-                        className="min-w-0 flex-1 truncate"
-                        onMouseEnter={clipTitle(label)}
-                      >
-                        {label}
-                      </span>
+                      {entry.origPath ? (
+                        // A rename is two paths and an arrow: the composite
+                        // can't ride PathText's only-when-clipped measurement,
+                        // so the row keeps a static title for the whole label.
+                        <span
+                          className="flex min-w-0 flex-1 items-center gap-1"
+                          title={label}
+                        >
+                          <PathText path={entry.origPath} />
+                          <span className="shrink-0">→</span>
+                          <PathText path={entry.path} />
+                        </span>
+                      ) : (
+                        <PathText path={entry.path} className="flex-1" />
+                      )}
                       {stat ? (
                         <DiffStat
                           added={stat.added}

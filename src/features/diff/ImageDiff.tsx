@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PathText } from "@/components/path-text";
 import {
   ImageLightbox,
   type LightboxImage,
@@ -254,9 +255,10 @@ export function ImageDiff({
     // ph-no-capture: user image content + path — block from session replay.
     <div className="ph-no-capture flex h-full flex-col">
       <div className="border-b px-3 py-1.5">
-        <p className="truncate font-mono text-xs text-muted-foreground">
-          {filePath}
-        </p>
+        <PathText
+          path={filePath}
+          className="font-mono text-xs text-muted-foreground"
+        />
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         <ImagePanes repoPath={repoPath} filePath={filePath} revs={revs} />

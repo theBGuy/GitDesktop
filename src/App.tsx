@@ -8,6 +8,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { ReconnectDialog } from "@/features/accounts/ReconnectDialog";
 import { ActivityStrip } from "@/features/activity/ActivityDock";
 import { useMacAppMenu } from "@/features/app-menu/useMacAppMenu";
+import { AutomationHistoryDialogHost } from "@/features/automations/AutomationHistoryDialog";
 import { AutomationResultDialog } from "@/features/automations/AutomationResultDialog";
 import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
@@ -26,7 +27,7 @@ import { useRepoDrop } from "@/features/welcome/useRepoDrop";
 import { WelcomeScreen } from "@/features/welcome/WelcomeScreen";
 import { syncAnalytics, track } from "@/lib/analytics";
 import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
-import { useGitInstalled } from "@/lib/git/queries";
+import { useGitInstalled, usePrefetchMyWorkSources } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
 import { MCP_WRITABLE_STORES } from "@/lib/mcp-writable-stores";
@@ -147,6 +148,11 @@ function App() {
   // view, welcome included); no-op unless a recent repo carries a pr-sync rule.
   useBackgroundPrSync();
 
+  // Warm the work inbox's sources probe here rather than on its first render:
+  // it reads two CLI configs plus the keyring over IPC, and paying for that at
+  // app open keeps it off the critical path of the welcome → My work jump.
+  usePrefetchMyWorkSources();
+
   // The app-wide hotkey dispatcher plus the always-available actions.
   useHotkeysListener();
   // The macOS menu bar routes into the same action dispatch; inert elsewhere.
@@ -254,6 +260,7 @@ function App() {
         <ActivityStrip />
       </div>
       <AutomationResultDialog />
+      <AutomationHistoryDialogHost />
       <CloneRepoDialog open={cloneOpen} onOpenChange={setCloneOpen} />
       <CreateRepoDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ConfirmDialogHost />

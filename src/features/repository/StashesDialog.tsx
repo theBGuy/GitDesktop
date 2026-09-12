@@ -3,6 +3,7 @@ import { useDeferredValue, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DiffStat } from "@/components/diff-stat";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -569,11 +570,8 @@ function StashFiles({
                     : "hover:bg-muted/60",
                 )}
                 onClick={() => setSelectedPath(file.path)}
-                title={file.path}
               >
-                <span className="min-w-0 flex-1 truncate font-mono">
-                  {file.path}
-                </span>
+                <PathText path={file.path} className="flex-1 font-mono" />
                 <DiffStat
                   added={file.added}
                   deleted={file.deleted}

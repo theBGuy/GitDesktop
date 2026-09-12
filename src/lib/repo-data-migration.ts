@@ -79,12 +79,16 @@ const IDENTITY_STORES: IdentityStore[] = [
   { file: "local-issues.json", merge: "id-merge" },
   { file: "pr-reviews.json", merge: "id-merge" },
   { file: "automation-results.json", merge: "id-merge" },
+  // The reserved "global-markers" key is not a repo key, and the walk below only
+  // touches keys matching the old checkout path — so it is naturally untouched.
+  { file: "automation-history.json", merge: "id-merge" },
   { file: "pr-review-drafts.json", merge: "inner-key" },
   { file: "review-notes.json", merge: "inner-key" },
   { file: "automation-dismissals.json", merge: "inner-key" },
   { file: "own-comments-digest.json", merge: "inner-key" },
   { file: "jira-links.json", merge: "keep-new" },
   { file: "repo-lens.json", merge: "keep-new" },
+  { file: "conversation-filters.json", merge: "keep-new" },
   { file: "branch-rules.json", merge: "keep-new" },
   {
     file: "automations.json",

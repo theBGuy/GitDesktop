@@ -2,6 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import hljs from "highlight.js/lib/common";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
@@ -113,8 +114,8 @@ export function BlameDialog({
           <DialogTitle className="truncate">
             {shortRev ? `Blame: ${name} @ ${shortRev}` : `Blame: ${name}`}
           </DialogTitle>
-          <DialogDescription className="truncate font-mono">
-            {path}
+          <DialogDescription>
+            <PathText path={path} className="font-mono" />
           </DialogDescription>
         </DialogHeader>
 

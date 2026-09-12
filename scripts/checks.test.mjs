@@ -226,11 +226,10 @@ test("select-item-clip-title flags the superseded item-level handler, wrapped or
     "</SelectItem>",
   ].join("\n");
   assert.deepEqual(selectItemClipTitle(deadSpan), [1]);
-  // A SELF-BOUNDED span (explicit max-w) keeps its handler LIVE — TaskDialog's
-  // interpreter-path sub-span. At close range it still pairs: the guard cannot
-  // see width bounds, so this is the known false positive the allowlist
-  // remedies. In the real tree the row's markup holds it ~2× outside the
-  // window.
+  // A synthetic SELF-BOUNDED span (an explicit max-w keeps its handler live).
+  // At close range it still pairs — the guard cannot see width bounds — so a
+  // real one would need the allowlist. No in-tree site carries this shape
+  // today: in-item path rows route through PathText.
   const bounded = [
     "<SelectItem key={i.id} value={i.id}>",
     "  <span",
@@ -1233,7 +1232,7 @@ test("titled-disabled-trigger leaves the primitive and the non-trigger wrappers 
   assert.deepEqual(titledDisabledTrigger(stacked), []);
 });
 
-test("titled-disabled-trigger allowlists the residual sites per file", () => {
+test("titled-disabled-trigger reports every site now that the allowlist is empty", () => {
   const check = CHECKS.find((c) => c.name === "titled-disabled-trigger");
   const row = [
     '<span title={heldReason} className="inline-flex">',
@@ -1250,8 +1249,12 @@ test("titled-disabled-trigger allowlists the residual sites per file", () => {
     "src/features/issues/SomeNewPicker.tsx",
   ];
   const views = new Map(files.map((f) => [f, view(row)]));
-  // A deferred residual stays quiet; the same markup in a fresh picker reports.
+  // Every residual site converted, so the allowlist is empty: this ONE former
+  // entry's path reports again alongside a fresh one, rather than staying
+  // quiet as it did before. The separate stale-allowlist test is what pins
+  // the general mechanism for every entry, past or future.
   assert.deepEqual(runCheck(check, files, views).violations, [
+    "src/features/conversations/ProjectsPopover.tsx:1",
     "src/features/issues/SomeNewPicker.tsx:1",
   ]);
 });

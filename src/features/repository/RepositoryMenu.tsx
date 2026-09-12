@@ -1,6 +1,7 @@
 import {
   ArrowSquareOutIcon,
   ChartBarIcon,
+  ClockCounterClockwiseIcon,
   CodeIcon,
   CopyIcon,
   CubeIcon,
@@ -42,6 +43,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import { Spinner } from "@/components/ui/spinner";
+import { useAutomationHistoryDialog } from "@/features/automations/AutomationHistoryDialog";
 import { RepoAutomationsDialog } from "@/features/automations/RepoAutomationsDialog";
 import { BranchRulesDialog } from "@/features/branch-rules/BranchRulesDialog";
 import { HooksDialog } from "@/features/hooks/HooksDialog";
@@ -52,6 +54,12 @@ import type {
   RepoSettingsDialog as RepoSettingsDialogComponent,
   SectionId,
 } from "@/features/repo-settings/RepoSettingsDialog";
+import { useAutomations } from "@/lib/automations/queries";
+import { runAutomationNow } from "@/lib/automations/runner";
+import {
+  repoEntry as automationRepoEntry,
+  effectiveActions,
+} from "@/lib/automations/types";
 import { copyText } from "@/lib/clipboard";
 import {
   forgeRepoUrl,
@@ -68,6 +76,7 @@ import {
   useForgeStatus,
   useForkRepo,
   useRepoAdmin,
+  useRepoIdentity,
   useRepoStarStatus,
   useRepoStatus,
   useSetRepoStar,
@@ -75,6 +84,7 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink } from "@/lib/jira/queries";
+import { useRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -126,10 +136,40 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const aiEnabled = useAiEnabled();
   const repoName = useUiStore((s) => s.repoName);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
+  const repoTab = useUiStore((s) => s.repoTab);
+  const selectedPr = useUiStore((s) => s.selectedPr);
   const fork = useForkRepo(repoPath);
   // The Fork item's verdict, sampled when the dropdown opens (see `canForkHere`).
   const [forkWhileOpen, setForkWhileOpen] = useState(false);
   const [automationsOpen, setAutomationsOpen] = useState(false);
+  // The history dialog is mounted once at the app root and opened by store flag,
+  // so it survives this menu closing under it.
+  const openAutomationHistory = useAutomationHistoryDialog((s) => s.open);
+  const automationsConfig = useAutomations().data;
+  const repoIdentity = useRepoIdentity(repoPath).data;
+  // Automations are origin-pinned end to end, so Run-now must not exist for a
+  // REMOTE selection under the upstream lens — a fork's two lenses share PR
+  // numbers, and an origin-resolved run against an upstream selection would
+  // review the wrong pull request. Local PRs never touch the forge, so they
+  // stay runnable under either lens.
+  const repoLens = useRepoLens(repoPath);
+  // Whether this repo's EFFECTIVE config enables any PR-lifecycle action — the
+  // same union Run-now executes, so the palette entry exists exactly when the
+  // action could start something.
+  const prAutomationConfigured =
+    automationsConfig !== undefined &&
+    (["pr-open", "pr-sync"] as const).some(
+      (lifecycle) =>
+        effectiveActions(
+          automationsConfig,
+          automationRepoEntry(
+            automationsConfig,
+            repoIdentity ?? repoPath,
+            repoPath,
+          ),
+          lifecycle,
+        ).length > 0,
+    );
   const [jiraOpen, setJiraOpen] = useState(false);
   const [repoSettingsOpen, setRepoSettingsOpen] = useState(false);
   // React's `lazy` suspends on its first element render even when the shared
@@ -202,15 +242,24 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
       : undefined;
   // Star, fork, and create-issue deliberately stay on `canGh` — they need the
   // authenticated probe, and offering them before auth is known would be worse.
-  // The stand-in never outlives a SETTLED probe on GitHub/GitLab: forgeRepoUrl
-  // shells `gh repo view` / `glab api` there, so "not ready" means the click
-  // would fail. `!isPaused` keeps an offline session (the query parks, pending
-  // forever) from counting as in-flight. Bitbucket's resolver is a local remote
-  // parse, so its item works regardless of the probe's verdict.
-  const canViewOnHost =
-    canGh ||
-    persistedProvider === "bitbucket" ||
-    (persistedProvider !== undefined && gh.isPending && !gh.isPaused);
+  // View-on-host needs neither for GitLab, Bitbucket, or a `github.com` origin:
+  // `forgeRepoUrl` shells no CLI for those. GitHub Enterprise and a non-canonical
+  // GitHub host (an SSH-config alias, an `insteadOf` rewrite) still round-trip
+  // through `gh repo view` — but neither ever persists a provider
+  // (`provider_tag_for_host` returns `None` for them) and their live probe needs
+  // auth, so the item stays hidden rather than offering a click that would fail.
+  // `Boolean` rather than an undefined check because `provider` is `T | null`,
+  // and a repo with no hosted remote at all settles to `null` too (never widen
+  // this to "any settled probe"). GitLab/Bitbucket's `provider` resolves from the
+  // origin remote regardless of auth; GitHub's live probe (`gh.data.provider`)
+  // still needs an authenticated `gh repo view` round-trip, but `persistedProvider`
+  // covers it anyway — `useRepoVisibilityProbe` persists `RecentRepo.provider`
+  // from a PURE LOCAL remote-host parse (`git_repo_owners`/`provider_tag_for_host`,
+  // no CLI) on every repo open, GitHub included, so a signed-out `github.com`
+  // repo shows the item too once it's been opened at least once. Only a
+  // never-before-opened signed-out repo (nothing persisted yet) still waits on
+  // that ambient probe to land.
+  const canViewOnHost = Boolean(provider) || persistedProvider !== undefined;
   const viewLabel = providerLabel(provider ?? persistedProvider);
   const canStar = canGh && forgeSupports(gh.data, "stars");
   const canCreateHostIssue = canGh && forgeSupports(gh.data, "issues");
@@ -416,6 +465,34 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("manage-files", () => openFiles("tracked"));
   useHotkeyAction("ai-excluded-files", () => openFiles("ai"), aiEnabled);
   useHotkeyAction("automations", () => setAutomationsOpen(true), aiEnabled);
+  useHotkeyAction(
+    "automation-history",
+    () => openAutomationHistory(repoPath),
+    aiEnabled,
+  );
+  // Run-now targets the PR open in the pulls tab, and only when this repo's
+  // effective config enables a PR-lifecycle action — a palette entry whose only
+  // possible outcome is a "nothing configured" toast would be worse than none.
+  useHotkeyAction(
+    "run-pr-automations",
+    () => {
+      // Fire-time re-read: the palette closes before dispatching, so the
+      // selection gating this render may have moved by the time this runs.
+      const pr = useUiStore.getState().selectedPr;
+      if (!pr) return;
+      runAutomationNow(
+        repoPath,
+        pr.kind === "remote"
+          ? { kind: "remote", number: Number(pr.id) }
+          : { kind: "local", id: pr.id },
+      );
+    },
+    aiEnabled &&
+      repoTab === "pulls" &&
+      selectedPr !== null &&
+      (selectedPr.kind === "local" || repoLens === "origin") &&
+      prAutomationConfigured,
+  );
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));
   useHotkeyAction("repository-settings", openRepoSettings, canOpenRepoSettings);
   useHotkeyAction("branch-rules", () => setBranchRulesOpen(true));
@@ -553,6 +630,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           <DropdownMenuItem onClick={() => setAutomationsOpen(true)}>
             <LightningIcon />
             Automations…
+          </DropdownMenuItem>
+        )}
+        {aiEnabled && (
+          <DropdownMenuItem onClick={() => openAutomationHistory(repoPath)}>
+            <ClockCounterClockwiseIcon />
+            Automation history…
           </DropdownMenuItem>
         )}
         <DropdownMenuItem onClick={() => setJiraOpen(true)}>

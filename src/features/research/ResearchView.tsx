@@ -10,6 +10,7 @@ import {
 } from "@phosphor-icons/react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { Markdown } from "@/components/markdown/markdown";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -554,11 +555,10 @@ function ResearchResult({ run }: { run: ResearchRun }) {
               </span>
             )}
             {reportPath && (
-              <span
-                className="min-w-0 truncate text-[11px] text-muted-foreground"
-                title={`Saved to ${reportPath}`}
-              >
-                Saved to <span className="font-mono">{reportPath}</span>
+              // gap-1, not a trailing label space — flex line boxes trim those.
+              <span className="flex min-w-0 gap-1 text-[11px] text-muted-foreground">
+                <span className="shrink-0">Saved to</span>
+                <PathText path={reportPath} className="font-mono" />
               </span>
             )}
             {report && (

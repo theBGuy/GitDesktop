@@ -15,11 +15,20 @@ import { Button } from "@/components/ui/button";
 import { SessionExpiryNotice } from "@/features/accounts/SessionExpiryNotice";
 import { ConversationFilterPopover } from "@/features/conversations/ConversationFilterPopover";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
+import { ConversationPresetSwitcher } from "@/features/conversations/ConversationPresetSwitcher";
 import { PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { RepoLensSwitcher } from "@/features/conversations/RepoLensSwitcher";
-import { useCollapsedSections } from "@/features/conversations/useCollapsedSections";
+import {
+  type ReviewGroupKind,
+  useCollapsedSections,
+} from "@/features/conversations/useCollapsedSections";
 import { useLocalRemoteFilter } from "@/features/conversations/useLocalRemoteFilter";
+import {
+  gitlabAxisCap,
+  useRemoteListFilter,
+} from "@/features/conversations/useRemoteListFilter";
 import { clipTitleFromText } from "@/lib/clip-title";
+import { presentError } from "@/lib/error-summary";
 import type { PrStateFilter } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import {
@@ -30,8 +39,9 @@ import {
   usePrList,
   usePrListCi,
   usePrListMergeability,
+  usePrReviewState,
 } from "@/lib/git/queries";
-import { providerLabel } from "@/lib/git/types";
+import { providerLabel, type ReviewStateEntry } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
@@ -47,6 +57,44 @@ import { useRetained } from "@/lib/use-retained";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { LocalPrContextMenu } from "./LocalPrContextMenu";
 import { useReconcileLocalPrs } from "./useReconcileLocalPrs";
+
+/** The review-state subsections, in the order a triage pass wants them. */
+const REVIEW_GROUPS: {
+  kind: ReviewGroupKind;
+  label: string;
+  title?: string;
+}[] = [
+  { kind: "not-reviewed", label: "Not reviewed yet" },
+  {
+    kind: "updated",
+    label: "Updated since my review",
+    title: "Any activity after your last review — commits, comments, labels",
+  },
+  { kind: "reviewed", label: "Reviewed" },
+];
+
+/** Why the list is flat despite the grouping toggle being on. */
+const UNGROUPED_NOTE = {
+  error: "Couldn't load your review state — the list is ungrouped.",
+  truncated: "Couldn't check every review — the list is ungrouped.",
+} as const;
+
+/** The saved team filter couldn't be validated, so the list ran without it — a
+ *  WIDER scope than the one saved, which the rows themselves can't show. */
+const TEAM_SCOPE_DROPPED_NOTE =
+  "Couldn't check your team filter — showing results without it.";
+
+/** Which subsection a PR belongs to. A number the backend didn't answer for is
+ *  absent from `entries` and reads as not reviewed. Both timestamps are ISO-8601
+ *  UTC, so a string compare orders them. */
+function reviewBucket(
+  number: number,
+  entries: Record<number, ReviewStateEntry>,
+): ReviewGroupKind {
+  const entry = entries[number];
+  if (!entry) return "not-reviewed";
+  return entry.updatedAt > entry.lastReviewedAt ? "updated" : "reviewed";
+}
 
 export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
@@ -65,12 +113,50 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     lens === "upstream" ? (upstreamSlug ?? "Upstream") : providerName;
   const remoteNoun = isGitLab ? "merge requests" : "pull requests";
   const ghReady = forgeFeatureReady(gh.data, "pullRequests");
+  // The provider's own capabilities, read separately from `forgeFeatureReady` so a
+  // not-yet-connected repo never gets told its PROVIDER lacks an axis it has.
+  const implemented = gh.data?.implemented;
+  const canFilterMine = forgeFeatureReady(gh.data, "listFilterMine");
+  const canFilterTeam = forgeFeatureReady(gh.data, "listFilterTeam");
+  const canFilterAuthor = forgeFeatureReady(gh.data, "listFilterAuthor");
+  // Borrowed from the label-editing flag: Bitbucket PRs have no labels at all, so
+  // there is nothing for the forge to filter by — the pick runs client-side there.
+  const canFilterLabel = forgeFeatureReady(gh.data, "mrLabels");
+  const canGroupByReview = forgeFeatureReady(gh.data, "reviewGrouping");
   // "closed" matches the Closed tab: closed and merged alike.
   const [stateFilter, setStateFilter] = useState<PrStateFilter>("open");
   // How many remote PRs to load; "Load more" bumps it. A tab switch (open/closed)
   // resets to the first page.
   const [limit, setLimit] = useState(PAGE_SIZE);
-  const prList = usePrList(repoPath, ghReady, stateFilter, limit, lens);
+  // Read once, high: three gates below key off it (team membership, mergeability,
+  // review state) — every network read this panel owns beyond the list itself.
+  const repoTab = useUiStore((s) => s.repoTab);
+  const onPullsTab = repoTab === "pulls";
+  const listFilter = useRemoteListFilter({
+    repoPath,
+    feature: "pulls",
+    lens,
+    canFilterMine,
+    canFilterTeam,
+    canFilterAuthor,
+    canFilterLabel,
+    canGroupByReview,
+    tabActive: onPullsTab,
+  });
+  // `scopeReady` in the gate: a repo with a stored filter would otherwise fetch
+  // once under a DIFFERENT scope and again under the saved one — unfiltered before
+  // the prefs land, or whole-repo before a saved team choice validates. The wait is
+  // covered by the same skeletons a cold load already shows (a held query reports
+  // `isPending`, which is what `listPending` below renders), and the gate always
+  // opens — see the hook's note on why neither leg can wedge.
+  const prList = usePrList(
+    repoPath,
+    ghReady && listFilter.scopeReady,
+    stateFilter,
+    limit,
+    lens,
+    listFilter.filter,
+  );
   // Row CI icons hydrate separately from the list, so the list paints immediately; the
   // backend routes GitHub/GitLab/Bitbucket, so `ghReady` is the readiness gate. Idle
   // while the list serves placeholder rows (tab switch or Load more): otherwise the
@@ -95,7 +181,6 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // a DISABLED query still renders placeholder data, so keeping the previous tab's or
   // lens's map off these rows is the hook's placeholder comparator's job.
   // PR numbers repeat across states and repos, so a misplaced chip is a wrong claim.
-  const repoTab = useUiStore((s) => s.repoTab);
   const prListMergeability = usePrListMergeability(
     repoPath,
     ghReady &&
@@ -106,8 +191,27 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     limit,
     prList.data,
     lens,
+    listFilter.filter,
   );
   const mergeMap = prListMergeability.data;
+  // The viewer's review timestamps, only while the grouping is actually on (the
+  // caller contract on the hook). `groupByReview` already carries the provider
+  // gate, but the contract names it, so it stays visible at the call site.
+  // `repoTab` mirrors the mergeability gate above: a hidden <Activity> panel
+  // still refetches, and this query is a multi-page search walk.
+  const reviewState = usePrReviewState(
+    repoPath,
+    ghReady &&
+      repoTab === "pulls" &&
+      listFilter.groupByReview &&
+      canGroupByReview &&
+      stateFilter === "open" &&
+      !prList.isPlaceholderData,
+    stateFilter,
+    limit,
+    lens,
+    listFilter.filter,
+  );
   const onStateFilter = (s: PrStateFilter) => {
     setStateFilter(s);
     setLimit(PAGE_SIZE);
@@ -124,14 +228,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const {
     filterText,
     setFilterText,
-    authorFilter,
-    labelFilter,
-    toggle,
     showArchived,
     setShowArchived,
     authors,
     labels,
-    activeFilterCount,
     stateLocal,
     stateRemote,
     visibleLocal,
@@ -143,6 +243,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     locals: localPrs.data ?? [],
     remotes: prList.data ?? [],
     stateFilter,
+    authorFilter: listFilter.authorFilter,
+    labelFilter: listFilter.labelFilter,
+    mineActive: listFilter.mineActive,
+    labelsServerSide: listFilter.labelsServerSide,
+    // `usePrList`'s key up to the state axis: every cached page for this lens and
+    // state feeds the author/label options and counts, whatever limit or filter
+    // produced it, so they don't collapse to the active filter.
+    optionSourcePrefix: ["repo", repoPath, "pr-list", lens, stateFilter],
   });
 
   // Creating a remote PR/MR follows its per-action write flag — ready GitHub AND
@@ -165,6 +273,30 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());
   useHotkeyAction("create-local-pr", () => openLocalPrCreate());
   useHotkeyAction("create-pr", () => setGhCreateOpen(true), canCreateGhPr);
+  // Each scope action mirrors its toolbar segment's availability, and adds the
+  // tab (`onPullsTab`, hoisted above): both panels stay mounted under <Activity>,
+  // so an ungated registration would rewrite this repo's PR filter from the Issues
+  // tab with nothing visible.
+  useHotkeyAction(
+    "pr-preset-all",
+    () => listFilter.setPreset("all"),
+    onPullsTab && canFilterMine,
+  );
+  useHotkeyAction(
+    "pr-preset-mine",
+    () => listFilter.setPreset("mine"),
+    onPullsTab && canFilterMine,
+  );
+  useHotkeyAction(
+    "pr-preset-needs-review",
+    () => listFilter.setPreset("needs-review"),
+    onPullsTab && canFilterMine && canGroupByReview,
+  );
+  useHotkeyAction(
+    "pr-group-review",
+    () => listFilter.setGroupByReview(!listFilter.groupByReview),
+    onPullsTab && canGroupByReview,
+  );
 
   // Palette path for the row context menu's record-management actions: they act
   // on the currently-selected LOCAL PR (enabled only when one is selected), so a
@@ -235,19 +367,89 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     }
   }, [pendingCreate, clearPendingCreate, canCreateGhPr, openLocalPrCreate]);
 
-  const { localCollapsed, remoteCollapsed, toggleLocal, toggleRemote } =
-    useCollapsedSections("pulls");
+  const {
+    localCollapsed,
+    remoteCollapsed,
+    toggleLocal,
+    toggleRemote,
+    isReviewGroupCollapsed,
+    toggleReviewGroup,
+  } = useCollapsedSections("pulls");
+
+  // The grouping needs its own answered page: a truncated map can't say which bucket
+  // the rows it dropped belong to, so it falls back to the flat list rather than
+  // guessing.
+  const reviewPage = reviewState.data;
+  // Two gates, deliberately different: the GROUPING additionally refuses stale rows
+  // and a failed map, while the explanation keys only on the user having asked —
+  // an error or a short map must never leave the list flat with nothing said. (A
+  // map still FETCHING is flat and silent by design; the note speaks for verdicts.)
+  const groupingRequested =
+    listFilter.groupByReview && canGroupByReview && stateFilter === "open";
+  // The LIST's placeholder is the live gate: its rows can still be the previous
+  // filter's while this map is a real answer for the incoming one, and bucketing
+  // those rows against it would misfile the ones outside it as "Not reviewed yet".
+  // The map's own gate is the standing rule's guard — `usePrReviewState` serves no
+  // placeholder, and this keeps the grouping honest if one is ever reintroduced.
+  // …and not on a failed refresh: react-query retains the previous map beside
+  // isError, and grouping from it would contradict the note announcing the
+  // flat-list fallback.
+  const groupingAsked =
+    groupingRequested &&
+    !reviewState.isPlaceholderData &&
+    !prList.isPlaceholderData &&
+    !reviewState.isError;
+  const remoteGroups =
+    groupingAsked && reviewPage && !reviewPage.truncated
+      ? REVIEW_GROUPS.map((group) => {
+          const items = visibleRemote.filter(
+            (pr) => reviewBucket(pr.number, reviewPage.entries) === group.kind,
+          );
+          return {
+            key: group.kind,
+            label: group.label,
+            title: group.title,
+            count: items.length,
+            collapsed: isReviewGroupCollapsed(group.kind),
+            onToggle: () => toggleReviewGroup(group.kind),
+            items,
+          };
+        })
+      : undefined;
+  // Both ways the grouping can fail say so: silently falling back to a flat list
+  // would read as "the toggle did nothing".
+  const groupingNote = (() => {
+    if (!groupingRequested) return undefined;
+    if (reviewState.isError) return UNGROUPED_NOTE.error;
+    if (groupingAsked && reviewPage?.truncated) return UNGROUPED_NOTE.truncated;
+    return undefined;
+  })();
+  // Two independent notes over one channel: SCOPE (which rows these are) before
+  // ARRANGEMENT (how they're ordered), because the first changes what the second
+  // describes. Deliberately not folded into UNGROUPED_NOTE — that Record is about
+  // the review grouping, and this is about the filter that fetched the page.
+  const remoteNote =
+    [
+      listFilter.teamScopeDropped ? TEAM_SCOPE_DROPPED_NOTE : undefined,
+      groupingNote,
+    ]
+      .filter(Boolean)
+      .join(" ") || undefined;
 
   // Arrow keys walk the visible rows, local section first like the list. A
   // collapsed section's body is unmounted, so its rows must leave the registry
-  // too — otherwise an arrow key could select an invisible row.
+  // too — otherwise an arrow key could select an invisible row. Grouped, the
+  // remote rows walk group by group in the order they render.
+  const navRemote = remoteGroups
+    ? remoteGroups.flatMap((group) => (group.collapsed ? [] : group.items))
+    : visibleRemote;
   const navTargets = [
     ...(localCollapsed
       ? []
       : visibleLocal.map((pr) => ({ kind: "local" as const, id: pr.id }))),
     ...(remoteCollapsed
       ? []
-      : visibleRemote.map((pr) => ({
+      : navRemote.map((pr) => ({
           kind: "remote" as const,
           id: String(pr.number),
         }))),
@@ -262,6 +464,48 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     rowKey: (target) => `${target.kind}:${target.id}`,
   });
 
+  // Held filter rows say which of the two reasons holds them: the provider can't
+  // express the axis, or this repo isn't connected yet. Never both, never a
+  // provider claim while `implemented` is still unknown.
+  const mineReason = (() => {
+    if (canFilterMine) return null;
+    if (implemented && !implemented.listFilterMine)
+      return `${providerName} pull requests have no assignees or review requests to filter by`;
+    return `Connect this repository to ${providerName} to filter by assignee or reviewer`;
+  })();
+  const teamsReason = (() => {
+    if (canFilterTeam) return null;
+    if (implemented && !implemented.listFilterTeam)
+      return `${providerName} has no team review requests`;
+    // Falls through to the group's reason (not connected) rather than repeating it.
+    return null;
+  })();
+  const reviewReason = (() => {
+    if (canGroupByReview) return null;
+    if (implemented && !implemented.reviewGrouping)
+      return `${providerName} doesn't report your last review on this list`;
+    return `Connect this repository to ${providerName} to group by your review`;
+  })();
+  const teamsNote = (() => {
+    if (listFilter.teamsError) return "Couldn't load your teams.";
+    if (listFilter.missingTeamScope)
+      return "Your GitHub token lacks read:org — run gh auth refresh -s read:org";
+    return null;
+  })();
+  // Same two-reason shape as mineReason above, and the order matters: the provider
+  // claim is only made where `implemented` actually refutes the axis, so a forge
+  // status that hasn't loaded — or one whose provider DOES support authors but
+  // isn't connected yet — falls to the connect line instead. Left null, the rows
+  // would stay live while the axis was dropped from the query, and a pick would
+  // silently empty the local section under a zero badge.
+  const authorReason = (() => {
+    if (canFilterAuthor) return null;
+    if (implemented && !implemented.listFilterAuthor)
+      return `${providerName} can't filter pull requests by author here`;
+    return `Connect this repository to ${providerName} to filter by author`;
+  })();
+  const axisCap = isGitLab ? gitlabAxisCap(providerName) : undefined;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <SessionExpiryNotice repoPath={repoPath} />
@@ -271,6 +515,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         remoteLabel={remoteLabel}
         stateFilter={stateFilter}
         onStateFilter={onStateFilter}
+        presetControl={
+          <ConversationPresetSwitcher
+            feature="pulls"
+            preset={listFilter.preset}
+            onPreset={listFilter.setPreset}
+            canFilterMine={canFilterMine}
+            canGroupByReview={canGroupByReview}
+          />
+        }
         lensControl={<RepoLensSwitcher repoPath={repoPath} />}
         newMenu={{
           ghLabel: isGitLab
@@ -286,12 +539,57 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           <ConversationFilterPopover
             authors={authors}
             labels={labels}
-            authorFilter={authorFilter}
-            labelFilter={labelFilter}
-            toggle={toggle}
-            activeFilterCount={activeFilterCount}
+            authorFilter={listFilter.authorFilter}
+            labelFilter={listFilter.labelFilter}
+            toggle={listFilter.toggleValue}
+            activeFilterCount={listFilter.activeFilterCount}
             authorCount={authorCount}
             labelCount={labelCount}
+            authorReason={authorReason}
+            axisCap={axisCap}
+            mine={{
+              label: "Mine",
+              disabledReason: mineReason,
+              rows: [
+                {
+                  key: "assigned",
+                  label: "Assigned to me",
+                  checked: listFilter.assignedToMe,
+                  onToggle: listFilter.setAssignedToMe,
+                },
+                {
+                  key: "review-requested",
+                  label: "Review requested: me",
+                  checked: listFilter.reviewRequestedMe,
+                  onToggle: listFilter.setReviewRequestedMe,
+                },
+              ],
+              teams: {
+                chosen: listFilter.chosenTeams,
+                options: listFilter.teamOptions,
+                pending: listFilter.teamsPending,
+                name: listFilter.teamName,
+                isStale: listFilter.isStaleTeam,
+                onToggle: listFilter.toggleTeam,
+                disabledReason: teamsReason,
+                note: teamsNote,
+                noteTitle: listFilter.missingTeamScope
+                  ? "gh auth refresh -s read:org"
+                  : undefined,
+              },
+            }}
+            review={{
+              label: "My review",
+              disabledReason: reviewReason,
+              rows: [
+                {
+                  key: "group-by-review",
+                  label: "Group by my review",
+                  checked: listFilter.groupByReview,
+                  onToggle: listFilter.setGroupByReview,
+                },
+              ],
+            }}
           />
         }
         filterRef={filterRef}
@@ -356,6 +654,16 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         remoteErrorSlot={
           <div className="space-y-2 px-3 py-4 text-xs text-muted-foreground">
             <p>Couldn't load {remoteNoun}.</p>
+            {/* The filter refusals this panel can provoke — a fan-out too wide for
+                the provider, a rejected author/label/team term, an advanced search
+                the host doesn't offer — are PERMANENT, and each already carries the
+                sentence that says how to get out of it. Retry stays for the
+                transient half, which can't tell itself apart from here. */}
+            {prList.error != null && (
+              <p className="text-[11px]">
+                {presentError(prList.error).summary}
+              </p>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -374,6 +682,8 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}
         stateRemote={stateRemote}
         visibleRemote={visibleRemote}
+        remoteGroups={remoteGroups}
+        remoteNote={remoteNote}
         remoteKey={(pr) => String(pr.number)}
         isRemoteActive={(pr) =>
           selectedPr?.kind === "remote" && selectedPr.id === String(pr.number)

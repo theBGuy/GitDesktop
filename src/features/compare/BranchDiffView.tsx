@@ -1,13 +1,18 @@
 import { useDeferredValue, useState } from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
+import { PathText } from "@/components/path-text";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { clipTitleFromText } from "@/lib/clip-title";
-import { useBranchDiffFiles, useBranchFileDiff } from "@/lib/git/queries";
+import {
+  useBranchDiffFiles,
+  useBranchFileDiff,
+  useMergeBase,
+} from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 
@@ -57,6 +62,15 @@ export function BranchDiffView({
     deferredPath,
     diffEnabled,
   );
+  // The diff is three-dot, so its old side is the fork point, not `base`'s tip.
+  // The merge base's own placeholder flag proves the fork point belongs to this
+  // (base, compare); the converse — a stale DIFF paired with fresh revs — is
+  // DiffContent's refusal via `dataIsPlaceholder`.
+  const mergeBase = useMergeBase(repoPath, base, compare);
+  const sideOldRev =
+    mergeBase.data !== undefined && !mergeBase.isPlaceholderData
+      ? mergeBase.data
+      : null;
 
   // A placeholder list is the PREVIOUS comparison's, so an empty one says nothing
   // about this pair — hold the skeleton rather than claim "no changes" below.
@@ -151,11 +165,8 @@ export function BranchDiffView({
                       : "hover:bg-muted/60",
                   )}
                   onClick={() => setSelectedPath(file.path)}
-                  title={file.path}
                 >
-                  <span className="min-w-0 flex-1 truncate font-mono">
-                    {file.path}
-                  </span>
+                  <PathText path={file.path} className="flex-1 font-mono" />
                   <DiffStat
                     added={file.added}
                     deleted={file.deleted}
@@ -175,7 +186,12 @@ export function BranchDiffView({
               filePath={deferredPath}
               diff={diff}
               repoPath={repoPath}
-              imageRevs={{ old: base, new: compare }}
+              imageRevs={
+                sideOldRev ? { old: sideOldRev, new: compare } : undefined
+              }
+              contentRevs={
+                sideOldRev ? { oldRev: sideOldRev, newRev: compare } : undefined
+              }
             />
           ) : (
             <DiffPlaceholder message="Select a file to see its changes" />
