@@ -357,6 +357,25 @@ export async function loadAutomations(): Promise<AutomationsConfigV2> {
 }
 
 /**
+ * {@link loadAutomations}, re-reading disk first — for the callers that must not
+ * decide on this process's snapshot, since a mode another instance disabled stays
+ * invisible to the memoized store until something reloads it. Same idea as
+ * `listReviews`' `{ fresh: true }`: cheap enough for a user-initiated gate, too
+ * expensive for a poll tick.
+ *
+ * A separate export rather than an option on {@link loadAutomations}: that one is
+ * handed to react-query as a BARE `queryFn` reference (`automations/queries.ts`),
+ * which would pass its own context object into any leading parameter.
+ */
+export async function loadAutomationsFresh(): Promise<AutomationsConfigV2> {
+  const store = await getStore();
+  // Inside the serialized queue so the reload can't land between a concurrent
+  // mutation's set and its flush.
+  await serialize(() => reloadRaw(store));
+  return loadAutomations();
+}
+
+/**
  * Persists the GLOBAL lifecycle defaults from `config`. Only `config.lifecycles` is
  * written; per-repo overrides are re-derived from fresh disk state inside the
  * serialized queue rather than taken from the caller's (possibly stale) snapshot, so

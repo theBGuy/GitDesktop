@@ -36,7 +36,7 @@ import { sectionFilePath } from "@/lib/git/diff-split";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { DiffStatEntry } from "@/lib/git/types";
 import { notifyIfUnfocused } from "@/lib/notify";
-import { listLocalPrs, updateLocalPr } from "@/lib/pulls/local";
+import { listLocalPrs, reloadLocalPrs, updateLocalPr } from "@/lib/pulls/local";
 import {
   listReviews,
   type PersistedReview,
@@ -71,7 +71,11 @@ import {
   updateAutomationActivity,
 } from "./history";
 import { type AutomationRunResult, useAutomationResults } from "./results";
-import { loadAutomations, repoAutomationsFor } from "./store";
+import {
+  loadAutomations,
+  loadAutomationsFresh,
+  repoAutomationsFor,
+} from "./store";
 import { sameSha } from "./sync";
 import {
   ACTION_LABELS,
@@ -290,6 +294,12 @@ interface RunOptions {
   /** Run-now: run every PR-lifecycle action regardless of the skip gates (the
    *  claim still applies). See {@link runAutomationNow}. */
   force?: boolean;
+  /** Force mode only: the modes the user was shown and agreed to spend on. The
+   *  confirm's whole job is naming the spend, so execution is pinned to what it
+   *  named, INTERSECTED with what is still enabled at run time — a mode enabled
+   *  while the confirm sat open never runs, and one disabled since simply doesn't
+   *  match (the `matched === 0` toast already covers that). Absent = no pin. */
+  modes?: ReviewMode[];
   /** What set this pass in motion; defaults to the event's own lifecycle. */
   trigger?: AutomationTrigger;
 }
@@ -297,16 +307,22 @@ interface RunOptions {
 /** The PR-lifecycle actions a forced (Run-now) pass runs: the SET-union over both
  *  PR lifecycles, deduped by action, so one click runs each mode exactly once
  *  whichever lifecycle enabled it. Branch conditions ride along but are never
- *  evaluated in force mode — the user named this PR explicitly. */
+ *  evaluated in force mode — the user named this PR explicitly. `confirmed` pins
+ *  the result to the modes a confirm named (see {@link RunOptions.modes}); without
+ *  it the whole currently-enabled union runs. */
 function forcedActions(
   config: AutomationsConfigV2,
   repo: RepoOverride | undefined,
+  confirmed?: ReviewMode[],
 ): ReturnType<typeof effectiveActions> {
+  const allowed = confirmed ? new Set<ActionId>(confirmed) : null;
   const seen = new Set<ActionId>();
   const union: ReturnType<typeof effectiveActions> = [];
   for (const lifecycle of ["pr-open", "pr-sync"] as const) {
     for (const entry of effectiveActions(config, repo, lifecycle)) {
       if (seen.has(entry.action)) continue;
+      // Intersection, not replacement: still-enabled AND named by the confirm.
+      if (allowed && !allowed.has(entry.action)) continue;
       seen.add(entry.action);
       union.push(entry);
     }
@@ -325,7 +341,13 @@ async function run(
   event: AutomationEvent,
   opts: RunOptions = {},
 ): Promise<RunOutcome> {
-  const { only, replacesKey, force = false, trigger = event.kind } = opts;
+  const {
+    only,
+    replacesKey,
+    force = false,
+    modes,
+    trigger = event.kind,
+  } = opts;
   // Cold-start instances share the automation-claims dir with the real instance, so an
   // armed cold instance can win a claim meant for the real run and suppress it. First
   // gate of all, so a gated tick reads no store at all and takes no claim — including
@@ -337,7 +359,12 @@ async function run(
   // resume when AI is shown again. The paused/resumed markers cover this stretch.
   const settings = await loadSettings();
   if (settings.hideAi) return { matched: 0, attempted: 0, outcomes: [] };
-  const config = await loadAutomations();
+  // Force passes read through to disk: they are rare, user-initiated, and about to
+  // spend money against a mode set a confirm named, so a mode another instance
+  // disabled meanwhile must not execute. Lifecycle passes keep the cached read —
+  // poll-tick frequency, and cross-instance staleness there is the accepted
+  // sibling-store class.
+  const config = force ? await loadAutomationsFresh() : await loadAutomations();
   const repo = await repoAutomationsFor(config, event.repoPath);
   // Whether this REPO has any automation at all, across every lifecycle — records
   // happen only when it does, so a repo the user never configured accrues zero rows
@@ -347,8 +374,9 @@ async function run(
   const recordingEnabled = lifecycles.some(
     (lc) => effectiveActions(config, repo, lc).length > 0,
   );
+  // `modes` is force-only: a lifecycle pass runs whatever its own lifecycle enables.
   const actions = force
-    ? forcedActions(config, repo)
+    ? forcedActions(config, repo, modes)
     : effectiveActions(config, repo, event.kind);
   // No enabled action for THIS lifecycle: records nothing by design — the dialog
   // derives the config header from the live config, not from a row per tick.
@@ -447,6 +475,29 @@ async function run(
     }
     return gateSnapshot;
   };
+  /**
+   * The gate snapshot, or null when its stores couldn't be read — a failure records an
+   * `eligibility-error` for this action and the caller skips it. Fail-closed like
+   * `prOpenEligible`, but with EVIDENCE: an unguarded rejection escapes run(),
+   * `triggerAutomations` swallows it, and `maybeFireSync` has already latched this head
+   * for the session — so an enabled re-review dies leaving nothing behind, the exact
+   * class this history exists to end.
+   */
+  const gateStateOrRecord = async (
+    prEvent: PrAutomationEvent,
+    forAction: ActionId,
+  ) => {
+    try {
+      return await gateState(prEvent);
+    } catch (e) {
+      skips.push({
+        action: forAction,
+        code: "eligibility-error",
+        detail: errorMessage(e),
+      });
+      return null;
+    }
+  };
   for (const { action, conditions } of actions) {
     if (only && action !== only) continue;
     // Force mode never evaluates conditions: the user named this PR explicitly, so
@@ -472,7 +523,9 @@ async function run(
     // so the gating is unchanged): each skip is a different thing to tell the user.
     if (!force && event.kind === "pr-sync") {
       const headSha = event.headSha ?? "";
-      const { reviews, dismissed } = await gateState(event);
+      const gate = await gateStateOrRecord(event, action);
+      if (!gate) continue;
+      const { reviews, dismissed } = gate;
       const covered = reviews.filter((r) => r.mode === action);
       // A CANCELLED re-review persists the dismissed head, so a cancelled head doesn't
       // re-fire after an app relaunch — only a genuinely newer head does.
@@ -498,7 +551,9 @@ async function run(
     // a head this mode already dismissed. Mirror of the pr-sync gate, inverted — pr-sync
     // requires a prior review, pr-open requires its absence.
     if (!force && event.kind === "pr-open") {
-      const { reviews, dismissed } = await gateState(event);
+      const gate = await gateStateOrRecord(event, action);
+      if (!gate) continue;
+      const { reviews, dismissed } = gate;
       // The list is newest-first, so this mode's first entry IS its latest review — the
       // same record `getLatestReview` would return.
       const prior = reviews.find((r) => r.mode === action);
@@ -533,17 +588,20 @@ async function run(
     // windows clicking Run-now on the same delivered head inside one run window can
     // both claim and both post.
     if (force && event.kind !== "commit" && headSha) {
-      const { reviews } = await gateState(event);
-      const alreadyCovered = reviews.some(
+      // A failed read leaves this action un-run with a recorded reason, rather than
+      // claiming a head whose coverage we couldn't check.
+      const gate = await gateStateOrRecord(event, action);
+      if (!gate) continue;
+      const alreadyCovered = gate.reviews.some(
         (r) => r.mode === action && sameSha(r.headSha, headSha),
       );
       if (
         alreadyCovered &&
-        !hasLiveAutomationRun(
+        !(await hasLiveAutomationRun(
           event.repoPath,
           event.target.type,
           targetRef(event),
-        )
+        ))
       ) {
         const repoKey = await repoIdentity(event.repoPath);
         await invoke("release_automation_claim", {
@@ -609,7 +667,7 @@ async function run(
     attempted++;
     // Record BEFORE the paid work: the longest operation must not be the one with zero
     // trace. A process killed mid-stream leaves this "started" row behind, which the
-    // dialog reads as interrupted (against SESSION_START_MS) rather than in flight.
+    // dialog renders as unsettled (its liveness check finds no matching live run).
     await recordProgress({ action, code: "started" });
     // Per-rule cancellation: HTTP providers stop via the AbortSignal, CLI providers by
     // killing the subprocess (`cancelAgentReview` once its id is known); both are driven
@@ -635,8 +693,9 @@ async function run(
       abort: controller,
       // Re-fires THIS event + mode (closes over this iteration's action) when the
       // run's stopped row's Re-run is clicked, passing its own row key so the
-      // fresh run removes THIS row when it registers.
-      rerun: () => rerunAutomation(event, action, selfKey),
+      // fresh row removes THIS row when it registers. `force` rides along so the
+      // retry of an explicitly-started run keeps the semantics the user chose.
+      rerun: () => rerunAutomation(event, action, selfKey, { force }),
     });
     selfKey = handle.key;
     // The replacement has registered — now remove the stopped row it replaces. Done here
@@ -880,7 +939,8 @@ async function run(
           // no-ops on a gone key).
           action: {
             label: "Re-run",
-            run: () => rerunAutomation(event, mode, selfKey),
+            // Same semantics as the dock row's Re-run — both re-fire the same pass.
+            run: () => rerunAutomation(event, mode, selfKey, { force }),
           },
           dedupeKey: `automation-failed:${event.repoPath}:${event.kind}:${
             event.kind === "commit" ? event.hash : targetRef(event)
@@ -944,12 +1004,20 @@ async function run(
  * than leave a dead button. While AI features are hidden — or in a cold-start instance
  * that never opted automations in — it stops before the clear: a paused re-run must not
  * consume the watermark.
+ *
+ * `opts.force` carries the ORIGINATING pass's mode through: retrying a stopped Run-now
+ * must skip the same gates the Run-now did, or the retry of a run the user started by
+ * hand gets rejected by a first-review/covered-head/branch rule it was never subject to
+ * (and on a pr-open-only repo, by the synthesized event's lifecycle having no rules at
+ * all). Absent = a lifecycle run's Re-run, unchanged.
  */
 export function rerunAutomation(
   event: AutomationEvent,
   only: ReviewMode,
   staleKey: string,
+  opts?: { force?: boolean },
 ): void {
+  const force = opts?.force ?? false;
   const label = modeLabel(only);
   const noun = event.kind === "commit" ? "commit" : "pull request";
   void (async () => {
@@ -967,7 +1035,9 @@ export function rerunAutomation(
       }
       // Best-effort ONLY here: a cleared-dismissal failure must not block the
       // re-run (it just means the pr-sync gate might skip; we then toast retryable).
-      if (event.kind !== "commit") {
+      // Skipped under force, which consults no watermark — clearing one would spend
+      // a record the next LIFECYCLE run still needs.
+      if (event.kind !== "commit" && !force) {
         await clearDismissedHead(
           event.repoPath,
           "origin",
@@ -981,7 +1051,8 @@ export function rerunAutomation(
       const { matched, attempted } = await run(event, {
         only,
         replacesKey: staleKey,
-        trigger: "re-run",
+        force,
+        trigger: force ? "run-now" : "re-run",
       });
       if (matched === 0) {
         // The rule genuinely no longer applies (disabled / conditions changed).
@@ -1007,6 +1078,11 @@ export function rerunAutomation(
  * click to the run's `finally`. The cross-instance claim doesn't exist yet during the
  * multi-second window this spends resolving the PR and waiting on a confirm, so
  * without this latch palette spam would start two runs on the same PR.
+ *
+ * Keyed on the RAW checkout path, unlike the identity-aware live-run check: resolving
+ * an identity here would mean awaiting before the latch is set, opening the TOCTOU
+ * window the latch exists to close. Residual: a double-invoke from two checkouts of
+ * one repo inside the pre-claim window rides the cross-instance claim dedup instead.
  */
 const runNowStarting = new Set<string>();
 
@@ -1020,6 +1096,17 @@ const CLOSED_PR_COPY =
 
 const UNRESOLVED_HEAD_COPY =
   "Couldn't resolve the pull request's current head — try refreshing.";
+
+/** A Run-now target's state at one moment: everything the synthesized event needs.
+ *  Every field is a point-in-time read, which is why it gets resolved twice. */
+interface ResolvedRunTarget {
+  base: string;
+  head: string;
+  title: string;
+  body: string;
+  commitSubjects: string[];
+  headSha: string;
+}
 
 /**
  * Runs this repo's PR automations against one pull request right now — the explicit
@@ -1060,66 +1147,82 @@ export function runAutomationNow(
         toast.info(NO_PR_AUTOMATION_COPY);
         return;
       }
-      if (hasLiveAutomationRun(repoPath, target.kind, ref)) {
+      if (await hasLiveAutomationRun(repoPath, target.kind, ref)) {
         toast.info(
           "An AI review of this pull request is already running — watch it in Activity.",
         );
         return;
       }
 
-      let base: string;
-      let head: string;
-      let title: string;
-      let body: string;
-      let commitSubjects: string[];
-      let headSha: string;
-      if (target.kind === "remote") {
-        // Origin-pinned like every other store/forge touch on this path.
-        const pr = await forgePrView(repoPath, target.number, "origin");
-        if (pr.state !== "OPEN") {
-          toast.info(CLOSED_PR_COPY);
-          return;
+      /** This target's state right now, or null when it can't run — the refusal
+       *  toast is already shown by the time null comes back. */
+      const resolveTarget = async (): Promise<ResolvedRunTarget | null> => {
+        let resolved: ResolvedRunTarget;
+        if (target.kind === "remote") {
+          // Origin-pinned like every other store/forge touch on this path.
+          const pr = await forgePrView(repoPath, target.number, "origin");
+          if (pr.state !== "OPEN") {
+            toast.info(CLOSED_PR_COPY);
+            return null;
+          }
+          resolved = {
+            base: pr.baseRefName,
+            head: pr.headRefName,
+            title: pr.title,
+            body: pr.body,
+            commitSubjects: pr.commits.map((c) => c.headline),
+            // The neutral commit list is oldest-first on every provider — GitLab and
+            // Bitbucket reverse their newest-first payloads to match GitHub's — so the
+            // PR head is the LAST entry (same read as RemotePrView's merge/review paths).
+            headSha: pr.commits.at(-1)?.oid ?? "",
+          };
+        } else {
+          // `listLocalPrs` reads the memoized store instance, so without this the
+          // re-read below would answer from this process's snapshot and miss a
+          // close/delete/retarget made by another instance or the MCP server. The
+          // remote arm gets this for free — it is a network read.
+          await reloadLocalPrs();
+          const prs = await listLocalPrs(repoPath);
+          const pr = prs.find((p) => p.id === target.id);
+          // Deleted since the menu opened — a head to resolve was never the problem,
+          // so "try refreshing" would send the user looking for the wrong thing.
+          if (!pr) {
+            toast.error("This pull request no longer exists.");
+            return null;
+          }
+          if (pr.status !== "open") {
+            toast.info(CLOSED_PR_COPY);
+            return null;
+          }
+          const tips = await gitBranchTips(repoPath, [pr.head]);
+          resolved = {
+            base: pr.base,
+            head: pr.head,
+            title: pr.title,
+            body: pr.body,
+            // Local PRs carry no commit list; the branch diff is the source of truth.
+            commitSubjects: [],
+            headSha: tips[pr.head] ?? "",
+          };
         }
-        base = pr.baseRefName;
-        head = pr.headRefName;
-        title = pr.title;
-        body = pr.body;
-        commitSubjects = pr.commits.map((c) => c.headline);
-        // The neutral commit list is oldest-first on every provider — GitLab and
-        // Bitbucket reverse their newest-first payloads to match GitHub's — so the
-        // PR head is the LAST entry (same read as RemotePrView's merge/review paths).
-        headSha = pr.commits.at(-1)?.oid ?? "";
-      } else {
-        const prs = await listLocalPrs(repoPath);
-        const pr = prs.find((p) => p.id === target.id);
-        // Deleted since the menu opened — a head to resolve was never the problem,
-        // so "try refreshing" would send the user looking for the wrong thing.
-        if (!pr) {
-          toast.error("This pull request no longer exists.");
-          return;
+        // The claim keys on the head: running without one forfeits cross-instance
+        // dedup, so refuse rather than risk a duplicate paid review.
+        if (!resolved.headSha) {
+          toast.error(UNRESOLVED_HEAD_COPY);
+          return null;
         }
-        if (pr.status !== "open") {
-          toast.info(CLOSED_PR_COPY);
-          return;
-        }
-        base = pr.base;
-        head = pr.head;
-        title = pr.title;
-        body = pr.body;
-        // Local PRs carry no commit list; the branch diff is the source of truth.
-        commitSubjects = [];
-        const tips = await gitBranchTips(repoPath, [pr.head]);
-        headSha = tips[pr.head] ?? "";
-      }
-      // The claim keys on the head: running without one forfeits cross-instance
-      // dedup, so refuse rather than risk a duplicate paid review.
-      if (!headSha) {
-        toast.error(UNRESOLVED_HEAD_COPY);
-        return;
-      }
+        return resolved;
+      };
+
+      // Read once to name the PR in the confirm — and to refuse a closed or
+      // unresolvable PR before spending a prompt on it.
+      const preview = await resolveTarget();
+      if (!preview) return;
 
       const reference =
-        target.kind === "remote" ? `#${target.number} · ${title}` : title;
+        target.kind === "remote"
+          ? `#${target.number} · ${preview.title}`
+          : preview.title;
       const modeList = modes.map((m) => ACTION_LABELS[m]).join(" and ");
       const ok = await useConfirm.getState().ask({
         title: "Run automations on this pull request?",
@@ -1128,25 +1231,38 @@ export function runAutomationNow(
       });
       if (!ok) return;
 
+      // The confirm has no deadline, so everything read above is stale by
+      // construction. A push while it sat open would have run() claim and persist
+      // the OLD head while `resolveDiff` fetches the provider's CURRENT diff — the
+      // review would cover content that no record then marks as covered, leaving the
+      // reviewed head eligible for a duplicate paid re-review. A close would slip
+      // past the open-state check entirely. Re-read; the SECOND read is what runs.
+      // Both arms read through to their source, so the only remaining window is the
+      // milliseconds between here and the claim inside run().
+      const current = await resolveTarget();
+      if (!current) return;
+
       const { matched, attempted } = await run(
         {
           kind: "pr-sync",
           repoPath,
-          base,
-          head,
-          headSha,
-          title,
-          body,
-          commitSubjects,
+          base: current.base,
+          head: current.head,
+          headSha: current.headSha,
+          title: current.title,
+          body: current.body,
+          commitSubjects: current.commitSubjects,
           target:
             target.kind === "remote"
               ? { type: "remote", number: target.number }
               : { type: "local", id: target.id },
         },
-        { force: true, trigger: "run-now" },
+        // `modes` is the exact set the confirm named, so a mode enabled in another
+        // window while the prompt sat open can't ride along on the user's yes.
+        { force: true, modes, trigger: "run-now" },
       );
       if (matched === 0) {
-        // The config changed between the confirm and the run.
+        // Every confirmed mode was disabled between the confirm and the run.
         toast.info(NO_PR_AUTOMATION_COPY);
       } else if (attempted === 0) {
         // The claim is identity-keyed, so this may be another worktree of this repo

@@ -6,7 +6,7 @@ import {
 } from "@/lib/git/repo-identity";
 import { queryClient } from "@/lib/query-client";
 import { storeName } from "@/lib/test-mode";
-import type { ActionId } from "./types";
+import { type ActionId, ALL_ACTION_IDS } from "./types";
 
 /**
  * Every decision the automation pipeline can record. Deliberately absent:
@@ -76,13 +76,24 @@ export interface AutomationOutcome {
  * rows it is the BRANCH name (the branch is the steady axis of a commit scoping
  * decision, and the specific commit rides `headSha`); "" for the global markers.
  */
+/** What a row describes. The value list and the type derive from one another, so the
+ *  guard's membership check below can't drift from the union it validates. */
+export const AUTOMATION_TARGET_KINDS = [
+  "remote",
+  "local",
+  "commit",
+  "none",
+] as const;
+
+export type AutomationTargetKind = (typeof AUTOMATION_TARGET_KINDS)[number];
+
 export interface AutomationHistoryEntry {
   schemaVersion: 1;
   id: string;
   /** ISO-8601. */
   ts: string;
   trigger: AutomationTrigger;
-  targetKind: "remote" | "local" | "commit" | "none";
+  targetKind: AutomationTargetKind;
   ref: string;
   title: string;
   headSha: string;
@@ -90,10 +101,6 @@ export interface AutomationHistoryEntry {
   count?: number;
   outcomes: AutomationOutcome[];
 }
-
-/** Module-load stamp: a "started" outcome older than this belongs to a process
- *  that is gone, so the UI renders it as interrupted rather than in flight. */
-export const SESSION_START_MS = Date.now();
 
 /** Query key for one repo's history list. */
 export function automationHistoryKey(repoPath: string) {
@@ -149,39 +156,82 @@ async function reloadRaw(): Promise<void> {
   }
 }
 
+// Sets, not object lookups: `Set.has("__proto__")` is false, where a plain-object
+// lookup would answer with `Object.prototype` for the same key.
 const KNOWN_CODES = new Set<string>(AUTOMATION_OUTCOME_CODES);
+const KNOWN_TARGET_KINDS = new Set<string>(AUTOMATION_TARGET_KINDS);
+const KNOWN_ACTIONS = new Set<string>(ALL_ACTION_IDS);
 
-/** Shape-guard one record out of untrusted store JSON: a hand-edited (or newer)
- *  `automation-history.json` reaches the dialog verbatim, so a malformed record is
- *  dropped rather than blanking the list or throwing mid-render. `code` is checked
- *  against the known set because the UI looks its label up in a Record — an
- *  unrecognized code would render as a blank row. `schemaVersion` is write-only;
- *  `count` and `detail` are typeof-guarded at their render sites. */
-function isStoredEntry(x: unknown): x is AutomationHistoryEntry {
-  if (typeof x !== "object" || x === null) return false;
+/**
+ * Normalize one record out of untrusted store JSON, or drop it — a hand-edited (or
+ * newer) `automation-history.json` reaches the dialog verbatim, and every consumer
+ * reads what this returns, so this is the one place the file's contents are made
+ * safe. Returns a REBUILT entry: a value that survives here can be rendered, and a
+ * later rewrite of the file persists the normalized form rather than the junk.
+ *
+ * Membership-validated here, because each one is used as a Record KEY at a render
+ * site and a prototype-shaped string would otherwise resolve to `Object.prototype`
+ * (a truthy non-function, which throws when rendered or called):
+ *   - `targetKind` — junk drops the ENTRY; there is no honest way to render a row
+ *     whose target is unreadable.
+ *   - each outcome's `code` — junk drops the ENTRY; the code IS the decision.
+ *   - each outcome's `action` — junk COERCES to null, which already means "decided
+ *     before any action was considered" and renders as the neutral label. Dropping
+ *     the row would discard a decision we can still report truthfully.
+ * Left to consumers: `trigger` (any string; the dialog falls back to a default
+ * glyph, so dropping the row would lose evidence over a cosmetic lookup) and the
+ * optional `count` / `detail`, which are carried only when they hold the right
+ * primitive. `schemaVersion` is write-only, so it is stamped rather than read.
+ */
+function sanitizeStoredEntry(x: unknown): AutomationHistoryEntry | null {
+  if (typeof x !== "object" || x === null) return null;
   const r = x as Record<string, unknown>;
-  return (
-    typeof r.id === "string" &&
-    typeof r.ts === "string" &&
-    typeof r.trigger === "string" &&
-    typeof r.targetKind === "string" &&
-    typeof r.ref === "string" &&
-    typeof r.title === "string" &&
-    typeof r.headSha === "string" &&
-    Array.isArray(r.outcomes) &&
-    r.outcomes.every(
-      (o) =>
-        typeof o === "object" &&
-        o !== null &&
-        KNOWN_CODES.has((o as { code?: unknown }).code as string),
-    )
-  );
+  if (
+    typeof r.id !== "string" ||
+    typeof r.ts !== "string" ||
+    typeof r.trigger !== "string" ||
+    typeof r.ref !== "string" ||
+    typeof r.title !== "string" ||
+    typeof r.headSha !== "string" ||
+    typeof r.targetKind !== "string" ||
+    !KNOWN_TARGET_KINDS.has(r.targetKind) ||
+    !Array.isArray(r.outcomes)
+  ) {
+    return null;
+  }
+  const outcomes: AutomationOutcome[] = [];
+  for (const o of r.outcomes) {
+    if (typeof o !== "object" || o === null) return null;
+    const raw = o as Record<string, unknown>;
+    if (typeof raw.code !== "string" || !KNOWN_CODES.has(raw.code)) return null;
+    outcomes.push({
+      action:
+        typeof raw.action === "string" && KNOWN_ACTIONS.has(raw.action)
+          ? (raw.action as ActionId)
+          : null,
+      code: raw.code as AutomationOutcomeCode,
+      ...(typeof raw.detail === "string" ? { detail: raw.detail } : {}),
+    });
+  }
+  return {
+    schemaVersion: 1,
+    id: r.id,
+    ts: r.ts,
+    trigger: r.trigger as AutomationTrigger,
+    targetKind: r.targetKind as AutomationTargetKind,
+    ref: r.ref,
+    title: r.title,
+    headSha: r.headSha,
+    ...(typeof r.count === "number" ? { count: r.count } : {}),
+    outcomes,
+  };
 }
 
 async function readByKey(key: string): Promise<AutomationHistoryEntry[]> {
   const store = await getStore();
   const raw = await store.get<unknown>(key);
-  return Array.isArray(raw) ? raw.filter(isStoredEntry) : [];
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => sanitizeStoredEntry(item) ?? []);
 }
 
 /** Reads a repo's records, merging in any still under a legacy checkout-path key
@@ -255,9 +305,14 @@ function prune(records: AutomationHistoryEntry[]): AutomationHistoryEntry[] {
   return ordered.filter((e) => keep.has(e));
 }
 
-function invalidateRepo(repoPath: string): void {
+/** Invalidate the whole history-query family, not one path's key: two checkouts
+ *  of one repo read the SAME identity-keyed records under DIFFERENT path-keyed
+ *  queries, so a path-scoped invalidation would leave a sibling checkout's open
+ *  dialog holding a stale "started" row after the run settled. Writes are rare
+ *  (steady ticks dedup to zero I/O), so the wider blast radius costs nothing. */
+function invalidateHistoryQueries(): void {
   void queryClient
-    .invalidateQueries({ queryKey: automationHistoryKey(repoPath) })
+    .invalidateQueries({ queryKey: ["automation-history"] })
     .catch(() => undefined);
 }
 
@@ -345,7 +400,7 @@ async function appendEntry(repoPath: string, entry: NewEntry): Promise<string> {
   const store = await getStore();
   const key = await keyFor(repoPath);
   const id = await appendUnder(store, key, await readByKey(key), entry);
-  invalidateRepo(repoPath);
+  invalidateHistoryQueries();
   return id;
 }
 
@@ -365,6 +420,12 @@ async function coalesceSteady(
     (e) =>
       e.targetKind === entry.targetKind &&
       e.ref === entry.ref &&
+      // User-initiated rows always APPEND (branch 1), so they are also never
+      // coalesce TARGETS: an automatic tick bumping a re-run's row would
+      // overwrite the retry's evidence and attribute later automatic skips
+      // to the user's click.
+      e.trigger !== "run-now" &&
+      e.trigger !== "re-run" &&
       allSteady(e.outcomes),
   );
   let id: string;
@@ -399,7 +460,7 @@ async function coalesceSteady(
     id = await appendUnder(store, key, all, entry);
   }
   steadySignatures.set(sigKey, sig);
-  invalidateRepo(repoPath);
+  invalidateHistoryQueries();
   return id;
 }
 
@@ -459,7 +520,7 @@ export async function updateAutomationActivity(
       };
       await store.set(key, prune([updated, ...all.filter((e) => e.id !== id)]));
       await store.save();
-      invalidateRepo(repoPath);
+      invalidateHistoryQueries();
     });
   } catch {
     // best-effort — a history failure must never surface to the run

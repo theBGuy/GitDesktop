@@ -84,6 +84,7 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink } from "@/lib/jira/queries";
+import { useRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -146,6 +147,12 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const openAutomationHistory = useAutomationHistoryDialog((s) => s.open);
   const automationsConfig = useAutomations().data;
   const repoIdentity = useRepoIdentity(repoPath).data;
+  // Automations are origin-pinned end to end, so Run-now must not exist for a
+  // REMOTE selection under the upstream lens — a fork's two lenses share PR
+  // numbers, and an origin-resolved run against an upstream selection would
+  // review the wrong pull request. Local PRs never touch the forge, so they
+  // stay runnable under either lens.
+  const repoLens = useRepoLens(repoPath);
   // Whether this repo's EFFECTIVE config enables any PR-lifecycle action — the
   // same union Run-now executes, so the palette entry exists exactly when the
   // action could start something.
@@ -483,6 +490,7 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
     aiEnabled &&
       repoTab === "pulls" &&
       selectedPr !== null &&
+      (selectedPr.kind === "local" || repoLens === "origin") &&
       prAutomationConfigured,
   );
   useHotkeyAction("link-jira-project", () => setJiraOpen(true));

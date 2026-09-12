@@ -9,7 +9,7 @@ import {
   PlayIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -35,7 +35,6 @@ import {
   automationHistoryKey,
   listAutomationHistory,
   recordAutomationPauseMarker,
-  SESSION_START_MS,
   STEADY_OUTCOME_CODES,
 } from "@/lib/automations/history";
 import { useAutomations } from "@/lib/automations/queries";
@@ -49,8 +48,11 @@ import {
 } from "@/lib/automations/types";
 import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
 import { useRepoIdentity } from "@/lib/git/queries";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { applyRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
+import { useReviewTasks } from "@/lib/stores/reviews";
 import { useUiStore } from "@/lib/stores/ui";
 import { COLD_START_AUTOMATIONS_OFF } from "@/lib/test-mode";
 import { validEpochMs } from "@/lib/time";
@@ -119,23 +121,34 @@ const UNKNOWN_REASON: ReasonLine = { text: "Unknown", tone: "muted" };
 
 /**
  * Reason copy + tone per outcome code, total over the union so a code added
- * later can't render as silence. `delivered` and `started` read the entry — one
- * varies with where the output went, the other with whether the run belongs to
- * this session or to one the app closed on.
+ * later can't render as silence. `delivered` reads the entry (where the output
+ * went); `started` reads `live` — whether THIS instance holds a running run for
+ * the row's target.
  */
 const OUTCOME_REASON: Record<
   AutomationOutcomeCode,
-  (entry: AutomationHistoryEntry, outcome: Outcome) => ReasonLine
+  (entry: AutomationHistoryEntry, outcome: Outcome, live: boolean) => ReasonLine
 > = {
   delivered: (entry) => ({
     text: DELIVERED_TEXT[entry.targetKind] ?? "Delivered",
     tone: "success",
   }),
-  started: (entry) =>
-    (stampMs(entry.ts) ?? 0) >= SESSION_START_MS
+  // Liveness, never the clock: instances share this store, so a row's age says
+  // nothing about whether its run is still going. "Running" is claimed only
+  // where this instance can show the row it points at; everything else — a
+  // crash mid-run, or a run another instance owns and will still post — is the
+  // same honest statement about the RECORD, which never settled.
+  started: (entry, _outcome, live) =>
+    live
       ? { text: "Running — watch it in Activity", tone: "info" }
       : {
-          text: "Interrupted — the app closed while this was running",
+          // Commit runs register a degenerate live target (no commit kind, empty
+          // ref), so their rows can never match liveness — the honest set for
+          // them includes "still running here".
+          text:
+            entry.targetKind === "commit"
+              ? "Didn't settle — it may still be running, or the app closed mid-run"
+              : "Didn't settle — the app closed mid-run, or another instance owns it",
           tone: "warning",
         },
   "branch-skip": () => ({
@@ -165,7 +178,7 @@ const OUTCOME_REASON: Record<
   // The recorder attaches a detail when it could NOT measure the PR's age, so
   // the 14-day claim is only made where an age was actually read.
   "too-old": (_entry, outcome) => ({
-    text: outcome.detail || "Skipped — opened more than 14 days ago",
+    text: asText(outcome.detail) || "Skipped — opened more than 14 days ago",
     tone: "muted",
   }),
   "empty-diff": () => ({
@@ -182,7 +195,9 @@ const OUTCOME_REASON: Record<
     tone: "warning",
   }),
   failed: (_entry, outcome) => ({
-    text: outcome.detail ? `Failed — ${outcome.detail}` : "Failed",
+    text: asText(outcome.detail)
+      ? `Failed — ${asText(outcome.detail)}`
+      : "Failed",
     tone: "destructive",
   }),
   "timed-out": () => ({
@@ -234,6 +249,35 @@ function actionLabel(action: ActionId | null): string {
   // A row can record a decision that belongs to no single action (a marker, a
   // whole-event skip), and the stored id may be one this build doesn't know.
   return (action && ACTION_LABELS[action]) || "Automations";
+}
+
+/**
+ * Row glyph. Target kind decides first: a pause marker is stored with the
+ * user-initiated trigger, and a Play glyph would claim a run that never was.
+ * The trigger lookup is OWN-property only — a hand-edited `"__proto__"` would
+ * otherwise resolve up the prototype chain to a truthy non-component that `??`
+ * can't catch and JSX throws on. (`action` and `targetKind` are
+ * membership-validated at the store's guard, so their Record lookups stay plain.)
+ */
+function glyphFor(entry: AutomationHistoryEntry): typeof LightningIcon {
+  if (entry.targetKind === "none") return LightningIcon;
+  if (!Object.hasOwn(TRIGGER_GLYPH, entry.trigger)) return LightningIcon;
+  return TRIGGER_GLYPH[entry.trigger] ?? LightningIcon;
+}
+
+/**
+ * One outcome's reason line. Own-property only, for the same reason
+ * {@link glyphFor} is: a hand-edited code resolves up the prototype chain
+ * otherwise — `"__proto__"` to a non-function the optional call throws on,
+ * `"toString"` to a real function that returns a string and renders as blanks.
+ */
+function reasonFor(
+  entry: AutomationHistoryEntry,
+  outcome: Outcome,
+  live: boolean,
+): ReasonLine {
+  if (!Object.hasOwn(OUTCOME_REASON, outcome.code)) return UNKNOWN_REASON;
+  return OUTCOME_REASON[outcome.code]?.(entry, outcome, live) ?? UNKNOWN_REASON;
 }
 
 /** Marker rows carry no target, so their title comes from what was recorded. */
@@ -379,6 +423,8 @@ function AutomationHistoryBody({
   onClose: () => void;
 }) {
   const aiEnabled = useAiEnabled();
+  const queryClient = useQueryClient();
+  const reviewTasks = useReviewTasks();
   const openPr = useUiStore((s) => s.openPr);
   const openSettings = useUiStore((s) => s.openSettings);
   const automations = useAutomations();
@@ -414,6 +460,58 @@ function AutomationHistoryBody({
   const newest = rows[0];
   const newestStamp = newest && stampMs(newest.ts) !== null ? newest.ts : null;
 
+  // Live automation runs in this instance — same discriminator as reviews.ts'
+  // imperative `hasLiveAutomationRun` (phase + the automation-only `rerun`); a
+  // shared reactive hook is a homed backlog follow-up. Filtered BEFORE the
+  // signature so the query key churns only on runs that could match.
+  const liveTasks = reviewTasks.filter(
+    (t) =>
+      (t.phase === "running" || t.phase === "queued") && t.rerun !== undefined,
+  );
+  const liveSignature = liveTasks
+    .map(
+      (t) => `${t.target.repoPath}#${t.target.kind}#${t.target.ref}#${t.mode}`,
+    )
+    .join("|");
+  // Matched by worktree-stable IDENTITY, never raw path: linked worktrees of one
+  // repo share this history, so a run started in a worktree is live for the main
+  // checkout's dialog too. A query because identities resolve over IPC and render
+  // can't await one per task; the signature in the key is what keeps it reactive,
+  // so a run starting or settling re-resolves the set.
+  const liveKeys = useQuery({
+    queryKey: [
+      "automation-live-targets",
+      repoPath,
+      identity ?? repoPath,
+      liveSignature,
+    ],
+    queryFn: async () => {
+      // Both sides go through the same memoized resolver, so the comparison can
+      // never straddle a raw path and an identity.
+      const mine = await repoIdentity(repoPath);
+      const resolved = await Promise.all(
+        liveTasks.map(async (t) => ({
+          key: `${t.target.kind}#${t.target.ref}#${t.mode}`,
+          identity: await repoIdentity(t.target.repoPath),
+        })),
+      );
+      return resolved.filter((r) => r.identity === mine).map((r) => r.key);
+    },
+    enabled: open,
+  }).data;
+  // Set built here, not returned from the query: structural sharing only
+  // recurses plain objects and arrays.
+  const liveTargets = new Set(liveKeys ?? []);
+  // Per OUTCOME, not per row: the outcome's action IS the run's mode, so an
+  // interrupted row can't light up because a NEW run for the same pull request
+  // is live. A null action (records are untrusted) matches nothing. Accepted
+  // residual: the live task carries no headSha, so two same-mode runs on one PR
+  // stay indistinguishable — head-granular matching needs the spine to register
+  // the head, and that follow-up is backlog-homed.
+  const isLive = (entry: AutomationHistoryEntry, action: ActionId | null) =>
+    action !== null &&
+    liveTargets.has(`${entry.targetKind}#${asText(entry.ref)}#${action}`);
+
   const onListKeyDown = listKeyboardNav({
     items: rows,
     activeIndex: focusedId ? rows.findIndex((r) => r.id === focusedId) : -1,
@@ -423,13 +521,33 @@ function AutomationHistoryBody({
 
   const openTarget = (entry: AutomationHistoryEntry) => {
     onClose();
+    const kind = entry.targetKind === "remote" ? "remote" : "local";
+    // Land under the lens the record was written for. Every automation path is
+    // origin-pinned, so a remote row always names an origin pull request, and a
+    // fork sitting on the upstream lens would otherwise open upstream's
+    // same-numbered one. Session-only (`persist: false`): a click is navigation,
+    // not a choice of lens. REMOTE only — a local PR is lens-independent, so
+    // applying one there would be a side effect its navigation never implied.
+    // No selection clears: the same call selects this PR.
+    const applyLens =
+      kind === "remote"
+        ? () =>
+            applyRepoLens(queryClient, repoPath, "origin", {
+              clearSelections: false,
+              persist: false,
+            })
+        : undefined;
     openPr({
-      kind: entry.targetKind === "remote" ? "remote" : "local",
+      kind,
       repoPath,
       repoName: repoPath.split(/[/\\]/).pop() ?? repoPath,
       ref: asText(entry.ref),
       section: null,
       reviewId: null,
+      // Run inside openPr's view-transition callback, so the lens and the
+      // selection reach the same commit; applied here it would land a render
+      // early and fetch the new lens against the OLD number.
+      beforeSelect: applyLens,
     });
   };
 
@@ -483,6 +601,7 @@ function AutomationHistoryBody({
         <HistoryList
           rows={rows}
           anyEnabled={anyEnabled}
+          isLive={isLive}
           onListKeyDown={onListKeyDown}
           onOpenTarget={openTarget}
           onSetUp={() => {
@@ -498,12 +617,16 @@ function AutomationHistoryBody({
 function HistoryList({
   rows,
   anyEnabled,
+  isLive,
   onListKeyDown,
   onOpenTarget,
   onSetUp,
 }: {
   rows: AutomationHistoryEntry[];
   anyEnabled: boolean;
+  /** Whether THIS instance holds a running/queued automation run for the row's
+   *  target in that outcome's mode. */
+  isLive: (entry: AutomationHistoryEntry, action: ActionId | null) => boolean;
   onListKeyDown: (e: KeyboardEvent) => void;
   onOpenTarget: (entry: AutomationHistoryEntry) => void;
   onSetUp: () => void;
@@ -547,7 +670,12 @@ function HistoryList({
       onKeyDown={onListKeyDown}
     >
       {rows.map((entry) => (
-        <HistoryRow key={entry.id} entry={entry} onOpenTarget={onOpenTarget} />
+        <HistoryRow
+          key={entry.id}
+          entry={entry}
+          isLive={isLive}
+          onOpenTarget={onOpenTarget}
+        />
       ))}
     </div>
   );
@@ -558,18 +686,15 @@ const ROW_CLASS =
 
 function HistoryRow({
   entry,
+  isLive,
   onOpenTarget,
 }: {
   entry: AutomationHistoryEntry;
+  isLive: (entry: AutomationHistoryEntry, action: ActionId | null) => boolean;
   onOpenTarget: (entry: AutomationHistoryEntry) => void;
 }) {
   const outcomes = Array.isArray(entry.outcomes) ? entry.outcomes : [];
-  // Target kind first, then trigger: a pause marker is stored with the
-  // user-initiated trigger, and a Play glyph would claim a run that never was.
-  const Glyph =
-    entry.targetKind === "none"
-      ? LightningIcon
-      : (TRIGGER_GLYPH[entry.trigger] ?? LightningIcon);
+  const Glyph = glyphFor(entry);
   const title =
     TITLE_FOR[entry.targetKind]?.(entry, outcomes) ?? markerTitle(outcomes);
   const count = asCount(entry.count);
@@ -596,8 +721,11 @@ function HistoryRow({
           {title}
         </span>
         {outcomes.map((outcome, i) => {
-          const reason =
-            OUTCOME_REASON[outcome.code]?.(entry, outcome) ?? UNKNOWN_REASON;
+          const reason = reasonFor(
+            entry,
+            outcome,
+            isLive(entry, outcome.action),
+          );
           return (
             <span
               // Index key: one entry's outcomes are a fixed list that never reorders.
