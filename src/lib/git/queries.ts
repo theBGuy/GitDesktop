@@ -5150,20 +5150,11 @@ export function useDiscardPendingReview(repo: string, lens: RemoteLens) {
         queryClient.setQueryData(threadsKey, prevThreads);
       }
     },
-    // The detail key prefix-matches the threads key too, so one invalidate reconciles
-    // both. The list pair rides along because a mine-axis filter (assigned/review
-    // requested/teams) is evaluated SERVER-side and `updatedAt` feeds the review
-    // buckets, so a detail-only reconcile leaves both surfaces describing a PR the
-    // next fetch would sort or drop differently. Same reasoning at every mutation
-    // below that touches those fields.
+    // Prefix-matches the threads key too, so one invalidate reconciles both.
     onSettled: (_d, _e, args) =>
-      Promise.all(
-        [
-          ["repo", repo, "pr", lens, args.number],
-          ["repo", repo, "pr-list", lens],
-          ["repo", repo, "pr-review-state", lens],
-        ].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
-      ),
+      queryClient.invalidateQueries({
+        queryKey: ["repo", repo, "pr", lens, args.number],
+      }),
   });
 }
 
@@ -5260,7 +5251,11 @@ export function useSetPrReviewers(repo: string, lens: RemoteLens) {
         cur ? { ...cur, reviewers: prevReviewers } : cur,
       );
     },
-    // Review requests are a filter axis; see useDiscardPendingReview's settle note.
+    // The list pair rides along because a mine-axis filter (assigned/review
+    // requested/teams) is evaluated SERVER-side and `updatedAt` feeds the review
+    // buckets, so a detail-only reconcile leaves both surfaces describing a PR the
+    // next fetch would sort or drop differently. Same reasoning at every mutation
+    // below that touches those fields.
     onSettled: (_d, _e, args) =>
       Promise.all(
         [
@@ -5305,7 +5300,7 @@ export function useSetPrAssignees(repo: string, lens: RemoteLens) {
         cur ? { ...cur, assignees: prevAssignees } : cur,
       );
     },
-    // Assignees are a filter axis; see useDiscardPendingReview's settle note.
+    // Assignees are a filter axis; see useSetPrReviewers's settle note.
     onSettled: (_d, _e, args) =>
       Promise.all(
         [
@@ -5397,8 +5392,7 @@ export function usePrUpdateBranch(repo: string) {
 
 /** Approve a workflow run GitHub is holding for maintainer approval (a first-time
  *  contributor's fork PR). Invalidates the Actions subtree like re-run/cancel, plus
- *  the PR subtree and the PR-list pair — the PR checks list renders these runs off PR
- *  details. */
+ *  the PR subtree — the PR checks list renders these runs off PR details. */
 export function useApproveWorkflowRun(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -5409,12 +5403,6 @@ export function useApproveWorkflowRun(repo: string) {
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "actions"] });
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });
-      // Lens-less like the line above (the run's lens is per-call and optional), and
-      // paired per usePrReviewState's contract; see useDiscardPendingReview's note.
-      queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr-list"] });
-      queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "pr-review-state"],
-      });
     },
   });
 }

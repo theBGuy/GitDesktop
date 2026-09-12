@@ -1063,6 +1063,18 @@ fn leg_needs_deeper(kept_created_at: &[&str], page_oldest: &str, limit: Option<u
     page_oldest >= times[limit - 1]
 }
 
+/// [`leg_needs_deeper`] over a page's REPORTED oldest timestamp, which the wire may not
+/// supply: `created_at` is `#[serde(default)]` on both list shapes, so a payload omitting
+/// it arrives as `""` — a value that sorts below every real cutoff and would stop the leg
+/// while vouching for it. Missing or empty deepens instead, and the leg ends at the
+/// horizon where [`refuse_truncated_walk`] refuses: the only honest end for a page whose
+/// ordering can't be read. Pure.
+fn leg_wants_deeper(page_oldest: Option<&str>, kept: &[&str], limit: Option<u32>) -> bool {
+    page_oldest
+        .filter(|oldest| !oldest.is_empty())
+        .is_none_or(|oldest| leg_needs_deeper(kept, oldest, limit))
+}
+
 /// Order a filtered page newest-created first. GitLab's `created_at` is a
 /// fixed-width ISO-8601 UTC string, so a lexicographic compare orders it
 /// chronologically; the id breaks ties, so the order never depends on which leg
@@ -1228,11 +1240,10 @@ where
                 continue;
             }
             let kept: Vec<&str> = kept_times.iter().map(String::as_str).collect();
-            // Unreachable today: a non-exhausted page mapped at least FILTER_PAGE_SIZE
-            // rows, so it has an oldest timestamp. Should that ever change, an unknown
-            // oldest DEEPENS — the leg walks to the horizon and the caller refuses,
-            // rather than vouching for a page it couldn't reason about.
-            if page_oldest.is_none_or(|oldest| leg_needs_deeper(&kept, oldest, limit)) {
+            // `None` is unreachable behind the exhausted-guard — a non-exhausted page
+            // mapped at least FILTER_PAGE_SIZE rows, so it has a last row — but that
+            // row's timestamp can still be EMPTY; leg_wants_deeper walks on both.
+            if leg_wants_deeper(page_oldest, &kept, limit) {
                 deeper.push(endpoint);
             }
         }
@@ -10250,6 +10261,31 @@ mod tests {
         ));
         // An empty kept set is short of any limit.
         assert!(leg_needs_deeper(&[], "2026-01-01T00:00:00.000Z", Some(1)));
+    }
+
+    /// A page whose oldest timestamp the wire never supplied reads as `""`, which sorts
+    /// below every real cutoff — vouching on it would stop a leg exactly where nothing
+    /// is known about the rows behind it, so both unknown spellings deepen instead.
+    #[test]
+    fn an_unreadable_page_oldest_deepens_instead_of_vouching() {
+        let full = [
+            "2026-05-01T00:00:00.000Z",
+            "2026-04-01T00:00:00.000Z",
+            "2026-03-01T00:00:00.000Z",
+        ];
+        assert!(leg_wants_deeper(None, &full, Some(3)));
+        assert!(leg_wants_deeper(Some(""), &full, Some(3)));
+        // A readable timestamp delegates to the stop rule, both ways.
+        assert!(leg_wants_deeper(
+            Some("2026-03-01T00:00:00.000Z"),
+            &full,
+            Some(3)
+        ));
+        assert!(!leg_wants_deeper(
+            Some("2026-02-01T00:00:00.000Z"),
+            &full,
+            Some(3)
+        ));
     }
 
     /// A `created_at` tie at the page boundary is not a stop. GitLab's list documents
