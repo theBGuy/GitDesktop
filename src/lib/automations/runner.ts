@@ -24,6 +24,7 @@ import type { AiSettings, PromptProvider, ReviewMode } from "@/lib/ai/types";
 import {
   forgePrComment,
   forgePrDiff,
+  forgePrPoll,
   forgePrView,
   forgeStatus,
   gitBranchDiff,
@@ -1052,7 +1053,10 @@ export function rerunAutomation(
         only,
         replacesKey: staleKey,
         force,
-        trigger: force ? "run-now" : "re-run",
+        // The trigger names the SURFACE that initiated the pass, not its semantics —
+        // this is a Re-run click however the original pass was started; `force` is
+        // what carries the gate-skipping forward.
+        trigger: "re-run",
       });
       if (matched === 0) {
         // The rule genuinely no longer applies (disabled / conditions changed).
@@ -1096,6 +1100,14 @@ const CLOSED_PR_COPY =
 
 const UNRESOLVED_HEAD_COPY =
   "Couldn't resolve the pull request's current head — try refreshing.";
+
+/** Nothing started because another run owns this head — it still lands. */
+const HEAD_CLAIMED_COPY =
+  "This pull request's head is already claimed by a review run — it will post when that one finishes.";
+
+/** Nothing started because a gate store couldn't be read — nothing will land. */
+const GATE_READ_FAILED_COPY =
+  "Couldn't read this pull request's review history, so nothing ran — see Automation history for the error.";
 
 /** A Run-now target's state at one moment: everything the synthesized event needs.
  *  Every field is a point-in-time read, which is why it gets resolved twice. */
@@ -1165,16 +1177,27 @@ export function runAutomationNow(
             toast.info(CLOSED_PR_COPY);
             return null;
           }
+          // The head-OID poll is the authority here — it is provider-neutral and its
+          // `headSha` is the very value pr-sync detection keys on, so Run-now claims
+          // and persists the same head the lifecycle would. The commits list alone
+          // can't be trusted for this: `gh_pr_view` completes a >100-commit PR from
+          // the paginated REST endpoint and falls back to the TRUNCATED 100-entry
+          // GraphQL list when that read fails, and the last entry of a truncated list
+          // is not the head. Best-effort — a poll hiccup shouldn't refuse a run the
+          // commits list can serve, so it falls back to the oldest-first list's last
+          // entry (GitLab and Bitbucket reverse their newest-first payloads to match
+          // GitHub's; same read as RemotePrView's merge/review paths). The
+          // empty-headSha refusal below is the final backstop.
+          const polledHead = await forgePrPoll(repoPath)
+            .then((prs) => prs.find((p) => p.number === target.number)?.headSha)
+            .catch(() => undefined);
           resolved = {
             base: pr.baseRefName,
             head: pr.headRefName,
             title: pr.title,
             body: pr.body,
             commitSubjects: pr.commits.map((c) => c.headline),
-            // The neutral commit list is oldest-first on every provider — GitLab and
-            // Bitbucket reverse their newest-first payloads to match GitHub's — so the
-            // PR head is the LAST entry (same read as RemotePrView's merge/review paths).
-            headSha: pr.commits.at(-1)?.oid ?? "",
+            headSha: polledHead || (pr.commits.at(-1)?.oid ?? ""),
           };
         } else {
           // `listLocalPrs` reads the memoized store instance, so without this the
@@ -1242,7 +1265,7 @@ export function runAutomationNow(
       const current = await resolveTarget();
       if (!current) return;
 
-      const { matched, attempted } = await run(
+      const { matched, attempted, outcomes } = await run(
         {
           kind: "pr-sync",
           repoPath,
@@ -1265,11 +1288,18 @@ export function runAutomationNow(
         // Every confirmed mode was disabled between the confirm and the run.
         toast.info(NO_PR_AUTOMATION_COPY);
       } else if (attempted === 0) {
-        // The claim is identity-keyed, so this may be another worktree of this repo
-        // or another machine — say what is true, not where it is.
-        toast.info(
-          "This pull request's head is already claimed by a review run — it will post when that one finishes.",
-        );
+        // Nothing started, and WHY decides the copy: a held claim still posts when it
+        // finishes, a failed gate read never will — telling the user to wait for a run
+        // that cannot arrive is the silent no-op this feature exists to end. A claim
+        // wins when both are present: it is the arm that still has a run behind it.
+        const codes = new Set(outcomes.map((o) => o.code));
+        if (!codes.has("claim-held") && codes.has("eligibility-error")) {
+          toast.error(GATE_READ_FAILED_COPY);
+        } else {
+          // The claim is identity-keyed, so this may be another worktree of this repo
+          // or another machine — say what is true, not where it is.
+          toast.info(HEAD_CLAIMED_COPY);
+        }
       }
       // attempted > 0: the dock's live row is the feedback — no toast.
     } catch (e) {

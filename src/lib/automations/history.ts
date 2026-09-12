@@ -6,7 +6,8 @@ import {
 } from "@/lib/git/repo-identity";
 import { queryClient } from "@/lib/query-client";
 import { storeName } from "@/lib/test-mode";
-import { type ActionId, ALL_ACTION_IDS } from "./types";
+import { loadAutomations } from "./store";
+import { type ActionId, ALL_ACTION_IDS, anyAutomationEnabled } from "./types";
 
 /**
  * Every decision the automation pipeline can record. Deliberately absent:
@@ -535,11 +536,18 @@ export async function updateAutomationActivity(
  *
  * Markers carry `trigger: "run-now"` — the only user-initiated value in the union,
  * and a flip IS a user action; consumers branch on `targetKind: "none"` first.
+ *
+ * Gated on the user having ANY automation configured, the same no-automation-no-
+ * evidence rule the per-repo recorders follow — a marker is not repo-keyed, so one
+ * written by a never-configured user would make every repo's list non-empty and put
+ * the teaching empty state out of reach app-wide. Knock-on, accepted: a flip made
+ * before any automation existed leaves no marker behind.
  */
 export async function recordAutomationPauseMarker(
   paused: boolean,
 ): Promise<void> {
   try {
+    if (!anyAutomationEnabled(await loadAutomations())) return;
     await serialize(async () => {
       await reloadRaw();
       const store = await getStore();

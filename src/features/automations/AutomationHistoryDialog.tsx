@@ -42,8 +42,8 @@ import {
   ACTION_LABELS,
   type ActionId,
   effectiveActions,
+  LIFECYCLE_EVENTS,
   LIFECYCLE_LABELS,
-  type LifecycleEvent,
   repoEntry,
 } from "@/lib/automations/types";
 import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
@@ -190,8 +190,12 @@ const OUTCOME_REASON: Record<
     text: "Skipped — this head is already claimed by a review run",
     tone: "warning",
   }),
-  "eligibility-error": () => ({
-    text: "Couldn't read review history — treated as already reviewed",
+  // The Run-now toast sends users HERE for the error, so the recorded detail
+  // must render (the row truncates with a full-text hover tooltip).
+  "eligibility-error": (_entry, outcome) => ({
+    text: asText(outcome.detail)
+      ? `Couldn't read review history — ${asText(outcome.detail)}`
+      : "Couldn't read review history — treated as already reviewed",
     tone: "warning",
   }),
   failed: (_entry, outcome) => ({
@@ -222,7 +226,7 @@ const LATCHING_CODES = new Set<string>([
   "claim-held",
 ]);
 
-const LIFECYCLES: LifecycleEvent[] = ["commit", "pr-open", "pr-sync"];
+const LIFECYCLES = LIFECYCLE_EVENTS;
 
 /** Every field below is read back from a JSON file a user can hand-edit, so a
  *  non-string reaches JSX as an object React refuses to render. */
@@ -299,8 +303,11 @@ const TITLE_FOR: Record<
   local: (entry) => asText(entry.title),
   commit: (entry) => {
     const title = asText(entry.title);
+    // ref is the BRANCH, which a commit made on a detached HEAD records as ""
+    // — the separator must not render against an empty side.
     const ref = asText(entry.ref);
-    return title ? `${ref} · ${title}` : ref;
+    if (!title) return ref;
+    return ref ? `${ref} · ${title}` : title;
   },
   none: (_entry, outcomes) => markerTitle(outcomes),
 };
