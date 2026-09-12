@@ -10,6 +10,8 @@ name: site
 # the root pnpm-lock.yaml is a trigger path here. The content collection makes this
 # gate load-bearing: a zod schema violation, a duplicate route, a missing hero
 # image, or an uncoercible date in a blog post are all build-time failures.
+# The job also carries assertions about the BUILT output, for regressions a
+# successful build cannot express on its own — see the whitespace step below.
 
 on:
   pull_request:
@@ -21,6 +23,10 @@ on:
       - "pnpm-workspace.yaml"
       - "biome.json"
       - ".github/workflows/site.yml"
+      # The guard script is a trigger path for the same reason this workflow
+      # lists itself: quality.yml's fixtures cover its exported predicate, but
+      # only a run here exercises its CLI against a real build.
+      - "scripts/check-built-whitespace.mjs"
 
 permissions:
   contents: read
@@ -37,7 +43,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6.0.10
+        uses: pnpm/action-setup@v6.1.0
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
@@ -54,6 +60,16 @@ jobs:
 
       - name: Build the marketing site
         run: pnpm --filter site build
+
+      # The predicate lives in scripts/ with the other guards so its fixtures run
+      # in quality.yml — a scanner's worst failure is a silent fail-open. It is
+      # invoked here rather than from the `checks` alias because it reads a built
+      # site/dist. PR gate only: Cloudflare Pages builds production from its own
+      # copy, so a direct push to master ships unguarded.
+      - name: Assert inline whitespace survived HTML compression
+        run: |
+          node scripts/check-built-whitespace.mjs \
+            site/dist/index.html site/dist/about/index.html
 
       # A second build with unpublished posts (drafts + future-dated) visible,
       # so a scheduled post's own route renders BEFORE its publication day —

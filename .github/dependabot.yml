@@ -3,6 +3,12 @@
 version: 2
 updates:
   # Frontend (pnpm) at the repo root.
+  #
+  # The npm updater converges on one version per dependency name across the whole
+  # pnpm workspace and rewrites every manifest to it, so root and site/ have to
+  # agree on a major: root tracks @vitejs/plugin-react's peer, site/ tracks the
+  # vite astro depends on. Any `ignore` added here must be name-only — a
+  # `versions:` bound writes the wrong major into the other manifest.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:

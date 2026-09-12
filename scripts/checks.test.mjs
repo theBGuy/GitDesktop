@@ -1,4 +1,4 @@
-// Negative controls for the five guard scanners. Their worst failure mode is
+// Negative controls for the guard scanners. Their worst failure mode is
 // silent fail-open — a pattern that stops matching still prints "OK" — so every
 // predicate keeps a fixture that MUST hit and a fixture that must not. The
 // scripts export their predicates and gate their CLI body on a main-module path
@@ -20,6 +20,11 @@ import {
   stripComments,
   view,
 } from "./check-banned-patterns.mjs";
+import {
+  footerOf,
+  hasInlineGap,
+  INLINE_GAP,
+} from "./check-built-whitespace.mjs";
 import {
   parseInvoked,
   parseRegistered,
@@ -1958,6 +1963,56 @@ test("a mounted carrier, when present, still states the whole rule", () => {
       `mounted carrier lost the rule: ${carrier}`,
     );
   }
+});
+
+// ------------------------------------------------ check-built-whitespace
+
+// The fixtures mirror what Astro actually emits: a newline between the anchors
+// under `compressHTML: true`, and none under "jsx". Both sit inside a <footer>
+// because that scoping IS the predicate — a gap anywhere else on the page must
+// not satisfy it.
+const footerWithGap = `<footer><div><a href="/a/">A</a>\n<a href="/b/">B</a></div></footer>`;
+const footerCompressed = `<footer><div><a href="/a/">A</a><a href="/b/">B</a></div></footer>`;
+
+test("the whitespace predicate fires on a compressed footer", () => {
+  assert.equal(hasInlineGap(footerWithGap), true);
+  assert.equal(hasInlineGap(footerCompressed), false);
+});
+
+test("an anchor gap outside the footer does not satisfy the gate", () => {
+  // The page-wide form passed on CTA pairs while the footer row was compressed,
+  // which is the fail-open this scoping closes.
+  const ctaGapOnly = `<main><a href="/x/">X</a> <a href="/y/">Y</a></main>${footerCompressed}`;
+  assert.equal(hasInlineGap(ctaGapOnly), false);
+});
+
+test("a block-level tag starting with 'a' does not satisfy the gate", () => {
+  // `<a` unbounded also matches <aside>/<article>/<abbr>, so the gate could go
+  // green on a block boundary with every real anchor pair compressed.
+  for (const tag of ["aside", "article", "abbr"]) {
+    assert.equal(INLINE_GAP.test(`</a>\n<${tag}>`), false, tag);
+  }
+  assert.equal(INLINE_GAP.test(`</a>\n<a href="/b/">`), true);
+});
+
+test("a page with no footer is not treated as passing", () => {
+  assert.equal(footerOf("<main><p>no footer here</p></main>"), null);
+  assert.equal(hasInlineGap("<main><p>no footer here</p></main>"), false);
+});
+
+test("a custom element whose name starts with 'footer' is not the footer", () => {
+  // `<footer` unbounded also starts inside <footer-links>, so a gapped pair
+  // there could carry the gate while the real footer stayed compressed.
+  const page = `<footer-links><a href="/a/">A</a> <a href="/b/">B</a></footer-links>${footerCompressed}`;
+  assert.equal(hasInlineGap(page), false);
+  assert.ok(footerOf(page).startsWith("<footer>"));
+});
+
+test("a footer close tag with trailing space still delimits the element", () => {
+  assert.equal(
+    hasInlineGap(footerWithGap.replace("</footer>", "</footer >")),
+    true,
+  );
 });
 
 // --------------------------------------------------- check-tauri-plugin-parity

@@ -46,7 +46,9 @@ jobs:
 
       # One step per script so a failure names its own check in the UI. The same
       # five scripts plus the self-tests below run locally via package.json's
-      # `checks` alias — a new guard is added in BOTH places.
+      # `checks` alias — a new guard is added in BOTH places. Exception: a guard
+      # needing a built artifact (check-built-whitespace.mjs) runs from the
+      # workflow that builds it, and reaches this job only via its fixtures.
       - name: Banned frontend patterns
         run: node scripts/check-banned-patterns.mjs
 
@@ -89,7 +91,7 @@ jobs:
       # not redden a job whose contract is "never gates".
       - name: Install pnpm
         continue-on-error: true
-        uses: pnpm/action-setup@v6.0.10
+        uses: pnpm/action-setup@v6.1.0
 
       - name: Install Node
         continue-on-error: true

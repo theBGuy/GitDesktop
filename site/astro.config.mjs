@@ -69,8 +69,10 @@ export default defineConfig({
     // variables are mapped in global.css under `.prose pre`.
     shikiConfig: { theme: "css-variables", wrap: true },
     // Astro 7 renders Markdown with Sätteri by default; unified() keeps the
-    // remark/rehype pipeline rehypeTableWrap is written against. Sätteri's hast
-    // plugins are a different visitor API that may not express a structural wrap.
+    // remark/rehype pipeline rehypeTableWrap is written against. Sätteri could
+    // express the wrap too (its hast context has wrapNode); the reason to stay
+    // is that switching engines re-renders every post, and no gate asserts the
+    // wrap survived.
     processor: unified({ rehypePlugins: [rehypeTableWrap] }),
   },
 
