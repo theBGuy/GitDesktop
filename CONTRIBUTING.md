@@ -116,21 +116,21 @@ pnpm run checks
 
 They run as the `guards` job in [`quality.yml`](.github/workflows/quality.yml),
 a required check on master, and cover banned frontend UI and state patterns
-(hover-revealed row actions, hand-rolled modifier keys, `setQueryData(key,
-undefined)`, bare `.mutate(` calls in the converted trees, inline clip-measured
+(hover-revealed row actions, hand-rolled modifier keys, bare `.mutate(` calls
+in the converted trees, `setQueryData(key, undefined)`, inline clip-measured
 tooltips), the Rust refspec-argv and sync-`#[tauri::command]` invariants,
 Tauri IPC drift (every registered command needs a caller, every `invoke()`
 a registration), drift between the files that restate the git-whitelist hard
 rule, and the major.minor parity of each Tauri package's npm and crate halves.
 
-The pattern and surface checks carry allowlists, and they ratchet one way
-(rule-mirror drift and Tauri parity carry none — there is nothing to exempt).
-Adding an entry is a reviewed change like any other: it needs an inline
-rationale naming what makes that site safe, and it isn't the way to quiet a
-fresh violation. The ratchet is enforced, not just documented — an entry that
-no longer suppresses anything (its site gone, or its command back in live use)
-fails the gate as a stale allowlist entry, so the PR that removes the site
-removes its entry too.
+The pattern, Rust-invariant, and surface checks carry allowlists, and they
+ratchet one way (rule-mirror drift and Tauri parity carry none — there is
+nothing to exempt). Adding an entry is a reviewed change like any other: it
+needs an inline rationale naming what makes that site safe, and it isn't the
+way to quiet a fresh violation. The ratchet is enforced, not just documented —
+an entry that no longer suppresses anything (its site gone, or its command back
+in live use) fails the gate as a stale allowlist entry, so the PR that removes
+the site removes its entry too.
 
 `knip` and `jscpd` run in the same workflow's `advisory` job — non-blocking on
 purpose. The job publishes unused-export and duplicate-code reports to the run

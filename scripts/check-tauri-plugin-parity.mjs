@@ -9,12 +9,14 @@
 // Comparison is major.minor on the RESOLVED versions, mirroring tauri-cli's own
 // InstalledPackages::mismatched(): patch drift between the halves is legal.
 //
-// Only pairs where BOTH halves exist HERE are compared: the build crates
-// (tauri-build, tauri-codegen, tauri-utils) ship no npm half at all, while
-// plugins this app uses from Rust alone (tauri-plugin-fs,
-// tauri-plugin-window-state) do publish a JS API — they are simply not
-// installed in package.json, so there is nothing to compare. @tauri-apps/cli
-// is the mirror case, an npm package with no crate dependency here.
+// The two directions are NOT symmetric. A crate with no npm half is skipped
+// and legitimately so: the build crates (tauri-build, tauri-codegen,
+// tauri-utils) publish none, and plugins this app drives from Rust alone
+// (tauri-plugin-fs, tauri-plugin-window-state) publish a JS API it simply does
+// not install. But a package.json-declared `@tauri-apps/*` whose name maps to a
+// crate owes a comparison and fails the gate when it produces none — a JS half
+// calling a plugin the Rust side never registers. @tauri-apps/cli maps to no
+// crate at all, so it stays out of the pairing entirely.
 //
 // Run: node scripts/check-tauri-plugin-parity.mjs
 // GD_TAURI_PARITY_ROOT points the check at a copy of the tree, for an ad-hoc
@@ -173,9 +175,12 @@ export function verdict(
     empty: pairs.length === 0,
     missingCore: !paired.has(CORE_CRATE),
     duplicated: [...duplicates].filter((name) => paired.has(name)).sort(),
+    // `paired` already requires both halves, so this covers a lost lockfile
+    // entry and a crate that was never declared at all. `crate !== null` is the
+    // only exemption: an npm package with no crate name owes no comparison.
     unpaired: declared.filter((name) => {
       const crate = crateNameFor(name);
-      return crate !== null && crates.has(crate) && !paired.has(crate);
+      return crate !== null && !paired.has(crate);
     }),
   };
 }
@@ -241,15 +246,19 @@ function main() {
   }
   if (unpaired.length > 0) {
     process.stderr.write(
-      `tauri-parity: FAIL — ${unpaired.length} declared package(s) have a crate half but produced no comparison\n`,
+      `tauri-parity: FAIL — ${unpaired.length} declared package(s) produced no comparison\n`,
     );
     for (const name of unpaired) {
+      const crate = crateNameFor(name);
+      const missing = crates.has(crate)
+        ? `${PNPM_LOCK} carries no root-importer entry for it`
+        : `${CARGO_LOCK} carries no \`${crate}\` block`;
       process.stderr.write(
-        `  ${name} (${PACKAGE_JSON}) <-> ${crateNameFor(name)} (${CARGO_LOCK}) — the ${PNPM_LOCK} half is missing\n`,
+        `  ${name} (${PACKAGE_JSON}) <-> ${crate} — ${missing}\n`,
       );
     }
     process.stderr.write(
-      `    re-lock if the dependency is genuinely gone; otherwise the root-importer block shape this gate reads has changed\n`,
+      `    supply the missing half, or drop the declaration if the dependency is genuinely gone; a half that IS present means the block shape this gate reads has changed\n`,
     );
     process.exitCode = 1;
     return;

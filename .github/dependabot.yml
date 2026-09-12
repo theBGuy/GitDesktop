@@ -29,9 +29,10 @@ updates:
       # Tauri's npm and crate halves must reach master in ONE commit: a group
       # cannot span ecosystems, so combine this PR with its cargo twin. Majors
       # are grouped too, unlike the ordinary deps below, because that bump
-      # moves both halves. A minor or major split reddens the parity gate, a
-      # patch-only one passes by design, and a package with no counterpart
-      # (@tauri-apps/cli, tauri-build) opens solo. First matching group wins.
+      # moves both halves; a minor or major split reddens the parity gate, a
+      # patch-only one passes by design. A package with no counterpart
+      # (@tauri-apps/cli on this side, tauri-build on the cargo side) opens
+      # solo. First matching group wins.
       tauri:
         patterns:
           - "@tauri-apps/*"

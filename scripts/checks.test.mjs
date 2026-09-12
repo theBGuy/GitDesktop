@@ -2095,9 +2095,8 @@ test("parseNpmVersions reads the root importer's resolved versions only", () => 
 
 test("parseNpmVersions yields nothing when there is no root importer", () => {
   // The degradation that feeds the `empty` fail-closed arm from the parser
-  // side: a lockfile whose `  .:` block this scan can no longer find still
-  // carries plenty of `version:` lines under `packages:`, and reading those
-  // would compare transitive copies the app never installs.
+  // side: no `  .:` importer block means no versions, and the transitive
+  // `packages:` copies are out of scope whatever they resolve to.
   const noImporter = [
     "lockfileVersion: '9.0'",
     "",
@@ -2303,13 +2302,22 @@ test("verdict fails closed on a declared package that produced no comparison", (
   });
   assert.equal(degraded.empty, false);
   assert.equal(degraded.missingCore, false);
-  // @tauri-apps/cli has no crate half at all, so it is skipped, not flagged.
+  // @tauri-apps/cli maps to no crate name, so it owes nothing and stays out.
   assert.deepEqual(degraded.unpaired, ["@tauri-apps/plugin-http"]);
-  // A declared package whose crate half is genuinely absent from Cargo.lock is
-  // also skipped: there is no comparison owed.
+  // A declared package whose crate is absent from Cargo.lock ENTIRELY is the
+  // same finding, not an exemption: a JS half calling a plugin the Rust side
+  // never registers is exactly what this arm is for.
   assert.deepEqual(
     verdict(crates, new Map([["@tauri-apps/api", "2.11.1"]]), {
       declared: ["@tauri-apps/api", "@tauri-apps/plugin-dialog"],
+    }).unpaired,
+    ["@tauri-apps/plugin-dialog"],
+  );
+  // The must-NOT-hit twin: the npm-only package stays out even when it is the
+  // only thing left to flag.
+  assert.deepEqual(
+    verdict(crates, new Map([["@tauri-apps/api", "2.11.1"]]), {
+      declared: ["@tauri-apps/api", "@tauri-apps/cli"],
     }).unpaired,
     [],
   );
