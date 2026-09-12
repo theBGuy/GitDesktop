@@ -115,14 +115,13 @@ pnpm run checks
 ```
 
 They run as the `guards` job in [`quality.yml`](.github/workflows/quality.yml),
-a required check on master. Between them they cover banned frontend UI
-and state patterns — hover-revealed row actions, hand-rolled modifier
-keys, `setQueryData(key, undefined)`, bare `.mutate(` calls in the
-converted trees, inline clip-measured tooltips — the Rust refspec-argv and
-sync-`#[tauri::command]` invariants, Tauri IPC drift (every registered command
-needs a caller, every `invoke()` a registration), drift between the files that
-restate the git-whitelist hard rule, and the major.minor parity of each Tauri
-package's npm and crate halves.
+a required check on master, and cover banned frontend UI and state patterns
+(hover-revealed row actions, hand-rolled modifier keys, `setQueryData(key,
+undefined)`, bare `.mutate(` calls in the converted trees, inline clip-measured
+tooltips), the Rust refspec-argv and sync-`#[tauri::command]` invariants,
+Tauri IPC drift (every registered command needs a caller, every `invoke()`
+a registration), drift between the files that restate the git-whitelist hard
+rule, and the major.minor parity of each Tauri package's npm and crate halves.
 
 The pattern and surface checks carry allowlists, and they ratchet one way
 (rule-mirror drift and Tauri parity carry none — there is nothing to exempt).

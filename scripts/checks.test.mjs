@@ -2093,6 +2093,23 @@ test("parseNpmVersions reads the root importer's resolved versions only", () => 
   assert.equal(npm.size, 3);
 });
 
+test("parseNpmVersions yields nothing when there is no root importer", () => {
+  // The degradation that feeds the `empty` fail-closed arm from the parser
+  // side: a lockfile whose `  .:` block this scan can no longer find still
+  // carries plenty of `version:` lines under `packages:`, and reading those
+  // would compare transitive copies the app never installs.
+  const noImporter = [
+    "lockfileVersion: '9.0'",
+    "",
+    "packages:",
+    "",
+    "  '@tauri-apps/api@9.9.9':",
+    "    resolution: {integrity: sha512-fixture}",
+    "    version: 9.9.9",
+  ].join("\n");
+  assert.equal(parseNpmVersions(noImporter).size, 0);
+});
+
 test("npmNameFor pairs the two forms and nothing else", () => {
   assert.equal(npmNameFor("tauri"), "@tauri-apps/api");
   assert.equal(
