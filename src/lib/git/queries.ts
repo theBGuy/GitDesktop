@@ -2570,14 +2570,14 @@ export function useEditItemProjects(
     // settles, which is what lets the picker's trigger stay held across the
     // refetch rather than freeing while the cache still holds `pending:` ids.
     // `invalidateQueries` resolves even when the refetch errors, so there is no
-    // stuck-trigger mode. The field values hang off the memberships this just
-    // changed, so an unlinked board's line must go with its chip rather than
-    // outliving it for the rest of that cache's staleTime.
-    onSettled: () =>
-      Promise.all([
-        queryClient.invalidateQueries({ queryKey: key }),
-        queryClient.invalidateQueries({ queryKey: fieldsKey }),
-      ]),
+    // stuck-trigger mode. The field values hang off these memberships, but their
+    // refetch stays UNAWAITED: the rail already filters its lines by the live
+    // memberships, so it is correct the moment this patch lands, and holding the
+    // trigger for the heavier read would only lengthen the wait.
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: fieldsKey });
+      return queryClient.invalidateQueries({ queryKey: key });
+    },
   });
 }
 

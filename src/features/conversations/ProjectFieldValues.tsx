@@ -78,6 +78,9 @@ function iterationRange(startDate: string, duration: number): string {
   if (start === null || !Number.isFinite(duration) || duration < 1) return "";
   const end = new Date(start);
   end.setDate(end.getDate() + Math.round(duration) - 1);
+  // A duration past Date's range lands an Invalid Date, whose formatted form is
+  // the literal string this module's date handling promises never to show.
+  if (Number.isNaN(end.getTime())) return "";
   const spansYears = start.getFullYear() !== end.getFullYear();
   return `${shortDay(start, spansYears)} – ${shortDay(end, spansYears)}`;
 }
@@ -270,21 +273,17 @@ export function ProjectFieldValues({
 
   // Keyed on CACHED DATA, never on query status, matching the chips above: a
   // failed background refetch flips the status to error while the data it already
-  // served is still good, and lines that vanish under a gh hiccup would leave the
-  // chips standing over an empty rail.
-  //
-  // Filtered by the picker's memberships, which are the truth for WHICH boards
-  // exist: an unlink empties them optimistically, and unlinking the LAST one
-  // disables this query — an invalidate neither refetches nor clears a disabled
-  // query, so its cache outlives the boards it describes. Lines render only for
-  // boards the item is still on, which also drops a partial unlink's stale line
-  // ahead of the refetch rather than after it.
+  // served is still good.
   const membershipIds = new Set(
     (memberships.data ?? []).map((item) => item.project.id),
   );
-  const entries = (values.data ?? []).filter((entry) =>
-    membershipIds.has(entry.project.id),
-  );
+  // Gated on live memberships AND the scope gate, because a cache outlives the
+  // gate that filled it: either one going away disables this query, which an
+  // invalidate can then neither refetch nor clear. The picker's chips and its
+  // scope-gap block are what the rail has to agree with.
+  const entries = canRead
+    ? (values.data ?? []).filter((entry) => membershipIds.has(entry.project.id))
+    : [];
   const lines = entries
     .map((entry) => ({ entry, parts: renderableParts(entry) }))
     .filter((line) => line.parts.length > 0);
@@ -318,9 +317,9 @@ export function ProjectFieldValues({
         );
       case loading:
         return <Skeleton className="h-4 w-40" aria-hidden />;
-      // Still board-gated: a disabled query keeps whatever error it last cached,
-      // and an item whose boards have since gone stays silent.
-      case values.error !== null && boardsKnown:
+      // Still gated: a disabled query keeps whatever error it last cached, so an
+      // item whose boards — or whose scope — have since gone stays silent.
+      case canRead && values.error !== null && boardsKnown:
         return (
           <span className="inline-flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
             {presentError(values.error).summary}

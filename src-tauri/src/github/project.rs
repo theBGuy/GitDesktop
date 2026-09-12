@@ -67,7 +67,7 @@ fn map_scope_error(e: AppError) -> AppError {
 
 /// A `ProjectV2` node, skipped entirely when it carries no id (the one field the
 /// mutations can't work without); the rest default rather than fail the read.
-fn project_ref(node: &Value) -> Option<ProjectV2Ref> {
+pub(super) fn project_ref(node: &Value) -> Option<ProjectV2Ref> {
     Some(ProjectV2Ref {
         id: node.get("id")?.as_str()?.to_string(),
         title: node

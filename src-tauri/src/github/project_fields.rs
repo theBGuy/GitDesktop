@@ -1,4 +1,4 @@
-//! Projects v2 field values and definitions for issue and PR sidebars.
+//! Projects v2 field values for issue and PR sidebars.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::issue::repo_owner_name;
-use crate::github::project::{ProjectV2Ref, PROJECT_FIELDS};
+use crate::github::project::{project_ref, ProjectV2Ref, PROJECT_FIELDS};
 use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize)]
@@ -224,13 +224,7 @@ fn parse_item_field_values(value: &Value, field: &str) -> Vec<ItemProjectFieldVa
             let project = node.get("project")?;
             Some(ItemProjectFieldValues {
                 item_id: node.get("id")?.as_str()?.to_string(),
-                project: ProjectV2Ref {
-                    id: project.get("id")?.as_str()?.to_string(),
-                    title: text(project, "title"),
-                    number: project["number"].as_u64().unwrap_or(0),
-                    closed: project["closed"].as_bool().unwrap_or(false),
-                    viewer_can_update: project["viewerCanUpdate"].as_bool().unwrap_or(false),
-                },
+                project: project_ref(project)?,
                 values: array(&node["fieldValues"]["nodes"])
                     .map(parse_field_value)
                     .collect(),
