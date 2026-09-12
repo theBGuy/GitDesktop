@@ -1145,13 +1145,14 @@ async fn filter_viewer(
 /// whether any leg stopped at a CAP with rows still unread behind it.
 ///
 /// Legs are walked BREADTH-first, one page deep across all of them before any
-/// second page: a leg's later pages hold only older rows, so starving another leg's
+/// second page: a leg's later pages hold no NEWER rows, so starving another leg's
 /// page 1 would drop rows newer than the ones the depth bought.
 ///
-/// That "later pages are older" premise is the whole displacement proof, so the plan's
-/// endpoints PIN `order_by=created_at&sort=desc` rather than inherit GitLab's default
-/// ordering — a default this walk merely happens to agree with could change and
-/// invalidate the proof silently.
+/// That "later pages are never newer" premise (ties included — see [`leg_needs_deeper`])
+/// is the whole displacement proof, so the plan's endpoints PIN
+/// `order_by=created_at&sort=desc` rather than inherit GitLab's default ordering: a
+/// default this walk merely happens to agree with could change and invalidate the proof
+/// silently.
 ///
 /// Three ways a leg ends, and only the third is truncation:
 /// 1. a short page — the leg is exhausted, nothing behind it;
@@ -1227,9 +1228,11 @@ where
                 continue;
             }
             let kept: Vec<&str> = kept_times.iter().map(String::as_str).collect();
-            // A full page with no readable timestamp can't be reasoned about, so the
-            // leg keeps walking rather than stopping on an unknown.
-            if leg_needs_deeper(&kept, page_oldest.unwrap_or(""), limit) {
+            // Unreachable today: a non-exhausted page mapped at least FILTER_PAGE_SIZE
+            // rows, so it has an oldest timestamp. Should that ever change, an unknown
+            // oldest DEEPENS — the leg walks to the horizon and the caller refuses,
+            // rather than vouching for a page it couldn't reason about.
+            if page_oldest.is_none_or(|oldest| leg_needs_deeper(&kept, oldest, limit)) {
                 deeper.push(endpoint);
             }
         }
