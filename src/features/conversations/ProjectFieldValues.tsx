@@ -38,7 +38,7 @@ const OPTION_COLORS: Record<string, string> = {
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 function optionColor(color: string): string {
-  return OPTION_COLORS[color?.toUpperCase()] ?? OPTION_COLORS.GRAY;
+  return OPTION_COLORS[color.toUpperCase()] ?? OPTION_COLORS.GRAY;
 }
 
 /** A project date field as a LOCAL date: a bare `YYYY-MM-DD` parses as UTC
@@ -248,7 +248,8 @@ export function ProjectFieldValues({
   /** The origin|upstream lens the parent PR/issue surface resolved. */
   lens: RemoteLens;
   /** Emit a label cell and a value cell as two SIBLING elements for a caller's
-   *  label/value grid. Default renders the bare block. */
+   *  label/value grid. Default renders the rail form, which labels itself above
+   *  the lines. */
   cells?: boolean;
 }) {
   const host = useActiveGhHost();
@@ -339,7 +340,18 @@ export function ProjectFieldValues({
   })();
 
   if (content === null) return null;
-  if (!cells) return content;
+  // The rail form carries its OWN heading rather than taking the row list's: this
+  // block renders nothing on a boardless item, and a host-supplied heading would
+  // be left standing over it.
+  if (!cells)
+    return (
+      <div className="space-y-1.5">
+        <p className="text-xs font-medium text-muted-foreground">
+          {FIELD_LABEL}
+        </p>
+        {content}
+      </div>
+    );
   return (
     <>
       <MetaFieldLabel>{FIELD_LABEL}</MetaFieldLabel>

@@ -2570,12 +2570,16 @@ export function useEditItemProjects(
     // settles, which is what lets the picker's trigger stay held across the
     // refetch rather than freeing while the cache still holds `pending:` ids.
     // `invalidateQueries` resolves even when the refetch errors, so there is no
-    // stuck-trigger mode. The field values hang off these memberships, but their
-    // refetch stays UNAWAITED: the rail already filters its lines by the live
-    // memberships, so it is correct the moment this patch lands, and holding the
-    // trigger for the heavier read would only lengthen the wait.
+    // stuck-trigger mode.
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: fieldsKey });
+      // The fields read stays UNAWAITED — the rail filters its lines by the live
+      // memberships, so it is already correct — but has to be CANCELLED first: a
+      // first link enables that query mid-mutation, and query-core dedupes a
+      // fetch whose data is still undefined by REUSING the in-flight promise
+      // instead of cancelling it, landing the pre-link empty read as fresh.
+      void queryClient
+        .cancelQueries({ queryKey: fieldsKey })
+        .then(() => queryClient.invalidateQueries({ queryKey: fieldsKey }));
       return queryClient.invalidateQueries({ queryKey: key });
     },
   });
