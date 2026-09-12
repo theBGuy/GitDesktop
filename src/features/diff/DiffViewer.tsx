@@ -689,8 +689,9 @@ interface DragAnchors {
 
 /** The number span for a line. Unified mode tags it `data-line-{new,old}-num`;
  *  split mode uses a generic `data-line-num` inside a cell marked `data-side`.
- *  Try both so either view works. A placeholder (a split row's empty side)
- *  carries no such span, so it can never resolve.
+ *  Try both so either view works; a caller that knows it is in split passes
+ *  `split` to skip the unified probe, which can never match there. A placeholder
+ *  (a split row's empty side) carries no such span, so it can never resolve.
  *  PRECONDITION: only the wrap-mode split renderer puts `data-side` on the
  *  CELLS (the normal one puts it on the row and splits the sides across two
  *  tables), so the split arm here and in `splitRowSpans` requires the view's
@@ -699,11 +700,14 @@ function numSpanForLine(
   container: HTMLElement,
   side: "old" | "new",
   line: number,
+  split = false,
 ) {
   const unifiedAttr =
     side === "new" ? "data-line-new-num" : "data-line-old-num";
   return (
-    container.querySelector(`span[${unifiedAttr}="${line}"]`) ??
+    (split
+      ? null
+      : container.querySelector(`span[${unifiedAttr}="${line}"]`)) ??
     container.querySelector(
       `td[data-side="${side}"] span[data-line-num="${line}"]`,
     )
@@ -759,7 +763,7 @@ function paintLines(
   clearPaint(container);
   for (const { side, line } of lines) {
     if (split) {
-      const span = numSpanForLine(container, side, line);
+      const span = numSpanForLine(container, side, line, split);
       if (span) paintSide(span);
     } else {
       rowForLine(container, side, line)?.classList.add(SELECT_CLASS);
@@ -790,7 +794,7 @@ function paintRange(
   const hi = Math.max(range.startLineNumber, range.endLineNumber);
   for (let n = lo; n <= hi; n++) {
     if (split) {
-      const span = numSpanForLine(container, range.side, n);
+      const span = numSpanForLine(container, range.side, n, split);
       if (span) paintSide(span);
     } else {
       rowForLine(container, range.side, n)?.classList.add(SELECT_CLASS);
@@ -841,8 +845,8 @@ function rowsBetween(
 
 /** Highlight an anchored drag's crossed rows over `base` (same additive base as
  *  `paintRange`). Context rows in the span tint for live feedback and numberless
- *  rows never do; split tints the drag's sides on every row that has them,
- *  matching the selection the drag is about to commit. */
+ *  rows never do; split tints the drag's sides on every row that has them. The
+ *  commit keeps only the changed lines among them — context drops via the sets. */
 function paintRowSpan(
   container: HTMLElement,
   drag: DragAnchors,
