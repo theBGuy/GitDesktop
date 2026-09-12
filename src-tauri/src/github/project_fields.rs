@@ -77,71 +77,6 @@ pub struct SelectOptionRef {
     pub color: String,
 }
 
-#[derive(Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ProjectFieldDef {
-    SingleSelect {
-        id: String,
-        name: String,
-        options: Vec<FieldOptionDef>,
-        is_issue_field: bool,
-    },
-    MultiSelect {
-        id: String,
-        name: String,
-        options: Vec<FieldOptionDef>,
-        is_issue_field: bool,
-    },
-    Iteration {
-        id: String,
-        name: String,
-        iterations: Vec<IterationDef>,
-        completed_iterations: Vec<IterationDef>,
-    },
-    Text {
-        id: String,
-        name: String,
-        is_issue_field: bool,
-    },
-    Number {
-        id: String,
-        name: String,
-        is_issue_field: bool,
-    },
-    Date {
-        id: String,
-        name: String,
-        is_issue_field: bool,
-    },
-    System {
-        id: String,
-        name: String,
-        data_type: String,
-    },
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FieldOptionDef {
-    pub id: String,
-    pub name: String,
-    pub color: String,
-    pub description: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IterationDef {
-    pub id: String,
-    pub title: String,
-    pub start_date: String,
-    pub duration: u32,
-}
-
 const FIELDS_SCOPE_HINT: &str =
     "GitHub project fields need the read:project scope. Run:  gh auth refresh -s project";
 
@@ -180,20 +115,6 @@ fn item_field_values_query(field: &str) -> String {
            ... on IssueFieldDateValue{{ date: value }} \
          }} }} \
          }} }} }} }} }} }} }}"
-    )
-}
-
-fn project_fields_query() -> String {
-    format!(
-        "query($id:ID!){{ node(id:$id){{ ... on ProjectV2{{ fields(first:50){{ nodes{{ \
-         __typename {FIELD_COMMON} \
-         ... on ProjectV2SingleSelectField{{ options{{ id name color description }} }} \
-         ... on ProjectV2MultiSelectField{{ multiSelectOptions{{ id name color description }} }} \
-         ... on ProjectV2IterationField{{ configuration{{ \
-           iterations{{ id title startDate duration }} \
-           completedIterations{{ id title startDate duration }} \
-         }} }} \
-         }} }} }} }} }}"
     )
 }
 
@@ -264,10 +185,13 @@ fn parse_field_value(node: &Value) -> ProjectFieldValue {
             }
         }
         ("ProjectV2ItemFieldNumberValue" | "IssueFieldNumberValue", "NUMBER") => {
+            let Some(number) = value["number"].as_f64() else {
+                return ProjectFieldValue::Unknown { field_name };
+            };
             ProjectFieldValue::Number {
                 field_id,
                 field_name,
-                number: value["number"].as_f64().unwrap_or(0.0),
+                number,
                 is_issue_field,
             }
         }
@@ -315,83 +239,6 @@ fn parse_item_field_values(value: &Value, field: &str) -> Vec<ItemProjectFieldVa
         .collect()
 }
 
-fn field_options(value: &Value) -> Vec<FieldOptionDef> {
-    array(value)
-        .map(|node| FieldOptionDef {
-            id: text(node, "id"),
-            name: text(node, "name"),
-            color: text(node, "color"),
-            description: text(node, "description"),
-        })
-        .collect()
-}
-
-fn iterations(value: &Value) -> Vec<IterationDef> {
-    array(value)
-        .map(|node| IterationDef {
-            id: text(node, "id"),
-            title: text(node, "title"),
-            start_date: text(node, "startDate"),
-            duration: duration(node),
-        })
-        .collect()
-}
-
-const PROJECT_FIELDS_POINTER: &str = "/data/node/fields/nodes";
-
-fn parse_project_fields(value: &Value) -> Vec<ProjectFieldDef> {
-    value
-        .pointer(PROJECT_FIELDS_POINTER)
-        .into_iter()
-        .flat_map(array)
-        .filter_map(|node| {
-            let id = node.get("id")?.as_str()?.to_string();
-            let name = text(node, "name");
-            let is_issue_field = node["isIssueField"].as_bool().unwrap_or(false);
-            Some(match node["dataType"].as_str().unwrap_or_default() {
-                "SINGLE_SELECT" => ProjectFieldDef::SingleSelect {
-                    id,
-                    name,
-                    options: field_options(&node["options"]),
-                    is_issue_field,
-                },
-                "MULTI_SELECT" => ProjectFieldDef::MultiSelect {
-                    id,
-                    name,
-                    options: field_options(&node["multiSelectOptions"]),
-                    is_issue_field,
-                },
-                "ITERATION" => ProjectFieldDef::Iteration {
-                    id,
-                    name,
-                    iterations: iterations(&node["configuration"]["iterations"]),
-                    completed_iterations: iterations(&node["configuration"]["completedIterations"]),
-                },
-                "TEXT" => ProjectFieldDef::Text {
-                    id,
-                    name,
-                    is_issue_field,
-                },
-                "NUMBER" => ProjectFieldDef::Number {
-                    id,
-                    name,
-                    is_issue_field,
-                },
-                "DATE" => ProjectFieldDef::Date {
-                    id,
-                    name,
-                    is_issue_field,
-                },
-                _ => ProjectFieldDef::System {
-                    id,
-                    name,
-                    data_type: text(node, "dataType"),
-                },
-            })
-        })
-        .collect()
-}
-
 #[tauri::command]
 pub async fn gh_item_field_values(
     repo_path: String,
@@ -433,35 +280,6 @@ pub async fn gh_item_field_values(
     Ok(parse_item_field_values(&value, field))
 }
 
-#[tauri::command]
-pub async fn gh_project_fields(
-    repo_path: String,
-    project_id: String,
-) -> AppResult<Vec<ProjectFieldDef>> {
-    let query = project_fields_query();
-    let out = run_gh(
-        Some(&repo_path),
-        &[
-            "api",
-            "graphql",
-            "-f",
-            &format!("id={project_id}"),
-            "-f",
-            &format!("query={query}"),
-        ],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await
-    .map_err(map_scope_error)?;
-    let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
-        gh_unreadable(
-            "the project fields",
-            format!("could not parse the project's fields: {e}"),
-        )
-    })?;
-    Ok(parse_project_fields(&value))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,18 +294,6 @@ mod tests {
             {"__typename":"ProjectV2ItemFieldDateValue", "field":{"id":"due","name":"Due","dataType":"DATE","isIssueField":false}, "date":"2026-09-12"},
             {"__typename":"ProjectV2ItemFieldIterationValue", "field":{"id":"sprint","name":"Sprint","dataType":"ITERATION","isIssueField":false}, "title":"Sprint 1","startDate":"2026-09-01","duration":14}
         ])
-    }
-
-    fn field_defs() -> Value {
-        json!({"data":{"node":{"fields":{"nodes":[
-            {"__typename":"ProjectV2SingleSelectField","id":"status","name":"Status","dataType":"SINGLE_SELECT","isIssueField":true,"options":[{"id":"done","name":"Done","color":"GREEN","description":"Delivered"}]},
-            {"__typename":"ProjectV2MultiSelectField","id":"teams","name":"Teams","dataType":"MULTI_SELECT","isIssueField":false,"multiSelectOptions":[{"id":"web","name":"Web","color":"BLUE","description":"Browser"}]},
-            {"__typename":"ProjectV2IterationField","id":"sprint","name":"Sprint","dataType":"ITERATION","configuration":{"iterations":[{"id":"next","title":"Next","startDate":"2026-09-15","duration":14}],"completedIterations":[{"id":"past","title":"Past","startDate":"2026-09-01","duration":14}]}},
-            {"__typename":"ProjectV2Field","id":"notes","name":"Notes","dataType":"TEXT","isIssueField":false},
-            {"__typename":"ProjectV2Field","id":"points","name":"Points","dataType":"NUMBER","isIssueField":false},
-            {"__typename":"ProjectV2Field","id":"due","name":"Due","dataType":"DATE","isIssueField":true},
-            {"__typename":"ProjectV2Field","id":"labels","name":"Labels","dataType":"LABELS"}
-        ]}}}})
     }
 
     fn assert_keys(value: &Value, expected: &[&str]) {
@@ -550,35 +356,6 @@ mod tests {
         ];
         for (value, (kind, keys)) in values.iter().zip(expected) {
             let wire = serde_json::to_value(value).expect("field value serializes");
-            assert_keys(&wire, keys);
-            assert_eq!(wire["kind"], kind);
-        }
-    }
-
-    #[test]
-    fn field_definition_wire_shapes_are_camel_case() {
-        let defs = parse_project_fields(&field_defs());
-        assert_eq!(defs.len(), 7);
-        let expected: [(&str, &[&str]); 7] = [
-            (
-                "singleSelect",
-                &["id", "isIssueField", "kind", "name", "options"],
-            ),
-            (
-                "multiSelect",
-                &["id", "isIssueField", "kind", "name", "options"],
-            ),
-            (
-                "iteration",
-                &["completedIterations", "id", "iterations", "kind", "name"],
-            ),
-            ("text", &["id", "isIssueField", "kind", "name"]),
-            ("number", &["id", "isIssueField", "kind", "name"]),
-            ("date", &["id", "isIssueField", "kind", "name"]),
-            ("system", &["dataType", "id", "kind", "name"]),
-        ];
-        for (def, (kind, keys)) in defs.iter().zip(expected) {
-            let wire = serde_json::to_value(def).expect("field definition serializes");
             assert_keys(&wire, keys);
             assert_eq!(wire["kind"], kind);
         }
@@ -721,13 +498,41 @@ mod tests {
         ] {
             assert!(parse_item_field_values(&response, "issue").is_empty());
         }
-        for response in [
-            json!({"data":{"node":{"fields":{"nodes":[]}}}}),
-            json!({"data":{"node":{"fields":null}}}),
-            json!({"data":{"node":null}}),
-            Value::Null,
-        ] {
-            assert!(parse_project_fields(&response).is_empty());
+    }
+
+    #[test]
+    fn numbers_distinguish_explicit_zero_from_unset_values() {
+        for bridge in [false, true] {
+            let typename = if bridge {
+                "IssueFieldNumberValue"
+            } else {
+                "ProjectV2ItemFieldNumberValue"
+            };
+            for (payload, expected) in [
+                (
+                    json!({"number":0.0}),
+                    json!({"kind":"number","fieldId":"points","fieldName":"Points","number":0.0,"isIssueField":bridge}),
+                ),
+                (
+                    json!({"number":null}),
+                    json!({"kind":"unknown","fieldName":"Points"}),
+                ),
+                (json!({}), json!({"kind":"unknown","fieldName":"Points"})),
+            ] {
+                let mut value = payload;
+                value["__typename"] = json!(typename);
+                let mut node = if bridge {
+                    json!({"__typename":"ProjectV2ItemIssueFieldValue","issueFieldValue":value})
+                } else {
+                    value
+                };
+                node["field"] = json!({"id":"points","name":"Points","dataType":"NUMBER"});
+                assert_eq!(
+                    serde_json::to_value(parse_field_value(&node))
+                        .expect("numeric value serializes"),
+                    expected
+                );
+            }
         }
     }
 
@@ -757,84 +562,11 @@ mod tests {
             assert_eq!(wire, json!({"kind":"unknown","fieldName":""}));
         }
         assert!(matches!(
-            parse_field_value(&json!({"__typename":"ProjectV2ItemFieldNumberValue","number":null})),
+            parse_field_value(
+                &json!({"__typename":"ProjectV2ItemFieldNumberValue","field":{"dataType":"NUMBER"},"number":null})
+            ),
             ProjectFieldValue::Unknown { .. }
         ));
-        let response = json!({"data":{"node":{"fields":{"nodes":[
-            {"id":"select","dataType":"SINGLE_SELECT","options":[{"id":"option","description":null}]},
-            {"id":"multi","dataType":"MULTI_SELECT","multiSelectOptions":null},
-            {"id":"iteration","dataType":"ITERATION","configuration":null},
-            {"id":"unknown"}, {"id":null}, null
-        ]}}}});
-        let defs = serde_json::to_value(parse_project_fields(&response))
-            .expect("partial definitions serialize");
-        assert_eq!(defs.as_array().expect("definitions array").len(), 4);
-        assert_eq!(defs[0]["options"][0]["description"], "");
-        assert_eq!(defs[1]["options"], json!([]));
-        assert_eq!(defs[2]["iterations"], json!([]));
-        assert_eq!(defs[2]["completedIterations"], json!([]));
-        assert_eq!(defs[3]["dataType"], "");
-    }
-
-    #[test]
-    fn definitions_keep_options_and_both_iteration_lists() {
-        let defs = serde_json::to_value(parse_project_fields(&field_defs()))
-            .expect("definitions serialize");
-        assert_eq!(
-            defs[0]["options"],
-            json!([{"id":"done","name":"Done","color":"GREEN","description":"Delivered"}])
-        );
-        assert_eq!(defs[0]["isIssueField"], true);
-        assert_eq!(
-            defs[1]["options"],
-            json!([{"id":"web","name":"Web","color":"BLUE","description":"Browser"}])
-        );
-        assert_eq!(
-            defs[2]["iterations"],
-            json!([{"id":"next","title":"Next","startDate":"2026-09-15","duration":14}])
-        );
-        assert_eq!(
-            defs[2]["completedIterations"],
-            json!([{"id":"past","title":"Past","startDate":"2026-09-01","duration":14}])
-        );
-        assert_keys(
-            &defs[0]["options"][0],
-            &["color", "description", "id", "name"],
-        );
-        assert_keys(
-            &defs[2]["iterations"][0],
-            &["duration", "id", "startDate", "title"],
-        );
-    }
-
-    #[test]
-    fn system_and_future_data_types_stay_readable() {
-        for data_type in [
-            "ASSIGNEES",
-            "LABELS",
-            "MILESTONE",
-            "REPOSITORY",
-            "TITLE",
-            "TRACKS",
-            "TRACKED_BY",
-            "ISSUE_TYPE",
-            "PARENT_ISSUE",
-            "SUB_ISSUES_PROGRESS",
-            "CREATED",
-            "UPDATED",
-            "CLOSED",
-            "LINKED_PULL_REQUESTS",
-            "REVIEWERS",
-            "FUTURE_TYPE",
-        ] {
-            let response = json!({"data":{"node":{"fields":{"nodes":[{"__typename":"ProjectV2Field","id":"field","name":"System","dataType":data_type}]}}}});
-            let defs = serde_json::to_value(parse_project_fields(&response))
-                .expect("system field serializes");
-            assert_eq!(
-                defs,
-                json!([{"kind":"system","id":"field","name":"System","dataType":data_type}])
-            );
-        }
     }
 
     fn assert_query_fields(query: &str, paths: &[&str]) {
@@ -903,40 +635,6 @@ mod tests {
                 assert!(query.contains(fragment));
             }
         }
-    }
-
-    #[test]
-    fn every_definition_pointer_names_a_field_the_query_actually_asks_for() {
-        let query = project_fields_query();
-        assert_query_fields(
-            &query,
-            &[
-                PROJECT_FIELDS_POINTER,
-                "/id",
-                "/name",
-                "/dataType",
-                "/isIssueField",
-                "/options/id",
-                "/options/name",
-                "/options/color",
-                "/options/description",
-                "/multiSelectOptions/id",
-                "/multiSelectOptions/name",
-                "/multiSelectOptions/color",
-                "/multiSelectOptions/description",
-                "/configuration/iterations/id",
-                "/configuration/iterations/title",
-                "/configuration/iterations/startDate",
-                "/configuration/iterations/duration",
-                "/configuration/completedIterations/id",
-                "/configuration/completedIterations/title",
-                "/configuration/completedIterations/startDate",
-                "/configuration/completedIterations/duration",
-            ],
-        );
-        assert!(query.starts_with("query($id:ID!)"));
-        assert!(query.contains("node(id:$id)"));
-        assert!(query.contains("fields(first:50)"));
     }
 
     #[test]
