@@ -3,7 +3,7 @@ packages:
 
 # Don't install versions published less than 3 days ago (4320 minutes), a
 # supply-chain safety delay. Dependabot's cooldown in .github/dependabot.yml
-# is the same idea on its own longer schedule — the two are not kept in step.
+# is the same idea on its own never-shorter schedule, not kept in step with it.
 minimumReleaseAge: 4320
 
 allowBuilds:

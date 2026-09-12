@@ -46,6 +46,7 @@ import {
 } from "./check-rust-invariants.mjs";
 import {
   crateNameFor,
+  declaredNpmAliases,
   declaredNpmPackages,
   duplicateCrateNames,
   mismatchedPairs,
@@ -2277,6 +2278,79 @@ test("declaredNpmPackages reads both dependency blocks, scoped to @tauri-apps", 
   // A manifest with neither block is not a crash — the arm simply expects
   // nothing.
   assert.deepEqual(declaredNpmPackages("{}"), []);
+});
+
+// One class, two cells: a declared Tauri package that never reaches `declared`
+// is a comparison the gate silently skips, and it can be lost either by the
+// BLOCK it sits in or by the KEY it is declared under. A new input path added
+// to the manifest scan belongs here.
+
+test("declaredNpmPackages counts optional deps and exempts peers", () => {
+  const pkg = JSON.stringify({
+    dependencies: { "@tauri-apps/api": "^2.11.1" },
+    optionalDependencies: { "@tauri-apps/plugin-shell": "^2.4.0" },
+    // pnpm does not install an app's peers, so flagging one would redden a
+    // required check over a package that was never meant to be there.
+    peerDependencies: { "@tauri-apps/plugin-fs": "^2.5.0" },
+  });
+  assert.deepEqual(declaredNpmPackages(pkg), [
+    "@tauri-apps/api",
+    "@tauri-apps/plugin-shell",
+  ]);
+});
+
+test("declaredNpmPackages resolves an npm: alias to the real package name", () => {
+  // The alias hides the package on BOTH sides at once: the key carries no
+  // `@tauri-apps/` prefix, and the lockfile's root importer keys the entry by
+  // the alias — so without reading the value, nothing is ever compared.
+  const pkg = JSON.stringify({
+    dependencies: {
+      "@tauri-apps/api": "^2.11.1",
+      "tauri-store-alias": "npm:@tauri-apps/plugin-store@^2.4.4",
+      "other-alias": "npm:left-pad@1.3.0",
+    },
+  });
+  assert.deepEqual(declaredNpmPackages(pkg), [
+    "@tauri-apps/api",
+    "@tauri-apps/plugin-store",
+  ]);
+  assert.deepEqual(
+    [...declaredNpmAliases(pkg)],
+    [["@tauri-apps/plugin-store", "tauri-store-alias"]],
+  );
+  // The mirror case keeps its scoped KEY, so the importer entry still matches
+  // and the garbage version lands in `mismatched` rather than here: it is a
+  // declaration under its own name, not an alias.
+  const forked = JSON.stringify({
+    dependencies: { "@tauri-apps/plugin-store": "npm:fork@1.0.0" },
+  });
+  assert.deepEqual(declaredNpmPackages(forked), ["@tauri-apps/plugin-store"]);
+  assert.deepEqual([...declaredNpmAliases(forked)], []);
+});
+
+test("an aliased declaration reaches the unpaired arm", () => {
+  // The end of the chain both cells feed: the name is declared, the crate is
+  // there, no pair can form under the alias — so the gate reports rather than
+  // passing over it.
+  const pkg = JSON.stringify({
+    dependencies: {
+      "@tauri-apps/api": "^2.11.1",
+      "tauri-store-alias": "npm:@tauri-apps/plugin-store@^2.4.4",
+    },
+  });
+  const decided = verdict(
+    new Map([
+      ["tauri", "2.11.5"],
+      ["tauri-plugin-store", "2.4.4"],
+    ]),
+    // What pnpm writes for an aliased install: the alias is the importer key.
+    new Map([
+      ["@tauri-apps/api", "2.11.1"],
+      ["tauri-store-alias", "2.4.4"],
+    ]),
+    { declared: declaredNpmPackages(pkg) },
+  );
+  assert.deepEqual(decided.unpaired, ["@tauri-apps/plugin-store"]);
 });
 
 test("crateNameFor inverts the pairing and stops at the npm-only package", () => {

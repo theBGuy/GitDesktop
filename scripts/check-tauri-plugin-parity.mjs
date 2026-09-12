@@ -64,6 +64,37 @@ export function duplicateCrateNames(cargoLockText) {
   return duplicated;
 }
 
+// pnpm installs all three of these; peerDependencies is deliberately absent,
+// because an app does not install its peers by default and flagging one would
+// redden a required check over a package that was never meant to be present.
+const DECLARED_BLOCKS = ["dependencies", "devDependencies", "optionalDependencies"];
+
+// An npm: alias carries the real package name in the VALUE, so the key alone
+// cannot answer what is installed: `"x": "npm:@tauri-apps/plugin-store@^2.4.4"`.
+const ALIASED_NAME = /^npm:(@tauri-apps\/[^@]+)/;
+
+/**
+ * Declared `@tauri-apps/*` name → the package.json key it is declared under
+ * (itself, unless an npm: alias renamed it). A declared package that never
+ * reaches this map is a comparison the gate skips in silence, so both the key
+ * and the value are read.
+ */
+function tauriEntries(packageJsonText) {
+  const pkg = JSON.parse(packageJsonText);
+  const entries = new Map();
+  for (const block of DECLARED_BLOCKS) {
+    for (const [key, value] of Object.entries(pkg[block] ?? {})) {
+      if (key.startsWith("@tauri-apps/")) {
+        entries.set(key, key);
+        continue;
+      }
+      const aliased = typeof value === "string" ? ALIASED_NAME.exec(value) : null;
+      if (aliased) entries.set(aliased[1], key);
+    }
+  }
+  return entries;
+}
+
 /**
  * The `@tauri-apps/*` packages package.json declares. This is the robust half
  * of the expectation — real JSON, against a lockfile scan that depends on an
@@ -71,11 +102,18 @@ export function duplicateCrateNames(cargoLockText) {
  * gate owes.
  */
 export function declaredNpmPackages(packageJsonText) {
-  const pkg = JSON.parse(packageJsonText);
-  return [
-    ...Object.keys(pkg.dependencies ?? {}),
-    ...Object.keys(pkg.devDependencies ?? {}),
-  ].filter((name) => name.startsWith("@tauri-apps/"));
+  return [...tauriEntries(packageJsonText).keys()];
+}
+
+/**
+ * Declared packages an npm: alias renamed, real name → alias key. The alias is
+ * what the lockfile's root importer keys, so no pair can form for one — the
+ * gate cannot version-verify an aliased Tauri package and says so.
+ */
+export function declaredNpmAliases(packageJsonText) {
+  return new Map(
+    [...tauriEntries(packageJsonText)].filter(([name, key]) => name !== key),
+  );
 }
 
 /**
@@ -194,12 +232,15 @@ function main() {
   let npm;
   let duplicates;
   let declared;
+  let aliases;
   try {
     const cargoLock = readFileSync(join(root, CARGO_LOCK), "utf8");
     crates = parseCrateVersions(cargoLock);
     duplicates = duplicateCrateNames(cargoLock);
     npm = parseNpmVersions(readFileSync(join(root, PNPM_LOCK), "utf8"));
-    declared = declaredNpmPackages(readFileSync(join(root, PACKAGE_JSON), "utf8"));
+    const packageJson = readFileSync(join(root, PACKAGE_JSON), "utf8");
+    declared = declaredNpmPackages(packageJson);
+    aliases = declaredNpmAliases(packageJson);
   } catch (err) {
     process.stderr.write("tauri-parity: FAIL — cannot read a manifest\n");
     process.stderr.write(`    ${err.message}\n`);
@@ -250,15 +291,20 @@ function main() {
     );
     for (const name of unpaired) {
       const crate = crateNameFor(name);
-      const missing = crates.has(crate)
-        ? `${PNPM_LOCK} carries no root-importer entry for it`
-        : `${CARGO_LOCK} carries no \`${crate}\` block`;
+      let missing;
+      if (aliases.has(name)) {
+        missing = `installed under the alias \`${aliases.get(name)}\`, which no version comparison can reach`;
+      } else if (crates.has(crate)) {
+        missing = `${PNPM_LOCK} carries no root-importer entry for it`;
+      } else {
+        missing = `${CARGO_LOCK} carries no \`${crate}\` block`;
+      }
       process.stderr.write(
         `  ${name} (${PACKAGE_JSON}) <-> ${crate} — ${missing}\n`,
       );
     }
     process.stderr.write(
-      "    supply the missing half, or drop the declaration if the dependency is genuinely gone; a half that IS present means the block shape this gate reads has changed\n",
+      "    supply the missing half, drop the declaration if the dependency is genuinely gone, or declare an aliased package under its real name; a half that IS present means the block shape this gate reads has changed\n",
     );
     process.exitCode = 1;
     return;
