@@ -383,10 +383,10 @@ function notifyReviewDone(
           ref: target.ref,
           lens: target.lens,
         },
-        // The lens is in the dedupe key because a fork's origin and upstream PRs share
-        // a number: without it, two reviews settling in the same window collapse into
-        // one notification.
-        dedupeKey: `review:${target.kind}:${target.repoPath}:${target.lens}:${target.ref}:${ok}`,
+        // Mode and lens both key it: a security audit queues behind a general run on the
+        // same target, and a fork's origin and upstream PRs share a number. Without
+        // either, two reviews settling in the same window collapse into one notification.
+        dedupeKey: `review:${mode}:${target.kind}:${target.repoPath}:${target.lens}:${target.ref}:${ok}`,
       },
       os: { title: headline, body: subtitle, focus: "unfocused" },
     });

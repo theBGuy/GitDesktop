@@ -19,10 +19,10 @@ export interface EmitOsPing {
   focus: "unfocused" | "always";
 }
 
-/** When each dedupe key last claimed the window. Held here rather than left to the
- *  inbox's own dedupe because that one can only suppress the row, never the OS ping.
- *  A key is claimed synchronously and RELEASED again if the gates end up delivering
- *  nothing, so a suppressed no-op can't shadow the next real event. */
+/** When each `source:repoPath:producerKey` last claimed the window. Held here rather
+ *  than left to the inbox's own dedupe because that one can only suppress the row,
+ *  never the OS ping. A key is claimed synchronously and RELEASED again if the gates
+ *  end up delivering nothing, so a suppressed no-op can't shadow the next event. */
 const lastEmit = new Map<string, number>();
 /** Bound on a long session's key churn; the oldest delivered key is evicted first
  *  (insertion order tracks delivery time, since every write re-inserts). */
@@ -71,7 +71,12 @@ export function emitNotification(input: {
   os?: EmitOsPing;
 }): void {
   const { source, row, os } = input;
-  const { dedupeKey } = row;
+  // Producer keys are repo-unqualified (`opened:42`), so two repos raising the same
+  // event would collapse into one. Qualify ONCE here and pass the same key down, so
+  // the inbox backstop dedupes on exactly what this register claimed.
+  const dedupeKey = row.dedupeKey
+    ? `${source}:${row.repoPath}:${row.dedupeKey}`
+    : undefined;
   // Claimed before the first await, so two same-tick fires of one transition can't
   // both get through and double-deliver on BOTH channels.
   const claimedAt = Date.now();
@@ -86,7 +91,9 @@ export function emitNotification(input: {
       override,
       source,
     );
-    if (channels.inApp) pushNotification(row);
+    if (channels.inApp) {
+      pushNotification(dedupeKey ? { ...row, dedupeKey } : row);
+    }
     // Hiding AI features mutes the OS ping for AI-minted kinds — a hidden feature
     // must not tap you on the shoulder — but never the inbox row above, which the
     // dock filters at render time.

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { Fragment, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { Button } from "@/components/ui/button";
@@ -13,11 +13,13 @@ import {
   MatrixCell,
   MatrixTable,
   notificationRows,
+  notificationsDraftOutOfSync,
   notificationsSignature,
   overrideCount,
   RowLabelCell,
   SOURCE_DESCRIPTIONS,
   SOURCE_LABELS,
+  useNotificationsDraft,
   useRepoNotificationsDialog,
   WatchRow,
 } from "@/features/notifications/RepoNotificationsDialog";
@@ -62,22 +64,25 @@ export const NotificationsSection = withForm({
     );
     const checksOff = !sources.prChecks.inApp && !sources.prChecks.os;
 
-    // Per-repo overrides are minted against the SAVED matrix, so an unsaved
-    // draft would let a cell "change" to a value the dialog already reads as
-    // global and store nothing. Only the notifications slice matters — the
-    // dialog reads no other field — and the selector returns the BOOLEAN so a
-    // keystroke elsewhere in the form can't re-render this panel.
+    // Only the notifications slice matters — the dialog reads no other field —
+    // so the selector narrows to it and a keystroke elsewhere in the form can't
+    // re-render this panel.
     const savedNotifications = useSettings().data?.notifications;
-    const savedSignature = savedNotifications
-      ? notificationsSignature(savedNotifications)
-      : null;
-    const draftOutOfSync = useSelector(
-      form.store,
-      (s) =>
-        savedSignature !== null &&
-        notificationsSignature(s.values.notifications) !== savedSignature,
+    const draftSignature = useSelector(form.store, (s) =>
+      notificationsSignature(s.values.notifications),
     );
-    const overrideReason = draftOutOfSync
+    // Published for the routes into the dialog that render outside this form
+    // (the command palette). Never cleared on unmount: a panel switch leaves
+    // the draft live in the form, so App retires it when Settings closes.
+    const publishDraft = useNotificationsDraft((s) => s.publish);
+    useEffect(() => {
+      publishDraft(draftSignature);
+    }, [draftSignature, publishDraft]);
+
+    const overrideReason = notificationsDraftOutOfSync(
+      draftSignature,
+      savedNotifications,
+    )
       ? "Save or discard your changes first — repository overrides start from the saved defaults."
       : null;
 
@@ -269,30 +274,37 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
     : [];
 
   // Identities resolve over IPC, so the mapping is a query rather than render
-  // work; `repoIdentity` memoizes per path, so a repeat costs nothing. Gated on
-  // the list actually rendering.
-  const resolvedPaths = useQuery({
-    queryKey: ["notification-override-repo-paths", otherKeys, recentPaths],
-    queryFn: async () => {
-      const ids = await Promise.all(recentPaths.map((p) => repoIdentity(p)));
-      const byIdentity = new Map(ids.map((id, i) => [id, recentPaths[i]]));
-      // Windows paths are case-insensitive; a legacy raw-path key is compared
-      // that way, exactly as the recent-repo writers dedupe them.
-      const byPath = new Map(recentPaths.map((p) => [p.toLowerCase(), p]));
-      return Object.fromEntries(
-        otherKeys.map((key) => [
-          key,
-          byIdentity.get(key) ?? byPath.get(key.toLowerCase()) ?? null,
-        ]),
-      );
-    },
+  // work; `repoIdentity` memoizes per path, so a repeat costs nothing. Keyed on
+  // the RECENT REPOS alone — what it resolves doesn't depend on which overrides
+  // exist, and carrying the key set would mint a fresh query on every Clear,
+  // flashing the list back to skeletons and unmounting the row focus was headed
+  // for. Returns a plain array aligned with `recentPaths`; the lookups are built
+  // at render, since structural sharing only recurses plain objects and arrays.
+  const recentIdentities = useQuery({
+    queryKey: ["notification-override-repo-identities", recentPaths],
+    queryFn: () => Promise.all(recentPaths.map((p) => repoIdentity(p))),
     enabled: otherKeys.length > 0,
     staleTime: Number.POSITIVE_INFINITY,
+    // Local git reads: the default online mode PARKS the query while the OS
+    // reports no connection, leaving this list on skeletons forever.
+    networkMode: "always",
   });
+
+  const identities = recentIdentities.data;
+  const byIdentity = new Map(
+    (identities ?? []).map((id, i) => [id, recentPaths[i]]),
+  );
+  // Windows paths are case-insensitive; a legacy raw-path key is compared that
+  // way, exactly as the recent-repo writers dedupe them. Maps, not objects: an
+  // override key is hand-editable, and "__proto__"/"toString" would resolve up
+  // an object's prototype chain to something that is not a path.
+  const byPath = new Map(recentPaths.map((p) => [p.toLowerCase(), p]));
 
   const rows: OverrideRow[] = otherKeys
     .map((key) => {
-      const path = resolvedPaths.data?.[key] ?? null;
+      const path = identities
+        ? (byIdentity.get(key) ?? byPath.get(key.toLowerCase()) ?? null)
+        : null;
       return {
         key,
         path,
@@ -310,19 +322,28 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
   });
 
   const rowSignature = otherKeys.join("|");
-  // biome-ignore lint/correctness/useExhaustiveDependencies: rowSignature is the commit trigger — the rows must already be gone before focus moves
+  // Whether a destination can exist in this commit: either the list is gone
+  // (footer fallback) or its rows are actually rendered.
+  const focusTargetReachable =
+    otherKeys.length === 0 || !recentIdentities.isPending;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: rowSignature is the commit trigger, not a value the body reads
   useLayoutEffect(() => {
     const target = pendingFocus.current;
-    if (target === null) return;
+    // RETAINED, never consumed, while the list is between renders: focusing a
+    // DOM that isn't there drops focus to body, and this effect gets no second
+    // chance once the aim is spent.
+    if (target === null || !focusTargetReachable) return;
     pendingFocus.current = null;
-    if (target === "") {
-      footerRef.current?.querySelector("button")?.focus();
-      return;
-    }
-    listRef.current
-      ?.querySelector<HTMLElement>(`[data-row="${CSS.escape(target)}"]`)
-      ?.focus();
-  }, [rowSignature]);
+    const row =
+      target === ""
+        ? null
+        : (listRef.current?.querySelector<HTMLElement>(
+            `[data-row="${CSS.escape(target)}"]`,
+          ) ?? null);
+    // The aimed row can be gone for reasons this component didn't cause (another
+    // window's write); the footer control bounds the retention.
+    (row ?? footerRef.current?.querySelector("button"))?.focus();
+  }, [rowSignature, focusTargetReachable]);
 
   async function clearRow(row: OverrideRow) {
     const ok = await useConfirm.getState().ask({
@@ -387,7 +408,7 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
           <h3 className="text-xs font-medium">
             Overrides in other repositories
           </h3>
-          {resolvedPaths.isPending ? (
+          {recentIdentities.isPending ? (
             <ListRowSkeletons
               rows={Math.min(otherKeys.length, 4)}
               lines={1}

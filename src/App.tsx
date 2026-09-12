@@ -14,7 +14,9 @@ import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
 import { MyWorkScreen } from "@/features/mywork/MyWorkScreen";
 import {
+  notificationsDraftOutOfSync,
   RepoNotificationsDialogHost,
+  useNotificationsDraft,
   useRepoNotificationsDialog,
 } from "@/features/notifications/RepoNotificationsDialog";
 import { RepositoryView } from "@/features/repository/RepositoryView";
@@ -55,6 +57,8 @@ function App() {
   const toggleActivity = useUiStore((s) => s.toggleActivity);
   const repoPath = useUiStore((s) => s.repoPath);
   const openRepoNotifications = useRepoNotificationsDialog((s) => s.open);
+  const publishedNotificationsDraft = useNotificationsDraft((s) => s.signature);
+  const clearNotificationsDraft = useNotificationsDraft((s) => s.clear);
   const gitInstalled = useGitInstalled();
   const queryClient = useQueryClient();
   const settings = useSettings();
@@ -68,6 +72,18 @@ function App() {
   // Screens with their own modals (e.g. Explore's clone dialog) register there.
   const screenModalOpen = useModalGateOpen();
   const dialogOpen = cloneOpen || createOpen || screenModalOpen;
+
+  // A mounted settings form publishes its notifications draft; the verdict is
+  // screen-scoped, so leaving Settings retires it. The section can't do this
+  // itself — it unmounts on every panel switch, while the draft it published is
+  // still live in the form.
+  useEffect(() => {
+    if (view !== "settings") clearNotificationsDraft();
+  }, [view, clearNotificationsDraft]);
+  const notificationsDraftHeld = notificationsDraftOutOfSync(
+    publishedNotificationsDraft,
+    settings.data?.notifications,
+  );
 
   // The dialogs live above the view switch, so navigation doesn't unmount them
   // (e.g. the clone dialog's "Open Settings → Accounts") — close them when the
@@ -203,15 +219,25 @@ function App() {
   useHotkeyAction("open-notifications-settings", () =>
     openSettings("notifications"),
   );
-  // The palette closes before it dispatches, so the repo is re-read at fire
-  // time rather than captured — a switch between the two is still honored.
+  // The palette closes before it dispatches, so both the repo and the settings
+  // draft are re-read at fire time rather than captured — the dialog's
+  // mint-on-match baseline is the SAVED matrix, so it must not open over a
+  // settings form still holding notification edits.
   useHotkeyAction(
     "open-repo-notification-settings",
     () => {
       const path = useUiStore.getState().repoPath;
-      if (path) openRepoNotifications(path);
+      if (!path) return;
+      if (
+        notificationsDraftOutOfSync(
+          useNotificationsDraft.getState().signature,
+          settings.data?.notifications,
+        )
+      )
+        return;
+      openRepoNotifications(path);
     },
-    Boolean(repoPath),
+    Boolean(repoPath) && !notificationsDraftHeld,
   );
   useHotkeyAction("show-help", openHelp);
   useHotkeyAction("open-explore", openExplore);

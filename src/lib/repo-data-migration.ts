@@ -90,7 +90,14 @@ const IDENTITY_STORES: IdentityStore[] = [
   { file: "repo-lens.json", merge: "keep-new" },
   { file: "conversation-filters.json", merge: "keep-new" },
   { file: "branch-rules.json", merge: "keep-new" },
-  { file: "notification-overrides.json", merge: "keep-new" },
+  {
+    // The whole repo map lives under one store key, so the nested walk addresses
+    // it with an identity getMap: `config` IS the map. No shape check here — the
+    // walker narrows `config` before the call and re-checks the result after.
+    file: "notification-overrides.json",
+    merge: "keep-new",
+    nested: { configKey: "overrides", getMap: (config) => config },
+  },
   {
     file: "automations.json",
     merge: "keep-new",

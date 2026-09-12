@@ -14,6 +14,9 @@ export function useNotificationOverrides() {
   return useQuery({
     queryKey: notificationOverridesKey,
     queryFn: loadNotificationOverrides,
+    // Local plugin-store read: the default online mode PARKS it while the OS
+    // reports no connection, and every override-gated surface wedges.
+    networkMode: "always",
   });
 }
 
@@ -34,6 +37,8 @@ export function useSaveRepoNotificationOverride(repoPath: string) {
   return useMutation({
     mutationFn: (override: RepoNotificationOverride) =>
       saveRepoNotificationOverride(repoPath, override),
+    // Local plugin-store write — never park it offline (see the query above).
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: notificationOverridesKey }),
   });
@@ -43,6 +48,8 @@ export function useClearNotificationOverride() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (repoKey: string) => clearNotificationOverride(repoKey),
+    // Local plugin-store write — never park it offline (see the query above).
+    networkMode: "always",
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: notificationOverridesKey }),
   });

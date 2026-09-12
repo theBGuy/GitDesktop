@@ -285,6 +285,10 @@ export function WatchRow(props: ComponentProps<typeof WatchSelect>) {
 interface RepoNotificationsDialogState {
   /** Repo path whose notifications are open, or null when closed. */
   repoPath: string | null;
+  /** Bumped by every `open()`. An awaited save that outlived its own dialog
+   *  compares this to tell "still my dialog" from "a later one for the same
+   *  repo" — the repo path alone can't, and the two hold different edits. */
+  generation: number;
   open: (repoPath: string) => void;
   close: () => void;
 }
@@ -295,11 +299,91 @@ interface RepoNotificationsDialogState {
 export const useRepoNotificationsDialog =
   create<RepoNotificationsDialogState>()((set) => ({
     repoPath: null,
-    open: (repoPath) => set({ repoPath }),
+    generation: 0,
+    open: (repoPath) =>
+      set((s) => ({ repoPath, generation: s.generation + 1 })),
     close: () => set({ repoPath: null }),
   }));
 
+interface NotificationsDraftState {
+  /** Fingerprint of the notifications slice a MOUNTED settings form holds, or
+   *  null when no settings screen is on. */
+  signature: string | null;
+  publish: (signature: string) => void;
+  clear: () => void;
+}
+
+/** What a live settings form is holding for notifications, so routes into the
+ *  per-repo dialog that render OUTSIDE the form (the command palette) can see
+ *  it. Screen-scoped, not panel-scoped: the draft survives a panel switch, so
+ *  the section never clears on unmount and App retires it on leaving Settings —
+ *  a flag that outlived its screen would hold the palette action shut forever. */
+export const useNotificationsDraft = create<NotificationsDraftState>()(
+  (set) => ({
+    signature: null,
+    publish: (signature) => set({ signature }),
+    clear: () => set({ signature: null }),
+  }),
+);
+
+/**
+ * Whether a live settings form holds notification edits the store hasn't taken
+ * yet. Per-repo overrides are minted against the SAVED matrix, so opening the
+ * dialog over an unsaved draft lets a user "change" a cell the dialog already
+ * reads as global — it stores nothing, and the pending Save then moves the
+ * global underneath it.
+ *
+ * The published signature carries the draft it was produced under and is
+ * compared against the live saved value rather than cleared by every writer, so
+ * a Save from another panel resolves it on its own. A Discard from another
+ * panel can't be seen — the section is unmounted — and leaves the verdict set
+ * until the screen closes: the fail-safe direction, since the section's own
+ * Customize button stays correct and reachable.
+ */
+export function notificationsDraftOutOfSync(
+  published: string | null,
+  saved: NotificationSettings | undefined,
+): boolean {
+  if (published === null || saved === undefined) return false;
+  return published !== notificationsSignature(saved);
+}
+
 const EMPTY_OVERRIDE: RepoNotificationOverride = {};
+
+/** Which body the dialog shows. A failed overrides load is its OWN state, never
+ *  a slow one: the query settles with no data, so a loading placeholder would
+ *  spin forever and an editable matrix would edit against nothing. */
+function bodyState({
+  error,
+  loaded,
+  identityPending,
+}: {
+  error: boolean;
+  loaded: boolean;
+  /** The repo's identity keys the lookup, so an editable matrix has to wait for
+   *  it — an identity-keyed override is invisible until it resolves. */
+  identityPending: boolean;
+}): "error" | "loading" | "ready" {
+  if (error) return "error";
+  if (!loaded || identityPending) return "loading";
+  return "ready";
+}
+
+/** The overrides store failed to load. Offers the retry rather than a dead
+ *  dialog: the store's loader doesn't memoize its rejection, so a storage
+ *  hiccup can genuinely clear. */
+function OverridesLoadFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted-foreground">
+        Couldn't load this repository's overrides.
+      </p>
+      <Button variant="outline" size="xs" onClick={onRetry}>
+        Retry
+      </Button>
+    </div>
+  );
+}
 
 function sortedJson(value: unknown): string {
   return JSON.stringify(value, (_key, val) =>
@@ -398,22 +482,41 @@ function RepoNotificationsBody({
   // select all point at it rather than each repeating the sentence.
   const mutedReasonId = useId();
   // Worktree-stable identity, so a linked worktree edits the same entry as its
-  // main checkout; the raw path stands in while it resolves.
-  const identity = useRepoIdentity(repoPath).data;
+  // main checkout. The raw path is the SETTLED fallback (the resolver returns it
+  // when git can't answer), never a stand-in to edit against while the lookup is
+  // still pending — see the skeleton gate below.
+  const identityQuery = useRepoIdentity(repoPath);
+  const identity = identityQuery.data;
 
+  // undefined until the stored overrides are actually in hand. EMPTY is only
+  // honest once the load SUCCEEDED and found nothing: a failed load standing in
+  // as "no overrides" would let a Save replace the repo's real entry.
   const saved = overrides.data
     ? (overrideEntry(overrides.data, identity ?? repoPath, repoPath) ??
       EMPTY_OVERRIDE)
-    : EMPTY_OVERRIDE;
+    : undefined;
 
   // null = untouched, so the draft follows the saved override (and any refetch
   // of it) until the user's first edit — no seeding effect to race the query.
   const [edited, setEdited] = useState<RepoNotificationOverride | null>(null);
   useSeedOnOpen(open, () => setEdited(null));
 
-  const draft = edited ?? saved;
-  const dirty = edited !== null && sortedJson(edited) !== sortedJson(saved);
   const global = settings.data?.notifications;
+  // Which of the three bodies renders. Every editable path hangs off "ready", so
+  // the baseline behind it is always a real one.
+  const state = bodyState({
+    error: overrides.isError,
+    loaded: global !== undefined && saved !== undefined,
+    identityPending: identityQuery.isPending,
+  });
+
+  // Render-only: the EMPTY tail feeds the derivations below, which are inert
+  // unless `state === "ready"`. The BASELINE `saved` above never falls back.
+  const draft = edited ?? saved ?? EMPTY_OVERRIDE;
+  const dirty =
+    edited !== null &&
+    saved !== undefined &&
+    sortedJson(edited) !== sortedJson(saved);
   const rows = notificationRows(aiEnabled);
   const muted = draft.muted === true;
   const mutedReason = muted
@@ -435,6 +538,9 @@ function RepoNotificationsBody({
   function patch(
     mutate: (current: RepoNotificationOverride) => RepoNotificationOverride,
   ) {
+    // No baseline, no edit: an override minted from a stand-in would be saved
+    // as the repo's whole entry.
+    if (saved === undefined) return;
     setEdited((current) => mutate(current ?? saved));
   }
 
@@ -481,10 +587,19 @@ function RepoNotificationsBody({
   }
 
   async function doSave() {
+    // Captured before the await: this save belongs to ONE opening of the dialog.
+    const savedGeneration = useRepoNotificationsDialog.getState().generation;
     try {
       await save.mutateAsync(draft);
+      // The toast is unconditional — the save landed either way. The close does
+      // not: it drives a SHARED store this continuation can outlive, and closing
+      // a dialog opened AFTER this save started throws away that dialog's edits
+      // (the next open reseeds the draft from disk). Same repo is not the same
+      // dialog, so the generation is what decides.
       toast.success("Repository notifications saved");
-      onClose();
+      const live = useRepoNotificationsDialog.getState();
+      if (live.repoPath === repoPath && live.generation === savedGeneration)
+        onClose();
     } catch (e) {
       toastError(e);
     }
@@ -492,14 +607,28 @@ function RepoNotificationsBody({
 
   const hasOverrides = muted || overrideCount(draft) > 0;
 
+  // Why Save is held, in precedence order. The error arm keeps it unreachable
+  // while there is no baseline to save against.
+  function saveBlockedReason(): string | null {
+    if (save.isPending) return "Saving…";
+    if (state === "error") return "Couldn't load this repository's overrides";
+    if (!dirty) return "No changes to save";
+    return null;
+  }
+  const saveReason = saveBlockedReason();
+
   return (
     <>
       {/* overflow-x-hidden alongside overflow-y-auto so the vertical scrollbar's
           width can't induce a phantom horizontal one. */}
       <div className="min-h-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto pr-1">
-        {!global || overrides.isPending ? (
-          <Skeleton className="h-40 w-full" />
-        ) : (
+        {state === "error" && (
+          <OverridesLoadFailed onRetry={() => overrides.refetch()} />
+        )}
+        {state === "loading" && <Skeleton className="h-40 w-full" />}
+        {/* `global !== undefined` re-narrows the type the discriminant already
+            guarantees; the matrix reads it on every row. */}
+        {state === "ready" && global !== undefined && (
           <>
             <label className="flex cursor-pointer items-center gap-2 text-xs">
               <Checkbox
@@ -589,8 +718,8 @@ function RepoNotificationsBody({
           // Button fills it to match the stretched Cancel beside it.
           className="w-full"
           onClick={doSave}
-          disabled={!dirty || save.isPending}
-          reason={save.isPending ? "Saving…" : "No changes to save"}
+          disabled={saveReason !== null}
+          reason={saveReason}
         >
           Save changes
         </DisabledReasonButton>
