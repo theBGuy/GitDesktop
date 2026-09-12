@@ -36,7 +36,7 @@ import {
 import { sectionFilePath } from "@/lib/git/diff-split";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { DiffStatEntry } from "@/lib/git/types";
-import { notifyIfUnfocused } from "@/lib/notify";
+import { emitNotification } from "@/lib/notifications/emit";
 import { listLocalPrs, reloadLocalPrs, updateLocalPr } from "@/lib/pulls/local";
 import {
   listReviews,
@@ -48,10 +48,7 @@ import {
 import { queryClient } from "@/lib/query-client";
 import { effectiveReviewAi, loadSettings } from "@/lib/settings/api";
 import { useConfirm } from "@/lib/stores/confirm";
-import {
-  type NotificationTarget,
-  pushNotification,
-} from "@/lib/stores/notifications";
+import type { NotificationTarget } from "@/lib/stores/notifications";
 import {
   hasLiveAutomationRun,
   type ReviewTarget,
@@ -439,7 +436,6 @@ async function run(
   const head = event.kind === "commit" ? undefined : event.head;
   const base = event.kind === "commit" ? undefined : event.base;
 
-  const notify = settings.notifications.automations;
   // The gate stores, read once and shared by an event's per-action gate checks: `fresh`
   // reloads from disk and queues behind any writer, and pr-reviews.json carries every
   // review's full markdown, so sharing is what keeps a two-mode event from paying twice.
@@ -799,7 +795,7 @@ async function run(
         neutralizeRefs: true,
         text,
       });
-      await deliver(event, action, body, text, notify);
+      await deliver(event, action, body, text);
       // Seed the review-history store so the next run (manual or auto) builds on these
       // findings and this headSha joins the heads pr-sync treats as covered. Best-effort.
       if (event.kind === "pr-open" || event.kind === "pr-sync") {
@@ -887,48 +883,49 @@ async function run(
       }
       toast.error(`AI ${label} failed: ${message}`);
       // Inbox parity with manual runs (reviews.ts's notifyReviewDone): a genuine failure
-      // records an inbox row too, gated on the same automations pref.
-      if (notify) {
-        // Carry the failure reason into the durable subtitle so the inbox row
-        // (and the OS ping) say WHY — subject-only when the reason is empty.
-        const subject =
-          event.kind === "commit"
-            ? `"${event.hash.slice(0, 7)}"`
-            : `"${event.title}"`;
-        const reason = message.trim() ? `${subject} — ${message}` : subject;
-        // Where the kept output waits differs by event: a PR partial is restored into
-        // the review panel, a commit partial only through this row.
-        const partialNote =
-          event.kind === "commit"
-            ? "Partial output is kept — open it from this notification."
-            : "Partial output is kept under Previous reviews.";
-        // The inbox row is where a kept partial gets discovered — a durable failure that
-        // doesn't mention it reads as a run with nothing to show for it.
-        const subtitle = keptPartial
-          ? `${reason}${reason.endsWith(".") ? "" : "."} ${partialNote}`
-          : reason;
-        // Local alias for the loop's `action: ReviewMode` — the Re-run closure's
-        // `run` body sees the outer `action` fine, but aliasing keeps the object
-        // literal (which also has a field named `action`) unambiguous to read.
-        const mode = action;
-        // A commit row navigates only when a partial actually landed — that record
-        // is the whole click-through. PR rows always land on their PR: automations
-        // run against the fork's own PRs (the poll that feeds them pins the origin
-        // slug deliberately), so the lens rides along.
-        let target: NotificationTarget | undefined;
-        if (event.kind === "commit") {
-          if (keptPartial) {
-            target = { type: "automation-result", id: partialResultId };
-          }
-        } else {
-          target = {
-            type: "pr",
-            kind: event.target.type,
-            ref: targetRef(event),
-            lens: "origin",
-          };
+      // records a notification too, on whichever channels the automations source has.
+      // Carry the failure reason into the durable subtitle so the inbox row
+      // (and the OS ping) say WHY — subject-only when the reason is empty.
+      const subject =
+        event.kind === "commit"
+          ? `"${event.hash.slice(0, 7)}"`
+          : `"${event.title}"`;
+      const reason = message.trim() ? `${subject} — ${message}` : subject;
+      // Where the kept output waits differs by event: a PR partial is restored into
+      // the review panel, a commit partial only through this row.
+      const partialNote =
+        event.kind === "commit"
+          ? "Partial output is kept — open it from this notification."
+          : "Partial output is kept under Previous reviews.";
+      // The inbox row is where a kept partial gets discovered — a durable failure that
+      // doesn't mention it reads as a run with nothing to show for it.
+      const subtitle = keptPartial
+        ? `${reason}${reason.endsWith(".") ? "" : "."} ${partialNote}`
+        : reason;
+      // Local alias for the loop's `action: ReviewMode` — the Re-run closure's
+      // `run` body sees the outer `action` fine, but aliasing keeps the object
+      // literal (which also has a field named `action`) unambiguous to read.
+      const mode = action;
+      // A commit row navigates only when a partial actually landed — that record
+      // is the whole click-through. PR rows always land on their PR: automations
+      // run against the fork's own PRs (the poll that feeds them pins the origin
+      // slug deliberately), so the lens rides along.
+      let target: NotificationTarget | undefined;
+      if (event.kind === "commit") {
+        if (keptPartial) {
+          target = { type: "automation-result", id: partialResultId };
         }
-        pushNotification({
+      } else {
+        target = {
+          type: "pr",
+          kind: event.target.type,
+          ref: targetRef(event),
+          lens: "origin",
+        };
+      }
+      emitNotification({
+        source: "automations",
+        row: {
           kind: "review-failed",
           tone: "danger",
           title: `AI ${label} failed`,
@@ -946,14 +943,9 @@ async function run(
           dedupeKey: `automation-failed:${event.repoPath}:${event.kind}:${
             event.kind === "commit" ? event.hash : targetRef(event)
           }:${action}`,
-        });
-        // Re-read rather than trust the run-start snapshot: hiding AI mid-run
-        // mutes the OS ping, while the inbox row above still records the failure
-        // (the dock filters that at render time, so no history is lost).
-        if (!(await loadSettings().catch(() => null))?.hideAi) {
-          void notifyIfUnfocused(`AI ${label} failed`, subtitle);
-        }
-      }
+        },
+        os: { title: `AI ${label} failed`, body: subtitle, focus: "unfocused" },
+      });
       // Persist a "Failed" stopped row (keeping its Re-run) instead of removing it.
       handle.fail(message);
       // A deadline kill and an outright failure look the same from the dock but not
@@ -1647,14 +1639,8 @@ async function deliver(
   mode: ReviewMode,
   body: string,
   rawText: string,
-  notify: boolean,
 ): Promise<void> {
   const label = modeLabel(mode);
-  // Whether this delivery may ping the OS. Read fresh, not from the run-start
-  // snapshot: hiding AI while a run is in flight mutes its ping, and the in-app
-  // toast + inbox row below still land (the dock filters those at render time).
-  // A settings-read failure counts as shown — delivery must never fail on it.
-  const osPing = notify && !(await loadSettings().catch(() => null))?.hideAi;
 
   if (event.kind === "commit") {
     // Commits have no comment surface — the results store is this review's only
@@ -1683,11 +1669,9 @@ async function deliver(
         onClick: () => useAutomationResults.getState().setOpen(result.id),
       },
     });
-    // Inbox parity with the failure path (and with manual runs): the row is gated on
-    // the automations pref ALONE, never on hideAi — the dock filters AI rows at
-    // render time, so hiding AI mutes the ping without losing the history.
-    if (notify) {
-      pushNotification({
+    emitNotification({
+      source: "automations",
+      row: {
         kind: "review-ready",
         tone: "success",
         title: `AI ${label} of ${event.hash.slice(0, 7)} ready`,
@@ -1696,14 +1680,13 @@ async function deliver(
         repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
         target: { type: "automation-result", id: result.id },
         dedupeKey: `automation-review:${event.repoPath}:commit:${event.hash}:${mode}`,
-      });
-    }
-    if (osPing) {
-      void notifyIfUnfocused(
-        `AI ${label} ready`,
-        `${event.hash.slice(0, 7)} — ${event.title}`,
-      );
-    }
+      },
+      os: {
+        title: `AI ${label} ready`,
+        body: `${event.hash.slice(0, 7)} — ${event.title}`,
+        focus: "unfocused",
+      },
+    });
     return;
   }
 
@@ -1724,10 +1707,10 @@ async function deliver(
       queryKey: ["repo", event.repoPath, "pr", "origin", event.target.number],
     });
     toast.success(`AI ${label} posted on #${event.target.number}`);
-    // Gated on the automations pref alone — see the commit arm.
-    if (notify) {
-      const prNumber = event.target.number;
-      pushNotification({
+    const prNumber = event.target.number;
+    emitNotification({
+      source: "automations",
+      row: {
         kind: "review-posted",
         tone: "success",
         title: `AI ${label} posted on #${prNumber}`,
@@ -1743,14 +1726,13 @@ async function deliver(
           lens: "origin",
         },
         dedupeKey: `automation-review:${event.repoPath}:remote:origin:${prNumber}:${mode}`,
-      });
-    }
-    if (osPing) {
-      void notifyIfUnfocused(
-        `AI ${label} posted on #${event.target.number}`,
-        event.title,
-      );
-    }
+      },
+      os: {
+        title: `AI ${label} posted on #${prNumber}`,
+        body: event.title,
+        focus: "unfocused",
+      },
+    });
     return;
   }
 
@@ -1778,9 +1760,9 @@ async function deliver(
     queryKey: ["local-prs", event.repoPath],
   });
   toast.success(`AI ${label} added to "${pr.title}"`);
-  // Gated on the automations pref alone — see the commit arm.
-  if (notify) {
-    pushNotification({
+  emitNotification({
+    source: "automations",
+    row: {
       kind: "review-posted",
       tone: "success",
       title: `AI ${label} added to "${pr.title}"`,
@@ -1788,11 +1770,13 @@ async function deliver(
       repoName: event.repoPath.split(/[/\\]/).pop() ?? event.repoPath,
       target: { type: "pr", kind: "local", ref: targetId, lens: "origin" },
       dedupeKey: `automation-review:${event.repoPath}:local:origin:${targetId}:${mode}`,
-    });
-  }
-  if (osPing) {
-    void notifyIfUnfocused(`AI ${label} finished`, `Local PR "${pr.title}"`);
-  }
+    },
+    os: {
+      title: `AI ${label} finished`,
+      body: `Local PR "${pr.title}"`,
+      focus: "unfocused",
+    },
+  });
 }
 
 /**

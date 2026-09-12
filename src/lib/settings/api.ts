@@ -167,22 +167,38 @@ export const AUTO_FETCH_INTERVALS = ["5", "10", "15", "30", "60"] as const;
  *  settings Select directly). */
 export type AutoFetchInterval = (typeof AUTO_FETCH_INTERVALS)[number];
 
-/** The CI-check notification scopes offered in Settings, in render order. */
-export const PR_CHECK_SCOPES = ["off", "mine", "all"] as const;
+/** Delivery channels for one notification source. */
+export interface ChannelPrefs {
+  /** Record a row in the activity-dock inbox. */
+  inApp: boolean;
+  /** OS notification (each producer's focus policy governs when). */
+  os: boolean;
+}
+
+/** Every notification source, in render order. The single manifest: the settings
+ *  matrix, the heal, and the emit gate all iterate THIS list, so a new source
+ *  cannot ship half-wired. */
+export const NOTIFICATION_SOURCES = [
+  "prChecks",
+  "prActivity",
+  "prReviews",
+  "actionRuns",
+  "reviews",
+  "automations",
+  "agents",
+] as const;
+export type NotificationSource = (typeof NOTIFICATION_SOURCES)[number];
+
+/** CI-check scopes offered in Settings. The legacy tri-state's "off" is retired —
+ *  both prChecks channels off expresses it, and {@link healNotifications} maps it. */
+export const PR_CHECK_SCOPE_FILTERS = ["mine", "all"] as const;
+export type PrCheckScopeFilter = (typeof PR_CHECK_SCOPE_FILTERS)[number];
 
 export interface NotificationSettings {
-  /** Automation results (review posted / ready / failed). */
-  automations: boolean;
-  /** An AI code review or security audit you started finishing in the background. */
-  reviews: boolean;
-  /** CI check completion on open PRs. */
-  prChecks: (typeof PR_CHECK_SCOPES)[number];
-  /** PRs opened / merged / closed in the current repo. */
-  prActivity: boolean;
-  /** Review decisions on PRs you authored. */
-  prReviews: boolean;
-  /** Workflow runs finishing (success/failure) on the current branch. */
-  actionRuns: boolean;
+  /** Per-source delivery channels, Record-typed against the manifest. */
+  sources: Record<NotificationSource, ChannelPrefs>;
+  /** Which PRs the prChecks source watches — orthogonal to its channels. */
+  prChecksScope: PrCheckScopeFilter;
 }
 
 /** The agent CLIs offerable as the Default agent, in render order. Spelled out here
@@ -244,7 +260,7 @@ export interface AppSettings {
    *  automations: no new automated run starts while set (an in-flight run finishes).
    *  Provider config, API keys, and rules are kept. */
   hideAi: boolean;
-  /** OS notifications (sent only while the window is unfocused). */
+  /** Which sources notify, and on which channels. */
   notifications: NotificationSettings;
   /** Hide the app to the system tray on window close (so background work keeps
    *  running) instead of quitting. */
@@ -390,12 +406,16 @@ export const DEFAULT_SETTINGS: AppSettings = {
   reviewEffort: "auto",
   hideAi: false,
   notifications: {
-    automations: true,
-    reviews: true,
-    prChecks: "all",
-    prActivity: true,
-    prReviews: true,
-    actionRuns: true,
+    sources: {
+      prChecks: { inApp: true, os: true },
+      prActivity: { inApp: true, os: true },
+      prReviews: { inApp: true, os: true },
+      actionRuns: { inApp: true, os: true },
+      reviews: { inApp: true, os: true },
+      automations: { inApp: true, os: true },
+      agents: { inApp: true, os: true },
+    },
+    prChecksScope: "all",
   },
   closeToTray: true,
   agentIsolation: "worktree",
@@ -529,6 +549,79 @@ export const asMcpServerArray = (value: unknown): McpServer[] =>
       )
     : [];
 
+/** A plain object, or `{}` for anything else (null, an array, a primitive) — the
+ *  stored settings file is hand-editable, so every branch below reads through this. */
+const asObject = (v: unknown): Record<string, unknown> =>
+  v && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : {};
+
+/** Builds a full source map from the manifest, which is the only enumeration of
+ *  source keys — a new source therefore cannot be missed by a heal branch. */
+const mapSources = (
+  cell: (source: NotificationSource) => ChannelPrefs,
+): Record<NotificationSource, ChannelPrefs> =>
+  Object.fromEntries(
+    NOTIFICATION_SOURCES.map((source) => [source, cell(source)]),
+  ) as Record<NotificationSource, ChannelPrefs>;
+
+/**
+ * Coerces a stored `notifications` value — new-shape, legacy (six accreted prefs),
+ * or junk — into a full {@link NotificationSettings}. The legacy branch stays
+ * forever: an install that skips several releases must still find its path here.
+ * A stored `sources` object marks the new shape and wins outright, so a file
+ * carrying both shapes never reads a stale legacy key.
+ *
+ * Pure; exported for the heal's reviewability.
+ */
+export function healNotifications(saved: unknown): NotificationSettings {
+  const defaults = DEFAULT_SETTINGS.notifications;
+  const obj = asObject(saved);
+
+  if (
+    obj.sources &&
+    typeof obj.sources === "object" &&
+    !Array.isArray(obj.sources)
+  ) {
+    const stored = obj.sources as Record<string, unknown>;
+    return {
+      sources: mapSources((source) => {
+        const pair = asObject(stored[source]);
+        return {
+          inApp:
+            typeof pair.inApp === "boolean"
+              ? pair.inApp
+              : defaults.sources[source].inApp,
+          os:
+            typeof pair.os === "boolean"
+              ? pair.os
+              : defaults.sources[source].os,
+        };
+      }),
+      prChecksScope: pick(obj.prChecksScope, PR_CHECK_SCOPE_FILTERS, "all"),
+    };
+  }
+
+  // Legacy: five boolean prefs named exactly like their sources, plus a tri-state
+  // prChecks whose "off" becomes both channels off and whose scope moves out. The
+  // `agents` producers were ungated before this shape, so they default on.
+  const legacyChecks = obj.prChecks;
+  return {
+    sources: mapSources((source) => {
+      if (source === "prChecks") {
+        return legacyChecks === "off"
+          ? { inApp: false, os: false }
+          : { ...defaults.sources.prChecks };
+      }
+      const stored = obj[source];
+      return typeof stored === "boolean"
+        ? { inApp: stored, os: stored }
+        : { ...defaults.sources[source] };
+    }),
+    prChecksScope: pick(legacyChecks, PR_CHECK_SCOPE_FILTERS, "all"),
+  };
+}
+
 /**
  * Coerces every statically-enumerable field to its default when the stored value is
  * off-list. settings.json is hand-editable and no writer validates membership, so an
@@ -569,14 +662,6 @@ function healEnumerated(settings: AppSettings): AppSettings {
     ),
     reviewTimeout: pick(settings.reviewTimeout, REVIEW_TIMEOUTS, "auto"),
     reviewEffort: pick(settings.reviewEffort, REVIEW_EFFORTS, "auto"),
-    notifications: {
-      ...settings.notifications,
-      prChecks: pick(
-        settings.notifications.prChecks,
-        PR_CHECK_SCOPES,
-        DEFAULT_SETTINGS.notifications.prChecks,
-      ),
-    },
     agentIsolation: pick(
       settings.agentIsolation,
       AGENT_ISOLATIONS,
@@ -618,8 +703,10 @@ function healEnumerated(settings: AppSettings): AppSettings {
 
 /** Loads settings, healing an older or partial saved object against DEFAULT_SETTINGS:
  *  any field absent (stored before that field shipped) reads as its default. Nested
- *  ai/reviewAi/notifications objects are merged, not replaced. Enumerated fields are
- *  then membership-checked by {@link healEnumerated}, so every caller — the settings
+ *  ai/reviewAi objects are merged, not replaced; `notifications` is rebuilt by
+ *  {@link healNotifications}, which is total (a nested spread there would splash
+ *  legacy primitives over the new channel objects). Enumerated fields are then
+ *  membership-checked by {@link healEnumerated}, so every caller — the settings
  *  form, the pre-React theme apply, and the RMW writers below — sees a valid object. */
 export async function loadSettings(): Promise<AppSettings> {
   const store = await getStore();
@@ -640,10 +727,7 @@ export async function loadSettings(): Promise<AppSettings> {
           },
         }
       : {}),
-    notifications: {
-      ...DEFAULT_SETTINGS.notifications,
-      ...saved?.notifications,
-    },
+    notifications: healNotifications(saved?.notifications),
   });
 }
 

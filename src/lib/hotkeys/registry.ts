@@ -86,6 +86,18 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "open-notifications-settings",
+    label: "Notification settings",
+    category: "Application",
+    defaultBinding: null,
+  },
+  {
+    id: "open-repo-notification-settings",
+    label: "Repository notification settings",
+    category: "Application",
+    defaultBinding: null,
+  },
+  {
     id: "cycle-theme",
     label: "Cycle theme",
     category: "Application",

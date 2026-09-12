@@ -82,6 +82,7 @@ const nullFallback = scanner("null-suspense-fallback");
 const bareGroupLabel = scanner("bare-group-label");
 const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
 const titledDisabledTrigger = scanner("titled-disabled-trigger");
+const ungatedProducer = scanner("ungated-notification-producer");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -1273,6 +1274,128 @@ test("titled-disabled-trigger reports every site now that the allowlist is empty
     "src/features/conversations/ProjectsPopover.tsx:1",
     "src/features/issues/SomeNewPicker.tsx:1",
   ]);
+});
+
+test("ungated-notification-producer flags both routes around the gate", () => {
+  // The inbox route, in the spellings the seven producers shipped in: the lone
+  // import, the mixed one, and the formatter-wrapped specifier list.
+  assert.deepEqual(
+    ungatedProducer(
+      'import { pushNotification } from "@/lib/stores/notifications";',
+    ),
+    [1],
+  );
+  assert.deepEqual(
+    ungatedProducer(
+      'import { pushNotification, repoNameFromPath } from "@/lib/stores/notifications";',
+    ),
+    [1],
+  );
+  const wrapped = [
+    "import {",
+    "  type NotificationKind,",
+    "  type NotificationTone,",
+    "  pushNotification,",
+    "  repoNameFromPath,",
+    '} from "@/lib/stores/notifications";',
+  ].join("\n");
+  assert.deepEqual(ungatedProducer(wrapped), [1]);
+  // A rename still reaches the same function, so the specifier's SOURCE name is
+  // what the pattern keys on.
+  assert.deepEqual(
+    ungatedProducer(
+      'import { pushNotification as push } from "@/lib/stores/notifications";',
+    ),
+    [1],
+  );
+  // The OS route: every export of the notify module is a direct ping, so the
+  // module path alone is the match — specifier and namespace forms together.
+  for (const source of [
+    'import { notify } from "@/lib/notify";',
+    'import { notifyIfUnfocused } from "@/lib/notify";',
+    'import { notify, notifyIfUnfocused } from "@/lib/notify";',
+    'import * as pings from "@/lib/notify";',
+  ])
+    assert.deepEqual(ungatedProducer(source), [1], `should flag ${source}`);
+  // A file taking both routes reports each on its own line.
+  const both = [
+    'import { notifyIfUnfocused } from "@/lib/notify";',
+    'import { pushNotification } from "@/lib/stores/notifications";',
+  ].join("\n");
+  assert.deepEqual(
+    ungatedProducer(both).sort((a, b) => a - b),
+    [1, 2],
+  );
+});
+
+test("ungated-notification-producer sees past the alias into relative spellings", () => {
+  // Both modules are reachable by path as well as by alias, and a producer may
+  // legitimately sit in either directory — src/lib/stores/ already spells the
+  // inbox module `./notifications` for an unrelated helper. Anchoring on the
+  // trailing path segment is what keeps the alias from being the whole gate.
+  for (const source of [
+    'import { pushNotification } from "./notifications";',
+    'import { pushNotification } from "../stores/notifications";',
+    'import { pushNotification } from "../../lib/stores/notifications";',
+    'import { pushNotification, repoNameFromPath } from "./notifications";',
+    'import { notify } from "./notify";',
+    'import { notifyIfUnfocused } from "../notify";',
+    'import { notifyIfUnfocused } from "../../lib/notify";',
+  ])
+    assert.deepEqual(ungatedProducer(source), [1], `should flag ${source}`);
+});
+
+test("ungated-notification-producer flags a namespace import of the inbox module", () => {
+  // `notifs.pushNotification(row)` names nothing at the import, so the
+  // specifier arm cannot see it — hence its own arm, in every spelling.
+  for (const source of [
+    'import * as notifs from "@/lib/stores/notifications";',
+    'import * as notifs from "./notifications";',
+    'import * as inbox from "../stores/notifications";',
+  ])
+    assert.deepEqual(ungatedProducer(source), [1], `should flag ${source}`);
+  // The namespace arm is scoped to the inbox module: a namespace import of any
+  // OTHER module, the gate's own neighbours included, is ordinary.
+  for (const source of [
+    'import * as overrides from "@/lib/notifications/overrides";',
+    'import * as api from "@/lib/settings/api";',
+  ])
+    assert.deepEqual(ungatedProducer(source), [], `should ignore ${source}`);
+});
+
+test("ungated-notification-producer leaves the gate's own siblings alone", () => {
+  for (const source of [
+    // The converted producer's imports: the gate, the resolution helpers, and
+    // the type-only / helper exports the inbox module also carries.
+    'import { emitNotification } from "@/lib/notifications/emit";',
+    'import { repoNameFromPath } from "@/lib/stores/notifications";',
+    'import type { NotificationTarget } from "@/lib/stores/notifications";',
+    'import { type NotificationKind, repoNameFromPath } from "@/lib/stores/notifications";',
+    // The RELATIVE spellings of those same legal imports — the segment anchor
+    // widened the module match, never the identifier one. The first line is
+    // src/lib/stores/repo-description-generation.ts's real import.
+    'import { repoNameFromPath } from "./notifications";',
+    'import type { NotificationKind } from "../stores/notifications";',
+    // A neighbouring import cannot supply the token: `[^}]*` stops at the
+    // import's own closing brace.
+    'import { pushNotification } from "@/lib/stores/other";\nimport { repoNameFromPath } from "@/lib/stores/notifications";',
+    // A CALL with no import of its own is emit.ts's own shape — the check is
+    // anchored on the import, which is what a producer cannot avoid.
+    "if (channels.inApp) pushNotification(row);",
+    // The comment naming the banned route is what comment stripping keeps clean.
+    '// never import { notifyIfUnfocused } from "@/lib/notify" in a producer',
+  ])
+    assert.deepEqual(ungatedProducer(source), [], `should ignore ${source}`);
+});
+
+test("ungated-notification-producer exempts the gate module only", () => {
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "ungated-notification-producer",
+  );
+  assert.equal(appliesTo("src/lib/notifications/emit.ts"), false);
+  assert.equal(appliesTo("src/lib/notifications/overrides.ts"), true);
+  assert.equal(appliesTo("src/lib/stores/notifications.ts"), true);
+  assert.equal(appliesTo("src/features/sessions/store.ts"), true);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {

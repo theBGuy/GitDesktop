@@ -10,12 +10,17 @@ import {
   useRepoIdentity,
 } from "@/lib/git/queries";
 import type { PrPollInfo } from "@/lib/git/types";
-import { notifyIfUnfocused } from "@/lib/notify";
+import { emitNotification } from "@/lib/notifications/emit";
+import {
+  anyChannelOn,
+  effectiveChecksScope,
+} from "@/lib/notifications/overrides";
+import { useRepoNotificationOverride } from "@/lib/notifications/queries";
+import type { NotificationSource } from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import {
   type NotificationKind,
   type NotificationTone,
-  pushNotification,
   repoNameFromPath,
 } from "@/lib/stores/notifications";
 
@@ -35,9 +40,17 @@ export function usePrNotifications(repoPath: string) {
   // but the poll itself keeps running for the non-AI notifications it also drives.
   const aiEnabled = useAiEnabled();
   const prefs = settings.data?.notifications;
-  const anyNotif = Boolean(
-    prefs && (prefs.prChecks !== "off" || prefs.prActivity || prefs.prReviews),
-  );
+  const override = useRepoNotificationOverride(repoPath);
+  // Same resolution the emit gate applies, so a repo whose PR sources all deliver
+  // on no channel makes no background call — and one whose override ENABLES a
+  // globally-muted source still polls.
+  const anyNotif =
+    settings.data !== undefined &&
+    anyChannelOn(settings.data.notifications, override, [
+      "prChecks",
+      "prActivity",
+      "prReviews",
+    ]);
   // The poll only earns its keep when a notification, pr-sync, or pr-open rule wants
   // it — the default (none of those) makes no background call.
   // Rules are keyed by repo IDENTITY so a worktree checkout sees the same rules as
@@ -151,11 +164,11 @@ export function usePrNotifications(repoPath: string) {
     // `useForgeGhHost`: null off GitHub (GitLab/Bitbucket logins aren't avatar-derivable).
     const ghHost =
       gh.data?.provider === "github" ? gh.data.host || "github.com" : null;
-    // Both channels: the persistent inbox always (notifyIfUnfocused no-ops while
-    // focused, so a focused user still gets a durable record) and an OS notification
-    // when unfocused. One pref gates both, so turning a category off also hides it
-    // from the inbox.
+    // Delivery is entirely emit's: it resolves the source's channels (global prefs
+    // merged with this repo's override) and owns the dedupe for both. What stays
+    // here is the classification — which transition happened, and whose PR it is.
     const record = (
+      source: NotificationSource,
       kind: NotificationKind,
       tone: NotificationTone,
       title: string,
@@ -172,36 +185,42 @@ export function usePrNotifications(repoPath: string) {
       },
     ) => {
       const authorLogin = opts?.authorLogin;
-      pushNotification({
-        kind,
-        tone,
-        title,
-        subtitle: pr.title,
-        repoPath,
-        repoName,
-        authorLogin,
-        authorGhHost: authorLogin ? (ghHost ?? undefined) : undefined,
-        target: {
-          type: "pr",
-          kind: "remote",
-          ref: String(pr.number),
-          // The poll pins the ORIGIN slug (see `gh_pr_poll`), so every event it
-          // reports happened on the fork's own pull requests.
-          lens: "origin",
-          reviewId: opts?.reviewId || undefined,
+      emitNotification({
+        source,
+        row: {
+          kind,
+          tone,
+          title,
+          subtitle: pr.title,
+          repoPath,
+          repoName,
+          authorLogin,
+          authorGhHost: authorLogin ? (ghHost ?? undefined) : undefined,
+          target: {
+            type: "pr",
+            kind: "remote",
+            ref: String(pr.number),
+            // The poll pins the ORIGIN slug (see `gh_pr_poll`), so every event it
+            // reports happened on the fork's own pull requests.
+            lens: "origin",
+            reviewId: opts?.reviewId || undefined,
+          },
+          dedupeKey,
         },
-        dedupeKey,
+        os: { title, body: pr.title, focus: "unfocused" },
       });
-      void notifyIfUnfocused(title, pr.title);
     };
+
+    // Scope is orthogonal to the prChecks channels — which PRs are watched, not
+    // whether the result is delivered (emit owns that).
+    const scope = effectiveChecksScope(prefs, override);
 
     for (const pr of snapshot.values()) {
       const old = before.get(pr.number);
       const mine = login !== null && pr.author === login;
 
       if (
-        prefs.prChecks !== "off" &&
-        (prefs.prChecks === "all" || mine) &&
+        (scope === "all" || mine) &&
         old &&
         pr.state === "OPEN" &&
         old.checksState !== pr.checksState &&
@@ -209,6 +228,7 @@ export function usePrNotifications(repoPath: string) {
       ) {
         const passed = pr.checksState === "SUCCESS";
         record(
+          "prChecks",
           passed ? "checks-passed" : "checks-failed",
           passed ? "success" : "danger",
           passed
@@ -219,30 +239,30 @@ export function usePrNotifications(repoPath: string) {
         );
       }
 
-      if (prefs.prActivity) {
-        if (!old && pr.state === "OPEN" && !mine && !pr.isDraft) {
-          record(
-            "pr-opened",
-            "info",
-            `New pull request #${pr.number}`,
-            pr,
-            `opened:${pr.number}`,
-            { authorLogin: pr.author },
-          );
-        }
-        if (old && old.state === "OPEN" && pr.state !== "OPEN") {
-          const merged = pr.state === "MERGED";
-          record(
-            merged ? "pr-merged" : "pr-closed",
-            merged ? "merged" : "neutral",
-            `#${pr.number} was ${merged ? "merged" : "closed"}`,
-            pr,
-            `state:${pr.number}:${pr.state}`,
-          );
-        }
+      if (!old && pr.state === "OPEN" && !mine && !pr.isDraft) {
+        record(
+          "prActivity",
+          "pr-opened",
+          "info",
+          `New pull request #${pr.number}`,
+          pr,
+          `opened:${pr.number}`,
+          { authorLogin: pr.author },
+        );
+      }
+      if (old && old.state === "OPEN" && pr.state !== "OPEN") {
+        const merged = pr.state === "MERGED";
+        record(
+          "prActivity",
+          merged ? "pr-merged" : "pr-closed",
+          merged ? "merged" : "neutral",
+          `#${pr.number} was ${merged ? "merged" : "closed"}`,
+          pr,
+          `state:${pr.number}:${pr.state}`,
+        );
       }
 
-      if (prefs.prReviews && mine && old) {
+      if (mine && old) {
         if (
           old.reviewDecision !== pr.reviewDecision &&
           (pr.reviewDecision === "APPROVED" ||
@@ -250,6 +270,7 @@ export function usePrNotifications(repoPath: string) {
         ) {
           const approved = pr.reviewDecision === "APPROVED";
           record(
+            "prReviews",
             approved ? "pr-approved" : "pr-changes-requested",
             approved ? "success" : "warning",
             approved
@@ -268,6 +289,7 @@ export function usePrNotifications(repoPath: string) {
           pr.lastReviewAuthor !== login
         ) {
           record(
+            "prReviews",
             "pr-review",
             "info",
             `New review on #${pr.number}`,
@@ -287,6 +309,7 @@ export function usePrNotifications(repoPath: string) {
           pr.lastCommentAuthor !== login
         ) {
           record(
+            "prReviews",
             "pr-comment",
             "info",
             `New comment on #${pr.number}`,
@@ -299,13 +322,13 @@ export function usePrNotifications(repoPath: string) {
       // Review requested FROM you — no author guard needed; a forge won't request
       // review from the PR's own author.
       if (
-        prefs.prReviews &&
         login !== null &&
         old &&
         pr.reviewRequests.includes(login) &&
         !old.reviewRequests.includes(login)
       ) {
         record(
+          "prReviews",
           "review-requested",
           "info",
           `Review requested on #${pr.number}`,

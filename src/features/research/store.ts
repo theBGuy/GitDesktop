@@ -20,10 +20,10 @@ import {
 } from "@/lib/ai/prompt";
 import { terminalErrorMessage } from "@/lib/ai/terminal-error";
 import { readRepoInstructions } from "@/lib/git/api";
-import { notify } from "@/lib/notify";
+import { emitNotification } from "@/lib/notifications/emit";
 import { norm } from "@/lib/repo-data-migration";
 import { loadSettings } from "@/lib/settings/api";
-import { pushNotification, repoNameFromPath } from "@/lib/stores/notifications";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { errorMessage, invoke } from "@/lib/tauri/invoke";
 import { loadPersistedResearch, savePersistedResearch } from "./persistence";
 
@@ -314,23 +314,21 @@ export const useResearchStore = create<ResearchState>((set, get) => {
         return;
       const label = run.origin?.topic?.trim() || "Research";
       const headline = failed ? "Research failed" : "Research ready";
-      // Hiding AI features mutes the OS ping — a hidden feature must not tap you
-      // on the shoulder. The inbox row below still lands (the dock filters it at
-      // render time), and a settings read that fails falls through to notifying.
-      void loadSettings()
-        .catch(() => null)
-        .then((s) => {
-          if (!s?.hideAi) void notify(headline, label);
-        });
-      pushNotification({
-        kind: "research-done",
-        tone: failed ? "danger" : "success",
-        title: headline,
-        subtitle: label,
-        repoPath: run.repoPath,
-        repoName: repoNameFromPath(run.repoPath),
-        target: { type: "agent" },
-        dedupeKey: `research:${id}:${failed}`,
+      emitNotification({
+        source: "agents",
+        row: {
+          kind: "research-done",
+          tone: failed ? "danger" : "success",
+          title: headline,
+          subtitle: label,
+          repoPath: run.repoPath,
+          repoName: repoNameFromPath(run.repoPath),
+          target: { type: "agent" },
+          dedupeKey: `research:${id}:${failed}`,
+        },
+        // Pings even while focused — the watching check above already excused the
+        // one surface that would make it redundant.
+        os: { title: headline, body: label, focus: "always" },
       });
     };
     try {

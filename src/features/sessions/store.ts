@@ -20,14 +20,14 @@ import {
   resumeWorktree,
   squashWorktree,
 } from "@/lib/git/worktree";
-import { notify } from "@/lib/notify";
+import { emitNotification } from "@/lib/notifications/emit";
 import { asMcpServerArray, loadSettings } from "@/lib/settings/api";
 import {
   isServerAvailable,
   mcpServerUsableBy,
   mcpSupportedFor,
 } from "@/lib/settings/mcp";
-import { pushNotification, repoNameFromPath } from "@/lib/stores/notifications";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { bumpNavVersion } from "./navVersion";
@@ -371,23 +371,21 @@ async function runTurn(
       "Agent session";
     const failed = t.status === "error";
     const headline = failed ? "Agent failed" : "Agent finished";
-    // Hiding AI features mutes the OS ping — a hidden feature must not tap you
-    // on the shoulder. The inbox row below still lands (the dock filters it at
-    // render time), and a settings read that fails falls through to notifying.
-    void loadSettings()
-      .catch(() => null)
-      .then((s) => {
-        if (!s?.hideAi) void notify(headline, label);
-      });
-    pushNotification({
-      kind: "agent-done",
-      tone: failed ? "danger" : "success",
-      title: headline,
-      subtitle: label,
-      repoPath: s.repoPath,
-      repoName: repoNameFromPath(s.repoPath),
-      target: { type: "agent" },
-      dedupeKey: `agent:${id}:${turnIndex}`,
+    emitNotification({
+      source: "agents",
+      row: {
+        kind: "agent-done",
+        tone: failed ? "danger" : "success",
+        title: headline,
+        subtitle: label,
+        repoPath: s.repoPath,
+        repoName: repoNameFromPath(s.repoPath),
+        target: { type: "agent" },
+        dedupeKey: `agent:${id}:${turnIndex}`,
+      },
+      // Pings even while focused — the watching check above already excused the
+      // one surface that would make it redundant.
+      os: { title: headline, body: label, focus: "always" },
     });
   };
 

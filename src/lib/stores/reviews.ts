@@ -34,7 +34,7 @@ import { track } from "@/lib/analytics";
 import { readRepoInstructions } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { DiffStatEntry, RemoteLens } from "@/lib/git/types";
-import { notifyIfUnfocused } from "@/lib/notify";
+import { emitNotification } from "@/lib/notifications/emit";
 import {
   reviewHistoryKey,
   reviewPartialKey,
@@ -42,7 +42,6 @@ import {
 } from "@/lib/pulls/reviews-history";
 import { queryClient } from "@/lib/query-client";
 import { loadSettings } from "@/lib/settings/api";
-import { pushNotification } from "@/lib/stores/notifications";
 import { errorMessage } from "@/lib/tauri/invoke";
 
 export interface ReviewContext {
@@ -349,9 +348,10 @@ function releaseSlot(lane: Limiter): void {
   lane.active--;
 }
 
-/** OS notification when a review settles while the window is hidden (close to
- *  tray) or unfocused, gated on the user's setting. Best-effort. */
-async function notifyReviewDone(
+/** Announces a settled review — inbox row plus an OS ping when the window is
+ *  hidden (close to tray) or unfocused, on whichever channels the `reviews`
+ *  source has for this repo. Best-effort. */
+function notifyReviewDone(
   title: string,
   mode: ReviewMode,
   ok: boolean,
@@ -361,39 +361,35 @@ async function notifyReviewDone(
    *  automation): a manual re-fire closure would capture a stale AiSettings snapshot,
    *  whereas the panel's Run button re-resolves fresh config. */
   error?: string,
-): Promise<void> {
+): void {
   try {
-    const { notifications, hideAi } = await loadSettings();
-    if (!notifications.reviews) return;
     const label = mode === "security" ? "security audit" : "review";
     const headline = ok ? `AI ${label} ready` : `AI ${label} failed`;
     // A failed review carries its reason in the subtitle; success stays subject-only.
     const subtitle =
       !ok && error?.trim() ? `"${title}" — ${error}` : `"${title}"`;
-    // Durable record in the inbox (regardless of focus), plus the OS ping when
-    // the window is hidden. Both ride the same `reviews` pref.
-    pushNotification({
-      kind: ok ? "review-ready" : "review-failed",
-      tone: ok ? "success" : "danger",
-      title: headline,
-      subtitle,
-      repoPath: target.repoPath,
-      repoName: target.repoName,
-      target: {
-        type: "pr",
-        kind: target.kind,
-        ref: target.ref,
-        lens: target.lens,
+    emitNotification({
+      source: "reviews",
+      row: {
+        kind: ok ? "review-ready" : "review-failed",
+        tone: ok ? "success" : "danger",
+        title: headline,
+        subtitle,
+        repoPath: target.repoPath,
+        repoName: target.repoName,
+        target: {
+          type: "pr",
+          kind: target.kind,
+          ref: target.ref,
+          lens: target.lens,
+        },
+        // The lens is in the dedupe key because a fork's origin and upstream PRs share
+        // a number: without it, two reviews settling in the same window collapse into
+        // one notification.
+        dedupeKey: `review:${target.kind}:${target.repoPath}:${target.lens}:${target.ref}:${ok}`,
       },
-      // The lens is in the dedupe key because a fork's origin and upstream PRs share
-      // a number: without it, two reviews settling in the same window collapse into
-      // one notification.
-      dedupeKey: `review:${target.kind}:${target.repoPath}:${target.lens}:${target.ref}:${ok}`,
+      os: { title: headline, body: subtitle, focus: "unfocused" },
     });
-    // Hiding AI features mutes the OS ping (a hidden feature must not tap you on
-    // the shoulder) but never the inbox record above — the dock filters that at
-    // render time, so the history is whole again when AI is shown.
-    if (!hideAi) void notifyIfUnfocused(headline, subtitle);
   } catch {
     // best-effort — a missed notification must never affect the review
   }
@@ -776,7 +772,7 @@ export async function startReview(
       truncatedCoverage: coverage.diffTruncated && !agenticRun,
       endedAt: Date.now(),
     });
-    void notifyReviewDone(title, mode, true, target);
+    notifyReviewDone(title, mode, true, target);
     // Persist the finished review so the NEXT run can use it as soft context.
     // Best-effort.
     // The agentic run's narration, peeled off at settle — persisted as display-only
@@ -827,7 +823,7 @@ export async function startReview(
         error: message,
         endedAt: Date.now(),
       });
-      void notifyReviewDone(title, mode, false, target, message);
+      notifyReviewDone(title, mode, false, target, message);
       // Whatever the run produced before it failed — this store is memory-only, so
       // without a record a timed-out 20-minute run is gone at the next restart. Saved
       // as a PARTIAL record (`phase`), which the history reads exclude: it's kept

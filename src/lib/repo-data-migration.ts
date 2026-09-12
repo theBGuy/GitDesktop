@@ -90,6 +90,7 @@ const IDENTITY_STORES: IdentityStore[] = [
   { file: "repo-lens.json", merge: "keep-new" },
   { file: "conversation-filters.json", merge: "keep-new" },
   { file: "branch-rules.json", merge: "keep-new" },
+  { file: "notification-overrides.json", merge: "keep-new" },
   {
     file: "automations.json",
     merge: "keep-new",

@@ -13,6 +13,10 @@ import { AutomationResultDialog } from "@/features/automations/AutomationResultD
 import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
 import { MyWorkScreen } from "@/features/mywork/MyWorkScreen";
+import {
+  RepoNotificationsDialogHost,
+  useRepoNotificationsDialog,
+} from "@/features/notifications/RepoNotificationsDialog";
 import { RepositoryView } from "@/features/repository/RepositoryView";
 import { usePickAndOpenRepo } from "@/features/repository/useOpenRepoByPath";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
@@ -49,6 +53,8 @@ function App() {
   const openExplore = useUiStore((s) => s.openExplore);
   const openMyWork = useUiStore((s) => s.openMyWork);
   const toggleActivity = useUiStore((s) => s.toggleActivity);
+  const repoPath = useUiStore((s) => s.repoPath);
+  const openRepoNotifications = useRepoNotificationsDialog((s) => s.open);
   const gitInstalled = useGitInstalled();
   const queryClient = useQueryClient();
   const settings = useSettings();
@@ -194,6 +200,19 @@ function App() {
     !settings.data?.hideAi,
   );
   useHotkeyAction("browse-mcp-registry", openMcpBrowse, !settings.data?.hideAi);
+  useHotkeyAction("open-notifications-settings", () =>
+    openSettings("notifications"),
+  );
+  // The palette closes before it dispatches, so the repo is re-read at fire
+  // time rather than captured — a switch between the two is still honored.
+  useHotkeyAction(
+    "open-repo-notification-settings",
+    () => {
+      const path = useUiStore.getState().repoPath;
+      if (path) openRepoNotifications(path);
+    },
+    Boolean(repoPath),
+  );
   useHotkeyAction("show-help", openHelp);
   useHotkeyAction("open-explore", openExplore);
   useHotkeyAction("open-my-work", openMyWork);
@@ -261,6 +280,7 @@ function App() {
       </div>
       <AutomationResultDialog />
       <AutomationHistoryDialogHost />
+      <RepoNotificationsDialogHost />
       <CloneRepoDialog open={cloneOpen} onOpenChange={setCloneOpen} />
       <CreateRepoDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ConfirmDialogHost />
