@@ -19,6 +19,16 @@ updates:
       prefix: "chore(deps)"
       prefix-development: "chore(deps-dev)"
     groups:
+      # Tauri's npm and crate halves must reach master in ONE commit: a group
+      # cannot span ecosystems, and the parity guard is a required check, so
+      # each half alone reddens its own merge ref — combine this PR and its
+      # cargo twin onto one branch. Declared FIRST: first matching group wins.
+      tauri:
+        patterns:
+          - "@tauri-apps/*"
+        update-types:
+          - "minor"
+          - "patch"
       # One PR for routine minor/patch bumps; majors stay separate.
       minor-and-patch:
         update-types:
@@ -45,6 +55,16 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     groups:
+      # The crate half of the npm `tauri` group above — a separate PR only
+      # because groups cannot span ecosystems; it merges combined with that one.
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-build"
+          - "tauri-plugin-*"
+        update-types:
+          - "minor"
+          - "patch"
       minor-and-patch:
         update-types:
           - "minor"

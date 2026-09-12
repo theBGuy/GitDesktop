@@ -1,4 +1,4 @@
-// Negative controls for the four guard scanners. Their worst failure mode is
+// Negative controls for the five guard scanners. Their worst failure mode is
 // silent fail-open — a pattern that stops matching still prints "OK" — so every
 // predicate keeps a fixture that MUST hit and a fixture that must not. The
 // scripts export their predicates and gate their CLI body on a main-module path
@@ -39,6 +39,13 @@ import {
   enclosingFn,
   staleAllowlistEntries,
 } from "./check-rust-invariants.mjs";
+import {
+  mismatchedPairs,
+  npmNameFor,
+  parseCrateVersions,
+  parseNpmVersions,
+  verdict,
+} from "./check-tauri-plugin-parity.mjs";
 
 // ------------------------------------------------------- check-banned-patterns
 
@@ -1951,4 +1958,216 @@ test("a mounted carrier, when present, still states the whole rule", () => {
       `mounted carrier lost the rule: ${carrier}`,
     );
   }
+});
+
+// --------------------------------------------------- check-tauri-plugin-parity
+
+/** Cargo.lock text in the block shape the gate reads, LF or CRLF on demand. */
+function cargoLock(entries, eol = "\n") {
+  return entries
+    .map(([name, version]) =>
+      ["[[package]]", `name = "${name}"`, `version = "${version}"`].join(eol),
+    )
+    .join(eol + eol);
+}
+
+/** Crate names the check reports, driven from two in-memory maps. */
+const splitCrates = (crates, npm) =>
+  mismatchedPairs(new Map(crates), new Map(npm)).map((p) => p.crate);
+
+test("parseCrateVersions reads the block shape under both line endings", () => {
+  // CRLF is not hypothetical: a Windows checkout materializes Cargo.lock that
+  // way under core.autocrlf, and an LF-only pattern would parse zero packages —
+  // the gate then passes having compared nothing.
+  const entries = [
+    ["tauri", "2.11.5"],
+    ["tauri-plugin-http", "2.6.0"],
+  ];
+  for (const eol of ["\n", "\r\n"]) {
+    assert.deepEqual(
+      [...parseCrateVersions(cargoLock(entries, eol))],
+      entries,
+      `should parse ${JSON.stringify(eol)} blocks`,
+    );
+  }
+});
+
+test("parseNpmVersions reads the root importer's resolved versions only", () => {
+  const lock = [
+    "lockfileVersion: '9.0'",
+    "",
+    "importers:",
+    "",
+    "  .:",
+    "    dependencies:",
+    "      '@tauri-apps/api':",
+    "        specifier: ^2.11.1",
+    "        version: 2.11.1",
+    "      zustand:",
+    "        specifier: ^5.0.15",
+    "        version: 5.0.15(react@19.2.8)",
+    "    devDependencies:",
+    "      '@tauri-apps/cli':",
+    "        specifier: ^2.11.4",
+    "        version: 2.11.4",
+    "",
+    "  site:",
+    "    dependencies:",
+    "      '@tauri-apps/api':",
+    "        specifier: ^1.0.0",
+    "        version: 1.0.0",
+    "",
+    "packages:",
+    "",
+    "  '@tauri-apps/api@9.9.9':",
+    "    resolution: {integrity: sha512-fixture}",
+  ].join("\n");
+  const npm = parseNpmVersions(lock);
+  // devDependencies count (that is where @tauri-apps/cli lives), the resolved
+  // version wins over the specifier, and a peer-resolution suffix is not part
+  // of the version.
+  assert.equal(npm.get("@tauri-apps/api"), "2.11.1");
+  assert.equal(npm.get("@tauri-apps/cli"), "2.11.4");
+  assert.equal(npm.get("zustand"), "5.0.15");
+  // The sibling importer and the transitive `packages:` section both carry the
+  // same name at a different version; either winning would compare a version
+  // the app never installs.
+  assert.equal(npm.size, 3);
+});
+
+test("npmNameFor pairs the two forms and nothing else", () => {
+  assert.equal(npmNameFor("tauri"), "@tauri-apps/api");
+  assert.equal(
+    npmNameFor("tauri-plugin-notification"),
+    "@tauri-apps/plugin-notification",
+  );
+  // The tauri-* build and runtime crates ship no npm half, and `tauri-plugin`
+  // itself is the plugin SDK, not a plugin.
+  for (const crate of [
+    "tauri-build",
+    "tauri-codegen",
+    "tauri-runtime-wry",
+    "tauri-utils",
+    "tauri-plugin",
+    "serde",
+  ]) {
+    assert.equal(npmNameFor(crate), null, `should not pair ${crate}`);
+  }
+});
+
+test("mismatchedPairs passes halves aligned on major.minor", () => {
+  assert.deepEqual(
+    splitCrates(
+      [["tauri-plugin-http", "2.6.0"]],
+      [["@tauri-apps/plugin-http", "2.6.0"]],
+    ),
+    [],
+  );
+  // Patch drift is legal — tauri-cli compares major and minor only, so flagging
+  // it would redden PRs whose bundle builds fine.
+  assert.deepEqual(
+    splitCrates(
+      [["tauri-plugin-http", "2.6.0"]],
+      [["@tauri-apps/plugin-http", "2.6.1"]],
+    ),
+    [],
+  );
+});
+
+test("mismatchedPairs flags a split in either direction", () => {
+  // Crate ahead: the Cargo.lock-only bump that ships a broken `tauri build`.
+  assert.deepEqual(
+    splitCrates(
+      [["tauri-plugin-http", "2.6.0"]],
+      [["@tauri-apps/plugin-http", "2.5.9"]],
+    ),
+    ["tauri-plugin-http"],
+  );
+  // npm ahead: the same break, reached from the other lockfile — a check that
+  // only looked one way would call this clean.
+  assert.deepEqual(
+    splitCrates(
+      [["tauri-plugin-http", "2.5.9"]],
+      [["@tauri-apps/plugin-http", "2.6.0"]],
+    ),
+    ["tauri-plugin-http"],
+  );
+  assert.deepEqual(
+    splitCrates([["tauri", "3.0.0"]], [["@tauri-apps/api", "2.6.0"]]),
+    ["tauri"],
+  );
+});
+
+test("mismatchedPairs carries both halves of the split it reports", () => {
+  assert.deepEqual(
+    mismatchedPairs(
+      new Map([["tauri", "2.11.5"]]),
+      new Map([["@tauri-apps/api", "2.10.1"]]),
+    ),
+    [
+      {
+        crate: "tauri",
+        npm: "@tauri-apps/api",
+        crateVersion: "2.11.5",
+        npmVersion: "2.10.1",
+      },
+    ],
+  );
+});
+
+test("verdict fails closed when the lockfiles yield no pairs at all", () => {
+  // The branch a broken parser lands in: nothing to compare is not a clean
+  // tree, because this repo always ships tauri on both sides.
+  const none = verdict(new Map(), new Map());
+  assert.equal(none.empty, true);
+  assert.deepEqual(none.pairs, []);
+  assert.deepEqual(none.mismatched, []);
+});
+
+test("verdict fails closed when the core pair is missing from a partial parse", () => {
+  // Partial degradation is the residual fail-open: plugins still pair, so the
+  // count looks healthy while the comparisons the gate exists for went missing.
+  const partial = verdict(
+    new Map([["tauri-plugin-http", "2.6.0"]]),
+    new Map([["@tauri-apps/plugin-http", "2.6.0"]]),
+  );
+  assert.equal(partial.empty, false);
+  assert.equal(partial.missingCore, true);
+  assert.deepEqual(partial.mismatched, []);
+});
+
+test("verdict clears only when the core pair is present and aligned", () => {
+  const clean = verdict(
+    new Map([
+      ["tauri", "2.11.5"],
+      ["tauri-plugin-http", "2.6.0"],
+    ]),
+    new Map([
+      ["@tauri-apps/api", "2.11.1"],
+      ["@tauri-apps/plugin-http", "2.6.0"],
+    ]),
+  );
+  assert.equal(clean.empty, false);
+  assert.equal(clean.missingCore, false);
+  assert.deepEqual(clean.mismatched, []);
+  assert.equal(clean.pairs.length, 2);
+});
+
+test("mismatchedPairs skips a half with no counterpart", () => {
+  // Crate-only plugins and the npm-only CLI have nothing to disagree with, so
+  // neither is a finding however far the versions sit apart.
+  assert.deepEqual(
+    splitCrates(
+      [
+        ["tauri-plugin-fs", "2.5.2"],
+        ["tauri-plugin-single-instance", "2.4.4"],
+      ],
+      [["@tauri-apps/cli", "2.11.4"]],
+    ),
+    [],
+  );
+  assert.deepEqual(
+    splitCrates([["tauri", "2.11.5"]], [["@tauri-apps/cli", "1.0.0"]]),
+    [],
+  );
 });
