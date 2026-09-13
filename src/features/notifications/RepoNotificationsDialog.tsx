@@ -172,8 +172,8 @@ interface MatrixSelectProps<T extends string> {
 /**
  * One axis qualifying a matrix row — which pull requests the CI-checks source
  * watches, which results a CI source notifies on, which automation results
- * notify. Composed from the Select
- * primitives rather than SelectField for two reasons the wrapper can't serve:
+ * notify. Composed from the Select primitives rather than SelectField for two
+ * reasons the wrapper can't serve:
  * the reason has to reach the trigger through `aria-describedby`, and a held
  * picker must stay in the tab order — Base UI's `disabled` sets `tabIndex={-1}`
  * on the trigger, which would put the control and its reason out of reach.
