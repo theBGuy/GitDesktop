@@ -15,7 +15,7 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
-import { ProjectFieldsEditor } from "./ProjectFieldsEditor";
+import { type EditableBoard, ProjectFieldsEditor } from "./ProjectFieldsEditor";
 import { projectScopeMissing } from "./ProjectsPopover";
 
 const FIELD_LABEL = "Project fields";
@@ -379,9 +379,17 @@ export function ProjectFieldValues({
   const entryByProject = new Map(
     entries.map((entry) => [entry.project.id, entry]),
   );
+  // `viewerCanUpdate` is read off the MEMBERSHIP row, which is the read that
+  // populates it — the same board inside a values entry doesn't carry the viewer's
+  // access, and the editor holds a board's rows on this flag.
   const boards = (memberships.data ?? [])
-    .map((item) => entryByProject.get(item.project.id))
-    .filter((entry): entry is ItemProjectFieldValues => entry !== undefined);
+    .map((item) => {
+      const entry = entryByProject.get(item.project.id);
+      return entry === undefined
+        ? undefined
+        : { ...entry, viewerCanUpdate: item.project.viewerCanUpdate };
+    })
+    .filter((board): board is EditableBoard => board !== undefined);
   const unsettledReason = (() => {
     switch (true) {
       case boards.length > 0:

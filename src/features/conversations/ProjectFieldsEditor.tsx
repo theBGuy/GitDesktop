@@ -1,6 +1,6 @@
 import { Popover } from "@base-ui/react/popover";
 import { SlidersHorizontalIcon } from "@phosphor-icons/react";
-import { useId, useState } from "react";
+import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
@@ -34,6 +34,9 @@ import { ScopeGapBlock } from "./ProjectsPopover";
 
 const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read project fields but not change them (needs the project scope)";
+/** Mirrors the Projects picker's own row wording verbatim — the two surfaces gate on
+ *  the same `viewerCanUpdate` flag and must not say it differently. */
+const NO_ACCESS_REASON = "You don't have write access to this project";
 const NO_ITERATIONS_REASON =
   "This board's iteration field has no iterations to pick from yet";
 const ISSUE_FIELD_REASON =
@@ -56,6 +59,21 @@ function isWritable(def: ProjectFieldDef): def is WritableFieldDef {
   return def.kind !== "system";
 }
 
+/** Why a whole board's rows are held, or `undefined` when they're editable. */
+function boardLockedReason(
+  readOnlyScope: boolean,
+  board: EditableBoard,
+): string | undefined {
+  switch (true) {
+    case readOnlyScope:
+      return READ_ONLY_SCOPE_REASON;
+    case !board.viewerCanUpdate:
+      return NO_ACCESS_REASON;
+    default:
+      return undefined;
+  }
+}
+
 /** An org issue-field bridged onto a board. `updateProjectV2ItemFieldValue` is not
  *  its write path, so its row is held rather than hidden — the rail shows the value,
  *  and a missing row there would read as a broken render. */
@@ -63,16 +81,34 @@ function isIssueFieldDef(def: WritableFieldDef): boolean {
   return def.kind !== "iteration" && def.isIssueField;
 }
 
-/** One field's drafted state: what it will READ as once written, plus the write that
+/** One field's drafted VALUE: what it will read as once written, plus the write that
  *  puts it there. Both halves are built where the definitions are — the ids a write
- *  needs and the names a value renders live only there. `null` is a drafted UNSET. */
-type FieldDraft = {
+ *  needs and the names a value renders live only there. */
+type CommittedDraft = {
   value: ProjectFieldValue;
   update: ProjectFieldValueUpdate;
-} | null;
+};
+
+/** A control holding an entry the browser can't parse. Measured in Chromium: a
+ *  half-typed exponent ("1e", "-") and an unfinished date segment all report
+ *  `value === ""` with `validity.badInput`, which is indistinguishable from the
+ *  emptied control that MEANS clear — hence a third state rather than `null`. */
+const INVALID_DRAFT = "invalid";
+
+/** One field's drafted state. `null` is a drafted UNSET (the clear gesture);
+ *  {@link INVALID_DRAFT} commits nothing at all, overriding any earlier draft. */
+type FieldDraft = CommittedDraft | typeof INVALID_DRAFT | null;
 
 /** Every touched field of one board, by field id. An absent key is untouched. */
 type BoardDraft = Record<string, FieldDraft>;
+
+/** One board this item sits on: its cached field values, plus whether the viewer may
+ *  change them. The flag rides the MEMBERSHIP row — the project object inside a values
+ *  entry carries a `viewerCanUpdate` of its own that this deliberately shadows, the
+ *  memberships read being the one that populates it. */
+export type EditableBoard = ItemProjectFieldValues & {
+  viewerCanUpdate: boolean;
+};
 
 /** A value's identity for the close-time diff. Kinds compare on what a write
  *  changes, so a multi-select reordered by the server still reads as unchanged, and
@@ -116,8 +152,9 @@ type FieldDiff = {
   updates: ProjectFieldValueUpdate[];
   clears: string[];
   /** The drafts that survived the diff, by field id — what the optimistic patch
-   *  applies, so a skipped draft can't reach the cache either. */
-  applied: Map<string, FieldDraft>;
+   *  applies, so a skipped draft can't reach the cache either. Typed without the
+   *  invalid arm: a skipped entry is never recorded here. */
+  applied: Map<string, CommittedDraft | null>;
 };
 
 /** Diffs one board's touched fields against its seeded snapshot. Untouched fields
@@ -130,10 +167,13 @@ function fieldDiff(
 ): FieldDiff {
   const updates: ProjectFieldValueUpdate[] = [];
   const clears: string[] = [];
-  const applied = new Map<string, FieldDraft>();
+  const applied = new Map<string, CommittedDraft | null>();
   for (const [fieldId, entry] of Object.entries(touched)) {
-    // A half-typed number stays on screen but never reaches the wire: the backend
-    // would have to read the NaN as something, and every reading is wrong.
+    // Neither an update nor a clear: the field keeps what the server holds while
+    // its control shows an entry still being typed.
+    if (entry === INVALID_DRAFT) continue;
+    // Defensive twin for a raw string that reached a parse from somewhere other
+    // than a number input, whose own sanitizing never yields an unparseable one.
     if (
       entry !== null &&
       entry.value.kind === "number" &&
@@ -208,7 +248,7 @@ export function ProjectFieldsEditor({
   lens: RemoteLens;
   /** The boards this item is on, in memberships order, each with the cached values
    *  the draft seeds from. Empty while those values are still unread. */
-  boards: ItemProjectFieldValues[];
+  boards: EditableBoard[];
   /** Set when the surface can't be edited right now — the viewer lacks the access
    *  its action needs, or the entity is still loading. Outranks every other hold. */
   disabledReason?: string;
@@ -262,10 +302,13 @@ export function ProjectFieldsEditor({
   }
 
   async function commit() {
-    const pending: { board: ItemProjectFieldValues; write: BoardWrite }[] = [];
+    const pending: { board: EditableBoard; write: BoardWrite }[] = [];
     for (const board of boards) {
       const touched = drafts[board.project.id];
       if (touched === undefined) continue;
+      // Belt for the rows' own hold: a board the viewer can't write would 403 at the
+      // end of a chain that stops on the first failure, stranding the boards after it.
+      if (!board.viewerCanUpdate) continue;
       // A board that appeared mid-open has no snapshot, so its LIVE values stand
       // in — a baseline that can move under a background refetch while a mounted
       // input's text stays frozen. Diffing only touched fields bounds that.
@@ -379,9 +422,10 @@ export function ProjectFieldsEditor({
                   open={open}
                   // A board GitHub reports with no title has no header to render.
                   showTitle={showTitles && board.project.title !== ""}
-                  lockedReason={
-                    readOnlyScope ? READ_ONLY_SCOPE_REASON : undefined
-                  }
+                  // Ranked as the Projects picker ranks its rows: the popover-wide
+                  // scope gap outranks the per-board access one, and BoardSection
+                  // puts the per-field issue-field reason below both.
+                  lockedReason={boardLockedReason(readOnlyScope, board)}
                   seed={seeds[board.project.id]}
                   draft={drafts[board.project.id]}
                   onChange={(fieldId, entry) =>
@@ -464,11 +508,7 @@ function BoardSection({
         <FieldRow
           key={def.id}
           def={def}
-          current={
-            def.id in (draft ?? {})
-              ? (draft?.[def.id]?.value ?? null)
-              : (baseline[def.id] ?? null)
-          }
+          current={currentValue(def, draft, baseline)}
           // The board-wide hold outranks the per-field one, as the Projects
           // picker's rows rank theirs: a scope gap has a remedy on this popup.
           lockedReason={
@@ -480,6 +520,20 @@ function BoardSection({
       ))}
     </div>
   );
+}
+
+/** What a row reads as now: its draft where the field was touched, else the seed. An
+ *  INVALID entry reads as the SEED — nothing will be written for it, so the field
+ *  still holds what it held, and its Clear stays offered. */
+function currentValue(
+  def: WritableFieldDef,
+  draft: BoardDraft | undefined,
+  baseline: Record<string, ProjectFieldValue>,
+): ProjectFieldValue | null {
+  const entry = draft?.[def.id];
+  if (entry === undefined || entry === INVALID_DRAFT)
+    return baseline[def.id] ?? null;
+  return entry?.value ?? null;
 }
 
 /** One field's control, plus the header that names it and clears it. A set field
@@ -498,6 +552,10 @@ function FieldRow({
   onChange: (entry: FieldDraft) => void;
 }) {
   const inputId = useId();
+  // Remounts the scalar input, which is uncontrolled so that a partly-typed entry
+  // the browser reports as empty stays legible while it can't be parsed. Bumped
+  // only by Clear, so a keystroke never costs the caret its place.
+  const [clearSeq, setClearSeq] = useState(0);
   const action =
     current === null ? (
       <span className="text-[11px] text-muted-foreground">Not set</span>
@@ -510,7 +568,10 @@ function FieldRow({
         aria-label={`Clear ${def.name}`}
         disabled={!!lockedReason}
         reason={lockedReason}
-        onClick={() => onChange(null)}
+        onClick={() => {
+          setClearSeq((n) => n + 1);
+          onChange(null);
+        }}
       >
         Clear
       </DisabledReasonButton>
@@ -531,6 +592,7 @@ function FieldRow({
           {action}
         </div>
         <ScalarInput
+          key={clearSeq}
           id={inputId}
           def={def}
           current={current}
@@ -602,8 +664,18 @@ function scalarText(def: ScalarDef, current: ProjectFieldValue | null): string {
 }
 
 /** Turns a scalar input's raw text into a draft. Empty is an UNSET rather than an
- *  empty value — an empty text field and a missing one read the same on a board. */
-function scalarDraft(def: ScalarDef, raw: string): FieldDraft {
+ *  empty value — an empty text field and a missing one read the same on a board.
+ *
+ *  `badInput` is what separates the two ways a control reads empty: the user cleared
+ *  it (clear), or the browser can't parse what's in it and reports `""` on their
+ *  behalf (commit nothing). Without it, typing the "e" of "1e5" into a set field
+ *  wipes the value on close. */
+function scalarDraft(
+  def: ScalarDef,
+  raw: string,
+  badInput: boolean,
+): FieldDraft {
+  if (badInput) return INVALID_DRAFT;
   const base = {
     fieldId: def.id,
     fieldName: def.name,
@@ -628,15 +700,21 @@ function scalarDraft(def: ScalarDef, raw: string): FieldDraft {
       value: { kind: "text", ...base, text: raw },
       update: { kind: "text", fieldId: def.id, text: raw },
     };
+  // Every intermediate of a typed 4-digit year is a valid date with a 1-3 digit one
+  // ("2026-12-15" arrives as 0002-, 0020-, 0202- first), and no project dates year
+  // <1000 — so the floor puts an unfinished year in the same commit-nothing state as
+  // an unparseable entry, where a valid-looking wrong date would otherwise be written.
+  if (Number(raw.split("-")[0]) < 1000) return INVALID_DRAFT;
   return {
     value: { kind: "date", ...base, date: raw },
     update: { kind: "date", fieldId: def.id, date: raw },
   };
 }
 
-/** Text / number / date. Controlled from its own state so the row's Clear can empty
- *  it: the draft above mirrors what's typed, and an unparseable number stays here
- *  exactly as entered rather than snapping back to the last good value. */
+/** Text / number / date. UNCONTROLLED: a number or date input mid-entry reports its
+ *  value as `""` while still showing what was typed, so re-driving it from that value
+ *  would blank the field under the user's cursor. The DOM keeps the text, the draft
+ *  above keeps the meaning, and the row's Clear remounts this via its `key`. */
 function ScalarInput({
   id,
   def,
@@ -650,28 +728,43 @@ function ScalarInput({
   lockedReason?: string;
   onChange: (entry: FieldDraft) => void;
 }) {
-  const [text, setText] = useState(() => scalarText(def, current));
-  // Clear empties the draft, which this mirrors — the row's own button is outside
-  // this component, so the emptied state has to arrive as a prop change.
-  const shown = current === null && text !== "" ? "" : text;
+  const hostRef = useRef<HTMLSpanElement>(null);
+  const onEdit = useEffectEvent((el: HTMLInputElement) => {
+    onChange(scalarDraft(def, el.value, el.validity.badInput));
+  });
+  // A NATIVE listener, not React's `onChange`: React gates its synthetic change on
+  // the input's exposed value STRING (`updateValueIfChanged`, react-dom-client
+  // :1592), so an edit that leaves that string `""` is never delivered. Both such
+  // edits flip badInput and so decide whether this field clears — typing the "-" of
+  // "-5" into a just-emptied field, and deleting it again to recover. Measured in
+  // Chromium: the native `input` event fires for both and bubbles to this host.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (host === null) return;
+    const handle = (e: Event) => {
+      if (e.target instanceof HTMLInputElement) onEdit(e.target);
+    };
+    host.addEventListener("input", handle);
+    return () => host.removeEventListener("input", handle);
+  }, []);
   return (
-    <Input
-      id={id}
-      type={def.kind === "text" ? "text" : def.kind}
-      // `any` rather than the default step of 1: a board's number field takes
-      // fractions, and a stepped input reports those as invalid.
-      step={def.kind === "number" ? "any" : undefined}
-      // A native date input renders its own segment mask and ignores this, so only
-      // the two free-text kinds get the invitation; the header says "Not set".
-      placeholder={def.kind === "date" ? undefined : `Set ${def.name}…`}
-      className="h-7"
-      disabled={!!lockedReason}
-      value={shown}
-      onChange={(e) => {
-        setText(e.target.value);
-        onChange(scalarDraft(def, e.target.value));
-      }}
-    />
+    // Owns the listener so the input's own ref-forwarding is never load-bearing;
+    // `block` keeps the input's full width in the row's column.
+    <span ref={hostRef} className="block">
+      <Input
+        id={id}
+        type={def.kind === "text" ? "text" : def.kind}
+        // `any` rather than the default step of 1: a board's number field takes
+        // fractions, and a stepped input reports those as invalid.
+        step={def.kind === "number" ? "any" : undefined}
+        // A native date input renders its own segment mask and ignores this, so only
+        // the two free-text kinds get the invitation; the header says "Not set".
+        placeholder={def.kind === "date" ? undefined : `Set ${def.name}…`}
+        className="h-7"
+        disabled={!!lockedReason}
+        defaultValue={scalarText(def, current)}
+      />
+    </span>
   );
 }
 
