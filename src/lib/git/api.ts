@@ -109,7 +109,7 @@ import type {
   PrInfo,
   PrMergeability,
   PrMergeabilityState,
-  ProjectFieldDef,
+  ProjectFieldDefs,
   ProjectFieldValueUpdate,
   ProjectItemRef,
   ProjectItemRemove,
@@ -2538,7 +2538,7 @@ export const ghEditItemProjects = (
  *  state, not item state, so it takes no lens: a board is the same object whichever
  *  remote the item was read through. */
 export const ghProjectFields = (repoPath: string, projectId: string) =>
-  invoke<ProjectFieldDef[]>("gh_project_fields", { repoPath, projectId });
+  invoke<ProjectFieldDefs>("gh_project_fields", { repoPath, projectId });
 
 /** Writes one board's field values for one item in a single call. `updates` sets or
  *  replaces; `clears` carries the field ids to UNSET, which no update shape can

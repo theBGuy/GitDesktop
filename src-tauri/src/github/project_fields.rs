@@ -128,6 +128,13 @@ pub enum ProjectFieldDef {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectFieldDefs {
+    pub fields: Vec<ProjectFieldDef>,
+    pub truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FieldOptionDef {
     pub id: String,
     pub name: String,
@@ -260,7 +267,7 @@ fn build_set_item_field_values_args(
             } else {
                 format!("v{n}")
             };
-            if values.is_empty() {
+            if matches!(update, FieldValueUpdate::MultiSelect { .. }) && values.is_empty() {
                 // gh's bracket key without '=' represents an empty array.
                 args.extend(["-f".to_string(), value_name]);
             } else {
@@ -338,17 +345,16 @@ pub async fn gh_set_item_field_values(
     item_id: String,
     updates: Vec<FieldValueUpdate>,
     clears: Vec<String>,
-) -> Result<(), String> {
+) -> AppResult<()> {
     if updates.is_empty() && clears.is_empty() {
         return Ok(());
     }
-    let args = build_set_item_field_values_args(&project_id, &item_id, &updates, &clears)
-        .map_err(|e| e.to_string())?;
+    let args = build_set_item_field_values_args(&project_id, &item_id, &updates, &clears)?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
         .await
-        .map_err(|e| map_field_write_error(e).to_string())?;
-    parse_field_write_response(&out.stdout_lossy()).map_err(|e| e.to_string())
+        .map_err(map_field_write_error)?;
+    parse_field_write_response(&out.stdout_lossy())
 }
 
 const FIELDS_SCOPE_HINT: &str =
@@ -394,7 +400,7 @@ fn item_field_values_query(field: &str) -> String {
 
 fn project_fields_query() -> String {
     format!(
-        "query($id:ID!){{ node(id:$id){{ ... on ProjectV2{{ fields(first:50){{ nodes{{ \
+        "query($id:ID!){{ node(id:$id){{ ... on ProjectV2{{ fields(first:50){{ pageInfo{{ hasNextPage }} nodes{{ \
          __typename {FIELD_COMMON} \
          ... on ProjectV2SingleSelectField{{ options{{ id name color description }} }} \
          ... on ProjectV2MultiSelectField{{ multiSelectOptions{{ id name color description }} }} \
@@ -550,9 +556,10 @@ fn iterations(value: &Value) -> Vec<IterationDef> {
 }
 
 const PROJECT_FIELDS_POINTER: &str = "/data/node/fields/nodes";
+const PROJECT_FIELDS_TRUNCATED_POINTER: &str = "/data/node/fields/pageInfo/hasNextPage";
 
-fn parse_project_fields(value: &Value) -> Vec<ProjectFieldDef> {
-    value
+fn parse_project_fields(value: &Value) -> ProjectFieldDefs {
+    let fields = value
         .pointer(PROJECT_FIELDS_POINTER)
         .into_iter()
         .flat_map(array)
@@ -601,7 +608,14 @@ fn parse_project_fields(value: &Value) -> Vec<ProjectFieldDef> {
                 },
             })
         })
-        .collect()
+        .collect();
+    ProjectFieldDefs {
+        fields,
+        truncated: value
+            .pointer(PROJECT_FIELDS_TRUNCATED_POINTER)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
 }
 
 #[tauri::command]
@@ -649,7 +663,7 @@ pub async fn gh_item_field_values(
 pub async fn gh_project_fields(
     repo_path: String,
     project_id: String,
-) -> AppResult<Vec<ProjectFieldDef>> {
+) -> AppResult<ProjectFieldDefs> {
     let query = project_fields_query();
     let out = run_gh(
         Some(&repo_path),
@@ -868,6 +882,81 @@ mod tests {
     }
 
     #[test]
+    fn double_digit_update_aliases_and_variables_are_distinct() {
+        let updates: Vec<_> = (0..11)
+            .map(|n| FieldValueUpdate::Text {
+                field_id: format!("field-{n}"),
+                text: format!("text-{n}"),
+            })
+            .collect();
+        let args = build_set_item_field_values_args("project", "item", &updates, &[]).unwrap();
+        let query = args.last().unwrap();
+        let declarations: Vec<_> = query
+            .strip_prefix("query=mutation(")
+            .unwrap()
+            .split_once(')')
+            .unwrap()
+            .0
+            .split(',')
+            .collect();
+        for declaration in ["$f1:ID!", "$f10:ID!", "$v1:String!", "$v10:String!"] {
+            assert_eq!(
+                declarations.iter().filter(|d| **d == declaration).count(),
+                1
+            );
+        }
+        assert_eq!(query.matches("updateProjectV2ItemFieldValue(").count(), 11);
+        for n in 0..11 {
+            assert_eq!(query.matches(&format!("s{n}: ")).count(), 1);
+        }
+        assert!(query.contains("s10: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f10,value:{text:$v10}})"));
+        let pairs: Vec<_> = args[2..]
+            .chunks_exact(2)
+            .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+            .collect();
+        for pair in [
+            ("-f", "f1=field-1"),
+            ("-f", "f10=field-10"),
+            ("-f", "v10=text-10"),
+        ] {
+            assert!(pairs.contains(&pair));
+        }
+    }
+
+    #[test]
+    fn empty_text_uses_an_empty_value_argument() {
+        let args = build_set_item_field_values_args(
+            "project",
+            "item",
+            &[FieldValueUpdate::Text {
+                field_id: "notes".into(),
+                text: String::new(),
+            }],
+            &[],
+        )
+        .unwrap();
+        assert!(args[2..].chunks_exact(2).any(|pair| pair == ["-f", "v0="]));
+        assert!(!args.iter().any(|arg| arg == "v0" || arg == "v0[]"));
+        assert!(args.last().unwrap().contains("value:{text:$v0}"));
+    }
+
+    #[tokio::test]
+    async fn field_write_errors_keep_their_serialized_kind() {
+        let result: AppResult<()> = gh_set_item_field_values(
+            String::new(),
+            String::new(),
+            "item".into(),
+            vec![],
+            vec!["field".into()],
+        )
+        .await;
+        let wire = serde_json::to_value(result.unwrap_err()).unwrap();
+        assert_eq!(wire["kind"], "invalidArgument");
+        let wire = serde_json::to_value(map_field_write_error(AppError::GhNotFound)).unwrap();
+        assert_eq!(wire["kind"], "ghNotFound");
+    }
+
+    #[test]
     fn finite_numbers_are_document_literals_without_value_variables() {
         for (number, literal) in [
             (0.0001, "0.0001"),
@@ -1054,7 +1143,7 @@ mod tests {
             {"id":"title","name":"Title","dataType":"TITLE"},
             {"id":"labels","name":"Labels","dataType":"LABELS"}
         ]}}}});
-        let defs = parse_project_fields(&builtins);
+        let defs = parse_project_fields(&builtins).fields;
         assert_eq!(defs.len(), 2);
         assert!(defs
             .iter()
@@ -1064,7 +1153,7 @@ mod tests {
             {"id":"sprint","dataType":"ITERATION","configuration":{"iterations":[],"completedIterations":[{"id":"past","title":"Past","startDate":"2026-09-01","duration":14}]}},
             {"id":"teams","dataType":"MULTI_SELECT","isIssueField":true,"multiSelectOptions":[{"id":"web","name":"Web","color":"BLUE"}]}
         ]}}}});
-        let defs = serde_json::to_value(parse_project_fields(&response)).unwrap();
+        let defs = serde_json::to_value(parse_project_fields(&response).fields).unwrap();
         assert_eq!(defs[0]["options"], json!([]));
         assert_eq!(defs[1]["iterations"], json!([]));
         assert_eq!(defs[1]["completedIterations"][0]["id"], "past");
@@ -1133,8 +1222,36 @@ mod tests {
     }
 
     #[test]
+    fn field_definition_wrapper_reports_truncation_tolerantly() {
+        for (page_info, truncated) in [
+            (None, false),
+            (Some(Value::Null), false),
+            (Some(json!({})), false),
+            (Some(json!({"hasNextPage": null})), false),
+            (Some(json!({"hasNextPage": "true"})), false),
+            (Some(json!({"hasNextPage": false})), false),
+            (Some(json!({"hasNextPage": true})), true),
+        ] {
+            let mut response = field_defs();
+            if let Some(page_info) = page_info {
+                response["data"]["node"]["fields"]["pageInfo"] = page_info;
+            }
+            let defs = parse_project_fields(&response);
+            assert_eq!(defs.truncated, truncated);
+            assert_eq!(defs.fields.len(), 7);
+            let wire = serde_json::to_value(defs).unwrap();
+            assert_keys(&wire, &["fields", "truncated"]);
+            assert_eq!(wire["truncated"], truncated);
+            assert_eq!(wire["fields"][0]["id"], "status");
+        }
+        let defs = parse_project_fields(&Value::Null);
+        assert!(defs.fields.is_empty());
+        assert!(!defs.truncated);
+    }
+
+    #[test]
     fn field_definition_wire_shapes_are_camel_case() {
-        let defs = parse_project_fields(&field_defs());
+        let defs = parse_project_fields(&field_defs()).fields;
         assert_eq!(defs.len(), 7);
         let expected: [(&str, &[&str]); 7] = [
             (
@@ -1319,7 +1436,7 @@ mod tests {
             json!({"data":{"node":null}}),
             Value::Null,
         ] {
-            assert!(parse_project_fields(&response).is_empty());
+            assert!(parse_project_fields(&response).fields.is_empty());
         }
     }
 
@@ -1396,7 +1513,7 @@ mod tests {
             {"id":"iteration","dataType":"ITERATION","configuration":null},
             {"id":"unknown"}, {"id":null}, null
         ]}}}});
-        let defs = serde_json::to_value(parse_project_fields(&response))
+        let defs = serde_json::to_value(parse_project_fields(&response).fields)
             .expect("partial definitions serialize");
         assert_eq!(defs.as_array().expect("definitions array").len(), 4);
         assert_eq!(defs[0]["options"][0]["description"], "");
@@ -1408,7 +1525,7 @@ mod tests {
 
     #[test]
     fn definitions_keep_options_and_both_iteration_lists() {
-        let defs = serde_json::to_value(parse_project_fields(&field_defs()))
+        let defs = serde_json::to_value(parse_project_fields(&field_defs()).fields)
             .expect("definitions serialize");
         assert_eq!(
             defs[0]["options"],
@@ -1458,7 +1575,7 @@ mod tests {
             "FUTURE_TYPE",
         ] {
             let response = json!({"data":{"node":{"fields":{"nodes":[{"__typename":"ProjectV2Field","id":"field","name":"System","dataType":data_type}]}}}});
-            let defs = serde_json::to_value(parse_project_fields(&response))
+            let defs = serde_json::to_value(parse_project_fields(&response).fields)
                 .expect("system field serializes");
             assert_eq!(
                 defs,
@@ -1543,6 +1660,7 @@ mod tests {
             &query,
             &[
                 PROJECT_FIELDS_POINTER,
+                PROJECT_FIELDS_TRUNCATED_POINTER,
                 "/id",
                 "/name",
                 "/dataType",

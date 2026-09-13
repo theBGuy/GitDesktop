@@ -29,8 +29,8 @@ import type {
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
-import { IterationRange, OptionValue } from "./ProjectFieldValues";
-import { ScopeGapBlock } from "./ProjectsPopover";
+import { DATE_ONLY, IterationRange, OptionValue } from "./ProjectFieldValues";
+import { projectScopeReadOnly, ScopeGapBlock } from "./ProjectsPopover";
 
 const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read project fields but not change them (needs the project scope)";
@@ -40,14 +40,14 @@ const NO_ACCESS_REASON = "You don't have write access to this project";
 const NO_ITERATIONS_REASON =
   "This board's iteration field has no iterations to pick from yet";
 const ISSUE_FIELD_REASON =
-  "Issue fields are edited on GitHub — board editing arrives later.";
+  "Issue fields are edited on GitHub — board editing arrives later";
+const MULTILINE_TEXT_REASON = "Multi-line text is edited on GitHub";
+
+/** A board text value the API wrote with line breaks in it. */
+const MULTILINE = /[\r\n]/;
 const SAVING_REASON = "Saving your last change…";
 const STRANDED_NOTICE =
   "Field changes weren't applied — this item is no longer on the board they were drafted for";
-
-/** GitHub's Date scalar, which carries no zone — and the only form a native date
- *  input accepts, so anything else seeds it empty rather than silently blank. */
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 /** The field kinds this editor can write. The built-in fields GitHub owns on the
  *  issue/PR itself (title, assignees, labels, milestone, repository, reviewers,
@@ -62,12 +62,12 @@ function isWritable(def: ProjectFieldDef): def is WritableFieldDef {
 /** Why a whole board's rows are held, or `undefined` when they're editable. */
 function boardLockedReason(
   readOnlyScope: boolean,
-  board: EditableBoard,
+  board: ItemProjectFieldValues,
 ): string | undefined {
   switch (true) {
     case readOnlyScope:
       return READ_ONLY_SCOPE_REASON;
-    case !board.viewerCanUpdate:
+    case !board.project.viewerCanUpdate:
       return NO_ACCESS_REASON;
     default:
       return undefined;
@@ -79,6 +79,26 @@ function boardLockedReason(
  *  and a missing row there would read as a broken render. */
 function isIssueFieldDef(def: WritableFieldDef): boolean {
   return def.kind !== "iteration" && def.isIssueField;
+}
+
+/** Why ONE field's row is held, or `undefined` when it's editable. Both arms are
+ *  per-field and rank below any board-wide hold; `seeded` is the value the board
+ *  holds now, which is what the multi-line arm protects. */
+function rowLockedReason(
+  def: WritableFieldDef,
+  seeded: ProjectFieldValue | undefined,
+): string | undefined {
+  switch (true) {
+    case isIssueFieldDef(def):
+      return ISSUE_FIELD_REASON;
+    // A single-line input strips CR/LF as the value is assigned to it, so the first
+    // keystroke would draft the flattened string and the close would commit it — a
+    // multi-line control belongs to a board surface if ever.
+    case seeded?.kind === "text" && MULTILINE.test(seeded.text):
+      return MULTILINE_TEXT_REASON;
+    default:
+      return undefined;
+  }
 }
 
 /** One field's drafted VALUE: what it will read as once written, plus the write that
@@ -101,14 +121,6 @@ type FieldDraft = CommittedDraft | typeof INVALID_DRAFT | null;
 
 /** Every touched field of one board, by field id. An absent key is untouched. */
 type BoardDraft = Record<string, FieldDraft>;
-
-/** One board this item sits on: its cached field values, plus whether the viewer may
- *  change them. The flag rides the MEMBERSHIP row — the project object inside a values
- *  entry carries a `viewerCanUpdate` of its own that this deliberately shadows, the
- *  memberships read being the one that populates it. */
-export type EditableBoard = ItemProjectFieldValues & {
-  viewerCanUpdate: boolean;
-};
 
 /** A value's identity for the close-time diff. Kinds compare on what a write
  *  changes, so a multi-select reordered by the server still reads as unchanged, and
@@ -248,7 +260,7 @@ export function ProjectFieldsEditor({
   lens: RemoteLens;
   /** The boards this item is on, in memberships order, each with the cached values
    *  the draft seeds from. Empty while those values are still unread. */
-  boards: EditableBoard[];
+  boards: ItemProjectFieldValues[];
   /** Set when the surface can't be edited right now — the viewer lacks the access
    *  its action needs, or the entity is still loading. Outranks every other hold. */
   disabledReason?: string;
@@ -258,12 +270,7 @@ export function ProjectFieldsEditor({
   const host = useActiveGhHost();
   const scopes = useGhScopes(host);
   const openReconnect = useUiStore((s) => s.openReconnect);
-  // Read-only classic token: the reads work, every write 403s. Hold the controls
-  // rather than letting each edit round-trip to a rollback + toast.
-  const readOnlyScope =
-    scopes.data?.classic === true &&
-    scopes.data.scopes.includes("read:project") &&
-    !scopes.data.scopes.includes("project");
+  const readOnlyScope = projectScopeReadOnly(scopes.data);
 
   const [open, setOpen] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, BoardDraft>>({});
@@ -302,13 +309,13 @@ export function ProjectFieldsEditor({
   }
 
   async function commit() {
-    const pending: { board: EditableBoard; write: BoardWrite }[] = [];
+    const pending: { board: ItemProjectFieldValues; write: BoardWrite }[] = [];
     for (const board of boards) {
       const touched = drafts[board.project.id];
       if (touched === undefined) continue;
       // Belt for the rows' own hold: a board the viewer can't write would 403 at the
       // end of a chain that stops on the first failure, stranding the boards after it.
-      if (!board.viewerCanUpdate) continue;
+      if (!board.project.viewerCanUpdate) continue;
       // A board that appeared mid-open has no snapshot, so its LIVE values stand
       // in — a baseline that can move under a background refetch while a mounted
       // input's text stays frozen. Diffing only touched fields bounds that.
@@ -388,7 +395,16 @@ export function ProjectFieldsEditor({
           className="isolate z-50"
         >
           <Popover.Popup className="w-80 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-            <p className="px-1 pb-1.5 text-xs font-medium">Project fields</p>
+            {/* The caption IS the popup's accessible name: Popover.Popup takes its
+                `aria-labelledby` from whatever Title registers, and a bare element
+                leaves the dialog unnamed. `render` keeps the <p> it has always been
+                — Title's own default element is an <h2>. */}
+            <Popover.Title
+              render={<p />}
+              className="px-1 pb-1.5 text-xs font-medium"
+            >
+              Project fields
+            </Popover.Title>
             {readOnlyScope && (
               <div className="mb-1 border-b pb-1">
                 <ScopeGapBlock
@@ -469,7 +485,7 @@ function BoardSection({
   onChange: (fieldId: string, entry: FieldDraft) => void;
 }) {
   const defs = useProjectFields(repoPath, board.project.id, open);
-  const writable = (defs.data ?? []).filter(isWritable);
+  const writable = (defs.data?.fields ?? []).filter(isWritable);
   const baseline = seed ?? seedBoard(board);
   return (
     <div className="space-y-2">
@@ -509,15 +525,20 @@ function BoardSection({
           key={def.id}
           def={def}
           current={currentValue(def, draft, baseline)}
-          // The board-wide hold outranks the per-field one, as the Projects
+          // The board-wide hold outranks the per-field ones, as the Projects
           // picker's rows rank theirs: a scope gap has a remedy on this popup.
-          lockedReason={
-            lockedReason ??
-            (isIssueFieldDef(def) ? ISSUE_FIELD_REASON : undefined)
-          }
+          lockedReason={lockedReason ?? rowLockedReason(def, baseline[def.id])}
           onChange={(entry) => onChange(def.id, entry)}
         />
       ))}
+      {/* Stands alone, as the picker's own truncation note does: a capped list of
+          fields this build can't write renders zero rows, where the empty-state
+          line above would be a lie. */}
+      {defs.data?.truncated === true && (
+        <p className="text-[11px] text-muted-foreground">
+          Some fields aren't shown.
+        </p>
+      )}
     </div>
   );
 }
@@ -817,6 +838,9 @@ function SingleSelectRows({
         <label
           key={option.id}
           className={cn(ROW_CLASS, lockedReason && "cursor-not-allowed")}
+          // The board's own note on what the option means, where GitHub shows it —
+          // supplementary, so it stays off the row's visible chrome.
+          title={option.description || undefined}
         >
           <Radio value={option.id} disabled={!!lockedReason} />
           <OptionValue name={option.name} color={option.color} />
@@ -901,6 +925,8 @@ function MultiSelectRows({
             lockedReason && "cursor-not-allowed",
             activeId === option.id && "bg-muted/60",
           )}
+          // See the single-select rows: the board's note on the option, hover-only.
+          title={option.description || undefined}
         >
           <Checkbox
             data-row={option.id}

@@ -15,7 +15,7 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
-import { type EditableBoard, ProjectFieldsEditor } from "./ProjectFieldsEditor";
+import { ProjectFieldsEditor } from "./ProjectFieldsEditor";
 import { projectScopeMissing } from "./ProjectsPopover";
 
 const FIELD_LABEL = "Project fields";
@@ -35,8 +35,9 @@ const OPTION_COLORS: Record<string, string> = {
   PURPLE: "#8d80ba",
 };
 
-/** GitHub's Date scalar, which carries no zone. */
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+/** GitHub's Date scalar, which carries no zone — and the only form a native date
+ *  input accepts, so the editor seeds anything else empty rather than blank. */
+export const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 function optionColor(color: string): string {
   return OPTION_COLORS[color.toUpperCase()] ?? OPTION_COLORS.GRAY;
@@ -379,17 +380,9 @@ export function ProjectFieldValues({
   const entryByProject = new Map(
     entries.map((entry) => [entry.project.id, entry]),
   );
-  // `viewerCanUpdate` is read off the MEMBERSHIP row, which is the read that
-  // populates it — the same board inside a values entry doesn't carry the viewer's
-  // access, and the editor holds a board's rows on this flag.
   const boards = (memberships.data ?? [])
-    .map((item) => {
-      const entry = entryByProject.get(item.project.id);
-      return entry === undefined
-        ? undefined
-        : { ...entry, viewerCanUpdate: item.project.viewerCanUpdate };
-    })
-    .filter((board): board is EditableBoard => board !== undefined);
+    .map((item) => entryByProject.get(item.project.id))
+    .filter((entry): entry is ItemProjectFieldValues => entry !== undefined);
   const unsettledReason = (() => {
     switch (true) {
       case boards.length > 0:

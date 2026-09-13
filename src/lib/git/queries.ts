@@ -2676,10 +2676,20 @@ export function useSetItemFieldValues(
     },
     // Cancel-before-invalidate, and RETURNED so `isPending` spans the refetch —
     // both for the reasons {@link useEditItemProjects}'s `onSettled` states.
-    onSettled: () =>
+    // Only the chain's LAST settle refetches: every board writes the same query and
+    // the caller awaits each, so invalidating per board would pay a full read
+    // between writes for a result the next write supersedes. An ERROR is also a
+    // last settle — the caller stops there, so this is the only chance to reconcile
+    // the boards already written. The cancel stays unconditional (an in-flight read
+    // still holds pre-write values), and `isPending` spans the chain either way.
+    onSettled: (_d, e, args) =>
       queryClient
         .cancelQueries({ queryKey: fieldsKey })
-        .then(() => queryClient.invalidateQueries({ queryKey: fieldsKey })),
+        .then(() =>
+          args.unwritten === 0 || e !== null
+            ? queryClient.invalidateQueries({ queryKey: fieldsKey })
+            : undefined,
+        ),
   });
 }
 

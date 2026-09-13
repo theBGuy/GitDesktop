@@ -1752,10 +1752,9 @@ duplicates, and same-project mentions.
   the trigger: it opens one popup holding every field you can set on every board the issue is
   on, filled in or not, and any field that already holds a value carries a **Clear** to empty
   it again. Like the pickers above it, the popup drafts your edits and writes them when it
-  closes — one write per board.
-  GitHub only, and changing anything needs the \`project\` scope: with just \`read:project\`
-  the boards still show but every row is locked, and with neither the picker says so and
-  helps you get it — when your sign-in's scopes are readable,
+  closes — one write per board. GitHub only, and changing anything needs the \`project\`
+  scope: with just \`read:project\` the boards still show but every row is locked, and with
+  neither the picker says so and helps you get it — when your sign-in's scopes are readable,
   that's a one-click **Reconnect GitHub…** plus a copyable \`gh auth refresh\` command
   already pointed at your host.
 

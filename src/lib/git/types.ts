@@ -2444,6 +2444,14 @@ export type ProjectFieldDef =
   | { kind: "date"; id: string; name: string; isIssueField: boolean }
   | { kind: "system"; id: string; name: string; dataType: string };
 
+/** One board's field definitions. `truncated` reports that the server capped the
+ *  list, which the editor says rather than implying it offers every field — the
+ *  same claim {@link AvailableProjects} makes about the catalog. */
+export interface ProjectFieldDefs {
+  fields: ProjectFieldDef[];
+  truncated: boolean;
+}
+
 /** One field to SET on an item, tagged by the field's kind. These field names are
  *  the wire the backend deserializes by — a renamed one reads as absent there.
  *  Unsetting is not expressed here: a clear rides the write's separate id list. */
