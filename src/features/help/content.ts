@@ -2618,8 +2618,8 @@ security audit** as toggles under each. There's no "add a rule" — a given mome
 exists at most once, so you can't create conflicting duplicates. Reviews use the review model
 from the AI section (security audits use the dedicated audit model when you've set one); PR
 results are posted as a comment, commit results open from their notification row — with
-**Automation results** set to *Failures only* under **Notify on**, a successful commit
-review creates no row, so its result has no row to open from.
+**Notify on** for **Automation results** set to *Failures only*, a successful commit
+review notifies nowhere, so there's nothing to open its result from.
 **Review draft PRs when created** (off by default) controls draft handling:
 left off, a draft PR gets its automated first review when it's marked ready for review, not
 at creation — marking it ready **in GitDesktop** always fires that first review, while a
