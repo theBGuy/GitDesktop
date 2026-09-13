@@ -512,16 +512,19 @@ const PLUGIN_STORE_LOAD_IMPORT_RE =
   /\bimport\s+(?:type\s+)?\{[^}]*\bload\b[^}]*\}\s*from\s*["']@tauri-apps\/plugin-store["']/g;
 const LOAD_STORE_NAME_CALL_RE = /\bload\s*\(\s*storeName\s*\(/g;
 
-// A raw `.reload(` on a plugin store. `window.location.reload()` is a different API
-// entirely, excluded structurally by the lookbehind rather than by an allowlist entry
-// — a reload of the WEBVIEW has nothing to do with a store's disk cache. Accepted
-// evasions, zero instances today: a `location` reload the formatter split across
-// lines (the joined view would put a space before `.reload`, defeating the
-// lookbehind), and a reload reached through a variable named `…location`.
+// A raw `.reload(` on a plugin store. A SINGLE-LINE `window.location.reload()` is a
+// different API entirely, excluded structurally by the lookbehind rather than by an
+// allowlist entry — a reload of the WEBVIEW has nothing to do with a store's disk
+// cache.
 // FALSE-POSITIVE direction, by design: the receiver is unchecked, so any future
 // non-store `.reload()` — `router.reload()`, an aliased location binding — goes red
-// with a store-flavored message. The remedy is an allowlist entry with rationale, NOT
-// a narrowed receiver pattern: naming the store receivers would fail-OPEN on the next
+// with a store-flavored message. The lookbehind is narrower than it looks, and in the
+// same direction: `view()` joins each trimmed line with a SPACE, so a `location` split
+// from its `.reload()` by the formatter reads as `window.location .reload(` and the
+// lookbehind sees the space, not `location` — the webview reload then MATCHES too
+// (measured against the live scanner; the single-line form is the only excluded one).
+// The remedy for every one of these is an allowlist entry with rationale, NOT a
+// narrowed receiver pattern: naming the store receivers would fail-OPEN on the next
 // store whose variable is spelled differently, which is the direction that matters.
 const RAW_STORE_RELOAD_RE = /(?<!location)\.reload\s*\(/g;
 

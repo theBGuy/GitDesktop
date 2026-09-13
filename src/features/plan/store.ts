@@ -124,8 +124,9 @@ interface PlanState {
   /** A seed for the activation "Plan a task" composer (set by the agent-plan
    *  hotkey, or an issue's Plan button), consumed by SessionActivation. */
   pendingPlanSeed: PlanSeed | null;
-  /** Whether persisted plans have been loaded (gates autosave so the initial
-   *  empty state never overwrites what's on disk). */
+  /** Whether persisted plans have been loaded. Short-circuits {@link hydrate}; it is
+   *  NOT what gates the autosave, which awaits a RESOLVED `hydrate()` instead, so a
+   *  read that failed at startup is retried rather than written over. */
   hydrated: boolean;
 
   /** Load persisted plans from disk into the list (once, at startup). */

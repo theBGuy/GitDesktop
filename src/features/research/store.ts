@@ -152,8 +152,9 @@ interface ResearchState {
   /** A seed for the activation "Research" composer (set by the agent-research
    *  hotkey), consumed by SessionActivation. */
   pendingResearchSeed: ResearchSeed | null;
-  /** Whether persisted runs have loaded (gates autosave so the initial empty
-   *  state never overwrites disk). */
+  /** Whether persisted runs have loaded. Short-circuits {@link hydrate}; it is NOT
+   *  what gates the autosave, which awaits a RESOLVED `hydrate()` instead, so a read
+   *  that failed at startup is retried rather than written over. */
   hydrated: boolean;
 
   hydrate: () => Promise<void>;

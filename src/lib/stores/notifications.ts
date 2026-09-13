@@ -186,6 +186,10 @@ async function persist(items: AppNotification[]): Promise<void> {
 // ---- Reactive store --------------------------------------------------------
 interface NotifState {
   items: AppNotification[];
+  /** Whether the persisted inbox has been read in. Short-circuits
+   *  {@link hydrateFromDisk}; it is NOT what gates the persist subscription, which
+   *  awaits a RESOLVED read instead, so a failed one is retried rather than written
+   *  over. */
   hydrated: boolean;
   hydrate: (items: AppNotification[]) => void;
   push: (n: AppNotification) => void;
