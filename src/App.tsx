@@ -73,9 +73,9 @@ function App() {
   const screenModalOpen = useModalGateOpen();
   const dialogOpen = cloneOpen || createOpen || screenModalOpen;
 
-  // SettingsScreen publishes its notifications draft while it is up; the verdict
-  // is screen-scoped, so leaving Settings retires it here — the publisher can't,
-  // having unmounted by the time the view changes.
+  // SettingsScreen publishes its notifications draft while it is up, and the
+  // verdict is screen-scoped: App owns the screen's lifetime, so leaving
+  // Settings retires it here.
   useEffect(() => {
     if (view !== "settings") clearNotificationsDraft();
   }, [view, clearNotificationsDraft]);

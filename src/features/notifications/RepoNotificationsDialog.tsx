@@ -257,9 +257,10 @@ function bodyState({
   return "ready";
 }
 
-/** Either side of the baseline failed to load. Offers the retry rather than a
- *  dead dialog: neither loader memoizes its rejection, so a storage hiccup can
- *  genuinely clear. */
+/** Either half of the baseline failed to load. Retry is worth offering: the
+ *  overrides loader clears its memo on a rejected load, and a settings read that
+ *  failed at `store.get` retries too — only a rejected settings `load()` stays
+ *  pinned until relaunch. */
 function BaselineLoadFailed({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="space-y-2">
