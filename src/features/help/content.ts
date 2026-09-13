@@ -1913,13 +1913,13 @@ is still paging in, that total can run ahead of the cards in front of you.
 
 A card carries its type and state glyph, its title, its number, and up to three assignee
 faces (with a **+N** for any beyond that). A card from another repository names that
-repository, so a board that spans several stays readable. **Draft** items — the notes that
-live only on the board — say so, and open their text in place. An item you don't have
-access to shows as **redacted** and says why, rather than silently thinning the board.
+repository, so a board that spans several stays readable. **Draft** items (the notes that
+live only on the board) say so, and open their text in place. An item you don't have
+access to shows as **redacted** and says so, rather than silently thinning the board.
 
 Open an issue or pull request from its card and it lands on its own tab. One from another
-repository — or from the other side of a fork's **Fork | Upstream** lens — opens on GitHub
-in your browser instead.
+repository, or from the other side of a fork's **Fork | Upstream** lens, opens on GitHub in
+your browser instead.
 
 ## Keyboard
 
@@ -1928,9 +1928,9 @@ next column at the same height, **Home / End** jump to a column's first or last 
 **Enter** opens the card you're on. Collapsing the sidebar ({{kbd:toggle-sidebar}}) hands
 the board its width.
 
-GitHub only, and it uses the same \`project\` sign-in scope the Projects picker on issues and
-pull requests already needs — without it, the tab says so and offers a one-click
-**Reconnect GitHub…**.`,
+GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
+Projects picker on issues and pull requests already asks for; with neither, the tab says so
+and offers a one-click **Reconnect GitHub…**, which requests \`project\`.`,
   },
   {
     id: "discussions",

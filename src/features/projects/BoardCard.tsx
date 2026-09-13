@@ -26,9 +26,9 @@ const AVATARS_SHOWN = 3;
 /** Why a closed issue closed, as the words that ride beside its glyph. An
  *  unmapped reason (wire drift) leaves the bare state, never a guess. */
 const CLOSED_REASON: Record<string, string> = {
-  COMPLETED: "Closed as completed",
-  NOT_PLANNED: "Closed as not planned",
-  DUPLICATE: "Closed as duplicate",
+  COMPLETED: "Issue closed as completed",
+  NOT_PLANNED: "Issue closed as not planned",
+  DUPLICATE: "Issue closed as duplicate",
 };
 
 interface StatePill {
@@ -53,9 +53,21 @@ interface StatePill {
  * spoken for, hence `FileDashed` for a draft rather than a second dashed circle.
  */
 const PR_STATE: Record<string, StatePill | undefined> = {
-  OPEN: { Icon: GitPullRequestIcon, tone: "text-success", word: "Open" },
-  MERGED: { Icon: GitMergeIcon, tone: "text-merged", word: "Merged" },
-  CLOSED: { Icon: XCircleIcon, tone: "text-destructive", word: "Closed" },
+  OPEN: {
+    Icon: GitPullRequestIcon,
+    tone: "text-success",
+    word: "Open pull request",
+  },
+  MERGED: {
+    Icon: GitMergeIcon,
+    tone: "text-merged",
+    word: "Merged pull request",
+  },
+  CLOSED: {
+    Icon: XCircleIcon,
+    tone: "text-destructive",
+    word: "Closed pull request",
+  },
 };
 
 function prPill(state: string, isDraft: boolean): StatePill {
@@ -63,7 +75,7 @@ function prPill(state: string, isDraft: boolean): StatePill {
     return {
       Icon: FileDashedIcon,
       tone: "text-muted-foreground",
-      word: "Draft",
+      word: "Draft pull request",
     };
   return (
     // A state this build doesn't know keeps a shape of its own and the forge's
@@ -71,15 +83,18 @@ function prPill(state: string, isDraft: boolean): StatePill {
     PR_STATE[state] ?? {
       Icon: CircleIcon,
       tone: "text-muted-foreground",
-      word: state,
+      word: `${state} pull request`,
     }
   );
 }
 
+/** State AND kind, since the card shows neither as text. A reason only qualifies
+ *  a CLOSED issue: REOPENED rides an OPEN one, so a present reason is never on
+ *  its own proof the issue is closed. */
 function issueStateWord(state: string, stateReason: string | null): string {
-  if (state !== "CLOSED") return "Open";
-  if (stateReason === null) return "Closed";
-  return CLOSED_REASON[stateReason] ?? "Closed";
+  if (state !== "CLOSED") return "Open issue";
+  if (stateReason === null) return "Closed issue";
+  return CLOSED_REASON[stateReason] ?? "Closed issue";
 }
 
 /** The card's first line: glyph, the state in words for a reader, and the title
@@ -90,6 +105,9 @@ function CardTitle({
   title,
 }: {
   glyph: ReactNode;
+  /** State AND kind — "Open issue", "Draft pull request". The glyph carries the
+   *  pair visually, so the sr-only text has to carry both too; a bare "Open"
+   *  leaves a reader unable to tell an issue from a pull request. */
   stateWord: string;
   title: string;
 }) {
@@ -97,7 +115,14 @@ function CardTitle({
     <span className="flex items-start gap-1.5">
       {glyph}
       <span className="sr-only">{stateWord}</span>
-      <span className="line-clamp-2 min-w-0 flex-1 font-medium">{title}</span>
+      {/* `clipTitleFromText` measures BOTH axes, so a two-line clamp counts as
+          clipped and a title only appears once the text really is cut off. */}
+      <span
+        className="line-clamp-2 min-w-0 flex-1 font-medium"
+        onMouseEnter={clipTitleFromText}
+      >
+        {title}
+      </span>
     </span>
   );
 }
@@ -261,9 +286,12 @@ export const BoardCard = memo(function BoardCard({
           <LockSimpleIcon className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 font-medium">Redacted item</span>
         </span>
+        {/* States the effect, never a cause: this arm covers an item the viewer
+            has no access to AND any content shape this build doesn't recognise,
+            so naming a reason would be a guess in at least one of them. */}
         <span className="text-[11px]">
-          This item is in a repository you can't see, so the board can't show
-          it.
+          The board can't show this item here. Open the project on GitHub to see
+          what it is.
         </span>
       </div>
     );

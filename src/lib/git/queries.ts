@@ -1,4 +1,5 @@
 import {
+  type QueryClient,
   type QueryKey,
   queryOptions,
   useInfiniteQuery,
@@ -2148,6 +2149,10 @@ function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
   /** Keys beyond the issue's own detail subtree, for the fields a LIST filter can
    *  key on — membership is server-evaluated, so those lists must refetch. */
   extraKeys: QueryKey[] = [],
+  /** Whether this field is drawn on a Projects BOARD card. Declared per call site
+   *  rather than assumed for the whole helper: assignees ride a card, while
+   *  milestone, issue type, due date and confidentiality do not. */
+  boardCards = false,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -2184,13 +2189,15 @@ function useOptimisticIssueMutation<TArgs extends { number: number }, TData>(
     // Narrow reconciliation: only the one issue's detail subtree (not repo-wide),
     // scoped to the lens the mutation ran under, plus whatever list surface the
     // caller says this field decides membership on.
-    onSettled: (_d, _e, args) =>
-      void Promise.all(
+    onSettled: (_d, _e, args) => {
+      if (boardCards) invalidateProjectBoards(queryClient, repo);
+      return void Promise.all(
         [
           ["repo", repo, "issue", lens, args.number] as QueryKey,
           ...extraKeys,
         ].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
-      ),
+      );
+    },
   });
 }
 
@@ -2210,6 +2217,8 @@ export function useSetIssueAssignees(repo: string, lens: RemoteLens) {
     // decides membership — a detail-only reconcile leaves a filtered list showing a
     // row the next fetch would drop. No review-state sibling on the issue side.
     [["repo", repo, "issue-list", lens]],
+    // Assignee avatars are drawn on every board card.
+    true,
   );
 }
 
@@ -2583,6 +2592,7 @@ export function useEditItemProjects(
       void queryClient
         .cancelQueries({ queryKey: fieldsKey })
         .then(() => queryClient.invalidateQueries({ queryKey: fieldsKey }));
+      invalidateProjectBoards(queryClient, repo);
       return queryClient.invalidateQueries({ queryKey: key });
     },
   });
@@ -2607,6 +2617,31 @@ export function useProjectFields(
 
 const projectItemsKey = (repo: string, projectId: string) =>
   ["repo", repo, "project-items", projectId] as const;
+
+/**
+ * Mark every board this repo has opened stale, for any write that changes what a
+ * board card SHOWS — its title, state glyph, assignees, membership, or the field
+ * value that decides its column. Partial key on purpose: the caller is editing an
+ * issue/PR and has no board id in scope, and the family is one entry per board
+ * actually visited.
+ *
+ * CANCEL before invalidate. A board read already in flight when the mutation
+ * settles would otherwise resolve afterwards and stamp itself fresh —
+ * `successState` clears `isInvalidated` — erasing the invalidation and serving
+ * pre-mutation cards for the rest of the staleTime window. There is no second
+ * chance: `invalidateQueries` refetches ACTIVE queries only, and a board behind
+ * the Projects tab's Activity gate is not active. (The repo's cancel-then-
+ * invalidate class, same as the item-field-values chains above.)
+ *
+ * Invalidate-only past that: no forced refetch, so the Activity gate still owns
+ * WHEN a hidden board re-reads.
+ */
+function invalidateProjectBoards(queryClient: QueryClient, repo: string): void {
+  const queryKey = ["repo", repo, "project-items"];
+  void queryClient
+    .cancelQueries({ queryKey })
+    .then(() => queryClient.invalidateQueries({ queryKey }));
+}
 
 /** One board's items, paged. Keyed on the board alone for the same reason the
  *  definitions are — a board is the same object whichever remote reached it —
@@ -2710,13 +2745,14 @@ export function useSetItemFieldValues(
     // the boards already written. The cancel stays unconditional (an in-flight read
     // still holds pre-write values), and `isPending` spans the chain either way.
     onSettled: (_d, e, args) =>
-      queryClient
-        .cancelQueries({ queryKey: fieldsKey })
-        .then(() =>
-          args.unwritten === 0 || e !== null
-            ? queryClient.invalidateQueries({ queryKey: fieldsKey })
-            : undefined,
-        ),
+      queryClient.cancelQueries({ queryKey: fieldsKey }).then(() => {
+        if (args.unwritten !== 0 && e === null) return undefined;
+        // The Projects BOARD reads these same values through its own query, so a
+        // field write has to reach it as well as the rail — it rides the same
+        // last-settle condition, for the same reason.
+        invalidateProjectBoards(queryClient, repo);
+        return queryClient.invalidateQueries({ queryKey: fieldsKey });
+      }),
   });
 }
 
@@ -2733,19 +2769,26 @@ function useIssueLifecycleMutation<TArgs, TData>(
   lens: RemoteLens,
   mutationFn: (args: TArgs) => Promise<TData>,
   numberOf: (args: TArgs) => number,
+  /** Whether this write changes what a Projects BOARD card draws. Declared per
+   *  call site, not assumed for the helper: close/reopen/edit/transfer/delete all
+   *  change a card's state glyph, title, or presence, while pin and lock/unlock
+   *  change nothing a card shows. */
+  boardCards = false,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn,
-    onSettled: (_d, _e, args) =>
-      void Promise.all([
+    onSettled: (_d, _e, args) => {
+      if (boardCards) invalidateProjectBoards(queryClient, repo);
+      return void Promise.all([
         queryClient.invalidateQueries({
           queryKey: ["repo", repo, "issue-list", lens],
         }),
         queryClient.invalidateQueries({
           queryKey: ["repo", repo, "issue", lens, numberOf(args)],
         }),
-      ]),
+      ]);
+    },
   });
 }
 
@@ -3124,6 +3167,8 @@ export function useCloseIssue(repo: string, lens: RemoteLens) {
     (args: { number: number; reason: string }) =>
       api.forgeIssueClose(repo, args.number, args.reason, lens),
     (args) => args.number,
+    // State + close reason are the card glyph and its screen-reader word.
+    true,
   );
 }
 
@@ -3133,6 +3178,8 @@ export function useReopenIssue(repo: string, lens: RemoteLens) {
     lens,
     (number: number) => api.forgeIssueReopen(repo, number, lens),
     (number) => number,
+    // Back to the open glyph, and REOPENED lands as the state reason.
+    true,
   );
 }
 
@@ -3143,6 +3190,8 @@ export function useEditIssue(repo: string, lens: RemoteLens) {
     (args: { number: number; title: string; body: string }) =>
       api.forgeIssueEdit(repo, args.number, args.title, args.body, lens),
     (args) => args.number,
+    // The title is the card.
+    true,
   );
 }
 
@@ -3153,6 +3202,8 @@ export function useTransferIssue(repo: string, lens: RemoteLens) {
     (args: { number: number; destination: string }) =>
       api.forgeIssueTransfer(repo, args.number, args.destination, lens),
     (args) => args.number,
+    // A transfer re-homes the item: its number and owning repo both change.
+    true,
   );
 }
 
@@ -3162,6 +3213,8 @@ export function useDeleteIssue(repo: string, lens: RemoteLens) {
     lens,
     (number: number) => api.forgeIssueDelete(repo, number, lens),
     (number) => number,
+    // A deleted issue leaves the board entirely.
+    true,
   );
 }
 
@@ -5485,15 +5538,19 @@ export function useSetPrAssignees(repo: string, lens: RemoteLens) {
         cur ? { ...cur, assignees: prevAssignees } : cur,
       );
     },
-    // Assignees are a filter axis; see useSetPrReviewers's settle note.
-    onSettled: (_d, _e, args) =>
-      Promise.all(
+    // Assignees are a filter axis; see useSetPrReviewers's settle note. This
+    // settle is SCOPED (three keys, not the repo subtree), so the board needs
+    // naming explicitly — assignee avatars ride every card.
+    onSettled: (_d, _e, args) => {
+      invalidateProjectBoards(queryClient, repo);
+      return Promise.all(
         [
           ["repo", repo, "pr", lens, args.number],
           ["repo", repo, "pr-list", lens],
           ["repo", repo, "pr-review-state", lens],
         ].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
-      ),
+      );
+    },
   });
 }
 

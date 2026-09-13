@@ -2482,7 +2482,10 @@ export type BoardItemContent =
       number: number;
       title: string;
       state: string;
-      /** COMPLETED / NOT_PLANNED / DUPLICATE on a closed issue; null otherwise. */
+      /** GitHub's issue state reason, or null when it carries none. COMPLETED /
+       *  NOT_PLANNED / DUPLICATE ride a CLOSED issue, but REOPENED rides an OPEN
+       *  one — so this is not a closed-only field, and a reader must not treat a
+       *  present reason as proof the issue is closed. */
       stateReason: string | null;
       repoNameWithOwner: string;
       assignees: AssigneeRef[];

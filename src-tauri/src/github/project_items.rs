@@ -61,6 +61,7 @@ pub enum BoardItemContent {
         body: String,
         assignees: Vec<AssigneeRef>,
     },
+    /// A REDACTED item or content the parser could not read.
     Redacted {},
 }
 
@@ -205,9 +206,9 @@ fn unreadable(detail: impl ToString) -> AppError {
     gh_unreadable("the project items", detail.to_string())
 }
 
-fn parse_content(item_type: &str, content: Option<Value>) -> AppResult<BoardItemContent> {
+fn parse_content(item_type: &str, content: Option<Value>) -> BoardItemContent {
     let Some(content) = content else {
-        return Ok(BoardItemContent::Redacted {});
+        return BoardItemContent::Redacted {};
     };
     if !matches!(
         (item_type, content["__typename"].as_str()),
@@ -215,12 +216,12 @@ fn parse_content(item_type: &str, content: Option<Value>) -> AppResult<BoardItem
             | ("PULL_REQUEST", Some("PullRequest"))
             | ("DRAFT_ISSUE", Some("DraftIssue"))
     ) {
-        return Ok(BoardItemContent::Redacted {});
+        return BoardItemContent::Redacted {};
     }
     let Ok(content) = serde_json::from_value::<ContentResponse>(content) else {
-        return Ok(BoardItemContent::Redacted {});
+        return BoardItemContent::Redacted {};
     };
-    Ok(match content {
+    match content {
         ContentResponse::Issue {
             id,
             number,
@@ -266,7 +267,7 @@ fn parse_content(item_type: &str, content: Option<Value>) -> AppResult<BoardItem
             body: body.unwrap_or_default(),
             assignees: assignee_refs(assignees),
         },
-    })
+    }
 }
 
 fn parse_page(output: &str) -> AppResult<BoardItems> {
@@ -285,22 +286,20 @@ fn parse_page(output: &str) -> AppResult<BoardItems> {
         .into_iter()
         .flatten()
         .flatten()
-        .map(|node| {
-            Ok(BoardItem {
-                item_id: node.id,
-                is_archived: node.is_archived,
-                content: parse_content(&node.item_type, node.content)?,
-                field_values: node
-                    .field_values
-                    .and_then(|values| values.nodes)
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .map(|value| parse_field_value(&value))
-                    .collect(),
-            })
+        .map(|node| BoardItem {
+            item_id: node.id,
+            is_archived: node.is_archived,
+            content: parse_content(&node.item_type, node.content),
+            field_values: node
+                .field_values
+                .and_then(|values| values.nodes)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|value| parse_field_value(&value))
+                .collect(),
         })
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect();
     Ok(BoardItems {
         items,
         total_count: page.total_count,
@@ -568,7 +567,7 @@ mod tests {
             issue["stateReason"] = reason.clone();
             issue["state"] = json!("CLOSED");
             issue["assignees"]["nodes"] = json!([null]);
-            let parsed = parse_content("ISSUE", Some(issue)).unwrap();
+            let parsed = parse_content("ISSUE", Some(issue));
             let wire = serde_json::to_value(parsed).unwrap();
             assert_eq!(wire["stateReason"], reason);
             assert_eq!(wire["state"], "CLOSED");

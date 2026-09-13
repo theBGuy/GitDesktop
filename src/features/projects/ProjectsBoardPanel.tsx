@@ -25,10 +25,12 @@ import {
   projectScopeMissing,
   ScopeGapBlock,
 } from "@/features/conversations/ProjectsPopover";
+import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import { useActiveGhHost, useForgeGhHost } from "@/lib/git/host";
 import {
+  forgeReady,
   useAvailableProjects,
   useForgeStatus,
   useGhScopes,
@@ -61,6 +63,7 @@ const FORGE_KIND: Record<
 const NO_GROUP_FIELDS_REASON =
   "This project has no single-select fields to group its board by";
 const LOADING_FIELDS_REASON = "Loading this project's fields…";
+const FIELDS_ERROR_REASON = "Couldn't load this project's fields";
 /** A view-option row. Mirrors the field editor's own option rows, which are the
  *  same shape on the same kind of choice. */
 const GROUP_ROW_CLASS =
@@ -88,6 +91,20 @@ function BoardSkeleton() {
         ))}
       </div>
     </>
+  );
+}
+
+/** The panel's error card: the failure's own summary plus the one control that
+ *  can clear it. `presentError(...).summary` alone is the house error-card
+ *  shape — the Issues and Pull Requests panels render exactly this. */
+function ErrorCard({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  return (
+    <div className="px-3 py-4 text-xs">
+      <p className="text-muted-foreground">{presentError(error).summary}</p>
+      <Button variant="outline" size="xs" className="mt-2" onClick={onRetry}>
+        Retry
+      </Button>
+    </div>
   );
 }
 
@@ -232,12 +249,10 @@ export function ProjectsBoardPanel({
     [host, repoSlug, selectIssue, selectPr, setRepoTab],
   );
 
-  /** The card DOM focus sits on, resolved from the DOM rather than from state:
-   *  a bare Tab into the board moves focus without touching the cursor, and the
-   *  arrows must act on where the user actually is. */
-  function focusedCard(root: HTMLElement): { col: number; idx: number } | null {
-    const el = document.activeElement;
-    if (!(el instanceof HTMLElement) || !root.contains(el)) return null;
+  /** The card `el` sits in, resolved from the DOM rather than from state: a bare
+   *  Tab into the board moves focus without touching the cursor, and the arrows
+   *  must act on where the user actually is. */
+  function cardAt(el: HTMLElement): { col: number; idx: number } | null {
     const card = el.closest<HTMLElement>("[data-card-index]");
     const column = card?.closest<HTMLElement>("[data-column-index]");
     if (!card || !column) return null;
@@ -256,7 +271,16 @@ export function ProjectsBoardPanel({
   }
 
   function onBoardKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    const from = focusedCard(e.currentTarget) ?? liveCursor;
+    // DOM containment first, and it gates the cursor fallback too. React routes
+    // synthetic events through the COMPONENT tree, so a keystroke typed inside a
+    // draft card's PORTALLED popup arrives here even though the popup is not a
+    // DOM descendant of the board — and the old `?? liveCursor` fallback then
+    // moved the board under someone reading a draft. Focus outside this
+    // container is not ours to act on, whatever the cursor still remembers.
+    const focused = document.activeElement;
+    if (!(focused instanceof HTMLElement) || !e.currentTarget.contains(focused))
+      return;
+    const from = cardAt(focused) ?? liveCursor;
     if (from === null) return;
     const column = columns[from.col];
     if (column === undefined || column.items.length === 0) return;
@@ -306,6 +330,11 @@ export function ProjectsBoardPanel({
     switch (true) {
       case fieldsPending:
         return LOADING_FIELDS_REASON;
+      // Ahead of the settled-empty claim: a FAILED read is neither pending nor
+      // holding data, so without this arm a board whose fields call errored
+      // would announce that it defines none.
+      case fields.error !== null:
+        return FIELDS_ERROR_REASON;
       case groupFields.length === 0:
         return NO_GROUP_FIELDS_REASON;
       default:
@@ -319,7 +348,15 @@ export function ProjectsBoardPanel({
   const projectItems: Record<string, string> = {};
   for (const p of openProjects) projectItems[p.id] = p.title;
 
-  const readError = projects.error ?? fields.error ?? items.error;
+  // Cards already on screen outlive a failed read. A next-page failure, a failed
+  // refetch, or a fields read that died after the board painted all leave the
+  // items that DID arrive in place and say what went wrong beside them — the
+  // error card is for having nothing to show, not for having stale-but-real
+  // cards.
+  const hasPages = (items.data?.pages.length ?? 0) > 0;
+  const fatalError = hasPages
+    ? null
+    : (projects.error ?? fields.error ?? items.error);
   // A DISABLED query is permanently "pending", so every loading test is gated on
   // the read actually being live — otherwise a GitLab repo would load forever.
   // The FIELDS leg matters as much as the items one: without it the board paints
@@ -329,12 +366,91 @@ export function ProjectsBoardPanel({
     (canRead && projects.isPending) ||
     fieldsPending ||
     (canRead && projectId !== null && items.isPending);
+  // An empty catalog is only an ABSENCE claim when the read was complete: a
+  // capped catalog (or one whose owner arm was denied) can come back empty while
+  // boards exist, and "there are none" would be a lie about a set we didn't
+  // finish searching.
+  const catalogTruncated = projects.data?.truncated === true;
+  // `isFetchNextPageError` is query-core's own discrimination (`isError &&
+  // fetchMeta.fetchMore.direction === "forward"`), which is what tells a dead
+  // CONTINUATION apart from a dead initial load. Paired with `hasPages` so a
+  // failure that left cards on screen never blanks them.
+  const pageError = hasPages && items.isFetchNextPageError && items.error;
+  // Load more is held for ANY in-flight items fetch, not just a continuation.
+  // `fetchNextPage` defaults to query-core's `cancelRefetch: true`, so clicking
+  // during the reconciliation refetch that an in-app edit triggered CANCELS that
+  // refetch and appends a fresh page onto the stale ones — and the append's own
+  // success then clears `isInvalidated`, stamping the stale cards provably fresh
+  // for the rest of the staleTime window. Measured against query-core 5.102.8.
+  // Two reasons, because the two waits mean different things to the user.
+  const loadMoreHeld = (() => {
+    switch (true) {
+      case items.isFetchingNextPage:
+        return "Loading more items…";
+      case items.isFetching:
+        return "Refreshing the board…";
+      // The post-failure half of the same hazard. A REFRESH that failed leaves
+      // the pre-edit pages on screen with the invalidation still owed, and both
+      // fetching guards above have released. Appending a continuation onto those
+      // pages would succeed, and that success clears the error AND the
+      // invalidation — stamping a stale board provably fresh for the rest of the
+      // staleTime window. Only the full refetch behind the strip's Retry can
+      // clear it, which is why this points there. A failed CONTINUATION is
+      // excluded: those pages were never invalidated, so retrying the page is
+      // exactly the right move.
+      case items.isError && !items.isFetchNextPageError:
+        return "The board's last refresh failed. Retry the refresh before loading more.";
+      default:
+        return undefined;
+    }
+  })();
+  // Once cards are on screen, EVERY failed read is non-fatal: it earns a line in
+  // the in-flow strip with its own retry wired to its own refetch, rather than
+  // vanishing behind a board that silently renders ungrouped or stale. Exactly
+  // one visible recovery path per failed read, which is why the items arm
+  // excludes a CONTINUATION failure — that one is recovered at Load more.
+  const liveNotices: {
+    key: string;
+    what: string;
+    message: string;
+    retry: () => void;
+  }[] = [];
+  if (hasPages) {
+    if (projects.error !== null)
+      liveNotices.push({
+        key: "projects",
+        what: "the project list",
+        message: presentError(projects.error).summary,
+        retry: () => void projects.refetch(),
+      });
+    if (fields.error !== null)
+      liveNotices.push({
+        key: "fields",
+        what: "this board's fields",
+        message: presentError(fields.error).summary,
+        retry: () => void fields.refetch(),
+      });
+    if (items.error !== null && !items.isFetchNextPageError)
+      liveNotices.push({
+        key: "items",
+        what: "this board's items",
+        message: presentError(items.error).summary,
+        retry: () => void items.refetch(),
+      });
+  }
 
   const body = (() => {
     switch (true) {
+      // A failed forge probe is not "still detecting": without this arm the
+      // panel sits on a skeleton forever and nothing on screen can refetch it.
+      case gh.error !== null:
+        return <ErrorCard error={gh.error} onRetry={() => void gh.refetch()} />;
       // Still detecting: `gh.data` undefined is not yet "not GitHub".
       case gh.data === undefined:
         return <BoardSkeleton />;
+      // A KNOWN other provider is the one thing this tab can name precisely, so
+      // it is checked ahead of the not-ready ladder: telling a GitLab user to
+      // install `glab` would walk them toward a feature GitLab doesn't have.
       case provider !== null && !isGitHub:
         return (
           <BoardNotice>
@@ -344,15 +460,13 @@ export function ProjectsBoardPanel({
             </p>
           </BoardNotice>
         );
-      case !isGitHub:
-        return (
-          <BoardNotice>
-            <p>
-              This repository has no GitHub remote — Projects boards are a
-              GitHub feature.
-            </p>
-          </BoardNotice>
-        );
+      // provider `null` ALSO means gh isn't installed, isn't signed in, or can't
+      // resolve this remote — "no GitHub remote" misdiagnosed all three and
+      // offered no way out. The shared ladder names the real blocker and pairs
+      // it with the action that clears it, exactly as the Issues / Discussions /
+      // Actions tabs do.
+      case !forgeReady(gh.data):
+        return <ForgeNotReady repoPath={repoPath} feature="project boards" />;
       case scopeGap:
         return (
           <ScopeGapBlock
@@ -366,38 +480,48 @@ export function ProjectsBoardPanel({
               })
             }
           >
-            Project boards need the <span className="font-mono">project</span>{" "}
-            scope, which your GitHub sign-in is missing.
+            {/* Names BOTH scopes the read accepts, matching the detector:
+                `projectScopeMissing` only fires when a classic token has
+                neither. The reconnect below asks for `project`, which is the
+                one that also permits the writes the pickers offer. */}
+            Reading project boards needs the{" "}
+            <span className="font-mono">project</span> or{" "}
+            <span className="font-mono">read:project</span> scope, and your
+            GitHub sign-in has neither.
           </ScopeGapBlock>
         );
-      case readError !== null:
+      case fatalError !== null:
         return (
-          <div className="px-3 py-4 text-xs">
-            <p className="text-muted-foreground">
-              {presentError(readError).summary}
-            </p>
-            <Button
-              variant="outline"
-              size="xs"
-              className="mt-2"
-              onClick={() => {
-                if (projects.error !== null) projects.refetch();
-                if (fields.error !== null) fields.refetch();
-                if (items.error !== null) items.refetch();
-              }}
-            >
-              Retry
-            </Button>
-          </div>
+          <ErrorCard
+            error={fatalError}
+            onRetry={() => {
+              if (projects.error !== null) void projects.refetch();
+              if (fields.error !== null) void fields.refetch();
+              if (items.error !== null) void items.refetch();
+            }}
+          />
         );
       case loading:
         return <BoardSkeleton />;
+      // A capped or half-answered catalog can be empty while boards exist, so
+      // the definitive "there are none" is held back for a complete read and the
+      // hedged wording names what wasn't searched.
+      case projectId === null && catalogTruncated:
+        return (
+          <BoardNotice>
+            <p>
+              No open project came back for this repository or its owner, but
+              the list was cut short, so there may be more.
+            </p>
+            <p>Open the owner's Projects page on GitHub to see all of them.</p>
+          </BoardNotice>
+        );
       case projectId === null:
         return (
           <BoardNotice>
             <p>
               A GitHub Project is a board that gathers issues and pull requests
-              — from this repository and others — into columns you define.
+              (from this repository and others) into columns you define.
             </p>
             <p>
               Neither this repository nor its owner has an open one yet. Start
@@ -433,8 +557,11 @@ export function ProjectsBoardPanel({
   })();
 
   const showBoardChrome = isGitHub && !scopeGap && projectId !== null;
-  const capped =
-    projects.data?.truncated === true || fields.data?.truncated === true;
+  const cappedNotes: string[] = [];
+  if (catalogTruncated)
+    cappedNotes.push("Some of this owner's projects aren't listed above.");
+  if (fields.data?.truncated === true)
+    cappedNotes.push("Some of this board's fields aren't offered above.");
   return (
     // `h-full`, not `min-h-0 flex-1`: the content pane (<main>) is a BLOCK box,
     // so a flex-item sizing chain never engages there and this root would take
@@ -471,12 +598,9 @@ export function ProjectsBoardPanel({
             </SelectContent>
           </Select>
           {/* Every control that shapes HOW the board is laid out lives behind
-              this one trigger: group-by is its only occupant today, and the
-              filter and sort controls later slices add become further rows in
-              the same body rather than more toolbar chrome. The project switcher
-              stays outside it — a project title says what it is, where a bare
-              "Status" never said what it DID, which is the whole reason these
-              moved in here. */}
+              this one trigger, so later slices add rows here rather than more
+              toolbar chrome. The project switcher stays outside it: a project
+              title already says what it is. */}
           <Popover.Root>
             <Popover.Trigger
               render={
@@ -576,29 +700,64 @@ export function ProjectsBoardPanel({
                 ? `${shown} of ${totalCount} items`
                 : `${shown} ${shown === 1 ? "item" : "items"}`}
             </span>
-            {items.hasNextPage && (
+            {/* A failed CONTINUATION says so HERE, beside the control that
+                caused it, and leaves the loaded board alone. `refetch()` would
+                replay every page already on screen; `fetchNextPage()` retries
+                only the one that failed. */}
+            {pageError && (
+              <span className="text-destructive">
+                {presentError(items.error).summary}
+              </span>
+            )}
+            {(items.hasNextPage || pageError) && (
               <DisabledReasonButton
                 variant="outline"
                 size="xs"
-                disabled={items.isFetchingNextPage}
-                reason="Loading more items…"
-                onClick={() => items.fetchNextPage()}
+                disabled={loadMoreHeld !== undefined}
+                reason={loadMoreHeld}
+                onClick={() => {
+                  // Belt-and-braces with the `disabled` above: the held state is
+                  // derived at render, and a click racing the render that sets it
+                  // must not get through either.
+                  if (items.isFetching) return;
+                  void items.fetchNextPage();
+                }}
               >
-                Load more
+                {pageError ? "Try again" : "Load more"}
               </DisabledReasonButton>
             )}
           </span>
         </div>
       )}
       {/* In the layout FLOW, pushing the board down — a persistent claim about
-          what this surface is showing must never float over its chrome. */}
-      {showBoardChrome && capped && (
-        <p className="mb-2 shrink-0 border-b pb-1.5 text-[11px] text-muted-foreground">
-          {projects.data?.truncated === true
-            ? "Some of this owner's projects aren't listed above."
-            : "Some of this board's fields aren't offered above."}
-        </p>
-      )}
+          what this surface is showing must never float over its chrome. Failed
+          reads come first (they are actionable), then the caps; both caps can be
+          on at once and each names a different list, so they are joined rather
+          than ranked. */}
+      {showBoardChrome &&
+        (liveNotices.length > 0 || cappedNotes.length > 0) && (
+          <div className="mb-2 shrink-0 space-y-1 border-b pb-1.5 text-[11px]">
+            {liveNotices.map((notice) => (
+              <p
+                key={notice.key}
+                className="flex flex-wrap items-center gap-1.5"
+              >
+                <span className="text-destructive">{notice.message}</span>
+                <button
+                  type="button"
+                  aria-label={`Retry loading ${notice.what}`}
+                  onClick={notice.retry}
+                  className="cursor-pointer text-muted-foreground underline hover:text-foreground"
+                >
+                  Retry
+                </button>
+              </p>
+            ))}
+            {cappedNotes.length > 0 && (
+              <p className="text-muted-foreground">{cappedNotes.join(" ")}</p>
+            )}
+          </div>
+        )}
       {body}
     </div>
   );

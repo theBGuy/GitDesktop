@@ -556,9 +556,10 @@ number, the owning repository when the board spans several, and up to three
 assignees; **draft** items open their notes in place, and an item you can't
 see says so rather than thinning the board silently. Open an issue or pull
 request straight from its card, page through a large board with **Load
-more**, and move around the whole thing from the keyboard. Read-only —
-changes still happen on GitHub — and it uses the same `project` sign-in
-scope the Projects picker already needs.
+more**, and move around the whole thing from the keyboard. Read-only
+(changes still happen on GitHub), and reading a board needs the same
+`project` or `read:project` sign-in scope the Projects picker already asks
+for.
 
 ### Code TODOs
 

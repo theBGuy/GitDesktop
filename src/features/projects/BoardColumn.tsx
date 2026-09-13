@@ -1,4 +1,8 @@
-import { useVirtualizer } from "@tanstack/react-virtual";
+import {
+  defaultRangeExtractor,
+  type Range,
+  useVirtualizer,
+} from "@tanstack/react-virtual";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { OptionValue } from "@/features/conversations/ProjectFieldValues";
 import { clipTitleFromText } from "@/lib/clip-title";
@@ -61,11 +65,29 @@ export const BoardColumn = memo(function BoardColumn({
     (index: number) => itemsRef.current[index]?.itemId ?? index,
     [items],
   );
+  // The board's single tab stop has to stay MOUNTED or Tab can't get into the
+  // board at all: scroll it past the overscan window by hand and the only
+  // tabbable card unmounts with it. Neither virtualized sibling hits this —
+  // ChangesPanel makes every row its own tab stop, MyWorkScreen keeps focus on
+  // a combobox input and never puts it on a row — so a roving tab stop over a
+  // virtualized list needs the window itself to carry the guarantee.
+  const rangeExtractor = useCallback(
+    (range: Range) => {
+      const window = defaultRangeExtractor(range);
+      if (tabStopIndex === null || window.includes(tabStopIndex)) return window;
+      // Ascending, like the default's own output: the rows are absolutely
+      // positioned, but keeping DOM order in step with index order keeps the
+      // measurement projection and a reader's traversal honest.
+      return [...window, tabStopIndex].sort((a, b) => a - b);
+    },
+    [tabStopIndex],
+  );
   const virtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollEl,
     estimateSize: () => CARD_ESTIMATE,
     getItemKey,
+    rangeExtractor,
     overscan: 8,
   });
 
@@ -80,8 +102,14 @@ export const BoardColumn = memo(function BoardColumn({
   // listing it can't re-run this. The nonce guard makes any extra run a no-op.
   const appliedNonce = useRef(focusNonce);
   useEffect(() => {
-    if (activeIndex === null || appliedNonce.current === focusNonce) return;
+    // Recorded on EVERY run, the early returns included. A column that sat
+    // inactive through an arrow press would otherwise keep the pre-press nonce
+    // and spend it later: clicking a card here — a DRAFT card, say, whose click
+    // hands focus to its popup — makes this column active, finds the stale
+    // mismatch, and yanks focus back out of the popup a frame later.
+    const unseen = appliedNonce.current !== focusNonce;
     appliedNonce.current = focusNonce;
+    if (activeIndex === null || !unseen) return;
     virtualizer.scrollToIndex(activeIndex, { align: "auto" });
     let frame = 0;
     let tries = 3;
