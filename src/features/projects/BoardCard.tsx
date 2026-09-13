@@ -1,0 +1,358 @@
+import { Popover } from "@base-ui/react/popover";
+import {
+  CircleIcon,
+  FileDashedIcon,
+  GitMergeIcon,
+  GitPullRequestIcon,
+  type Icon,
+  LockSimpleIcon,
+  NoteIcon,
+  XCircleIcon,
+} from "@phosphor-icons/react";
+import { memo, type ReactNode } from "react";
+import { ForgeUserAvatar } from "@/components/forge-user-avatar";
+import { Markdown } from "@/components/markdown/markdown";
+import { usePanelPortalContainer } from "@/components/panel-portal";
+import { Badge } from "@/components/ui/badge";
+import { StateIcon } from "@/features/issues/IssueRelations";
+import { clipTitleFromText } from "@/lib/clip-title";
+import type { AssigneeRef, BoardItem, BoardItemContent } from "@/lib/git/types";
+import { cn } from "@/lib/utils";
+
+/** How many assignee faces a card shows before the rest collapse into "+N" —
+ *  three is what fits beside the number on the narrowest column. */
+const AVATARS_SHOWN = 3;
+
+/** Why a closed issue closed, as the words that ride beside its glyph. An
+ *  unmapped reason (wire drift) leaves the bare state, never a guess. */
+const CLOSED_REASON: Record<string, string> = {
+  COMPLETED: "Closed as completed",
+  NOT_PLANNED: "Closed as not planned",
+  DUPLICATE: "Closed as duplicate",
+};
+
+interface StatePill {
+  Icon: Icon;
+  tone: string;
+  /** The state as words — what actually carries it, since colour never may. */
+  word: string;
+}
+
+/**
+ * A pull request's glyph and tone per state. Every arm carries its OWN SHAPE:
+ * a card shows no state text, so a table that separated open from closed by tone
+ * alone would be conveying state by colour — which is why this diverges from
+ * `IssueDevelopment`'s `prPresentation` and `markdown-ref-card`'s `STATE_PILL`
+ * (both hand `GitPullRequestIcon` to more than one state). CLOSED also takes the
+ * destructive tone because a closed pull request is abandoned where a closed
+ * ISSUE is resolved, the one place the app's two conventions part — so the issue
+ * arm reuses `StateIcon` rather than sharing this table.
+ *
+ * Shapes are picked to stay distinct from the ISSUE glyphs too, since one board
+ * mixes both: `CircleDashed` (issue open) and `CheckCircle` (issue closed) are
+ * spoken for, hence `FileDashed` for a draft rather than a second dashed circle.
+ */
+const PR_STATE: Record<string, StatePill | undefined> = {
+  OPEN: { Icon: GitPullRequestIcon, tone: "text-success", word: "Open" },
+  MERGED: { Icon: GitMergeIcon, tone: "text-merged", word: "Merged" },
+  CLOSED: { Icon: XCircleIcon, tone: "text-destructive", word: "Closed" },
+};
+
+function prPill(state: string, isDraft: boolean): StatePill {
+  if (isDraft && state === "OPEN")
+    return {
+      Icon: FileDashedIcon,
+      tone: "text-muted-foreground",
+      word: "Draft",
+    };
+  return (
+    // A state this build doesn't know keeps a shape of its own and the forge's
+    // own word, rather than borrowing "open"'s glyph at a different tone.
+    PR_STATE[state] ?? {
+      Icon: CircleIcon,
+      tone: "text-muted-foreground",
+      word: state,
+    }
+  );
+}
+
+function issueStateWord(state: string, stateReason: string | null): string {
+  if (state !== "CLOSED") return "Open";
+  if (stateReason === null) return "Closed";
+  return CLOSED_REASON[stateReason] ?? "Closed";
+}
+
+/** The card's first line: glyph, the state in words for a reader, and the title
+ *  over at most two lines. */
+function CardTitle({
+  glyph,
+  stateWord,
+  title,
+}: {
+  glyph: ReactNode;
+  stateWord: string;
+  title: string;
+}) {
+  return (
+    <span className="flex items-start gap-1.5">
+      {glyph}
+      <span className="sr-only">{stateWord}</span>
+      <span className="line-clamp-2 min-w-0 flex-1 font-medium">{title}</span>
+    </span>
+  );
+}
+
+/** Up to three assignee faces plus a "+N" for the rest. Nothing at all when the
+ *  item has none, so the meta line doesn't reserve empty space. */
+function Assignees({
+  assignees,
+  ghHost,
+}: {
+  assignees: AssigneeRef[];
+  ghHost: string | null;
+}) {
+  if (assignees.length === 0) return null;
+  const shown = assignees.slice(0, AVATARS_SHOWN);
+  const overflow = assignees.length - shown.length;
+  return (
+    <span className="ml-auto flex shrink-0 items-center gap-0.5">
+      {shown.map((assignee) => (
+        <ForgeUserAvatar
+          key={assignee.login}
+          login={assignee.login}
+          avatarUrl={assignee.avatarUrl}
+          ghHost={ghHost}
+          size="sm"
+        />
+      ))}
+      {overflow > 0 && (
+        <span className="tabular-nums">
+          +{overflow}
+          <span className="sr-only"> more assignees</span>
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** An issue's head line. The glyph is the related-issue `StateIcon` the Issues
+ *  surfaces already use, so a closed issue reads the same everywhere. */
+function IssueHead({
+  content,
+}: {
+  content: Extract<BoardItemContent, { kind: "issue" }>;
+}) {
+  return (
+    <CardTitle
+      glyph={<StateIcon state={content.state} />}
+      stateWord={issueStateWord(content.state, content.stateReason)}
+      title={content.title}
+    />
+  );
+}
+
+/** A pull request's head line, off {@link PR_STATE}. */
+function PullRequestHead({
+  content,
+}: {
+  content: Extract<BoardItemContent, { kind: "pullRequest" }>;
+}) {
+  const pill = prPill(content.state, content.isDraft);
+  return (
+    <CardTitle
+      glyph={<pill.Icon className={cn("size-3.5 shrink-0", pill.tone)} />}
+      stateWord={pill.word}
+      title={content.title}
+    />
+  );
+}
+
+/** The card's second line: the number, the owning repo when the board reaches
+ *  past this one, and the assignees. */
+function CardMeta({
+  number,
+  repoLabel,
+  assignees,
+  ghHost,
+}: {
+  number: number;
+  repoLabel: string | null;
+  assignees: AssigneeRef[];
+  ghHost: string | null;
+}) {
+  return (
+    <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <span className="shrink-0 tabular-nums">#{number}</span>
+      {repoLabel !== null && (
+        <span className="min-w-0 truncate" onMouseEnter={clipTitleFromText}>
+          {repoLabel}
+        </span>
+      )}
+      <Assignees assignees={assignees} ghHost={ghHost} />
+    </span>
+  );
+}
+
+const CARD_CLASS =
+  "flex w-full flex-col gap-1 border bg-background px-2 py-1.5 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
+
+/**
+ * One board card. Memoized and deliberately light: a column re-renders its whole
+ * mounted window whenever the keyboard cursor moves, and only the two cards whose
+ * `active` flips should re-render with it.
+ *
+ * Issues and pull requests activate (the panel decides where they land); a draft
+ * owns its own popover, so the trigger IS this card and the popup's lifetime is
+ * tied to the card's — a virtualized row that scrolls out must never leave a
+ * popup anchored to a detached node. A redacted item explains itself and does
+ * nothing: it still takes a position in the column so the counts and the
+ * keyboard walk stay honest about what the board holds.
+ */
+export const BoardCard = memo(function BoardCard({
+  item,
+  index,
+  setSize,
+  columnIndex,
+  active,
+  rovingTab,
+  repoSlug,
+  ghHost,
+  onFocus,
+  onOpen,
+}: {
+  item: BoardItem;
+  /** Position in the COLUMN, which is also the virtualizer's index. */
+  index: number;
+  /** The column's full item count — windowing hides it from a reader otherwise. */
+  setSize: number;
+  columnIndex: number;
+  active: boolean;
+  /** Roving tabindex: one tab stop for the whole board, on the cursor's card. */
+  rovingTab: number;
+  /** The open repo under the ACTIVE lens; a card from another repo names its own. */
+  repoSlug: string | null;
+  ghHost: string | null;
+  onFocus: (columnIndex: number, index: number) => void;
+  onOpen: (item: BoardItem) => void;
+}) {
+  const portalContainer = usePanelPortalContainer();
+  const content = item.content;
+  const shared = {
+    "data-card-index": index,
+    role: "option",
+    "aria-selected": active,
+    "aria-setsize": setSize,
+    "aria-posinset": index + 1,
+    tabIndex: rovingTab,
+    onFocus: () => onFocus(columnIndex, index),
+  } as const;
+  const toneClass = active && "bg-accent text-accent-foreground";
+
+  if (content.kind === "redacted") {
+    return (
+      // Focusable but inert: `aria-disabled` with no handlers, so the walk can
+      // pass over it and a reader is told why it can't be opened.
+      <div
+        {...shared}
+        aria-disabled
+        className={cn(CARD_CLASS, "text-muted-foreground", toneClass)}
+      >
+        <span className="flex items-start gap-1.5">
+          <LockSimpleIcon className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 font-medium">Redacted item</span>
+        </span>
+        <span className="text-[11px]">
+          This item is in a repository you can't see, so the board can't show
+          it.
+        </span>
+      </div>
+    );
+  }
+
+  if (content.kind === "draft") {
+    const body = content.body.trim();
+    return (
+      <Popover.Root>
+        <Popover.Trigger
+          render={
+            <button
+              type="button"
+              {...shared}
+              className={cn(CARD_CLASS, "cursor-pointer", toneClass)}
+            />
+          }
+        >
+          <CardTitle
+            glyph={
+              <NoteIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            }
+            stateWord="Draft"
+            title={content.title}
+          />
+          <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <Badge variant="secondary">Draft</Badge>
+            <Assignees assignees={content.assignees} ghHost={ghHost} />
+          </span>
+        </Popover.Trigger>
+        <Popover.Portal container={portalContainer}>
+          <Popover.Positioner
+            align="start"
+            sideOffset={4}
+            className="isolate z-50"
+          >
+            <Popover.Popup className="max-h-96 w-80 overflow-y-auto rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
+              {/* The caption IS the popup's accessible name: Popup takes its
+                  `aria-labelledby` from whatever Title registers, and a bare
+                  element leaves the dialog unnamed. `render` keeps it a <p> —
+                  Title's own default element is an <h2>. */}
+              <Popover.Title
+                render={<p />}
+                className="px-1 pb-1.5 text-xs font-medium"
+              >
+                {content.title || "Draft item"}
+              </Popover.Title>
+              {body === "" ? (
+                <p className="px-1 text-xs text-muted-foreground">
+                  This draft has no notes yet.
+                </p>
+              ) : (
+                <Markdown className="px-1 text-xs">{body}</Markdown>
+              )}
+            </Popover.Popup>
+          </Popover.Positioner>
+        </Popover.Portal>
+      </Popover.Root>
+    );
+  }
+
+  // A board reaches across repositories, so name the owner only where it is
+  // KNOWN to differ from the one that's open — on a single-repo board every card
+  // would carry it, and while the open repo's slug is still resolving `null`
+  // means "not known yet", never "different", so the label stays off rather than
+  // flickering onto every card.
+  const repoLabel =
+    repoSlug !== null &&
+    content.repoNameWithOwner.toLowerCase() !== repoSlug.toLowerCase()
+      ? content.repoNameWithOwner
+      : null;
+  return (
+    <button
+      type="button"
+      {...shared}
+      className={cn(CARD_CLASS, "cursor-pointer", toneClass)}
+      onClick={() => onOpen(item)}
+    >
+      {content.kind === "pullRequest" ? (
+        <PullRequestHead content={content} />
+      ) : (
+        <IssueHead content={content} />
+      )}
+      <CardMeta
+        number={content.number}
+        repoLabel={repoLabel}
+        assignees={content.assignees}
+        ghHost={ghHost}
+      />
+    </button>
+  );
+});

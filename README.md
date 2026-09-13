@@ -545,6 +545,21 @@ mentions.
 
 ![An issue open in GitDesktop with its description, labels, assignees, milestone, sub-issues, and a linked development branch and pull request; local and GitHub issues appear together in the sidebar.](site/src/assets/app-issues.png)
 
+### Project boards
+
+A tab that shows a **GitHub Project** as a live kanban board, so you can see
+where a whole piece of work stands without leaving the app. Pick any open
+board the repository or its owner has, and pick which of its single-select
+fields makes the columns (**Status** to start with), with a trailing column
+for anything the field doesn't cover. Cards carry their type and state, the
+number, the owning repository when the board spans several, and up to three
+assignees; **draft** items open their notes in place, and an item you can't
+see says so rather than thinning the board silently. Open an issue or pull
+request straight from its card, page through a large board with **Load
+more**, and move around the whole thing from the keyboard. Read-only —
+changes still happen on GitHub — and it uses the same `project` sign-in
+scope the Projects picker already needs.
+
 ### Code TODOs
 
 A tab that scans your working tree for real `TODO`, `FIXME`, `HACK`, `BUG`,

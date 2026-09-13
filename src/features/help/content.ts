@@ -1881,6 +1881,58 @@ From an issue, **Solve with agent** starts a write-capable agent session framed 
 that issue (see *Agent sessions*).{{/ai}}`,
   },
   {
+    id: "projects",
+    label: "Project boards",
+    body: `# Project boards
+
+The **Projects** tab (in the More ▾ menu; palette-only by default — bind a key in Settings)
+shows a **GitHub Project** as a board, so you can see where a whole piece of work stands
+without leaving the app. It's read-only for now: everything on it is live, and you make
+changes on GitHub.
+
+## Picking a board and its columns
+
+The toolbar above the board holds your choices, all of them for this visit only — nothing is
+saved:
+
+- **Project** lists the open boards this repository and its owner have, the repository's own
+  first. Closed boards aren't listed.
+- **View options** gathers the controls for how the board is laid out. **Group by** is the
+  one there today: it picks which of the board's single-select fields becomes the columns,
+  starting on **Status**, since that's what a board's columns usually mean. Your pick applies
+  straight away, so you can try a few without closing the popup. Anything the field doesn't
+  cover collects in a final **No {field}** column, so nothing on the board is hidden from
+  you. A board with no single-select field at all shows every card in one column.
+
+Beside them, the count says how much of the board you're looking at, and **Load more**
+fetches the next page of a big one. Items the board has **archived** stay out of the columns
+and out of the per-column counts. The board's own total still counts them, so while a board
+is still paging in, that total can run ahead of the cards in front of you.
+
+## Reading a card
+
+A card carries its type and state glyph, its title, its number, and up to three assignee
+faces (with a **+N** for any beyond that). A card from another repository names that
+repository, so a board that spans several stays readable. **Draft** items — the notes that
+live only on the board — say so, and open their text in place. An item you don't have
+access to shows as **redacted** and says why, rather than silently thinning the board.
+
+Open an issue or pull request from its card and it lands on its own tab. One from another
+repository — or from the other side of a fork's **Fork | Upstream** lens — opens on GitHub
+in your browser instead.
+
+## Keyboard
+
+The board is fully keyboard-operable: **↑ / ↓** move through a column, **← / →** step to the
+next column at the same height, **Home / End** jump to a column's first or last card, and
+**Enter** opens the card you're on. Collapsing the sidebar ({{kbd:toggle-sidebar}}) hands
+the board its width.
+
+GitHub only, and it uses the same \`project\` sign-in scope the Projects picker on issues and
+pull requests already needs — without it, the tab says so and offers a one-click
+**Reconnect GitHub…**.`,
+  },
+  {
     id: "discussions",
     label: "Discussions",
     body: `# Discussions
@@ -2742,9 +2794,9 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 - **Tabs:** {{kbd:tab-changes}} Changes · {{kbd:tab-history}} History ·
   {{kbd:tab-compare}} Compare · {{kbd:tab-pulls}} Pull Requests · {{kbd:tab-actions}}
   Actions · {{kbd:tab-issues}} Issues · {{kbd:tab-discussions}} Discussions ·
-  {{kbd:tab-tags}} Tags · {{kbd:tab-insights}} Insights. The **Code TODOs**, **Findings**,
-  and **Tasks** tabs are palette-only by default{{ai}}, as is **Agent**{{/ai}} (bind a key
-  in **Settings → Keyboard**).
+  {{kbd:tab-tags}} Tags · {{kbd:tab-insights}} Insights. The **Projects**, **Code TODOs**,
+  **Findings**, and **Tasks** tabs are palette-only by default{{ai}}, as is
+  **Agent**{{/ai}} (bind a key in **Settings → Keyboard**).
 - {{kbd:show-repositories}} repositories · {{kbd:show-branches}} branches ·
   {{kbd:back-to-repositories}} back to repositories · {{kbd:focus-filter}} focus the
   filter.

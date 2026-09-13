@@ -61,6 +61,7 @@ import { IssuesPanel } from "@/features/issues/IssuesPanel";
 import { JiraIssueView } from "@/features/issues/JiraIssueView";
 import { LocalIssueView } from "@/features/issues/LocalIssueView";
 import { RemoteIssueView } from "@/features/issues/RemoteIssueView";
+import { ProjectsBoardPanel } from "@/features/projects/ProjectsBoardPanel";
 import { CreateLocalPrDialog } from "@/features/pulls/CreateLocalPrDialog";
 import { LocalPrView } from "@/features/pulls/LocalPrView";
 import { PullRequestsPanel } from "@/features/pulls/PullRequestsPanel";
@@ -159,6 +160,7 @@ const SECONDARY_TABS: { tab: RepoTab; label: string; ai?: boolean }[] = [
   { tab: "compare", label: "Compare" },
   { tab: "agent", label: "Agent", ai: true },
   { tab: "issues", label: "Issues" },
+  { tab: "projects", label: "Projects" },
   { tab: "code-todos", label: "Code TODOs" },
   { tab: "discussions", label: "Discussions" },
   { tab: "actions", label: "Actions" },
@@ -564,6 +566,7 @@ export function RepositoryView() {
   useHotkeyAction("tab-compare", () => changeTab("compare"));
   useHotkeyAction("tab-pulls", () => changeTab("pulls"));
   useHotkeyAction("tab-issues", () => changeTab("issues"));
+  useHotkeyAction("tab-projects", () => changeTab("projects"));
   useHotkeyAction("tab-discussions", () => changeTab("discussions"));
   useHotkeyAction("tab-actions", () => changeTab("actions"));
   useHotkeyAction("tab-findings", () => changeTab("findings"));
@@ -874,6 +877,18 @@ export function RepositoryView() {
             <TabPanel active={sidebarTabActive("issues")}>
               <IssuesPanel repoPath={repoPath} />
             </TabPanel>
+            <TabPanel active={sidebarTabActive("projects")}>
+              {/* The board fills the content pane, so this tab has no list of
+                  its own here — say so rather than leaving a blank column, and
+                  name the control that hands the board this width. The toggle's
+                  own title string is reused, so the chord is the user's live
+                  binding (and absent when they've cleared it). */}
+              <p className="px-3 py-4 text-xs text-muted-foreground">
+                The project board fills the pane on the right.{" "}
+                <span className="font-medium">{sidebarToggleTitle}</span> hands
+                it this width too.
+              </p>
+            </TabPanel>
             <TabPanel active={sidebarTabActive("discussions")}>
               <DiscussionsPanel repoPath={repoPath} />
             </TabPanel>
@@ -1005,6 +1020,17 @@ export function RepositoryView() {
                 message="Select an issue"
               />
             )}
+          </TabPanel>
+          {/* The board IS the surface — it needs the content pane's width for a
+              row of 300px columns, so unlike the list/detail tabs it has no
+              sidebar half (the aside says so). Gated on the tab being the
+              visible one: <Activity> defers a hidden panel's effects but NOT its
+              React Query fetches, and these are owner-wide reads. */}
+          <TabPanel active={repoTab === "projects"}>
+            <ProjectsBoardPanel
+              repoPath={repoPath}
+              active={repoTab === "projects"}
+            />
           </TabPanel>
           <TabPanel active={repoTab === "discussions"}>
             {deferredDiscussion ? (

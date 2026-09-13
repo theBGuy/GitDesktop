@@ -23,6 +23,7 @@ import type {
   BitbucketRepoSettingsInput,
   BitbucketWorkspace,
   BlameLine,
+  BoardItems,
   Branch,
   BranchComparison,
   BranchDivergence,
@@ -2539,6 +2540,19 @@ export const ghEditItemProjects = (
  *  remote the item was read through. */
 export const ghProjectFields = (repoPath: string, projectId: string) =>
   invoke<ProjectFieldDefs>("gh_project_fields", { repoPath, projectId });
+
+/** One board's items, in the board's own position order. Auto-pages up to 500 per
+ *  call; more than that comes back `truncated` with the `endCursor` the next call
+ *  passes as `after`. Board state like the field definitions, so no lens. `query`
+ *  is the board's own filter grammar, unused by the read-only board (always
+ *  null). */
+export const ghProjectItems = (
+  repoPath: string,
+  projectId: string,
+  after: string | null,
+  query: string | null,
+) =>
+  invoke<BoardItems>("gh_project_items", { repoPath, projectId, after, query });
 
 /** Writes one board's field values for one item in a single call. `updates` sets or
  *  replaces; `clears` carries the field ids to UNSET, which no update shape can

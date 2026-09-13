@@ -34,6 +34,7 @@ export type RepoTab =
   | "compare"
   | "pulls"
   | "issues"
+  | "projects"
   | "discussions"
   | "actions"
   | "findings"

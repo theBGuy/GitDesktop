@@ -375,12 +375,9 @@ const FIELD_COMMON: &str = "... on ProjectV2FieldCommon { id name dataType isIss
 // The IssueField*Value arms alias their `value` scalar (`text: value`, …) so
 // classic and bridge values parse by the same keys and String/Float response
 // names stay disjoint.
-fn item_field_values_query(field: &str) -> String {
+pub(super) fn field_value_selection() -> String {
     format!(
-        "query($owner:String!,$name:String!,$number:Int!){{ \
-         repository(owner:$owner,name:$name){{ {field}(number:$number){{ \
-         projectItems(first:20, includeArchived:true){{ nodes{{ id project{{ {PROJECT_FIELDS} }} \
-         fieldValues(first:50){{ nodes{{ __typename \
+        "__typename \
          ... on ProjectV2ItemFieldSingleSelectValue{{ field{{ {FIELD_COMMON} }} name optionId color }} \
          ... on ProjectV2ItemFieldMultiSelectValue{{ field{{ {FIELD_COMMON} }} options{{ id name color }} }} \
          ... on ProjectV2ItemFieldTextValue{{ field{{ {FIELD_COMMON} }} text }} \
@@ -393,7 +390,17 @@ fn item_field_values_query(field: &str) -> String {
            ... on IssueFieldTextValue{{ text: value }} \
            ... on IssueFieldNumberValue{{ number: value }} \
            ... on IssueFieldDateValue{{ date: value }} \
-         }} }} \
+         }} }}"
+    )
+}
+
+fn item_field_values_query(field: &str) -> String {
+    let values = field_value_selection();
+    format!(
+        "query($owner:String!,$name:String!,$number:Int!){{ \
+         repository(owner:$owner,name:$name){{ {field}(number:$number){{ \
+         projectItems(first:20, includeArchived:true){{ nodes{{ id project{{ {PROJECT_FIELDS} }} \
+         fieldValues(first:50){{ nodes{{ {values} \
          }} }} }} }} }} }} }}"
     )
 }
@@ -430,7 +437,7 @@ fn duration(node: &Value) -> u32 {
         .unwrap_or(0)
 }
 
-fn parse_field_value(node: &Value) -> ProjectFieldValue {
+pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
     let field = &node["field"];
     let field_id = text(field, "id");
     let field_name = text(field, "name");

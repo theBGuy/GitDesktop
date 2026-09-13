@@ -160,6 +160,14 @@ export const ACTIONS = [
     defaultBinding: "mod+9",
   },
   {
+    id: "tab-projects",
+    label: "Projects tab",
+    category: "Navigation",
+    // Palette-only by default: mod+1–9 are already taken by the other tabs, so
+    // this secondary tab has no default chord. Users can bind a key.
+    defaultBinding: null,
+  },
+  {
     id: "tab-code-todos",
     label: "Code TODOs tab",
     category: "Navigation",

@@ -2605,6 +2605,33 @@ export function useProjectFields(
   });
 }
 
+const projectItemsKey = (repo: string, projectId: string) =>
+  ["repo", repo, "project-items", projectId] as const;
+
+/** One board's items, paged. Keyed on the board alone for the same reason the
+ *  definitions are — a board is the same object whichever remote reached it —
+ *  and `retry: false` for the same reason the rest of the Projects family uses
+ *  it: the common failure is a missing `project` scope, which no retry fixes.
+ *  The backend auto-pages, so a page here is up to 500 items and `truncated`
+ *  drives "Load more" rather than an automatic walk to the end of a 5,000-item
+ *  board. */
+export function useProjectItems(
+  repo: string,
+  projectId: string,
+  enabled: boolean,
+) {
+  return useInfiniteQuery({
+    queryKey: projectItemsKey(repo, projectId),
+    queryFn: ({ pageParam }) =>
+      api.ghProjectItems(repo, projectId, pageParam, null),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => (last.truncated ? last.endCursor : null),
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
 /**
  * The field editor's batched per-board write, with an optimistic patch of that
  * board's entry in the item-field-values cache. `values` is the patch itself: the
@@ -3310,9 +3337,10 @@ export function useAccountsHealth() {
  *  token scopes (a reconnect can grant new ones), and the repo-settings lists a
  *  scope hint sends users here from — secrets, variables and webhooks all fail
  *  closed on a missing scope, so their error cards must retry the call themselves,
- *  as do the four GitHub Projects reads (catalog, memberships, field values and a
- *  board's field definitions): a granted `project` scope has to light the picker,
- *  the rail's field lines and the field editor up without a restart, and the work
+ *  as do the five GitHub Projects reads (catalog, memberships, field values, a
+ *  board's field definitions, and a board's items): a granted `project` scope has
+ *  to light the picker, the rail's field lines, the field editor and the Projects
+ *  board up without a restart, and the work
  *  inbox's sources probe plus its pages
  *  (a `login` mode reconnect is how a forge becomes a source in the first place).
  *  Call from a reconnect's `finished: ok` handler. */
@@ -3339,7 +3367,8 @@ export function useInvalidateAfterReconnect() {
           q.queryKey[2] === "projects-available" ||
           q.queryKey[2] === "item-projects" ||
           q.queryKey[2] === "item-field-values" ||
-          q.queryKey[2] === "project-fields"),
+          q.queryKey[2] === "project-fields" ||
+          q.queryKey[2] === "project-items"),
     });
     // A `login` here is a real source change for the work inbox — its probe gates
     // each forge's leg on a 5-minute window, so without this a session signed in
