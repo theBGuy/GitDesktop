@@ -1023,13 +1023,12 @@ review via its subscription login. The full list is under
   clearable history that survives a restart, so a review that finishes
   while you're away is never a missed click. Open it from the command
   palette; which events show follows your notification settings, where
-  each source sets its inbox and desktop channels independently, with
-  per-repository overrides. A cancelled or failed **automated** review also
-  lingers in a **Stopped** group with one-click **Re-run** (re-firing
-  exactly that run's mode) and **Dismiss**, so a stopped automation isn't a
-  dead end. The *review failed* notification row itself states why the run
-  failed, and for automated runs carries the same one-click **Re-run**
-  right on the row.
+  each source sets its inbox and desktop channels independently. A
+  cancelled or failed **automated** review also lingers in a **Stopped**
+  group with one-click **Re-run** (re-firing exactly that run's mode) and
+  **Dismiss**, so a stopped automation isn't a dead end. The *review
+  failed* notification row itself states why the run failed, and for
+  automated runs carries the same one-click **Re-run** right on the row.
 - **Environment check**: a Settings → **About** panel reports your
   app/OS/Tauri versions and the status of every CLI GitDesktop uses (git,
   the GitHub & GitLab CLIs, Claude Code, Codex): installed?, version,

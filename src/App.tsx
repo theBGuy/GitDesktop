@@ -13,12 +13,7 @@ import { AutomationResultDialog } from "@/features/automations/AutomationResultD
 import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
 import { MyWorkScreen } from "@/features/mywork/MyWorkScreen";
-import {
-  notificationsDraftOutOfSync,
-  RepoNotificationsDialogHost,
-  useNotificationsDraft,
-  useRepoNotificationsDialog,
-} from "@/features/notifications/RepoNotificationsDialog";
+import { RepoNotificationsDialogHost } from "@/features/notifications/RepoNotificationsDialog";
 import { RepositoryView } from "@/features/repository/RepositoryView";
 import { usePickAndOpenRepo } from "@/features/repository/useOpenRepoByPath";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
@@ -37,6 +32,11 @@ import { useGitInstalled, usePrefetchMyWorkSources } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
 import { MCP_WRITABLE_STORES } from "@/lib/mcp-writable-stores";
+import {
+  notificationsDraftOutOfSync,
+  useNotificationsDraft,
+  useRepoNotificationsDialog,
+} from "@/lib/notifications/matrix";
 import {
   useApplyTheme,
   useSaveSettings,

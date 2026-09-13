@@ -71,9 +71,9 @@ export function emitNotification(input: {
   os?: EmitOsPing;
 }): void {
   const { source, row, os } = input;
-  // Producer keys are repo-unqualified (`opened:42`), so two repos raising the same
-  // event would collapse into one. Qualify ONCE here and pass the same key down, so
-  // the inbox backstop dedupes on exactly what this register claimed.
+  // Producer keys vary: most are repo-unqualified (`opened:42`), a few already
+  // embed the path (harmlessly duplicated here), so isolation rests on THIS
+  // uniform prefix, not the producer — and the inbox gets the key we claimed.
   const dedupeKey = row.dedupeKey
     ? `${source}:${row.repoPath}:${row.dedupeKey}`
     : undefined;

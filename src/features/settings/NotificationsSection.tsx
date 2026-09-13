@@ -6,21 +6,9 @@ import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  CHANNELS,
-  CHECKS_OFF_WATCH_REASON,
-  type Channel,
-  channelAriaLabel,
   MatrixCell,
   MatrixTable,
-  notificationRows,
-  notificationsDraftOutOfSync,
-  notificationsSignature,
-  overrideCount,
   RowLabelCell,
-  SOURCE_DESCRIPTIONS,
-  SOURCE_LABELS,
-  useNotificationsDraft,
-  useRepoNotificationsDialog,
   WatchRow,
 } from "@/features/notifications/RepoNotificationsDialog";
 import { clipTitleFromText } from "@/lib/clip-title";
@@ -28,6 +16,20 @@ import { withForm } from "@/lib/form";
 import { useRepoIdentity } from "@/lib/git/queries";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import {
+  CHANNELS,
+  CHECKS_OFF_WATCH_REASON,
+  type Channel,
+  channelAriaLabel,
+  notificationRows,
+  notificationsDraftOutOfSync,
+  notificationsSignature,
+  overrideCount,
+  SOURCE_DESCRIPTIONS,
+  SOURCE_LABELS,
+  useNotificationsDraft,
+  useRepoNotificationsDialog,
+} from "@/lib/notifications/matrix";
 import type { RepoNotificationOverride } from "@/lib/notifications/overrides";
 import {
   useClearNotificationOverride,
@@ -119,7 +121,7 @@ export const NotificationsSection = withForm({
           </p>
         </div>
 
-        <MatrixTable>
+        <MatrixTable caption="Global notification channels">
           <tr>
             <RowLabelCell label="All notifications" className="font-medium" />
             {CHANNELS.map((channel) => {
@@ -263,13 +265,18 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
     overrides.data !== undefined &&
     (repoPath === null || identity !== undefined);
   // Every key the open repo could be stored under — its identity and, until the
-  // next save folds it, its raw checkout path.
+  // next save folds it, its raw checkout path. Compared case-insensitively, in
+  // step with `overrideEntry`, which matches both arms through `samePath`: an
+  // exact-case test here would count a differently-cased path entry as the open
+  // repo's AND list it as another repository's.
   const ownKeys = new Set(
-    [repoPath, identity].filter((k): k is string => typeof k === "string"),
+    [repoPath, identity]
+      .filter((k): k is string => typeof k === "string")
+      .map((k) => k.toLowerCase()),
   );
   const otherKeys = resolved
     ? Object.keys(overrides.data ?? {})
-        .filter((key) => !ownKeys.has(key))
+        .filter((key) => !ownKeys.has(key.toLowerCase()))
         .sort()
     : [];
 
@@ -290,20 +297,25 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
     networkMode: "always",
   });
 
+  // Both maps key on the LOWERCASED form, and every lookup lowercases too, so
+  // the whole file associates keys under one rule — the one `overrideEntry`
+  // resolves the open repo by. An exact-case identity map would miss a stored
+  // key that differs only in case and mislabel its row "(not in recent
+  // repositories)". Values stay original-cased: they are real paths. Maps, not
+  // objects, because an override key is hand-editable and
+  // "__proto__"/"toString" would resolve up an object's prototype chain to
+  // something that is not a path.
   const identities = recentIdentities.data;
   const byIdentity = new Map(
-    (identities ?? []).map((id, i) => [id, recentPaths[i]]),
+    (identities ?? []).map((id, i) => [id.toLowerCase(), recentPaths[i]]),
   );
-  // Windows paths are case-insensitive; a legacy raw-path key is compared that
-  // way, exactly as the recent-repo writers dedupe them. Maps, not objects: an
-  // override key is hand-editable, and "__proto__"/"toString" would resolve up
-  // an object's prototype chain to something that is not a path.
   const byPath = new Map(recentPaths.map((p) => [p.toLowerCase(), p]));
 
   const rows: OverrideRow[] = otherKeys
     .map((key) => {
+      const lowerKey = key.toLowerCase();
       const path = identities
-        ? (byIdentity.get(key) ?? byPath.get(key.toLowerCase()) ?? null)
+        ? (byIdentity.get(lowerKey) ?? byPath.get(lowerKey) ?? null)
         : null;
       return {
         key,

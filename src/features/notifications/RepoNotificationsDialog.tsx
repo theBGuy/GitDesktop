@@ -6,7 +6,6 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
-import { create } from "zustand";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
@@ -31,6 +30,20 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { useRepoIdentity } from "@/lib/git/queries";
 import {
+  CHANNEL_LABELS,
+  CHANNELS,
+  CHECK_SCOPE_LABELS,
+  CHECKS_OFF_WATCH_REASON,
+  type Channel,
+  channelAriaLabel,
+  notificationRows,
+  overrideCount,
+  SOURCE_DESCRIPTIONS,
+  SOURCE_LABELS,
+  sortedJson,
+  useRepoNotificationsDialog,
+} from "@/lib/notifications/matrix";
+import {
   effectiveChannels,
   effectiveChecksScope,
   overrideEntry,
@@ -40,12 +53,10 @@ import {
   useNotificationOverrides,
   useSaveRepoNotificationOverride,
 } from "@/lib/notifications/queries";
-import {
-  type ChannelPrefs,
-  NOTIFICATION_SOURCES,
-  type NotificationSettings,
-  type NotificationSource,
-  type PrCheckScopeFilter,
+import type {
+  ChannelPrefs,
+  NotificationSource,
+  PrCheckScopeFilter,
 } from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
@@ -54,75 +65,21 @@ import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
-// ── Shared vocabulary (imported by Settings → Notifications) ────────────────
-
-/** Delivery channels in column order; the matrix's DOM order is row-major over
- *  this list, so the tab order matches what a reader hears. */
-export const CHANNELS = ["inApp", "os"] as const;
-export type Channel = (typeof CHANNELS)[number];
-
-export const CHANNEL_LABELS: Record<Channel, string> = {
-  inApp: "In-app",
-  os: "OS",
-};
-
-/** Spoken channel word inside a cell's aria-label — the column header is a
- *  `<th scope="col">`, but a checkbox still needs a name of its own. */
-const CHANNEL_ARIA: Record<Channel, string> = {
-  inApp: "in-app",
-  os: "OS",
-};
-
-/** Record-typed against the manifest, so a new source can't ship label-less. */
-export const SOURCE_LABELS: Record<NotificationSource, string> = {
-  prChecks: "CI checks finish (pass or fail)",
-  prActivity: "Pull requests opened, merged, or closed",
-  prReviews: "Reviews on my pull requests",
-  actionRuns: "Workflow runs finish on the current branch",
-  reviews: "AI reviews I start",
-  automations: "Automation results",
-  agents: "Agent tasks finish",
-};
-
-/** Second line under a row's label; a source with nothing to add carries none. */
-export const SOURCE_DESCRIPTIONS: Partial<Record<NotificationSource, string>> =
-  {
-    prReviews:
-      "Approvals, change requests, comments, and requests for your review",
-    reviews: "A review or security audit finishing in the background",
-    automations: "Automated reviews ready, posted, or failed",
-    agents: "Sessions, plans, and research",
-  };
-
-/** Sources hidden with the AI surfaces. */
-const AI_SOURCES: ReadonlySet<NotificationSource> = new Set<NotificationSource>(
-  ["reviews", "automations", "agents"],
-);
-
-export const CHECK_SCOPE_LABELS: Record<PrCheckScopeFilter, string> = {
-  mine: "My pull requests only",
-  all: "All open pull requests",
-};
-
-/** The rows the matrix renders, in manifest order. Hidden AI rows keep whatever
- *  the draft holds — they are omitted from the view, never rewritten. */
-export function notificationRows(
-  aiEnabled: boolean,
-): readonly NotificationSource[] {
-  return aiEnabled
-    ? NOTIFICATION_SOURCES
-    : NOTIFICATION_SOURCES.filter((source) => !AI_SOURCES.has(source));
-}
-
-export function channelAriaLabel(rowLabel: string, channel: Channel): string {
-  return `${rowLabel} — ${CHANNEL_ARIA[channel]}`;
-}
-
-/** The source × channel grid. A real table with scoped headers: the row and
- *  column headers ARE the a11y wiring, which is why no LabeledGroup wraps it. */
-export function MatrixTable({ children }: { children: ReactNode }) {
+/** The source × channel grid. A real table with scoped headers: the caption
+ *  names it for table navigation, and the row and column headers ARE the rest of
+ *  the a11y wiring — which is why no LabeledGroup wraps it. */
+export function MatrixTable({
+  caption,
+  children,
+}: {
+  /** Names the table for assistive tech; required, since a reader landing on an
+   *  unnamed grid has nothing to tell it apart from the other one. */
+  caption: string;
+  children: ReactNode;
+}) {
   return (
     <table className="w-full border-collapse text-xs">
+      <caption className="sr-only">{caption}</caption>
       <thead>
         <tr>
           <th className="w-full" />
@@ -184,11 +141,6 @@ const OVERRIDDEN_CHIP = (
     overridden
   </span>
 );
-
-/** Why the scope picker is held while the CI-checks source delivers nowhere.
- *  Shared so the global matrix and the per-repo dialog say the same sentence. */
-export const CHECKS_OFF_WATCH_REASON =
-  "Turn on a CI checks channel to choose which pull requests to watch";
 
 /**
  * Which pull requests the CI-checks source watches. Composed from the Select
@@ -280,73 +232,7 @@ export function WatchRow(props: ComponentProps<typeof WatchSelect>) {
   );
 }
 
-// ── Open-state store + host ─────────────────────────────────────────────────
-
-interface RepoNotificationsDialogState {
-  /** Repo path whose notifications are open, or null when closed. */
-  repoPath: string | null;
-  /** Bumped by every `open()`. An awaited save that outlived its own dialog
-   *  compares this to tell "still my dialog" from "a later one for the same
-   *  repo" — the repo path alone can't, and the two hold different edits. */
-  generation: number;
-  open: (repoPath: string) => void;
-  close: () => void;
-}
-
-/** Open-state for the one mounted {@link RepoNotificationsDialogHost}, so the
- *  settings footer, the overrides audit list, and the command palette all reach
- *  the same dialog without threading props or mounting a second copy. */
-export const useRepoNotificationsDialog =
-  create<RepoNotificationsDialogState>()((set) => ({
-    repoPath: null,
-    generation: 0,
-    open: (repoPath) =>
-      set((s) => ({ repoPath, generation: s.generation + 1 })),
-    close: () => set({ repoPath: null }),
-  }));
-
-interface NotificationsDraftState {
-  /** Fingerprint of the notifications slice a MOUNTED settings form holds, or
-   *  null when no settings screen is on. */
-  signature: string | null;
-  publish: (signature: string) => void;
-  clear: () => void;
-}
-
-/** What a live settings form is holding for notifications, so routes into the
- *  per-repo dialog that render OUTSIDE the form (the command palette) can see
- *  it. Screen-scoped, not panel-scoped: the draft survives a panel switch, so
- *  the section never clears on unmount and App retires it on leaving Settings —
- *  a flag that outlived its screen would hold the palette action shut forever. */
-export const useNotificationsDraft = create<NotificationsDraftState>()(
-  (set) => ({
-    signature: null,
-    publish: (signature) => set({ signature }),
-    clear: () => set({ signature: null }),
-  }),
-);
-
-/**
- * Whether a live settings form holds notification edits the store hasn't taken
- * yet. Per-repo overrides are minted against the SAVED matrix, so opening the
- * dialog over an unsaved draft lets a user "change" a cell the dialog already
- * reads as global — it stores nothing, and the pending Save then moves the
- * global underneath it.
- *
- * The published signature carries the draft it was produced under and is
- * compared against the live saved value rather than cleared by every writer, so
- * a Save from another panel resolves it on its own. A Discard from another
- * panel can't be seen — the section is unmounted — and leaves the verdict set
- * until the screen closes: the fail-safe direction, since the section's own
- * Customize button stays correct and reachable.
- */
-export function notificationsDraftOutOfSync(
-  published: string | null,
-  saved: NotificationSettings | undefined,
-): boolean {
-  if (published === null || saved === undefined) return false;
-  return published !== notificationsSignature(saved);
-}
+// ── Dialog + host ───────────────────────────────────────────────────────────
 
 const EMPTY_OVERRIDE: RepoNotificationOverride = {};
 
@@ -383,41 +269,6 @@ function OverridesLoadFailed({ onRetry }: { onRetry: () => void }) {
       </Button>
     </div>
   );
-}
-
-function sortedJson(value: unknown): string {
-  return JSON.stringify(value, (_key, val) =>
-    val && typeof val === "object" && !Array.isArray(val)
-      ? Object.fromEntries(
-          Object.keys(val as Record<string, unknown>)
-            .sort()
-            .map((k) => [k, (val as Record<string, unknown>)[k]]),
-        )
-      : val,
-  );
-}
-
-/** Key-order-insensitive fingerprint of the global notification settings. The
- *  dialog's mint/drop-on-match baseline is the SAVED value, so the settings
- *  screen compares its draft against this to know when the two disagree. */
-export function notificationsSignature(value: NotificationSettings): string {
-  return sortedJson(value);
-}
-
-/** How many individual settings an override pins — each channel field plus the
- *  scope. The Reset gate and the settings footer's status line both count it. */
-export function overrideCount(
-  override: RepoNotificationOverride | undefined,
-): number {
-  if (!override) return 0;
-  let count = override.prChecksScope === undefined ? 0 : 1;
-  for (const source of NOTIFICATION_SOURCES) {
-    const cell = override.sources?.[source];
-    if (!cell) continue;
-    if (cell.inApp !== undefined) count += 1;
-    if (cell.os !== undefined) count += 1;
-  }
-  return count;
 }
 
 /**
@@ -645,7 +496,7 @@ function RepoNotificationsBody({
                 {mutedReason}
               </p>
             ) : null}
-            <MatrixTable>
+            <MatrixTable caption="Notification channels for this repository">
               {rows.map((source) => {
                 const channels = effectiveChannels(global, draft, source);
                 const label = SOURCE_LABELS[source];

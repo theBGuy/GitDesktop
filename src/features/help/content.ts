@@ -2806,9 +2806,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   requests**, and **Workflow runs finish on the current branch**{{ai}}, plus **AI reviews
   I start**, **Automation results**, and **Agent tasks finish**{{/ai}}. **Customize…**
   opens the per-repository overrides: **Mute this repository** silences every source for
-  that repo, or set single cells and its **Watch** choice, with anything you leave alone
-  following your global settings. *Notification settings* and *Repository notification
-  settings* in the command palette open each directly.
+  that repo, or you can set individual cells and the CI-checks **Watch** choice, with
+  anything you leave alone following your global settings. *Notification settings* and
+  *Repository notification settings* in the command palette open each directly.
   The bell is a persistent, click-to-open history (it survives a restart) so a finished
   review or a PR update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump

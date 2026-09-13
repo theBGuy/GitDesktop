@@ -165,20 +165,22 @@ export function anyChannelOn(
   });
 }
 
-/** Windows paths are case-insensitive, so a legacy checkout-path key can differ in
- *  case from the live `repoPath` (see `addRecentRepo`). Identity keys stay exact —
- *  git reports one spelling of the common dir. */
+/** Both repo-key forms here are PATHS — the identity is the git common dir, whose
+ *  casing follows however the repo was opened — and Windows paths are
+ *  case-insensitive, so every key comparison goes through this (see `addRecentRepo`).
+ *  Deliberately unconditional on every platform, matching the recents store's
+ *  trade-off: case-twin paths naming genuinely distinct repos on a case-sensitive
+ *  filesystem would share one entry — accepted; a platform-aware compare belongs in
+ *  a shared helper adopted by all stores at once, never a per-store fork. */
 const samePath = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-/** Every stored key that is the legacy raw-path form of `repoPath`. Used on read
- *  (the fallback) and on write (the fold), so both see the same set. */
-function legacyPathKeys(
+/** Every stored key naming `path`, whatever its casing. Used on read (lookup) and on
+ *  write (the fold), so neither arm can see a key the other misses. */
+function keysMatching(
   map: Record<string, RepoNotificationOverride>,
-  identity: string,
-  repoPath: string,
+  path: string,
 ): string[] {
-  if (identity === repoPath) return [];
-  return Object.keys(map).filter((key) => samePath(key, repoPath));
+  return Object.keys(map).filter((key) => samePath(key, path));
 }
 
 /** A repo's override, looked up by its worktree-stable identity with a legacy
@@ -190,9 +192,10 @@ export function overrideEntry(
   identity: string,
   repoPath: string,
 ): RepoNotificationOverride | undefined {
-  const exact = map[identity];
-  if (exact) return exact;
-  const legacy = legacyPathKeys(map, identity, repoPath)[0];
+  const own = keysMatching(map, identity)[0];
+  if (own !== undefined) return map[own];
+  if (samePath(identity, repoPath)) return undefined;
+  const legacy = keysMatching(map, repoPath)[0];
   return legacy === undefined ? undefined : map[legacy];
 }
 
@@ -245,11 +248,14 @@ export async function saveRepoNotificationOverride(
   const normalized = normalizeOverride(override);
   return mutateOverrides((current) => {
     const next = { ...current };
-    // Every case-variant of the raw path goes, not just the live spelling — a
-    // survivor would sit beside the identity key as a ghost nothing ever reads.
-    for (const key of legacyPathKeys(next, id, repoPath)) delete next[key];
+    // Drop every case-variant of BOTH key forms before writing back under the
+    // freshly resolved casing — a survivor would be a ghost entry that
+    // `overrideEntry` might return instead, and that no save could reach again.
+    for (const key of keysMatching(next, id)) delete next[key];
+    if (!samePath(id, repoPath)) {
+      for (const key of keysMatching(next, repoPath)) delete next[key];
+    }
     if (normalized) next[id] = normalized;
-    else delete next[id];
     return next;
   });
 }
