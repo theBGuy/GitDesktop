@@ -325,7 +325,7 @@ export const capabilities: Capability[] = [
   {
     group: "Issues & discussions",
     label:
-      "Project field values — Status, Priority, Iteration & dates on issues and PRs",
+      "Project field values — read & set Status, Priority, Iteration & dates on issues and PRs",
   },
   {
     group: "Issues & discussions",

@@ -525,7 +525,7 @@ function ProjectRow({
  *  be attempted at all) and one with only `read:project` (reads work, writes 403).
  *  Both need the same `project` scope, so both get the same remedy; `children` is
  *  the one sentence that differs. */
-function ScopeGapBlock({
+export function ScopeGapBlock({
   host,
   onReconnect,
   children,

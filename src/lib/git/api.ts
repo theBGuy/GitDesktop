@@ -109,6 +109,8 @@ import type {
   PrInfo,
   PrMergeability,
   PrMergeabilityState,
+  ProjectFieldDef,
+  ProjectFieldValueUpdate,
   ProjectItemRef,
   ProjectItemRemove,
   PrPollInfo,
@@ -2530,6 +2532,30 @@ export const ghEditItemProjects = (
     contentId,
     addProjectIds,
     removes,
+  });
+
+/** One board's field definitions — every field it defines, writable or not. Board
+ *  state, not item state, so it takes no lens: a board is the same object whichever
+ *  remote the item was read through. */
+export const ghProjectFields = (repoPath: string, projectId: string) =>
+  invoke<ProjectFieldDef[]>("gh_project_fields", { repoPath, projectId });
+
+/** Writes one board's field values for one item in a single call. `updates` sets or
+ *  replaces; `clears` carries the field ids to UNSET, which no update shape can
+ *  express. Both address the item by its membership `itemId` on `projectId`. */
+export const ghSetItemFieldValues = (
+  repoPath: string,
+  projectId: string,
+  itemId: string,
+  updates: ProjectFieldValueUpdate[],
+  clears: string[],
+) =>
+  invoke<void>("gh_set_item_field_values", {
+    repoPath,
+    projectId,
+    itemId,
+    updates,
+    clears,
   });
 
 /** Third-party AI-reviewer findings on a PR/MR (Copilot/CodeRabbit/…), behind the

@@ -14,7 +14,7 @@ import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { COLD_START_NO_GH, COLD_START_NO_GIT } from "@/lib/test-mode";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import * as api from "./api";
 import { primeCommitAuthorIndex } from "./commit-avatar";
 import {
@@ -48,10 +48,13 @@ import type {
   IssueReactions,
   IssueRelation,
   IssueType,
+  ItemProjectFieldValues,
   MyWorkSources,
   PrDetails,
   PrInfo,
   PrMergeabilityState,
+  ProjectFieldValue,
+  ProjectFieldValueUpdate,
   ProjectItemRef,
   ProjectItemRemove,
   ProjectV2Ref,
@@ -2585,6 +2588,101 @@ export function useEditItemProjects(
   });
 }
 
+/** One board's field DEFINITIONS. Keyed on the board alone — no lens, no item: the
+ *  same board serves every item on it. Options mirror {@link useAvailableProjects},
+ *  `enabled` being the caller's own UI state, never another query's cache. */
+export function useProjectFields(
+  repo: string,
+  projectId: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["repo", repo, "project-fields", projectId] as const,
+    queryFn: () => api.ghProjectFields(repo, projectId),
+    enabled,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+/**
+ * The field editor's batched per-board write, with an optimistic patch of that
+ * board's entry in the item-field-values cache. `values` is the patch itself: the
+ * wire `updates` carry ids alone, so only the editor — which holds the board's
+ * definitions — can say what those ids render as.
+ */
+export function useSetItemFieldValues(
+  repo: string,
+  kind: "issue" | "pr",
+  number: number,
+  lens: RemoteLens,
+) {
+  const queryClient = useQueryClient();
+  const fieldsKey = itemFieldValuesKey(repo, lens, kind, number);
+  return useMutation({
+    mutationFn: (args: {
+      projectId: string;
+      /** The membership's item id on `projectId` — what the write addresses. */
+      itemId: string;
+      updates: ProjectFieldValueUpdate[];
+      /** Field ids to UNSET; no update shape expresses a clear. */
+      clears: string[];
+      /** That board's values as they'll read once this lands. */
+      values: ProjectFieldValue[];
+      /** Boards queued behind this one. The editor writes board by board and stops
+       *  at the first failure, so a failure here names what that stop left undone. */
+      unwritten: number;
+    }) =>
+      api.ghSetItemFieldValues(
+        repo,
+        args.projectId,
+        args.itemId,
+        args.updates,
+        args.clears,
+      ),
+    onMutate: async (args) => {
+      await queryClient.cancelQueries({ queryKey: fieldsKey });
+      const prev =
+        queryClient.getQueryData<ItemProjectFieldValues[]>(fieldsKey);
+      if (prev) {
+        queryClient.setQueryData<ItemProjectFieldValues[]>(
+          fieldsKey,
+          prev.map((entry) =>
+            entry.project.id === args.projectId
+              ? { ...entry, values: args.values }
+              : entry,
+          ),
+        );
+      }
+      return { prev };
+    },
+    // Reporting lives here, not in the caller's `mutate` options: the popover that
+    // fires this closes as it does, and react-query drops mutate-scoped callbacks
+    // once the observer loses its listeners. The caller still sees the rejection
+    // through `mutateAsync`, which is what stops its per-board chain.
+    onError: (e, args, ctx) => {
+      if (ctx?.prev)
+        queryClient.setQueryData<ItemProjectFieldValues[]>(fieldsKey, ctx.prev);
+      if (args.unwritten === 0) {
+        toastError(e);
+        return;
+      }
+      toastErrorWithNote(
+        e,
+        args.unwritten === 1
+          ? "One more board's changes were left unwritten."
+          : `${args.unwritten} more boards' changes were left unwritten.`,
+      );
+    },
+    // Cancel-before-invalidate, and RETURNED so `isPending` spans the refetch —
+    // both for the reasons {@link useEditItemProjects}'s `onSettled` states.
+    onSettled: () =>
+      queryClient
+        .cancelQueries({ queryKey: fieldsKey })
+        .then(() => queryClient.invalidateQueries({ queryKey: fieldsKey })),
+  });
+}
+
 /**
  * An issue-lifecycle write (close/reopen/edit/pin/lock/transfer/delete) that reconciles
  * NARROWLY instead of whole-repo: the one issue's detail subtree (prefix-matched, so its
@@ -3202,9 +3300,10 @@ export function useAccountsHealth() {
  *  token scopes (a reconnect can grant new ones), and the repo-settings lists a
  *  scope hint sends users here from — secrets, variables and webhooks all fail
  *  closed on a missing scope, so their error cards must retry the call themselves,
- *  as do the three GitHub Projects reads (catalog, memberships and field values): a
- *  granted `project` scope has to light the picker and the rail's field lines up
- *  without a restart, and the work inbox's sources probe plus its pages
+ *  as do the four GitHub Projects reads (catalog, memberships, field values and a
+ *  board's field definitions): a granted `project` scope has to light the picker,
+ *  the rail's field lines and the field editor up without a restart, and the work
+ *  inbox's sources probe plus its pages
  *  (a `login` mode reconnect is how a forge becomes a source in the first place).
  *  Call from a reconnect's `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {
@@ -3216,6 +3315,10 @@ export function useInvalidateAfterReconnect() {
     queryClient.invalidateQueries({ queryKey: ["gh", "token-scopes"] });
     queryClient.invalidateQueries({
       // Partial keys with a repo path in slot 1, so match on the axis instead.
+      // Its charter is SCOPE-GRANT RECOVERY only: every axis listed here is one a
+      // newly granted scope can change the answer to. Cache identity across
+      // ACCOUNTS is a query-key-axis concern — a cache that may hold another
+      // account's answer needs that account in its key, never a wider sweep here.
       predicate: (q) =>
         q.queryKey[0] === "repo" &&
         (q.queryKey[2] === "forge-status" ||
@@ -3225,7 +3328,8 @@ export function useInvalidateAfterReconnect() {
           q.queryKey[2] === "webhooks" ||
           q.queryKey[2] === "projects-available" ||
           q.queryKey[2] === "item-projects" ||
-          q.queryKey[2] === "item-field-values"),
+          q.queryKey[2] === "item-field-values" ||
+          q.queryKey[2] === "project-fields"),
     });
     // A `login` here is a real source change for the work inbox — its probe gates
     // each forge's leg on a 5-minute window, so without this a session signed in

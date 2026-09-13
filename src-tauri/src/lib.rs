@@ -572,6 +572,8 @@ pub fn run() {
             github::project::gh_item_projects,
             github::project::gh_edit_item_projects,
             github::project_fields::gh_item_field_values,
+            github::project_fields::gh_project_fields,
+            github::project_fields::gh_set_item_field_values,
             github::discussion::gh_discussion_categories,
             github::discussion::gh_discussion_list,
             github::discussion::gh_discussion_view,
