@@ -142,9 +142,9 @@ Click the **⋮** menu next to the repo name for repo-wide actions:
   on the host. GitLab's fork page asks where the fork should go, so the item stays
   offered on any project, including your own.
 - **Insights** (analytics), **manage files**, **submodules**, the **remote URL**,
-  **branch rules**, **git hooks**, {{ai}}**automations**, {{/ai}}**repository settings**,
-  an **alias**, copy the repo path, copy the branch name, copy the HEAD SHA, and
-  remove the repo from the list.
+  **branch rules**, **git hooks**, **notifications** for this repository,
+  {{ai}}**automations**, {{/ai}}**repository settings**, an **alias**, copy the repo
+  path, copy the branch name, copy the HEAD SHA, and remove the repo from the list.
 
 ## Submodules
 
@@ -1992,8 +1992,8 @@ prompt** you can hand to a coding agent to implement the fix. Copy just that pro
 **Copy fix prompt**.
 
 {{/ai}}A small **CI badge** in the header tracks the current branch's latest run; click it
-to jump to that run. You can also get an OS **notification** when a run finishes
-(**Settings → Notifications**).`,
+to jump to that run. You can also get an OS **notification** when a run finishes — every
+result, only the failures, or only the successes (**Settings → Notifications**).`,
   },
   {
     id: "findings",
@@ -2803,17 +2803,23 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 - **Automations** — AI actions that run on triggers.
 {{/ai}}- **Notifications** — pick, for each source, where its events land: a row in the
   header's **Activity & notifications** bell, an OS notification, both, or neither (a
-  source with both boxes clear records nothing). OS notifications are sent only while the
+  source with both boxes clear records nothing, and a result outside a CI source's
+  **Notify on** choice stays quiet too). OS notifications are sent only while the
   window isn't focused{{ai}}, apart from **Agent tasks finish**, which pings even while
-  you're working elsewhere in the app{{/ai}}. The sources are **CI checks finish (pass or
-  fail)** (which also carries a **Watch** choice of *My pull requests only* or *All open
+  you're working elsewhere in the app{{/ai}}. The sources are **CI checks finish**
+  (which also carries a **Watch** choice of *My pull requests only* or *All open
   pull requests*), **Pull requests opened, merged, or closed**, **Reviews on my pull
   requests**, and **Workflow runs finish on the current branch**{{ai}}, plus **AI reviews
-  I start**, **Automation results**, and **Agent tasks finish**{{/ai}}. **Customize…**
+  I start**, **Automation results**, and **Agent tasks finish**{{/ai}}. Both CI sources
+  carry a **Notify on** choice — *Successes and failures*, *Failures only*, or
+  *Successes only* — so a green day can stay silent and a red one still reaches you;
+  *Failures only* covers runs that timed out or failed to start as well. **Customize…**
   opens the per-repository overrides: **Mute this repository** silences every source for
-  that repo, or you can set individual cells and the CI-checks **Watch** choice, with
-  anything you leave alone following your global settings. *Notification settings* and
-  *Repository notification settings* in the command palette open each directly.
+  that repo, or you can set individual cells, the CI-checks **Watch** choice, and either
+  **Notify on** choice, with anything you leave alone following your global settings.
+  *Notification settings* and
+  *Repository notification settings* in the command palette open each directly, and the
+  repo **⋮** menu's **Notifications…** opens the current repository's overrides.
   The bell is a persistent, click-to-open history (it survives a restart) so a finished
   review or a PR update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump

@@ -16,7 +16,11 @@ import {
   effectiveChecksScope,
 } from "@/lib/notifications/overrides";
 import { useRepoNotificationOverride } from "@/lib/notifications/queries";
-import type { NotificationSource } from "@/lib/settings/api";
+import type {
+  NotificationOutcome,
+  NotificationSource,
+  OutcomeSource,
+} from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import {
   type NotificationKind,
@@ -167,8 +171,7 @@ export function usePrNotifications(repoPath: string) {
     // Delivery is entirely emit's: it resolves the source's channels (global prefs
     // merged with this repo's override) and owns the dedupe for both. What stays
     // here is the classification — which transition happened, and whose PR it is.
-    const record = (
-      source: NotificationSource,
+    const event = (
       kind: NotificationKind,
       tone: NotificationTone,
       title: string,
@@ -185,8 +188,7 @@ export function usePrNotifications(repoPath: string) {
       },
     ) => {
       const authorLogin = opts?.authorLogin;
-      emitNotification({
-        source,
+      return {
         row: {
           kind,
           tone,
@@ -197,19 +199,33 @@ export function usePrNotifications(repoPath: string) {
           authorLogin,
           authorGhHost: authorLogin ? (ghHost ?? undefined) : undefined,
           target: {
-            type: "pr",
-            kind: "remote",
+            type: "pr" as const,
+            kind: "remote" as const,
             ref: String(pr.number),
             // The poll pins the ORIGIN slug (see `gh_pr_poll`), so every event it
             // reports happened on the fork's own pull requests.
-            lens: "origin",
+            lens: "origin" as const,
             reviewId: opts?.reviewId || undefined,
           },
           dedupeKey,
         },
-        os: { title, body: pr.title, focus: "unfocused" },
-      });
+        os: { title, body: pr.title, focus: "unfocused" as const },
+      };
     };
+
+    // The sources with no outcome axis. Splitting the two callers is what lets the
+    // union emit takes stay exhaustive without a cast at either site.
+    const record = (
+      source: Exclude<NotificationSource, OutcomeSource>,
+      ...rest: Parameters<typeof event>
+    ) => emitNotification({ source, ...event(...rest) });
+
+    /** A CI source's event, carrying the result class the outcome filter reads. */
+    const recordOutcome = (
+      source: OutcomeSource,
+      outcome: NotificationOutcome,
+      ...rest: Parameters<typeof event>
+    ) => emitNotification({ source, outcome, ...event(...rest) });
 
     // Scope is orthogonal to the prChecks channels — which PRs are watched, not
     // whether the result is delivered (emit owns that).
@@ -227,8 +243,9 @@ export function usePrNotifications(repoPath: string) {
         (pr.checksState === "SUCCESS" || pr.checksState === "FAILURE")
       ) {
         const passed = pr.checksState === "SUCCESS";
-        record(
+        recordOutcome(
           "prChecks",
+          passed ? "success" : "failure",
           passed ? "checks-passed" : "checks-failed",
           passed ? "success" : "danger",
           passed

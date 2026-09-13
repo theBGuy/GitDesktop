@@ -1,7 +1,6 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { create } from "zustand";
 import type { RemoteLens } from "@/lib/git/types";
-import { storeName } from "@/lib/test-mode";
+import { memoizedStoreLoader } from "@/lib/plugin-store";
 
 /** Semantic tone for a notification's glyph — paired with an icon + word in the
  *  UI so state never rides on color alone (WCAG AA). */
@@ -143,14 +142,7 @@ const TONES: ReadonlySet<string> = new Set<NotificationTone>([
 // notification on a hard crash is acceptable, and there is no cross-write race
 // (one window owns its own inbox; a second window keeps its own copy — an
 // accepted v1 limit, matching the settings store's cross-window caveat).
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("notifications.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("notifications.json");
 
 /** Shape-guard a value read back from disk — external/older files must never
  *  crash hydration; a malformed entry is simply dropped. */

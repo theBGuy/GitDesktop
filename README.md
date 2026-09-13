@@ -1017,8 +1017,9 @@ review via its subscription login. The full list is under
 - **Integrations**: open in any editor or terminal (auto-detected, point at
   any executable, or set a full custom command with a `{path}` placeholder),
   and per-source notification controls that send each kind of event to the
-  activity inbox, your desktop, both, or neither, with per-repository
-  overrides.
+  activity inbox, your desktop, both, or neither — with the CI sources
+  narrowing to just the failures (or just the successes) — and
+  per-repository overrides.
 - **Activity and notifications**: a persistent bell in the header collects
   terminal events (a finished review, checks passing/failing, a PR
   approved/commented/merged, a review requested from you, a completed CI

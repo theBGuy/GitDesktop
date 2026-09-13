@@ -83,6 +83,8 @@ const bareGroupLabel = scanner("bare-group-label");
 const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
 const titledDisabledTrigger = scanner("titled-disabled-trigger");
 const ungatedProducer = scanner("ungated-notification-producer");
+const handRolledStoreOpen = scanner("hand-rolled-store-open");
+const rawStoreReload = scanner("raw-store-reload");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -1396,6 +1398,106 @@ test("ungated-notification-producer exempts the gate module only", () => {
   assert.equal(appliesTo("src/lib/notifications/overrides.ts"), true);
   assert.equal(appliesTo("src/lib/stores/notifications.ts"), true);
   assert.equal(appliesTo("src/features/sessions/store.ts"), true);
+});
+
+test("hand-rolled-store-open flags both routes to a hand-opened store", () => {
+  for (const source of [
+    // The import route, in every spelling a store module used: the value import,
+    // the mixed value + type import the converted files all had, and an alias.
+    'import { load } from "@tauri-apps/plugin-store";',
+    'import { load, type Store } from "@tauri-apps/plugin-store";',
+    'import { load as openStore } from "@tauri-apps/plugin-store";',
+  ])
+    assert.deepEqual(handRolledStoreOpen(source), [1], `should flag ${source}`);
+  // The call route — the backstop for a load the import arm cannot see.
+  assert.deepEqual(
+    handRolledStoreOpen('const s = await load(storeName("x.json"), {});'),
+    [1],
+  );
+});
+
+test("hand-rolled-store-open sees the memo across the wrapped call", () => {
+  const source = [
+    'import * as store from "@tauri-apps/plugin-store";',
+    "",
+    "let storePromise = null;",
+    "function getStore() {",
+    '  storePromise ??= store.load(storeName("x.json"), {',
+    "    autoSave: true,",
+    "    defaults: {},",
+    "  });",
+    "  return storePromise;",
+    "}",
+  ].join("\n");
+  // The namespace import carries no `load` specifier, so only the call arm fires.
+  assert.deepEqual(handRolledStoreOpen(source), [5]);
+});
+
+test("hand-rolled-store-open leaves the helper route and type-only imports alone", () => {
+  for (const source of [
+    // The converted shape: the helper, and the `Store` type the stores that take a
+    // store-typed parameter still need.
+    'import { memoizedStoreLoader } from "@/lib/plugin-store";\nconst getStore = memoizedStoreLoader("x.json");',
+    'import type { Store } from "@tauri-apps/plugin-store";',
+    'import { type Store } from "@tauri-apps/plugin-store";',
+    // A neighbouring import cannot supply the token: `[^}]*` stops at the import's
+    // own closing brace.
+    'import { load } from "./other";\nimport { type Store } from "@tauri-apps/plugin-store";',
+    // A same-named import of something else entirely.
+    'import { load } from "@/lib/settings/api";',
+    // The idiom named in a comment is not a use of it.
+    '// never `storePromise ??= load(storeName("x.json"), …)` — see plugin-store.ts',
+  ])
+    assert.deepEqual(
+      handRolledStoreOpen(source),
+      [],
+      `should ignore ${source}`,
+    );
+});
+
+test("hand-rolled-store-open exempts the helper module only", () => {
+  const { appliesTo } = CHECKS.find((c) => c.name === "hand-rolled-store-open");
+  assert.equal(appliesTo("src/lib/plugin-store.ts"), false);
+  assert.equal(appliesTo("src/lib/jira/store.ts"), true);
+  assert.equal(appliesTo("src/lib/repo-data-migration.ts"), true);
+});
+
+test("raw-store-reload flags a bare store reload, wrapped or not", () => {
+  assert.deepEqual(
+    rawStoreReload("await store.reload({ ignoreDefaults: true });"),
+    [1],
+  );
+  assert.deepEqual(rawStoreReload("await store.reload();"), [1]);
+  const wrapped = [
+    "async function reloadRaw(store) {",
+    "  try {",
+    "    await store.reload({",
+    "      ignoreDefaults: true,",
+    "    });",
+    "  } catch {}",
+    "}",
+  ].join("\n");
+  assert.deepEqual(rawStoreReload(wrapped), [3]);
+});
+
+test("raw-store-reload leaves the helper route and a webview reload alone", () => {
+  for (const source of [
+    // The converted shape.
+    'import { reloadToleratingEmptyStore } from "@/lib/plugin-store";\nawait reloadToleratingEmptyStore(await getStore());',
+    // A different API entirely — excluded by the lookbehind, not by an allowlist.
+    "<button onClick={() => window.location.reload()}>Reload</button>",
+    "location.reload();",
+    // Comment stripping keeps prose about the banned call clean.
+    "// a bare store.reload() would swallow an unreadable file",
+  ])
+    assert.deepEqual(rawStoreReload(source), [], `should ignore ${source}`);
+});
+
+test("raw-store-reload exempts the helper module only", () => {
+  const { appliesTo } = CHECKS.find((c) => c.name === "raw-store-reload");
+  assert.equal(appliesTo("src/lib/plugin-store.ts"), false);
+  assert.equal(appliesTo("src/lib/issues/local.ts"), true);
+  assert.equal(appliesTo("src/components/ErrorBoundary.tsx"), true);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {

@@ -1,7 +1,9 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
-import { storeName } from "@/lib/test-mode";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 
 /**
  * A distilled decision ledger for one PR's over-budget GitDesktop-own comments,
@@ -75,14 +77,7 @@ function legacyDigestKey(key: string): string | undefined {
 // (not its checkout path) so a PR's cached digest is shared across the main
 // checkout and every worktree. Routed through storeName() so cold-start/test mode
 // never pollutes real data. One digest per `digestKey` key.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("own-comments-digest.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("own-comments-digest.json");
 
 // Serialize every read-modify-write through one in-process queue — without it two
 // overlapping saves each reload the same pre-flush disk snapshot (autoSave's ~100ms
@@ -95,15 +90,7 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 }
 
 async function reloadRaw(): Promise<void> {
-  const store = await getStore();
-  // Tolerate a missing store file: `load()` tolerates it but `reload()` rejects
-  // with a raw io error until the first `save()` creates the file. Fall back to
-  // the in-memory state on ANY reload failure — the next save() creates the file.
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing/unreadable file — proceed with in-memory state.
-  }
+  await reloadToleratingEmptyStore(await getStore());
 }
 
 /** The identity store key for `repo`, folding any legacy checkout-path-keyed

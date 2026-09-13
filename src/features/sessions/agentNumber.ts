@@ -1,6 +1,5 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { create } from "zustand";
-import { storeName } from "@/lib/test-mode";
+import { memoizedStoreLoader } from "@/lib/plugin-store";
 
 // A GitHub-style short identifier (`#N`) for every agent entry — sessions, plans,
 // and research — so an entry is easy to reference and a plan can point at the
@@ -26,14 +25,7 @@ interface AgentNumberState {
   ensure: (ids: string[]) => void;
 }
 
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("agent-numbers.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("agent-numbers.json");
 
 export const useAgentNumbers = create<AgentNumberState>((set, get) => ({
   numbers: {},

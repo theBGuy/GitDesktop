@@ -378,6 +378,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `queries.ts`; a hand-built key or raw-path key silently fails to
   co-invalidate siblings.
+- **Plugin-store open/reload** — an app-data store opens via
+  `memoizedStoreLoader` and re-reads via `reloadToleratingEmptyStore`
+  (`src/lib/plugin-store.ts`), never a hand-rolled `??= load(storeName(…))` or a
+  bare `store.reload()`: the former memoizes a REJECTED load (store dead until
+  restart), the latter swallows an unreadable file and saves the cache over it.
 
 ## Rust / Tauri conventions
 

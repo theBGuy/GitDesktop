@@ -1,4 +1,3 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { ALL_PROVIDER_IDS } from "@/lib/ai/providers";
 import {
   REVIEW_CONTEXT_SIZES,
@@ -8,7 +7,7 @@ import { REVIEW_EFFORTS, type ReviewEffort } from "@/lib/ai/review-effort";
 import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiSettings, ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
-import { storeName } from "@/lib/test-mode";
+import { memoizedStoreLoader } from "@/lib/plugin-store";
 import { THEME_ORDER, type ThemeSetting } from "@/lib/theme";
 
 export interface RecentRepo {
@@ -194,11 +193,61 @@ export type NotificationSource = (typeof NOTIFICATION_SOURCES)[number];
 export const PR_CHECK_SCOPE_FILTERS = ["mine", "all"] as const;
 export type PrCheckScopeFilter = (typeof PR_CHECK_SCOPE_FILTERS)[number];
 
+/** The outcome classes the CI producers actually emit today. Adding one is a SHAPE
+ *  change (see {@link OUTCOME_FILTERS}) — not a new member here. */
+export const OUTCOME_CLASSES = ["success", "failure"] as const;
+export type NotificationOutcome = (typeof OUTCOME_CLASSES)[number];
+
+/** The non-empty subsets of {@link OUTCOME_CLASSES}; the empty subset is spelled
+ *  "both channels off". Every member delivers SOMETHING — the poll-enable gates rely
+ *  on it (see `anyChannelOn`); a member that can empty the set must thread into them. */
+export const OUTCOME_FILTERS = ["all", "failures", "successes"] as const;
+export type OutcomeFilter = (typeof OUTCOME_FILTERS)[number];
+
+/** The sources carrying an outcome axis. Pinned as a union because the derivation
+ *  below only exists at runtime. */
+export type OutcomeSource = "prChecks" | "actionRuns";
+
+/** Per-source outcome axis, declared for EVERY source so adding a source forces an
+ *  explicit decision (an empty array = no outcome axis). The split typing is the
+ *  drift guard: only an {@link OutcomeSource} may carry classes, so handing another
+ *  source an axis here fails to compile until it joins that union too. */
+export const SOURCE_OUTCOMES: Record<
+  OutcomeSource,
+  readonly NotificationOutcome[]
+> &
+  Record<Exclude<NotificationSource, OutcomeSource>, readonly []> = {
+  prChecks: OUTCOME_CLASSES,
+  prActivity: [],
+  prReviews: [],
+  actionRuns: OUTCOME_CLASSES,
+  reviews: [],
+  automations: [],
+  agents: [],
+};
+
+/** Narrowing form of the axis test — `OUTCOME_SOURCES.includes` does not narrow, and
+ *  the typing above is what makes the predicate true rather than asserted. */
+export function isOutcomeSource(
+  source: NotificationSource,
+): source is OutcomeSource {
+  return SOURCE_OUTCOMES[source].length > 0;
+}
+
+/** The outcome sources in manifest order — the one enumeration a heal branch, an
+ *  override normalizer, or a matrix sub-row iterates. */
+export const OUTCOME_SOURCES = NOTIFICATION_SOURCES.filter(
+  isOutcomeSource,
+) satisfies readonly OutcomeSource[];
+
 export interface NotificationSettings {
   /** Per-source delivery channels, Record-typed against the manifest. */
   sources: Record<NotificationSource, ChannelPrefs>;
   /** Which PRs the prChecks source watches — orthogonal to its channels. */
   prChecksScope: PrCheckScopeFilter;
+  /** Which results notify, per source with an outcome axis — orthogonal to that
+   *  source's channels, exactly like the scope. */
+  outcomes: Record<OutcomeSource, OutcomeFilter>;
 }
 
 /** The agent CLIs offerable as the Default agent, in render order. Spelled out here
@@ -416,6 +465,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
       agents: { inApp: true, os: true },
     },
     prChecksScope: "all",
+    outcomes: {
+      prChecks: "all",
+      actionRuns: "all",
+    },
   },
   closeToTray: true,
   agentIsolation: "worktree",
@@ -478,15 +531,7 @@ export function effectiveReviewAi(
 
 const MAX_RECENT_REPOS = 200;
 
-let storePromise: Promise<Store> | null = null;
-
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("settings.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("settings.json");
 
 /** The stored value when it is one of `allowed`, else `fallback`. */
 const pick = <T extends string>(
@@ -565,6 +610,15 @@ const mapSources = (
     NOTIFICATION_SOURCES.map((source) => [source, cell(source)]),
   ) as Record<NotificationSource, ChannelPrefs>;
 
+/** The same trick over the outcome manifest, so a source that gains an axis cannot
+ *  be missed by a heal branch either. */
+const mapOutcomes = (
+  filter: (source: OutcomeSource) => OutcomeFilter,
+): Record<OutcomeSource, OutcomeFilter> =>
+  Object.fromEntries(
+    OUTCOME_SOURCES.map((source) => [source, filter(source)]),
+  ) as Record<OutcomeSource, OutcomeFilter>;
+
 /**
  * Coerces a stored `notifications` value — new-shape, legacy (six accreted prefs),
  * or junk — into a full {@link NotificationSettings}. The legacy branch stays
@@ -577,6 +631,14 @@ const mapSources = (
 export function healNotifications(saved: unknown): NotificationSettings {
   const defaults = DEFAULT_SETTINGS.notifications;
   const obj = asObject(saved);
+
+  // Read the same way by BOTH branches below: no legacy writer ever produced this
+  // key, so a stored `outcomes` is always an intentional hand-edit and heals
+  // generously, per key. The "a stored `sources` wins outright" discriminant
+  // arbitrates the two conflicting CHANNEL shapes only — outcomes has just the one.
+  const outcomes = mapOutcomes((source) =>
+    pick(asObject(obj.outcomes)[source], OUTCOME_FILTERS, "all"),
+  );
 
   if (
     obj.sources &&
@@ -599,6 +661,7 @@ export function healNotifications(saved: unknown): NotificationSettings {
         };
       }),
       prChecksScope: pick(obj.prChecksScope, PR_CHECK_SCOPE_FILTERS, "all"),
+      outcomes,
     };
   }
 
@@ -619,6 +682,7 @@ export function healNotifications(saved: unknown): NotificationSettings {
         : { ...defaults.sources[source] };
     }),
     prChecksScope: pick(legacyChecks, PR_CHECK_SCOPE_FILTERS, "all"),
+    outcomes,
   };
 }
 

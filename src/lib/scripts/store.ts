@@ -1,5 +1,7 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
-import { storeName } from "@/lib/test-mode";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 import {
   type ArgDoc,
   EMPTY_SCRIPTS,
@@ -11,14 +13,7 @@ import {
 
 // Personal app-data — task definitions are the user's, NEVER read from repo
 // content, so a cloned/malicious repo can't plant a runnable task.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("scripts.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("scripts.json");
 
 // Serialize every read-modify-write through one in-process queue so two
 // overlapping saves can't each read the same pre-flush snapshot and drop each
@@ -30,23 +25,13 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Re-read `scripts.json` into the store, tolerating a missing file (until the
- *  first `save()` creates it, `reload()` rejects — proceed with in-memory state). */
-async function reloadRaw(store: Store): Promise<void> {
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing/unreadable — the next save() bootstraps the file.
-  }
-}
-
 /** Serialized read-modify-write against fresh disk state. */
 function mutateConfig(
   mutate: (current: ScriptsConfig) => ScriptsConfig,
 ): Promise<void> {
   return serialize(async () => {
     const store = await getStore();
-    await reloadRaw(store);
+    await reloadToleratingEmptyStore(store);
     const current = normalizeScripts(await store.get<unknown>("config"));
     const next = mutate(current);
     await store.set("config", next);

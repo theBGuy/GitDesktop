@@ -1,6 +1,5 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { repoIdentity } from "@/lib/git/repo-identity";
-import { storeName } from "@/lib/test-mode";
+import { memoizedStoreLoader } from "@/lib/plugin-store";
 
 // The per-repo filter choices for the Pull Requests + Issues panels, persisted in
 // app data (never committed). Keyed by the repo's worktree-stable identity
@@ -68,14 +67,7 @@ export function normalizeConversationFilterPrefs(
   };
 }
 
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("conversation-filters.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("conversation-filters.json");
 
 /** Read a repo's persisted filter prefs. Never throws: an unreadable store reads as
  *  the defaults (an unfiltered panel), since a failed preference read must not keep

@@ -1,4 +1,3 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ReviewMode } from "@/lib/ai/types";
 import {
   identityKeyFor,
@@ -6,7 +5,10 @@ import {
   repoIdentity,
 } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
-import { storeName } from "@/lib/test-mode";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 
 /**
  * A finished AI review, persisted so the NEXT run of the same PR + mode can feed
@@ -98,14 +100,7 @@ const groupKey = (
 // into the repo itself (the text quotes user source + may contain AI false
 // positives). Routed through storeName() so cold-start/test mode never pollutes
 // real history.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("pr-reviews.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("pr-reviews.json");
 
 // Serialize every read-modify-write on this store through one in-process queue:
 // autoSave persists on a ~100ms debounce, so two overlapping mutations would both
@@ -122,17 +117,7 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 }
 
 async function reloadRaw(): Promise<void> {
-  const store = await getStore();
-  // Tolerate a missing store file: `load()` tolerates one but `reload()` rejects with
-  // a raw io error (os error 2) until the first `save()` creates the file — without
-  // this guard the first-ever mutation throws before reaching `save()` and the store
-  // can never bootstrap (an external delete of the file breaks every mutation until
-  // restart the same way). Fall back to the loaded in-memory state on ANY reload failure.
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing file — the next save() creates it.
-  }
+  await reloadToleratingEmptyStore(await getStore());
 }
 
 // Keyed by the repo's worktree-stable identity, so reads merge in any records still

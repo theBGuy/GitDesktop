@@ -1,14 +1,23 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
+import {
   type ChannelPrefs,
+  isOutcomeSource,
   NOTIFICATION_SOURCES,
+  type NotificationOutcome,
   type NotificationSettings,
   type NotificationSource,
+  OUTCOME_CLASSES,
+  OUTCOME_FILTERS,
+  OUTCOME_SOURCES,
+  type OutcomeFilter,
+  type OutcomeSource,
   PR_CHECK_SCOPE_FILTERS,
   type PrCheckScopeFilter,
 } from "@/lib/settings/api";
-import { storeName } from "@/lib/test-mode";
 
 /** A repo's adjustments; every absent field inherits the global. */
 export interface RepoNotificationOverride {
@@ -16,26 +25,15 @@ export interface RepoNotificationOverride {
   muted?: boolean;
   sources?: Partial<Record<NotificationSource, Partial<ChannelPrefs>>>;
   prChecksScope?: PrCheckScopeFilter;
+  /** Which results notify, per CI source; an absent key inherits the global. */
+  outcomes?: Partial<Record<OutcomeSource, OutcomeFilter>>;
 }
 
 /** The single store key holding `Record<repoKey, RepoNotificationOverride>`. */
 const STORE_KEY = "overrides";
 
 // Personal app-data — notification preferences are the user's, never the repo's.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("notification-overrides.json"), {
-    autoSave: true,
-    defaults: {},
-  }).catch((e: unknown) => {
-    // A rejected load must not be memoized: the emit gate reads this store on every
-    // notification, and a pinned failure would silently ignore every pref for the
-    // rest of the session. Drop the memo so the next call retries.
-    storePromise = null;
-    throw e;
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("notification-overrides.json");
 
 // Serialize every read-modify-write on this store through one in-process queue:
 // autoSave persists on a ~100ms debounce, so two overlapping saves would both read
@@ -48,19 +46,6 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   // Keep the queue alive whether `op` fulfilled or rejected; callers still get `run`.
   opChain = run.catch(() => undefined);
   return run;
-}
-
-/** Re-read the file into the in-memory store, tolerating a missing one: `load()`
- *  tolerates it but `reload()` rejects with a raw io error until the first `save()`
- *  creates it, so ANY reload failure proceeds with in-memory state.
- *  `ignoreDefaults: true` matches the store to disk so externally-deleted keys drop.
- *  Call inside the serialized queue so it can't land between a set and its flush. */
-async function reloadRaw(store: Store): Promise<void> {
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing file — the next save() creates it.
-  }
 }
 
 // ── Normalization (every load) ──────────────────────────────────────────────
@@ -95,6 +80,25 @@ function normalizeSources(
   return any ? out : undefined;
 }
 
+/** Same manifest rule for the outcome axis: a key naming no outcome source, or a
+ *  value naming no filter, drops. */
+function normalizeOutcomes(
+  v: unknown,
+): RepoNotificationOverride["outcomes"] | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const obj = v as Record<string, unknown>;
+  const out: Partial<Record<OutcomeSource, OutcomeFilter>> = {};
+  let any = false;
+  for (const source of OUTCOME_SOURCES) {
+    const filter = obj[source];
+    if (OUTCOME_FILTERS.includes(filter as OutcomeFilter)) {
+      out[source] = filter as OutcomeFilter;
+      any = true;
+    }
+  }
+  return any ? out : undefined;
+}
+
 /** Type-checks one untrusted override, dropping malformed fields. Returns undefined
  *  when nothing usable survives: an empty override is no override, and storing one
  *  would mark the repo as overridden while it inherits everything. */
@@ -104,6 +108,7 @@ function normalizeOverride(v: unknown): RepoNotificationOverride | undefined {
     muted?: unknown;
     sources?: unknown;
     prChecksScope?: unknown;
+    outcomes?: unknown;
   };
   const out: RepoNotificationOverride = {};
   if (obj.muted === true) out.muted = true;
@@ -114,7 +119,11 @@ function normalizeOverride(v: unknown): RepoNotificationOverride | undefined {
   ) {
     out.prChecksScope = obj.prChecksScope as PrCheckScopeFilter;
   }
-  if (!out.muted && !out.sources && !out.prChecksScope) return undefined;
+  const outcomes = normalizeOutcomes(obj.outcomes);
+  if (outcomes) out.outcomes = outcomes;
+  if (!out.muted && !out.sources && !out.prChecksScope && !out.outcomes) {
+    return undefined;
+  }
   return out;
 }
 
@@ -150,6 +159,53 @@ export function effectiveChecksScope(
   override: RepoNotificationOverride | undefined,
 ): PrCheckScopeFilter {
   return override?.prChecksScope ?? global.prChecksScope;
+}
+
+/** Which results a repo notifies on for one CI source — orthogonal to that source's
+ *  channels, like the scope, so it stays meaningful while the source is muted. */
+export function effectiveOutcomeFilter(
+  global: NotificationSettings,
+  override: RepoNotificationOverride | undefined,
+  source: OutcomeSource,
+): OutcomeFilter {
+  return override?.outcomes?.[source] ?? global.outcomes[source];
+}
+
+/** The set each filter delivers, spelled out rather than derived: every filter names
+ *  a non-empty set, which is the invariant the poll-enable gates lean on. */
+const FILTER_DELIVERS: Record<OutcomeFilter, readonly NotificationOutcome[]> = {
+  all: OUTCOME_CLASSES,
+  failures: ["failure"],
+  successes: ["success"],
+};
+
+/** Whether one result passes a filter. Pure. */
+export function outcomeAllowed(
+  filter: OutcomeFilter,
+  outcome: NotificationOutcome,
+): boolean {
+  return FILTER_DELIVERS[filter].includes(outcome);
+}
+
+/**
+ * THE delivery seam: the channels a source delivers on for one repo and one event.
+ * An outcome filter is all-or-nothing today — a filtered-out result delivers
+ * nowhere — so this zeroes the pair the channel resolution produced. A per-CHANNEL
+ * outcome axis would change only this body: every producer and the emit gate
+ * already ask the question in the shape that answer needs.
+ */
+export function deliveredChannels(
+  global: NotificationSettings,
+  override: RepoNotificationOverride | undefined,
+  source: NotificationSource,
+  outcome?: NotificationOutcome,
+): ChannelPrefs {
+  const channels = effectiveChannels(global, override, source);
+  if (outcome === undefined || !isOutcomeSource(source)) return channels;
+  const filter = effectiveOutcomeFilter(global, override, source);
+  return outcomeAllowed(filter, outcome)
+    ? channels
+    : { inApp: false, os: false };
 }
 
 /** Whether any of `sources` delivers on any channel — the shape a poll-enable
@@ -228,7 +284,7 @@ function mutateOverrides(
 ): Promise<void> {
   return serialize(async () => {
     const store = await getStore();
-    await reloadRaw(store);
+    await reloadToleratingEmptyStore(store);
     const current = normalizeOverrides(await store.get<unknown>(STORE_KEY));
     await store.set(STORE_KEY, mutate(current));
     await store.save();

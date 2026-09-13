@@ -1,12 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { load, type Store } from "@tauri-apps/plugin-store";
 import {
   identityKeyFor,
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
-import { storeName } from "@/lib/test-mode";
+import { memoizedStoreLoader } from "@/lib/plugin-store";
 import { toastError } from "@/lib/toast";
 
 /** One pending draft comment in a not-yet-submitted batch review. `id` is a local
@@ -37,14 +36,7 @@ const legacyDraftKey = (lens: RemoteLens, number: number) =>
 
 // Personal app-data, keyed by repo path → per-PR drafts — never written into the
 // repo itself. Mirrors `local.ts`'s store idiom.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("pr-review-drafts.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("pr-review-drafts.json");
 
 // Serialize every read-modify-write on this store through one in-process queue.
 // Without it, two overlapping mutations each reload the SAME pre-flush disk

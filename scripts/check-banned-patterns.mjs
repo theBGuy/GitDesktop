@@ -487,6 +487,38 @@ const ONERROR_SETTINGS_REFETCH_RE = new RegExp(
 // its own line. Accepted evasions, zero instances today: a dynamic `import()`
 // of either module (no `from` clause), and a re-export chain through a third
 // module.
+// The two routes to opening a `@tauri-apps/plugin-store` store by hand, each of
+// which re-opens the rejected-load class: `storePromise ??= load(...)` memoizes the
+// REJECTED promise as readily as a resolved one, so one unreadable file leaves that
+// store dead for the rest of the session.
+//
+// The import arm is the primary anchor, matched on the `load` SPECIFIER inside the
+// braces (`[^}]*` cannot cross the import's own closing brace, so a neighbouring
+// import can never supply the token, and an alias — `load as loadStore` — still
+// hits). A type-only `import type { Store }` carries no `load` specifier and stays
+// legal, which is what lets the stores that still take a `Store`-typed parameter
+// import the type. The call arm is the backstop for a route the specifier match
+// cannot see (a namespace import, or a re-export chain), anchored on the house
+// spelling `load(storeName(` — a load naming its file some other way evades it.
+// Both run over the whole-file view: the formatter puts each specifier, and a long
+// argument list, on its own line.
+const PLUGIN_STORE_LOAD_IMPORT_RE =
+  /\bimport\s+(?:type\s+)?\{[^}]*\bload\b[^}]*\}\s*from\s*["']@tauri-apps\/plugin-store["']/g;
+const LOAD_STORE_NAME_CALL_RE = /\bload\s*\(\s*storeName\s*\(/g;
+
+// A raw `.reload(` on a plugin store. `window.location.reload()` is a different API
+// entirely, excluded structurally by the lookbehind rather than by an allowlist entry
+// — a reload of the WEBVIEW has nothing to do with a store's disk cache. Accepted
+// evasions, zero instances today: a `location` reload the formatter split across
+// lines (the joined view would put a space before `.reload`, defeating the
+// lookbehind), and a reload reached through a variable named `…location`.
+// FALSE-POSITIVE direction, by design: the receiver is unchecked, so any future
+// non-store `.reload()` — `router.reload()`, an aliased location binding — goes red
+// with a store-flavored message. The remedy is an allowlist entry with rationale, NOT
+// a narrowed receiver pattern: naming the store receivers would fail-OPEN on the next
+// store whose variable is spelled differently, which is the direction that matters.
+const RAW_STORE_RELOAD_RE = /(?<!location)\.reload\s*\(/g;
+
 const PUSH_NOTIFICATION_IMPORT_RE =
   /\bimport\s+(?:type\s+)?\{[^}]*\bpushNotification\b[^}]*\}\s*from\s*["'][^"']*\/notifications["']/g;
 const NOTIFICATIONS_NAMESPACE_IMPORT_RE =
@@ -848,6 +880,42 @@ export const CHECKS = [
     allowlist: [],
     message:
       "notifications are delivered by emitNotification (src/lib/notifications/emit.ts) alone — it resolves each source's channels against the global prefs AND the repo's override, mutes the OS ping for AI kinds while AI is hidden, and dedupes both channels together; a producer reaching pushNotification or @/lib/notify directly ships a surface the user cannot turn off (the sessions, plan, and research producers were ungated exactly that way), so route it through emit or add an allowlist entry with rationale",
+  },
+  {
+    name: "hand-rolled-store-open",
+    // The helper IS the opener, so it holds the import and the call by definition.
+    appliesTo: (file) => file !== "src/lib/plugin-store.ts",
+    scan: anyOf([
+      perFile(PLUGIN_STORE_LOAD_IMPORT_RE),
+      perFile(LOAD_STORE_NAME_CALL_RE),
+    ]),
+    allowlist: [
+      // The relocate migration deliberately re-opens every per-repo store BY NAME
+      // from a table, with the same options, to mutate the instances the feature
+      // modules cached — a memoized per-file opener is the wrong shape for it, and
+      // it holds no long-lived memo to poison.
+      "src/lib/repo-data-migration.ts",
+      // Opens `analytics.json` per call rather than memoizing, so it has no
+      // rejected-memo to pin; converting it is a follow-up, not an exception to
+      // the rule.
+      "src/lib/analytics/posthog.ts",
+    ],
+    message:
+      "app-data stores open through memoizedStoreLoader (src/lib/plugin-store.ts) — a hand-rolled `storePromise ??= load(...)` memoizes a REJECTED load just as readily as a resolved one, so a single unreadable file leaves that store dead until the app restarts; route it through the helper or add an allowlist entry with rationale",
+  },
+  {
+    name: "raw-store-reload",
+    // The helper IS the reload, so it holds the only raw call.
+    appliesTo: (file) => file !== "src/lib/plugin-store.ts",
+    scan: perFile(RAW_STORE_RELOAD_RE),
+    allowlist: [
+      // Re-homing runs outside the feature modules' write queues and writes back
+      // unconditionally, so a tolerate-vs-rethrow decision it does not make is not
+      // the guard it needs (its own comment records the orphan-on-throw residual).
+      "src/lib/repo-data-migration.ts",
+    ],
+    message:
+      "re-read a store through reloadToleratingEmptyStore (src/lib/plugin-store.ts) — a bare `store.reload()` wrapped in a catch-everything treats an unreadable file exactly like an absent one, so the read-modify-write proceeds and saves this process's cache over whatever was on disk; a caller that genuinely must swallow every failure (a POST-write cache refresh, which has no pending write to protect — see review-notes' writeBranch) wraps the helper in its own try/catch rather than calling reload directly, and a non-store `.reload()` this pattern cannot tell apart takes an allowlist entry with rationale",
   },
 ];
 

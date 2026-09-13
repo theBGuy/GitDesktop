@@ -472,7 +472,7 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "Per-source notification controls — in-app vs OS channels, per-repo overrides",
+      "Per-source notification controls — in-app vs OS channels, failures-only CI, per-repo overrides",
   },
   { group: "Repository & workspace", label: "Environment & CLI health check" },
   {

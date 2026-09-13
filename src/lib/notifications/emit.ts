@@ -2,14 +2,16 @@ import { notify, notifyIfUnfocused } from "@/lib/notify";
 import {
   DEFAULT_SETTINGS,
   loadSettings,
+  type NotificationOutcome,
   type NotificationSource,
+  type OutcomeSource,
 } from "@/lib/settings/api";
 import {
   AI_NOTIFICATION_KINDS,
   DEDUPE_WINDOW_MS,
   pushNotification,
 } from "@/lib/stores/notifications";
-import { effectiveChannels, overrideForRepo } from "./overrides";
+import { deliveredChannels, overrideForRepo } from "./overrides";
 
 export interface EmitOsPing {
   title: string;
@@ -65,12 +67,26 @@ function releaseDedupeKey(key: string, claimedAt: number): void {
  * repo override still applies, and a failed override read leaves the user's real
  * global prefs governing. Silence is never the failure mode.
  */
-export function emitNotification(input: {
-  source: NotificationSource;
-  row: Parameters<typeof pushNotification>[0];
-  os?: EmitOsPing;
-}): void {
-  const { source, row, os } = input;
+export function emitNotification(
+  input:
+    | {
+        source: OutcomeSource;
+        /** Compulsory by type, which is why a CI producer cannot forget to hand
+         *  the outcome filter the class it needs. */
+        outcome: NotificationOutcome;
+        row: Parameters<typeof pushNotification>[0];
+        os?: EmitOsPing;
+      }
+    | {
+        source: Exclude<NotificationSource, OutcomeSource>;
+        /** No outcome axis — `never` so passing one is a compile error rather than
+         *  a field the gate silently ignores. */
+        outcome?: never;
+        row: Parameters<typeof pushNotification>[0];
+        os?: EmitOsPing;
+      },
+): void {
+  const { source, row, os, outcome } = input;
   // Producer keys vary: most are repo-unqualified (`opened:42`), a few already
   // embed the path (harmlessly duplicated here), so isolation rests on THIS
   // uniform prefix, not the producer — and the inbox gets the key we claimed.
@@ -86,10 +102,11 @@ export function emitNotification(input: {
       loadSettings().catch(() => DEFAULT_SETTINGS),
       overrideForRepo(row.repoPath).catch(() => undefined),
     ]);
-    const channels = effectiveChannels(
+    const channels = deliveredChannels(
       settings.notifications,
       override,
       source,
+      outcome,
     );
     if (channels.inApp) {
       pushNotification(dedupeKey ? { ...row, dedupeKey } : row);

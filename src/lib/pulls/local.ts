@@ -1,10 +1,12 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import {
   identityKeyFor,
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
-import { storeName } from "@/lib/test-mode";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 
 export interface LocalPrComment {
   id: string;
@@ -68,14 +70,7 @@ export interface LocalPr {
 
 // Personal app-data, keyed by the repo's worktree-stable identity — never written
 // into the repo itself.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("local-prs.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("local-prs.json");
 
 // Serialize every read-modify-write on this store (and the reconcile reload) through
 // one in-process queue: autoSave persists on a ~100ms debounce, so two overlapping
@@ -91,17 +86,7 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 }
 
 async function reloadRaw(): Promise<void> {
-  const store = await getStore();
-  // Tolerate a missing store file: `load()` tolerates one but `reload()` rejects with
-  // a raw io error (os error 2) until the first `save()` creates the file — without
-  // this guard the first-ever mutation throws before reaching `save()` and the store
-  // can never bootstrap (an external delete of the file breaks every mutation until
-  // restart the same way). Fall back to the loaded in-memory state on ANY reload failure.
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing file — the next save() creates it.
-  }
+  await reloadToleratingEmptyStore(await getStore());
 }
 
 /** Re-read `local-prs.json` from disk into the in-memory store. The MCP server

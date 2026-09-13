@@ -1,4 +1,3 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { toast } from "sonner";
 import { create } from "zustand";
 import type { ReviewMode } from "@/lib/ai/types";
@@ -7,7 +6,10 @@ import {
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
-import { storeName } from "@/lib/test-mode";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 
 /**
  * A finished automated COMMIT review — the one review target with no comment
@@ -43,14 +45,7 @@ const MAX_IN_SESSION = 20;
 // into the repo itself (the text quotes user source + may contain AI false
 // positives). Routed through storeName() so cold-start/test mode never pollutes
 // real results.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("automation-results.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("automation-results.json");
 
 // Serialize every read-modify-write through one in-process queue: autoSave persists
 // on a ~100ms debounce, so two overlapping writes would both reload the same
@@ -69,16 +64,7 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 }
 
 async function reloadRaw(): Promise<void> {
-  const store = await getStore();
-  // Tolerate a missing store file: `load()` tolerates one but `reload()` rejects with
-  // a raw io error (os error 2) until the first `save()` creates the file — without
-  // this guard the first-ever write throws before reaching `save()` and the store can
-  // never bootstrap. Fall back to the loaded in-memory state on ANY reload failure.
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing file — the next save() creates it.
-  }
+  await reloadToleratingEmptyStore(await getStore());
 }
 
 /** Shape-guard one record out of untrusted store JSON: a hand-edited (or older)

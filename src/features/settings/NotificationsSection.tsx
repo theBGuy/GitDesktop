@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { Fragment, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useId, useLayoutEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   MatrixCell,
   MatrixTable,
+  OutcomeRow,
   RowLabelCell,
   WatchRow,
 } from "@/features/notifications/RepoNotificationsDialog";
@@ -18,12 +19,13 @@ import { repoIdentity } from "@/lib/git/repo-identity";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   CHANNELS,
-  CHECKS_OFF_WATCH_REASON,
+  CHECKS_OFF_REASON,
   type Channel,
   channelAriaLabel,
   notificationRows,
   notificationsDraftOutOfSync,
   notificationsSignature,
+  OUTCOME_HELD_REASONS,
   overrideCount,
   SOURCE_DESCRIPTIONS,
   SOURCE_LABELS,
@@ -35,7 +37,12 @@ import {
   useNotificationOverrides,
   useRepoNotificationOverride,
 } from "@/lib/notifications/queries";
-import { type RecentRepo, repoDisplayName } from "@/lib/settings/api";
+import {
+  isOutcomeSource,
+  type NotificationSource,
+  type RecentRepo,
+  repoDisplayName,
+} from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { repoNameFromPath } from "@/lib/stores/notifications";
@@ -63,7 +70,13 @@ export const NotificationsSection = withForm({
       form.store,
       (s) => s.values.notifications.sources,
     );
-    const checksOff = !sources.prChecks.inApp && !sources.prChecks.os;
+    // A source delivering on no channel has nothing to watch and no result to
+    // filter, so its sub-rows are held.
+    const channelsOff = (source: NotificationSource) =>
+      !sources[source].inApp && !sources[source].os;
+    // The two CI-checks sub-rows are held by one condition and share one sentence:
+    // the Watch row prints it under this id and the Notify-on row points at it.
+    const checksReasonId = useId();
 
     // Only the notifications slice matters — the dialog reads no other field —
     // so the selector narrows to it and a keystroke elsewhere in the form can't
@@ -109,7 +122,9 @@ export const NotificationsSection = withForm({
           <p className="text-xs text-muted-foreground">
             Choose where each event lands: a row in the activity inbox (In-app),
             an OS notification, or both. A source with both channels off records
-            nothing. OS notifications fire only while GitDesktop is unfocused
+            nothing, and the CI sources add a Notify on choice so you can keep
+            just the failures — results outside your choice stay quiet. OS
+            notifications fire only while GitDesktop is unfocused
             {aiEnabled
               ? " — agent tasks also ping while you work elsewhere in the app."
               : "."}{" "}
@@ -175,7 +190,29 @@ export const NotificationsSection = withForm({
                         value={field.state.value}
                         onValueChange={field.handleChange}
                         disabledReason={
-                          checksOff ? CHECKS_OFF_WATCH_REASON : null
+                          channelsOff("prChecks") ? CHECKS_OFF_REASON : null
+                        }
+                        reasonId={checksReasonId}
+                      />
+                    )}
+                  </form.AppField>
+                )}
+                {/* Likewise per CI source: which results are worth notifying
+                    about qualifies that one row. */}
+                {isOutcomeSource(source) && (
+                  <form.AppField name={`notifications.outcomes.${source}`}>
+                    {(field) => (
+                      <OutcomeRow
+                        source={source}
+                        value={field.state.value}
+                        onValueChange={field.handleChange}
+                        disabledReason={
+                          channelsOff(source)
+                            ? OUTCOME_HELD_REASONS[source]
+                            : null
+                        }
+                        sharedReasonId={
+                          source === "prChecks" ? checksReasonId : undefined
                         }
                       />
                     )}

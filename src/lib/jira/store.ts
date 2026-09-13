@@ -1,6 +1,8 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
-import { storeName } from "@/lib/test-mode";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 
 /** A repo's link to a Jira project. Personal app-data — never written into the
  *  repo itself — keyed by the repo's worktree-stable identity so the link is
@@ -15,14 +17,7 @@ export interface JiraLink {
 }
 
 // Personal app-data — one link per repo, keyed by repo identity.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("jira-links.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("jira-links.json");
 
 // Serialize every read-modify-write on this store (and the reload) through one
 // in-process queue — mirrors the local-issue/PR stores. Without it two
@@ -38,21 +33,7 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 }
 
 async function reloadRaw(): Promise<void> {
-  const store = await getStore();
-  // Tolerate a missing store file. Asymmetry: `load()` tolerates a missing file
-  // but `reload()` rejects with a raw io error ("The system cannot find the file
-  // specified. (os error 2)") — the file only exists after the first `save()`.
-  // Without this guard the first-ever mutation throws before reaching `save()`,
-  // so the store can never bootstrap (live-hit on first Save 2026-07-10); an
-  // external delete of the file breaks every mutation until restart the same way.
-  // Fall back to the loaded in-memory state on ANY reload failure — the
-  // serialized op-chain + force-save still protect the write path.
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing/unreadable file — proceed with in-memory state; the next save()
-    // creates it.
-  }
+  await reloadToleratingEmptyStore(await getStore());
 }
 
 /** Type-guard an untrusted stored value into a JiraLink; `null` when malformed

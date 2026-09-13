@@ -1,8 +1,10 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { toast } from "sonner";
 import { REVIEW_MODES, type ReviewMode } from "@/lib/ai/types";
 import { repoIdentity } from "@/lib/git/repo-identity";
-import { storeName } from "@/lib/test-mode";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 import {
   type ActionConfig,
   type ActionId,
@@ -21,14 +23,7 @@ const LIFECYCLES = LIFECYCLE_EVENTS;
 const ACTIONS = REVIEW_MODES;
 
 // Personal app-data — automation rules are the user's, never the repo's.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("automations.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("automations.json");
 
 // Serialize every read-modify-write on this store through one in-process queue:
 // autoSave persists on a ~100ms debounce, so two overlapping saves would both read
@@ -44,19 +39,6 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Re-read `automations.json` into the in-memory store, tolerating a missing file:
- *  `load()` tolerates one but `reload()` rejects with a raw io error until the first
- *  `save()` creates it, so ANY reload failure proceeds with in-memory state.
- *  `ignoreDefaults: true` matches the store to disk so externally-deleted keys drop.
- *  Call inside the serialized queue so it can't land between a set and its flush. */
-async function reloadRaw(store: Store): Promise<void> {
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing file — the next save() creates it.
-  }
-}
-
 /**
  * Serialized read-modify-write against fresh disk state: reload, read the current
  * normalized config, apply `mutate`, persist. The force-save (`store.save()`)
@@ -68,7 +50,7 @@ function mutateConfig(
 ): Promise<void> {
   return serialize(async () => {
     const store = await getStore();
-    await reloadRaw(store);
+    await reloadToleratingEmptyStore(store);
     const current = normalizeAutomations(await store.get<unknown>("config"));
     const next = mutate(current);
     await store.set("config", next);
@@ -338,7 +320,7 @@ export async function loadAutomations(): Promise<AutomationsConfigV2> {
     // already wrote a v2 value mid-migration, leave it intact rather than clobber
     // it with a migration computed from the now-stale v1 blob.
     await serialize(async () => {
-      await reloadRaw(store);
+      await reloadToleratingEmptyStore(store);
       const fresh = await store.get<unknown>("config");
       if (!isV1(fresh)) return;
       await store.set("config", config);
@@ -371,7 +353,7 @@ export async function loadAutomationsFresh(): Promise<AutomationsConfigV2> {
   const store = await getStore();
   // Inside the serialized queue so the reload can't land between a concurrent
   // mutation's set and its flush.
-  await serialize(() => reloadRaw(store));
+  await serialize(() => reloadToleratingEmptyStore(store));
   return loadAutomations();
 }
 

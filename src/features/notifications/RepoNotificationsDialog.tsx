@@ -1,10 +1,4 @@
-import {
-  type ComponentProps,
-  Fragment,
-  type ReactNode,
-  useId,
-  useState,
-} from "react";
+import { Fragment, type ReactNode, useId, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { SelectClipText } from "@/components/select-clip-text";
@@ -34,10 +28,13 @@ import {
   CHANNEL_LABELS,
   CHANNELS,
   CHECK_SCOPE_LABELS,
-  CHECKS_OFF_WATCH_REASON,
   type Channel,
   channelAriaLabel,
   notificationRows,
+  OUTCOME_FILTER_LABELS,
+  OUTCOME_HELD_REASONS,
+  OUTCOME_ROW_LABEL,
+  outcomeAriaLabel,
   overrideCount,
   SOURCE_DESCRIPTIONS,
   SOURCE_LABELS,
@@ -47,6 +44,7 @@ import {
 import {
   effectiveChannels,
   effectiveChecksScope,
+  effectiveOutcomeFilter,
   overrideEntry,
   type RepoNotificationOverride,
 } from "@/lib/notifications/overrides";
@@ -54,10 +52,13 @@ import {
   useNotificationOverrides,
   useSaveRepoNotificationOverride,
 } from "@/lib/notifications/queries";
-import type {
-  ChannelPrefs,
-  NotificationSource,
-  PrCheckScopeFilter,
+import {
+  type ChannelPrefs,
+  isOutcomeSource,
+  type NotificationSource,
+  type OutcomeFilter,
+  type OutcomeSource,
+  type PrCheckScopeFilter,
 } from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
@@ -143,8 +144,31 @@ const OVERRIDDEN_CHIP = (
   </span>
 );
 
+interface MatrixSelectProps<T extends string> {
+  /** Visible label, associated with the trigger through `htmlFor`. */
+  label: string;
+  /** Accessible name, for a label that repeats across sub-rows and so names none
+   *  of them on its own. Must START with `label` (WCAG 2.5.3); left unset, the
+   *  `<Label>` association is the whole name. */
+  ariaLabel?: string;
+  /** Value → label map, in the order the popup lists them. */
+  items: Record<T, string>;
+  value: T;
+  onValueChange: (value: T) => void;
+  /** Non-null holds the select and renders the reason as a visible line. */
+  disabledReason?: string | null;
+  /** Id of a reason line the caller already shows for a whole group of
+   *  controls; set, the select points at that instead of printing a copy. */
+  sharedReasonId?: string;
+  /** Id for the line this select prints itself, so a sibling held by the same
+   *  condition can point at it: a group's FIRST picker owns the one line. */
+  reasonId?: string;
+  chip?: ReactNode;
+}
+
 /**
- * Which pull requests the CI-checks source watches. Composed from the Select
+ * One axis qualifying a matrix row — which pull requests the CI-checks source
+ * watches, which results a CI source notifies on. Composed from the Select
  * primitives rather than SelectField for two reasons the wrapper can't serve:
  * the reason has to reach the trigger through `aria-describedby`, and a held
  * picker must stay in the tab order — Base UI's `disabled` sets `tabIndex={-1}`
@@ -152,38 +176,34 @@ const OVERRIDDEN_CHIP = (
  * `readOnly` locks the value (including closed-trigger typeahead) but still
  * lets the popup open, so the open state is controlled and gated here too.
  */
-function WatchSelect({
+function MatrixSelect<T extends string>({
+  label,
+  ariaLabel,
+  items,
   value,
   onValueChange,
   disabledReason,
   sharedReasonId,
+  reasonId: printedReasonId,
   chip,
-}: {
-  value: PrCheckScopeFilter;
-  onValueChange: (value: PrCheckScopeFilter) => void;
-  /** Non-null holds the select and renders the reason as a visible line. */
-  disabledReason?: string | null;
-  /** Id of a reason line the caller already shows for a whole group of
-   *  controls; set, the select points at that instead of printing a copy. */
-  sharedReasonId?: string;
-  chip?: ReactNode;
-}) {
+}: MatrixSelectProps<T>) {
   const id = useId();
-  const ownReasonId = useId();
+  const fallbackReasonId = useId();
+  const ownReasonId = printedReasonId ?? fallbackReasonId;
   const reasonId = sharedReasonId ?? ownReasonId;
   const held = !!disabledReason;
   const [open, setOpen] = useState(false);
   return (
     <div className="space-y-1">
       <span className="flex items-center gap-1.5">
-        <Label htmlFor={id}>Watch</Label>
+        <Label htmlFor={id}>{label}</Label>
         {chip}
       </span>
       <Select
-        items={CHECK_SCOPE_LABELS}
+        items={items}
         value={value}
         onValueChange={(v) => {
-          if (v) onValueChange(v as PrCheckScopeFilter);
+          if (v) onValueChange(v as T);
         }}
         readOnly={held}
         open={open}
@@ -195,19 +215,18 @@ function WatchSelect({
           id={id}
           size="sm"
           className={cn("w-full", ARIA_DISABLED_CLASS)}
+          aria-label={ariaLabel}
           aria-disabled={held || undefined}
           aria-describedby={held ? reasonId : undefined}
         >
           <SelectValue onMouseEnter={clipTitleFromText} />
         </SelectTrigger>
         <SelectContent>
-          {(Object.keys(CHECK_SCOPE_LABELS) as PrCheckScopeFilter[]).map(
-            (scope) => (
-              <SelectItem key={scope} value={scope}>
-                <SelectClipText>{CHECK_SCOPE_LABELS[scope]}</SelectClipText>
-              </SelectItem>
-            ),
-          )}
+          {(Object.keys(items) as T[]).map((item) => (
+            <SelectItem key={item} value={item}>
+              <SelectClipText>{items[item]}</SelectClipText>
+            </SelectItem>
+          ))}
         </SelectContent>
       </Select>
       {disabledReason && !sharedReasonId ? (
@@ -219,17 +238,44 @@ function WatchSelect({
   );
 }
 
-/** The Watch picker as a matrix sub-row, indented under the CI-checks row it
- *  qualifies. The channel columns stay empty: the scope is orthogonal to the
- *  channels, so it has no cell of its own to fill. */
-export function WatchRow(props: ComponentProps<typeof WatchSelect>) {
+/** A qualifying picker as a matrix sub-row, indented under the source row it
+ *  belongs to. The channel columns stay empty: these axes are orthogonal to the
+ *  channels, so they have no cell of their own to fill. */
+function MatrixSelectRow<T extends string>(props: MatrixSelectProps<T>) {
   return (
     <tr>
       <td className="py-1.5 pr-2 pl-4">
-        <WatchSelect {...props} />
+        <MatrixSelect {...props} />
       </td>
       <td colSpan={CHANNELS.length} />
     </tr>
+  );
+}
+
+/** Which pull requests the CI-checks source watches. */
+export function WatchRow(
+  props: Omit<MatrixSelectProps<PrCheckScopeFilter>, "label" | "items">,
+) {
+  return (
+    <MatrixSelectRow {...props} label="Watch" items={CHECK_SCOPE_LABELS} />
+  );
+}
+
+/** Which results a CI source notifies on. The visible label is the same word on
+ *  every such row, so the source rides the accessible name instead. */
+export function OutcomeRow({
+  source,
+  ...props
+}: Omit<MatrixSelectProps<OutcomeFilter>, "label" | "ariaLabel" | "items"> & {
+  source: OutcomeSource;
+}) {
+  return (
+    <MatrixSelectRow
+      {...props}
+      label={OUTCOME_ROW_LABEL}
+      ariaLabel={outcomeAriaLabel(source)}
+      items={OUTCOME_FILTER_LABELS}
+    />
   );
 }
 
@@ -337,9 +383,12 @@ function RepoNotificationsBody({
   const settings = useSettings();
   const overrides = useNotificationOverrides();
   const save = useSaveRepoNotificationOverride(repoPath);
-  // One reason line for the whole muted group — the grid's cells and the Watch
-  // select all point at it rather than each repeating the sentence.
+  // One reason line for the whole muted group — the grid's cells and the sub-row
+  // selects all point at it rather than each repeating the sentence.
   const mutedReasonId = useId();
+  // The CI-checks sub-rows are held by one condition and share one sentence, so
+  // the Watch row prints it under this id and the Notify-on row points at it.
+  const checksReasonId = useId();
   // Worktree-stable identity, so a linked worktree edits the same entry as its
   // main checkout. The raw path is the SETTLED fallback (the resolver returns it
   // when git can't answer), never a stand-in to edit against while the lookup is
@@ -384,18 +433,22 @@ function RepoNotificationsBody({
   const mutedReason = muted
     ? "Muted — nothing from this repository notifies."
     : null;
-  // The scope is held for the same reason it is in the global matrix — a source
-  // delivering on no channel has nothing to watch — read off the EFFECTIVE
-  // channels so an inherited pair counts. Muting zeroes both, so it is tested
-  // first and its sentence wins.
-  const checksChannels = global
-    ? effectiveChannels(global, draft, "prChecks")
-    : null;
-  const watchReason =
-    mutedReason ??
-    (checksChannels && !checksChannels.inApp && !checksChannels.os
-      ? CHECKS_OFF_WATCH_REASON
-      : null);
+  // A sub-row is held for the same reason it is in the global matrix — a source
+  // delivering on no channel has nothing to watch and no result to filter — read
+  // off the EFFECTIVE channels so an inherited pair counts. Muting zeroes both, so
+  // it is tested first and its sentence wins.
+  function heldReason(source: OutcomeSource): string | null {
+    if (mutedReason) return mutedReason;
+    if (!global) return null;
+    const channels = effectiveChannels(global, draft, source);
+    return channels.inApp || channels.os ? null : OUTCOME_HELD_REASONS[source];
+  }
+
+  /** Whose reason line a sub-row points at rather than printing its own. */
+  function sharedReasonFor(source: OutcomeSource): string | undefined {
+    if (muted) return mutedReasonId;
+    return source === "prChecks" ? checksReasonId : undefined;
+  }
 
   function patch(
     mutate: (current: RepoNotificationOverride) => RepoNotificationOverride,
@@ -444,6 +497,21 @@ function RepoNotificationsBody({
       const out = { ...current };
       if (next === global.prChecksScope) delete out.prChecksScope;
       else out.prChecksScope = next;
+      return out;
+    });
+  }
+
+  // Same inherit-when-absent rule as the cells: a filter edited back to the global
+  // value drops its key rather than pinning a copy of it.
+  function patchOutcome(source: OutcomeSource, next: OutcomeFilter) {
+    if (!global) return;
+    patch((current) => {
+      const outcomes = { ...(current.outcomes ?? {}) };
+      if (next === global.outcomes[source]) delete outcomes[source];
+      else outcomes[source] = next;
+      const out = { ...current };
+      if (Object.keys(outcomes).length === 0) delete out.outcomes;
+      else out.outcomes = outcomes;
       return out;
     });
   }
@@ -550,10 +618,25 @@ function RepoNotificationsBody({
                       <WatchRow
                         value={effectiveChecksScope(global, draft)}
                         onValueChange={setScope}
-                        disabledReason={watchReason}
+                        disabledReason={heldReason("prChecks")}
                         sharedReasonId={muted ? mutedReasonId : undefined}
+                        reasonId={checksReasonId}
                         chip={
                           draft.prChecksScope !== undefined
+                            ? OVERRIDDEN_CHIP
+                            : null
+                        }
+                      />
+                    )}
+                    {isOutcomeSource(source) && (
+                      <OutcomeRow
+                        source={source}
+                        value={effectiveOutcomeFilter(global, draft, source)}
+                        onValueChange={(next) => patchOutcome(source, next)}
+                        disabledReason={heldReason(source)}
+                        sharedReasonId={sharedReasonFor(source)}
+                        chip={
+                          draft.outcomes?.[source] !== undefined
                             ? OVERRIDDEN_CHIP
                             : null
                         }

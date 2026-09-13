@@ -1,5 +1,4 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
-import { storeName } from "@/lib/test-mode";
+import { memoizedStoreLoader } from "@/lib/plugin-store";
 import type { PlanRun } from "./store";
 
 // Plans persist as a small JSON list (`<app_data>/plans.json`) — they're few and
@@ -12,14 +11,7 @@ import type { PlanRun } from "./store";
  *  reset on load (a reloaded run is never mid-turn). */
 type PersistedPlan = Omit<PlanRun, "generating" | "status">;
 
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("plans.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("plans.json");
 
 function toPersisted(r: PlanRun): PersistedPlan {
   return {

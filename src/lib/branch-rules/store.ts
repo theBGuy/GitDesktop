@@ -1,7 +1,6 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { readRepoBranchRules, writeRepoBranchRules } from "@/lib/git/api";
 import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
-import { storeName } from "@/lib/test-mode";
+import { memoizedStoreLoader } from "@/lib/plugin-store";
 import {
   ALL_MERGE_METHODS,
   type BranchProtection,
@@ -63,14 +62,7 @@ export function normalizeBranchRules(saved: unknown): BranchRulesConfig {
 
 // ── Personal scope: app-data keyed by repo path, never committed ────────────
 
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("branch-rules.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("branch-rules.json");
 
 // Keyed by the repo's worktree-stable identity (not its checkout path) so a repo's
 // personal branch rules apply the same from the main checkout and every worktree.

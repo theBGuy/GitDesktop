@@ -3,6 +3,9 @@ import {
   NOTIFICATION_SOURCES,
   type NotificationSettings,
   type NotificationSource,
+  OUTCOME_SOURCES,
+  type OutcomeFilter,
+  type OutcomeSource,
   type PrCheckScopeFilter,
 } from "@/lib/settings/api";
 import type { RepoNotificationOverride } from "./overrides";
@@ -32,7 +35,7 @@ const CHANNEL_ARIA: Record<Channel, string> = {
 
 /** Record-typed against the manifest, so a new source can't ship label-less. */
 export const SOURCE_LABELS: Record<NotificationSource, string> = {
-  prChecks: "CI checks finish (pass or fail)",
+  prChecks: "CI checks finish",
   prActivity: "Pull requests opened, merged, or closed",
   prReviews: "Reviews on my pull requests",
   actionRuns: "Workflow runs finish on the current branch",
@@ -61,10 +64,36 @@ export const CHECK_SCOPE_LABELS: Record<PrCheckScopeFilter, string> = {
   all: "All open pull requests",
 };
 
-/** Why the scope picker is held while the CI-checks source delivers nowhere.
- *  Shared so the global matrix and the per-repo dialog say the same sentence. */
-export const CHECKS_OFF_WATCH_REASON =
-  "Turn on a CI checks channel to choose which pull requests to watch";
+/** Names the SET each filter delivers, never "All results": a class this app doesn't
+ *  classify yet (cancelled, skipped) must not silently join an existing user's
+ *  choice when it does. */
+export const OUTCOME_FILTER_LABELS: Record<OutcomeFilter, string> = {
+  all: "Successes and failures",
+  failures: "Failures only",
+  successes: "Successes only",
+};
+
+/** Visible label on every outcome sub-row. */
+export const OUTCOME_ROW_LABEL = "Notify on";
+
+/** Accessible name for an outcome picker: the two matrices hold one per CI source,
+ *  so the visible word alone names neither. Visible text first (WCAG 2.5.3). */
+export function outcomeAriaLabel(source: OutcomeSource): string {
+  return `${OUTCOME_ROW_LABEL} — ${SOURCE_LABELS[source]}`;
+}
+
+/** Why the CI-checks sub-rows are held while that source delivers nowhere. Shared so
+ *  the global matrix and the per-repo dialog say the same sentence — and shared by
+ *  the Watch and Notify-on pickers, which are held by exactly the same condition. */
+export const CHECKS_OFF_REASON =
+  "Turn on a CI checks channel to choose which pull requests to watch and which results notify";
+
+/** Why an outcome picker is held, per source — the CI-checks sentence also covers
+ *  its Watch neighbour, so the two rows print one line between them. */
+export const OUTCOME_HELD_REASONS: Record<OutcomeSource, string> = {
+  prChecks: CHECKS_OFF_REASON,
+  actionRuns: "Turn on a workflow-runs channel to choose which results notify",
+};
 
 /** The rows the matrix renders, in manifest order. Hidden AI rows keep whatever
  *  the draft holds — they are omitted from the view, never rewritten. */
@@ -100,13 +129,17 @@ export function notificationsSignature(value: NotificationSettings): string {
   return sortedJson(value);
 }
 
-/** How many individual settings an override pins — each channel field plus the
- *  scope. The Reset gate and the settings footer's status line both count it. */
+/** How many individual settings an override pins — each channel field, the scope,
+ *  and each outcome filter. The Reset gate and the settings footer's status line
+ *  both count it. */
 export function overrideCount(
   override: RepoNotificationOverride | undefined,
 ): number {
   if (!override) return 0;
   let count = override.prChecksScope === undefined ? 0 : 1;
+  for (const source of OUTCOME_SOURCES) {
+    if (override.outcomes?.[source] !== undefined) count += 1;
+  }
   for (const source of NOTIFICATION_SOURCES) {
     const cell = override.sources?.[source];
     if (!cell) continue;

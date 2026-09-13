@@ -79,6 +79,7 @@ export function useRunNotifications(repoPath: string) {
         const title = `${run.workflowName} ${statusLabel(run.status, run.conclusion).toLowerCase()} on ${run.headBranch}`;
         emitNotification({
           source: "actionRuns",
+          outcome: ok ? "success" : "failure",
           row: {
             kind: "ci-run",
             tone: ok ? "success" : "danger",

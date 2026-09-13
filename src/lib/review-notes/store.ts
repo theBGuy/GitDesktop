@@ -1,7 +1,10 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { repoIdentity } from "@/lib/git/repo-identity";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 import { invoke } from "@/lib/tauri/invoke";
-import { COLD_START, storeName } from "@/lib/test-mode";
+import { COLD_START } from "@/lib/test-mode";
 
 /** A per-branch "Notes for reviewers" deposit, keyed by the repo's
  *  worktree-stable identity then the branch name. Written (out-of-process) by
@@ -20,14 +23,7 @@ type BranchNotes = Record<string, ReviewNote>;
 
 // Personal app-data, keyed by the repo's worktree-stable identity — never
 // written into the repo itself.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("review-notes.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("review-notes.json");
 
 // Serialize every read-modify-write on this store (and the reconcile reload)
 // through one in-process queue. Without it, two overlapping mutations each
@@ -45,20 +41,7 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 }
 
 async function reloadRaw(): Promise<void> {
-  const store = await getStore();
-  // Tolerate a missing store file. Asymmetry: `load()` tolerates a missing file
-  // but `reload()` rejects with a raw io error ("The system cannot find the file
-  // specified. (os error 2)") — the file only exists after the first `save()`.
-  // Without this guard the first-ever mutation throws before reaching `save()`,
-  // so the store can never bootstrap; an external delete of the file breaks every
-  // mutation the same way. Fall back to the loaded in-memory state on ANY reload
-  // failure — the serialized op-chain + force-save still protect the write path.
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing/unreadable file — proceed with in-memory state; the next save()
-    // creates it.
-  }
+  await reloadToleratingEmptyStore(await getStore());
 }
 
 /** Re-read `review-notes.json` from disk into the in-memory store. The MCP
@@ -110,7 +93,18 @@ async function writeBranch(
   }
   // `reloadRaw`, not the serialized `reloadReviewNotes`: we are already inside a
   // serialized op, and queueing behind it would wait on ourselves.
-  await reloadRaw();
+  //
+  // The ONLY reload in this codebase that runs AFTER its write, so the only one that
+  // swallows every failure: the strict form exists to abort a read-modify-write before
+  // it clobbers disk, and this is not one — the note is already committed by the Rust
+  // writer above. Letting a refresh failure (a Windows sharing violation, say) reject
+  // here would toast an error for a save that succeeded; the stale cache instead
+  // self-corrects on the next reload or relaunch.
+  try {
+    await reloadRaw();
+  } catch {
+    // Cache refresh only — the write already landed.
+  }
 }
 
 /** The legacy plugin-store write, still the cold-start path (see [`writeBranch`]). */

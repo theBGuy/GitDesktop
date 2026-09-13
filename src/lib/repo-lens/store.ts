@@ -1,7 +1,6 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
-import { storeName } from "@/lib/test-mode";
+import { memoizedStoreLoader } from "@/lib/plugin-store";
 
 // The per-repo origin|upstream lens for the Pull Requests + Issues surfaces,
 // persisted in app data (never committed). Keyed by the repo's worktree-stable
@@ -11,14 +10,7 @@ import { storeName } from "@/lib/test-mode";
 // This is a NEW store file, so there are no legacy checkout-path-keyed entries
 // to fold — a plain identity-key read/write suffices (no identityKeyFor).
 
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("repo-lens.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("repo-lens.json");
 
 /** Read the persisted lens for a repo. Any value that isn't exactly "upstream"
  *  (missing, hand-edited junk, an older shape) reads as "origin" — the safe

@@ -1,5 +1,4 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
-import { storeName } from "@/lib/test-mode";
+import { memoizedStoreLoader } from "@/lib/plugin-store";
 import type { ResearchRun } from "./store";
 
 // Research runs persist as a small JSON list (`<app_data>/research.json`),
@@ -16,14 +15,7 @@ type PersistedResearch = Omit<
   "generating" | "status" | "distilling"
 >;
 
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("research.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("research.json");
 
 function toPersisted(r: ResearchRun): PersistedResearch {
   return {

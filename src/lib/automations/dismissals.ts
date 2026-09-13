@@ -1,8 +1,10 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ReviewMode } from "@/lib/ai/types";
 import { identityKeyFor, repoIdentity } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
-import { storeName } from "@/lib/test-mode";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 import { ALL_ACTION_IDS } from "./types";
 
 /**
@@ -45,14 +47,7 @@ const legacyCellPrefix = (
 
 // Personal app-data, keyed by repo identity — never written into the repo itself.
 // Routed through storeName() so cold-start/test mode never pollutes real data.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("automation-dismissals.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("automation-dismissals.json");
 
 // Serialize every read-modify-write AND every fresh read on this store through one
 // in-process queue: a reload replaces the whole in-memory map from disk, so one
@@ -67,18 +62,9 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-// Re-read the store from disk, tolerating a store file that doesn't exist yet:
-// `load()` tolerates a missing file but `reload()` rejects with a raw io error
-// until the first `save()` creates it. Falls back to the in-memory state on ANY
-// failure. Mirrors the same guard in reviews-history.ts. Call inside the serialized
-// queue so it can't land between a set and its flush.
+// Call inside the serialized queue so it can't land between a set and its flush.
 async function reloadRaw(): Promise<void> {
-  const store = await getStore();
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing file — the next save() creates it.
-  }
+  await reloadToleratingEmptyStore(await getStore());
 }
 
 // Reads merge in any records still under a legacy checkout-path key (folded onto

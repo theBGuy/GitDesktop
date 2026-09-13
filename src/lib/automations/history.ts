@@ -1,11 +1,14 @@
-import { load, type Store } from "@tauri-apps/plugin-store";
+import type { Store } from "@tauri-apps/plugin-store";
 import {
   identityKeyFor,
   mergeById,
   repoIdentity,
 } from "@/lib/git/repo-identity";
+import {
+  memoizedStoreLoader,
+  reloadToleratingEmptyStore,
+} from "@/lib/plugin-store";
 import { queryClient } from "@/lib/query-client";
-import { storeName } from "@/lib/test-mode";
 import { loadAutomations } from "./store";
 import { type ActionId, ALL_ACTION_IDS, anyAutomationEnabled } from "./types";
 
@@ -122,14 +125,7 @@ const MAX_MARKERS = 10;
 
 // Personal app-data, keyed by the repo's worktree-stable identity. Routed through
 // storeName() so cold-start/test instances never pollute the real file.
-let storePromise: Promise<Store> | null = null;
-function getStore(): Promise<Store> {
-  storePromise ??= load(storeName("automation-history.json"), {
-    autoSave: true,
-    defaults: {},
-  });
-  return storePromise;
-}
+const getStore = memoizedStoreLoader("automation-history.json");
 
 // Serialize every read-modify-write through one in-process queue: autoSave persists
 // on a ~100ms debounce, so two overlapping writes would both reload the same
@@ -146,15 +142,7 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 }
 
 async function reloadRaw(): Promise<void> {
-  const store = await getStore();
-  // Tolerate a missing store file: `load()` tolerates one but `reload()` rejects with
-  // a raw io error (os error 2) until the first `save()` creates the file — without
-  // this guard the first-ever write throws before reaching `save()`.
-  try {
-    await store.reload({ ignoreDefaults: true });
-  } catch {
-    // Missing file — the next save() creates it.
-  }
+  await reloadToleratingEmptyStore(await getStore());
 }
 
 // Sets, not object lookups: `Set.has("__proto__")` is false, where a plain-object

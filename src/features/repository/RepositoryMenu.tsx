@@ -1,5 +1,6 @@
 import {
   ArrowSquareOutIcon,
+  BellIcon,
   ChartBarIcon,
   ClockCounterClockwiseIcon,
   CodeIcon,
@@ -84,6 +85,7 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink } from "@/lib/jira/queries";
+import { useRepoNotificationsDialog } from "@/lib/notifications/matrix";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
@@ -145,6 +147,15 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // The history dialog is mounted once at the app root and opened by store flag,
   // so it survives this menu closing under it.
   const openAutomationHistory = useAutomationHistoryDialog((s) => s.open);
+  // Same store the settings footer and the palette action drive, so all three
+  // routes land on the ONE dialog mounted at the app root (App.tsx's
+  // RepoNotificationsDialogHost) rather than a second copy under this menu.
+  // No draft guard here, unlike the palette's twin: that action fires from
+  // anywhere, while this menu lives under RepositoryView, which App renders only
+  // for `view === "repo"` — the notifications form belongs to SettingsScreen, on
+  // the mutually exclusive `view === "settings"` arm, so no live draft can exist
+  // while this item is on screen.
+  const openRepoNotifications = useRepoNotificationsDialog((s) => s.open);
   const automationsConfig = useAutomations().data;
   const repoIdentity = useRepoIdentity(repoPath).data;
   // Automations are origin-pinned end to end, so Run-now must not exist for a
@@ -638,6 +649,13 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
             Automation history…
           </DropdownMenuItem>
         )}
+        {/* Deliberately OUTSIDE the aiEnabled gate above: notifications are not
+            an AI feature, so this repo's overrides stay reachable while the AI
+            surfaces are hidden. */}
+        <DropdownMenuItem onClick={() => openRepoNotifications(repoPath)}>
+          <BellIcon />
+          Notifications…
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => setJiraOpen(true)}>
           <KanbanIcon />
           {jiraLink.data ? "Change Jira project…" : "Link Jira project…"}
