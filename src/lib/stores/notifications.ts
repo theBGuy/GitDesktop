@@ -243,15 +243,18 @@ const useNotifStore = create<NotifState>()((set) => ({
   clearAll: () => set((s) => (s.items.length > 0 ? { items: [] } : {})),
 }));
 
-// Persist on every post-hydration change; autoSave debounces the disk write.
-useNotifStore.subscribe((state, prev) => {
-  if (!state.hydrated || state.items === prev.items) return;
-  void persist(state.items);
-});
-
-// Hydrate once at module load, before any push can arrive.
-void (async () => {
-  try {
+/** Read the persisted inbox and merge it under whatever has been pushed already.
+ *  REJECTS when the file can't be read, leaving `hydrated` false — {@link persist}
+ *  writes the WHOLE list, so hydrating as empty on a failed read would let the next
+ *  push persist a near-empty inbox over history this process never read. An absent
+ *  file is not a failure: the plugin's `load()` tolerates it and `get` answers
+ *  undefined, which reads as an empty (but successful) hydrate. */
+let hydrating: Promise<void> | null = null;
+function hydrateFromDisk(): Promise<void> {
+  if (useNotifStore.getState().hydrated) return Promise.resolve();
+  // Concurrent callers WAIT on the in-flight attempt rather than starting a second
+  // read; cleared on settle so a FAILED attempt can be retried.
+  hydrating ??= (async () => {
     const store = await getStore();
     const raw = (await store.get<unknown[]>(STORE_KEY)) ?? [];
     const clean = (Array.isArray(raw) ? raw.filter(isValidNotification) : [])
@@ -266,10 +269,29 @@ void (async () => {
       })
       .slice(0, CAP);
     useNotifStore.getState().hydrate(clean);
-  } catch {
-    useNotifStore.getState().hydrate([]);
-  }
-})();
+  })().finally(() => {
+    hydrating = null;
+  });
+  return hydrating;
+}
+
+// Persist on every change; autoSave debounces the disk write. `hydrateFromDisk()` is
+// the gate rather than the `hydrated` flag: it no-ops once hydrated, and otherwise
+// re-attempts the read the module-load call may have lost to a transient failure (the
+// store loader retries on the next call). Only a resolved hydrate reaches `persist`,
+// so the written list always holds the disk history plus whatever was pushed since; a
+// still-failing read writes nothing and leaves the file intact for the next push.
+useNotifStore.subscribe((state, prev) => {
+  if (state.items === prev.items) return;
+  void hydrateFromDisk()
+    // Read AFTER the merge, never the `state` this callback closed over.
+    .then(() => persist(useNotifStore.getState().items))
+    .catch(() => undefined);
+});
+
+// Hydrate once at module load, before any push can arrive. A failure is not terminal:
+// the subscription above retries, so the inbox fills in on the next push.
+void hydrateFromDisk().catch(() => undefined);
 
 // ---- Public API ------------------------------------------------------------
 

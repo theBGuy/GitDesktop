@@ -267,6 +267,10 @@ export function researchRunContextPack(run: ResearchRun): ContextPack {
  * repo). See {@link ResearchRun} for the per-run model.
  */
 export const useResearchStore = create<ResearchState>((set, get) => {
+  /** The in-flight `hydrate()` attempt, so concurrent callers share one disk read
+   *  (see `hydrate`). Lives in the factory closure, which runs exactly once. */
+  let hydrating: Promise<void> | null = null;
+
   /** Patch one run by id — touches only that run, so concurrent runs streaming
    *  at once never clobber each other. */
   const patch = (id: string, p: Partial<ResearchRun>) =>
@@ -473,19 +477,30 @@ export const useResearchStore = create<ResearchState>((set, get) => {
     pendingResearchSeed: null,
     hydrated: false,
 
+    // REJECTS when the file can't be read, and leaves `hydrated` false — that flag
+    // is what stands between the persistence subscription below and a whole-list
+    // write, so marking it true on failure would let the next state change persist
+    // a live-only snapshot over research this process never read. A store with
+    // nothing saved yet resolves to `[]` (the plugin's `load()` tolerates a missing
+    // file), so a throw means genuinely unreadable and the save path retries it.
     hydrate: async () => {
       if (get().hydrated) return;
-      let persisted: ResearchRun[] = [];
-      try {
-        persisted = await loadPersistedResearch();
-      } catch {
-        // No store yet / unreadable — start clean.
-      }
-      const live = new Set(get().runs.map((r) => r.id));
-      set({
-        runs: [...persisted.filter((p) => !live.has(p.id)), ...get().runs],
-        hydrated: true,
+      // Concurrent callers WAIT on the in-flight attempt instead of starting a
+      // second read — and never skip, which would let a save proceed before the
+      // merge landed. Cleared on settle so a FAILED attempt can be retried; a
+      // successful one is short-circuited by `hydrated` above.
+      hydrating ??= (async () => {
+        const persisted = await loadPersistedResearch();
+        // Merge under any runs created before hydration finished (newest wins).
+        const live = new Set(get().runs.map((r) => r.id));
+        set({
+          runs: [...persisted.filter((p) => !live.has(p.id)), ...get().runs],
+          hydrated: true,
+        });
+      })().finally(() => {
+        hydrating = null;
       });
+      return hydrating;
     },
 
     setActiveResearch: (activeResearchId) => {
@@ -735,18 +750,35 @@ export const useResearchStore = create<ResearchState>((set, get) => {
 
 // Persist the research list to disk, debounced so a streaming run's rapid updates coalesce
 // (latest snapshot wins, and it captures the native session id mid-stream so a resume survives
-// a restart). Gated on `hydrated` so the initial empty state never clobbers disk.
+// a restart).
+//
+// This is a WHOLE-LIST write, so it must never run against a list that hasn't been merged
+// with disk. `hydrate()` is the gate rather than the `hydrated` flag: it no-ops once
+// hydrated, and otherwise re-attempts the read the startup call may have lost to a transient
+// failure (the store loader retries on the next call). Only a resolved hydrate reaches
+// `savePersistedResearch`, so the snapshot always contains what was on disk plus whatever is
+// live; a still-failing read rejects here and writes nothing, leaving the file intact.
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 useResearchStore.subscribe((state, prev) => {
-  if (!state.hydrated || state.runs === prev.runs) return;
+  if (state.runs === prev.runs) return;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    void savePersistedResearch(useResearchStore.getState().runs);
+    void useResearchStore
+      .getState()
+      .hydrate()
+      // Read the list AFTER the merge, never the `state` this callback closed over.
+      .then(() => savePersistedResearch(useResearchStore.getState().runs))
+      .catch(() => undefined);
   }, 800);
 });
 
-// Load persisted research once at startup (so runs are back in the sidebar).
-void useResearchStore.getState().hydrate();
+// Load persisted research once at startup (so runs are back in the sidebar). A failure here
+// is not terminal: it leaves `hydrated` false and the save path above retries, so the
+// sidebar fills in as soon as the file is readable again.
+void useResearchStore
+  .getState()
+  .hydrate()
+  .catch(() => undefined);
 
 /** The currently-selected research run, or null. Reference-stable while that run
  *  is unchanged (so streaming another run won't re-render the active one). */

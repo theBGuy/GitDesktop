@@ -2817,9 +2817,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   opens the per-repository overrides: **Mute this repository** silences every source for
   that repo, or you can set individual cells, the CI-checks **Watch** choice, and either
   **Notify on** choice, with anything you leave alone following your global settings.
-  *Notification settings* and
-  *Repository notification settings* in the command palette open each directly, and the
-  repo **⋮** menu's **Notifications…** opens the current repository's overrides.
+  *Notification settings* and *Repository notification settings* in the command
+  palette open each directly, and the repo **⋮** menu's **Notifications…**
+  opens the current repository's overrides.
   The bell is a persistent, click-to-open history (it survives a restart) so a finished
   review or a PR update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump

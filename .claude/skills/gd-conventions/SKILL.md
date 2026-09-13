@@ -383,6 +383,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (`src/lib/plugin-store.ts`), never a hand-rolled `??= load(storeName(…))` or a
   bare `store.reload()`: the former memoizes a REJECTED load (store dead until
   restart), the latter swallows an unreadable file and saves the cache over it.
+- **Hydrate gating** — a `hydrate` that swallows its read must NEVER set the
+  ready flag, and a snapshot write gates on a RESOLVED `hydrate()`, not on the
+  flag: `memoizedStoreLoader` retries after a transient failure, so a store
+  marked ready on an empty read will write that empty snapshot over data it
+  never read (and re-attempting on the write path is what makes it self-heal).
 
 ## Rust / Tauri conventions
 

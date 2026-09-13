@@ -418,7 +418,6 @@ export function SessionList({ repoPath }: { repoPath: string }) {
   // creation order), backfilling existing ones and numbering new ones. Global
   // (across repos) so an id is unique app-wide, like a GitHub PR number.
   const ensureNumbers = useAgentNumbers((s) => s.ensure);
-  const numbersHydrated = useAgentNumbers((s) => s.hydrated);
   const orderedIds = useMemo(
     () => [
       ...allResearch.map((r) => r.id),
@@ -427,9 +426,13 @@ export function SessionList({ repoPath }: { repoPath: string }) {
     ],
     [allResearch, allRuns, allSessions],
   );
+  // Called unconditionally — no hydration gate here. `ensure` refuses to mint until the
+  // store has read the file, re-attempts that read itself when it hasn't, and replays
+  // these ids once it lands; gating the call instead would make a startup read lost to
+  // a transient failure permanent for the session, with every badge blank.
   useEffect(() => {
-    if (numbersHydrated) ensureNumbers(orderedIds);
-  }, [orderedIds, numbersHydrated, ensureNumbers]);
+    ensureNumbers(orderedIds);
+  }, [orderedIds, ensureNumbers]);
 
   const [tab, setTab] = useState<SessionTab>("active");
   const [query, setQuery] = useState("");
