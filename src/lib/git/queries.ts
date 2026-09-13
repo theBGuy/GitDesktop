@@ -2615,6 +2615,9 @@ export function useProjectFields(
   });
 }
 
+/** Repo + board, with NO account axis — deliberately the same contract every
+ *  forge-cache family here keeps (pr-list, pr, the three sibling Projects reads).
+ *  An account axis belongs to all of them at once, in the account-switch task. */
 const projectItemsKey = (repo: string, projectId: string) =>
   ["repo", repo, "project-items", projectId] as const;
 
@@ -3393,8 +3396,7 @@ export function useAccountsHealth() {
  *  as do the five GitHub Projects reads (catalog, memberships, field values, a
  *  board's field definitions, and a board's items): a granted `project` scope has
  *  to light the picker, the rail's field lines, the field editor and the Projects
- *  board up without a restart, and the work
- *  inbox's sources probe plus its pages
+ *  board up without a restart, and the work inbox's sources probe plus its pages
  *  (a `login` mode reconnect is how a forge becomes a source in the first place).
  *  Call from a reconnect's `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {

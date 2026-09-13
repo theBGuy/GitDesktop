@@ -314,7 +314,7 @@ export const BoardCard = memo(function BoardCard({
             glyph={
               <NoteIcon className="size-3.5 shrink-0 text-muted-foreground" />
             }
-            stateWord="Draft"
+            stateWord="Draft item"
             title={content.title}
           />
           <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">

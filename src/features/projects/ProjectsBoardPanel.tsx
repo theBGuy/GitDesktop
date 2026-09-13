@@ -345,8 +345,8 @@ export function ProjectsBoardPanel({
   // reading, so no id on the control itself.
   const groupLabelId = useId();
   const portalContainer = usePanelPortalContainer();
-  const projectItems: Record<string, string> = {};
-  for (const p of openProjects) projectItems[p.id] = p.title;
+  const projectTitles: Record<string, string> = {};
+  for (const p of openProjects) projectTitles[p.id] = p.title;
 
   // Cards already on screen outlive a failed read. A next-page failure, a failed
   // refetch, or a fields read that died after the board painted all leave the
@@ -362,10 +362,15 @@ export function ProjectsBoardPanel({
   // The FIELDS leg matters as much as the items one: without it the board paints
   // ungrouped for a frame and then re-lays out into columns as the definitions
   // land.
+  // ONE name for "the items read hasn't settled", shared by the skeleton gate
+  // and the count beside it. Two expressions of the same condition would drift,
+  // and this is the pair that must not: a count is an ASSERTION about the board,
+  // so it may never say "0 items" over a skeleton that is still loading them.
+  // Re-arms on every project switch too — a new projectId is a new query key,
+  // which starts with no data and so reports pending again.
+  const itemsPending = canRead && projectId !== null && items.isPending;
   const loading =
-    (canRead && projects.isPending) ||
-    fieldsPending ||
-    (canRead && projectId !== null && items.isPending);
+    (canRead && projects.isPending) || fieldsPending || itemsPending;
   // An empty catalog is only an ABSENCE claim when the read was complete: a
   // capped catalog (or one whose owner arm was denied) can come back empty while
   // boards exist, and "there are none" would be a lie about a set we didn't
@@ -469,26 +474,33 @@ export function ProjectsBoardPanel({
         return <ForgeNotReady repoPath={repoPath} feature="project boards" />;
       case scopeGap:
         return (
-          <ScopeGapBlock
-            host={host}
-            onReconnect={() =>
-              openReconnect({
-                provider: "github",
-                host,
-                mode: "refresh",
-                scopes: ["project"],
-              })
-            }
-          >
-            {/* Names BOTH scopes the read accepts, matching the detector:
-                `projectScopeMissing` only fires when a classic token has
-                neither. The reconnect below asks for `project`, which is the
-                one that also permits the writes the pickers offer. */}
-            Reading project boards needs the{" "}
-            <span className="font-mono">project</span> or{" "}
-            <span className="font-mono">read:project</span> scope, and your
-            GitHub sign-in has neither.
-          </ScopeGapBlock>
+          // ScopeGapBlock carries POPUP padding (px-1 py-1) — it was written for
+          // the Projects picker's popover. This is a full-pane state, so the call
+          // site makes up the difference: px-2 py-3 here lands it on the px-3 py-4
+          // the sibling arms use, without touching a component two other surfaces
+          // share.
+          <div className="px-2 py-3">
+            <ScopeGapBlock
+              host={host}
+              onReconnect={() =>
+                openReconnect({
+                  provider: "github",
+                  host,
+                  mode: "refresh",
+                  scopes: ["project"],
+                })
+              }
+            >
+              {/* Names BOTH scopes the read accepts, matching the detector:
+                  `projectScopeMissing` only fires when a classic token has
+                  neither. The reconnect below asks for `project`, which is the
+                  one that also permits the writes the pickers offer. */}
+              Reading project boards needs the{" "}
+              <span className="font-mono">project</span> or{" "}
+              <span className="font-mono">read:project</span> scope, and your
+              GitHub sign-in has neither.
+            </ScopeGapBlock>
+          </div>
         );
       case fatalError !== null:
         return (
@@ -576,7 +588,7 @@ export function ProjectsBoardPanel({
       {showBoardChrome && (
         <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
           <Select
-            items={projectItems}
+            items={projectTitles}
             value={projectId}
             onValueChange={(v) => {
               setPickedProjectId(v);
@@ -695,11 +707,18 @@ export function ProjectsBoardPanel({
             </Popover.Portal>
           </Popover.Root>
           <span className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="tabular-nums">
-              {items.hasNextPage
-                ? `${shown} of ${totalCount} items`
-                : `${shown} ${shown === 1 ? "item" : "items"}`}
-            </span>
+            {/* No number until the read settles: an unsettled board has no count
+                to state, and "0 items" over a loading skeleton is a claim, not a
+                placeholder. */}
+            {itemsPending ? (
+              <Skeleton className="h-4 w-20" aria-hidden />
+            ) : (
+              <span className="tabular-nums">
+                {items.hasNextPage
+                  ? `${shown} of ${totalCount} items`
+                  : `${shown} ${shown === 1 ? "item" : "items"}`}
+              </span>
+            )}
             {/* A failed CONTINUATION says so HERE, beside the control that
                 caused it, and leaves the loaded board alone. `refetch()` would
                 replay every page already on screen; `fetchNextPage()` retries

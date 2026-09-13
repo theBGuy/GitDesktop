@@ -54,15 +54,11 @@ export const BoardColumn = memo(function BoardColumn({
   // empty and the column paints blank under a full-height scrollbar.
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
   const items = column.items;
-  // The virtualizer keys its measurement projection on `getItemKey`'s IDENTITY,
-  // so this is re-minted per item SEQUENCE rather than per render: never
-  // re-minting would paint a card into the previous occupant's measured slot
-  // after a regroup, and re-minting every render rebuilds all rows.
-  const itemsRef = useRef(items);
-  itemsRef.current = items;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the dep re-mints the identity; the ref supplies the items
+  // Re-minted per item SEQUENCE, which the `[items]` dep is: the virtualizer
+  // keys its measurement projection on this callback's IDENTITY, so a stale one
+  // paints a card into the previous occupant's measured slot after a regroup.
   const getItemKey = useCallback(
-    (index: number) => itemsRef.current[index]?.itemId ?? index,
+    (index: number) => items[index]?.itemId ?? index,
     [items],
   );
   // The board's single tab stop has to stay MOUNTED or Tab can't get into the
