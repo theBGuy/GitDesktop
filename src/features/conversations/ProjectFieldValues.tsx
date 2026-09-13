@@ -36,7 +36,8 @@ const OPTION_COLORS: Record<string, string> = {
 };
 
 /** GitHub's Date scalar, which carries no zone — and the only form a native date
- *  input accepts, so the editor seeds anything else empty rather than blank. */
+ *  input accepts: the control's own sanitization silently discards any other
+ *  shape, so the editor seeds those empty on purpose instead. */
 export const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 function optionColor(color: string): string {

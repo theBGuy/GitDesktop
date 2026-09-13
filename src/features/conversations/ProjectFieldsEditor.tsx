@@ -42,12 +42,12 @@ const NO_ITERATIONS_REASON =
 const ISSUE_FIELD_REASON =
   "Issue fields are edited on GitHub — board editing arrives later";
 const MULTILINE_TEXT_REASON = "Multi-line text is edited on GitHub";
-
-/** A board text value the API wrote with line breaks in it. */
-const MULTILINE = /[\r\n]/;
 const SAVING_REASON = "Saving your last change…";
 const STRANDED_NOTICE =
   "Field changes weren't applied — this item is no longer on the board they were drafted for";
+
+/** A board text value the API wrote with line breaks in it. */
+const MULTILINE = /[\r\n]/;
 
 /** The field kinds this editor can write. The built-in fields GitHub owns on the
  *  issue/PR itself (title, assignees, labels, milestone, repository, reviewers,
