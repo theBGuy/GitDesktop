@@ -706,7 +706,8 @@ export const capabilities: Capability[] = [
   {
     group: "AI · generate & review",
     ai: true,
-    label: "Automations — review or audit on commit, PR open, or new commits",
+    label:
+      "Automations — review or audit on commit, PR open, or new commits, with notifications for everything or failures only",
   },
   {
     group: "AI · generate & review",

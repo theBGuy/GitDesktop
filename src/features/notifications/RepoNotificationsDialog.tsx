@@ -33,13 +33,14 @@ import {
   channelAriaLabel,
   notificationRows,
   OUTCOME_FILTER_LABELS,
-  OUTCOME_ROW_LABEL,
-  outcomeAriaLabel,
   overrideCount,
   SOURCE_DESCRIPTIONS,
   SOURCE_LABELS,
   SUBROW_HELD_REASONS,
+  SUBROW_LABEL,
+  type SubrowSource,
   sortedJson,
+  subrowAriaLabel,
   useRepoNotificationsDialog,
 } from "@/lib/notifications/matrix";
 import {
@@ -276,8 +277,8 @@ export function OutcomeRow({
   return (
     <MatrixSelectRow
       {...props}
-      label={OUTCOME_ROW_LABEL}
-      ariaLabel={outcomeAriaLabel(source)}
+      label={SUBROW_LABEL}
+      ariaLabel={subrowAriaLabel(source)}
       items={OUTCOME_FILTER_LABELS}
     />
   );
@@ -295,8 +296,8 @@ export function AutomationKindsRow(
   return (
     <MatrixSelectRow
       {...props}
-      label={OUTCOME_ROW_LABEL}
-      ariaLabel={outcomeAriaLabel("automations")}
+      label={SUBROW_LABEL}
+      ariaLabel={subrowAriaLabel("automations")}
       items={AUTOMATION_KIND_FILTER_LABELS}
     />
   );
@@ -459,7 +460,7 @@ function RepoNotificationsBody({
   // delivering on no channel has nothing to watch and no result to filter — read
   // off the EFFECTIVE channels so an inherited pair counts. Muting zeroes both, so
   // it is tested first and its sentence wins.
-  function heldReason(source: OutcomeSource | "automations"): string | null {
+  function heldReason(source: SubrowSource): string | null {
     if (mutedReason) return mutedReason;
     if (!global) return null;
     const channels = effectiveChannels(global, draft, source);
@@ -467,9 +468,7 @@ function RepoNotificationsBody({
   }
 
   /** Whose reason line a sub-row points at rather than printing its own. */
-  function sharedReasonFor(
-    source: OutcomeSource | "automations",
-  ): string | undefined {
+  function sharedReasonFor(source: SubrowSource): string | undefined {
     if (muted) return mutedReasonId;
     return source === "prChecks" ? checksReasonId : undefined;
   }

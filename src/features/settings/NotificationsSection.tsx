@@ -123,9 +123,10 @@ export const NotificationsSection = withForm({
             Choose where each event lands: a row in the activity inbox (In-app),
             an OS notification, or both. A source with both channels off records
             nothing, and the CI sources
-            {aiEnabled ? " and Automation results" : ""} add a Notify on choice
-            so you can keep just the failures — results outside your choice stay
-            quiet. OS notifications fire only while GitDesktop is unfocused
+            {aiEnabled ? ", plus Automation results," : ""} add a Notify on
+            choice so you can keep just the failures — results outside your
+            choice stay quiet. OS notifications fire only while GitDesktop is
+            unfocused
             {aiEnabled
               ? " — agent tasks also ping while you work elsewhere in the app."
               : "."}{" "}

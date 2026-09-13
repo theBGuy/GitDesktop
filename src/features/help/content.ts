@@ -2617,8 +2617,9 @@ request opened*, and *On new commits to a reviewed PR* — with **AI code review
 security audit** as toggles under each. There's no "add a rule" — a given moment × action
 exists at most once, so you can't create conflicting duplicates. Reviews use the review model
 from the AI section (security audits use the dedicated audit model when you've set one); PR
-results are posted as a comment, commit results open from their notification row — set
-**Notify on** for **Automation results** to *Failures only* and those rows stay quiet too.
+results are posted as a comment, commit results open from their notification row — with
+**Automation results** set to *Failures only* under **Notify on**, a successful commit
+review creates no row, so its result has no row to open from.
 **Review draft PRs when created** (off by default) controls draft handling:
 left off, a draft PR gets its automated first review when it's marked ready for review, not
 at creation — marking it ready **in GitDesktop** always fires that first review, while a
@@ -2821,10 +2822,10 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   carry a **Notify on** choice (*Successes and failures*, *Failures only*, or
   *Successes only*), so a green day can stay silent and a red one still reaches you;
   *Failures only* covers runs that timed out or failed to start as well.{{ai}}
-  **Automation results** carries a **Notify on** choice of its own — *Everything* or
-  *Failures only* — so reviews your automations post or leave ready can stay quiet
-  while a failed automation still reaches you; a quieted ready review then has no
-  inbox row to open its result from.{{/ai}} **Customize…**
+  **Automation results** carries a **Notify on** choice of its own (*Everything* or
+  *Failures only*), so reviews that your automations post or leave ready can stay
+  quiet while a failed automation still reaches you; a quieted ready review then has
+  no inbox row to open its result from.{{/ai}} **Customize…**
   opens the per-repository overrides: **Mute this repository** silences every source for
   that repo, or you can set individual cells, the CI-checks **Watch** choice, and every
   **Notify on** choice, with anything you leave alone following your global settings.

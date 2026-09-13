@@ -186,7 +186,10 @@ export const AutomationsSection = withForm({
             defaults apply to every repository; a repository can override them
             from its ⋯ menu. Reviews use the review model configured in the AI
             section — PR results are posted as a comment, commit results open
-            from a notification.
+            from their notification row. Setting Notifications → Automation
+            results → Notify on to Failures only suppresses the row a successful
+            commit review would have created, leaving its result with no row to
+            open from.
           </p>
         </div>
         <div className="space-y-1.5">

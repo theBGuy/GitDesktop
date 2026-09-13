@@ -85,16 +85,19 @@ export const AUTOMATION_KIND_FILTER_LABELS: Record<
   failures: "Failures only",
 };
 
+/** A source carrying a Notify-on sub-row — the CI sources on the outcome axis, plus
+ *  automations on its kind axis. Named once here, since the label, the held reason,
+ *  and both dialog predicates all key off the same set. */
+export type SubrowSource = OutcomeSource | "automations";
+
 /** Visible label on every Notify-on sub-row, on both the outcome and kind axes. */
-export const OUTCOME_ROW_LABEL = "Notify on";
+export const SUBROW_LABEL = "Notify on";
 
 /** Accessible name for a Notify-on picker: each matrix holds one per CI source plus
  *  the automations row, so the visible word alone names none of them. Visible text
  *  first (WCAG 2.5.3). */
-export function outcomeAriaLabel(
-  source: OutcomeSource | "automations",
-): string {
-  return `${OUTCOME_ROW_LABEL} — ${SOURCE_LABELS[source]}`;
+export function subrowAriaLabel(source: SubrowSource): string {
+  return `${SUBROW_LABEL} — ${SOURCE_LABELS[source]}`;
 }
 
 /** Why the CI-checks sub-rows are held while that source delivers nowhere. Named
@@ -106,10 +109,7 @@ const CHECKS_OFF_REASON =
 
 /** Why a qualifying sub-row is held, per source — the CI-checks sentence also covers
  *  its Watch neighbour, so those two rows print one line between them. */
-export const SUBROW_HELD_REASONS: Record<
-  OutcomeSource | "automations",
-  string
-> = {
+export const SUBROW_HELD_REASONS: Record<SubrowSource, string> = {
   prChecks: CHECKS_OFF_REASON,
   actionRuns: "Turn on a workflow-runs channel to choose which results notify",
   automations: "Turn on an automations channel to choose which results notify",

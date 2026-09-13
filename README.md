@@ -1020,8 +1020,8 @@ review via its subscription login. The full list is under
   any executable, or set a full custom command with a `{path}` placeholder),
   and per-source notification controls that send each kind of event to the
   activity inbox, your desktop, both, or neither, with per-repository
-  overrides and CI sources that can narrow to just the failures (or just the
-  successes).
+  overrides, CI sources that can narrow to just the failures (or just the
+  successes), and automation results that can narrow to failures only.
 - **Activity and notifications**: a persistent bell in the header collects
   terminal events (a finished review, checks passing/failing, a PR
   approved/commented/merged, a review requested from you, a completed CI
