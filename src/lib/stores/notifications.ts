@@ -40,7 +40,10 @@ export type NotificationKind =
  *  OS-ping gates both read this set, so a new AI producer can't drift out of the
  *  Hide-AI story. `review-requested` is deliberately absent — it is a forge event
  *  (a human asked you to review), not AI output. Widened to `string` on read
- *  because {@link AppNotification.kind} is untrusted: an unlisted kind shows. */
+ *  because {@link AppNotification.kind} is untrusted: an unlisted kind shows.
+ *  Kind never implies source: `review-ready`/`review-failed` are minted by BOTH the
+ *  manual-review store and the automation runner under different sources, so every
+ *  emit site declares its source explicitly. */
 export const AI_NOTIFICATION_KINDS: ReadonlySet<string> =
   new Set<NotificationKind>([
     "review-ready",
@@ -121,7 +124,7 @@ export interface AppNotification {
 const CAP = 50;
 const STORE_KEY = "items";
 /** A repeated identical event inside this window is treated as a double-fire. */
-const DEDUPE_WINDOW_MS = 8_000;
+export const DEDUPE_WINDOW_MS = 8_000;
 
 /** The valid tones — used to coerce a corrupt/older on-disk `tone` to a safe
  *  default so the glyph never renders uncolored. */

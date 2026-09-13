@@ -10,9 +10,11 @@ import {
   isRunActive,
   type WorkflowRun,
 } from "@/lib/github/actions";
-import { notifyIfUnfocused } from "@/lib/notify";
+import { emitNotification } from "@/lib/notifications/emit";
+import { anyChannelOn } from "@/lib/notifications/overrides";
+import { useRepoNotificationOverride } from "@/lib/notifications/queries";
 import { useSettings } from "@/lib/settings/queries";
-import { pushNotification, repoNameFromPath } from "@/lib/stores/notifications";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { isFailureConclusion, statusLabel } from "./status";
 
 /**
@@ -26,13 +28,18 @@ export function useRunNotifications(repoPath: string) {
   const gh = useForgeStatus(repoPath);
   const status = useRepoStatus(repoPath);
   const branch = status.data?.branch.name ?? null;
+  const override = useRepoNotificationOverride(repoPath);
   // Polled for any provider whose CI read is built — GitHub Actions and GitLab
   // pipelines both map onto the same neutral run shape the diff below reads.
+  // Shares the emit gate's resolution once the override is in hand: it reads undefined
+  // until the overrides query resolves, so a muted repo can still fire its first poll.
+  // Delivery stays correct regardless — emit re-reads the override itself.
   const enabled =
     repoPath !== "" &&
     forgeFeatureReady(gh.data, "ci") &&
     Boolean(branch) &&
-    Boolean(settings.data?.notifications.actionRuns);
+    settings.data !== undefined &&
+    anyChannelOn(settings.data.notifications, override, ["actionRuns"]);
 
   const poll = useQuery({
     queryKey: ["repo", repoPath, "actions", "notify", branch ?? ""] as const,
@@ -70,17 +77,20 @@ export function useRunNotifications(repoPath: string) {
         const bad = isFailureConclusion(run.conclusion);
         if (!ok && !bad) continue; // skipped/cancelled/neutral: stay quiet
         const title = `${run.workflowName} ${statusLabel(run.status, run.conclusion).toLowerCase()} on ${run.headBranch}`;
-        pushNotification({
-          kind: "ci-run",
-          tone: ok ? "success" : "danger",
-          title,
-          subtitle: run.displayTitle,
-          repoPath,
-          repoName: repoNameFromPath(repoPath),
-          target: { type: "run", runId: run.id },
-          dedupeKey: `run:${run.id}:${run.conclusion}`,
+        emitNotification({
+          source: "actionRuns",
+          row: {
+            kind: "ci-run",
+            tone: ok ? "success" : "danger",
+            title,
+            subtitle: run.displayTitle,
+            repoPath,
+            repoName: repoNameFromPath(repoPath),
+            target: { type: "run", runId: run.id },
+            dedupeKey: `run:${run.id}:${run.conclusion}`,
+          },
+          os: { title, body: run.displayTitle, focus: "unfocused" },
         });
-        void notifyIfUnfocused(title, run.displayTitle);
       }
     }
   });

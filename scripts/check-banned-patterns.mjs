@@ -464,6 +464,35 @@ const ONERROR_SETTINGS_REFETCH_RE = new RegExp(
   "g",
 );
 
+// The routes around the notification gate, each matched at its IMPORT. Every
+// module specifier is anchored on its trailing PATH SEGMENT rather than on the
+// alias spelling, because `@/lib/stores/notifications`, `./notifications` and
+// `../stores/notifications` all resolve to the same module and a producer may
+// legitimately sit in either directory (repo-description-generation.ts already
+// imports `./notifications` for an unrelated helper). No other module under
+// src/ ends in `/notifications` or `/notify`, so the segment anchor costs no
+// precision; a future one would need the banned identifier to report at all.
+//
+// The inbox route keys on the `pushNotification` identifier inside the
+// specifier list, so the type-only and helper exports the same module carries
+// (NotificationKind, NotificationTone, NotificationTarget, repoNameFromPath)
+// stay legal; `[^}]*` cannot cross the import's own closing brace, so a
+// neighbouring import can never supply the token. A NAMESPACE import defeats
+// that specifier match outright — `notifs.pushNotification(row)` names nothing
+// at the import — so it takes its own arm, module path alone. The OS route
+// needs neither: every export of the notify module is a direct ping, so the
+// module path alone covers its specifier and namespace forms together.
+//
+// All three run over the whole-file view: the formatter puts each specifier on
+// its own line. Accepted evasions, zero instances today: a dynamic `import()`
+// of either module (no `from` clause), and a re-export chain through a third
+// module.
+const PUSH_NOTIFICATION_IMPORT_RE =
+  /\bimport\s+(?:type\s+)?\{[^}]*\bpushNotification\b[^}]*\}\s*from\s*["'][^"']*\/notifications["']/g;
+const NOTIFICATIONS_NAMESPACE_IMPORT_RE =
+  /\bimport\s+\*\s+as\s+[\w$]+\s+from\s*["'][^"']*\/notifications["']/g;
+const NOTIFY_MODULE_IMPORT_RE = /\bfrom\s*["'][^"']*\/notify["']/g;
+
 export const CHECKS = [
   {
     name: "hover-reveal",
@@ -802,6 +831,23 @@ export const CHECKS = [
     allowlist: [],
     message:
       "a menu/popover trigger that carries its disabled reason on a titled wrapper is hover-only — a natively disabled trigger leaves the tab order, so keyboard and screen-reader users reach neither the control nor the reason; compose `<Trigger render={<DisabledReasonButton disabled reason/>}>` instead (src/components/disabled-reason-button.tsx), which holds the reason on a focusable aria-disabled button whose own useButton swallows activation; a site that genuinely cannot take the primitive needs an allowlist entry with rationale",
+  },
+  {
+    name: "ungated-notification-producer",
+    // emit.ts IS the gate, so it holds both imports by definition.
+    appliesTo: (file) => file !== "src/lib/notifications/emit.ts",
+    scan: anyOf([
+      perFile(PUSH_NOTIFICATION_IMPORT_RE),
+      perFile(NOTIFICATIONS_NAMESPACE_IMPORT_RE),
+      perFile(NOTIFY_MODULE_IMPORT_RE),
+    ]),
+    // Empty by construction: every producer routes through emit, and the one
+    // exception is excluded by appliesTo rather than listed here. The inbox
+    // module itself needs no entry either — it cannot import itself, so an
+    // entry naming it would read stale on the first run.
+    allowlist: [],
+    message:
+      "notifications are delivered by emitNotification (src/lib/notifications/emit.ts) alone — it resolves each source's channels against the global prefs AND the repo's override, mutes the OS ping for AI kinds while AI is hidden, and dedupes both channels together; a producer reaching pushNotification or @/lib/notify directly ships a surface the user cannot turn off (the sessions, plan, and research producers were ungated exactly that way), so route it through emit or add an allowlist entry with rationale",
   },
 ];
 

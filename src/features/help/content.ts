@@ -2801,11 +2801,21 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 - **MCP servers** — register Model Context Protocol servers (secrets in your OS keychain)
   that agent sessions can opt into.
 - **Automations** — AI actions that run on triggers.
-{{/ai}}- **Notifications** — opt into OS notifications (sent only when the window isn't
-  focused) for PR activity, CI checks, reviews on your PRs, and workflow runs finishing.
-  Whatever you enable here also lands in the header's **Activity & notifications** bell — a
-  persistent, click-to-open history (it survives a restart) so a finished review or a PR
-  update is never a missed moment. Open it from the command palette
+{{/ai}}- **Notifications** — pick, for each source, where its events land: a row in the
+  header's **Activity & notifications** bell, an OS notification, both, or neither (a
+  source with both boxes clear records nothing). OS notifications are sent only while the
+  window isn't focused{{ai}}, apart from **Agent tasks finish**, which pings even while
+  you're working elsewhere in the app{{/ai}}. The sources are **CI checks finish (pass or
+  fail)** (which also carries a **Watch** choice of *My pull requests only* or *All open
+  pull requests*), **Pull requests opened, merged, or closed**, **Reviews on my pull
+  requests**, and **Workflow runs finish on the current branch**{{ai}}, plus **AI reviews
+  I start**, **Automation results**, and **Agent tasks finish**{{/ai}}. **Customize…**
+  opens the per-repository overrides: **Mute this repository** silences every source for
+  that repo, or you can set individual cells and the CI-checks **Watch** choice, with
+  anything you leave alone following your global settings. *Notification settings* and
+  *Repository notification settings* in the command palette open each directly.
+  The bell is a persistent, click-to-open history (it survives a restart) so a finished
+  review or a PR update is never a missed moment. Open it from the command palette
   ({{kbd:command-palette}} → *Activity & notifications*), click an entry to jump
   to it, arrow-key through the list, and clear items or mark all read. A
   pull-request entry opens that PR on the tab its event happened on, under the
@@ -2815,9 +2825,10 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and
   **Dismiss** — a stopped row notes how long it ran before it stopped — and a failed
-  automated run also lands a *review failed* row in the inbox (gated on the automations
-  notification preference) that shows why it failed and offers a one-click **Re-run** right
-  from the row, matching manual-run failures (which show their reason too).{{/ai}}
+  automated run also lands a *review failed* row in the inbox (whenever the **Automation
+  results** source keeps its in-app channel on) that shows why it failed and offers a
+  one-click **Re-run** right from the row, matching manual-run failures (which show their
+  reason too).{{/ai}}
 - **Keyboard** — rebind any shortcut, with live key-capture, filterable by name, category,
   or key.
 - **Accounts** — your **GitHub** and **GitLab** sign-ins and your **Bitbucket**

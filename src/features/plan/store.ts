@@ -18,10 +18,10 @@ import {
 } from "@/lib/ai/prompt";
 import { terminalErrorMessage } from "@/lib/ai/terminal-error";
 import { gitListTracked, readRepoInstructions } from "@/lib/git/api";
-import { notify } from "@/lib/notify";
+import { emitNotification } from "@/lib/notifications/emit";
 import { norm } from "@/lib/repo-data-migration";
 import { loadSettings } from "@/lib/settings/api";
-import { pushNotification, repoNameFromPath } from "@/lib/stores/notifications";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { loadPersistedPlans, savePersistedPlans } from "./persistence";
 
@@ -235,23 +235,21 @@ export const usePlanStore = create<PlanState>((set, get) => {
         : hasQuestions
           ? "Plan ready — answer its questions"
           : "Plan ready";
-      // Hiding AI features mutes the OS ping — a hidden feature must not tap you
-      // on the shoulder. The inbox row below still lands (the dock filters it at
-      // render time), and a settings read that fails falls through to notifying.
-      void loadSettings()
-        .catch(() => null)
-        .then((s) => {
-          if (!s?.hideAi) void notify(headline, label);
-        });
-      pushNotification({
-        kind: "plan-done",
-        tone: failed ? "danger" : hasQuestions ? "warning" : "success",
-        title: headline,
-        subtitle: label,
-        repoPath: run.repoPath,
-        repoName: repoNameFromPath(run.repoPath),
-        target: { type: "agent" },
-        dedupeKey: `plan:${id}:${failed}:${hasQuestions}`,
+      emitNotification({
+        source: "agents",
+        row: {
+          kind: "plan-done",
+          tone: failed ? "danger" : hasQuestions ? "warning" : "success",
+          title: headline,
+          subtitle: label,
+          repoPath: run.repoPath,
+          repoName: repoNameFromPath(run.repoPath),
+          target: { type: "agent" },
+          dedupeKey: `plan:${id}:${failed}:${hasQuestions}`,
+        },
+        // Pings even while focused — the watching check above already excused the
+        // one surface that would make it redundant, questions excepted.
+        os: { title: headline, body: label, focus: "always" },
       });
     };
     try {

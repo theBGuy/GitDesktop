@@ -13,6 +13,7 @@ import { AutomationResultDialog } from "@/features/automations/AutomationResultD
 import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
 import { MyWorkScreen } from "@/features/mywork/MyWorkScreen";
+import { RepoNotificationsDialogHost } from "@/features/notifications/RepoNotificationsDialog";
 import { RepositoryView } from "@/features/repository/RepositoryView";
 import { usePickAndOpenRepo } from "@/features/repository/useOpenRepoByPath";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
@@ -32,6 +33,11 @@ import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
 import { MCP_WRITABLE_STORES } from "@/lib/mcp-writable-stores";
 import {
+  notificationsDraftOutOfSync,
+  useNotificationsDraft,
+  useRepoNotificationsDialog,
+} from "@/lib/notifications/matrix";
+import {
   useApplyTheme,
   useSaveSettings,
   useSettings,
@@ -49,6 +55,10 @@ function App() {
   const openExplore = useUiStore((s) => s.openExplore);
   const openMyWork = useUiStore((s) => s.openMyWork);
   const toggleActivity = useUiStore((s) => s.toggleActivity);
+  const repoPath = useUiStore((s) => s.repoPath);
+  const openRepoNotifications = useRepoNotificationsDialog((s) => s.open);
+  const publishedNotificationsDraft = useNotificationsDraft((s) => s.signature);
+  const clearNotificationsDraft = useNotificationsDraft((s) => s.clear);
   const gitInstalled = useGitInstalled();
   const queryClient = useQueryClient();
   const settings = useSettings();
@@ -62,6 +72,17 @@ function App() {
   // Screens with their own modals (e.g. Explore's clone dialog) register there.
   const screenModalOpen = useModalGateOpen();
   const dialogOpen = cloneOpen || createOpen || screenModalOpen;
+
+  // SettingsScreen publishes its notifications draft while it is up, and the
+  // verdict is screen-scoped: App owns the screen's lifetime, so leaving
+  // Settings retires it here.
+  useEffect(() => {
+    if (view !== "settings") clearNotificationsDraft();
+  }, [view, clearNotificationsDraft]);
+  const notificationsDraftHeld = notificationsDraftOutOfSync(
+    publishedNotificationsDraft,
+    settings.data?.notifications,
+  );
 
   // The dialogs live above the view switch, so navigation doesn't unmount them
   // (e.g. the clone dialog's "Open Settings → Accounts") — close them when the
@@ -194,6 +215,31 @@ function App() {
     !settings.data?.hideAi,
   );
   useHotkeyAction("browse-mcp-registry", openMcpBrowse, !settings.data?.hideAi);
+  useHotkeyAction(
+    "open-notifications-settings",
+    () => openSettings("notifications"),
+    gitInstalled.isSuccess && !dialogOpen,
+  );
+  // The palette closes before it dispatches, so both the repo and the settings
+  // draft are re-read at fire time rather than captured — the dialog's
+  // mint-on-match baseline is the SAVED matrix, so it must not open over a
+  // settings form still holding notification edits.
+  useHotkeyAction(
+    "open-repo-notification-settings",
+    () => {
+      const path = useUiStore.getState().repoPath;
+      if (!path) return;
+      if (
+        notificationsDraftOutOfSync(
+          useNotificationsDraft.getState().signature,
+          settings.data?.notifications,
+        )
+      )
+        return;
+      openRepoNotifications(path);
+    },
+    Boolean(repoPath) && !notificationsDraftHeld && !dialogOpen,
+  );
   useHotkeyAction("show-help", openHelp);
   useHotkeyAction("open-explore", openExplore);
   useHotkeyAction("open-my-work", openMyWork);
@@ -261,6 +307,7 @@ function App() {
       </div>
       <AutomationResultDialog />
       <AutomationHistoryDialogHost />
+      <RepoNotificationsDialogHost />
       <CloneRepoDialog open={cloneOpen} onOpenChange={setCloneOpen} />
       <CreateRepoDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ConfirmDialogHost />

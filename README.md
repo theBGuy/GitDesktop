@@ -1016,14 +1016,17 @@ review via its subscription login. The full list is under
   confirming the modes and the posted comment before spending a model call.
 - **Integrations**: open in any editor or terminal (auto-detected, point at
   any executable, or set a full custom command with a `{path}` placeholder),
-  and tunable OS notifications for PR activity, checks, and CI runs.
+  and per-source notification controls that send each kind of event to the
+  activity inbox, your desktop, both, or neither, with per-repository
+  overrides.
 - **Activity and notifications**: a persistent bell in the header collects
   terminal events (a finished review, checks passing/failing, a PR
   approved/commented/merged, a review requested from you, a completed CI
   run, or a finished agent / research / plan run) into a clickable,
   clearable history that survives a restart, so a review that finishes
   while you're away is never a missed click. Open it from the command
-  palette; which events show follows your notification settings. A
+  palette; which events show follows your notification settings, where
+  each source sets its inbox and desktop channels independently. A
   cancelled or failed **automated** review also lingers in a **Stopped**
   group with one-click **Re-run** (re-firing exactly that run's mode) and
   **Dismiss**, so a stopped automation isn't a dead end. The *review

@@ -469,6 +469,11 @@ export const capabilities: Capability[] = [
       "Activity & notifications inbox — never miss a finished review or check",
     highlight: true,
   },
+  {
+    group: "Repository & workspace",
+    label:
+      "Per-source notification controls — in-app vs OS channels, per-repo overrides",
+  },
   { group: "Repository & workspace", label: "Environment & CLI health check" },
   {
     group: "Repository & workspace",
