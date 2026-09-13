@@ -260,11 +260,11 @@ function bodyState({
 /** Either side of the baseline failed to load. Offers the retry rather than a
  *  dead dialog: neither loader memoizes its rejection, so a storage hiccup can
  *  genuinely clear. */
-function OverridesLoadFailed({ onRetry }: { onRetry: () => void }) {
+function BaselineLoadFailed({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="space-y-2">
       <p className="text-xs text-muted-foreground">
-        Couldn't load this repository's overrides.
+        Couldn't load your notification settings.
       </p>
       <Button variant="outline" size="xs" onClick={onRetry}>
         Retry
@@ -472,7 +472,7 @@ function RepoNotificationsBody({
   // while there is no baseline to save against.
   function saveBlockedReason(): string | null {
     if (save.isPending) return "Saving…";
-    if (state === "error") return "Couldn't load this repository's overrides";
+    if (state === "error") return "Couldn't load your notification settings";
     if (!dirty) return "No changes to save";
     return null;
   }
@@ -486,7 +486,7 @@ function RepoNotificationsBody({
         {/* Retries BOTH halves: the arm fires for either failure, and refetching
             only one leaves the other's error in place. */}
         {state === "error" && (
-          <OverridesLoadFailed
+          <BaselineLoadFailed
             onRetry={() => {
               overrides.refetch();
               settings.refetch();

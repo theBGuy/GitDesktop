@@ -149,9 +149,9 @@ interface NotificationsDraftState {
 
 /** What a live settings form is holding for notifications, so routes into the
  *  per-repo dialog that render OUTSIDE the form (the command palette) can see
- *  it. Screen-scoped, not panel-scoped: the draft survives a panel switch, so
- *  the section never clears on unmount and App retires it on leaving Settings —
- *  a flag that outlived its screen would hold the palette action shut forever. */
+ *  it. SettingsScreen publishes it from the form store and App retires it on
+ *  leaving Settings: the screen outlives every panel switch, and a value that
+ *  outlived its screen would hold the palette action shut forever. */
 export const useNotificationsDraft = create<NotificationsDraftState>()(
   (set) => ({
     signature: null,
@@ -168,11 +168,9 @@ export const useNotificationsDraft = create<NotificationsDraftState>()(
  * global underneath it.
  *
  * The published signature carries the draft it was produced under and is
- * compared against the live saved value rather than cleared by every writer, so
- * a Save from another panel resolves it on its own. A Discard from another
- * panel can't be seen — the section is unmounted — and leaves the verdict set
- * until the screen closes: the fail-safe direction, since the section's own
- * Customize button stays correct and reachable.
+ * compared against the live saved value rather than cleared per writer, so a
+ * Save OR a Discard from any panel resolves it: SettingsScreen publishes from
+ * the form store, which outlives panel switches, and App clears on screen close.
  */
 export function notificationsDraftOutOfSync(
   published: string | null,

@@ -73,10 +73,9 @@ function App() {
   const screenModalOpen = useModalGateOpen();
   const dialogOpen = cloneOpen || createOpen || screenModalOpen;
 
-  // A mounted settings form publishes its notifications draft; the verdict is
-  // screen-scoped, so leaving Settings retires it. The section can't do this
-  // itself — it unmounts on every panel switch, while the draft it published is
-  // still live in the form.
+  // SettingsScreen publishes its notifications draft while it is up; the verdict
+  // is screen-scoped, so leaving Settings retires it here — the publisher can't,
+  // having unmounted by the time the view changes.
   useEffect(() => {
     if (view !== "settings") clearNotificationsDraft();
   }, [view, clearNotificationsDraft]);
