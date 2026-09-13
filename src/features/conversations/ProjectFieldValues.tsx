@@ -15,6 +15,7 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { parseableDate } from "@/lib/time";
+import { ProjectFieldsEditor } from "./ProjectFieldsEditor";
 import { projectScopeMissing } from "./ProjectsPopover";
 
 const FIELD_LABEL = "Project fields";
@@ -34,8 +35,10 @@ const OPTION_COLORS: Record<string, string> = {
   PURPLE: "#8d80ba",
 };
 
-/** GitHub's Date scalar, which carries no zone. */
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+/** GitHub's Date scalar, which carries no zone — and the only form a native date
+ *  input accepts: the control's own sanitization silently discards any other
+ *  shape, so the editor seeds those empty on purpose instead. */
+export const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 function optionColor(color: string): string {
   return OPTION_COLORS[color.toUpperCase()] ?? OPTION_COLORS.GRAY;
@@ -85,9 +88,26 @@ function iterationRange(startDate: string, duration: number): string {
   return `${shortDay(start, spansYears)} – ${shortDay(end, spansYears)}`;
 }
 
+/** An iteration's span in muted parentheses, or nothing when it can't be read. The
+ *  parenthetical is one unbreakable run: wrapped mid-span it reads as two values on
+ *  two lines. Shared with the field editor's iteration rows. */
+export function IterationRange({
+  startDate,
+  duration,
+}: {
+  startDate: string;
+  duration: number;
+}) {
+  const range = iterationRange(startDate, duration);
+  if (range === "") return null;
+  return (
+    <span className="whitespace-nowrap text-muted-foreground"> ({range})</span>
+  );
+}
+
 /** One select option. The dot is decorative and the name carries the value, so
- *  nothing here rests on the colour. */
-function OptionValue({ name, color }: { name: string; color: string }) {
+ *  nothing here rests on the colour. Shared with the field editor's option rows. */
+export function OptionValue({ name, color }: { name: string; color: string }) {
   return (
     <span className="inline-flex min-w-0 max-w-full items-center gap-1">
       <span
@@ -148,14 +168,18 @@ function fieldValueNode(value: ProjectFieldValue): ReactNode {
     case "date":
       return value.date === "" ? null : formatFieldDate(value.date);
     case "iteration": {
-      const range = iterationRange(value.startDate, value.duration);
-      if (value.title === "" && range === "") return null;
+      if (
+        value.title === "" &&
+        iterationRange(value.startDate, value.duration) === ""
+      )
+        return null;
       return (
         <>
           {value.title}
-          {range === "" ? null : (
-            <span className="text-muted-foreground"> ({range})</span>
-          )}
+          <IterationRange
+            startDate={value.startDate}
+            duration={value.duration}
+          />
         </>
       );
     }
@@ -224,12 +248,12 @@ function ProjectFieldLine({
 }
 
 /**
- * The read-only view of an item's GitHub Projects field values — one line per
- * board, under the Projects picker on both the issue rail and the PR header grid.
- * Nothing renders until there is something to say: no memberships, no set fields,
- * or no GitHub, and the block is absent entirely rather than showing empty chrome.
- * Reads only — the picker above owns the memberships, and the fields themselves
- * aren't editable here.
+ * An item's GitHub Projects field values — one line per board, under the Projects
+ * picker on both the issue rail and the PR header grid, with the editor's trigger
+ * taking the place of the heading that names them. Nothing renders until there is
+ * something to say: no memberships, or no GitHub, and the block is absent entirely
+ * rather than leaving a heading standing over nothing. The picker above owns the
+ * memberships; this owns the values.
  */
 export function ProjectFieldValues({
   repoPath,
@@ -237,6 +261,7 @@ export function ProjectFieldValues({
   kind,
   number,
   lens,
+  disabledReason,
   cells = false,
 }: {
   repoPath: string;
@@ -247,6 +272,11 @@ export function ProjectFieldValues({
   number: number;
   /** The origin|upstream lens the parent PR/issue surface resolved. */
   lens: RemoteLens;
+  /** Set when the editor can't be opened right now — the viewer lacks the access
+   *  its writes need, or the surface is still loading the entity. Write access
+   *  itself is the MOUNT's gate: both call sites render this only where they render
+   *  the Projects picker, which is the same permission. */
+  disabledReason?: string;
   /** Emit a label cell and a value cell as two SIBLING elements for a caller's
    *  label/value grid. Default renders the rail form, which labels itself above
    *  the lines. */
@@ -339,23 +369,68 @@ export function ProjectFieldValues({
     }
   })();
 
-  if (content === null) return null;
+  // The editor rides the same gate the VALUES do: a boardless item has nothing to
+  // edit, so it gets no trigger and — the null contract below — no heading either.
+  const showEditor = canRead && boardsKnown;
+  // Memberships order, not the values read's: the boards are named in the same
+  // sequence the chips above are. A board whose values haven't arrived has no
+  // baseline to draft from, so it stays out and the trigger says why.
+  // PARITY REQUIREMENT: both reads page `projectItems(first: 20)`, and a board the
+  // memberships read returns but the values read doesn't leaves the editor without
+  // a word — this intersection is only safe while their caps and filters agree.
+  const entryByProject = new Map(
+    entries.map((entry) => [entry.project.id, entry]),
+  );
+  const boards = (memberships.data ?? [])
+    .map((item) => entryByProject.get(item.project.id))
+    .filter((entry): entry is ItemProjectFieldValues => entry !== undefined);
+  const unsettledReason = (() => {
+    switch (true) {
+      case boards.length > 0:
+        return undefined;
+      case loading:
+        return "Loading project fields…";
+      // Reachable with no error and nothing to retry — a values read that settled
+      // empty against live memberships lands here, so this names no control.
+      default:
+        return "Project fields haven't loaded for this item's boards yet.";
+    }
+  })();
+  const heading = showEditor ? (
+    <ProjectFieldsEditor
+      repoPath={repoPath}
+      kind={kind}
+      number={number}
+      lens={lens}
+      boards={boards}
+      disabledReason={disabledReason}
+      unsettledReason={unsettledReason}
+    />
+  ) : null;
+
+  if (content === null && heading === null) return null;
   // The rail form carries its OWN heading rather than taking the row list's: this
   // block renders nothing on a boardless item, and a host-supplied heading would
   // be left standing over it.
   if (!cells)
     return (
       <div className="space-y-1.5">
-        <p className="text-xs font-medium text-muted-foreground">
-          {FIELD_LABEL}
-        </p>
+        {heading ?? (
+          <p className="text-xs font-medium text-muted-foreground">
+            {FIELD_LABEL}
+          </p>
+        )}
         {content}
       </div>
     );
   return (
     <>
-      <MetaFieldLabel>{FIELD_LABEL}</MetaFieldLabel>
-      <MetaValueCell label={FIELD_LABEL} busy={lines.length === 0 && loading}>
+      {heading ?? <MetaFieldLabel>{FIELD_LABEL}</MetaFieldLabel>}
+      <MetaValueCell
+        label={FIELD_LABEL}
+        empty={content === null}
+        busy={lines.length === 0 && loading}
+      >
         {content}
       </MetaValueCell>
     </>

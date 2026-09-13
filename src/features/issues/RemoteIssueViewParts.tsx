@@ -289,6 +289,7 @@ export function IssueSidebar({
           kind="issue"
           number={number}
           lens={lens}
+          disabledReason={pickerDisabledReason}
         />
       ),
     },

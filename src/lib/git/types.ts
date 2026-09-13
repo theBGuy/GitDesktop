@@ -2369,6 +2369,10 @@ export type ProjectFieldValue =
       kind: "iteration";
       fieldId: string;
       fieldName: string;
+      /** Which iteration of the field's configured set this is — the id a write
+       *  addresses it by, and the only stable identity it has: title and dates are
+       *  editable on the board. */
+      iterationId: string;
       title: string;
       startDate: string;
       /** Length in DAYS, so the last day is `startDate + duration - 1`. */
@@ -2384,6 +2388,80 @@ export interface ItemProjectFieldValues {
   project: ProjectV2Ref;
   values: ProjectFieldValue[];
 }
+
+/** One option a board's single/multi-select field offers. */
+export interface ProjectFieldOptionDef {
+  id: string;
+  name: string;
+  /** GitHub color NAME (GRAY/BLUE/GREEN/YELLOW/ORANGE/RED/PINK/PURPLE). */
+  color: string;
+  description: string;
+}
+
+/** One iteration a board's iteration field offers. `duration` is a DAY count, so
+ *  the last day is `startDate + duration - 1` — the same shape the iteration VALUE
+ *  arm carries, plus the `id` a write addresses it by. */
+export interface ProjectIterationDef {
+  id: string;
+  title: string;
+  /** A bare `YYYY-MM-DD` as GitHub's Date scalar sends it — no zone. */
+  startDate: string;
+  duration: number;
+}
+
+/** One project field's DEFINITION, tagged by kind — what the editor offers, where
+ *  {@link ProjectFieldValue} is what an item currently holds. `system` is both the
+ *  built-ins bucket (title, assignees, labels, milestone, repository, reviewers,
+ *  tracking — GitHub owns those on the issue/PR itself) and the tolerant fallback
+ *  for a `dataType` this build doesn't know, which is how the editor excludes them:
+ *  by kind, never by name. */
+export type ProjectFieldDef =
+  | {
+      kind: "singleSelect";
+      id: string;
+      name: string;
+      options: ProjectFieldOptionDef[];
+      isIssueField: boolean;
+    }
+  | {
+      kind: "multiSelect";
+      id: string;
+      name: string;
+      options: ProjectFieldOptionDef[];
+      isIssueField: boolean;
+    }
+  | {
+      kind: "iteration";
+      id: string;
+      name: string;
+      iterations: ProjectIterationDef[];
+      /** Past iterations, offered apart: still assignable, but not what a board
+       *  means by "the current one". */
+      completedIterations: ProjectIterationDef[];
+    }
+  | { kind: "text"; id: string; name: string; isIssueField: boolean }
+  | { kind: "number"; id: string; name: string; isIssueField: boolean }
+  | { kind: "date"; id: string; name: string; isIssueField: boolean }
+  | { kind: "system"; id: string; name: string; dataType: string };
+
+/** One board's field definitions. `truncated` reports that the server capped the
+ *  list, which the editor says rather than implying it offers every field — the
+ *  same claim {@link AvailableProjects} makes about the catalog. */
+export interface ProjectFieldDefs {
+  fields: ProjectFieldDef[];
+  truncated: boolean;
+}
+
+/** One field to SET on an item, tagged by the field's kind. These field names are
+ *  the wire the backend deserializes by — a renamed one reads as absent there.
+ *  Unsetting is not expressed here: a clear rides the write's separate id list. */
+export type ProjectFieldValueUpdate =
+  | { kind: "text"; fieldId: string; text: string }
+  | { kind: "number"; fieldId: string; number: number }
+  | { kind: "date"; fieldId: string; date: string }
+  | { kind: "singleSelect"; fieldId: string; optionId: string }
+  | { kind: "multiSelect"; fieldId: string; optionIds: string[] }
+  | { kind: "iteration"; fieldId: string; iterationId: string };
 
 export interface Reaction {
   /** GitHub ReactionContent enum value (THUMBS_UP, HEART, ROCKET, …). */

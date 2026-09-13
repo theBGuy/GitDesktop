@@ -1070,8 +1070,9 @@ leaving the app — see *Conflicts with the base branch* below.
 
 An open pull request gets a **Projects** picker alongside its **labels**, **assignees**, and
 **reviewers**: chips for the **GitHub Projects** it belongs to, and a popup to link or
-unlink it. Under the chips, a **Project fields** row reads out where the pull request
-stands on each of those boards (see *Issues*).
+unlink it. Alongside the chips, a **Project fields** row reads out where the pull
+request stands on each of those boards, and its trigger opens the editor that sets
+them (see *Issues*).
 
 The list toolbar's **All | Mine | Needs review** switch scopes the list in one click:
 **Mine** is everything assigned to you or awaiting your review, and **Needs review** is
@@ -1747,8 +1748,11 @@ duplicates, and same-project mentions.
   changes apply when the picker closes. Below the chips, one line per board reads out where
   the issue stands: **Status**, **Priority**, **Iteration** (with the dates it covers), plus
   date, text, number, and multi-select fields, each named beside its value. A board is named
-  on its own line once the issue sits on more than one. Those values are read-only here;
-  change them on the board itself. GitHub only, and changing anything needs the \`project\`
+  on its own line once the issue sits on more than one. The **Project fields** row itself is
+  the trigger: it opens one popup holding every field you can set on every board the issue is
+  on, filled in or not, and any field that already holds a value carries a **Clear** to empty
+  it again. Like the pickers above it, the popup drafts your edits and writes them when it
+  closes — one write per board. GitHub only, and changing anything needs the \`project\`
   scope: with just \`read:project\` the boards still show but every row is locked, and with
   neither the picker says so and helps you get it — when your sign-in's scopes are readable,
   that's a one-click **Reconnect GitHub…** plus a copyable \`gh auth refresh\` command

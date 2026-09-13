@@ -2471,8 +2471,9 @@ export function RemotePrView({
         disabledReason={pickerReason}
       />,
     );
-    // Read-only field values under the picker, on the same gate: they come from
-    // the same boards, so wherever the chips are, the fields belong.
+    // Field values under the picker, on the same gate: they come from the same
+    // boards, so wherever the chips are, the fields belong — and so does the
+    // editor's trigger, which this row carries in place of its label.
     metaCells.push(
       <ProjectFieldValues
         key={`project-fields-${entityKey}`}
@@ -2482,6 +2483,7 @@ export function RemotePrView({
         kind="pr"
         number={number}
         lens={lens}
+        disabledReason={pickerReason}
       />,
     );
   }

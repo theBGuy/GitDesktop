@@ -58,6 +58,17 @@ export function projectScopeMissing(scopes: GhScopes | undefined): boolean {
   );
 }
 
+/** Read-only classic token: the reads work, every write 403s. Hold the controls
+ *  rather than letting each edit round-trip to a rollback + toast. Shared so no
+ *  Projects surface can offer a write another one holds. */
+export function projectScopeReadOnly(scopes: GhScopes | undefined): boolean {
+  return (
+    scopes?.classic === true &&
+    scopes.scopes.includes("read:project") &&
+    !scopes.scopes.includes("project")
+  );
+}
+
 /** A closed board still holds items, so its rows and chips stay — the state rides
  *  the label as words, never as a colour. */
 function projectLabel(project: ProjectV2Ref): string {
@@ -106,12 +117,7 @@ export function ProjectsPopover({
   const scopes = useGhScopes(host);
   const openReconnect = useUiStore((s) => s.openReconnect);
   const classicMissing = projectScopeMissing(scopes.data);
-  // Read-only classic token: the reads work, every write 403s. Hold the rows
-  // rather than letting each toggle round-trip to a rollback + toast.
-  const readOnlyScope =
-    scopes.data?.classic === true &&
-    scopes.data.scopes.includes("read:project") &&
-    !scopes.data.scopes.includes("project");
+  const readOnlyScope = projectScopeReadOnly(scopes.data);
   const canRead = enabled && !classicMissing;
 
   const [open, setOpen] = useState(false);
@@ -525,7 +531,7 @@ function ProjectRow({
  *  be attempted at all) and one with only `read:project` (reads work, writes 403).
  *  Both need the same `project` scope, so both get the same remedy; `children` is
  *  the one sentence that differs. */
-function ScopeGapBlock({
+export function ScopeGapBlock({
   host,
   onReconnect,
   children,
