@@ -18,6 +18,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { AutomationsSection } from "@/features/automations/AutomationsSection";
 import { useAppForm } from "@/lib/form";
+import {
+  notificationsSignature,
+  useNotificationsDraft,
+} from "@/lib/notifications/matrix";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { useLatestRef } from "@/lib/use-latest-ref";
@@ -185,6 +189,23 @@ export function SettingsScreen() {
       savedStr !== null &&
       stableStringify(s.values) !== savedStr,
   );
+
+  // Publish the notifications slice for the surfaces that reach the per-repo
+  // dialog from OUTSIDE this form (the command palette): overrides are minted
+  // against the SAVED matrix, so those routes have to refuse while a draft
+  // disagrees. It lives here, not in the panel — the screen outlives every panel
+  // switch, so Save and Discard from ANY panel move it, while a panel-level
+  // publisher would freeze the moment its section unmounted. Same derived-string
+  // shape as `dirty`, so a keystroke in another panel can't churn it, and
+  // pre-seed publishes nothing: there is no draft to disagree with yet.
+  const notificationsDraft = useSelector(form.store, (s) =>
+    seeded.current ? notificationsSignature(s.values.notifications) : null,
+  );
+  const publishNotificationsDraft = useNotificationsDraft((s) => s.publish);
+  useEffect(() => {
+    if (notificationsDraft !== null)
+      publishNotificationsDraft(notificationsDraft);
+  }, [notificationsDraft, publishNotificationsDraft]);
 
   // Either the settings form or the Automations panel having unsaved edits
   // should guard closing the screen.

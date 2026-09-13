@@ -216,8 +216,10 @@ function App() {
     !settings.data?.hideAi,
   );
   useHotkeyAction("browse-mcp-registry", openMcpBrowse, !settings.data?.hideAi);
-  useHotkeyAction("open-notifications-settings", () =>
-    openSettings("notifications"),
+  useHotkeyAction(
+    "open-notifications-settings",
+    () => openSettings("notifications"),
+    gitInstalled.isSuccess && !dialogOpen,
   );
   // The palette closes before it dispatches, so both the repo and the settings
   // draft are re-read at fire time rather than captured — the dialog's
@@ -237,7 +239,7 @@ function App() {
         return;
       openRepoNotifications(path);
     },
-    Boolean(repoPath) && !notificationsDraftHeld,
+    Boolean(repoPath) && !notificationsDraftHeld && !dialogOpen,
   );
   useHotkeyAction("show-help", openHelp);
   useHotkeyAction("open-explore", openExplore);

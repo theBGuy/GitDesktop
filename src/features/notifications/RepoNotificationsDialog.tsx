@@ -29,6 +29,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { useRepoIdentity } from "@/lib/git/queries";
+import { useModalGateRegistration } from "@/lib/hotkeys/modal-gate";
 import {
   CHANNEL_LABELS,
   CHANNELS,
@@ -236,9 +237,10 @@ export function WatchRow(props: ComponentProps<typeof WatchSelect>) {
 
 const EMPTY_OVERRIDE: RepoNotificationOverride = {};
 
-/** Which body the dialog shows. A failed overrides load is its OWN state, never
- *  a slow one: the query settles with no data, so a loading placeholder would
- *  spin forever and an editable matrix would edit against nothing. */
+/** Which body the dialog shows. A failed load of EITHER half of the baseline —
+ *  the stored overrides or the global settings they sit on — is its own state,
+ *  never a slow one: the query settles with no data, so a loading placeholder
+ *  would spin forever and an editable matrix would edit against nothing. */
 function bodyState({
   error,
   loaded,
@@ -255,9 +257,9 @@ function bodyState({
   return "ready";
 }
 
-/** The overrides store failed to load. Offers the retry rather than a dead
- *  dialog: the store's loader doesn't memoize its rejection, so a storage
- *  hiccup can genuinely clear. */
+/** Either side of the baseline failed to load. Offers the retry rather than a
+ *  dead dialog: neither loader memoizes its rejection, so a storage hiccup can
+ *  genuinely clear. */
 function OverridesLoadFailed({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="space-y-2">
@@ -282,6 +284,11 @@ export function RepoNotificationsDialogHost() {
   // Retained so the body keeps its repo through the close fade instead of
   // blanking the dialog as it animates out.
   const shownRepo = useRetained(repoPath);
+  // App's repo/settings actions stay reachable from the macOS menu bar, which
+  // sits outside this dialog's modal overlay — register so they refuse while it
+  // owns the screen. Keyed on the live flag, not the retained one, so the close
+  // fade releases the gate.
+  useModalGateRegistration(repoPath !== null);
 
   return (
     <Dialog
@@ -356,7 +363,10 @@ function RepoNotificationsBody({
   // Which of the three bodies renders. Every editable path hangs off "ready", so
   // the baseline behind it is always a real one.
   const state = bodyState({
-    error: overrides.isError,
+    // Settings counts too: `global` is half the baseline, and a failed
+    // loadSettings would otherwise leave it undefined behind a skeleton that
+    // never resolves.
+    error: overrides.isError || settings.isError,
     loaded: global !== undefined && saved !== undefined,
     identityPending: identityQuery.isPending,
   });
@@ -473,8 +483,15 @@ function RepoNotificationsBody({
       {/* overflow-x-hidden alongside overflow-y-auto so the vertical scrollbar's
           width can't induce a phantom horizontal one. */}
       <div className="min-h-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto pr-1">
+        {/* Retries BOTH halves: the arm fires for either failure, and refetching
+            only one leaves the other's error in place. */}
         {state === "error" && (
-          <OverridesLoadFailed onRetry={() => overrides.refetch()} />
+          <OverridesLoadFailed
+            onRetry={() => {
+              overrides.refetch();
+              settings.refetch();
+            }}
+          />
         )}
         {state === "loading" && <Skeleton className="h-40 w-full" />}
         {/* `global !== undefined` re-narrows the type the discriminant already

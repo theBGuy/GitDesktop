@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useLayoutEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,6 @@ import {
   overrideCount,
   SOURCE_DESCRIPTIONS,
   SOURCE_LABELS,
-  useNotificationsDraft,
   useRepoNotificationsDialog,
 } from "@/lib/notifications/matrix";
 import type { RepoNotificationOverride } from "@/lib/notifications/overrides";
@@ -68,18 +67,12 @@ export const NotificationsSection = withForm({
 
     // Only the notifications slice matters — the dialog reads no other field —
     // so the selector narrows to it and a keystroke elsewhere in the form can't
-    // re-render this panel.
+    // re-render this panel. SettingsScreen publishes the same value for the
+    // routes that reach the dialog from outside this form.
     const savedNotifications = useSettings().data?.notifications;
     const draftSignature = useSelector(form.store, (s) =>
       notificationsSignature(s.values.notifications),
     );
-    // Published for the routes into the dialog that render outside this form
-    // (the command palette). Never cleared on unmount: a panel switch leaves
-    // the draft live in the form, so App retires it when Settings closes.
-    const publishDraft = useNotificationsDraft((s) => s.publish);
-    useEffect(() => {
-      publishDraft(draftSignature);
-    }, [draftSignature, publishDraft]);
 
     const overrideReason = notificationsDraftOutOfSync(
       draftSignature,
@@ -111,12 +104,16 @@ export const NotificationsSection = withForm({
       <section className="space-y-4">
         <div>
           <h2 className="text-sm font-medium">Notifications</h2>
+          {/* The agent-tasks clause names a row that Hide AI removes, so it is
+              gated exactly like the same sentence in the user guide. */}
           <p className="text-xs text-muted-foreground">
             Choose where each event lands: a row in the activity inbox (In-app),
             an OS notification, or both. A source with both channels off records
-            nothing. OS notifications fire only while GitDesktop is unfocused —
-            agent tasks also ping while you work elsewhere in the app. Pull
-            request events are polled about once a minute while a hosted
+            nothing. OS notifications fire only while GitDesktop is unfocused
+            {aiEnabled
+              ? " — agent tasks also ping while you work elsewhere in the app."
+              : "."}{" "}
+            Pull request events are polled about once a minute while a hosted
             repository (GitHub, GitLab, or Bitbucket) is open.
           </p>
         </div>
@@ -297,14 +294,9 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
     networkMode: "always",
   });
 
-  // Both maps key on the LOWERCASED form, and every lookup lowercases too, so
-  // the whole file associates keys under one rule — the one `overrideEntry`
-  // resolves the open repo by. An exact-case identity map would miss a stored
-  // key that differs only in case and mislabel its row "(not in recent
-  // repositories)". Values stay original-cased: they are real paths. Maps, not
-  // objects, because an override key is hand-editable and
-  // "__proto__"/"toString" would resolve up an object's prototype chain to
-  // something that is not a path.
+  // Keys lowercased on both sides, matching `overrideEntry`. Maps, not objects:
+  // an override key is hand-editable, and "__proto__" would resolve up an
+  // object's prototype chain to something that is not a path.
   const identities = recentIdentities.data;
   const byIdentity = new Map(
     (identities ?? []).map((id, i) => [id.toLowerCase(), recentPaths[i]]),

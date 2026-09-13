@@ -41,9 +41,9 @@ export function usePrNotifications(repoPath: string) {
   const aiEnabled = useAiEnabled();
   const prefs = settings.data?.notifications;
   const override = useRepoNotificationOverride(repoPath);
-  // Same resolution the emit gate applies, so a repo whose PR sources all deliver
-  // on no channel makes no background call — and one whose override ENABLES a
-  // globally-muted source still polls.
+  // The emit gate's own resolution, applied once the override is in hand: it reads
+  // undefined until the overrides query resolves, so a muted repo can still fire its
+  // first poll. Delivery stays correct regardless — emit re-reads the override itself.
   const anyNotif =
     settings.data !== undefined &&
     anyChannelOn(settings.data.notifications, override, [

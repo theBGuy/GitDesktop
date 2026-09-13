@@ -31,8 +31,9 @@ export function useRunNotifications(repoPath: string) {
   const override = useRepoNotificationOverride(repoPath);
   // Polled for any provider whose CI read is built — GitHub Actions and GitLab
   // pipelines both map onto the same neutral run shape the diff below reads.
-  // The poll shares the emit gate's resolution, so a state that would deliver on
-  // no channel makes no background call; unloaded settings poll nothing.
+  // Shares the emit gate's resolution once the override is in hand: it reads undefined
+  // until the overrides query resolves, so a muted repo can still fire its first poll.
+  // Delivery stays correct regardless — emit re-reads the override itself.
   const enabled =
     repoPath !== "" &&
     forgeFeatureReady(gh.data, "ci") &&
