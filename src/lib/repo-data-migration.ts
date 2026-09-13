@@ -1,5 +1,6 @@
 import { load } from "@tauri-apps/plugin-store";
 import { repoIdentity } from "@/lib/git/repo-identity";
+import { rehomeTaskScopes } from "@/lib/scripts/store";
 import { storeName } from "@/lib/test-mode";
 
 // Best-effort re-homing of every per-repo app-data store when a recents row is
@@ -29,12 +30,14 @@ import { storeName } from "@/lib/test-mode";
 //   - `keep-new`  — single values: keep the new-key value if present, else the old.
 //
 // plans.json / research.json are handled separately: their items carry a RAW
-// checkout `repoPath`, rewritten in place.
+// checkout `repoPath`, rewritten in place. scripts.json likewise: its tasks are one
+// flat list carrying a per-repo `scope` plus per-repo run confirmations, re-homed
+// by `rehomeTaskScopes`.
 //
 // Deliberately excluded: settings.json (already moved), sessions/*.jsonl (Rust-owned
 // append-only; a moved repo's session worktrees are broken at the git level anyway),
-// notifications.json (transient), scripts / analytics / agent-numbers /
-// jira-field-maps (not per-repo).
+// notifications.json (transient), analytics / agent-numbers / jira-field-maps
+// (not per-repo).
 //
 // Accepted residuals: this runs outside the feature modules' serialized write queues,
 // so a peer write landing between a store's reload() and save() loses to our
@@ -294,6 +297,12 @@ export async function migrateRepoData(
       } catch {
         // Unreadable/corrupt store — skip it, migrate the rest.
       }
+    }
+    try {
+      // Task scopes are identity keys, so they re-home onto newKey, not newPath.
+      await rehomeTaskScopes(oldPath, newKey);
+    } catch {
+      // Unreadable/corrupt store — skip it, migrate the rest.
     }
   } catch {
     // Identity resolution or anything unforeseen — the open must never block on us.

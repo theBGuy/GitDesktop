@@ -5,6 +5,7 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { PathText } from "@/components/path-text";
+import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -24,12 +25,19 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { isMac, isWindows } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import {
   useDetectedInterpreters,
   useResolvedInterpreter,
 } from "@/lib/scripts/interpreters";
+import { useTaskRepoKeys } from "@/lib/scripts/queries";
+import {
+  scopeRepoLabel,
+  TASK_SCOPE_GLOBAL,
+  taskScope,
+} from "@/lib/scripts/scope";
 import {
   type ArgDoc,
   availableInterpreters,
@@ -129,6 +137,43 @@ export function TaskDialog({
   const [describe, setDescribe] = useState("");
   const [confirmBeforeRun, setConfirmBeforeRun] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [scope, setScope] = useState<string>(TASK_SCOPE_GLOBAL);
+
+  // Scope lookup keys for the open repo: [repoPath] while its identity resolves,
+  // [repoPath, identity] once it does. The canonical value the "This repository"
+  // option stores is the most-preferred (last) key — the identity once resolved,
+  // matching what the store folds a written scope onto.
+  const { keys: repoKeys } = useTaskRepoKeys(repoPath);
+  const thisRepoKey = repoKeys.length ? repoKeys[repoKeys.length - 1] : null;
+  // A legacy raw-path scope for the OPEN repo reads as "this repository" too
+  // (repoKeys carries both forms), so it selects that option rather than falling
+  // through to the other-repository one.
+  const scopedToThisRepo =
+    scope !== TASK_SCOPE_GLOBAL && repoKeys.includes(scope);
+  const scopeOptions: { value: string; label: string }[] = [
+    { value: TASK_SCOPE_GLOBAL, label: "All repositories" },
+  ];
+  if (repoPath && thisRepoKey)
+    scopeOptions.push({
+      value: thisRepoKey,
+      label: `This repository — ${scopeRepoLabel(repoPath)}`,
+    });
+  // A scope pointing at a DIFFERENT repo needs an option of its own: without one
+  // the Select can't represent its own value, and saving an untouched edit would
+  // silently re-scope the task to whatever the trigger happened to show.
+  if (scope !== TASK_SCOPE_GLOBAL && !scopedToThisRepo)
+    scopeOptions.push({
+      value: scope,
+      label: `${scopeRepoLabel(scope)} — other repository`,
+    });
+  // The Select's value must equal an option value: normalize a this-repo scope
+  // held under a non-canonical key onto the option's canonical one. The
+  // `?? scope` arm is type-level only — `scopedToThisRepo` implies repoKeys is
+  // non-empty, which TS can't narrow across the check.
+  const selectedScope = scopedToThisRepo ? (thisRepoKey ?? scope) : scope;
+  const scopeItems = Object.fromEntries(
+    scopeOptions.map((o) => [o.value, o.label]),
+  );
 
   // The cheap `detected` pass above only checks PATH + known install dirs, so it
   // misses nvm/fnm-managed binaries when the app was launched from Finder/Dock
@@ -184,7 +229,12 @@ export function TaskDialog({
     setDescribe("");
     setConfirmBeforeRun(editing?.confirmBeforeRun ?? true);
     setConfirmDelete(false);
-  }, [open, editing, cancelGenerate, cancelAnalyze]);
+    // The task's stored scope verbatim; a new task belongs to the open repo.
+    // Whether that value is the canonical "this repository" key is decided at
+    // render (`selectedScope`), so a scope seeded before the identity resolved
+    // still lands on the right option once it does.
+    setScope(editing ? taskScope(editing) : (thisRepoKey ?? TASK_SCOPE_GLOBAL));
+  }, [open, editing, cancelGenerate, cancelAnalyze, thisRepoKey]);
 
   const trimmedName = name.trim();
   // Saving mid-stream would persist a half-written script, so an in-flight
@@ -275,6 +325,10 @@ export function TaskDialog({
           description: d,
         })),
       confirmBeforeRun,
+      scope: selectedScope,
+      // Confirmations are the run surface's to record; the editor carries the
+      // task's existing ones through untouched.
+      runConfirmedIn: editing?.runConfirmedIn ?? [],
     });
   }
 
@@ -399,6 +453,36 @@ export function TaskDialog({
             autoComplete="off"
           />
         </div>
+
+        {/* No repo open means no choice to offer — the task stays global. */}
+        {repoPath && (
+          <div className="space-y-1.5">
+            <Label htmlFor="task-scope">Available in</Label>
+            <Select
+              // Without `items`, Base UI's SelectValue renders the RAW value —
+              // for an identity-keyed scope that's a bare "…/.git" path. The map
+              // makes the trigger show the option label.
+              items={scopeItems}
+              value={selectedScope}
+              onValueChange={(v) => v && setScope(v)}
+            >
+              <SelectTrigger id="task-scope" className="w-full">
+                <SelectValue onMouseEnter={clipTitleFromText} />
+              </SelectTrigger>
+              <SelectContent>
+                {scopeOptions.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    <SelectClipText>{o.label}</SelectClipText>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              A task is offered in the repository it belongs to. Choose all
+              repositories to reach it from every repo you open.
+            </p>
+          </div>
+        )}
 
         {/* Source: an existing file, or an inline body — with the AI analyzer
             alongside, since it documents whichever source is active. */}

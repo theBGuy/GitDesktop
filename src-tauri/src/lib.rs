@@ -235,6 +235,7 @@ pub fn run() {
             pty::pty_close,
             pty::detect_interpreters,
             pty::resolve_task_interpreter,
+            pty::resolve_task_script,
             pty::task_open_terminal,
             git::ops::git_checkout_commit,
             git::ops::git_revert,

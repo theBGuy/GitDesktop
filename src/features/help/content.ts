@@ -2708,6 +2708,13 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   provider connected, **Generate** writes an inline script from a short description, and
   **Analyze with AI** reads the script and fills in the name, description, and the
   arguments it accepts.{{/ai}} Either way it runs in the open repository's folder.
+- **Available in.** A new task belongs to the repository you have open. Switch
+  **Available in** to **All repositories** for one you want everywhere (a general
+  cleanup script, say), and switch it back at any time from the same editor. Tasks
+  you saved before this choice existed stay available in every repository.
+- **Tasks from your other repositories.** They stay listed in a collapsed **Other
+  repositories** group, each with the repo it belongs to, so nothing you saved goes
+  missing. Open one there to edit or delete it; it runs in its own repository.
 - **Arguments.** A task carries default **arguments** (e.g. \`--preview\`; quote values with
   spaces), and you can **document the arguments** the script accepts — each with a short
   description, like a CLI's \`--help\` — shown as a reference wherever you set arguments.
@@ -2717,8 +2724,13 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   terminal, so a script that prompts you — the next version to release, a yes/no — works,
   and output keeps its colour. **Stop** ends a run and the processes it started; **Rerun**
   starts a fresh one with the same arguments.
+- **Which file it runs.** A task pointed at a script in the repo names the **exact file**
+  it resolved in this repository, in the confirmation and again in the running task's
+  header, and says so when that file isn't there.
 - **Confirm before running.** Each task can ask for confirmation first (on by default) —
-  turn it off per task once you trust it (it then always runs its saved arguments).
+  turn it off per task once you trust it (it then always runs its saved arguments). Even
+  then, a task pointed at a script in the repo confirms its **first** run in each
+  repository, so a path that resolves differently from repo to repo gets a look first.
   Starting a task while another is still running asks before it replaces it.`,
   },
   {

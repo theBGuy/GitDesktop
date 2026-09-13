@@ -142,6 +142,15 @@ export interface TaskDef {
   /** Confirm before each run. Defaults on; a trusted, frequently-run task can turn
    *  it off in its editor. */
   confirmBeforeRun: boolean;
+  /** Which repositories offer this task: `"global"` for every repo, otherwise one
+   *  repo's worktree-stable identity key (a legacy raw checkout path is still
+   *  honored on read, folded onto the identity on write). An unrecognized value
+   *  narrows rather than widens — it simply matches no open repo. */
+  scope: string;
+  /** Repo keys where this task's first run was already confirmed, so the
+   *  file-task confirmation is per repo and once-only. Same key forms as
+   *  {@link scope}. */
+  runConfirmedIn: string[];
 }
 
 /**
@@ -179,8 +188,9 @@ export function parseArgs(input: string): string[] {
 
 /**
  * The `scripts.json` store shape. `enabled` is the one-time consent to run tasks
- * at all (off until the user opts in); `tasks` is a list shared across every repo
- * (per-repo scoping is a later phase).
+ * at all (off until the user opts in) and stays global — which repos see a task is
+ * the task's own {@link TaskDef.scope}, so `tasks` is one flat list whose entries
+ * each apply everywhere or in a single repo.
  */
 export interface ScriptsConfig {
   schemaVersion: 1;

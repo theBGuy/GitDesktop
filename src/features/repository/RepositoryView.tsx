@@ -89,7 +89,8 @@ import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useLensGate, useSetRepoLens } from "@/lib/repo-lens/queries";
-import { useScripts } from "@/lib/scripts/queries";
+import { useScripts, useTaskRepoKeys } from "@/lib/scripts/queries";
+import { taskInScope } from "@/lib/scripts/scope";
 import type { AppSettings } from "@/lib/settings/api";
 import {
   settingsKeys,
@@ -457,8 +458,17 @@ export function RepositoryView() {
   // the palette can reach it from any tab. Gated on tasks being enabled + present.
   const [runTaskPickerOpen, setRunTaskPickerOpen] = useState(false);
   const scripts = useScripts();
+  const { keys: taskRepoKeys, settled: taskKeysSettled } =
+    useTaskRepoKeys(repoPath);
   const tasksEnabled = scripts.data?.enabled ?? false;
-  const hasTasks = (scripts.data?.tasks.length ?? 0) > 0;
+  // Only this repo's tasks (plus the global ones) count: the picker offers
+  // exactly those, so a repo holding nothing but other repos' tasks drops the
+  // palette action rather than opening an empty picker. Held until the identity
+  // settles, matching the picker — an unsettled classification may only ever
+  // withhold the action, never offer another repo's task as runnable.
+  const hasTasks =
+    taskKeysSettled &&
+    (scripts.data?.tasks ?? []).some((t) => taskInScope(t, taskRepoKeys));
   // A running task shows a dot on the "More" trigger when you're on another tab.
   const taskRunning = useTaskRunStore((s) => s.activeRun?.status === "running");
   // Sidebar collapse: persisted, and only ever flipped by the user (the toggle,

@@ -298,6 +298,33 @@ pub async fn resolve_task_interpreter(key: String) -> AppResult<Option<String>> 
         .map(|p| p.to_string_lossy().into_owned()))
 }
 
+/// The one resolver for a task's script path — both spawn sites and the
+/// `resolve_task_script` display command share it, so what the UI names is
+/// always the file a run would execute.
+fn resolve_script_path(cwd: &str, file: &str) -> PathBuf {
+    if std::path::Path::new(file).is_absolute() {
+        PathBuf::from(file)
+    } else {
+        std::path::Path::new(cwd).join(file)
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedTaskScript {
+    pub path: String,
+    pub exists: bool,
+}
+
+#[tauri::command]
+pub async fn resolve_task_script(cwd: String, path: String) -> AppResult<ResolvedTaskScript> {
+    let resolved = resolve_script_path(&cwd, &path);
+    Ok(ResolvedTaskScript {
+        path: resolved.to_string_lossy().into_owned(),
+        exists: resolved.exists(),
+    })
+}
+
 /// The built PTY child plus teardown metadata.
 struct BuiltCommand {
     cmd: CommandBuilder,
@@ -346,11 +373,7 @@ async fn build_command(opts: &PtyOpts, id: &str) -> AppResult<BuiltCommand> {
         // source: write the body to a temp file (unique per run) and run that.
         let (script_path, cleanup) = match opts.path.as_deref().filter(|p| !p.is_empty()) {
             Some(file) => {
-                let full = if std::path::Path::new(file).is_absolute() {
-                    std::path::PathBuf::from(file)
-                } else {
-                    std::path::Path::new(&opts.cwd).join(file)
-                };
+                let full = resolve_script_path(&opts.cwd, file);
                 if !full.exists() {
                     return Err(AppError::Command(format!(
                         "script file not found: {}",
@@ -869,11 +892,7 @@ async fn task_open_terminal_impl(
 
     let script_path = match path.as_deref().filter(|p| !p.is_empty()) {
         Some(file) => {
-            let full = if std::path::Path::new(file).is_absolute() {
-                std::path::PathBuf::from(file)
-            } else {
-                std::path::Path::new(&cwd).join(file)
-            };
+            let full = resolve_script_path(&cwd, file);
             if !full.exists() {
                 return Err(AppError::Command(format!(
                     "script file not found: {}",
@@ -917,6 +936,73 @@ mod tests {
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::Condvar;
     use std::time::{Duration, Instant};
+
+    #[cfg(windows)]
+    const SCRIPT_CWD: &str = "C:/repo";
+    #[cfg(not(windows))]
+    const SCRIPT_CWD: &str = "/repo";
+
+    #[test]
+    fn resolve_script_relative_path_joins_cwd() {
+        assert_eq!(
+            resolve_script_path(SCRIPT_CWD, "scripts/task.sh"),
+            PathBuf::from(format!("{SCRIPT_CWD}/scripts/task.sh"))
+        );
+    }
+
+    #[test]
+    fn resolve_script_absolute_path_ignores_cwd() {
+        let file = format!("{SCRIPT_CWD}/scripts/task.sh");
+        assert_eq!(resolve_script_path("ignored", &file), PathBuf::from(&file));
+    }
+
+    #[test]
+    fn resolve_script_trailing_separator_joins_cwd() {
+        assert_eq!(
+            resolve_script_path(&format!("{SCRIPT_CWD}/"), "task.sh"),
+            PathBuf::from(format!("{SCRIPT_CWD}/task.sh"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_script_windows_partial_paths_follow_std_join() {
+        // Display-parity contract: std join replaces the base for a drive-relative
+        // prefix, while a rooted path retains the base's drive and replaces its tail.
+        assert_eq!(
+            resolve_script_path(r"C:\repo", "C:file"),
+            PathBuf::from("C:file")
+        );
+        assert_eq!(
+            resolve_script_path(r"C:\repo", r"\file"),
+            PathBuf::from(r"C:\file")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_script_command_reports_existing_and_missing_file() {
+        let cwd = std::env::temp_dir();
+        let file = tempfile::NamedTempFile::new_in(&cwd).unwrap();
+        let path = file.path().to_string_lossy().into_owned();
+        let name = file
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let cwd = cwd.to_string_lossy().into_owned();
+
+        let existing = resolve_task_script(cwd.clone(), name.clone())
+            .await
+            .unwrap();
+        assert_eq!(existing.path, path);
+        assert!(existing.exists);
+
+        file.close().unwrap();
+        let missing = resolve_task_script(cwd, name).await.unwrap();
+        assert_eq!(missing.path, path);
+        assert!(!missing.exists);
+    }
 
     /// The input side of the PTY map. A real `PtyHandle` needs a live child, so the
     /// concurrency tests key on the two fields `pty_write` touches.

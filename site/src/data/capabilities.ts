@@ -439,7 +439,7 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "Tasks — register a repo script or write one inline, run it in an interactive terminal",
+      "Tasks — register a repo script or write one inline and run it in an interactive terminal, kept to one repository or available in all",
     highlight: true,
   },
   { group: "Repository & workspace", label: "Manage tracked & ignored files" },

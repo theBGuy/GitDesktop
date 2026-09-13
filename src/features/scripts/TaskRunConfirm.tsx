@@ -1,4 +1,6 @@
+import { FileCodeIcon, WarningIcon } from "@phosphor-icons/react";
 import { Fragment, useEffect, useRef, useState } from "react";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -10,8 +12,15 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  useResolvedTaskScript,
+  useTaskRepoKeys,
+  useUpdateTask,
+} from "@/lib/scripts/queries";
+import { isRunConfirmedIn } from "@/lib/scripts/scope";
 import { INTERPRETERS } from "@/lib/scripts/types";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
+import { useUiStore } from "@/lib/stores/ui";
 import { useRetained } from "@/lib/use-retained";
 
 const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
@@ -25,12 +34,18 @@ const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
  * the task's saved args (the saved task is never changed here), with the task's
  * documented arguments as reference below — Enter runs immediately.
  * `reason: "replace"` additionally warns that the still-running task stops.
+ *
+ * A file task names the absolute file this run will execute: its stored path can
+ * be repo-relative, so the same task points at a different file in every repo.
  */
 export function TaskRunConfirm() {
+  const repoPath = useUiStore((s) => s.repoPath);
   const pending = useTaskRunStore((s) => s.pending);
   const activeRun = useTaskRunStore((s) => s.activeRun);
   const confirmPending = useTaskRunStore((s) => s.confirmPending);
   const cancelPending = useTaskRunStore((s) => s.cancelPending);
+  const { keys } = useTaskRepoKeys(repoPath);
+  const updateTask = useUpdateTask();
 
   const [args, setArgs] = useState("");
   // Seed the args field from the task's saved string each time a run is
@@ -51,10 +66,42 @@ export function TaskRunConfirm() {
   const shownPending = useRetained(pending);
 
   const replacing = shownPending?.reason === "replace";
+  const firstRun = shownPending?.firstRun === true;
   const task = shownPending?.task ?? null;
   const interpreter = task
     ? (INTERPRETER_LABELS[task.interpreter] ?? task.interpreter)
     : "";
+  const resolved = useResolvedTaskScript(task, repoPath);
+  const detail =
+    task?.description ||
+    `Runs the ${interpreter} script in the repository's folder. Make sure you trust what it does.`;
+
+  // The Run button and the args field's Enter share this: which control the user
+  // reaches for must not decide whether the confirmation is recorded.
+  const run = () => {
+    // `shownPending` outlives the live one through the close animation, and the
+    // args field can still hold focus there — so a run fired against a pending
+    // the repo switch already cleared would record the NEW repo's key while
+    // `confirmPending` no-ops, skipping that repo's genuine first run.
+    if (!useTaskRunStore.getState().pending) return;
+    if (task?.source.kind === "file" && !isRunConfirmedIn(task, keys)) {
+      // The canonical key is the most-preferred one `useTaskRepoKeys` reports —
+      // the worktree-stable identity once resolved, the raw checkout path until
+      // then (the store folds a raw one onto the identity on the next write).
+      const key = keys.at(-1);
+      // Fire-and-forget: the run starts either way and nothing downstream reads
+      // the result, so this takes no continuation to lose.
+      if (key) {
+        updateTask
+          .mutateAsync({
+            ...task,
+            runConfirmedIn: [...task.runConfirmedIn, key],
+          })
+          .catch(() => undefined);
+      }
+    }
+    confirmPending(args);
+  };
   // Keys precomputed outside the JSX: `arg` alone isn't guaranteed unique (the
   // editor doesn't forbid documenting the same flag twice), and the list is
   // static per dialog-open, so a position-qualified key is stable and safe.
@@ -83,16 +130,44 @@ export function TaskRunConfirm() {
                 Stops “{activeRun?.task.name}” — still running — and runs “
                 {task?.name}” instead.
               </>
-            ) : task?.description ? (
-              task.description
             ) : (
               <>
-                Runs the {interpreter} script in the repository's folder. Make
-                sure you trust what it does.
+                {firstRun
+                  ? "This is the task's first run in this repository, so it confirms once here. Later runs start straight away. "
+                  : ""}
+                {detail}
               </>
             )}
           </DialogDescription>
         </DialogHeader>
+
+        {task?.source.kind === "file" ? (
+          // The exact file this run executes, knowable only once resolved against
+          // this repo. `min-w-0` because `DialogContent` is a grid: the item would
+          // otherwise floor at the path's width and outgrow the dialog's cap.
+          <div className="min-w-0 space-y-1 text-xs">
+            <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+              <FileCodeIcon className="size-3.5 shrink-0" />
+              <PathText
+                path={resolved.data?.path ?? task.source.path}
+                className="font-mono"
+              />
+            </div>
+            {/* Icon + text, never color alone (WCAG AA). */}
+            {resolved.data?.exists === false ? (
+              <p className="flex items-start gap-1.5 text-warning">
+                <WarningIcon
+                  weight="fill"
+                  className="mt-0.5 size-3.5 shrink-0"
+                />
+                <span className="min-w-0">
+                  No such file in this repository. The run will stop with
+                  “script file not found”.
+                </span>
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="space-y-1.5">
           <Label htmlFor="run-args">Arguments</Label>
@@ -105,7 +180,7 @@ export function TaskRunConfirm() {
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                confirmPending(args);
+                run();
               }
             }}
             placeholder="none"
@@ -133,10 +208,7 @@ export function TaskRunConfirm() {
           <Button variant="outline" onClick={cancelPending}>
             Cancel
           </Button>
-          <Button
-            variant={replacing ? "destructive" : "default"}
-            onClick={() => confirmPending(args)}
-          >
+          <Button variant={replacing ? "destructive" : "default"} onClick={run}>
             {replacing ? "Stop & run" : "Run"}
           </Button>
         </DialogFooter>

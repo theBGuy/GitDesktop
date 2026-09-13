@@ -1,12 +1,15 @@
 import {
+  CaretDownIcon,
+  CaretRightIcon,
   DotsThreeVerticalIcon,
+  FolderIcon,
   LightningIcon,
   PencilSimpleIcon,
   PlayIcon,
   PlusIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
-import { useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,16 +27,53 @@ import {
   useRemoveTask,
   useScripts,
   useSetTasksEnabled,
+  useTaskRepoKeys,
   useUpdateTask,
 } from "@/lib/scripts/queries";
+import {
+  scopeRepoLabel,
+  TASK_SCOPE_GLOBAL,
+  taskInScope,
+  taskScope,
+  taskScopedElsewhere,
+} from "@/lib/scripts/scope";
 import { INTERPRETERS, type TaskDef } from "@/lib/scripts/types";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
+import { useUiStore } from "@/lib/stores/ui";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 import { TaskDialog } from "./TaskDialog";
 
 const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
   INTERPRETERS.map((i) => [i.id, i.label]),
 );
+
+/** One keyboard-navigable row: the in-scope tasks, then the other-repositories
+ *  disclosure header and — while it's open — that group's rows. One list, so the
+ *  arrows cross the boundary without the user learning a second gesture. */
+type NavRow =
+  | { kind: "task"; task: TaskDef }
+  | { kind: "group" }
+  | { kind: "other"; task: TaskDef };
+
+const GROUP_ROW_KEY = "other-repos-header";
+
+/** DOM key per row. The two task kinds are prefixed apart: the same task id can
+ *  never appear in both buckets, but a shared key space across row TYPES is the
+ *  collision React resolves by keeping the first row's DOM alive. */
+function navRowKey(row: NavRow): string {
+  switch (row.kind) {
+    case "group":
+      return GROUP_ROW_KEY;
+    case "other":
+      return `other-${row.task.id}`;
+    default:
+      return row.task.id;
+  }
+}
 
 export function TasksPanel() {
   const scripts = useScripts();
@@ -42,13 +82,22 @@ export function TasksPanel() {
   const updateTask = useUpdateTask();
   const removeTask = useRemoveTask();
   const request = useTaskRunStore((s) => s.request);
+  const repoPath = useUiStore((s) => s.repoPath);
+  // Scope classification waits for `settled`: the identity key resolves a beat
+  // after open, and classifying against the raw path alone would flash an
+  // identity-scoped task through the other-repositories group.
+  const { keys, settled } = useTaskRepoKeys(repoPath);
 
   const [editing, setEditing] = useState<TaskDef | "new" | null>(null);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [othersOpen, setOthersOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const othersId = useId();
 
   const enabled = scripts.data?.enabled ?? false;
   const tasks = scripts.data?.tasks ?? [];
+  const inScope = tasks.filter((t) => taskInScope(t, keys));
+  const elsewhere = tasks.filter((t) => taskScopedElsewhere(t, keys));
 
   function saveTask(task: TaskDef) {
     const isNew = editing === "new";
@@ -63,6 +112,8 @@ export function TasksPanel() {
   }
 
   function deleteTask(id: string) {
+    // All tasks, not just the in-scope ones: the other-repositories group deletes
+    // through here too.
     const name = tasks.find((t) => t.id === id)?.name ?? "task";
     removeTask.mutate(id, {
       onSuccess: () => {
@@ -73,20 +124,53 @@ export function TasksPanel() {
     });
   }
 
+  const navRows: NavRow[] = [];
+  for (const task of inScope) navRows.push({ kind: "task", task });
+  if (elsewhere.length > 0) {
+    navRows.push({ kind: "group" });
+    if (othersOpen) {
+      for (const task of elsewhere) navRows.push({ kind: "other", task });
+    }
+  }
+  const groupIndex = inScope.length;
+  // The cursor is clamped at render, not stored clamped: the row list shrinks
+  // under it (a delete, a collapse, a repo switch), and a stale index past the
+  // end would leave no row carrying tabIndex=0 — the list unreachable by Tab —
+  // and hand the nav an undefined row to key.
+  const clamped = Math.min(activeIndex, navRows.length - 1);
+  // Roving tabindex over the composite list: exactly one row is a tab stop, and
+  // until a row is focused (clamped === -1) that's the first one, so the list is
+  // keyboard-reachable from the start.
+  const tabStop = Math.max(clamped, 0);
+
   const nav = listKeyboardNav({
-    items: tasks,
-    activeIndex,
-    onActivate: (_item, to) => setActiveIndex(to),
-    rowKey: (t) => t.id,
+    items: navRows,
+    activeIndex: clamped,
+    onActivate: (_row, to) => setActiveIndex(to),
+    rowKey: navRowKey,
   });
+
+  // The row cursor and the group's expansion describe the repo they were made
+  // in. Guarded on the path actually changing: this panel outlives a repo switch
+  // (RepositoryView is one instance) and <Activity> replays effects on every tab
+  // show, where an unguarded reset would collapse the group under the user.
+  const prevRepo = useRef(repoPath);
+  useEffect(() => {
+    if (prevRepo.current === repoPath) return;
+    prevRepo.current = repoPath;
+    setActiveIndex(-1);
+    setOthersOpen(false);
+  }, [repoPath]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
         <LightningIcon className="size-4 text-muted-foreground" />
         <span className="text-xs font-medium">Tasks</span>
-        {enabled && tasks.length > 0 && (
-          <span className="text-xs text-muted-foreground">{tasks.length}</span>
+        {enabled && settled && inScope.length > 0 && (
+          <span className="text-xs text-muted-foreground">
+            {inScope.length}
+          </span>
         )}
         <span className="flex-1" />
         {enabled && (
@@ -102,7 +186,10 @@ export function TasksPanel() {
         )}
       </div>
 
-      {scripts.isPending ? (
+      {/* The identity gate applies only once tasks are enabled: the consent
+          screen classifies nothing, so it must not wait on an identity lookup
+          that may never settle. */}
+      {scripts.isPending || (enabled && !settled) ? (
         <div className="space-y-2 p-3">
           <Skeleton className="h-8 w-full" />
           <Skeleton className="h-8 w-full" />
@@ -136,8 +223,9 @@ export function TasksPanel() {
           <div className="space-y-1">
             <p className="text-sm font-medium">No tasks yet</p>
             <p className="text-xs text-muted-foreground">
-              Register a script to run it here. Tasks are shared across your
-              repositories and run in whichever one is open.
+              Register a script to run it here. A task belongs to the repository
+              you create it in, and you can make one available in every
+              repository instead.
             </p>
           </div>
           <Button size="sm" onClick={() => setEditing("new")}>
@@ -154,91 +242,163 @@ export function TasksPanel() {
             onKeyDown={nav}
             className="space-y-0.5 p-2"
           >
-            {tasks.map((task, index) => (
-              <div key={task.id} className="flex items-center gap-1">
-                <button
-                  type="button"
-                  data-row={task.id}
-                  // Roving tabindex: exactly one row is a tab stop. Until a row
-                  // is focused (activeIndex === -1) that's the first row, so the
-                  // list is keyboard-reachable from the start — otherwise nothing
-                  // is tabbable and the arrow-nav + Enter-to-run can't be reached.
-                  tabIndex={index === Math.max(activeIndex, 0) ? 0 : -1}
-                  onFocus={() => setActiveIndex(index)}
-                  onClick={() => request(task)}
-                  className={cn(
-                    "flex min-w-0 flex-1 items-start gap-2 rounded px-2 py-1.5 text-left text-xs",
-                    index === activeIndex
-                      ? "bg-accent text-accent-foreground"
-                      : "hover:bg-muted/60",
-                  )}
-                >
-                  <PlayIcon className="mt-px size-3.5 shrink-0 text-muted-foreground" />
-                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="flex items-center gap-2">
-                      <span
-                        className="min-w-0 flex-1 truncate"
-                        onMouseEnter={clipTitle(task.name)}
-                      >
-                        {task.name}
-                      </span>
-                      {task.args !== "" && (
+            {inScope.length === 0 ? (
+              <div className="flex flex-col items-center gap-3 px-4 py-8 text-center">
+                <LightningIcon className="size-8 text-muted-foreground" />
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">
+                    No tasks for this repository
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Create one here, or open the repository a task below belongs
+                    to.
+                  </p>
+                </div>
+                <Button size="sm" onClick={() => setEditing("new")}>
+                  <PlusIcon data-icon="inline-start" />
+                  New task
+                </Button>
+              </div>
+            ) : (
+              inScope.map((task, index) => (
+                <div key={task.id} className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    data-row={task.id}
+                    tabIndex={index === tabStop ? 0 : -1}
+                    onFocus={() => setActiveIndex(index)}
+                    onClick={() => void request(task)}
+                    className={cn(
+                      "flex min-w-0 flex-1 items-start gap-2 rounded px-2 py-1.5 text-left text-xs",
+                      index === clamped
+                        ? "bg-accent text-accent-foreground"
+                        : "hover:bg-muted/60",
+                    )}
+                  >
+                    <PlayIcon className="mt-px size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="flex items-center gap-2">
                         <span
-                          className="min-w-0 max-w-32 truncate font-mono text-[10px] text-muted-foreground"
-                          onMouseEnter={clipTitle(task.args)}
+                          className="min-w-0 flex-1 truncate"
+                          onMouseEnter={clipTitle(task.name)}
                         >
-                          {task.args}
+                          {task.name}
+                        </span>
+                        {task.args !== "" && (
+                          <span
+                            className="min-w-0 max-w-32 truncate font-mono text-[10px] text-muted-foreground"
+                            onMouseEnter={clipTitle(task.args)}
+                          >
+                            {task.args}
+                          </span>
+                        )}
+                        {taskScope(task) === TASK_SCOPE_GLOBAL && (
+                          <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                            All repos
+                          </span>
+                        )}
+                        <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                          {INTERPRETER_LABELS[task.interpreter] ??
+                            task.interpreter}
+                        </span>
+                      </span>
+                      {task.description !== "" && (
+                        <span
+                          className="truncate text-[11px] text-muted-foreground"
+                          onMouseEnter={clipTitle(task.description)}
+                        >
+                          {task.description}
                         </span>
                       )}
-                      <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                        {INTERPRETER_LABELS[task.interpreter] ??
-                          task.interpreter}
-                      </span>
                     </span>
-                    {task.description !== "" && (
-                      <span
-                        className="truncate text-[11px] text-muted-foreground"
-                        onMouseEnter={clipTitle(task.description)}
-                      >
-                        {task.description}
-                      </span>
-                    )}
-                  </span>
-                </button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <Button
-                        size="icon-xs"
-                        variant="ghost"
-                        className="shrink-0 text-muted-foreground"
-                        title={`More actions for "${task.name}"`}
-                        aria-label={`More actions for ${task.name}`}
-                      />
-                    }
-                  >
-                    <DotsThreeVerticalIcon />
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => request(task)}>
-                      <PlayIcon data-icon="inline-start" />
-                      Run
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => setEditing(task)}>
-                      <PencilSimpleIcon data-icon="inline-start" />
-                      Edit
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      variant="destructive"
-                      onClick={() => deleteTask(task.id)}
+                  </button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger
+                      render={
+                        <Button
+                          size="icon-xs"
+                          variant="ghost"
+                          className="shrink-0 text-muted-foreground"
+                          title={`More actions for "${task.name}"`}
+                          aria-label={`More actions for ${task.name}`}
+                        />
+                      }
                     >
-                      <TrashIcon data-icon="inline-start" />
-                      Delete
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                      <DotsThreeVerticalIcon />
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => void request(task)}>
+                        <PlayIcon data-icon="inline-start" />
+                        Run
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setEditing(task)}>
+                        <PencilSimpleIcon data-icon="inline-start" />
+                        Edit
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onClick={() => deleteTask(task.id)}
+                      >
+                        <TrashIcon data-icon="inline-start" />
+                        Delete
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              ))
+            )}
+
+            {elsewhere.length > 0 && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  data-row={GROUP_ROW_KEY}
+                  tabIndex={groupIndex === tabStop ? 0 : -1}
+                  onFocus={() => setActiveIndex(groupIndex)}
+                  aria-expanded={othersOpen}
+                  aria-controls={othersId}
+                  onClick={() => setOthersOpen((v) => !v)}
+                  className={cn(
+                    "flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1.5 text-left text-xs",
+                    groupIndex === clamped
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {othersOpen ? (
+                    <CaretDownIcon className="size-3 shrink-0" />
+                  ) : (
+                    <CaretRightIcon className="size-3 shrink-0" />
+                  )}
+                  Other repositories
+                  <span className="tabular-nums">· {elsewhere.length}</span>
+                </button>
+                {/* The panel is the only place tasks can be managed, so a task
+                    whose repository isn't open stays listed and editable here —
+                    hiding it would strand the tasks of a removed repo. */}
+                <div
+                  id={othersId}
+                  hidden={!othersOpen}
+                  className="space-y-0.5 pt-0.5"
+                >
+                  {othersOpen &&
+                    elsewhere.map((task, offset) => {
+                      const index = groupIndex + 1 + offset;
+                      return (
+                        <OtherTaskRow
+                          key={`other-${task.id}`}
+                          task={task}
+                          active={index === clamped}
+                          tabIndex={index === tabStop ? 0 : -1}
+                          onFocus={() => setActiveIndex(index)}
+                          onEdit={() => setEditing(task)}
+                          onDelete={() => deleteTask(task.id)}
+                        />
+                      );
+                    })}
+                </div>
               </div>
-            ))}
+            )}
           </div>
         </ScrollArea>
       )}
@@ -252,6 +412,111 @@ export function TasksPanel() {
         onSave={saveTask}
         onDelete={deleteTask}
       />
+    </div>
+  );
+}
+
+/**
+ * A task scoped to another repository: still listed and manageable, never
+ * runnable from here. The row takes the raw-`<button>` arm of the disabled-reason
+ * contract (the vendored Button can't carry this row's layout), and its Run menu
+ * item repeats the reason in its label — a disabled menu item can't hold a
+ * tooltip. Editing is live so the task can be re-scoped from wherever you are.
+ */
+function OtherTaskRow({
+  task,
+  active,
+  tabIndex,
+  onFocus,
+  onEdit,
+  onDelete,
+}: {
+  task: TaskDef;
+  active: boolean;
+  tabIndex: number;
+  onFocus: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const label = scopeRepoLabel(taskScope(task));
+  // The reason names the task as well as its repo because it is the row's ONLY
+  // hover text: `aria-disabled:pointer-events-none` reaches every descendant, so
+  // a clipped-only tooltip inside the row could never fire, and the wrapper span
+  // that does see the pointer is not the node that overflows.
+  const reason = `"${task.name}" is scoped to "${label}" — open that repository to run it`;
+  const { blockedReason, reasonId, wrapperTitle, describedBy, nativeProps } =
+    useDisabledReason({ disabled: true, reason });
+
+  return (
+    <div className="flex items-center gap-1">
+      <span
+        className={cn(
+          "flex min-w-0 flex-1",
+          blockedReason && "cursor-not-allowed",
+        )}
+        title={wrapperTitle}
+      >
+        <button
+          {...nativeProps}
+          type="button"
+          data-row={`other-${task.id}`}
+          tabIndex={tabIndex}
+          onFocus={onFocus}
+          aria-describedby={describedBy}
+          className={cn(
+            ARIA_DISABLED_CLASS,
+            "flex min-w-0 flex-1 items-start gap-2 rounded px-2 py-1.5 text-left text-xs",
+            active && "bg-accent text-accent-foreground",
+          )}
+        >
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate">{task.name}</span>
+              <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                {INTERPRETER_LABELS[task.interpreter] ?? task.interpreter}
+              </span>
+            </span>
+            <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
+              <FolderIcon className="size-3 shrink-0" />
+              <span className="truncate">{label}</span>
+            </span>
+          </span>
+        </button>
+        {blockedReason ? (
+          <span id={reasonId} className="sr-only">
+            {blockedReason}
+          </span>
+        ) : null}
+      </span>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              className="shrink-0 text-muted-foreground"
+              title={`More actions for "${task.name}"`}
+              aria-label={`More actions for ${task.name}`}
+            />
+          }
+        >
+          <DotsThreeVerticalIcon />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem disabled>
+            <PlayIcon data-icon="inline-start" />
+            {`Run (scoped to "${label}")`}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={onEdit}>
+            <PencilSimpleIcon data-icon="inline-start" />
+            Edit
+          </DropdownMenuItem>
+          <DropdownMenuItem variant="destructive" onClick={onDelete}>
+            <TrashIcon data-icon="inline-start" />
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

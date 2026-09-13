@@ -1005,7 +1005,15 @@ review via its subscription login. The full list is under
   **which it detected** on your machine (and where). Task definitions live
   in your app data, never read from repository content, so a cloned repo
   can't plant one; running is **off until you enable it**, and each task
-  can **confirm before it runs**.
+  can **confirm before it runs**. Each task belongs to the repository you
+  create it in; set **Available in** to **All repositories** for one that
+  should follow you everywhere (tasks saved before this stay available
+  everywhere). Tasks from your other repositories stay listed under
+  **Other repositories**, ready to edit or delete, and run in the repo
+  they belong to. A run you confirm names the **exact script file** it
+  resolved and flags one that isn't there, and the run header shows that
+  path while it runs; a file task's first run in a repository always
+  confirms.
 - **Automations**: a lifecycle grid (on commit / on PR opened / on new
   commits to a reviewed PR) that runs AI review or security audit
   automatically, with per-action branch conditions, Save/Discard drafts,

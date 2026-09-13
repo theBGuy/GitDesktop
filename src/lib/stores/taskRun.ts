@@ -1,11 +1,14 @@
 import { toast } from "sonner";
 import { create } from "zustand";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import {
   openTaskInTerminal,
   TASKS_USE_EXTERNAL_TERMINAL,
 } from "@/lib/scripts/launch";
+import { isRunConfirmedIn } from "@/lib/scripts/scope";
 import type { TaskDef } from "@/lib/scripts/types";
 import { useUiStore } from "@/lib/stores/ui";
+import { invoke } from "@/lib/tauri/invoke";
 
 export type RunStatus = "running" | "exited";
 
@@ -27,15 +30,20 @@ export interface ActiveRun {
 export interface PendingRun {
   task: TaskDef;
   reason: "confirm" | "replace";
+  /** The dialog is open ONLY because this is the task's first run in this
+   *  repository (its own confirm-before-run is off), which the copy explains. */
+  firstRun: boolean;
 }
 
 interface TaskRunState {
   activeRun: ActiveRun | null;
   pending: PendingRun | null;
   /** Ask to run `task`: runs immediately, or opens the run dialog (its own
-   *  confirm-before-run, or replacing a still-running task). Always the entry
-   *  point — panel Run, Enter, and the palette picker all funnel through here. */
-  request: (task: TaskDef) => void;
+   *  confirm-before-run, replacing a still-running task, or a file task's first
+   *  run in this repository). Always the entry point — panel Run, Enter, and the
+   *  palette picker all funnel through here. Async only for the first-run gate's
+   *  identity lookup; the immediate cases settle before it awaits anything. */
+  request: (task: TaskDef) => Promise<void>;
   /** The user confirmed the pending run → start it with `args` (the dialog's
    *  possibly-adjusted argument string; the saved task is untouched). */
   confirmPending: (args: string) => void;
@@ -70,7 +78,21 @@ function begin(
     // failed spawn surfaces.
     const cwd = useUiStore.getState().repoPath;
     if (cwd) {
-      openTaskInTerminal(task, cwd, args).catch((e) => toast.error(String(e)));
+      openTaskInTerminal(task, cwd, args)
+        .then(() => {
+          // The external terminal creates no in-app run row, so this toast is the
+          // only place this path names the file that actually executes — the same
+          // thing the in-app run header shows. Best-effort: the hand-off already
+          // succeeded, so a failed resolve is not worth an error.
+          if (task.source.kind !== "file") return;
+          invoke<{ path: string; exists: boolean }>("resolve_task_script", {
+            cwd,
+            path: task.source.path,
+          })
+            .then((r) => toast.info(`Running ${r.path}`))
+            .catch(() => undefined);
+        })
+        .catch((e) => toast.error(String(e)));
     }
     return;
   }
@@ -89,16 +111,35 @@ function begin(
 export const useTaskRunStore = create<TaskRunState>((set, get) => ({
   activeRun: null,
   pending: null,
-  request: (task) => {
+  request: async (task) => {
+    // Snapshot the repo before the gate's await: everything below decides for the
+    // repo the user asked from, and the post-await check compares against it.
+    const repoPath = useUiStore.getState().repoPath;
     const running = get().activeRun?.status === "running";
     if (running) {
-      set(() => ({ pending: { task, reason: "replace" } }));
-    } else if (task.confirmBeforeRun) {
-      set(() => ({ pending: { task, reason: "confirm" } }));
-    } else {
-      // No dialog → the saved arguments run as-is.
-      begin(set, task, task.args);
+      set(() => ({ pending: { task, reason: "replace", firstRun: false } }));
+      return;
     }
+    if (task.confirmBeforeRun) {
+      set(() => ({ pending: { task, reason: "confirm", firstRun: false } }));
+      return;
+    }
+    if (task.source.kind === "file" && repoPath) {
+      // A repo-relative script path names a different file in every repository,
+      // so even a confirm-off file task confirms once per repo. Inline bodies are
+      // the same text everywhere and stay un-gated.
+      const identity = await repoIdentity(repoPath);
+      // The repo may have switched while the identity resolved. The repo-switch
+      // subscription below already cleared `pending`, so setting a stale one here
+      // would strand a dialog naming the previous repo's run.
+      if (useUiStore.getState().repoPath !== repoPath) return;
+      if (!isRunConfirmedIn(task, [repoPath, identity])) {
+        set(() => ({ pending: { task, reason: "confirm", firstRun: true } }));
+        return;
+      }
+    }
+    // No dialog → the saved arguments run as-is.
+    begin(set, task, task.args);
   },
   confirmPending: (args) => {
     const p = get().pending;

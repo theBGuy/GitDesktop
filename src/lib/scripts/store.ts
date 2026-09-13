@@ -2,6 +2,8 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { norm } from "@/lib/repo-data-migration";
+import { foldTaskScopeKeys, TASK_SCOPE_GLOBAL } from "./scope";
 import {
   type ArgDoc,
   EMPTY_SCRIPTS,
@@ -74,6 +76,14 @@ export function normalizeArgDocs(v: unknown): ArgDoc[] {
   return out;
 }
 
+/** Type-checks an untrusted list of repo keys, dropping blank and non-string
+ *  entries. Values stay verbatim: either key form (identity or legacy raw path)
+ *  is meaningful, and only the repo itself can tell them apart. */
+function normalizeRepoKeys(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((k): k is string => typeof k === "string" && k.trim() !== "");
+}
+
 /** Type-checks one untrusted task, dropping it (undefined) when unusable. */
 function normalizeTask(v: unknown): TaskDef | undefined {
   if (!v || typeof v !== "object") return undefined;
@@ -87,6 +97,8 @@ function normalizeTask(v: unknown): TaskDef | undefined {
     args?: unknown;
     argDocs?: unknown;
     confirmBeforeRun?: unknown;
+    scope?: unknown;
+    runConfirmedIn?: unknown;
   };
   if (typeof obj.id !== "string" || obj.id === "") return undefined;
   if (!isInterpreter(obj.interpreter)) return undefined;
@@ -100,6 +112,14 @@ function normalizeTask(v: unknown): TaskDef | undefined {
     argDocs: normalizeArgDocs(obj.argDocs),
     // Absent (older) or non-boolean → confirm, the safe default.
     confirmBeforeRun: obj.confirmBeforeRun !== false,
+    // A scope we can't match keeps its value rather than widening to global:
+    // tasks written for one repo must never leak into another because its key
+    // went stale.
+    scope:
+      typeof obj.scope === "string" && obj.scope.trim() !== ""
+        ? obj.scope.trim()
+        : TASK_SCOPE_GLOBAL,
+    runConfirmedIn: normalizeRepoKeys(obj.runConfirmedIn),
   };
 }
 
@@ -136,14 +156,20 @@ export function setTasksEnabled(enabled: boolean): Promise<void> {
   return mutateConfig((c) => ({ ...c, enabled }));
 }
 
-export function addTask(task: TaskDef): Promise<void> {
-  return mutateConfig((c) => ({ ...c, tasks: [...c.tasks, task] }));
+// Both writers fold the task's scope keys BEFORE entering the serialized chain,
+// so every persisted key lands on the worktree-stable identity when git can
+// resolve it — a task scoped from one checkout then matches its sibling worktrees.
+
+export async function addTask(task: TaskDef): Promise<void> {
+  const folded = await foldTaskScopeKeys(task);
+  return mutateConfig((c) => ({ ...c, tasks: [...c.tasks, folded] }));
 }
 
-export function updateTask(task: TaskDef): Promise<void> {
+export async function updateTask(task: TaskDef): Promise<void> {
+  const folded = await foldTaskScopeKeys(task);
   return mutateConfig((c) => ({
     ...c,
-    tasks: c.tasks.map((t) => (t.id === task.id ? task : t)),
+    tasks: c.tasks.map((t) => (t.id === folded.id ? folded : t)),
   }));
 }
 
@@ -152,4 +178,46 @@ export function removeTask(id: string): Promise<void> {
     ...c,
     tasks: c.tasks.filter((t) => t.id !== id),
   }));
+}
+
+/**
+ * Re-home every task scope and run-confirmation key from a relocated repo onto
+ * `newKey` (the resolved identity of its new location), in one serialized pass.
+ * The old key can't be recomputed — `--git-common-dir` needs the vanished folder —
+ * so both on-disk forms are matched, `<oldPath>/.git` (identity) and `<oldPath>`
+ * verbatim, case-insensitively via the same {@link norm} the repo-data migration
+ * matches with. Tasks scoped elsewhere, and global ones, pass through untouched.
+ */
+export async function rehomeTaskScopes(
+  oldPath: string,
+  newKey: string,
+): Promise<void> {
+  const raw = norm(oldPath);
+  const dotGit = `${raw}/.git`;
+  const isOld = (key: string) => {
+    const k = norm(key);
+    return k === dotGit || k === raw;
+  };
+  // Read-only pre-check, so a relocate that touches no task neither rewrites
+  // scripts.json nor creates it for someone who never used Tasks. A concurrent
+  // writer adding a matching task between this read and the bail is the same
+  // residual the relocate migration already accepts.
+  const { tasks: current } = await loadScripts();
+  if (!current.some((t) => isOld(t.scope) || t.runConfirmedIn.some(isOld)))
+    return;
+  return mutateConfig((c) => {
+    let changed = false;
+    const tasks = c.tasks.map((t) => {
+      const scope = isOld(t.scope) ? newKey : t.scope;
+      const hitConfirmed = t.runConfirmedIn.some(isOld);
+      // Dedup: the repo may already be confirmed under the new key.
+      const runConfirmedIn = hitConfirmed
+        ? [...new Set(t.runConfirmedIn.map((k) => (isOld(k) ? newKey : k)))]
+        : t.runConfirmedIn;
+      if (scope === t.scope && !hitConfirmed) return t;
+      changed = true;
+      return { ...t, scope, runConfirmedIn };
+    });
+    return changed ? { ...c, tasks } : c;
+  });
 }

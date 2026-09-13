@@ -3,9 +3,11 @@ import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { clipTitle } from "@/lib/clip-title";
-import { useScripts } from "@/lib/scripts/queries";
+import { useScripts, useTaskRepoKeys } from "@/lib/scripts/queries";
+import { taskInScope } from "@/lib/scripts/scope";
 import { INTERPRETERS } from "@/lib/scripts/types";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
+import { useUiStore } from "@/lib/stores/ui";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
@@ -26,6 +28,8 @@ export function RunTaskPicker({
   onOpenChange: (open: boolean) => void;
 }) {
   const tasks = useScripts().data?.tasks ?? [];
+  const repoPath = useUiStore((s) => s.repoPath);
+  const { keys, settled } = useTaskRepoKeys(repoPath);
   const request = useTaskRunStore((s) => s.request);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
@@ -37,12 +41,20 @@ export function RunTaskPicker({
   });
 
   const q = query.trim().toLowerCase();
-  const items = tasks.filter(
-    (t) =>
-      !q ||
-      t.name.toLowerCase().includes(q) ||
-      t.description.toLowerCase().includes(q),
-  );
+  // Scope first: a task belonging to another repository is never offered here —
+  // running it is the harm the scope prevents. Managing it lives in the panel.
+  // The unsettled identity window offers nothing rather than classifying against
+  // the raw path alone: under-offering for a beat is the safe direction, and the
+  // same hold keeps this list and the panel from disagreeing.
+  const items = settled
+    ? tasks.filter(
+        (t) =>
+          taskInScope(t, keys) &&
+          (!q ||
+            t.name.toLowerCase().includes(q) ||
+            t.description.toLowerCase().includes(q)),
+      )
+    : [];
   const highlighted = items[Math.min(highlight, items.length - 1)];
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: scrolls to whichever row carries the highlight
@@ -56,7 +68,7 @@ export function RunTaskPicker({
     const task = tasks.find((t) => t.id === taskId);
     onOpenChange(false);
     // Let the dialog close first so its confirm (if any) isn't fighting focus.
-    if (task) setTimeout(() => request(task), 0);
+    if (task) setTimeout(() => void request(task), 0);
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
