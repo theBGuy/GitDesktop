@@ -6,6 +6,7 @@ import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
+  AutomationKindsRow,
   MatrixCell,
   MatrixTable,
   OutcomeRow,
@@ -24,10 +25,10 @@ import {
   notificationRows,
   notificationsDraftOutOfSync,
   notificationsSignature,
-  OUTCOME_HELD_REASONS,
   overrideCount,
   SOURCE_DESCRIPTIONS,
   SOURCE_LABELS,
+  SUBROW_HELD_REASONS,
   useRepoNotificationsDialog,
 } from "@/lib/notifications/matrix";
 import type { RepoNotificationOverride } from "@/lib/notifications/overrides";
@@ -121,9 +122,10 @@ export const NotificationsSection = withForm({
           <p className="text-xs text-muted-foreground">
             Choose where each event lands: a row in the activity inbox (In-app),
             an OS notification, or both. A source with both channels off records
-            nothing, and the CI sources add a Notify on choice so you can keep
-            just the failures — results outside your choice stay quiet. OS
-            notifications fire only while GitDesktop is unfocused
+            nothing, and the CI sources
+            {aiEnabled ? " and Automation results" : ""} add a Notify on choice
+            so you can keep just the failures — results outside your choice stay
+            quiet. OS notifications fire only while GitDesktop is unfocused
             {aiEnabled
               ? " — agent tasks also ping while you work elsewhere in the app."
               : "."}{" "}
@@ -190,7 +192,7 @@ export const NotificationsSection = withForm({
                         onValueChange={field.handleChange}
                         disabledReason={
                           channelsOff("prChecks")
-                            ? OUTCOME_HELD_REASONS.prChecks
+                            ? SUBROW_HELD_REASONS.prChecks
                             : null
                         }
                         reasonId={checksReasonId}
@@ -209,11 +211,28 @@ export const NotificationsSection = withForm({
                         onValueChange={field.handleChange}
                         disabledReason={
                           channelsOff(source)
-                            ? OUTCOME_HELD_REASONS[source]
+                            ? SUBROW_HELD_REASONS[source]
                             : null
                         }
                         sharedReasonId={
                           source === "prChecks" ? checksReasonId : undefined
+                        }
+                      />
+                    )}
+                  </form.AppField>
+                )}
+                {/* The same Notify-on question qualifies the automations row,
+                    over its own vocabulary: kinds, not CI outcomes. */}
+                {source === "automations" && (
+                  <form.AppField name="notifications.automationKinds">
+                    {(field) => (
+                      <AutomationKindsRow
+                        value={field.state.value}
+                        onValueChange={field.handleChange}
+                        disabledReason={
+                          channelsOff("automations")
+                            ? SUBROW_HELD_REASONS.automations
+                            : null
                         }
                       />
                     )}

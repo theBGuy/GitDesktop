@@ -4,6 +4,8 @@ import {
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
 import {
+  AUTOMATION_KIND_FILTERS,
+  type AutomationKindFilter,
   type ChannelPrefs,
   isOutcomeSource,
   NOTIFICATION_SOURCES,
@@ -18,6 +20,9 @@ import {
   PR_CHECK_SCOPE_FILTERS,
   type PrCheckScopeFilter,
 } from "@/lib/settings/api";
+// Type-only: `stores/notifications` imports nothing of ours, and importing only its
+// type keeps it that way at runtime.
+import type { NotificationKind } from "@/lib/stores/notifications";
 
 /** A repo's adjustments; every absent field inherits the global. */
 export interface RepoNotificationOverride {
@@ -27,6 +32,8 @@ export interface RepoNotificationOverride {
   prChecksScope?: PrCheckScopeFilter;
   /** Which results notify, per CI source; an absent key inherits the global. */
   outcomes?: Partial<Record<OutcomeSource, OutcomeFilter>>;
+  /** Which automation results notify; absent inherits the global. */
+  automationKinds?: AutomationKindFilter;
 }
 
 /** The single store key holding `Record<repoKey, RepoNotificationOverride>`. */
@@ -109,6 +116,7 @@ function normalizeOverride(v: unknown): RepoNotificationOverride | undefined {
     sources?: unknown;
     prChecksScope?: unknown;
     outcomes?: unknown;
+    automationKinds?: unknown;
   };
   const out: RepoNotificationOverride = {};
   if (obj.muted === true) out.muted = true;
@@ -121,7 +129,20 @@ function normalizeOverride(v: unknown): RepoNotificationOverride | undefined {
   }
   const outcomes = normalizeOutcomes(obj.outcomes);
   if (outcomes) out.outcomes = outcomes;
-  if (!out.muted && !out.sources && !out.prChecksScope && !out.outcomes) {
+  if (
+    AUTOMATION_KIND_FILTERS.includes(
+      obj.automationKinds as AutomationKindFilter,
+    )
+  ) {
+    out.automationKinds = obj.automationKinds as AutomationKindFilter;
+  }
+  if (
+    !out.muted &&
+    !out.sources &&
+    !out.prChecksScope &&
+    !out.outcomes &&
+    !out.automationKinds
+  ) {
     return undefined;
   }
   return out;
@@ -171,6 +192,16 @@ export function effectiveOutcomeFilter(
   return override?.outcomes?.[source] ?? global.outcomes[source];
 }
 
+/** Which automation results a repo notifies on — orthogonal to the automations
+ *  channels, like the scope and the outcome filters, so it stays meaningful while
+ *  that source is muted. */
+export function effectiveAutomationKindFilter(
+  global: NotificationSettings,
+  override: RepoNotificationOverride | undefined,
+): AutomationKindFilter {
+  return override?.automationKinds ?? global.automationKinds;
+}
+
 /** The set each filter delivers, spelled out rather than derived: every filter names
  *  a non-empty set, which is the invariant the poll-enable gates lean on. */
 const FILTER_DELIVERS: Record<OutcomeFilter, readonly NotificationOutcome[]> = {
@@ -188,11 +219,36 @@ function outcomeAllowed(
   return FILTER_DELIVERS[filter].includes(outcome);
 }
 
+/** The kinds each automations filter delivers. `null` is the identity filter: the
+ *  default delivers everything INCLUDING kinds this app doesn't emit yet, so a new
+ *  one can never go dark on an existing user. The trailing `satisfies` closes EVERY
+ *  entry over real kinds — a set cannot opt out of that check — while the declared
+ *  value type stays `string`, since a delivered row's kind is untrusted on read (see
+ *  `AppNotification.kind`). */
+const AUTOMATION_KIND_DELIVERS: Record<
+  AutomationKindFilter,
+  readonly string[] | null
+> = {
+  all: null,
+  failures: ["review-failed"],
+} satisfies Record<AutomationKindFilter, readonly NotificationKind[] | null>;
+
+/** Whether one automation event's kind passes a filter. Pure; module-private, since
+ *  {@link deliveredChannels} is the seam every caller asks through. */
+function automationKindAllowed(
+  filter: AutomationKindFilter,
+  kind: string,
+): boolean {
+  const delivers = AUTOMATION_KIND_DELIVERS[filter];
+  return delivers === null || delivers.includes(kind);
+}
+
 /**
- * THE delivery seam: the channels a source delivers on for one repo and one event.
- * An outcome filter is all-or-nothing today — a filtered-out result delivers
- * nowhere — so this zeroes the pair the channel resolution produced. A per-CHANNEL
- * outcome axis would change only this body: every producer and the emit gate
+ * THE delivery seam: the channels a source delivers on for one repo and one event,
+ * across both event axes — the CI sources' outcome filter and the automations
+ * source's kind filter. Either is all-or-nothing today — a filtered-out event
+ * delivers nowhere — so this zeroes the pair the channel resolution produced. A
+ * per-CHANNEL axis would change only this body: every producer and the emit gate
  * already ask the question in the shape that answer needs.
  */
 export function deliveredChannels(
@@ -200,13 +256,22 @@ export function deliveredChannels(
   override: RepoNotificationOverride | undefined,
   source: NotificationSource,
   outcome?: NotificationOutcome,
+  kind?: string,
 ): ChannelPrefs {
   const channels = effectiveChannels(global, override, source);
-  if (outcome === undefined || !isOutcomeSource(source)) return channels;
-  const filter = effectiveOutcomeFilter(global, override, source);
-  return outcomeAllowed(filter, outcome)
-    ? channels
-    : { inApp: false, os: false };
+  if (outcome !== undefined && isOutcomeSource(source)) {
+    const filter = effectiveOutcomeFilter(global, override, source);
+    if (!outcomeAllowed(filter, outcome)) return { inApp: false, os: false };
+  }
+  // Gated on the SOURCE, never the kind alone: the `reviews` source mints the same
+  // kind strings as the automation runner (see stores/notifications.ts), and this
+  // axis must never reach it.
+  if (source === "automations" && kind !== undefined) {
+    const filter = effectiveAutomationKindFilter(global, override);
+    if (!automationKindAllowed(filter, kind))
+      return { inApp: false, os: false };
+  }
+  return channels;
 }
 
 /** Whether any of `sources` delivers on any channel — the shape a poll-enable

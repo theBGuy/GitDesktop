@@ -102,11 +102,14 @@ export function emitNotification(
       loadSettings().catch(() => DEFAULT_SETTINGS),
       overrideForRepo(row.repoPath).catch(() => undefined),
     ]);
+    // The kind rides along for every source; the seam scopes it to the one source
+    // that carries a kind axis.
     const channels = deliveredChannels(
       settings.notifications,
       override,
       source,
       outcome,
+      row.kind,
     );
     if (channels.inApp) {
       pushNotification(dedupeKey ? { ...row, dedupeKey } : row);

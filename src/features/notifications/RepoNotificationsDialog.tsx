@@ -25,6 +25,7 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import { useRepoIdentity } from "@/lib/git/queries";
 import { useModalGateRegistration } from "@/lib/hotkeys/modal-gate";
 import {
+  AUTOMATION_KIND_FILTER_LABELS,
   CHANNEL_LABELS,
   CHANNELS,
   CHECK_SCOPE_LABELS,
@@ -32,16 +33,17 @@ import {
   channelAriaLabel,
   notificationRows,
   OUTCOME_FILTER_LABELS,
-  OUTCOME_HELD_REASONS,
   OUTCOME_ROW_LABEL,
   outcomeAriaLabel,
   overrideCount,
   SOURCE_DESCRIPTIONS,
   SOURCE_LABELS,
+  SUBROW_HELD_REASONS,
   sortedJson,
   useRepoNotificationsDialog,
 } from "@/lib/notifications/matrix";
 import {
+  effectiveAutomationKindFilter,
   effectiveChannels,
   effectiveChecksScope,
   effectiveOutcomeFilter,
@@ -53,6 +55,7 @@ import {
   useSaveRepoNotificationOverride,
 } from "@/lib/notifications/queries";
 import {
+  type AutomationKindFilter,
   type ChannelPrefs,
   isOutcomeSource,
   type NotificationSource,
@@ -168,7 +171,8 @@ interface MatrixSelectProps<T extends string> {
 
 /**
  * One axis qualifying a matrix row — which pull requests the CI-checks source
- * watches, which results a CI source notifies on. Composed from the Select
+ * watches, which results a CI source notifies on, which automation results
+ * notify. Composed from the Select
  * primitives rather than SelectField for two reasons the wrapper can't serve:
  * the reason has to reach the trigger through `aria-describedby`, and a held
  * picker must stay in the tab order — Base UI's `disabled` sets `tabIndex={-1}`
@@ -275,6 +279,25 @@ export function OutcomeRow({
       label={OUTCOME_ROW_LABEL}
       ariaLabel={outcomeAriaLabel(source)}
       items={OUTCOME_FILTER_LABELS}
+    />
+  );
+}
+
+/** Which automation results notify. Shares the Notify-on label with the CI rows,
+ *  so the source rides the accessible name here too — but its own vocabulary: these
+ *  are event kinds, not a success/failure outcome. */
+export function AutomationKindsRow(
+  props: Omit<
+    MatrixSelectProps<AutomationKindFilter>,
+    "label" | "ariaLabel" | "items"
+  >,
+) {
+  return (
+    <MatrixSelectRow
+      {...props}
+      label={OUTCOME_ROW_LABEL}
+      ariaLabel={outcomeAriaLabel("automations")}
+      items={AUTOMATION_KIND_FILTER_LABELS}
     />
   );
 }
@@ -436,15 +459,17 @@ function RepoNotificationsBody({
   // delivering on no channel has nothing to watch and no result to filter — read
   // off the EFFECTIVE channels so an inherited pair counts. Muting zeroes both, so
   // it is tested first and its sentence wins.
-  function heldReason(source: OutcomeSource): string | null {
+  function heldReason(source: OutcomeSource | "automations"): string | null {
     if (mutedReason) return mutedReason;
     if (!global) return null;
     const channels = effectiveChannels(global, draft, source);
-    return channels.inApp || channels.os ? null : OUTCOME_HELD_REASONS[source];
+    return channels.inApp || channels.os ? null : SUBROW_HELD_REASONS[source];
   }
 
   /** Whose reason line a sub-row points at rather than printing its own. */
-  function sharedReasonFor(source: OutcomeSource): string | undefined {
+  function sharedReasonFor(
+    source: OutcomeSource | "automations",
+  ): string | undefined {
     if (muted) return mutedReasonId;
     return source === "prChecks" ? checksReasonId : undefined;
   }
@@ -511,6 +536,17 @@ function RepoNotificationsBody({
       const out = { ...current };
       if (Object.keys(outcomes).length === 0) delete out.outcomes;
       else out.outcomes = outcomes;
+      return out;
+    });
+  }
+
+  // Same rule on the automations kind axis; flat, so the field itself is the key.
+  function patchAutomationKinds(next: AutomationKindFilter) {
+    if (!global) return;
+    patch((current) => {
+      const out = { ...current };
+      if (next === global.automationKinds) delete out.automationKinds;
+      else out.automationKinds = next;
       return out;
     });
   }
@@ -636,6 +672,19 @@ function RepoNotificationsBody({
                         sharedReasonId={sharedReasonFor(source)}
                         chip={
                           draft.outcomes?.[source] !== undefined
+                            ? OVERRIDDEN_CHIP
+                            : null
+                        }
+                      />
+                    )}
+                    {source === "automations" && (
+                      <AutomationKindsRow
+                        value={effectiveAutomationKindFilter(global, draft)}
+                        onValueChange={patchAutomationKinds}
+                        disabledReason={heldReason("automations")}
+                        sharedReasonId={sharedReasonFor("automations")}
+                        chip={
+                          draft.automationKinds !== undefined
                             ? OVERRIDDEN_CHIP
                             : null
                         }

@@ -2617,7 +2617,9 @@ request opened*, and *On new commits to a reviewed PR* — with **AI code review
 security audit** as toggles under each. There's no "add a rule" — a given moment × action
 exists at most once, so you can't create conflicting duplicates. Reviews use the review model
 from the AI section (security audits use the dedicated audit model when you've set one); PR
-results are posted as a comment, commit results open from a notification. **Review draft PRs when created** (off by default) controls draft handling:
+results are posted as a comment, commit results open from their notification row — set
+**Notify on** for **Automation results** to *Failures only* and those rows stay quiet too.
+**Review draft PRs when created** (off by default) controls draft handling:
 left off, a draft PR gets its automated first review when it's marked ready for review, not
 at creation — marking it ready **in GitDesktop** always fires that first review, while a
 draft readied elsewhere is picked up by the background catch-up poller within its window.
@@ -2808,7 +2810,7 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
 - **Automations** — AI actions that run on triggers.
 {{/ai}}- **Notifications** — pick, for each source, where its events land: a row in the
   header's **Activity & notifications** bell, an OS notification, both, or neither (a
-  source with both boxes clear records nothing, and a result outside a CI source's
+  source with both boxes clear records nothing, and a result outside a source's
   **Notify on** choice stays quiet too). OS notifications are sent only while the
   window isn't focused{{ai}}, apart from **Agent tasks finish**, which pings even while
   you're working elsewhere in the app{{/ai}}. The sources are **CI checks finish**
@@ -2818,9 +2820,13 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   I start**, **Automation results**, and **Agent tasks finish**{{/ai}}. Both CI sources
   carry a **Notify on** choice (*Successes and failures*, *Failures only*, or
   *Successes only*), so a green day can stay silent and a red one still reaches you;
-  *Failures only* covers runs that timed out or failed to start as well. **Customize…**
+  *Failures only* covers runs that timed out or failed to start as well.{{ai}}
+  **Automation results** carries a **Notify on** choice of its own — *Everything* or
+  *Failures only* — so reviews your automations post or leave ready can stay quiet
+  while a failed automation still reaches you; a quieted ready review then has no
+  inbox row to open its result from.{{/ai}} **Customize…**
   opens the per-repository overrides: **Mute this repository** silences every source for
-  that repo, or you can set individual cells, the CI-checks **Watch** choice, and either
+  that repo, or you can set individual cells, the CI-checks **Watch** choice, and every
   **Notify on** choice, with anything you leave alone following your global settings.
   *Notification settings* and *Repository notification settings* in the command
   palette open each directly, and the repo **⋮** menu's **Notifications…**

@@ -221,6 +221,7 @@ const SOURCE_OUTCOMES: Record<OutcomeSource, readonly NotificationOutcome[]> &
   prReviews: [],
   actionRuns: OUTCOME_CLASSES,
   reviews: [],
+  // Empty by design: automations filters by KIND, via `automationKinds`.
   automations: [],
   agents: [],
 };
@@ -238,6 +239,12 @@ export function isOutcomeSource(
 export const OUTCOME_SOURCES: readonly OutcomeSource[] =
   NOTIFICATION_SOURCES.filter(isOutcomeSource);
 
+/** The automations source's own filter vocabulary. Its events are distinct notification
+ *  KINDS rather than a success/failure lattice, so this is a separate axis with its own
+ *  roster — never a member of {@link OUTCOME_FILTERS}. */
+export const AUTOMATION_KIND_FILTERS = ["all", "failures"] as const;
+export type AutomationKindFilter = (typeof AUTOMATION_KIND_FILTERS)[number];
+
 export interface NotificationSettings {
   /** Per-source delivery channels, Record-typed against the manifest. */
   sources: Record<NotificationSource, ChannelPrefs>;
@@ -246,6 +253,10 @@ export interface NotificationSettings {
   /** Which results notify, per source with an outcome axis — orthogonal to that
    *  source's channels, exactly like the scope. */
   outcomes: Record<OutcomeSource, OutcomeFilter>;
+  /** Which automation results notify — the automations source's per-KIND axis,
+   *  orthogonal to its channels like the two above. Flat, since exactly one source
+   *  carries it. */
+  automationKinds: AutomationKindFilter;
 }
 
 /** The agent CLIs offerable as the Default agent, in render order. Spelled out here
@@ -467,6 +478,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
       prChecks: "all",
       actionRuns: "all",
     },
+    automationKinds: "all",
   },
   closeToTray: true,
   agentIsolation: "worktree",
@@ -637,6 +649,13 @@ export function healNotifications(saved: unknown): NotificationSettings {
   const outcomes = mapOutcomes((source) =>
     pick(asObject(obj.outcomes)[source], OUTCOME_FILTERS, "all"),
   );
+  // Same story for the automations kind axis: no legacy writer produced this key
+  // either, so one generous read serves both branches.
+  const automationKinds = pick(
+    obj.automationKinds,
+    AUTOMATION_KIND_FILTERS,
+    "all",
+  );
 
   if (
     obj.sources &&
@@ -660,6 +679,7 @@ export function healNotifications(saved: unknown): NotificationSettings {
       }),
       prChecksScope: pick(obj.prChecksScope, PR_CHECK_SCOPE_FILTERS, "all"),
       outcomes,
+      automationKinds,
     };
   }
 
@@ -681,6 +701,7 @@ export function healNotifications(saved: unknown): NotificationSettings {
     }),
     prChecksScope: pick(legacyChecks, PR_CHECK_SCOPE_FILTERS, "all"),
     outcomes,
+    automationKinds,
   };
 }
 
