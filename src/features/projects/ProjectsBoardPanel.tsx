@@ -357,18 +357,16 @@ export function ProjectsBoardPanel({
   const fatalError = hasPages
     ? null
     : (projects.error ?? fields.error ?? items.error);
+  // ONE name for "the items read hasn't settled", shared by the skeleton gate
+  // and the count beside it. Two expressions of the same condition would drift,
+  // and this is the pair that must not: a count is an ASSERTION about the board,
+  // so it may never state a number the read hasn't produced.
+  const itemsPending = canRead && projectId !== null && items.isPending;
   // A DISABLED query is permanently "pending", so every loading test is gated on
   // the read actually being live — otherwise a GitLab repo would load forever.
   // The FIELDS leg matters as much as the items one: without it the board paints
   // ungrouped for a frame and then re-lays out into columns as the definitions
   // land.
-  // ONE name for "the items read hasn't settled", shared by the skeleton gate
-  // and the count beside it. Two expressions of the same condition would drift,
-  // and this is the pair that must not: a count is an ASSERTION about the board,
-  // so it may never say "0 items" over a skeleton that is still loading them.
-  // Re-arms on every project switch too — a new projectId is a new query key,
-  // which starts with no data and so reports pending again.
-  const itemsPending = canRead && projectId !== null && items.isPending;
   const loading =
     (canRead && projects.isPending) || fieldsPending || itemsPending;
   // An empty catalog is only an ABSENCE claim when the read was complete: a
@@ -706,19 +704,28 @@ export function ProjectsBoardPanel({
               </Popover.Positioner>
             </Popover.Portal>
           </Popover.Root>
-          <span className="flex items-center gap-2 text-xs text-muted-foreground">
-            {/* No number until the read settles: an unsettled board has no count
-                to state, and "0 items" over a loading skeleton is a claim, not a
-                placeholder. */}
-            {itemsPending ? (
-              <Skeleton className="h-4 w-20" aria-hidden />
-            ) : (
-              <span className="tabular-nums">
-                {items.hasNextPage
-                  ? `${shown} of ${totalCount} items`
-                  : `${shown} ${shown === 1 ? "item" : "items"}`}
-              </span>
-            )}
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {/* No number until the read has produced one. "0 items" is a CLAIM
+                about the board, and neither unsettled state has earned it: still
+                loading gets the skeleton, and failed-with-nothing-loaded gets
+                nothing at all, because the error card below already says what
+                happened and a zero beside it would read as the answer. */}
+            {(() => {
+              switch (true) {
+                case itemsPending:
+                  return <Skeleton className="h-4 w-20" aria-hidden />;
+                case !hasPages:
+                  return null;
+                default:
+                  return (
+                    <span className="tabular-nums">
+                      {items.hasNextPage
+                        ? `${shown} of ${totalCount} items`
+                        : `${shown} ${shown === 1 ? "item" : "items"}`}
+                    </span>
+                  );
+              }
+            })()}
             {/* A failed CONTINUATION says so HERE, beside the control that
                 caused it, and leaves the loaded board alone. `refetch()` would
                 replay every page already on screen; `fetchNextPage()` retries
@@ -745,7 +752,7 @@ export function ProjectsBoardPanel({
                 {pageError ? "Try again" : "Load more"}
               </DisabledReasonButton>
             )}
-          </span>
+          </div>
         </div>
       )}
       {/* In the layout FLOW, pushing the board down — a persistent claim about

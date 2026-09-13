@@ -2616,7 +2616,7 @@ export function useProjectFields(
 }
 
 /** Repo + board, with NO account axis — deliberately the same contract every
- *  forge-cache family here keeps (pr-list, pr, the three sibling Projects reads).
+ *  forge-cache family here keeps (pr-list, pr, the four sibling Projects reads).
  *  An account axis belongs to all of them at once, in the account-switch task. */
 const projectItemsKey = (repo: string, projectId: string) =>
   ["repo", repo, "project-items", projectId] as const;
