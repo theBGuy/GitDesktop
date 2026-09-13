@@ -179,8 +179,9 @@ const FILTER_DELIVERS: Record<OutcomeFilter, readonly NotificationOutcome[]> = {
   successes: ["success"],
 };
 
-/** Whether one result passes a filter. Pure. */
-export function outcomeAllowed(
+/** Whether one result passes a filter. Pure; module-private, since
+ *  {@link deliveredChannels} is the seam every caller asks through. */
+function outcomeAllowed(
   filter: OutcomeFilter,
   outcome: NotificationOutcome,
 ): boolean {

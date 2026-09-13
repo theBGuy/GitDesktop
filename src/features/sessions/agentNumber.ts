@@ -21,22 +21,40 @@ interface AgentNumberState {
   hydrate: () => Promise<void>;
   /** Assign `#N` to any of `ids` that don't have one yet (in the given order, so
    *  numbers track creation order), in a single update. Backfills existing entries
-   *  on first run and numbers new ones thereafter. No-op until hydrated. */
+   *  on first run and numbers new ones thereafter.
+   *
+   *  Mints nothing until the persisted map has loaded. Rather than dropping the
+   *  request, an unhydrated call records `ids` and drives the load itself (rate
+   *  limited after a failure), then replays them — so callers never gate on
+   *  {@link hydrated} and a read lost to a transient failure still resolves. */
   ensure: (ids: string[]) => void;
 }
 
 const getStore = memoizedStoreLoader("agent-numbers.json");
 
-/** The in-flight `hydrate()` attempt, so the retry `ensure` kicks on every unhydrated
- *  pass shares one disk read instead of starting a fresh one per call (the entry list
- *  it runs off changes on every streaming tick). Module-level like `saveTimer` below —
- *  this store is a singleton. */
+/** The in-flight `hydrate()` attempt, so concurrent callers share one disk read instead
+ *  of each starting their own. Pairs with {@link RETRY_COOLDOWN_MS}: this bounds
+ *  attempts that OVERLAP, the cooldown bounds ones that follow each other. Module-level
+ *  like `saveTimer` below — this store is a singleton. */
 let hydrating: Promise<void> | null = null;
 
 /** The ids the most recent unhydrated `ensure` was asked for, replayed once that
  *  store's read lands. Holding them here is what keeps the retry loop OFF the caller:
  *  the mint happens when hydration finishes, not when the caller happens to re-render. */
 let pendingIds: string[] = [];
+
+/** How long `ensure` stops re-driving `hydrate` after a failed attempt. The retry rides
+ *  a HIGH-FREQUENCY trigger — SessionList's effect re-runs whenever its id list is
+ *  re-derived, which for a streaming run is every token batch — and a rejected load
+ *  clears the store loader's memo, so each pass would otherwise cost a fresh store-open
+ *  IPC round trip for the rest of the session. Unlike the plan/research/notification
+ *  hydrators, which are bounded by construction (an 800ms debounce, an items-change
+ *  trigger), this one needs the cooldown explicitly. */
+const RETRY_COOLDOWN_MS = 5_000;
+
+/** `Date.now()` before which `ensure` skips driving a retry; 0 once a read succeeds.
+ *  A throttle on ATTEMPTS only — it never gates minting, which keys on `hydrated`. */
+let retryBlockedUntil = 0;
 
 export const useAgentNumbers = create<AgentNumberState>((set, get) => ({
   numbers: {},
@@ -70,9 +88,19 @@ export const useAgentNumbers = create<AgentNumberState>((set, get) => ({
         counter: Math.max(counter, maxAssigned + 1, 1),
         hydrated: true,
       });
-    })().finally(() => {
-      hydrating = null;
-    });
+    })()
+      .then(() => {
+        retryBlockedUntil = 0;
+      })
+      .catch((e: unknown) => {
+        // Stamp the cooldown here, where the outcome is known, and rethrow so every
+        // waiter still sees the failure.
+        retryBlockedUntil = Date.now() + RETRY_COOLDOWN_MS;
+        throw e;
+      })
+      .finally(() => {
+        hydrating = null;
+      });
     return hydrating;
   },
 
@@ -84,12 +112,19 @@ export const useAgentNumbers = create<AgentNumberState>((set, get) => ({
     // NOTHING this pass, which is the invariant that matters: an unhydrated map would
     // hand out numbers from 1 and collide with every number already on disk.
     //
+    // The ids are recorded on EVERY unhydrated pass, including the ones the cooldown
+    // skips, so whenever a read does land it replays the newest list rather than one
+    // frozen at the first failure. Only the hydrate CALL is rate limited
+    // ({@link RETRY_COOLDOWN_MS}); a persistent failure therefore costs one store-open
+    // attempt per cooldown window, not one per trigger.
+    //
     // The replay is what closes the loop without the caller's help: once hydration
     // lands, this re-enters `ensure` with `hydrated` now true and mints against the
     // real map. Re-entry is depth-1 by construction, and a second waiter replaying the
     // same ids finds them all numbered and sets nothing.
     if (!hydrated) {
       pendingIds = ids;
+      if (Date.now() < retryBlockedUntil) return;
       void get()
         .hydrate()
         .then(() => get().ensure(pendingIds))

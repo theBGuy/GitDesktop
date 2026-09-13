@@ -1992,8 +1992,9 @@ prompt** you can hand to a coding agent to implement the fix. Copy just that pro
 **Copy fix prompt**.
 
 {{/ai}}A small **CI badge** in the header tracks the current branch's latest run; click it
-to jump to that run. You can also get an OS **notification** when a run finishes — every
-result, only the failures, or only the successes (**Settings → Notifications**).`,
+to jump to that run. You can also get an OS **notification** when a run finishes:
+successes and failures, only the failures, or only the successes
+(**Settings → Notifications**).`,
   },
   {
     id: "findings",
@@ -2811,8 +2812,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   pull requests*), **Pull requests opened, merged, or closed**, **Reviews on my pull
   requests**, and **Workflow runs finish on the current branch**{{ai}}, plus **AI reviews
   I start**, **Automation results**, and **Agent tasks finish**{{/ai}}. Both CI sources
-  carry a **Notify on** choice — *Successes and failures*, *Failures only*, or
-  *Successes only* — so a green day can stay silent and a red one still reaches you;
+  carry a **Notify on** choice (*Successes and failures*, *Failures only*, or
+  *Successes only*), so a green day can stay silent and a red one still reaches you;
   *Failures only* covers runs that timed out or failed to start as well. **Customize…**
   opens the per-repository overrides: **Mute this repository** silences every source for
   that repo, or you can set individual cells, the CI-checks **Watch** choice, and either

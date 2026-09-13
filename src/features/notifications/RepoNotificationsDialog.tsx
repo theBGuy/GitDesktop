@@ -303,10 +303,9 @@ function bodyState({
   return "ready";
 }
 
-/** Either half of the baseline failed to load. Retry is worth offering: the
- *  overrides loader clears its memo on a rejected load, and a settings read that
- *  failed at `store.get` retries too — only a rejected settings `load()` stays
- *  pinned until relaunch. */
+/** Either half of the baseline failed to load. Retry reaches both halves: the
+ *  overrides and settings files open through the shared memoized loader, which
+ *  drops its memo on a rejected load, so a refetch re-opens the file itself. */
 function BaselineLoadFailed({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="space-y-2">

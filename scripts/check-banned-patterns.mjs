@@ -487,6 +487,12 @@ const ONERROR_SETTINGS_REFETCH_RE = new RegExp(
 // its own line. Accepted evasions, zero instances today: a dynamic `import()`
 // of either module (no `from` clause), and a re-export chain through a third
 // module.
+const PUSH_NOTIFICATION_IMPORT_RE =
+  /\bimport\s+(?:type\s+)?\{[^}]*\bpushNotification\b[^}]*\}\s*from\s*["'][^"']*\/notifications["']/g;
+const NOTIFICATIONS_NAMESPACE_IMPORT_RE =
+  /\bimport\s+\*\s+as\s+[\w$]+\s+from\s*["'][^"']*\/notifications["']/g;
+const NOTIFY_MODULE_IMPORT_RE = /\bfrom\s*["'][^"']*\/notify["']/g;
+
 // The two routes to opening a `@tauri-apps/plugin-store` store by hand, each of
 // which re-opens the rejected-load class: `storePromise ??= load(...)` memoizes the
 // REJECTED promise as readily as a resolved one, so one unreadable file leaves that
@@ -518,12 +524,6 @@ const LOAD_STORE_NAME_CALL_RE = /\bload\s*\(\s*storeName\s*\(/g;
 // a narrowed receiver pattern: naming the store receivers would fail-OPEN on the next
 // store whose variable is spelled differently, which is the direction that matters.
 const RAW_STORE_RELOAD_RE = /(?<!location)\.reload\s*\(/g;
-
-const PUSH_NOTIFICATION_IMPORT_RE =
-  /\bimport\s+(?:type\s+)?\{[^}]*\bpushNotification\b[^}]*\}\s*from\s*["'][^"']*\/notifications["']/g;
-const NOTIFICATIONS_NAMESPACE_IMPORT_RE =
-  /\bimport\s+\*\s+as\s+[\w$]+\s+from\s*["'][^"']*\/notifications["']/g;
-const NOTIFY_MODULE_IMPORT_RE = /\bfrom\s*["'][^"']*\/notify["']/g;
 
 export const CHECKS = [
   {
