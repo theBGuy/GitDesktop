@@ -387,7 +387,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   ready flag, and a snapshot write gates on a RESOLVED `hydrate()`, not on the
   flag: `memoizedStoreLoader` retries after a transient failure, so a store
   marked ready on an empty read will write that empty snapshot over data it
-  never read (and re-attempting on the write path is what makes it self-heal).
+  never read (re-attempting on the write path is what makes it self-heal).
+  The flag alone suffices only where the state provably cannot change before
+  the read lands — `agentNumber`, whose `ensure` won't mint while it's false.
 
 ## Rust / Tauri conventions
 

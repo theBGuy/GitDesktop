@@ -211,11 +211,10 @@ export type OutcomeSource = "prChecks" | "actionRuns";
 /** Per-source outcome axis, declared for EVERY source so adding a source forces an
  *  explicit decision (an empty array = no outcome axis). The split typing is the
  *  drift guard: only an {@link OutcomeSource} may carry classes, so handing another
- *  source an axis here fails to compile until it joins that union too. */
-export const SOURCE_OUTCOMES: Record<
-  OutcomeSource,
-  readonly NotificationOutcome[]
-> &
+ *  source an axis here fails to compile until it joins that union too. Read through
+ *  {@link isOutcomeSource} and {@link OUTCOME_SOURCES}, which are this manifest's
+ *  two public forms. */
+const SOURCE_OUTCOMES: Record<OutcomeSource, readonly NotificationOutcome[]> &
   Record<Exclude<NotificationSource, OutcomeSource>, readonly []> = {
   prChecks: OUTCOME_CLASSES,
   prActivity: [],
@@ -236,9 +235,8 @@ export function isOutcomeSource(
 
 /** The outcome sources in manifest order — the one enumeration a heal branch, an
  *  override normalizer, or a matrix sub-row iterates. */
-export const OUTCOME_SOURCES = NOTIFICATION_SOURCES.filter(
-  isOutcomeSource,
-) satisfies readonly OutcomeSource[];
+export const OUTCOME_SOURCES: readonly OutcomeSource[] =
+  NOTIFICATION_SOURCES.filter(isOutcomeSource);
 
 export interface NotificationSettings {
   /** Per-source delivery channels, Record-typed against the manifest. */

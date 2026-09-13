@@ -82,10 +82,11 @@ export function outcomeAriaLabel(source: OutcomeSource): string {
   return `${OUTCOME_ROW_LABEL} — ${SOURCE_LABELS[source]}`;
 }
 
-/** Why the CI-checks sub-rows are held while that source delivers nowhere. Shared so
- *  the global matrix and the per-repo dialog say the same sentence — and shared by
- *  the Watch and Notify-on pickers, which are held by exactly the same condition. */
-export const CHECKS_OFF_REASON =
+/** Why the CI-checks sub-rows are held while that source delivers nowhere. Named
+ *  rather than inlined below because the Watch and Notify-on pickers are held by
+ *  exactly the same condition and print one line between them; every reader reaches
+ *  it through {@link OUTCOME_HELD_REASONS}, so it stays module-private. */
+const CHECKS_OFF_REASON =
   "Turn on a CI checks channel to choose which pull requests to watch and which results notify";
 
 /** Why an outcome picker is held, per source — the CI-checks sentence also covers

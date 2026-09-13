@@ -19,7 +19,6 @@ import { repoIdentity } from "@/lib/git/repo-identity";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   CHANNELS,
-  CHECKS_OFF_REASON,
   type Channel,
   channelAriaLabel,
   notificationRows,
@@ -190,7 +189,9 @@ export const NotificationsSection = withForm({
                         value={field.state.value}
                         onValueChange={field.handleChange}
                         disabledReason={
-                          channelsOff("prChecks") ? CHECKS_OFF_REASON : null
+                          channelsOff("prChecks")
+                            ? OUTCOME_HELD_REASONS.prChecks
+                            : null
                         }
                         reasonId={checksReasonId}
                       />
