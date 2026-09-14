@@ -1887,8 +1887,7 @@ that issue (see *Agent sessions*).{{/ai}}`,
 
 The **Projects** tab (in the More ▾ menu; palette-only by default — bind a key in Settings)
 shows a **GitHub Project** as a board, so you can see where a whole piece of work stands
-without leaving the app. It's read-only for now: everything on it is live, and you make
-changes on GitHub.
+without leaving the app, and move a card along its columns without switching to the browser.
 
 ## Picking a board and its columns
 
@@ -1921,16 +1920,38 @@ Open an issue or pull request from its card and it lands on its own tab. One fro
 repository, or from the other side of a fork's **Fork | Upstream** lens, opens on GitHub in
 your browser instead.
 
+## Moving a card
+
+{{Secondaryclick}} a card for its menu. On Windows and Linux, {{key:shift+f10}} (or the Menu
+key) opens it on the card you're on. For an issue or pull request the menu opens with
+**Open**, which reads **Open on GitHub** where the card belongs somewhere the app can't
+follow. Below it, **Move to** lists the columns of whatever the board is grouped by: pick one
+and the card is there straight away, with the write going to GitHub behind it. The column the
+card already sits in is ticked and can't be picked, and the **No {field}** column clears the
+field rather than setting it. Your keyboard place follows the card, so the arrows carry on
+from where it landed; if GitHub refuses the write, the card returns to its old column and a
+message says why. A **draft** card on a grouped board carries the **Move to** section alone,
+since its notes already open from the card itself, and a redacted item has no menu at all.
+
+One move at a time: while a write is in flight the menu says so in place of the columns. The
+section is held the same way, with its reason on it, when your GitHub sign-in can read
+project fields but not change them, when you don't have write access to the board, and when
+the board is grouped by one of GitHub's own issue fields (those are edited on GitHub). An
+ungrouped board has no columns to move between, so its cards carry **Open** alone, and a
+draft card there has no menu at all.
+
 ## Keyboard
 
 The board is fully keyboard-operable: **↑ / ↓** move through a column, **← / →** step to the
 next column at the same height, **Home / End** jump to a column's first or last card, and
-**Enter** opens the card you're on. Collapsing the sidebar ({{kbd:toggle-sidebar}}) hands
-the board its width.
+**Enter** opens the card you're on; on Windows and Linux, {{key:shift+f10}} opens its menu.
+Collapsing the sidebar ({{kbd:toggle-sidebar}}) hands the board its width.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
-and offers a one-click **Reconnect GitHub…**, which requests \`project\`.`,
+and offers a one-click **Reconnect GitHub…**, which requests \`project\`. Moving a card needs
+the full \`project\` scope, so a \`read:project\` sign-in draws the board with its move rows
+held.`,
   },
   {
     id: "discussions",

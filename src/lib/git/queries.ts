@@ -1,4 +1,5 @@
 import {
+  type InfiniteData,
   type QueryClient,
   type QueryKey,
   queryOptions,
@@ -29,6 +30,7 @@ import type {
   BbEnvironment,
   BitbucketHookInput,
   BitbucketRepoSettingsInput,
+  BoardItems,
   CiStatus,
   CommitCommentOut,
   DiffStatEntry,
@@ -54,6 +56,8 @@ import type {
   PrDetails,
   PrInfo,
   PrMergeabilityState,
+  ProjectFieldDef,
+  ProjectFieldOptionDef,
   ProjectFieldValue,
   ProjectFieldValueUpdate,
   ProjectItemRef,
@@ -2667,6 +2671,137 @@ export function useProjectItems(
     enabled,
     staleTime: 60_000,
     retry: false,
+  });
+}
+
+/** The board field a move writes: the single-select arm alone, since only that
+ *  kind makes columns. */
+type BoardGroupField = Extract<ProjectFieldDef, { kind: "singleSelect" }>;
+
+/** The moved item's field values with `field` set to `option`, or dropped when
+ *  `option` is null — the clear. Replaced IN PLACE where an entry already exists
+ *  so the rail's line order survives a move. */
+function withGroupValue(
+  values: ProjectFieldValue[],
+  field: BoardGroupField,
+  option: ProjectFieldOptionDef | null,
+): ProjectFieldValue[] {
+  const next: ProjectFieldValue | null =
+    option === null
+      ? null
+      : {
+          kind: "singleSelect",
+          fieldId: field.id,
+          fieldName: field.name,
+          optionId: option.id,
+          name: option.name,
+          color: option.color,
+          isIssueField: field.isIssueField,
+        };
+  const held = values.some(
+    (value) => value.kind === "singleSelect" && value.fieldId === field.id,
+  );
+  if (!held) return next === null ? values : [...values, next];
+  return values.flatMap((value) => {
+    if (value.kind !== "singleSelect" || value.fieldId !== field.id)
+      return [value];
+    return next === null ? [] : [next];
+  });
+}
+
+/**
+ * The board's own move: one item's grouped single-select field, written through the
+ * same command the field editor uses, with an optimistic patch of the board's item
+ * pages. `buildColumns` derives the columns from those field values, so the patch
+ * re-buckets the card at its global-position slot without the board re-reading.
+ *
+ * Single-writer by contract: the panel holds ONE instance and disables every move
+ * row while it is pending, because two overlapping moves' rollbacks would restore
+ * each other's snapshots.
+ */
+export function useMoveBoardCard(repo: string, projectId: string) {
+  const queryClient = useQueryClient();
+  const key = projectItemsKey(repo, projectId);
+  // The board can't name a cross-repo card's lens, kind, or number, so the honest
+  // co-invalidation of the issue/PR rail is the family prefix.
+  const railKey = ["repo", repo, "item-field-values"];
+  return useMutation({
+    mutationFn: (args: {
+      /** The membership's item id on `projectId` — what the write addresses. */
+      itemId: string;
+      field: BoardGroupField;
+      /** The column's option, or null for the board's "No {field}" column. */
+      option: ProjectFieldOptionDef | null;
+    }) =>
+      api.ghSetItemFieldValues(
+        repo,
+        projectId,
+        args.itemId,
+        args.option === null
+          ? []
+          : [
+              {
+                kind: "singleSelect",
+                fieldId: args.field.id,
+                optionId: args.option.id,
+              },
+            ],
+        args.option === null ? [args.field.id] : [],
+      ),
+    onMutate: async (args) => {
+      await queryClient.cancelQueries({ queryKey: key });
+      const prev =
+        queryClient.getQueryData<InfiniteData<BoardItems, string | null>>(key);
+      if (prev) {
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(key, {
+          ...prev,
+          pages: prev.pages.map((page) => ({
+            ...page,
+            items: page.items.map((item) =>
+              item.itemId === args.itemId
+                ? {
+                    ...item,
+                    fieldValues: withGroupValue(
+                      item.fieldValues,
+                      args.field,
+                      args.option,
+                    ),
+                  }
+                : item,
+            ),
+          })),
+        });
+      }
+      // The targets ride the CONTEXT, never these closures: a pending mutation
+      // takes the latest render's options (query-core's MutationObserver
+      // re-applies them on every re-render), so a repo or board switch mid-flight
+      // would otherwise roll the old board's snapshot into the new board's key and
+      // invalidate the wrong repo's boards.
+      return { prev, key, railKey, repo };
+    },
+    // Reporting and rollback live here, not in the caller's `mutate` options: the
+    // context menu that fires this closes as it does, and react-query drops
+    // mutate-scoped callbacks once the observer loses its listeners.
+    onError: (e, _args, ctx) => {
+      if (ctx?.prev)
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          ctx.key,
+          ctx.prev,
+        );
+      toastError(e);
+    },
+    // Cancel-before-invalidate on both families, for the reason
+    // {@link invalidateProjectBoards} states: a read already in flight would
+    // otherwise resolve afterwards and stamp itself fresh, erasing the
+    // invalidation. Invalidate-only past that — no forced refetch, so a rail
+    // behind a closed sidebar still re-reads on its own terms.
+    onSettled: (_d, _e, _args, ctx) => {
+      if (ctx === undefined) return;
+      invalidateProjectBoards(queryClient, ctx.repo);
+      void queryClient
+        .cancelQueries({ queryKey: ctx.railKey })
+        .then(() => queryClient.invalidateQueries({ queryKey: ctx.railKey }));
+    },
   });
 }
 

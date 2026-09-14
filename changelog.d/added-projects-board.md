@@ -6,5 +6,8 @@
   (when a board spans several) and assignees; **draft** items open their notes in place,
   issues and pull requests from this repository open on their own tab (cards from
   elsewhere open on GitHub), and the whole board answers to the arrow keys. Large boards
-  page in with **Load more**. GitHub only, read-only for now, and reading a board needs
-  the same `project` or `read:project` sign-in scope the Projects picker already asks for.
+  page in with **Load more**. Right-click a card (Shift+F10 on Windows and Linux) to
+  **move it to another column**: the board re-draws where it lands and your keyboard place
+  goes with it, while the write reaches GitHub behind you. GitHub only; reading a board
+  needs the same `project` or `read:project` sign-in scope the Projects picker already asks
+  for, and moving a card needs the `project` scope plus write access to the board.

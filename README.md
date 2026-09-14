@@ -556,10 +556,12 @@ number, the owning repository when the board spans several, and up to three
 assignees; **draft** items open their notes in place, and an item you can't
 see says so rather than thinning the board silently. Open an issue or pull
 request straight from its card, page through a large board with **Load
-more**, and move around the whole thing from the keyboard. Read-only
-(changes still happen on GitHub), and reading a board needs the same
-`project` or `read:project` sign-in scope the Projects picker already asks
-for.
+more**, and move around the whole thing from the keyboard. **Right-click a
+card** (Shift+F10 on Windows and Linux) for its menu: open it, or **move it to
+another column**, which writes the board's grouping field and re-draws the
+card where it lands, keyboard place and all. Moving needs write access to
+the board and the `project` sign-in scope; reading one needs only the
+`project` or `read:project` scope the Projects picker already asks for.
 
 ### Code TODOs
 

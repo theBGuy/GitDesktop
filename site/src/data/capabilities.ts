@@ -330,7 +330,7 @@ export const capabilities: Capability[] = [
   {
     group: "Issues & discussions",
     label:
-      "Project boards — a GitHub Project as a kanban, grouped by any of its single-select fields",
+      "Project boards — a GitHub Project as a kanban, grouped by any of its single-select fields, with right-click move between columns",
     highlight: true,
   },
   {
