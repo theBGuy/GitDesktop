@@ -2544,8 +2544,8 @@ export const ghProjectFields = (repoPath: string, projectId: string) =>
 /** One board's items, in the board's own position order. Auto-pages up to 500 per
  *  call; more than that comes back `truncated` with the `endCursor` the next call
  *  passes as `after`. Board state like the field definitions, so no lens. `query`
- *  is the board's own filter grammar, unused by the read-only board (always
- *  null). */
+ *  is the board's own filter grammar, which no caller passes yet (always null —
+ *  saved-view lenses are its intended user). */
 export const ghProjectItems = (
   repoPath: string,
   projectId: string,
