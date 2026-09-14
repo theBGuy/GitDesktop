@@ -679,7 +679,7 @@ function HistoryList({
   onOpenTarget: (entry: AutomationHistoryEntry) => void;
   onViewResult: (resultId: string) => void;
   /** Seats the arrow-key cursor on a row the user reached with Tab, so the next
-   *  arrow steps from there rather than warping to the end of the list. */
+   *  arrow steps from there rather than to the start or the end of the list. */
   onFocusRow: (id: string) => void;
   onSetUp: () => void;
 }) {
