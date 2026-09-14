@@ -2497,12 +2497,17 @@ export function useItemProjects(
   });
 }
 
+/** Every item's field values in one repo — the prefix {@link itemFieldValuesKey}
+ *  extends, and the only handle a writer without an item's lens/kind/number has. */
+const itemFieldValuesFamilyKey = (repo: string) =>
+  ["repo", repo, "item-field-values"] as const;
+
 const itemFieldValuesKey = (
   repo: string,
   lens: RemoteLens,
   kind: "issue" | "pr",
   number: number,
-) => ["repo", repo, "item-field-values", lens, kind, number] as const;
+) => [...itemFieldValuesFamilyKey(repo), lens, kind, number] as const;
 
 /** One issue/PR's project field values, per board. Same axes, staleTime and
  *  `retry: false` as {@link useItemProjects} — it reads the same boards through the
@@ -2709,6 +2714,28 @@ function withGroupValue(
   });
 }
 
+/** One item's `fieldValues` replaced across every cached page, leaving every OTHER
+ *  item and every page the caller never read exactly as they are. Both directions
+ *  of the write go through here: a whole-tree restore would drop a `Load more` page
+ *  that landed mid-flight, since the rollback would carry the tree as it was before
+ *  that page existed. */
+function patchBoardItem(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  itemId: string,
+  values: ProjectFieldValue[],
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (data === undefined) return undefined;
+  return {
+    ...data,
+    pages: data.pages.map((page) => ({
+      ...page,
+      items: page.items.map((item) =>
+        item.itemId === itemId ? { ...item, fieldValues: values } : item,
+      ),
+    })),
+  };
+}
+
 /**
  * The board's own move: one item's grouped single-select field, written through the
  * same command the field editor uses, with an optimistic patch of the board's item
@@ -2716,8 +2743,10 @@ function withGroupValue(
  * re-buckets the card at its global-position slot without the board re-reading.
  *
  * Single-writer by contract: the panel holds ONE instance and disables every move
- * row while it is pending, because two overlapping moves' rollbacks would restore
- * each other's snapshots.
+ * row while it is pending. Not for the snapshot's sake — the rollback below is one
+ * item wide — but because two writes to the same card's field settle in an order
+ * neither the board nor GitHub promises, and a late rollback would put a card back
+ * in a column a later write already moved it out of.
  *
  * The write TARGET rides the variables, never this hook's scope. A pending mutation
  * runs on the latest render's options — query-core re-applies them on every
@@ -2757,47 +2786,41 @@ export function useMoveBoardCard() {
       // before the pause so its own scope is safe, but one source of truth for
       // WHERE the write lands is what keeps the settle handlers honest.
       const key = projectItemsKey(args.repo, args.projectId);
-      // The board can't name a cross-repo card's lens, kind, or number, so the
-      // honest co-invalidation of the issue/PR rail is the family prefix.
-      const railKey = ["repo", args.repo, "item-field-values"];
+      const railKey = itemFieldValuesFamilyKey(args.repo);
       await queryClient.cancelQueries({ queryKey: key });
-      const prev =
-        queryClient.getQueryData<InfiniteData<BoardItems, string | null>>(key);
-      if (prev) {
-        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(key, {
-          ...prev,
-          pages: prev.pages.map((page) => ({
-            ...page,
-            items: page.items.map((item) =>
-              item.itemId === args.itemId
-                ? {
-                    ...item,
-                    fieldValues: withGroupValue(
-                      item.fieldValues,
-                      args.field,
-                      args.option,
-                    ),
-                  }
-                : item,
+      // The one card's values, not the whole tree: that is all the rollback needs,
+      // and all it may safely carry.
+      const before = queryClient
+        .getQueryData<InfiniteData<BoardItems, string | null>>(key)
+        ?.pages.flatMap((page) => page.items)
+        .find((item) => item.itemId === args.itemId)?.fieldValues;
+      if (before !== undefined)
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          (data) =>
+            patchBoardItem(
+              data,
+              args.itemId,
+              withGroupValue(before, args.field, args.option),
             ),
-          })),
-        });
-      }
+        );
       // The settle handlers read these, never their own scope: they too run on the
       // latest render's options, so a mid-flight switch would otherwise roll the
-      // old board's snapshot into the new board's key and invalidate the wrong
-      // repo's boards.
-      return { prev, key, railKey, repo: args.repo };
+      // old board's values into the new board's key and invalidate the wrong repo's
+      // boards.
+      return { before, itemId: args.itemId, key, railKey, repo: args.repo };
     },
     // Reporting and rollback live here, not in the caller's `mutate` options: the
     // context menu that fires this closes as it does, and react-query drops
     // mutate-scoped callbacks once the observer loses its listeners.
     onError: (e, _args, ctx) => {
-      if (ctx?.prev)
+      if (ctx !== undefined && ctx.before !== undefined) {
+        const { key, itemId, before } = ctx;
         queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
-          ctx.key,
-          ctx.prev,
+          key,
+          (data) => patchBoardItem(data, itemId, before),
         );
+      }
       toastError(e);
     },
     // Cancel-before-invalidate on both families, for the reason

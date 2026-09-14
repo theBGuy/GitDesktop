@@ -22,9 +22,16 @@ export function groupableFields(fields: ProjectFieldDef[]): GroupField[] {
   return fields.filter((f): f is GroupField => f.kind === "singleSelect");
 }
 
+/** The catch-all column's id. Not an option id — it stands for the ABSENCE of a
+ *  value, which is what makes it the column a clear writes to. */
+export const UNSET_COLUMN_ID = "__unset__";
+
 /** The option a board item sits under for `field`, or null when the field is
- *  unset on it. Matched on `optionId`, never the name: options are renamable. */
-function optionIdFor(item: BoardItem, field: GroupField): string | null {
+ *  unset on it. Matched on `optionId`, never the name: options are renamable.
+ *  Exported so a surface acting on the VALUE reads it the same way the bucketing
+ *  does — the catch-all holds unset cards AND cards whose stored option the field
+ *  no longer defines, so a column is not a value. */
+export function optionIdFor(item: BoardItem, field: GroupField): string | null {
   for (const value of item.fieldValues) {
     if (value.kind === "singleSelect" && value.fieldId === field.id)
       return value.optionId;
@@ -64,7 +71,12 @@ export function buildColumns(
       color: option.color,
       items: byOption.get(option.id) ?? [],
     })),
-    { id: "__unset__", label: `No ${field.name}`, color: null, items: unset },
+    {
+      id: UNSET_COLUMN_ID,
+      label: `No ${field.name}`,
+      color: null,
+      items: unset,
+    },
   ];
 }
 

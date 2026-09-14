@@ -1933,11 +1933,12 @@ from where it landed; if GitHub refuses the write, the card returns to its old c
 message says why. A **draft** card on a grouped board carries the **Move to** section alone,
 since its notes already open from the card itself, and a redacted item has no menu at all.
 
-One move at a time: while a write is in flight the menu says so in place of the columns. The
-section is held the same way, with its reason on it, when your GitHub sign-in can read
-project fields but not change them, when you don't have write access to the board, and when
-the board is grouped by one of GitHub's own issue fields (those are edited on GitHub). An
-ungrouped board has no columns to move between, so its cards carry **Open** alone, and a
+One move at a time: while a write is in flight the menu says so in place of the columns, and
+it waits the same way while **Load more** is still fetching, so a move can't cut the page
+you asked for short. The section is held with its reason on it when your GitHub sign-in can
+read project fields but not change them, when you don't have write access to the board, and
+when the board is grouped by one of GitHub's own issue fields (those are edited on GitHub).
+An ungrouped board has no columns to move between, so its cards carry **Open** alone, and a
 draft card there has no menu at all.
 
 ## Keyboard

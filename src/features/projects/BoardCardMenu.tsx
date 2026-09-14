@@ -11,12 +11,18 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import type { BoardItem } from "@/lib/git/types";
 import type { BoardColumnModel } from "./board-model";
 
-/** What the board's one shared context menu acts on, recorded on right-click:
- *  the card, and the column it was drawn in. `null` means nothing actionable was
- *  under the pointer and the menu is suppressed rather than opened empty. */
+/** What the board's one shared context menu acts on, recorded on right-click or
+ *  long press. `null` means nothing actionable was under the pointer and the menu
+ *  is suppressed rather than opened empty. */
 export type BoardMenuTarget = {
   item: BoardItem;
-  columnIndex: number;
+  /** The column id the card's own grouped-field VALUE names — its option's column,
+   *  or the catch-all when the field is unset. A card whose stored option the field
+   *  no longer defines carries an id no column has: it is drawn in the catch-all
+   *  but is not unset, so nothing is checked and every row, the clear included,
+   *  stays live. Drawn position would be the wrong axis — the clear is exactly what
+   *  fixes such a card. */
+  valueColumnId: string;
 } | null;
 
 /** Callbacks the menu items invoke — owned by the panel, which holds the lens,
@@ -52,7 +58,6 @@ export function BoardCardMenuItems({
   actions: BoardMenuActions;
 }) {
   if (target === null) return null;
-  const current = columns[target.columnIndex];
   return (
     <>
       {openLabel !== null && (
@@ -67,7 +72,7 @@ export function BoardCardMenuItems({
           // id as the group's `aria-labelledby`, and it throws outside a group at
           // all, so it can't be hoisted above this.
           <ContextMenuRadioGroup
-            value={current?.id ?? null}
+            value={target.valueColumnId}
             onValueChange={(next) => {
               // Base UI types a radio group's value as `any`; the guard is what
               // narrows it back to the column id these rows carry.
@@ -77,7 +82,7 @@ export function BoardCardMenuItems({
             }}
           >
             <ContextMenuLabel>Move to</ContextMenuLabel>
-            {columns.map((column, i) => (
+            {columns.map((column) => (
               <ContextMenuRadioItem
                 key={column.id}
                 value={column.id}
@@ -85,9 +90,10 @@ export function BoardCardMenuItems({
                 // (its checkbox sibling does too) — without this the menu would
                 // sit over the card it just moved.
                 closeOnClick
-                // The card is already here: checked by the row's own indicator
-                // glyph, and held so the write can't be sent to a no-op.
-                disabled={i === target.columnIndex}
+                // The card's value is already this one: checked by the row's own
+                // indicator glyph, and held so the write can't be sent as a no-op.
+                // By VALUE, never by drawn column — see `valueColumnId`.
+                disabled={column.id === target.valueColumnId}
               >
                 {column.color === null ? (
                   <span

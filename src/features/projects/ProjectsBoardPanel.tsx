@@ -64,6 +64,8 @@ import {
   buildColumns,
   firstCardPosition,
   groupableFields,
+  optionIdFor,
+  UNSET_COLUMN_ID,
 } from "./board-model";
 
 /** Where an issue or pull request on this board lands, per kind: the tab that
@@ -90,9 +92,12 @@ const READ_ONLY_SCOPE_REASON =
 const NO_ACCESS_REASON = "You don't have write access to this project";
 const ISSUE_FIELD_REASON =
   "Issue fields are edited on GitHub — board editing arrives later";
-/** Single-writer: the optimistic snapshot is one deep, so a second move's
- *  rollback would restore the first one's patch. */
+/** Single-writer: two writes to one card's field settle in an order nothing
+ *  promises, and the later one's rollback can undo the earlier one's landing. */
 const MOVING_REASON = "Moving your last card…";
+/** Held rather than queued: a move cancels the board's reads, and query-core's
+ *  cancel REVERTS an in-flight one. */
+const LOADING_PAGE_REASON = "Finishing the board's next page…";
 /** A view-option row. Mirrors the field editor's own option rows, which are the
  *  same shape on the same kind of choice. */
 const GROUP_ROW_CLASS =
@@ -420,8 +425,8 @@ export function ProjectsBoardPanel({
   }
 
   // The board's one write. ONE instance, which is what makes `isPending` a real
-  // single-flight gate: the optimistic snapshot is one deep, so two overlapping
-  // moves' rollbacks would restore each other's patches.
+  // single-flight gate — the menu's stated contract, and what keeps two writes to
+  // one card's field from settling in an order that leaves it in the wrong column.
   const move = useMoveBoardCard();
   const [menuTarget, setMenuTarget] = useState<BoardMenuTarget>(null);
   // The same target, readable SYNCHRONOUSLY. Base UI decides whether to open from
@@ -471,8 +476,8 @@ export function ProjectsBoardPanel({
   }, [chase, chaseCol, chaseIdx, menuBusy, movePending]);
 
   // Ranked like the field editor's own holds, and for the same reasons — the two
-  // surfaces gate on the same flags, so they say it the same way. The in-flight
-  // arm ranks last: it is the only one that clears on its own.
+  // surfaces gate on the same flags, so they say it the same way. The last two arms
+  // rank at the tail because they are the only ones that clear on their own.
   const moveHeldReason = (() => {
     switch (true) {
       case projectScopeReadOnly(scopes.data):
@@ -483,6 +488,11 @@ export function ProjectsBoardPanel({
         return ISSUE_FIELD_REASON;
       case movePending:
         return MOVING_REASON;
+      // A move's own `cancelQueries` REVERTS an in-flight fetch (query-core cancels
+      // with `revert: true` by default), so starting one now would silently undo
+      // the page the user just asked for.
+      case items.isFetchingNextPage:
+        return LOADING_PAGE_REASON;
       default:
         return undefined;
     }
@@ -507,7 +517,17 @@ export function ProjectsBoardPanel({
       kind === "redacted" ||
       (kind === "draft" && groupField === null)
         ? null
-        : { item, columnIndex: at.col };
+        : {
+            item,
+            // The card's VALUE, read the way the bucketing reads it. An unset field
+            // names the catch-all; a stored option the field no longer defines
+            // names a column that isn't drawn, which is what leaves the clear row
+            // live for the one card that needs it.
+            valueColumnId:
+              groupField === null
+                ? UNSET_COLUMN_ID
+                : (optionIdFor(item, groupField) ?? UNSET_COLUMN_ID),
+          };
     menuTargetRef.current = next;
     setMenuTarget(next);
     return next !== null;
@@ -538,6 +558,9 @@ export function ProjectsBoardPanel({
     const column = columns[columnIndex];
     if (groupField === null || projectId === null || column === undefined)
       return;
+    // Belt-and-braces with the rows' own `disabled`: the hold is derived at render,
+    // and a pick racing the render that sets it must not get through either.
+    if (moveHeldReason !== undefined) return;
     const option = groupField.options.find((o) => o.id === column.id) ?? null;
     setChase(item.itemId);
     // The board this move belongs to travels WITH it: an offline move parks before
