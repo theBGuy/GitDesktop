@@ -390,6 +390,16 @@ one grep away on the named symbol. Grows via Conventions-sync.
   to global); the store registers a relocate rewrite in repo-data-migration.ts.
   Two instances: `settings/mcp.ts` (`serverScope`) and `scripts/scope.ts`
   (`taskScope`) — deliberate mirrors of each other, not a shared import.
+- **Repo-identity observers** — every observer of `["repo-identity", repoPath]`
+  spreads the ONE factory `repoIdentityQueryOptions`
+  (`src/lib/git/repo-identity-query.ts`), never an inline query: its strict
+  queryFn REJECTS on IPC failure, so a transient error retries instead of pinning
+  the raw-path fallback for the session. Three steady states, not two — resolved,
+  pending, and a MOUNTED observer sitting on `isError` with no data until a
+  remount: a consumer gating on `data !== undefined` must treat the error as
+  settled (fall back to the raw path, the key the swallowing `repoIdentity` and
+  the disk loaders use) or its gate never opens. Direct store/fold callers keep
+  the swallowing `repoIdentity`.
 - **Hydrate gating** — a `hydrate` that swallows its read must NEVER set the
   ready flag, and a snapshot write gates on a RESOLVED `hydrate()`, not on the
   flag: `memoizedStoreLoader` retries after a transient failure, so a store

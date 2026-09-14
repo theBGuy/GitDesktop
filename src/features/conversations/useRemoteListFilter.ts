@@ -301,9 +301,11 @@ export function useRemoteListFilter(opts: {
      * ONCE, under the scope the user saved, instead of flashing a different one.
      *
      * It cannot wedge closed. The prefs loader catches its own failures and resolves
-     * to the defaults; `useMyTeams` carries `retry: false`, so it always reaches
-     * success or error; and the team leg only applies where teams can be chosen at
-     * all, which the issue panel never does.
+     * to the defaults, and its cache key falls back to the raw checkout path once the
+     * repo's identity lookup fails for good, so the read runs on either outcome;
+     * `useMyTeams` carries `retry: false`, so it always reaches success or error; and
+     * the team leg only applies where teams can be chosen at all, which the issue
+     * panel never does.
      */
     scopeReady: prefsQuery.data !== undefined && teamScopeSettled,
     /** A saved team axis that will NOT be in the running filter, because it could not

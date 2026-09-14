@@ -3,7 +3,7 @@ import { useCallback, useMemo } from "react";
 import { PROVIDERS_REQUIRING_KEY } from "@/lib/ai/providers";
 import type { AiProviderId } from "@/lib/ai/types";
 import { getSecret } from "@/lib/git/api";
-import { repoIdentity } from "@/lib/git/repo-identity";
+import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
 import { commitTheme, type ThemeSetting } from "@/lib/theme";
 import {
   type AppSettings,
@@ -33,26 +33,16 @@ export function useSettings() {
 /**
  * The scope/override lookup keys for a repo, most-preferred LAST: `[repoPath]`
  * while the identity is still resolving (or when null — no repo open → `[]`), and
- * `[repoPath, identity]` (deduped) once `repoIdentity` resolves. Feeds the MCP
+ * `[repoPath, identity]` (deduped) once the identity resolves. Feeds the MCP
  * scope helpers ({@link isServerAvailable} et al.) so a repo-scoped server or
  * per-repo override set from one checkout matches from a sibling worktree, while
  * a value still under a raw checkout path (pre-identity-keying) keeps matching.
  *
- * Identity is stable for a session, so this never refetches (`staleTime`
- * Infinity) — a plain query, safe to read inside an `<Activity>`-managed tab
- * (no effects). `networkMode` must stay "always" here and on every other observer
- * of this key: it's a local git read, the mode is baked into the retryer by
- * whichever observer initiates the fetch, and one observer left on the default
- * parks the shared fetch offline for all of them.
+ * A plain query (the shared identity options), safe to read inside an
+ * `<Activity>`-managed tab — no effects.
  */
 export function useRepoKeys(repoPath: string | null): RepoKeys {
-  const { data: identity } = useQuery({
-    queryKey: ["repo-identity", repoPath],
-    queryFn: () => repoIdentity(repoPath as string),
-    enabled: !!repoPath,
-    staleTime: Number.POSITIVE_INFINITY,
-    networkMode: "always",
-  });
+  const { data: identity } = useQuery(repoIdentityQueryOptions(repoPath));
   // Stable reference across renders (same repoPath/identity) so it can sit in
   // downstream `useMemo` dependency arrays without churning them.
   return useMemo(() => {

@@ -13,24 +13,33 @@ import { invoke } from "@/lib/tauri/invoke";
 
 const identityCache = new Map<string, Promise<string>>();
 
-/** Resolve `repoPath` to its worktree-stable identity key (memoized per path).
- *  Falls back to the raw path when git can't resolve it (a non-repo path, or an
- *  IPC failure) — a stable key that matches the Rust fallback exactly. Failures
- *  aren't cached, so a transient error doesn't pin a repo to the raw path for the
- *  whole session. */
-export function repoIdentity(repoPath: string): Promise<string> {
+/** Resolve `repoPath` to its identity key (memoized per path), REJECTING when the
+ *  IPC call fails. The Rust command owns the unresolvable-repo case itself and
+ *  answers the raw path, so a rejection here is transport failure alone — callers
+ *  that can retry (the query observers, via `repoIdentityQueryOptions`) need to
+ *  see it. Only successes are cached; a failure drops its entry so a retry calls
+ *  git again. */
+export function repoIdentityStrict(repoPath: string): Promise<string> {
   const hit = identityCache.get(repoPath);
   if (hit) return hit;
-  const p = (async () => {
-    try {
-      return await invoke<string>("git_repo_identity", { repoPath });
-    } catch {
-      identityCache.delete(repoPath);
-      return repoPath;
-    }
-  })();
+  const p = invoke<string>("git_repo_identity", { repoPath }).catch((e) => {
+    identityCache.delete(repoPath);
+    throw e;
+  });
   identityCache.set(repoPath, p);
   return p;
+}
+
+/** {@link repoIdentityStrict} for callers with nowhere to put a failure: never
+ *  rejects, standing in the raw path when the IPC call fails — the same key the
+ *  Rust fallback produces. For one-shot store/fold callers; observers that can
+ *  retry use the strict form. */
+export async function repoIdentity(repoPath: string): Promise<string> {
+  try {
+    return await repoIdentityStrict(repoPath);
+  } catch {
+    return repoPath;
+  }
 }
 
 /** Merge two id-bearing lists, dropping duplicates by `id`; `keep`'s items come

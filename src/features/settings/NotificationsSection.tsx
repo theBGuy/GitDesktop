@@ -299,7 +299,9 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
   const clear = useClearNotificationOverride();
   // An empty path reads as "no repo open" all the way down: the identity query
   // is disabled and the override lookup misses, so no branch needs a guard.
-  const identity = useRepoIdentity(repoPath ?? "").data;
+  const { data: identity, isError: identityFailed } = useRepoIdentity(
+    repoPath ?? "",
+  );
   const current = useRepoNotificationOverride(repoPath ?? "");
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -313,12 +315,14 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
   const recents = settings.data?.recentRepos ?? [];
   const recentPaths = recents.map((r) => r.path);
   // Nothing is claimed about a repo until BOTH the stored overrides and the open
-  // repo's identity are in hand: an identity-keyed entry is invisible while that
-  // resolves, so an early read would name the open repo as "another repository"
-  // and call it unmodified in the same frame.
+  // repo's identity have SETTLED: an identity-keyed entry is invisible while the
+  // lookup resolves, so an early read would name the open repo as "another
+  // repository" and call it unmodified in the same frame. A lookup that failed for
+  // good settles too — the raw path is then all this repo can be addressed by, and
+  // holding out for an identity would leave the section blank until a remount.
   const resolved =
     overrides.data !== undefined &&
-    (repoPath === null || identity !== undefined);
+    (repoPath === null || identity !== undefined || identityFailed);
   // Every key the open repo could be stored under — its identity and, until the
   // next save folds it, its raw checkout path. Compared case-insensitively, in
   // step with `overrideEntry`, which matches both arms through `samePath`: an

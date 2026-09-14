@@ -413,9 +413,9 @@ function RepoNotificationsBody({
   // the Watch row prints it under this id and the Notify-on row points at it.
   const checksReasonId = useId();
   // Worktree-stable identity, so a linked worktree edits the same entry as its
-  // main checkout. The raw path is the SETTLED fallback (the resolver returns it
-  // when git can't answer), never a stand-in to edit against while the lookup is
-  // still pending — see the skeleton gate below.
+  // main checkout. The `?? repoPath` below is this call site's own fallback for a
+  // lookup that FAILED, never a stand-in to edit against while one is still
+  // pending — see the skeleton gate below.
   const identityQuery = useRepoIdentity(repoPath);
   const identity = identityQuery.data;
 

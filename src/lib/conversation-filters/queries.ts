@@ -23,12 +23,17 @@ import {
 const prefsKey = (identity: string) =>
   ["conversation-filters", identity] as const;
 
-/** The cache key for a repo's filter prefs, or null until its identity resolves.
+/** The cache key for a repo's filter prefs: its identity, or — once the identity
+ *  lookup has failed for good — the raw checkout path, which is what the disk
+ *  loader falls back to on the same failure, so cache and record stay addressed
+ *  alike. Null only while the lookup is still pending, since callers hold their
+ *  ready-gates on a null key and a gate with nothing left to wait for never opens.
  *  Module-private on purpose: the reader, the writer and the invalidator below are
  *  the only holders, so nothing outside can key this cache by checkout path. */
 function useConversationFilterPrefsKey(repo: string) {
-  const identity = useRepoIdentity(repo).data;
-  return identity === undefined ? null : prefsKey(identity);
+  const { data: identity, isError } = useRepoIdentity(repo);
+  if (identity !== undefined) return prefsKey(identity);
+  return isError ? prefsKey(repo) : null;
 }
 
 // Unsettled saves per identity. Module-level rather than per-hook because the Pull
@@ -39,14 +44,15 @@ const pendingSaves = new Map<string, number>();
 /** A repo's persisted PR/issue filter prefs. The store is the source of truth —
  *  there's no server to go stale against. `data` stays undefined across the
  *  identity-resolution window as well as the disk read, which is what callers'
- *  ready-gates gate on; it can't wedge there, since `repoIdentity` falls back to
- *  the raw path rather than failing. */
+ *  ready-gates gate on; a failed identity lookup falls the key back to the raw
+ *  path, so the read still runs and the gate still opens, and a later mount
+ *  upgrades the key once the identity resolves. */
 export function useConversationFilterPrefs(repo: string) {
   const key = useConversationFilterPrefsKey(repo);
   return useQuery({
     // The unresolved-identity key is a parking spot, never fetched (disabled below)
     // and never written — callers compose keys through the hook above, which
-    // withholds one until the identity lands.
+    // withholds one until the identity settles.
     queryKey: key ?? prefsKey(""),
     queryFn: () => loadConversationFilterPrefs(repo),
     enabled: key !== null,

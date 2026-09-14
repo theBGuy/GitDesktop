@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { repoIdentity } from "@/lib/git/repo-identity";
+import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
 import { invoke } from "@/lib/tauri/invoke";
 import {
   addTask,
@@ -36,23 +36,16 @@ export function useScripts() {
  * than flashing an identity-scoped task through "other repos".
  *
  * Shares the `["repo-identity", repoPath]` query with settings' `useRepoKeys`, so
- * one identity lookup serves both registries. Identity is stable for a session, so
- * this never refetches (`staleTime` Infinity) — a plain query, safe to read inside
- * an `<Activity>`-managed tab (no effects). `networkMode` always because this is a
- * local git read: the default online mode PARKS it while the OS reports no
- * connection, leaving `settled` false and every scope decision pending.
+ * one identity lookup serves both registries. A plain query (the shared identity
+ * options), safe to read inside an `<Activity>`-managed tab — no effects.
  */
 export function useTaskRepoKeys(repoPath: string | null): {
   keys: readonly string[];
   settled: boolean;
 } {
-  const { data: identity, isFetched } = useQuery({
-    queryKey: ["repo-identity", repoPath],
-    queryFn: () => repoIdentity(repoPath as string),
-    enabled: !!repoPath,
-    staleTime: Number.POSITIVE_INFINITY,
-    networkMode: "always",
-  });
+  const { data: identity, isFetched } = useQuery(
+    repoIdentityQueryOptions(repoPath),
+  );
   // Stable reference across renders (same repoPath/identity) so it can sit in
   // downstream `useMemo` dependency arrays without churning them.
   return useMemo(() => {
