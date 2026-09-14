@@ -4,7 +4,7 @@ description: "Git says another process seems to be running. What .git/index.lock
 pubDate: 2026-09-16
 author: theBGuy
 pillar: git-safety
-tags: ["git", "recovery", "index"]
+tags: ["git", "recovery"]
 ---
 
 You ran an ordinary Git command and got a refusal with a file path
@@ -16,8 +16,8 @@ repository, then delete the file. Your work is not inside it.
 
 The rest of this post is why that answer holds and what the check
 protects you from, measured on Git 2.51 (Windows build, stock
-configuration, driven from Git Bash, so the commands read the same
-on every platform). The demos below are one continuous session;
+configuration, driven from Git Bash; platform spellings that differ
+are called out in place). The demos below are one continuous session;
 every command shows its complete output; only machine paths are shortened.
 
 ## The lock is a draft of your index
@@ -75,8 +75,8 @@ lock belongs to the operations that rewrite the index.
 
 ## Endings Git can see, and endings it can't
 
-Interrupt the waiting commit politely and watch what
-Git does on the way out:
+End it politely. In this one-terminal setup the signal lands on the
+waiting editor, and Git is still alive to see its editor die:
 
 ```sh
 $ kill 3232059
@@ -88,11 +88,11 @@ $ git status --short
 ?? slow-editor
 ```
 
-The commit aborted, the lock is gone, and the pending change is
-still pending. Git's lock machinery registers cleanup for every exit
-it attends: finish, fail, or die of a signal it can catch, the lock
-is removed. Ctrl-C in a terminal lands in this category. So
-does a crashed editor.
+The editor died; Git woke to an empty message, aborted the commit,
+and removed its lock on the way out. A crashed editor is an ending
+Git attends — so is a finish, a failure, or a signal Git itself can
+catch (Ctrl-C included; its signal handlers run the same cleanup).
+Every ending Git sees, it sweeps up after.
 
 Now the ending Git cannot attend. `kill -9` is the reproducible
 stand-in for the power cut, the out-of-memory killer, Task Manager's
@@ -147,10 +147,10 @@ a roadblock on one street, not a frozen repository.
 
 ## One check, then delete
 
-The check is the first sentence of Git's advice: is any Git process
-alive here? On Windows ask the task list (from PowerShell or cmd
-that's `tasklist /FI "IMAGENAME eq git.exe"`); elsewhere `pgrep git`
-asks the same question.
+The check is the first sentence of Git's advice: is any Git
+process alive here? From PowerShell or cmd the spelling is
+`tasklist /FI "IMAGENAME eq git.exe"`; elsewhere it's `pgrep git`;
+the Git Bash session below counts the same thing with a pipeline:
 
 ```sh
 $ tasklist | grep -c git.exe
@@ -173,16 +173,24 @@ question is about one repository: another repo mid-operation, an
 fsmonitor daemon (`core.fsmonitor` keeps one alive per watched
 repository), or a prompt daemon that happens to match `pgrep git`
 will all hold the number above zero on a perfectly quiet setup.
-Treat a nonzero answer as a suspect list to clear against this
-repository before you touch anything. With the owner provably gone,
-delete it and take inventory: the pending change is
-still pending, the history is intact, and the commit that was
-interrupted two sections ago never happened — Git doesn't half-commit.
+Treat a nonzero answer as a suspect list, and read each survivor's
+command line to see what it is: `pgrep -a git` on Linux,
+`ps -p "$(pgrep git)" -o pid,command` on macOS, or in PowerShell
+`Get-CimInstance Win32_Process` filtered to git.exe. Daemons
+announce themselves there. The one thing a command line won't
+reliably name is the repository (a git launched from inside one
+carries no path in its arguments), so close anything you can't
+account for before trusting the delete. With the owner provably
+gone, delete it (`del .git\index.lock` from PowerShell or cmd) and
+take inventory: the pending change is still pending, the history
+is intact, and the commit that was interrupted two sections ago
+never happened — Git doesn't half-commit.
 The one trace the crash left is that dangling tree: a scratch object
-the dying commit wrote, referenced by nothing, which garbage
-collection will sweep in its own time. That's the complete damage
-report for a hard kill plus a hand-deleted lock: one orphan object
-and a finished cup of coffee.
+the dying commit wrote, referenced by nothing, sitting in the same
+unreferenced limbo a [dropped stash](/blog/recover-a-dropped-git-stash/)
+sits in until garbage collection sweeps it. That's the complete
+damage report for a hard kill plus a hand-deleted lock: one orphan
+object and a finished cup of coffee.
 
 When you run the check, remember the suspects that don't look like
 Git: the editor window from the error message's own example, an IDE
@@ -250,19 +258,19 @@ $ git status --short
 ```
 
 Take that apart. The commit landed (`git log` shows it), but the
-committing process lost the race to write the index it believed in,
-so it died pointing at a disk-full that never happened.
+committing process lost the race to write the index it believed
+in, so it died pointing at a disk-full that never happened.
 `git status` now reports `MM` on a file that was committed one
 command ago: staged changes that differ from the commit and a
-working tree that differs from the staging. No line of anyone's work
-was lost, and Git's own printed recovery put the index back in one
-command — though read it before you reuse it: the recovery runs
-`git restore --staged :/`, which unstages everything in the
+working tree that differs from the staging. No line of anyone's
+work was lost, and Git's own printed recovery put the index back
+in one command — though read it before you reuse it: the recovery
+runs `git restore --staged :/`, which unstages everything in the
 repository, the deliberate `add` included; that is `notes.md`
-dropping back to untracked on the last line. What the blind delete
-bought was a torn scoreboard, a misleading error, and a repair
-step — on a toy repository with one human typing slowly. The check
-costs one command. This is what it buys.
+dropping back to untracked on the last line. What the blind
+delete bought was a torn scoreboard, a misleading error, and a
+repair step — on a toy repository with one human typing slowly.
+The check costs one command; this is what it buys.
 
 ## Even `git status` writes through that lock
 
@@ -285,9 +293,9 @@ A `git status` that printed nothing rewrote the index. (The
 `stat -c` spelling is GNU; BSD and macOS spell it `stat -f '%Sm'`.)
 The touched file made Git re-check its cached file metadata, and
 it saved the refreshed cache the only way it saves anything: new
-table under the lock name, atomic rename. Git treats that particular lock as
-optional (a status that can't get it just skips the save) and
-gives tools a switch to opt out entirely:
+table under the lock name, atomic rename. Git treats that
+particular lock as optional (a status that can't get it just
+skips the save) and gives tools a switch to opt out entirely:
 
 ```sh
 $ touch parser.js
@@ -308,9 +316,9 @@ Look at the suspect list in Git's error message one more time:
 "another git process" for a living. It refreshes status every few
 seconds; it fetches while you read; it is the thing most likely to
 be holding, or meeting, that lock at the moment you get unlucky.
-The error message reads as an accusation of exactly my
-category of software, so I treat it as a conduct code
-for [GitDesktop](/features/), in three clauses.
+The error message reads as an accusation of exactly my category of
+software, so I treat it as a conduct code for [GitDesktop](/features/),
+in three clauses.
 
 Every Git command the client itself runs goes through one spawn
 path, and that path sets `GIT_OPTIONAL_LOCKS=0`. The background
@@ -339,6 +347,5 @@ eventually die holding the claim. When it happens, you now know
 exactly what is in that file: a draft of a table you can regenerate
 with any `git add`, guarded by a name whose owner may be long gone.
 
-So the title's question answers itself. The delete is safe the
-moment you can prove the last writer is gone; the file was always
-a draft wearing an important-sounding name.
+The delete is safe the moment you can prove the last writer is gone;
+the file was always a draft wearing an important-sounding name.
