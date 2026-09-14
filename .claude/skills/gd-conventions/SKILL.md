@@ -400,10 +400,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   settled (fall back to the raw path, the key the swallowing `repoIdentity` and
   the disk loaders use) or its gate never opens. A store's WRITER takes
   `repoIdentityStrict` unless its reads heal through an `identityKeyFor` fold:
-  swallowing there mints a record no healed read consults (the exemplar is
-  `conversation-filters/store.ts`); loaders may still swallow, a defaults read
-  costing one session rather than a strand. The `inline-repo-identity-query`
-  guard in `pnpm run checks` fails on the key spelled anywhere but the factory.
+  swallowing in a fold-less writer mints a record no healed read consults (the
+  exemplar is `conversation-filters/store.ts`); loaders may still swallow, since
+  a defaults read costs one session, never a strand. `pnpm run checks` fails the
+  `inline-repo-identity-query` guard on the key spelled anywhere but the factory.
 - **Hydrate gating** — a `hydrate` that swallows its read must NEVER set the
   ready flag, and a snapshot write gates on a RESOLVED `hydrate()`, not on the
   flag: `memoizedStoreLoader` retries after a transient failure, so a store

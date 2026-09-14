@@ -16,7 +16,7 @@ import {
 import { clipTitleFromText } from "@/lib/clip-title";
 import { withForm } from "@/lib/form";
 import { useRepoIdentity } from "@/lib/git/queries";
-import { repoIdentity } from "@/lib/git/repo-identity";
+import { repoIdentityStrict } from "@/lib/git/repo-identity";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   CHANNELS,
@@ -342,7 +342,8 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
     : [];
 
   // Identities resolve over IPC, so the mapping is a query rather than render
-  // work; `repoIdentity` memoizes per path, so a repeat costs nothing. Keyed on
+  // work; the resolver memoizes per path, so a repeat costs nothing. STRICT
+  // because this staleTime would pin a swallowed raw path forever. Keyed on
   // the RECENT REPOS alone — what it resolves doesn't depend on which overrides
   // exist, and carrying the key set would mint a fresh query on every Clear,
   // flashing the list back to skeletons and unmounting the row focus was headed
@@ -350,7 +351,7 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
   // at render, since structural sharing only recurses plain objects and arrays.
   const recentIdentities = useQuery({
     queryKey: ["notification-override-repo-identities", recentPaths],
-    queryFn: () => Promise.all(recentPaths.map((p) => repoIdentity(p))),
+    queryFn: () => Promise.all(recentPaths.map((p) => repoIdentityStrict(p))),
     enabled: otherKeys.length > 0,
     staleTime: Number.POSITIVE_INFINITY,
     // Local git reads: the default online mode PARKS the query while the OS
