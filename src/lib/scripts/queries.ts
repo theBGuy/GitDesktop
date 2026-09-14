@@ -9,7 +9,7 @@ import {
   setTasksEnabled,
   updateTask,
 } from "./store";
-import type { TaskDef } from "./types";
+import type { ResolvedTaskScript, TaskDef } from "./types";
 
 export const scriptsKeys = {
   config: ["scripts"] as const,
@@ -77,7 +77,7 @@ export function useResolvedTaskScript(
   return useQuery({
     queryKey: ["resolve-task-script", repoPath, path],
     queryFn: () =>
-      invoke<{ path: string; exists: boolean }>("resolve_task_script", {
+      invoke<ResolvedTaskScript>("resolve_task_script", {
         cwd: repoPath,
         path,
       }),

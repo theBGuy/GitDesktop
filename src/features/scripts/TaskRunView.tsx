@@ -58,7 +58,7 @@ export function TaskRunView() {
       <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2 text-xs">
         <span className="shrink-0 truncate font-medium">{task.name}</span>
         {task.source.kind === "file" && (
-          // The absolute file this run executes; the stored path can be
+          // The resolved file this run executes; the stored path can be
           // repo-relative, so it stands in only until the resolve lands.
           <PathText
             path={resolved.data?.path ?? task.source.path}

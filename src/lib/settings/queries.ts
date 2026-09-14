@@ -40,7 +40,10 @@ export function useSettings() {
  *
  * Identity is stable for a session, so this never refetches (`staleTime`
  * Infinity) — a plain query, safe to read inside an `<Activity>`-managed tab
- * (no effects).
+ * (no effects). `networkMode` must stay "always" here and on every other observer
+ * of this key: it's a local git read, the mode is baked into the retryer by
+ * whichever observer initiates the fetch, and one observer left on the default
+ * parks the shared fetch offline for all of them.
  */
 export function useRepoKeys(repoPath: string | null): RepoKeys {
   const { data: identity } = useQuery({
@@ -48,6 +51,7 @@ export function useRepoKeys(repoPath: string | null): RepoKeys {
     queryFn: () => repoIdentity(repoPath as string),
     enabled: !!repoPath,
     staleTime: Number.POSITIVE_INFINITY,
+    networkMode: "always",
   });
   // Stable reference across renders (same repoPath/identity) so it can sit in
   // downstream `useMemo` dependency arrays without churning them.

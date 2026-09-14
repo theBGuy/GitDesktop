@@ -92,13 +92,14 @@ export function useOpenRepoByPath() {
         // automations, Jira link, …) onto the new location's identity key. Purely
         // best-effort — a migration failure must never block opening the repo.
         await migrateRepoData(oldPath, info.root).catch(() => undefined);
-        // The task config is cached under one global key with no staleTime, so a
-        // panel would keep classifying tasks under the pre-migration repo key —
-        // and an edit made from that snapshot would persist the old scope back
-        // over the re-home. Marked stale immediately; the refetch isn't awaited,
-        // so it can never hold up the open.
+        // The task config is cached under one global key, and a save made from a
+        // pre-migration snapshot would persist the old scope keys back over the
+        // re-home — in their identity form, which folding won't repair. Reset
+        // rather than invalidate: observers drop to pending (a brief skeleton)
+        // instead of serving stale tasks through the refetch. Not awaited, so it
+        // can never hold up the open.
         void queryClient
-          .invalidateQueries({ queryKey: scriptsKeys.config })
+          .resetQueries({ queryKey: scriptsKeys.config })
           .catch(() => undefined);
         // The plan/research stores hydrate once at startup, so their live runs
         // still carry the old path — repoint them, or the sidebar loses them and

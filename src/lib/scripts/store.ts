@@ -2,8 +2,12 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
-import { norm } from "@/lib/repo-data-migration";
-import { foldTaskScopeKeys, TASK_SCOPE_GLOBAL } from "./scope";
+import { norm } from "@/lib/repo-key";
+import {
+  foldTaskScopeKeys,
+  TASK_SCOPE_GLOBAL,
+  TASK_SCOPE_UNKNOWN,
+} from "./scope";
 import {
   type ArgDoc,
   EMPTY_SCRIPTS,
@@ -27,15 +31,20 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Serialized read-modify-write against fresh disk state. */
+/** Serialized read-modify-write against fresh disk state. The queue position is
+ *  taken when this is CALLED and the whole entry — an async `mutate` included —
+ *  runs to completion before the next starts, so ops commit in INVOCATION order.
+ *  Per-write resolution that can block (scope folding spawns git) therefore
+ *  belongs inside `mutate`: awaited before the call, a slow one would commit
+ *  after a later write and overwrite it. */
 function mutateConfig(
-  mutate: (current: ScriptsConfig) => ScriptsConfig,
+  mutate: (current: ScriptsConfig) => ScriptsConfig | Promise<ScriptsConfig>,
 ): Promise<void> {
   return serialize(async () => {
     const store = await getStore();
     await reloadToleratingEmptyStore(store);
     const current = normalizeScripts(await store.get<unknown>("config"));
-    const next = mutate(current);
+    const next = await mutate(current);
     await store.set("config", next);
     await store.save();
   });
@@ -91,7 +100,7 @@ function normalizeRepoKeys(v: unknown): string[] {
  *  string is kept verbatim, matching repo or not. */
 function normalizeScope(v: unknown): string {
   if (v === undefined) return TASK_SCOPE_GLOBAL;
-  if (typeof v !== "string") return "unknown";
+  if (typeof v !== "string") return TASK_SCOPE_UNKNOWN;
   return v.trim() || TASK_SCOPE_GLOBAL;
 }
 
@@ -164,21 +173,25 @@ export function setTasksEnabled(enabled: boolean): Promise<void> {
   return mutateConfig((c) => ({ ...c, enabled }));
 }
 
-// Both writers fold the task's scope keys BEFORE entering the serialized chain,
-// so every persisted key lands on the worktree-stable identity when git can
-// resolve it — a task scoped from one checkout then matches its sibling worktrees.
+// Both writers fold the task's scope keys INSIDE the serialized entry, so every
+// persisted key lands on the worktree-stable identity when git can resolve it
+// without the resolution's latency reordering the writes against each other.
 
-export async function addTask(task: TaskDef): Promise<void> {
-  const folded = await foldTaskScopeKeys(task);
-  return mutateConfig((c) => ({ ...c, tasks: [...c.tasks, folded] }));
+export function addTask(task: TaskDef): Promise<void> {
+  return mutateConfig(async (c) => ({
+    ...c,
+    tasks: [...c.tasks, await foldTaskScopeKeys(task)],
+  }));
 }
 
-export async function updateTask(task: TaskDef): Promise<void> {
-  const folded = await foldTaskScopeKeys(task);
-  return mutateConfig((c) => ({
-    ...c,
-    tasks: c.tasks.map((t) => (t.id === folded.id ? folded : t)),
-  }));
+export function updateTask(task: TaskDef): Promise<void> {
+  return mutateConfig(async (c) => {
+    const folded = await foldTaskScopeKeys(task);
+    return {
+      ...c,
+      tasks: c.tasks.map((t) => (t.id === folded.id ? folded : t)),
+    };
+  });
 }
 
 export function removeTask(id: string): Promise<void> {
@@ -193,8 +206,9 @@ export function removeTask(id: string): Promise<void> {
  * `newKey` (the resolved identity of its new location), in one serialized pass.
  * The old key can't be recomputed — `--git-common-dir` needs the vanished folder —
  * so both on-disk forms are matched, `<oldPath>/.git` (identity) and `<oldPath>`
- * verbatim, case-insensitively via the same {@link norm} the repo-data migration
- * matches with. Tasks scoped elsewhere, and global ones, pass through untouched.
+ * verbatim, case-insensitively via {@link norm} — the shared key rule the app-data
+ * migration matches with. Tasks scoped elsewhere, and global ones, pass through
+ * untouched.
  */
 export async function rehomeTaskScopes(
   oldPath: string,

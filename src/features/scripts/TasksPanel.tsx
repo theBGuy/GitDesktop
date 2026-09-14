@@ -8,6 +8,7 @@ import {
   PlayIcon,
   PlusIcon,
   TrashIcon,
+  WarningIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -33,6 +34,7 @@ import {
 import {
   scopeRepoLabel,
   TASK_SCOPE_GLOBAL,
+  TASK_SCOPE_UNKNOWN,
   taskInScope,
   taskScope,
   taskScopedElsewhere,
@@ -439,6 +441,37 @@ export function TasksPanel() {
 }
 
 /**
+ * The three strings an other-repo row shows for its scope. The reason names the
+ * task because it is the row's ONLY hover text — `aria-disabled:pointer-events-none`
+ * reaches every descendant, so a clipped-only tooltip inside could never fire.
+ * A malformed stored scope names no repository to open, so its copy points at
+ * the repair instead: Edit, then the "Available in" picker.
+ */
+function otherRowCopy(task: TaskDef): {
+  attribution: string;
+  reason: string;
+  runLabel: string;
+  unreadable: boolean;
+} {
+  const scope = taskScope(task);
+  if (scope === TASK_SCOPE_UNKNOWN) {
+    return {
+      attribution: "scope unreadable",
+      reason: `"${task.name}" has an unreadable saved scope — edit the task to choose where it's available`,
+      runLabel: "Run (scope unreadable)",
+      unreadable: true,
+    };
+  }
+  const label = scopeRepoLabel(scope);
+  return {
+    attribution: label,
+    reason: `"${task.name}" is scoped to "${label}" — open that repository to run it`,
+    runLabel: `Run (scoped to "${label}")`,
+    unreadable: false,
+  };
+}
+
+/**
  * A task scoped to another repository: still listed and manageable, never
  * runnable from here. The row takes the raw-`<button>` arm of the disabled-reason
  * contract (the vendored Button can't carry this row's layout), and its Run menu
@@ -460,14 +493,9 @@ function OtherTaskRow({
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const label = scopeRepoLabel(taskScope(task));
-  // The reason names the task as well as its repo because it is the row's ONLY
-  // hover text: `aria-disabled:pointer-events-none` reaches every descendant, so
-  // a clipped-only tooltip inside the row could never fire, and the wrapper span
-  // that does see the pointer is not the node that overflows.
-  const reason = `"${task.name}" is scoped to "${label}" — open that repository to run it`;
+  const copy = otherRowCopy(task);
   const { blockedReason, reasonId, wrapperTitle, describedBy, nativeProps } =
-    useDisabledReason({ disabled: true, reason });
+    useDisabledReason({ disabled: true, reason: copy.reason });
 
   return (
     <div className="flex items-center gap-1">
@@ -499,8 +527,12 @@ function OtherTaskRow({
               </span>
             </span>
             <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
-              <FolderIcon className="size-3 shrink-0" />
-              <span className="truncate">{label}</span>
+              {copy.unreadable ? (
+                <WarningIcon className="size-3 shrink-0 text-warning" />
+              ) : (
+                <FolderIcon className="size-3 shrink-0" />
+              )}
+              <span className="truncate">{copy.attribution}</span>
             </span>
           </span>
         </button>
@@ -527,7 +559,7 @@ function OtherTaskRow({
         <DropdownMenuContent align="end">
           <DropdownMenuItem disabled>
             <PlayIcon data-icon="inline-start" />
-            {`Run (scoped to "${label}")`}
+            {copy.runLabel}
           </DropdownMenuItem>
           <DropdownMenuItem onClick={onEdit}>
             <PencilSimpleIcon data-icon="inline-start" />

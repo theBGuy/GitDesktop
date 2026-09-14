@@ -2714,7 +2714,8 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   you saved before this choice existed stay available in every repository.
 - **Tasks from your other repositories.** They stay listed in a collapsed **Other
   repositories** group, each with the repo it belongs to, so nothing you saved goes
-  missing. Open one there to edit or delete it; it runs in its own repository.
+  missing. A task's **⋮** menu there offers **Edit** and **Delete**; **Run** waits until
+  you open the repository that task belongs to, which its row and the menu both name.
 - **Arguments.** A task carries default **arguments** (e.g. \`--preview\`; quote values with
   spaces), and you can **document the arguments** the script accepts — each with a short
   description, like a CLI's \`--help\` — shown as a reference wherever you set arguments.

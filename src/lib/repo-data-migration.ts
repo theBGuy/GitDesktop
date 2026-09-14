@@ -1,5 +1,10 @@
 import { load } from "@tauri-apps/plugin-store";
 import { repoIdentity } from "@/lib/git/repo-identity";
+// `norm` lives in its own leaf module: the other key-matching sides of a
+// relocate (the live plan/research stores, task scopes) must compare by exactly
+// the rule {@link migrateRawPathStore} rewrote rows with, without importing this
+// module back.
+import { norm } from "@/lib/repo-key";
 import { rehomeTaskScopes } from "@/lib/scripts/store";
 import { storeName } from "@/lib/test-mode";
 
@@ -50,14 +55,6 @@ import { storeName } from "@/lib/test-mode";
  *  so we mutate the same cached instance rather than a private copy. */
 function loadStore(file: string) {
   return load(storeName(file), { autoSave: true, defaults: {} });
-}
-
-/** Normalize a path/key for comparison: forward slashes, no trailing slash,
- *  lower-cased (Windows paths differ in case in the wild). Exported because the
- *  live plan/research stores re-home their in-memory runs on the same relocate —
- *  they must match exactly the rows {@link migrateRawPathStore} rewrote. */
-export function norm(s: string): string {
-  return s.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
 /** How a store's per-repo values combine when both the old and new keys hold data. */

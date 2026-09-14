@@ -21,7 +21,7 @@ import {
 import { terminalErrorMessage } from "@/lib/ai/terminal-error";
 import { readRepoInstructions } from "@/lib/git/api";
 import { emitNotification } from "@/lib/notifications/emit";
-import { norm } from "@/lib/repo-data-migration";
+import { norm } from "@/lib/repo-key";
 import { loadSettings } from "@/lib/settings/api";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { errorMessage, invoke } from "@/lib/tauri/invoke";

@@ -103,6 +103,15 @@ export type TaskSource =
   | { kind: "file"; path: string }
   | { kind: "inline"; body: string };
 
+/** The `resolve_task_script` command's reply (Rust `ResolvedTaskScript`): where a
+ *  file task's script lands in the open repo, and whether it's there. A
+ *  repo-relative path names a different file in every repo, so run surfaces show
+ *  the resolved target rather than the stored one. */
+export interface ResolvedTaskScript {
+  path: string;
+  exists: boolean;
+}
+
 /** One documented argument a task's script accepts — `--help`-style reference
  *  shown while editing args and in the run dialog. Documentation only; what
  *  actually gets passed is the args string. */
@@ -145,7 +154,9 @@ export interface TaskDef {
   /** Which repositories offer this task: `"global"` for every repo, otherwise one
    *  repo's worktree-stable identity key (a legacy raw checkout path is still
    *  honored on read, folded onto the identity on write). An unrecognized value
-   *  narrows rather than widens — it simply matches no open repo. */
+   *  narrows rather than widens — it simply matches no open repo, and a malformed
+   *  stored value normalizes to `TASK_SCOPE_UNKNOWN`, which fails closed the same
+   *  way until the task is re-scoped. */
   scope: string;
   /** Repo keys where this task's first run was already confirmed, so the
    *  file-task confirmation is per repo and once-only. Same key forms as

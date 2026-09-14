@@ -8,6 +8,11 @@ import type { TaskDef } from "./types";
 /** The sentinel scope meaning "offered in every repository". */
 export const TASK_SCOPE_GLOBAL = "global";
 
+/** The sentinel a malformed stored scope normalizes to. Non-global, so it
+ *  partitions closed through the helpers below and matches no repo until the
+ *  user re-scopes the task. */
+export const TASK_SCOPE_UNKNOWN = "unknown";
+
 /** A task's effective scope ("global" when unset, for back-compat with tasks
  *  saved before scoping existed). */
 export function taskScope(task: TaskDef): string {
@@ -36,13 +41,20 @@ export function taskScopedElsewhere(
   return !taskInScope(task, repoKeys);
 }
 
+/** A key already in identity form (`<repo>/.git`): canonical, so folding spawns no
+ *  git for it. A raw checkout path literally ending in `.git` therefore never
+ *  folds — harmless, because reads match both key forms. Case-insensitive, and
+ *  {@link scopeRepoLabel} strips by the same pattern so a key that counts as
+ *  canonical can't still show its `.git` segment in the label. */
+const CANONICAL_KEY_RE = /[\\/]\.git[\\/]?$/i;
+
 /** A scope key rendered for humans: the repo folder's name. Strips a trailing
  *  `.git` common-dir segment (the identity key is `<repo>/.git`) so the label
  *  shows the repo, not a bare `.git`, then takes the last path segment; a raw
  *  legacy path yields its own last segment. Display only — the stored value is
  *  never altered. */
 export function scopeRepoLabel(scope: string): string {
-  const path = scope.replace(/[/\\]\.git[/\\]?$/, "");
+  const path = scope.replace(CANONICAL_KEY_RE, "");
   return path.split(/[/\\]/).filter(Boolean).at(-1) ?? path;
 }
 
@@ -55,11 +67,6 @@ export function isRunConfirmedIn(
 ): boolean {
   return task.runConfirmedIn.some((key) => repoKeys.includes(key));
 }
-
-/** A key already in identity form (`<repo>/.git`): canonical, so folding spawns no
- *  git for it. A raw checkout path literally ending in `.git` therefore never
- *  folds — harmless, because reads match both key forms. */
-const CANONICAL_KEY_RE = /[\\/]\.git[\\/]?$/i;
 
 /** Fold a written task's LEGACY raw-path scope and confirmation keys onto the
  *  repo's worktree-stable identity, so a value set from one checkout is honored

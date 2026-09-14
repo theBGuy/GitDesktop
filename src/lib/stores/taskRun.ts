@@ -6,7 +6,7 @@ import {
   TASKS_USE_EXTERNAL_TERMINAL,
 } from "@/lib/scripts/launch";
 import { isRunConfirmedIn } from "@/lib/scripts/scope";
-import type { TaskDef } from "@/lib/scripts/types";
+import type { ResolvedTaskScript, TaskDef } from "@/lib/scripts/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { invoke } from "@/lib/tauri/invoke";
 
@@ -85,7 +85,7 @@ function begin(
           // thing the in-app run header shows. Best-effort: the hand-off already
           // succeeded, so a failed resolve is not worth an error.
           if (task.source.kind !== "file") return;
-          invoke<{ path: string; exists: boolean }>("resolve_task_script", {
+          invoke<ResolvedTaskScript>("resolve_task_script", {
             cwd,
             path: task.source.path,
           })

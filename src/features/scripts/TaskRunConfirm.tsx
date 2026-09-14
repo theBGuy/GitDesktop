@@ -35,7 +35,7 @@ const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
  * documented arguments as reference below — Enter runs immediately.
  * `reason: "replace"` additionally warns that the still-running task stops.
  *
- * A file task names the absolute file this run will execute: its stored path can
+ * A file task names the resolved file this run will execute: its stored path can
  * be repo-relative, so the same task points at a different file in every repo.
  */
 export function TaskRunConfirm() {

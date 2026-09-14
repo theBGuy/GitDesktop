@@ -55,14 +55,19 @@ export function RunTaskPicker({
             t.description.toLowerCase().includes(q)),
       )
     : [];
-  const highlighted = items[Math.min(highlight, items.length - 1)];
+  // ONE clamped cursor drives the Enter target, the rendered highlight, and the
+  // arrow steps: the list shrinks under an open picker (a repo switch, the
+  // settled flip), and clamping in only one of those places runs a row that no
+  // row shows as selected. Empty list = -1, which indexes to undefined.
+  const active = items.length > 0 ? Math.min(highlight, items.length - 1) : -1;
+  const highlighted = items[active];
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: scrolls to whichever row carries the highlight
   useEffect(() => {
     listRef.current
       ?.querySelector('[data-highlighted="true"]')
       ?.scrollIntoView({ block: "nearest" });
-  }, [highlight]);
+  }, [active]);
 
   function run(taskId: string) {
     const task = tasks.find((t) => t.id === taskId);
@@ -72,12 +77,15 @@ export function RunTaskPicker({
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
+    // The steps read the CLAMPED cursor, not the stored one: a stale-high stored
+    // value would otherwise step from a row the user never saw highlighted.
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setHighlight((h) => Math.min(h + 1, items.length - 1));
+      if (items.length > 0)
+        setHighlight(Math.min(active + 1, items.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setHighlight((h) => Math.max(h - 1, 0));
+      if (items.length > 0) setHighlight(Math.max(active - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (highlighted) run(highlighted.id);
@@ -111,10 +119,10 @@ export function RunTaskPicker({
               <li key={task.id}>
                 <button
                   type="button"
-                  data-highlighted={index === highlight || undefined}
+                  data-highlighted={index === active || undefined}
                   className={cn(
                     "flex w-full items-start gap-2 px-3 py-1.5 text-left text-xs",
-                    index === highlight
+                    index === active
                       ? "bg-accent text-accent-foreground"
                       : "hover:bg-muted/60",
                   )}
