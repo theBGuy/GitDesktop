@@ -2670,7 +2670,7 @@ security audit** as toggles under each. There's no "add a rule" — a given mome
 exists at most once, so you can't create conflicting duplicates. Reviews use the review model
 from the AI section (security audits use the dedicated audit model when you've set one); PR
 results are posted as a comment, commit results open from their notification row, and from
-**Automation history**, whatever your **Notify on** choice for **Automation results**.
+**Automation history** whatever your **Notify on** choice for **Automation results** is.
 **Review draft PRs when created** (off by default) controls draft handling:
 left off, a draft PR gets its automated first review when it's marked ready for review, not
 at creation — marking it ready **in GitDesktop** always fires that first review, while a
@@ -2702,7 +2702,7 @@ first load; any duplicates are merged and disclosed once with a toast.
 the activity bell) is this repository's decision log. It opens on the repository's effective
 configuration, one line per moment, then lists every recorded decision, newest first.
 
-- **Skips are recorded too.** Each line names the action it belongs to and how it ended:
+- **Skips are recorded too.** Each line names the action it belongs to and what came of it:
   posted as a comment, review saved, skipped because branch conditions didn't match, already
   reviewed, a draft while draft reviews are off, handed off to another review run, failed
   (with the error), timed out, or cancelled. When a moment is switched off entirely, nothing is

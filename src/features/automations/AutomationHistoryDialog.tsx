@@ -852,12 +852,16 @@ function HistoryRow({
     </>
   );
 
+  // Both arms seat the cursor: a `tabIndex={-1}` row still takes focus on click,
+  // and an unseated cursor makes the next arrow warp to the end of the list.
+  // Idempotent against the keyboard nav, which focuses the row it just activated.
   if (navigable) {
     return (
       <button
         type="button"
         data-row={entry.id}
         tabIndex={-1}
+        onFocus={() => onFocusRow(entry.id)}
         onClick={() => onOpenTarget(entry)}
         className={cn(ROW_CLASS, "hover:bg-muted/60")}
       >
@@ -866,7 +870,12 @@ function HistoryRow({
     );
   }
   return (
-    <div data-row={entry.id} tabIndex={-1} className={ROW_CLASS}>
+    <div
+      data-row={entry.id}
+      tabIndex={-1}
+      onFocus={() => onFocusRow(entry.id)}
+      className={ROW_CLASS}
+    >
       {body}
     </div>
   );
