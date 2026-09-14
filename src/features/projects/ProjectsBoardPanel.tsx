@@ -93,7 +93,8 @@ const NO_ACCESS_REASON = "You don't have write access to this project";
 const ISSUE_FIELD_REASON =
   "Issue fields are edited on GitHub — board editing arrives later";
 /** Single-writer: two writes to one card's field settle in an order nothing
- *  promises, and the later one's rollback can undo the earlier one's landing. */
+ *  promises, and an EARLIER move failing late puts the card back in a column a
+ *  later write already moved it out of. */
 const MOVING_REASON = "Moving your last card…";
 /** Held rather than queued: a move cancels the board's reads, and query-core's
  *  cancel REVERTS an in-flight one. */
@@ -638,13 +639,20 @@ export function ProjectsBoardPanel({
   // refetch and appends a fresh page onto the stale ones — and the append's own
   // success then clears `isInvalidated`, stamping the stale cards provably fresh
   // for the rest of the staleTime window. Measured against query-core 5.102.8.
-  // Two reasons, because the two waits mean different things to the user.
+  // Each reason is its own wait, because they mean different things to the user.
   const loadMoreHeld = (() => {
     switch (true) {
       case items.isFetchingNextPage:
         return "Loading more items…";
       case items.isFetching:
         return "Refreshing the board…";
+      // The mirror of the menu's own page-fetch hold, and the same mechanism read
+      // from the other side: a move's settle cancels this query's family to force
+      // the reconciliation, and query-core's cancel REVERTS whatever is in flight —
+      // so a continuation started during the write window would be thrown away
+      // between its request and the pages it was meant to extend.
+      case movePending:
+        return "Finishing your last card move…";
       // The post-failure half of the same hazard. A REFRESH that failed leaves
       // the pre-edit pages on screen with the invalidation still owed, and both
       // fetching guards above have released. Appending a continuation onto those
@@ -1046,7 +1054,7 @@ export function ProjectsBoardPanel({
                   // Belt-and-braces with the `disabled` above: the held state is
                   // derived at render, and a click racing the render that sets it
                   // must not get through either.
-                  if (items.isFetching) return;
+                  if (items.isFetching || movePending) return;
                   void items.fetchNextPage();
                 }}
               >
