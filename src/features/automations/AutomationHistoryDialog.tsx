@@ -825,8 +825,9 @@ function HistoryRow({
                   className="-my-0.5 shrink-0"
                   aria-label={viewResultLabel(outcome.action, title)}
                   // Tab can land here without the arrow cursor ever moving, and
-                  // an unseated cursor makes the next arrow jump to the end of
-                  // the list. Same state the keyboard nav's onActivate writes.
+                  // an unseated cursor sends the next arrow to the start or the
+                  // end of the list, not to the neighboring row. Same state the
+                  // keyboard nav's onActivate writes.
                   onFocus={() => onFocusRow(entry.id)}
                   onClick={() => onViewResult(resultId)}
                 >
@@ -853,8 +854,9 @@ function HistoryRow({
   );
 
   // Both arms seat the cursor: a `tabIndex={-1}` row still takes focus on click,
-  // and an unseated cursor makes the next arrow warp to the end of the list.
-  // Idempotent against the keyboard nav, which focuses the row it just activated.
+  // and an unseated cursor sends the next arrow to the start or the end of the
+  // list, not to the neighboring row. Idempotent against the keyboard nav, which
+  // focuses the row it just activated.
   if (navigable) {
     return (
       <button
