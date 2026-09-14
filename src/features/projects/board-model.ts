@@ -1,4 +1,10 @@
-import type { BoardItem, ProjectFieldDef } from "@/lib/git/types";
+import type {
+  BoardItem,
+  ProjectFieldDef,
+  ProjectFieldValue,
+  ProjectViewDef,
+  ProjectViewSort,
+} from "@/lib/git/types";
 
 /** A board field that can group a board: one column per option. Narrowed off the
  *  shared union so the column builder can read `options` without re-testing. */
@@ -78,6 +84,151 @@ export function buildColumns(
       items: unset,
     },
   ];
+}
+
+/** The field kinds a saved view's sort can be honoured on. A key over any other
+ *  kind — a multi-select, or one of GitHub's own system fields — is dropped
+ *  rather than guessed at, which leaves the board's POSITION order for that key. */
+type SortableDef = Extract<
+  ProjectFieldDef,
+  { kind: "text" | "number" | "date" | "singleSelect" | "iteration" }
+>;
+
+function sortableDef(def: ProjectFieldDef | undefined): SortableDef | null {
+  if (def === undefined) return null;
+  switch (def.kind) {
+    case "text":
+    case "number":
+    case "date":
+    case "singleSelect":
+    case "iteration":
+      return def;
+    default:
+      return null;
+  }
+}
+
+/** The item's value for `fieldId` as `kind`, or null when it carries none — the
+ *  value's own kind has to match the definition's, since a wire shape that
+ *  disagrees is not a value of this field. */
+function valueOfKind<K extends ProjectFieldValue["kind"]>(
+  item: BoardItem,
+  fieldId: string,
+  kind: K,
+): Extract<ProjectFieldValue, { kind: K }> | null {
+  for (const value of item.fieldValues) {
+    if (value.kind !== kind) continue;
+    if ("fieldId" in value && value.fieldId === fieldId)
+      return value as Extract<ProjectFieldValue, { kind: K }>;
+  }
+  return null;
+}
+
+/** What `item` sorts by under `def`, or null when it holds no value for it. A
+ *  single-select sorts by the option's POSITION in the field, which is the order
+ *  the board itself draws those options in; an option the field no longer defines
+ *  has no position, so it counts as unset. */
+function sortKeyFor(item: BoardItem, def: SortableDef): string | number | null {
+  switch (def.kind) {
+    case "text": {
+      const text = valueOfKind(item, def.id, "text")?.text.trim();
+      return text === undefined || text === "" ? null : text;
+    }
+    case "number": {
+      const number = valueOfKind(item, def.id, "number")?.number;
+      return number !== undefined && Number.isFinite(number) ? number : null;
+    }
+    case "date": {
+      const date = valueOfKind(item, def.id, "date")?.date;
+      return date === undefined || date === "" ? null : date;
+    }
+    case "singleSelect": {
+      const optionId = valueOfKind(item, def.id, "singleSelect")?.optionId;
+      const at = def.options.findIndex((option) => option.id === optionId);
+      return at === -1 ? null : at;
+    }
+    default: {
+      const start = valueOfKind(item, def.id, "iteration")?.startDate;
+      return start === undefined || start === "" ? null : start;
+    }
+  }
+}
+
+/** Two keys off the SAME field, so they are always the same JS type. Text
+ *  collates in the user's locale; dates and iteration starts are GitHub's bare
+ *  `YYYY-MM-DD`, where a plain string comparison IS chronological. */
+function compareKeys(
+  a: string | number,
+  b: string | number,
+  collate: boolean,
+): number {
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  const left = String(a);
+  const right = String(b);
+  if (collate) return left.localeCompare(right);
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+/**
+ * One column's cards in a saved view's sort order. Keys apply in the view's own
+ * order, each breaking the previous one's ties, and an item with no value for a
+ * key sorts LAST whichever direction that key runs — a direction orders values,
+ * and an absent one is not a small value.
+ *
+ * `toSorted` is stable, which is the rest of the contract: the input arrives in
+ * the board's POSITION order, so every pair the keys can't separate keeps it, and
+ * a view with no usable key leaves the column exactly as it was.
+ */
+export function sortColumnItems(
+  items: BoardItem[],
+  sortBy: ProjectViewSort[],
+  fields: ProjectFieldDef[],
+): BoardItem[] {
+  const keys: { sort: ProjectViewSort; def: SortableDef }[] = [];
+  for (const sort of sortBy) {
+    const def = sortableDef(fields.find((f) => f.id === sort.fieldId));
+    if (def !== null) keys.push({ sort, def });
+  }
+  if (keys.length === 0) return items;
+  return items.toSorted((a, b) => {
+    for (const { sort, def } of keys) {
+      const left = sortKeyFor(a, def);
+      const right = sortKeyFor(b, def);
+      if (left === null && right === null) continue;
+      if (left === null) return 1;
+      if (right === null) return -1;
+      const cmp = compareKeys(left, right, def.kind === "text");
+      if (cmp !== 0) return sort.direction === "desc" ? -cmp : cmp;
+    }
+    return 0;
+  });
+}
+
+/**
+ * The fields a card shows as chips under `view`: the view's own visible fields,
+ * in its order, minus what the card already carries. The whole `system` kind
+ * drops — title and assignees are structural on the card, and GitHub owns the
+ * rest of that bucket on the issue itself, so their values arrive as `unknown`
+ * with nothing to render. Excluded by KIND, never by name, the same way the field
+ * editor excludes them. The grouped field drops too: the column the card sits in
+ * is already that value.
+ */
+export function chipFieldDefs(
+  view: ProjectViewDef | null,
+  fields: ProjectFieldDef[],
+  groupField: GroupField | null,
+): ProjectFieldDef[] {
+  if (view === null) return [];
+  const byId = new Map(fields.map((field) => [field.id, field]));
+  const chips: ProjectFieldDef[] = [];
+  for (const id of view.visibleFieldIds) {
+    if (id === groupField?.id) continue;
+    const def = byId.get(id);
+    if (def === undefined || def.kind === "system") continue;
+    chips.push(def);
+  }
+  return chips;
 }
 
 /** Where the board's single tab stop parks when the user hasn't moved it: the

@@ -53,7 +53,7 @@ function parseFieldDate(date: string): Date | null {
 
 /** A date field in the user's locale, falling back to the raw forge string when it
  *  can't be read — never "Invalid Date". */
-function formatFieldDate(date: string): string {
+export function formatFieldDate(date: string): string {
   const parsed = parseFieldDate(date);
   if (parsed === null) return date;
   return parsed.toLocaleDateString(undefined, {
@@ -76,7 +76,7 @@ function shortDay(date: Date, withYear: boolean): string {
  *  read or the duration isn't a usable day count — the title alone still names it.
  *  A span crossing New Year carries the year on BOTH ends: "Dec 28 – Jan 10" reads
  *  backwards without it. */
-function iterationRange(startDate: string, duration: number): string {
+export function iterationRange(startDate: string, duration: number): string {
   const start = parseFieldDate(startDate);
   if (start === null || !Number.isFinite(duration) || duration < 1) return "";
   const end = new Date(start);

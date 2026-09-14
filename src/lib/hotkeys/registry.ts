@@ -354,6 +354,14 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  // The board's own switcher sits in its View options popover, so this ships
+  // palette-only rather than spending a chord.
+  {
+    id: "clear-project-view",
+    label: "Clear project view",
+    category: "Repository",
+    defaultBinding: null,
+  },
   {
     id: "create-discussion",
     label: "Create discussion",

@@ -114,6 +114,7 @@ import type {
   ProjectFieldValueUpdate,
   ProjectItemRef,
   ProjectItemRemove,
+  ProjectViews,
   PrPollInfo,
   PrRef,
   PrTask,
@@ -2544,8 +2545,8 @@ export const ghProjectFields = (repoPath: string, projectId: string) =>
 /** One board's items, in the board's own position order. Auto-pages up to 500 per
  *  call; more than that comes back `truncated` with the `endCursor` the next call
  *  passes as `after`. Board state like the field definitions, so no lens. `query`
- *  is the board's own filter grammar, which no caller passes yet (always null —
- *  saved-view lenses are its intended user). */
+ *  is the board's own filter grammar, passed VERBATIM for the server to parse —
+ *  a saved view's filter is what fills it, and null is the unfiltered board. */
 export const ghProjectItems = (
   repoPath: string,
   projectId: string,
@@ -2553,6 +2554,12 @@ export const ghProjectItems = (
   query: string | null,
 ) =>
   invoke<BoardItems>("gh_project_items", { repoPath, projectId, after, query });
+
+/** One board's saved views — the lenses its owner set up on GitHub, read-only
+ *  here. Board state like the field definitions, so no lens; capped server-side,
+ *  which is what `truncated` reports. */
+export const ghProjectViews = (repoPath: string, projectId: string) =>
+  invoke<ProjectViews>("gh_project_views", { repoPath, projectId });
 
 /** Writes one board's field values for one item in a single call. `updates` sets or
  *  replaces; `clears` carries the field ids to UNSET, which no update shape can

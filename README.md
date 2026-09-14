@@ -559,9 +559,16 @@ request straight from its card, page through a large board with **Load
 more**, and move around the whole thing from the keyboard. **Right-click a
 card** (Shift+F10 on Windows and Linux) for its menu: open it, or **move it to
 another column**, which writes the board's grouping field and re-draws the
-card where it lands, keyboard place and all. Moving needs write access to
-the board and the `project` sign-in scope; reading one needs only the
-`project` or `read:project` scope the Projects picker already asks for.
+card where it lands, keyboard place and all. The board's **saved views** come
+along as lenses: pick one and GitHub filters the read for you, its sort
+orders the cards in each column, its visible fields ride along as chips on
+the cards, and its grouping seeds **Group by** while you stay free to
+regroup. Table and roadmap views are drawn as a board, and **Clear view**
+brings the whole item set back in the board's own order with the chips off,
+leaving the grouping where you last put it. Nothing here writes to the view.
+Moving needs write access to the board and the `project` sign-in scope;
+reading one needs only the `project` or `read:project` scope the Projects
+picker already asks for.
 
 ### Code TODOs
 

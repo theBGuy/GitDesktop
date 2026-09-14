@@ -2624,11 +2624,23 @@ export function useProjectFields(
   });
 }
 
-/** Repo + board, with NO account axis — deliberately the same contract every
- *  forge-cache family here keeps (pr-list, pr, the four sibling Projects reads).
- *  An account axis belongs to all of them at once, in the account-switch task. */
-const projectItemsKey = (repo: string, projectId: string) =>
-  ["repo", repo, "project-items", projectId] as const;
+/** Repo + board + LENS, with NO account axis — deliberately the same contract
+ *  every forge-cache family here keeps (pr-list, pr, the sibling Projects reads).
+ *  An account axis belongs to all of them at once, in the account-switch task.
+ *
+ *  `query` is the saved view's filter, and it is an identity axis rather than an
+ *  option: the server answers a filtered read with a DIFFERENT set of items, so
+ *  two lenses over one board are two caches. Null is the unfiltered board. */
+const projectItemsKey = (
+  repo: string,
+  projectId: string,
+  query: string | null,
+) => ["repo", repo, "project-items", projectId, query] as const;
+
+/** One board's saved views. Repo + board and no account axis, the family contract
+ *  {@link projectItemsKey} states. */
+const projectViewsKey = (repo: string, projectId: string) =>
+  ["repo", repo, "project-views", projectId] as const;
 
 /**
  * Mark every board this repo has opened stale, for any write that changes what a
@@ -2647,6 +2659,10 @@ const projectItemsKey = (repo: string, projectId: string) =>
  *
  * Invalidate-only past that: no forced refetch, so the Activity gate still owns
  * WHEN a hidden board re-reads.
+ *
+ * The key stops SHORT of the board id and its lens, so every saved view's cache
+ * of every board goes stale together — a write changes what the item is, which no
+ * filter makes untrue.
  */
 function invalidateProjectBoards(queryClient: QueryClient, repo: string): void {
   const queryKey = ["repo", repo, "project-items"];
@@ -2655,26 +2671,54 @@ function invalidateProjectBoards(queryClient: QueryClient, repo: string): void {
     .then(() => queryClient.invalidateQueries({ queryKey }));
 }
 
-/** One board's items, paged. Keyed on the board alone for the same reason the
- *  definitions are — a board is the same object whichever remote reached it —
- *  and `retry: false` for the same reason the rest of the Projects family uses
- *  it: the common failure is a missing `project` scope, which no retry fixes.
- *  The backend auto-pages, so a page here is up to 500 items and `truncated`
- *  drives "Load more" rather than an automatic walk to the end of a 5,000-item
- *  board. */
+/** One board's items under one LENS, paged. Keyed on the board and the saved
+ *  view's filter — a board is the same object whichever remote reached it, but a
+ *  filtered read is a different set of items — and `retry: false` for the same
+ *  reason the rest of the Projects family uses it: the common failure is a
+ *  missing `project` scope, which no retry fixes. The backend auto-pages, so a
+ *  page here is up to 500 items and `truncated` drives "Load more" rather than an
+ *  automatic walk to the end of a 5,000-item board.
+ *
+ *  `query` rides to the server verbatim; null is the unfiltered board. Switching
+ *  lenses keeps the previous one's cards on screen (the axes below), so callers
+ *  gate every claim they DERIVE from the data — a count, a page control — on
+ *  `!isPlaceholderData`. */
 export function useProjectItems(
   repo: string,
   projectId: string,
+  query: string | null,
   enabled: boolean,
 ) {
   return useInfiniteQuery({
-    queryKey: projectItemsKey(repo, projectId),
+    queryKey: projectItemsKey(repo, projectId, query),
     queryFn: ({ pageParam }) =>
-      api.ghProjectItems(repo, projectId, pageParam, null),
+      api.ghProjectItems(repo, projectId, pageParam, query),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => (last.truncated ? last.endCursor : null),
     enabled,
     staleTime: 60_000,
+    retry: false,
+    // The board is an axis (index 3 in the key literal above); the LENS at index
+    // 4 deliberately is not. Switching views keeps the previous lens's cards on
+    // screen while the filtered read lands, where switching BOARDS must never
+    // show the other board's.
+    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, projectId]]),
+  });
+}
+
+/** One board's SAVED VIEWS — the lenses the switcher offers. Board state like the
+ *  field definitions, so the same options: no lens, no item, `retry: false`
+ *  because the common failure is the missing `project`/`read:project` scope. */
+export function useProjectViews(
+  repo: string,
+  projectId: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: projectViewsKey(repo, projectId),
+    queryFn: () => api.ghProjectViews(repo, projectId),
+    enabled,
+    staleTime: 5 * 60_000,
     retry: false,
   });
 }
@@ -2765,6 +2809,11 @@ export function useMoveBoardCard() {
       field: BoardGroupField;
       /** The column's option, or null for the board's "No {field}" column. */
       option: ProjectFieldOptionDef | null;
+      /** The lens the board was showing when the move was fired — the cache this
+       *  write patches and rolls back. Switching views mid-flight is safe because
+       *  `onMutate` pins the key into the context the settle handlers read, not
+       *  because anything cancels the write. */
+      query: string | null;
     }) =>
       api.ghSetItemFieldValues(
         args.repo,
@@ -2785,7 +2834,7 @@ export function useMoveBoardCard() {
       // Derived from the variables, like every other target here: `onMutate` runs
       // before the pause so its own scope is safe, but one source of truth for
       // WHERE the write lands is what keeps the settle handlers honest.
-      const key = projectItemsKey(args.repo, args.projectId);
+      const key = projectItemsKey(args.repo, args.projectId, args.query);
       const railKey = itemFieldValuesFamilyKey(args.repo);
       await queryClient.cancelQueries({ queryKey: key });
       // The one card's values, not the whole tree: that is all the rollback needs,
@@ -3561,10 +3610,10 @@ export function useAccountsHealth() {
  *  token scopes (a reconnect can grant new ones), and the repo-settings lists a
  *  scope hint sends users here from — secrets, variables and webhooks all fail
  *  closed on a missing scope, so their error cards must retry the call themselves,
- *  as do the five GitHub Projects reads (catalog, memberships, field values, a
- *  board's field definitions, and a board's items): a granted `project` scope has
- *  to light the picker, the rail's field lines, the field editor and the Projects
- *  board up without a restart, and the work inbox's sources probe plus its pages
+ *  as do the six GitHub Projects reads (catalog, memberships, field values, a
+ *  board's field definitions, its saved views, and its items): a granted `project`
+ *  scope has to light the picker, the rail's field lines, the field editor and the
+ *  Projects board up without a restart, and the work inbox's sources probe plus its pages
  *  (a `login` mode reconnect is how a forge becomes a source in the first place).
  *  Call from a reconnect's `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {
@@ -3591,6 +3640,9 @@ export function useInvalidateAfterReconnect() {
           q.queryKey[2] === "item-projects" ||
           q.queryKey[2] === "item-field-values" ||
           q.queryKey[2] === "project-fields" ||
+          q.queryKey[2] === "project-views" ||
+          // Slot 2, so every LENS of a board is covered: the items key carries
+          // the saved view's filter after the board id.
           q.queryKey[2] === "project-items"),
     });
     // A `login` here is a real source change for the work inbox — its probe gates

@@ -9,6 +9,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -48,12 +49,15 @@ import {
   useMoveBoardCard,
   useProjectFields,
   useProjectItems,
+  useProjectViews,
 } from "@/lib/git/queries";
 import {
   type BoardItem,
   type BoardItemContent,
+  type ProjectViewDef,
   providerLabel,
 } from "@/lib/git/types";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -62,9 +66,11 @@ import { BoardColumn } from "./BoardColumn";
 import {
   type BoardColumnModel,
   buildColumns,
+  chipFieldDefs,
   firstCardPosition,
   groupableFields,
   optionIdFor,
+  sortColumnItems,
   UNSET_COLUMN_ID,
 } from "./board-model";
 
@@ -92,6 +98,15 @@ const READ_ONLY_SCOPE_REASON =
 const NO_ACCESS_REASON = "You don't have write access to this project";
 const ISSUE_FIELD_REASON =
   "Issue fields are edited on GitHub — board editing arrives later";
+const LOADING_VIEWS_REASON = "Loading this project's views…";
+const VIEWS_ERROR_REASON = "Couldn't load this project's views";
+const NO_VIEWS_REASON = "This project has no saved views";
+/** Said by every control that would otherwise speak for the board on screen: while
+ *  a new lens loads, those cards are the PREVIOUS view's. */
+const LENS_LOADING_REASON = "Loading this view of the board…";
+const VIEWS_TRUNCATED_NOTE = "Showing the first 50 views.";
+/** A view GitHub reports with no name. */
+const UNTITLED_VIEW = "Untitled view";
 /** Single-writer: two writes to one card's field settle in an order nothing
  *  promises, and an EARLIER move failing late puts the card back in a column a
  *  later write already moved it out of. */
@@ -103,6 +118,46 @@ const LOADING_PAGE_REASON = "Finishing the board's next page…";
  *  same shape on the same kind of choice. */
 const GROUP_ROW_CLASS =
   "flex cursor-pointer items-center gap-2 px-1 py-1 text-xs hover:bg-muted/60";
+/** The switcher's "no lens" row. Not a view id — it stands for the ABSENCE of
+ *  one, the way the board's catch-all column stands for an unset field. */
+const NO_VIEW_ROW_ID = "__no_view__";
+/** What the board says about a view it is drawing in the only layout it has. A
+ *  BOARD view needs no note, and an unrecognised layout names no shape it can't
+ *  vouch for. */
+const FLAT_FALLBACK_NOTE: Partial<Record<ProjectViewDef["layout"], string>> = {
+  table: "Table view, shown as a board",
+  roadmap: "Roadmap view, shown as a board",
+  unknown: "Shown as a board",
+};
+/** The switcher row's muted qualifier, for the layouts that aren't this one. */
+const VIEW_LAYOUT_WORD: Partial<Record<ProjectViewDef["layout"], string>> = {
+  table: "table",
+  roadmap: "roadmap",
+};
+
+/** A view's filter as the board's LENS. GitHub reports an unfiltered view as
+ *  either null or an empty string, and sending `""` would key a second cache
+ *  entry for the same unfiltered read; anything else rides VERBATIM, since the
+ *  filter grammar is the server's to parse. */
+function lensFilter(view: ProjectViewDef | null): string | null {
+  const filter = view?.filter ?? null;
+  return filter === null || filter.trim() === "" ? null : filter;
+}
+
+/** The one control that takes the board back to no lens, worded the same wherever
+ *  it appears: the strip that announces the view, and the state its filter
+ *  emptied. */
+function ClearViewButton({ onClear }: { onClear: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClear}
+      className="cursor-pointer underline hover:text-foreground"
+    >
+      Clear view
+    </button>
+  );
+}
 
 /** Whether a card's issue or pull request opens IN-APP rather than in the browser.
  *  `selectIssue`/`selectPr` hand over a bare number the destination resolves under
@@ -289,7 +344,8 @@ export function ProjectsBoardPanel({
     projectId ?? "",
     canRead && projectId !== null,
   );
-  const groupFields = groupableFields(fields.data?.fields ?? []);
+  const fieldDefs = fields.data?.fields ?? [];
+  const groupFields = groupableFields(fieldDefs);
   const [pickedFieldId, setPickedFieldId] = useState<string | null>(null);
   // "Status" by name is what a GitHub board means by its columns; anything else
   // is a board that renamed or dropped it, where the first single-select is the
@@ -299,13 +355,48 @@ export function ProjectsBoardPanel({
   const groupField =
     groupFields.find((f) => f.id === pickedFieldId) ?? defaultField;
 
-  const items = useProjectItems(
+  const views = useProjectViews(
     repoPath,
     projectId ?? "",
     canRead && projectId !== null,
   );
+  const viewList = views.data?.views ?? [];
+  // Transient like the grouping above, and DERIVED like the project pick: a view
+  // that has since been deleted (or fell past the server's cap) degrades to no
+  // lens, where a stored snapshot would keep filtering by something nothing
+  // serves.
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+  const view = viewList.find((v) => v.id === activeViewId) ?? null;
+  const lensQuery = lensFilter(view);
+
+  const items = useProjectItems(
+    repoPath,
+    projectId ?? "",
+    lensQuery,
+    canRead && projectId !== null,
+  );
+  // The cards on screen belong to the PREVIOUS lens until this clears, so every
+  // claim derived from them waits: the count, Load more, and the move rows.
+  const lensLoading = items.isPlaceholderData;
   const loaded = items.data?.pages.flatMap((page) => page.items) ?? [];
-  const columns = buildColumns(loaded, groupField);
+  // The view's sort orders cards WITHIN a column, so it applies after bucketing —
+  // which column a card lands in is the grouping's answer alone. With no sort the
+  // columns are untouched, board POSITION order and all.
+  const grouped = buildColumns(loaded, groupField);
+  const columns =
+    view === null || view.sortBy.length === 0
+      ? grouped
+      : grouped.map((column) => ({
+          ...column,
+          items: sortColumnItems(column.items, view.sortBy, fieldDefs),
+        }));
+  // Identity-stable for the memoized cards: a fresh array per render would
+  // re-render every mounted card whenever the keyboard cursor moves. Keyed on the
+  // query DATA rather than the derived list, which re-mints while it is absent.
+  const chipFields = useMemo(
+    () => chipFieldDefs(view, fields.data?.fields ?? [], groupField),
+    [view, fields.data, groupField],
+  );
   // Counts the cards the board DRAWS, so it agrees with the column headers;
   // `totalCount` is the board's own figure and includes archived items, which is
   // why it only ever appears as the "of M" of a partly-loaded board.
@@ -330,6 +421,35 @@ export function ProjectsBoardPanel({
       ? cursor
       : null;
   const tabStop = liveCursor ?? firstCardPosition(columns);
+
+  /** Take the board back to no lens: its whole item set, its own POSITION order,
+   *  no chips. The GROUPING stays where it is — a view seeds it once, and what
+   *  the user has in front of them is their own pick from then on. */
+  function clearView() {
+    setActiveViewId(null);
+    setCursor(null);
+  }
+
+  /** Selecting a view is an EVENT, never an effect: the grouping seed fires once,
+   *  here, so a Group-by change made UNDER an active view stands rather than being
+   *  re-seeded on the next render. */
+  function pickView(nextId: string | null) {
+    setActiveViewId(nextId);
+    const picked =
+      nextId === null ? null : (viewList.find((v) => v.id === nextId) ?? null);
+    // Seeded only from a grouping this board can actually draw, off the same
+    // `groupableFields` set the Group-by rows offer: a table view groups by
+    // nothing, and a view grouped by an iteration field makes no columns here.
+    const vgroup = picked?.verticalGroupFieldIds[0];
+    if (vgroup !== undefined && groupFields.some((f) => f.id === vgroup))
+      setPickedFieldId(vgroup);
+    // The columns are about to hold a different set of cards.
+    setCursor(null);
+  }
+
+  // Palette-only, and live only where it can do something: a board on screen
+  // with a view on it.
+  useHotkeyAction("clear-project-view", clearView, active && view !== null);
 
   const openItem = useCallback(
     (item: BoardItem) => {
@@ -487,6 +607,12 @@ export function ProjectsBoardPanel({
         return NO_ACCESS_REASON;
       case groupField !== null && groupField.isIssueField:
         return ISSUE_FIELD_REASON;
+      // Below the three permission arms, which are true whatever is on screen,
+      // and above the two that clear on their own: the cards drawn while a lens
+      // loads are the PREVIOUS view's, so the column a pick names isn't the one
+      // the board is about to have.
+      case lensLoading:
+        return LENS_LOADING_REASON;
       case movePending:
         return MOVING_REASON;
       // A move's own `cancelQueries` REVERTS an in-flight fetch (query-core cancels
@@ -564,14 +690,17 @@ export function ProjectsBoardPanel({
     if (moveHeldReason !== undefined) return;
     const option = groupField.options.find((o) => o.id === column.id) ?? null;
     setChase(item.itemId);
-    // The board this move belongs to travels WITH it: an offline move parks before
-    // the write and resumes on whatever render is current by then.
+    // The board AND the lens this move belongs to travel WITH it: an offline move
+    // parks before the write and resumes on whatever render is current by then,
+    // and `onMutate` pins this lens's key into the context its rollback and its
+    // settle read — so switching views mid-flight needs no hold of its own.
     move.mutate({
       repo: repoPath,
       projectId,
       itemId: item.itemId,
       field: groupField,
       option,
+      query: lensQuery,
     });
   }
 
@@ -586,8 +715,11 @@ export function ProjectsBoardPanel({
         return LOADING_FIELDS_REASON;
       // Ahead of the settled-empty claim: a FAILED read is neither pending nor
       // holding data, so without this arm a board whose fields call errored
-      // would announce that it defines none.
-      case fields.error !== null:
+      // would announce that it defines none. Gated on having NOTHING to offer,
+      // because a background refetch failure leaves the cached definitions in
+      // place — and those are the definitions drawing the board behind this
+      // popup, so replacing the rows with a failure would be false.
+      case fields.error !== null && groupFields.length === 0:
         return FIELDS_ERROR_REASON;
       case groupFields.length === 0:
         return NO_GROUP_FIELDS_REASON;
@@ -595,9 +727,29 @@ export function ProjectsBoardPanel({
         return undefined;
     }
   })();
+  // Ranked the same way, over the same three states: a read still in flight, one
+  // that failed with nothing cached, and one that settled on a board with no
+  // saved views. Only the last is an ABSENCE claim, and only it may be made — a
+  // refetch that failed over a list already on screen takes none of these arms,
+  // since those views loaded fine and the switcher is the only way back to
+  // No view from inside this popup.
+  const viewsPending = canRead && projectId !== null && views.isPending;
+  const viewsHeldReason = (() => {
+    switch (true) {
+      case viewsPending:
+        return LOADING_VIEWS_REASON;
+      case views.error !== null && viewList.length === 0:
+        return VIEWS_ERROR_REASON;
+      case viewList.length === 0:
+        return NO_VIEWS_REASON;
+      default:
+        return undefined;
+    }
+  })();
   // Names the radio group; its checked row supplies the value half of the
   // reading, so no id on the control itself.
   const groupLabelId = useId();
+  const viewLabelId = useId();
   const portalContainer = usePanelPortalContainer();
   const projectTitles: Record<string, string> = {};
   for (const p of openProjects) projectTitles[p.id] = p.title;
@@ -633,6 +785,16 @@ export function ProjectsBoardPanel({
   // CONTINUATION apart from a dead initial load. Paired with `hasPages` so a
   // failure that left cards on screen never blanks them.
   const pageError = hasPages && items.isFetchNextPageError && items.error;
+  // What keeps Load more MOUNTED through a lens switch. `hasNextPage` is computed
+  // from the query's own `state.data`, which a placeholder never fills — the
+  // substitution writes the result's local `data` alone — so it reads false for
+  // the whole switch however many pages are on screen (query-core 5.102.8:
+  // `hasNextPage(options, state.data)`, and `if (!data) return false`). Those
+  // cards ARE the previous lens's pages, so its last page is what says whether
+  // there is more under them, tested exactly as `getNextPageParam` does.
+  const placeholderPage = lensLoading ? items.data?.pages.at(-1) : undefined;
+  const heldNextPage =
+    placeholderPage?.truncated === true && placeholderPage.endCursor !== null;
   // Load more is held for ANY in-flight items fetch, not just a continuation.
   // `fetchNextPage` defaults to query-core's `cancelRefetch: true`, so clicking
   // during the reconciliation refetch that an in-app edit triggered CANCELS that
@@ -642,6 +804,11 @@ export function ProjectsBoardPanel({
   // Each reason is its own wait, because they mean different things to the user.
   const loadMoreHeld = (() => {
     switch (true) {
+      // Ahead of every fetch arm: the pages on screen are the previous lens's, so
+      // a continuation now would extend a board this view is about to replace.
+      // `heldNextPage` above is what leaves the control mounted to say so.
+      case lensLoading:
+        return LENS_LOADING_REASON;
       case items.isFetchingNextPage:
         return "Loading more items…";
       case items.isFetching:
@@ -800,6 +967,24 @@ export function ProjectsBoardPanel({
             </p>
           </BoardNotice>
         );
+      // A filter that matched nothing is a different statement from an empty
+      // board, and only the settled read may make it — the cards standing while
+      // a lens loads are the previous view's. An unfiltered view can't reach
+      // here: its empty board is the board's own, and the columns say so.
+      case view !== null &&
+        lensQuery !== null &&
+        !lensLoading &&
+        hasPages &&
+        loaded.length === 0:
+        return (
+          <BoardNotice>
+            <p>No items match this view's filter.</p>
+            <p className="font-mono break-all">{lensQuery}</p>
+            <p>
+              <ClearViewButton onClear={clearView} />
+            </p>
+          </BoardNotice>
+        );
       default:
         return (
           // ONE menu for the whole board rather than a portal per card: a
@@ -846,6 +1031,7 @@ export function ProjectsBoardPanel({
                   focusNonce={focusNonce}
                   repoSlug={repoSlug}
                   ghHost={ghHost}
+                  chipFields={chipFields}
                   onCardFocus={onCardFocus}
                   onOpen={openItem}
                 />
@@ -958,6 +1144,66 @@ export function ProjectsBoardPanel({
                       one-of-many choice already is. */}
                   <div className="space-y-2">
                     <div className="space-y-1">
+                      {/* Names the GROUP the same way the section below does: the
+                          label plus the checked row reads as "View …, No view,
+                          selected". */}
+                      <p
+                        id={viewLabelId}
+                        className="px-1 text-xs text-muted-foreground"
+                      >
+                        View
+                      </p>
+                      {viewsHeldReason !== undefined ? (
+                        <p className="px-1 py-1 text-xs text-muted-foreground">
+                          {viewsHeldReason}
+                        </p>
+                      ) : (
+                        <RadioGroup
+                          // Scrolls at its own edge: the server offers up to 50
+                          // views, and a popup that tall would run off screen.
+                          className="max-h-56 gap-0 overflow-y-auto"
+                          aria-labelledby={viewLabelId}
+                          value={view?.id ?? NO_VIEW_ROW_ID}
+                          onValueChange={(next) => {
+                            // Base UI types the group's value as `any`; the guard
+                            // narrows it back to the row ids these rows carry.
+                            if (typeof next !== "string") return;
+                            pickView(next === NO_VIEW_ROW_ID ? null : next);
+                          }}
+                        >
+                          <label className={GROUP_ROW_CLASS}>
+                            <Radio value={NO_VIEW_ROW_ID} />
+                            <span className="min-w-0 truncate">No view</span>
+                          </label>
+                          {viewList.map((v) => (
+                            <label key={v.id} className={GROUP_ROW_CLASS}>
+                              <Radio value={v.id} />
+                              <span
+                                className="min-w-0 truncate"
+                                onMouseEnter={clipTitleFromText}
+                              >
+                                {v.name === "" ? UNTITLED_VIEW : v.name}
+                              </span>
+                              {/* The layout the view was saved in, where it isn't
+                                  the one this board draws — the row says so up
+                                  front rather than leaving the strip to explain
+                                  it after the pick. */}
+                              {VIEW_LAYOUT_WORD[v.layout] !== undefined && (
+                                <span className="shrink-0 text-muted-foreground">
+                                  {VIEW_LAYOUT_WORD[v.layout]}
+                                </span>
+                              )}
+                            </label>
+                          ))}
+                        </RadioGroup>
+                      )}
+                      {views.data?.truncated === true && (
+                        <p className="px-1 text-[11px] text-muted-foreground">
+                          {VIEWS_TRUNCATED_NOTE}
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-1">
                       {/* Names the GROUP, which is what carries the meaning here:
                           the label plus the checked row reads as "Group by …,
                           Status, selected". */}
@@ -1018,10 +1264,12 @@ export function ProjectsBoardPanel({
                 about the board, and neither unsettled state has earned it: still
                 loading gets the skeleton, and failed-with-nothing-loaded gets
                 nothing at all, because the error card below already says what
-                happened and a zero beside it would read as the answer. */}
+                happened and a zero beside it would read as the answer. A count
+                taken off another lens's cards is the same false claim, so a lens
+                still loading takes the skeleton too. */}
             {(() => {
               switch (true) {
-                case itemsPending:
+                case itemsPending || lensLoading:
                   return <Skeleton className="h-4 w-20" aria-hidden />;
                 case !hasPages:
                   return null;
@@ -1044,7 +1292,7 @@ export function ProjectsBoardPanel({
                 {presentError(items.error).summary}
               </span>
             )}
-            {(items.hasNextPage || pageError) && (
+            {(items.hasNextPage || pageError || heldNextPage) && (
               <DisabledReasonButton
                 variant="outline"
                 size="xs"
@@ -1054,7 +1302,7 @@ export function ProjectsBoardPanel({
                   // Belt-and-braces with the `disabled` above: the held state is
                   // derived at render, and a click racing the render that sets it
                   // must not get through either.
-                  if (items.isFetching || movePending) return;
+                  if (items.isFetching || movePending || lensLoading) return;
                   void items.fetchNextPage();
                 }}
               >
@@ -1093,6 +1341,35 @@ export function ProjectsBoardPanel({
             )}
           </div>
         )}
+      {/* The lens the board is under, in the layout FLOW like the notices above
+          it — a persistent claim about what this surface is showing may never
+          float over its chrome. Below them on purpose: a failed read is
+          actionable, this is a statement. */}
+      {showBoardChrome && view !== null && (
+        <div className="mb-2 flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b pb-1.5 text-[11px] text-muted-foreground">
+          <span
+            className="min-w-0 max-w-64 truncate font-medium text-foreground"
+            onMouseEnter={clipTitleFromText}
+          >
+            {view.name === "" ? UNTITLED_VIEW : view.name}
+          </span>
+          {FLAT_FALLBACK_NOTE[view.layout] !== undefined && (
+            <span>{FLAT_FALLBACK_NOTE[view.layout]}</span>
+          )}
+          {lensQuery !== null && (
+            <span className="flex min-w-0 items-center gap-1">
+              Filter:
+              <span
+                className="min-w-0 truncate font-mono"
+                onMouseEnter={clipTitleFromText}
+              >
+                {lensQuery}
+              </span>
+            </span>
+          )}
+          <ClearViewButton onClear={clearView} />
+        </div>
+      )}
       {body}
     </div>
   );
