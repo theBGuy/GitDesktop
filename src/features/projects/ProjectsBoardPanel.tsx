@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type KeyboardEvent,
   type MouseEvent,
+  type PointerEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -349,7 +350,7 @@ export function ProjectsBoardPanel({
   /** The card `el` sits in, resolved from the DOM rather than from state: a bare
    *  Tab into the board moves focus without touching the cursor, and the arrows
    *  must act on where the user actually is. */
-  function cardAt(el: HTMLElement): { col: number; idx: number } | null {
+  function cardAt(el: Element): { col: number; idx: number } | null {
     const card = el.closest<HTMLElement>("[data-card-index]");
     const column = card?.closest<HTMLElement>("[data-column-index]");
     if (!card || !column) return null;
@@ -421,8 +422,12 @@ export function ProjectsBoardPanel({
   // The board's one write. ONE instance, which is what makes `isPending` a real
   // single-flight gate: the optimistic snapshot is one deep, so two overlapping
   // moves' rollbacks would restore each other's patches.
-  const move = useMoveBoardCard(repoPath, projectId ?? "");
+  const move = useMoveBoardCard();
   const [menuTarget, setMenuTarget] = useState<BoardMenuTarget>(null);
+  // The same target, readable SYNCHRONOUSLY. Base UI decides whether to open from
+  // inside the very dispatch the keyboard route records in, so the open gate below
+  // can't wait for this render's state to commit.
+  const menuTargetRef = useRef<BoardMenuTarget>(null);
   // True from the moment the menu opens until its close has fully SETTLED, which
   // is why the completion callback owns the falling edge: Base UI returns focus to
   // the trigger from the popup's unmount cleanup, and that unmount is what fires
@@ -483,32 +488,47 @@ export function ProjectsBoardPanel({
     }
   })();
 
-  /** Right-click anywhere in the board: act on the card under the pointer, and
-   *  suppress the menu where it would open with nothing in it — board chrome and
-   *  empty column space, a redacted card (nothing to open, nothing to move), and
-   *  a draft on an UNGROUPED board, whose Open row and Move section are both
-   *  absent. */
-  function handleCardContextMenu(e: MouseEvent) {
-    const el = e.target instanceof HTMLElement ? e.target : null;
+  /** Record what a menu opened over `el` would act on, and report whether that is
+   *  anything at all. Null — and so no menu — for board chrome and empty column
+   *  space, for a redacted card (nothing to open, nothing to move), and for a draft
+   *  on an UNGROUPED board, whose Open row and Move section are both absent. */
+  function recordMenuTarget(el: Element | null): boolean {
     const at = el === null ? null : cardAt(el);
     const item = at === null ? undefined : columns[at.col]?.items[at.idx];
-    // The cursor moves to whatever was right-clicked, suppressed menu included, so
-    // the board's selection and the menu describe the same card (the Actions and
-    // History lists select their right-clicked row the same way). The nonce stays
-    // put: a right-click sets where the arrows resume, never where focus goes.
+    // The cursor moves to whatever was pressed, a suppressed menu included, so the
+    // board's selection and the menu describe the same card (the Actions and
+    // History lists select their pressed row the same way). The nonce stays put:
+    // this sets where the arrows resume, never where focus goes.
     if (at !== null && item !== undefined) setCursor(at);
     const kind = item?.content.kind;
-    if (
-      item === undefined ||
+    const next: BoardMenuTarget =
       at === null ||
+      item === undefined ||
       kind === "redacted" ||
       (kind === "draft" && groupField === null)
-    ) {
-      setMenuTarget(null);
+        ? null
+        : { item, columnIndex: at.col };
+    menuTargetRef.current = next;
+    setMenuTarget(next);
+    return next !== null;
+  }
+
+  /** Every pointer route into the menu passes here first. Base UI opens a TOUCH
+   *  menu from its own long-press timer without ever dispatching `contextmenu`, so
+   *  pointerdown is the one gesture both routes share — recording anywhere else
+   *  leaves a long press showing the previously right-clicked card's menu. */
+  function handleCardPointerDown(e: PointerEvent) {
+    recordMenuTarget(e.target instanceof Element ? e.target : null);
+  }
+
+  /** The mouse and keyboard route. Re-records because Shift+F10 and the Menu key
+   *  reach here with no pointerdown ahead of them. */
+  function handleCardContextMenu(e: MouseEvent) {
+    // Element-wide, not HTMLElement: a card's state/draft/lock glyphs are SVG, and
+    // a right-click landing on one is a right-click on the card — narrowing here
+    // reads those hits as empty space and suppresses the menu over a real card.
+    if (!recordMenuTarget(e.target instanceof Element ? e.target : null))
       suppressContextMenu(e);
-      return;
-    }
-    setMenuTarget({ item, columnIndex: at.col });
   }
 
   /** Write the grouped field so `item` lands in `columns[columnIndex]`. The
@@ -520,7 +540,15 @@ export function ProjectsBoardPanel({
       return;
     const option = groupField.options.find((o) => o.id === column.id) ?? null;
     setChase(item.itemId);
-    move.mutate({ itemId: item.itemId, field: groupField, option });
+    // The board this move belongs to travels WITH it: an offline move parks before
+    // the write and resumes on whatever render is current by then.
+    move.mutate({
+      repo: repoPath,
+      projectId,
+      itemId: item.itemId,
+      field: groupField,
+      option,
+    });
   }
 
   // Ranked, because the popup can be opened before the fields read settles and
@@ -749,7 +777,17 @@ export function ProjectsBoardPanel({
           // UI's own trigger handler, so the target is recorded — or the menu
           // suppressed — before it opens.
           <ContextMenu
-            onOpenChange={(open) => {
+            onOpenChange={(open, details) => {
+              // The one gate BOTH routes pass. A long press opens from the
+              // trigger's own timer and dispatches no `contextmenu`, so the
+              // capture-phase suppression can't reach it; `cancel()` refuses the
+              // change before Base UI mounts the popup, which is what keeps an
+              // empty one off the screen rather than flashing it closed. The mouse
+              // route never gets here — its suppression already stopped the event.
+              if (open && menuTargetRef.current === null) {
+                details.cancel();
+                return;
+              }
               if (open) setMenuBusy(true);
             }}
             onOpenChangeComplete={setMenuBusy}
@@ -762,6 +800,7 @@ export function ProjectsBoardPanel({
                 <div
                   className="flex min-h-0 flex-1 gap-2 overflow-x-auto"
                   onKeyDown={onBoardKeyDown}
+                  onPointerDownCapture={handleCardPointerDown}
                   onContextMenuCapture={handleCardContextMenu}
                 />
               }

@@ -2718,15 +2718,19 @@ function withGroupValue(
  * Single-writer by contract: the panel holds ONE instance and disables every move
  * row while it is pending, because two overlapping moves' rollbacks would restore
  * each other's snapshots.
+ *
+ * The write TARGET rides the variables, never this hook's scope. A pending mutation
+ * runs on the latest render's options — query-core re-applies them on every
+ * re-render, and an offline move PAUSES before `mutationFn` and resumes through
+ * whatever closure is current — so a repo or board switch mid-flight would
+ * otherwise submit the old card against the new board.
  */
-export function useMoveBoardCard(repo: string, projectId: string) {
+export function useMoveBoardCard() {
   const queryClient = useQueryClient();
-  const key = projectItemsKey(repo, projectId);
-  // The board can't name a cross-repo card's lens, kind, or number, so the honest
-  // co-invalidation of the issue/PR rail is the family prefix.
-  const railKey = ["repo", repo, "item-field-values"];
   return useMutation({
     mutationFn: (args: {
+      repo: string;
+      projectId: string;
       /** The membership's item id on `projectId` — what the write addresses. */
       itemId: string;
       field: BoardGroupField;
@@ -2734,8 +2738,8 @@ export function useMoveBoardCard(repo: string, projectId: string) {
       option: ProjectFieldOptionDef | null;
     }) =>
       api.ghSetItemFieldValues(
-        repo,
-        projectId,
+        args.repo,
+        args.projectId,
         args.itemId,
         args.option === null
           ? []
@@ -2749,6 +2753,13 @@ export function useMoveBoardCard(repo: string, projectId: string) {
         args.option === null ? [args.field.id] : [],
       ),
     onMutate: async (args) => {
+      // Derived from the variables, like every other target here: `onMutate` runs
+      // before the pause so its own scope is safe, but one source of truth for
+      // WHERE the write lands is what keeps the settle handlers honest.
+      const key = projectItemsKey(args.repo, args.projectId);
+      // The board can't name a cross-repo card's lens, kind, or number, so the
+      // honest co-invalidation of the issue/PR rail is the family prefix.
+      const railKey = ["repo", args.repo, "item-field-values"];
       await queryClient.cancelQueries({ queryKey: key });
       const prev =
         queryClient.getQueryData<InfiniteData<BoardItems, string | null>>(key);
@@ -2772,12 +2783,11 @@ export function useMoveBoardCard(repo: string, projectId: string) {
           })),
         });
       }
-      // The targets ride the CONTEXT, never these closures: a pending mutation
-      // takes the latest render's options (query-core's MutationObserver
-      // re-applies them on every re-render), so a repo or board switch mid-flight
-      // would otherwise roll the old board's snapshot into the new board's key and
-      // invalidate the wrong repo's boards.
-      return { prev, key, railKey, repo };
+      // The settle handlers read these, never their own scope: they too run on the
+      // latest render's options, so a mid-flight switch would otherwise roll the
+      // old board's snapshot into the new board's key and invalidate the wrong
+      // repo's boards.
+      return { prev, key, railKey, repo: args.repo };
     },
     // Reporting and rollback live here, not in the caller's `mutate` options: the
     // context menu that fires this closes as it does, and react-query drops
