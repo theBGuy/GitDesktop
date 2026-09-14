@@ -38,6 +38,7 @@ import {
   STEADY_OUTCOME_CODES,
 } from "@/lib/automations/history";
 import { useAutomations } from "@/lib/automations/queries";
+import { openAutomationResult } from "@/lib/automations/results";
 import {
   ACTION_LABELS,
   type ActionId,
@@ -186,9 +187,11 @@ const OUTCOME_REASON: Record<
     tone: "muted",
   }),
   cancelled: () => ({ text: "Cancelled", tone: "muted" }),
+  // Not an ending: the run holding the claim is producing this review, so the
+  // "Skipped — " grammar the other skips share would read as a dead end.
   "claim-held": () => ({
-    text: "Skipped — this head is already claimed by a review run",
-    tone: "warning",
+    text: "Handed off — another review run owns this head",
+    tone: "muted",
   }),
   // The Run-now toast sends users HERE for the error, so the recorded detail
   // must render (the row truncates with a full-text hover tooltip).
@@ -218,13 +221,10 @@ const OUTCOME_REASON: Record<
   }),
 };
 
-/** Codes whose catch-up run latched the (PR, head) pair for the session, so the
- *  poller won't come back to it on its own. */
-const LATCHING_CODES = new Set<string>([
-  "eligibility-error",
-  "failed",
-  "claim-held",
-]);
+/** Latched (PR, head) pairs the poller won't return to AND the user can act on.
+ *  `claim-held` latches too but is excluded — the run holding the claim is
+ *  producing the review, so the footer would read as a dead end. */
+const LATCHING_CODES = new Set<string>(["eligibility-error", "failed"]);
 
 /** Every field below is read back from a JSON file a user can hand-edit, so a
  *  non-string reaches JSX as an object React refuses to render. */
@@ -280,6 +280,32 @@ function reasonFor(
 ): ReasonLine {
   if (!Object.hasOwn(OUTCOME_REASON, outcome.code)) return UNKNOWN_REASON;
   return OUTCOME_REASON[outcome.code]?.(entry, outcome, live) ?? UNKNOWN_REASON;
+}
+
+/**
+ * The stored result this outcome can open, or null. Only a commit review has a
+ * record of its own, and only where the run got far enough to write one — a
+ * delivered review, or a timed-out run whose partial was kept. Untrusted like
+ * every other stored field: a hand-edited non-string (or an empty id, which
+ * could only ever dead-end) renders no affordance rather than a dead click.
+ */
+function viewableResultId(
+  entry: AutomationHistoryEntry,
+  outcome: Outcome,
+): string | null {
+  if (entry.targetKind !== "commit") return null;
+  if (outcome.code !== "delivered" && outcome.code !== "timed-out") return null;
+  return typeof outcome.resultId === "string" && outcome.resultId !== ""
+    ? outcome.resultId
+    : null;
+}
+
+/** Self-contained button label: "View result" alone is ambiguous in a list, and
+ *  two of these can sit on one row. A commit made on a detached HEAD with no
+ *  subject titles as "", where the separator would dangle against nothing. */
+function viewResultLabel(action: ActionId | null, title: string): string {
+  const base = `View ${actionLabel(action)} result`;
+  return title ? `${base} — ${title}` : base;
 }
 
 /** Marker rows carry no target, so their title comes from what was recorded. */
@@ -556,6 +582,15 @@ function AutomationHistoryBody({
     });
   };
 
+  // Close first, then open: both are dialogs, and the result must land on top of
+  // a settled stack rather than race the history dialog's close. The result
+  // dialog is mounted at the app root, so it opens for this row's repository
+  // whether or not it is the one in view.
+  const viewResult = (resultId: string) => {
+    onClose();
+    void openAutomationResult(repoPath, resultId);
+  };
+
   return (
     // Full-bleed to the dialog's edges so the banners read as strips and the
     // rows as a list, not as inset cards.
@@ -609,6 +644,7 @@ function AutomationHistoryBody({
           isLive={isLive}
           onListKeyDown={onListKeyDown}
           onOpenTarget={openTarget}
+          onViewResult={viewResult}
           onSetUp={() => {
             onClose();
             openSettings("automations");
@@ -625,6 +661,7 @@ function HistoryList({
   isLive,
   onListKeyDown,
   onOpenTarget,
+  onViewResult,
   onSetUp,
 }: {
   rows: AutomationHistoryEntry[];
@@ -634,6 +671,7 @@ function HistoryList({
   isLive: (entry: AutomationHistoryEntry, action: ActionId | null) => boolean;
   onListKeyDown: (e: KeyboardEvent) => void;
   onOpenTarget: (entry: AutomationHistoryEntry) => void;
+  onViewResult: (resultId: string) => void;
   onSetUp: () => void;
 }) {
   if (rows.length === 0) {
@@ -663,8 +701,9 @@ function HistoryList({
   }
 
   return (
-    // Roving tabindex: the list takes one tab stop and the arrows walk the rows,
-    // so Tab never has to step through fifty records to leave the dialog.
+    // Roving tabindex: the arrows walk the rows from this one container stop, so
+    // Tab doesn't step through fifty records. The View result buttons inside
+    // qualifying commit rows are native tab stops of their own.
     <div
       // The container is the tab stop, so it carries the name a reader hears on
       // arrival; `group` is the generic role that can hold one.
@@ -680,6 +719,7 @@ function HistoryList({
           entry={entry}
           isLive={isLive}
           onOpenTarget={onOpenTarget}
+          onViewResult={onViewResult}
         />
       ))}
     </div>
@@ -693,10 +733,12 @@ function HistoryRow({
   entry,
   isLive,
   onOpenTarget,
+  onViewResult,
 }: {
   entry: AutomationHistoryEntry;
   isLive: (entry: AutomationHistoryEntry, action: ActionId | null) => boolean;
   onOpenTarget: (entry: AutomationHistoryEntry) => void;
+  onViewResult: (resultId: string) => void;
 }) {
   const outcomes = Array.isArray(entry.outcomes) ? entry.outcomes : [];
   const Glyph = glyphFor(entry);
@@ -734,19 +776,47 @@ function HistoryRow({
             outcome,
             isLive(entry, outcome.action),
           );
+          // Per outcome, not per row: one commit can settle a code review AND a
+          // security audit into the same row, and each keeps its own result.
+          const resultId = viewableResultId(entry, outcome);
           return (
             <span
               // Index key: one entry's outcomes are a fixed list that never reorders.
               key={i}
-              className="mt-0.5 block truncate text-[11px]"
-              onMouseEnter={clipTitleFromText}
+              className="mt-0.5 flex items-start gap-1 text-[11px]"
             >
-              <span className="text-muted-foreground">
-                {actionLabel(outcome.action)} ·{" "}
+              {/* The truncating element owns the hover tooltip, so the button's
+                  label never joins the text a clipped line reports. */}
+              <span
+                className="min-w-0 flex-1 truncate"
+                onMouseEnter={clipTitleFromText}
+              >
+                <span className="text-muted-foreground">
+                  {actionLabel(outcome.action)} ·{" "}
+                </span>
+                <span className={TONE_CLASS[reason.tone]}>
+                  {joinCount(
+                    reason.text,
+                    count,
+                    entry.targetKind,
+                    outcome.code,
+                  )}
+                </span>
               </span>
-              <span className={TONE_CLASS[reason.tone]}>
-                {joinCount(reason.text, count, entry.targetKind, outcome.code)}
-              </span>
+              {/* Only commit outcomes qualify, and a commit row is never
+                  `navigable` — so this button can never nest inside the row's
+                  own <button> arm. */}
+              {resultId !== null && (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="-my-0.5 shrink-0"
+                  aria-label={viewResultLabel(outcome.action, title)}
+                  onClick={() => onViewResult(resultId)}
+                >
+                  View result
+                </Button>
+              )}
             </span>
           );
         })}

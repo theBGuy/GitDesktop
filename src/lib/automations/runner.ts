@@ -266,6 +266,10 @@ type RunActionOutcome = {
   action: ActionId;
   code: AutomationOutcomeCode;
   detail?: string;
+  /** The stored result this decision produced, carried into the history row so it
+   *  can open the output. Commit targets only — a PR's partial lives in the review
+   *  history store, which this id family doesn't address. */
+  resultId?: string;
 };
 
 /** What a {@link run} pass did, so a re-run can tell outcomes apart:
@@ -795,7 +799,7 @@ async function run(
         neutralizeRefs: true,
         text,
       });
-      await deliver(event, action, body, text);
+      const resultId = await deliver(event, action, body, text);
       // Seed the review-history store so the next run (manual or auto) builds on these
       // findings and this headSha joins the heads pr-sync treats as covered. Best-effort.
       if (event.kind === "pr-open" || event.kind === "pr-sync") {
@@ -810,7 +814,11 @@ async function run(
       }
       // Success: remove the dock row — a delivered review lands in Notifications.
       handle.settle();
-      settled.push({ action, code: "delivered" });
+      settled.push({
+        action,
+        code: "delivered",
+        ...(resultId ? { resultId } : {}),
+      });
       await recordProgress();
     } catch (e) {
       // Release the claim on every failure/cancel path so a transient error doesn't
@@ -954,6 +962,11 @@ async function run(
         action,
         code: progress.timedOut ? "timed-out" : "failed",
         detail: message,
+        // A commit partial is the only failure output with a record of its own —
+        // a PR's lives in the review-history store, which this id can't address.
+        ...(event.kind === "commit" && keptPartial
+          ? { resultId: partialResultId }
+          : {}),
       });
       await recordProgress();
     } finally {
@@ -1634,12 +1647,15 @@ async function generateReviewText(
   return { text: buffer, thoughts: "" };
 }
 
+/** Delivers one finished review to wherever its event's output belongs, returning
+ *  the stored result's id for a COMMIT event — the only arm whose output has a
+ *  record to point at. PR arms post a comment and return undefined. */
 async function deliver(
   event: AutomationEvent,
   mode: ReviewMode,
   body: string,
   rawText: string,
-): Promise<void> {
+): Promise<string | undefined> {
   const label = modeLabel(mode);
 
   if (event.kind === "commit") {
@@ -1687,7 +1703,7 @@ async function deliver(
         focus: "unfocused",
       },
     });
-    return;
+    return result.id;
   }
 
   if (event.target.type === "remote") {

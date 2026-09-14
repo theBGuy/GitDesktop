@@ -72,6 +72,12 @@ export interface AutomationOutcome {
   action: ActionId | null;
   code: AutomationOutcomeCode;
   detail?: string;
+  /** A persisted `AutomationRunResult` id, so the row can open the output it
+   *  describes. Written only where one exists: a COMMIT-target `delivered` or
+   *  kept-partial `timed-out` outcome. Same id family the notification target
+   *  `{ type: "automation-result", id }` carries — both take it from the result
+   *  record at its mint site. */
+  resultId?: string;
 }
 
 /** What a row describes. The value list and the type derive from one another, so the
@@ -169,8 +175,9 @@ const KNOWN_ACTIONS = new Set<string>(ALL_ACTION_IDS);
  *     the row would discard a decision we can still report truthfully.
  * Left to consumers: `trigger` (any string; the dialog falls back to a default
  * glyph, so dropping the row would lose evidence over a cosmetic lookup) and the
- * optional `count` / `detail`, which are carried only when they hold the right
- * primitive. `schemaVersion` is write-only, so it is stamped rather than read.
+ * optional `count` / `detail` / `resultId`, which are carried only when they hold
+ * the right primitive. `schemaVersion` is write-only, so it is stamped rather
+ * than read.
  */
 function sanitizeStoredEntry(x: unknown): AutomationHistoryEntry | null {
   if (typeof x !== "object" || x === null) return null;
@@ -200,6 +207,7 @@ function sanitizeStoredEntry(x: unknown): AutomationHistoryEntry | null {
           : null,
       code: raw.code as AutomationOutcomeCode,
       ...(typeof raw.detail === "string" ? { detail: raw.detail } : {}),
+      ...(typeof raw.resultId === "string" ? { resultId: raw.resultId } : {}),
     });
   }
   return {

@@ -2669,9 +2669,9 @@ request opened*, and *On new commits to a reviewed PR* — with **AI code review
 security audit** as toggles under each. There's no "add a rule" — a given moment × action
 exists at most once, so you can't create conflicting duplicates. Reviews use the review model
 from the AI section (security audits use the dedicated audit model when you've set one); PR
-results are posted as a comment, commit results open from their notification row — with
-**Notify on** for **Automation results** set to *Failures only*, a successful commit
-review notifies nowhere, so there's nothing to open its result from.
+results are posted as a comment, commit results open from their notification row or from
+**Automation history**, even when **Notify on** for **Automation results** is set to
+*Failures only*.
 **Review draft PRs when created** (off by default) controls draft handling:
 left off, a draft PR gets its automated first review when it's marked ready for review, not
 at creation — marking it ready **in GitDesktop** always fires that first review, while a
@@ -2705,14 +2705,15 @@ configuration, one line per moment, then lists every recorded decision, newest f
 
 - **Skips are recorded too.** Each line names the action it belongs to and how it ended:
   posted as a comment, review saved, skipped because branch conditions didn't match, already
-  reviewed, a draft while draft reviews are off, claimed by another review run, failed (with
-  the error), timed out, or cancelled. When a moment is switched off entirely, nothing is
+  reviewed, a draft while draft reviews are off, handed off to another review run, failed
+  (with the error), timed out, or cancelled. When a moment is switched off entirely, nothing is
   recorded for it, and the configuration lines at the top say so.
 - **Repeats read as summaries.** A decision that recurred coalesces into one row with its
   count — "Skipped 23 commits — branch conditions didn't match" for a run of commits, or
   "(seen 4×)" for a pull request checked again.
-- **Pull request rows open their pull request** on click or Enter; commit rows and markers
-  are text. The arrow keys walk the whole list.
+- **Pull request rows open their pull request** on click or Enter; a commit row with a
+  stored result carries a **View result** button that opens it, and markers are text. The
+  arrow keys walk the whole list.
 - **Pausing is logged.** Once you have an automation enabled, turning **Hide AI** on
   records *Automations paused*, and turning it off records *Automations resumed*, so a
   quiet stretch in the log carries its own reason.
@@ -2876,8 +2877,8 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   *Failures only* covers runs that timed out or failed to start as well.{{ai}}
   **Automation results** carries a **Notify on** choice of its own (*Everything* or
   *Failures only*), so reviews that your automations post or leave ready can stay
-  quiet while a failed automation still reaches you; a quieted ready review then has
-  no inbox row to open its result from.{{/ai}} **Customize…**
+  quiet while a failed automation still reaches you; a quieted ready review can be
+  opened from **Automation history** instead.{{/ai}} **Customize…**
   opens the per-repository overrides: **Mute this repository** silences every source for
   that repo, or you can set individual cells, the CI-checks **Watch** choice, and every
   **Notify on** choice, with anything you leave alone following your global settings.
