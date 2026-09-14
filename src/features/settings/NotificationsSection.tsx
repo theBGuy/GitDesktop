@@ -343,7 +343,8 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
 
   // Identities resolve over IPC, so the mapping is a query rather than render
   // work; the resolver memoizes per path, so a repeat costs nothing. STRICT
-  // because this staleTime would pin a swallowed raw path forever. Keyed on
+  // because this staleTime would pin a swallowed raw path forever; a failed
+  // mapping still resolves path-keyed rows through `byPath`. Keyed on
   // the RECENT REPOS alone — what it resolves doesn't depend on which overrides
   // exist, and carrying the key set would mint a fresh query on every Clear,
   // flashing the list back to skeletons and unmounting the row focus was headed
@@ -371,9 +372,7 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
   const rows: OverrideRow[] = otherKeys
     .map((key) => {
       const lowerKey = key.toLowerCase();
-      const path = identities
-        ? (byIdentity.get(lowerKey) ?? byPath.get(lowerKey) ?? null)
-        : null;
+      const path = byIdentity.get(lowerKey) ?? byPath.get(lowerKey) ?? null;
       return {
         key,
         path,
