@@ -36,6 +36,7 @@ import { useTaskRepoKeys } from "@/lib/scripts/queries";
 import {
   scopeRepoLabel,
   TASK_SCOPE_GLOBAL,
+  TASK_SCOPE_UNKNOWN,
   taskScope,
 } from "@/lib/scripts/scope";
 import {
@@ -71,6 +72,35 @@ type ArgDocRow = ArgDoc & { key: string };
 
 const toRows = (docs: ArgDoc[]): ArgDocRow[] =>
   docs.map((d) => ({ ...d, key: crypto.randomUUID() }));
+
+/**
+ * How a draft scoped outside the open repo describes itself: its Select option,
+ * and why the two repo-reading file controls are held. A malformed stored scope
+ * names no repository to open, so its copy points at the repair — pick a scope —
+ * rather than at a repo that doesn't exist.
+ */
+function elsewhereScopeCopy(scope: string): {
+  optionLabel: string;
+  chooseReason: string;
+  analyzeReason: string;
+} {
+  if (scope === TASK_SCOPE_UNKNOWN) {
+    // Both controls clear the same way, so they share one sentence.
+    const repair =
+      "This task's saved scope is unreadable — choose where it's available first";
+    return {
+      optionLabel: "Unreadable saved scope",
+      chooseReason: repair,
+      analyzeReason: repair,
+    };
+  }
+  const label = scopeRepoLabel(scope);
+  return {
+    optionLabel: `${label} — other repository`,
+    chooseReason: `Scoped to "${label}" — open that repository to pick a script from it`,
+    analyzeReason: `Scoped to "${label}" — open that repository to read its script`,
+  };
+}
 
 /** Make a picked absolute path relative to the repo root when it's inside it, so a
  *  task like `scripts/release.mjs` works in any repo that has it. Outside the repo,
@@ -154,6 +184,9 @@ export function TaskDialog({
   // from the DRAFT, not the saved task, so re-scoping to this repository releases
   // the file-source controls in the same keystroke that adopts the task.
   const scopedElsewhere = scope !== TASK_SCOPE_GLOBAL && !scopedToThisRepo;
+  // One source for every string a foreign scope produces here — the option label
+  // and both file-control reasons — so they can't disagree about what it is.
+  const elsewhereCopy = elsewhereScopeCopy(scope);
   const scopeOptions: { value: string; label: string }[] = [
     { value: TASK_SCOPE_GLOBAL, label: "All repositories" },
   ];
@@ -164,12 +197,10 @@ export function TaskDialog({
     });
   // A scope pointing at a DIFFERENT repo needs an option of its own: without one
   // the Select can't represent its own value, and saving an untouched edit would
-  // silently re-scope the task to whatever the trigger happened to show.
+  // silently re-scope the task to whatever the trigger happened to show. The value
+  // stays the stored scope verbatim whatever the label says.
   if (scopedElsewhere)
-    scopeOptions.push({
-      value: scope,
-      label: `${scopeRepoLabel(scope)} — other repository`,
-    });
+    scopeOptions.push({ value: scope, label: elsewhereCopy.optionLabel });
   // The Select's value must equal an option value: normalize a this-repo scope
   // held under a non-canonical key onto the option's canonical one. The
   // `?? scope` arm is type-level only — `scopedToThisRepo` implies repoKeys is
@@ -260,13 +291,12 @@ export function TaskDialog({
   // identity key can't be reversed to a checkout path (the owning repo may not be
   // on disk at all), so the controls are held rather than retargeted. Inline
   // sources are repo-independent and stay live.
-  const otherRepoLabel = scopeRepoLabel(scope);
   const chooseBlockedReason = scopedElsewhere
-    ? `Scoped to "${otherRepoLabel}" — open that repository to pick a script from it`
+    ? elsewhereCopy.chooseReason
     : null;
   const analyzeBlockedReason =
     scopedElsewhere && sourceKind === "file"
-      ? `Scoped to "${otherRepoLabel}" — open that repository to read its script`
+      ? elsewhereCopy.analyzeReason
       : null;
 
   async function choose() {

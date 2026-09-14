@@ -1,9 +1,5 @@
 import { load } from "@tauri-apps/plugin-store";
 import { repoIdentity } from "@/lib/git/repo-identity";
-// `norm` lives in its own leaf module: the other key-matching sides of a
-// relocate (the live plan/research stores, task scopes) must compare by exactly
-// the rule {@link migrateRawPathStore} rewrote rows with, without importing this
-// module back.
 import { norm } from "@/lib/repo-key";
 import { rehomeTaskScopes } from "@/lib/scripts/store";
 import { storeName } from "@/lib/test-mode";
