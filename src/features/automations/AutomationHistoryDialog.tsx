@@ -295,17 +295,21 @@ function viewableResultId(
 ): string | null {
   if (entry.targetKind !== "commit") return null;
   if (outcome.code !== "delivered" && outcome.code !== "timed-out") return null;
-  return typeof outcome.resultId === "string" && outcome.resultId !== ""
+  // Trimmed for the emptiness test only — an id is opaque and matched exactly,
+  // so what gets returned is the stored string itself.
+  return typeof outcome.resultId === "string" && outcome.resultId.trim() !== ""
     ? outcome.resultId
     : null;
 }
 
 /** Self-contained button label: "View result" alone is ambiguous in a list, and
- *  two of these can sit on one row. A commit made on a detached HEAD with no
- *  subject titles as "", where the separator would dangle against nothing. */
+ *  two of these can sit on one row. The visible label leads, contiguous and
+ *  unmodified, so speech input can address the button by what it reads (WCAG
+ *  2.5.3). A commit made on a detached HEAD with no subject titles as "", where
+ *  the comma join would trail against nothing. */
 function viewResultLabel(action: ActionId | null, title: string): string {
-  const base = `View ${actionLabel(action)} result`;
-  return title ? `${base} — ${title}` : base;
+  const base = `View result — ${actionLabel(action)}`;
+  return title ? `${base}, ${title}` : base;
 }
 
 /** Marker rows carry no target, so their title comes from what was recorded. */
@@ -645,6 +649,7 @@ function AutomationHistoryBody({
           onListKeyDown={onListKeyDown}
           onOpenTarget={openTarget}
           onViewResult={viewResult}
+          onFocusRow={setFocusedId}
           onSetUp={() => {
             onClose();
             openSettings("automations");
@@ -662,6 +667,7 @@ function HistoryList({
   onListKeyDown,
   onOpenTarget,
   onViewResult,
+  onFocusRow,
   onSetUp,
 }: {
   rows: AutomationHistoryEntry[];
@@ -672,6 +678,9 @@ function HistoryList({
   onListKeyDown: (e: KeyboardEvent) => void;
   onOpenTarget: (entry: AutomationHistoryEntry) => void;
   onViewResult: (resultId: string) => void;
+  /** Seats the arrow-key cursor on a row the user reached with Tab, so the next
+   *  arrow steps from there rather than warping to the end of the list. */
+  onFocusRow: (id: string) => void;
   onSetUp: () => void;
 }) {
   if (rows.length === 0) {
@@ -720,6 +729,7 @@ function HistoryList({
           isLive={isLive}
           onOpenTarget={onOpenTarget}
           onViewResult={onViewResult}
+          onFocusRow={onFocusRow}
         />
       ))}
     </div>
@@ -734,11 +744,13 @@ function HistoryRow({
   isLive,
   onOpenTarget,
   onViewResult,
+  onFocusRow,
 }: {
   entry: AutomationHistoryEntry;
   isLive: (entry: AutomationHistoryEntry, action: ActionId | null) => boolean;
   onOpenTarget: (entry: AutomationHistoryEntry) => void;
   onViewResult: (resultId: string) => void;
+  onFocusRow: (id: string) => void;
 }) {
   const outcomes = Array.isArray(entry.outcomes) ? entry.outcomes : [];
   const Glyph = glyphFor(entry);
@@ -812,6 +824,10 @@ function HistoryRow({
                   size="xs"
                   className="-my-0.5 shrink-0"
                   aria-label={viewResultLabel(outcome.action, title)}
+                  // Tab can land here without the arrow cursor ever moving, and
+                  // an unseated cursor makes the next arrow jump to the end of
+                  // the list. Same state the keyboard nav's onActivate writes.
+                  onFocus={() => onFocusRow(entry.id)}
                   onClick={() => onViewResult(resultId)}
                 >
                   View result

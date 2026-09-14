@@ -2669,9 +2669,8 @@ request opened*, and *On new commits to a reviewed PR* — with **AI code review
 security audit** as toggles under each. There's no "add a rule" — a given moment × action
 exists at most once, so you can't create conflicting duplicates. Reviews use the review model
 from the AI section (security audits use the dedicated audit model when you've set one); PR
-results are posted as a comment, commit results open from their notification row or from
-**Automation history**, even when **Notify on** for **Automation results** is set to
-*Failures only*.
+results are posted as a comment, commit results open from their notification row, and from
+**Automation history**, whatever your **Notify on** choice for **Automation results**.
 **Review draft PRs when created** (off by default) controls draft handling:
 left off, a draft PR gets its automated first review when it's marked ready for review, not
 at creation — marking it ready **in GitDesktop** always fires that first review, while a

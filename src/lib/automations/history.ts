@@ -72,11 +72,11 @@ export interface AutomationOutcome {
   action: ActionId | null;
   code: AutomationOutcomeCode;
   detail?: string;
-  /** A persisted `AutomationRunResult` id, so the row can open the output it
-   *  describes. Written only where one exists: a COMMIT-target `delivered` or
-   *  kept-partial `timed-out` outcome. Same id family the notification target
-   *  `{ type: "automation-result", id }` carries — both take it from the result
-   *  record at its mint site. */
+  /** An `AutomationRunResult` id, so the row can open the output it describes.
+   *  Written wherever the result record was minted: a COMMIT-target `delivered`
+   *  or kept-partial `timed-out` outcome. The durable write behind it is
+   *  best-effort, so a record that never landed (or was pruned since) opens the
+   *  "no longer available" toast — the same fallback its notification target has. */
   resultId?: string;
 }
 
