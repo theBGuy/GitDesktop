@@ -22,7 +22,7 @@ export function useNotificationOverrides() {
 
 /** The open repo's override (undefined while loading or when none). Keyed by the
  *  repo's worktree-stable identity, falling back to the raw path while that
- *  resolves and for entries still stored under it. */
+ *  resolves, once it has failed for good, and for entries still stored under it. */
 export function useRepoNotificationOverride(
   repoPath: string,
 ): RepoNotificationOverride | undefined {

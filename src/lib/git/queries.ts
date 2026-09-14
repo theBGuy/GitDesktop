@@ -85,9 +85,11 @@ import {
 } from "./worktree";
 
 /** A repo's worktree-stable identity key (its common git dir), for keying
- *  per-repo app-data the same across the main checkout and every worktree.
- *  Callers pass `""` for no repo, which disables the query. */
-export function useRepoIdentity(repo: string) {
+ *  per-repo app-data the same across the main checkout and every worktree. Null or
+ *  `""` means no repo, which disables the query. On an IPC failure `data` stays
+ *  undefined with `isError` set, so consumers read `identity ?? repoPath` and
+ *  treat the error as settled rather than waiting on a value that needs a remount. */
+export function useRepoIdentity(repo: string | null) {
   return useQuery(repoIdentityQueryOptions(repo || null));
 }
 

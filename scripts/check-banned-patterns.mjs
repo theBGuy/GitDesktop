@@ -528,6 +528,14 @@ const LOAD_STORE_NAME_CALL_RE = /\bload\s*\(\s*storeName\s*\(/g;
 // store whose variable is spelled differently, which is the direction that matters.
 const RAW_STORE_RELOAD_RE = /(?<!location)\.reload\s*\(/g;
 
+// The repo-identity query key, spelled as a literal anywhere but its factory —
+// which is the only way to observe that key without the factory's options. Both
+// quote styles, and the quotes are the anchor rather than a token boundary: the
+// unrelated `"notification-override-repo-identities"` key contains this string
+// but not as a complete literal. Blind to a key built from a CONSTANT, which no
+// site does today; comment stripping keeps the several doc mentions clean.
+const INLINE_REPO_IDENTITY_KEY_RE = /(["'])repo-identity\1/g;
+
 export const CHECKS = [
   {
     name: "hover-reveal",
@@ -919,6 +927,15 @@ export const CHECKS = [
     ],
     message:
       "re-read a store through reloadToleratingEmptyStore (src/lib/plugin-store.ts) — a bare `store.reload()` wrapped in a catch-everything treats an unreadable file exactly like an absent one, so the read-modify-write proceeds and saves this process's cache over whatever was on disk; a caller that genuinely must swallow every failure (a POST-write cache refresh, which has no pending write to protect — see review-notes' writeBranch) wraps the helper in its own try/catch rather than calling reload directly, and a non-store `.reload()` this pattern cannot tell apart takes an allowlist entry with rationale",
+  },
+  {
+    name: "inline-repo-identity-query",
+    // The factory IS the key, so it holds the only literal by definition.
+    appliesTo: (file) => file !== "src/lib/git/repo-identity-query.ts",
+    scan: perFile(INLINE_REPO_IDENTITY_KEY_RE),
+    allowlist: [],
+    message:
+      "every observer of the repo-identity query spreads repoIdentityQueryOptions (src/lib/git/repo-identity-query.ts) — the shared fetch takes its options from whichever observer starts it, so an inline copy splits networkMode and the retry ladder across observers of one key, and a queryFn that swallows the IPC failure caches the raw-path fallback under an infinite staleTime, mis-scoping repo-scoped servers and per-repo app-data for the whole session; import the factory, or add an allowlist entry with rationale",
   },
 ];
 

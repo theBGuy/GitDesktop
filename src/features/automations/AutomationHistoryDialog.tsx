@@ -464,7 +464,8 @@ function AutomationHistoryBody({
   const openSettings = useUiStore((s) => s.openSettings);
   const automations = useAutomations();
   // Worktree-stable identity, so a worktree checkout reads the same overrides as
-  // its main checkout; the raw path stands in while it resolves.
+  // its main checkout; the raw path stands in while it resolves, and stays in once
+  // the lookup has failed for good — until a remount refetches it.
   const identity = useRepoIdentity(repoPath).data;
   const history = useQuery({
     queryKey: automationHistoryKey(repoPath),

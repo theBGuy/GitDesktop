@@ -33,7 +33,8 @@ export function useScripts() {
  * identity is still resolving (or when it IS the path), `[repoPath, identity]`
  * once they differ, and `[]` when no repo is open. `settled` reports that the
  * lookup is done, so a caller can hold scope classification until then rather
- * than flashing an identity-scoped task through "other repos".
+ * than flashing an identity-scoped task through "other repos" — a lookup that
+ * FAILED settles too, on `[repoPath]`, until a remount refetches the identity.
  *
  * Shares the `["repo-identity", repoPath]` query with settings' `useRepoKeys`, so
  * one identity lookup serves both registries. A plain query (the shared identity

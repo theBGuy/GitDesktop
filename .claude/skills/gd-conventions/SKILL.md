@@ -399,7 +399,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   remount: a consumer gating on `data !== undefined` must treat the error as
   settled (fall back to the raw path, the key the swallowing `repoIdentity` and
   the disk loaders use) or its gate never opens. Direct store/fold callers keep
-  the swallowing `repoIdentity`.
+  the swallowing `repoIdentity`; the `inline-repo-identity-query` guard in
+  `pnpm run checks` fails on the key spelled anywhere but the factory.
 - **Hydrate gating** — a `hydrate` that swallows its read must NEVER set the
   ready flag, and a snapshot write gates on a RESOLVED `hydrate()`, not on the
   flag: `memoizedStoreLoader` retries after a transient failure, so a store

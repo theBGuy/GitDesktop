@@ -58,7 +58,8 @@ export function usePrNotifications(repoPath: string) {
   // The poll only earns its keep when a notification, pr-sync, or pr-open rule wants
   // it — the default (none of those) makes no background call.
   // Rules are keyed by repo IDENTITY so a worktree checkout sees the same rules as
-  // main; the raw path is the fallback while identity resolves / for legacy keys.
+  // main; the raw path is the fallback while identity resolves, once the lookup has
+  // failed for good (until a remount refetches it), and for legacy keys.
   const repoId = useRepoIdentity(repoPath).data;
   const hasPrSync = automations.data
     ? effectiveActions(

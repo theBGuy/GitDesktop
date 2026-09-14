@@ -98,7 +98,8 @@ export function RepoAutomationsDialog({
 
   // Look up this repo's overrides by its worktree-stable identity (so a worktree
   // checkout and main share one entry); falls back to the raw path while identity
-  // resolves or for a not-yet-folded legacy key.
+  // resolves, once the lookup has failed for good (until a remount refetches it),
+  // or for a not-yet-folded legacy key.
   const repoId = useRepoIdentity(repoPath).data;
   const savedOverride = automations.data
     ? (repoEntry(automations.data, repoId ?? repoPath, repoPath) ??

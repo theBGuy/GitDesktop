@@ -297,11 +297,9 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
   const settings = useSettings();
   const overrides = useNotificationOverrides();
   const clear = useClearNotificationOverride();
-  // An empty path reads as "no repo open" all the way down: the identity query
+  // No repo open reads as "nothing to claim" all the way down: the identity query
   // is disabled and the override lookup misses, so no branch needs a guard.
-  const { data: identity, isError: identityFailed } = useRepoIdentity(
-    repoPath ?? "",
-  );
+  const { data: identity, isError: identityFailed } = useRepoIdentity(repoPath);
   const current = useRepoNotificationOverride(repoPath ?? "");
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -328,6 +326,10 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
   // step with `overrideEntry`, which matches both arms through `samePath`: an
   // exact-case test here would count a differently-cased path entry as the open
   // repo's AND list it as another repository's.
+  // With the identity unknown (a failed lookup), the raw path is the only arm, so
+  // an identity-keyed entry for the OPEN repo lists under "other repositories"
+  // (named by `recentIdentities`) until the lookup heals — the accepted cost of
+  // settling, and the same place the old swallowed fallback left it.
   const ownKeys = new Set(
     [repoPath, identity]
       .filter((k): k is string => typeof k === "string")

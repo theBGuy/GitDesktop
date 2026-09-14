@@ -85,6 +85,7 @@ const titledDisabledTrigger = scanner("titled-disabled-trigger");
 const ungatedProducer = scanner("ungated-notification-producer");
 const handRolledStoreOpen = scanner("hand-rolled-store-open");
 const rawStoreReload = scanner("raw-store-reload");
+const inlineRepoIdentityQuery = scanner("inline-repo-identity-query");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -1498,6 +1499,60 @@ test("raw-store-reload exempts the helper module only", () => {
   assert.equal(appliesTo("src/lib/plugin-store.ts"), false);
   assert.equal(appliesTo("src/lib/issues/local.ts"), true);
   assert.equal(appliesTo("src/components/ErrorBoundary.tsx"), true);
+});
+
+test("inline-repo-identity-query flags an inline observer of the shared key", () => {
+  // The pre-fix shape all three observers had: the key spelled at the call site,
+  // with its own options — which is how they drifted on networkMode.
+  const inline = [
+    "const { data: identity } = useQuery({",
+    '  queryKey: ["repo-identity", repoPath],',
+    "  queryFn: () => repoIdentity(repoPath),",
+    "  enabled: !!repoPath,",
+    "});",
+  ].join("\n");
+  assert.deepEqual(inlineRepoIdentityQuery(inline), [2]);
+  // A cache read or an invalidation reaches the same key without useQuery at all.
+  assert.deepEqual(
+    inlineRepoIdentityQuery(
+      'qc.invalidateQueries({ queryKey: ["repo-identity", repo] });',
+    ),
+    [1],
+  );
+  // Both quote styles: the anchor is the quote pair, not the house style.
+  assert.deepEqual(
+    inlineRepoIdentityQuery("const k = ['repo-identity', r];"),
+    [1],
+  );
+});
+
+test("inline-repo-identity-query leaves the factory route and the longer key alone", () => {
+  for (const source of [
+    // The converted shape: the options come from the factory, key included.
+    'import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";\nconst q = useQuery(repoIdentityQueryOptions(repoPath));',
+    // NotificationsSection's own key CONTAINS the string but is not that literal —
+    // the quote anchor is what keeps it clean, where a bare substring would not.
+    'queryKey: ["notification-override-repo-identities", recentPaths],',
+    // The hook consumers, which never name the key.
+    "const identity = useRepoIdentity(repoPath).data;",
+    // Comment stripping keeps the several doc mentions of the key clean.
+    '// every observer of ["repo-identity", repoPath] spreads the factory',
+  ])
+    assert.deepEqual(
+      inlineRepoIdentityQuery(source),
+      [],
+      `should ignore ${source}`,
+    );
+});
+
+test("inline-repo-identity-query exempts the factory module only", () => {
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "inline-repo-identity-query",
+  );
+  assert.equal(appliesTo("src/lib/git/repo-identity-query.ts"), false);
+  assert.equal(appliesTo("src/lib/git/queries.ts"), true);
+  assert.equal(appliesTo("src/lib/settings/queries.ts"), true);
+  assert.equal(appliesTo("src/lib/scripts/queries.ts"), true);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {
