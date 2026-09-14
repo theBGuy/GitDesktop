@@ -1088,6 +1088,11 @@ export function ProjectsBoardPanel({
               // The new board defines its own fields, and the cursor addresses
               // columns that are about to be replaced.
               setPickedFieldId(null);
+              // A lens belongs to the board it was picked on. Leaving the id set
+              // reads as "no view" on any other board, but returning to this one
+              // would find it again and re-apply its filter, sort and chips
+              // WITHOUT the grouping seed, which only `pickView` performs.
+              setActiveViewId(null);
               setCursor(null);
             }}
           >
