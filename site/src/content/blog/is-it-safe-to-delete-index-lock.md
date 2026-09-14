@@ -175,9 +175,9 @@ repository), or a prompt daemon that happens to match `pgrep git`
 will all hold the number above zero on a perfectly quiet setup.
 Treat a nonzero answer as a suspect list, and read each survivor's
 command line to see what it is: `pgrep -a git` on Linux,
-`ps -p "$(pgrep git)" -o pid,command` on macOS, or in PowerShell
-`Get-CimInstance Win32_Process` filtered to git.exe. Daemons
-announce themselves there. The one thing a command line won't
+`pgrep -fl git` on macOS, or in PowerShell the one-liner
+`gcim Win32_Process -Filter "Name='git.exe'" | select ProcessId,CommandLine`.
+Daemons announce themselves there. The one thing a command line won't
 reliably name is the repository (a git launched from inside one
 carries no path in its arguments), so close anything you can't
 account for before trusting the delete. With the owner provably
@@ -185,6 +185,7 @@ gone, delete it (`del .git\index.lock` from PowerShell or cmd) and
 take inventory: the pending change is still pending, the history
 is intact, and the commit that was interrupted two sections ago
 never happened — Git doesn't half-commit.
+
 The one trace the crash left is that dangling tree: a scratch object
 the dying commit wrote, referenced by nothing, sitting in the same
 unreferenced limbo a [dropped stash](/blog/recover-a-dropped-git-stash/)
@@ -337,9 +338,9 @@ a job object, so the `git` shim on PATH and the real `git.exe` it
 launches underneath die together instead of leaving an orphan
 writer behind. A half-killed Git that keeps writing after the
 client reported failure is the "crashed earlier" branch of that
-error message, manufactured by tooling; the least a client can do
-is make sure that when this post's check says nothing is
-running, nothing is.
+error message, manufactured by tooling; the least a client
+can do is make sure that when this post's check says nothing
+is running, nothing is.
 
 None of that makes the stale lock impossible. Power still fails,
 laptops still sleep at the wrong moment, and some other tool will
