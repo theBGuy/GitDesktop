@@ -99,6 +99,14 @@ const NO_ACCESS_REASON = "You don't have write access to this project";
 const ISSUE_FIELD_REASON =
   "Issue fields are edited on GitHub — board editing arrives later";
 const LOADING_VIEWS_REASON = "Loading this project's views…";
+/** The two holds the switcher takes on the SEED's input rather than on the views
+ *  themselves: a pick seeds the grouping from the field definitions, so it waits
+ *  for them and refuses while they are unreachable. The second names the read to
+ *  retry rather than where its control is: that failure reaches the user as the
+ *  strip's notice over a drawn board, and as the panel's error card without one. */
+const VIEWS_AWAIT_FIELDS_REASON = "Waiting for this board's fields…";
+const VIEWS_FIELDS_FAILED_REASON =
+  "Couldn't load this board's fields, which saved views need. Retry that read and they're selectable again.";
 const VIEWS_ERROR_REASON = "Couldn't load this project's views";
 const NO_VIEWS_REASON = "This project has no saved views";
 /** Said by every control that would otherwise speak for the board on screen: while
@@ -727,17 +735,31 @@ export function ProjectsBoardPanel({
         return undefined;
     }
   })();
-  // Ranked the same way, over the same three states: a read still in flight, one
-  // that failed with nothing cached, and one that settled on a board with no
-  // saved views. Only the last is an ABSENCE claim, and only it may be made — a
-  // refetch that failed over a list already on screen takes none of these arms,
-  // since those views loaded fine and the switcher is the only way back to
-  // No view from inside this popup.
+  // Ranked like the Group-by section's reason: unsettled reads first, the
+  // ABSENCE claim last and only from a settled board. Two reads rank here, not
+  // one — the seed-input arms below say why the FIELDS read holds these rows.
+  // A refetch that failed over a list already on screen takes none of these
+  // arms, since those views loaded fine and the switcher is the only way back
+  // to No view from inside this popup.
   const viewsPending = canRead && projectId !== null && views.isPending;
   const viewsHeldReason = (() => {
     switch (true) {
       case viewsPending:
         return LOADING_VIEWS_REASON;
+      // The next two arms hold on the SEED'S INPUT, not on the views: `pickView`
+      // reads `groupFields` at pick time, once, with no later retry. Views and
+      // fields are independent `gh` calls that settle in either order, so a pick
+      // made while the definitions are still absent finds none, skips the seed
+      // silently, and leaves the view's own grouping unapplied when they land —
+      // whether they land from the first read or from the notice's Retry after it
+      // failed. Holding the rows is what keeps the one-shot event safe without
+      // deferring it into effect machinery. Both arms test the ABSENCE of
+      // definitions, never a stale flag: cached ones can seed, so neither a
+      // background refetch nor a failure over them may take the rows away.
+      case fieldsPending:
+        return VIEWS_AWAIT_FIELDS_REASON;
+      case fields.error !== null && fields.data === undefined:
+        return VIEWS_FIELDS_FAILED_REASON;
       case views.error !== null && viewList.length === 0:
         return VIEWS_ERROR_REASON;
       case viewList.length === 0:
@@ -860,6 +882,16 @@ export function ProjectsBoardPanel({
         what: "this board's fields",
         message: presentError(fields.error).summary,
         retry: () => void fields.refetch(),
+      });
+    // Beside the fields read, which is the other board-level one and the read the
+    // switcher's own hold points at. The popover names the failure where the rows
+    // would be; the recovery control is here, like every other failed read's.
+    if (views.error !== null)
+      liveNotices.push({
+        key: "views",
+        what: "this board's saved views",
+        message: presentError(views.error).summary,
+        retry: () => void views.refetch(),
       });
     if (items.error !== null && !items.isFetchNextPageError)
       liveNotices.push({
