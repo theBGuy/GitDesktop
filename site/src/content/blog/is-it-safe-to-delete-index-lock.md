@@ -176,7 +176,7 @@ will all hold the number above zero on a perfectly quiet setup.
 Treat a nonzero answer as a suspect list, and read each survivor's
 command line to see what it is: `pgrep -a git` on Linux,
 `pgrep -fl git` on macOS, or in PowerShell the one-liner
-`gcim Win32_Process -Filter "Name='git.exe'" | select ProcessId,CommandLine`.
+`gcim Win32_Process -Filter "Name='git.exe'" | fl ProcessId,CommandLine`.
 Daemons announce themselves there. The one thing a command line won't
 reliably name is the repository (a git launched from inside one
 carries no path in its arguments), so close anything you can't
