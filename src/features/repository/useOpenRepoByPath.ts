@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback } from "react";
 import { toast } from "sonner";
@@ -7,6 +8,7 @@ import { track } from "@/lib/analytics";
 import { validateRepo } from "@/lib/git/api";
 import type { RepoInfo } from "@/lib/git/types";
 import { migrateRepoData } from "@/lib/repo-data-migration";
+import { scriptsKeys } from "@/lib/scripts/queries";
 import {
   useAddRecentRepo,
   useRelocateRecentRepo,
@@ -35,6 +37,7 @@ export function useOpenRepoByPath() {
   const relocate = useRelocateRecentRepo();
   const settings = useSettings();
   const recentRepos = settings.data?.recentRepos;
+  const queryClient = useQueryClient();
 
   // Shared tail for every successful open: record in recents (best-effort — a
   // settings-write failure must never block opening), switch to the repo, track.
@@ -89,6 +92,14 @@ export function useOpenRepoByPath() {
         // automations, Jira link, …) onto the new location's identity key. Purely
         // best-effort — a migration failure must never block opening the repo.
         await migrateRepoData(oldPath, info.root).catch(() => undefined);
+        // The task config is cached under one global key with no staleTime, so a
+        // panel would keep classifying tasks under the pre-migration repo key —
+        // and an edit made from that snapshot would persist the old scope back
+        // over the re-home. Marked stale immediately; the refetch isn't awaited,
+        // so it can never hold up the open.
+        void queryClient
+          .invalidateQueries({ queryKey: scriptsKeys.config })
+          .catch(() => undefined);
         // The plan/research stores hydrate once at startup, so their live runs
         // still carry the old path — repoint them, or the sidebar loses them and
         // their debounced autosave writes the pre-migration paths back to disk.
@@ -105,7 +116,7 @@ export function useOpenRepoByPath() {
         }
       }
     },
-    [relocate, recordOpenAndTrack, recentRepos],
+    [relocate, recordOpenAndTrack, recentRepos, queryClient],
   );
 
   return useCallback(

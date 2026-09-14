@@ -38,6 +38,7 @@ import {
   taskScopedElsewhere,
 } from "@/lib/scripts/scope";
 import { INTERPRETERS, type TaskDef } from "@/lib/scripts/types";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
 import { useUiStore } from "@/lib/stores/ui";
 import {
@@ -50,6 +51,14 @@ import { TaskDialog } from "./TaskDialog";
 const INTERPRETER_LABELS: Record<string, string> = Object.fromEntries(
   INTERPRETERS.map((i) => [i.id, i.label]),
 );
+
+/** What a delete costs, by source: an inline body exists only inside the task,
+ *  while a file task owns nothing but the registration. */
+const DELETE_BODY: Record<TaskDef["source"]["kind"], string> = {
+  inline:
+    "The task and its inline script are removed together. The script is stored only in this task, so deleting it is permanent.",
+  file: "The task is removed. The script file it points at stays on disk.",
+};
 
 /** One keyboard-navigable row: the in-scope tasks, then the other-repositories
  *  disclosure header and — while it's open — that group's rows. One list, so the
@@ -122,6 +131,19 @@ export function TasksPanel() {
       },
       onError: (e) => toast.error(String(e)),
     });
+  }
+
+  // The row menus' delete is one click from gone, so it asks first. The editor's
+  // own two-step Delete… already confirms and calls `deleteTask` directly — a
+  // second prompt would stack on it.
+  async function confirmDeleteTask(task: TaskDef) {
+    const ok = await useConfirm.getState().ask({
+      title: `Delete "${task.name}"?`,
+      body: DELETE_BODY[task.source.kind],
+      confirmLabel: "Delete task",
+      confirmVariant: "destructive",
+    });
+    if (ok) deleteTask(task.id);
   }
 
   const navRows: NavRow[] = [];
@@ -337,7 +359,7 @@ export function TasksPanel() {
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         variant="destructive"
-                        onClick={() => deleteTask(task.id)}
+                        onClick={() => void confirmDeleteTask(task)}
                       >
                         <TrashIcon data-icon="inline-start" />
                         Delete
@@ -392,7 +414,7 @@ export function TasksPanel() {
                           tabIndex={index === tabStop ? 0 : -1}
                           onFocus={() => setActiveIndex(index)}
                           onEdit={() => setEditing(task)}
-                          onDelete={() => deleteTask(task.id)}
+                          onDelete={() => void confirmDeleteTask(task)}
                         />
                       );
                     })}

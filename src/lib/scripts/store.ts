@@ -84,6 +84,17 @@ function normalizeRepoKeys(v: unknown): string[] {
   return v.filter((k): k is string => typeof k === "string" && k.trim() !== "");
 }
 
+/** Type-checks a task's scope. Only ABSENCE — a missing or blank value, as tasks
+ *  saved before scoping existed have — may be read as "every repository"; a
+ *  present-but-malformed value gets a non-global sentinel instead, which fails
+ *  closed through the scope partition and the task editor can repair. A non-empty
+ *  string is kept verbatim, matching repo or not. */
+function normalizeScope(v: unknown): string {
+  if (v === undefined) return TASK_SCOPE_GLOBAL;
+  if (typeof v !== "string") return "unknown";
+  return v.trim() || TASK_SCOPE_GLOBAL;
+}
+
 /** Type-checks one untrusted task, dropping it (undefined) when unusable. */
 function normalizeTask(v: unknown): TaskDef | undefined {
   if (!v || typeof v !== "object") return undefined;
@@ -112,13 +123,10 @@ function normalizeTask(v: unknown): TaskDef | undefined {
     argDocs: normalizeArgDocs(obj.argDocs),
     // Absent (older) or non-boolean → confirm, the safe default.
     confirmBeforeRun: obj.confirmBeforeRun !== false,
-    // A scope we can't match keeps its value rather than widening to global:
-    // tasks written for one repo must never leak into another because its key
-    // went stale.
-    scope:
-      typeof obj.scope === "string" && obj.scope.trim() !== ""
-        ? obj.scope.trim()
-        : TASK_SCOPE_GLOBAL,
+    // Never widens: a scope we can't match — stale key or malformed value —
+    // keeps a non-global value, so a task written for one repo can't leak into
+    // another.
+    scope: normalizeScope(obj.scope),
     runConfirmedIn: normalizeRepoKeys(obj.runConfirmedIn),
   };
 }

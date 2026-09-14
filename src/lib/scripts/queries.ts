@@ -16,12 +16,15 @@ export const scriptsKeys = {
 };
 
 /** The task config (enable flag + task list). Personal app-data, session-stable —
- *  a plain query (staleTime Infinity), safe to read inside an `<Activity>` tab. */
+ *  a plain query (staleTime Infinity), safe to read inside an `<Activity>` tab.
+ *  Local read: the default "online" mode parks it while the OS reports no
+ *  connection, which would leave every task surface empty. */
 export function useScripts() {
   return useQuery({
     queryKey: scriptsKeys.config,
     queryFn: loadScripts,
     staleTime: Number.POSITIVE_INFINITY,
+    networkMode: "always",
   });
 }
 
@@ -88,6 +91,9 @@ function useScriptsMutation<A>(fn: (arg: A) => Promise<void>) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: fn,
+    // Local write — see useScripts: "online" mode would park it offline, so a
+    // first-run confirmation or an edit would sit unwritten until the app closed.
+    networkMode: "always",
     onSuccess: () => qc.invalidateQueries({ queryKey: scriptsKeys.config }),
   });
 }

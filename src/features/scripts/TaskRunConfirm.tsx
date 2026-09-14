@@ -18,7 +18,7 @@ import {
   useUpdateTask,
 } from "@/lib/scripts/queries";
 import { isRunConfirmedIn } from "@/lib/scripts/scope";
-import { INTERPRETERS } from "@/lib/scripts/types";
+import { INTERPRETERS, type TaskDef } from "@/lib/scripts/types";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
 import { useUiStore } from "@/lib/stores/ui";
 import { useRetained } from "@/lib/use-retained";
@@ -71,7 +71,31 @@ export function TaskRunConfirm() {
   const interpreter = task
     ? (INTERPRETER_LABELS[task.interpreter] ?? task.interpreter)
     : "";
-  const resolved = useResolvedTaskScript(task, repoPath);
+  // Resolution rides the LIVE pending, not the retained one: that way the query
+  // goes dormant at close and re-enables at each open, refetching once its
+  // staleTime lapses — a branch switch between runs must never leave the safety
+  // surface showing a stale path or missing-file verdict.
+  const resolved = useResolvedTaskScript(pending?.task ?? null, repoPath);
+  // Closing empties the live query key (the path drops out of it), so hold the last
+  // resolution alongside the SIGNATURE it was produced under — the repo and stored
+  // path that are the query key's own axes, never a task id, which survives a repo
+  // switch or a path edit and would name a file this run wouldn't execute. Both
+  // retains share one flag so they can't desync; a mismatch (or a failed re-resolve)
+  // falls back to the stored path with no existence verdict.
+  const scriptSig = (t: TaskDef | null) =>
+    t?.source.kind === "file" && repoPath
+      ? `${repoPath}::${t.source.path}`
+      : null;
+  const hasResolved = resolved.data != null;
+  const lastResolved = useRetained(resolved.data ?? null, hasResolved);
+  const lastResolvedFor = useRetained(
+    scriptSig(pending?.task ?? null),
+    hasResolved,
+  );
+  const script =
+    lastResolvedFor !== null && lastResolvedFor === scriptSig(task)
+      ? lastResolved
+      : null;
   const detail =
     task?.description ||
     `Runs the ${interpreter} script in the repository's folder. Make sure you trust what it does.`;
@@ -149,12 +173,12 @@ export function TaskRunConfirm() {
             <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
               <FileCodeIcon className="size-3.5 shrink-0" />
               <PathText
-                path={resolved.data?.path ?? task.source.path}
+                path={script?.path ?? task.source.path}
                 className="font-mono"
               />
             </div>
             {/* Icon + text, never color alone (WCAG AA). */}
-            {resolved.data?.exists === false ? (
+            {script?.exists === false ? (
               <p className="flex items-start gap-1.5 text-warning">
                 <WarningIcon
                   weight="fill"

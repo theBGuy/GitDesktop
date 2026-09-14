@@ -150,6 +150,10 @@ export function TaskDialog({
   // through to the other-repository one.
   const scopedToThisRepo =
     scope !== TASK_SCOPE_GLOBAL && repoKeys.includes(scope);
+  // The draft belongs to a repo that isn't the one open behind this dialog. Read
+  // from the DRAFT, not the saved task, so re-scoping to this repository releases
+  // the file-source controls in the same keystroke that adopts the task.
+  const scopedElsewhere = scope !== TASK_SCOPE_GLOBAL && !scopedToThisRepo;
   const scopeOptions: { value: string; label: string }[] = [
     { value: TASK_SCOPE_GLOBAL, label: "All repositories" },
   ];
@@ -161,7 +165,7 @@ export function TaskDialog({
   // A scope pointing at a DIFFERENT repo needs an option of its own: without one
   // the Select can't represent its own value, and saving an untouched edit would
   // silently re-scope the task to whatever the trigger happened to show.
-  if (scope !== TASK_SCOPE_GLOBAL && !scopedToThisRepo)
+  if (scopedElsewhere)
     scopeOptions.push({
       value: scope,
       label: `${scopeRepoLabel(scope)} — other repository`,
@@ -246,6 +250,24 @@ export function TaskDialog({
     !scriptAnalyze.analyzing;
   const canAnalyze =
     sourceKind === "file" ? path.trim() !== "" : body.trim() !== "";
+  const analyzeEmptyReason =
+    sourceKind === "file"
+      ? "Choose a script file first"
+      : "Write or generate a script first";
+  // The file-source controls read the OPEN repo's tree — the picker relativizes
+  // against it and the analyzer reads through it — so on a task scoped elsewhere
+  // they would resolve a foreign relative path against the wrong checkout. An
+  // identity key can't be reversed to a checkout path (the owning repo may not be
+  // on disk at all), so the controls are held rather than retargeted. Inline
+  // sources are repo-independent and stay live.
+  const otherRepoLabel = scopeRepoLabel(scope);
+  const chooseBlockedReason = scopedElsewhere
+    ? `Scoped to "${otherRepoLabel}" — open that repository to pick a script from it`
+    : null;
+  const analyzeBlockedReason =
+    scopedElsewhere && sourceKind === "file"
+      ? `Scoped to "${otherRepoLabel}" — open that repository to read its script`
+      : null;
 
   async function choose() {
     const picked = await openDialog({
@@ -528,12 +550,8 @@ export function TaskDialog({
                 variant="ghost"
                 size="xs"
                 className="text-muted-foreground"
-                disabled={!canAnalyze}
-                reason={
-                  sourceKind === "file"
-                    ? "Choose a script file first"
-                    : "Write or generate a script first"
-                }
+                disabled={!canAnalyze || analyzeBlockedReason !== null}
+                reason={analyzeBlockedReason ?? analyzeEmptyReason}
                 title="Read the script and fill in the name, description, and documented arguments"
                 onClick={runAnalyze}
               >
@@ -556,9 +574,15 @@ export function TaskDialog({
                 autoComplete="off"
                 spellCheck={false}
               />
-              <Button type="button" variant="outline" onClick={choose}>
+              <DisabledReasonButton
+                type="button"
+                variant="outline"
+                disabled={chooseBlockedReason !== null}
+                reason={chooseBlockedReason}
+                onClick={choose}
+              >
                 Choose…
-              </Button>
+              </DisabledReasonButton>
             </div>
             <p className="text-xs text-muted-foreground">
               Relative to the repository root — runs the live file, so edits to
