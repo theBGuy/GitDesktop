@@ -87,7 +87,7 @@ export function buildColumns(
 }
 
 /** The field kinds a saved view's sort can be honoured on. A key over any other
- *  kind — a multi-select, or one of GitHub's own system fields — is dropped
+ *  kind — a multi-select, or a system field other than Title — is dropped
  *  rather than guessed at, which leaves the board's POSITION order for that key. */
 type SortableDef = Extract<
   ProjectFieldDef,
