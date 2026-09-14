@@ -233,14 +233,18 @@ function CardMeta({
 const CHIP_CLASS =
   "inline-flex min-w-0 max-w-full items-center gap-1 border px-1 py-px text-[10px] text-muted-foreground";
 
-/** The item's value for `fieldId`, or undefined when it holds none. `unknown` is
- *  the one value arm without a `fieldId`, and it renders nothing anyway. */
+/** The item's value for `def`, or undefined when it holds none. The value's own
+ *  kind has to match the definition's — a wire shape that disagrees is not a
+ *  value of this field — which is the same test `valueOfKind` makes in
+ *  board-model, so the chips and the sort read an item the same way. `unknown` is
+ *  the one value arm without a `fieldId`, and it matches no definition. */
 function valueFor(
   item: BoardItem,
-  fieldId: string,
+  def: ProjectFieldDef,
 ): ProjectFieldValue | undefined {
   return item.fieldValues.find(
-    (value) => "fieldId" in value && value.fieldId === fieldId,
+    (value) =>
+      value.kind === def.kind && "fieldId" in value && value.fieldId === def.id,
   );
 }
 
@@ -325,7 +329,7 @@ function CardChips({
 }) {
   const chips: { id: string; node: ReactNode }[] = [];
   for (const def of fields) {
-    const value = valueFor(item, def.id);
+    const value = valueFor(item, def);
     const node = value === undefined ? null : chipNode(value);
     if (node !== null) chips.push({ id: def.id, node });
   }

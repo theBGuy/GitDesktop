@@ -91,9 +91,14 @@ export function buildColumns(
  *  rather than guessed at, which leaves the board's POSITION order for that key. */
 type SortableDef = Extract<
   ProjectFieldDef,
-  { kind: "text" | "number" | "date" | "singleSelect" | "iteration" }
+  { kind: "text" | "number" | "date" | "singleSelect" | "iteration" | "system" }
 >;
 
+/** `def` as a sort key, or null where this build can't order by it. The `system`
+ *  bucket is admitted for TITLE alone: a board sorted by its Title column orders
+ *  by what the card already shows, where every other system field (assignees,
+ *  labels, milestone, …) reaches an item as an `unknown` value with nothing to
+ *  compare. Tested on `dataType`, never the name — the field is renamable. */
 function sortableDef(def: ProjectFieldDef | undefined): SortableDef | null {
   if (def === undefined) return null;
   switch (def.kind) {
@@ -103,10 +108,21 @@ function sortableDef(def: ProjectFieldDef | undefined): SortableDef | null {
     case "singleSelect":
     case "iteration":
       return def;
+    case "system":
+      return def.dataType === "TITLE" ? def : null;
     default:
       return null;
   }
 }
+
+/** Whether `def`'s keys are WORDS, which collate in the user's locale rather than
+ *  comparing by code unit. Title is text whichever bucket carries it. */
+function collates(def: SortableDef): boolean {
+  return def.kind === "text" || def.kind === "system";
+}
+
+/** One usable key of a view's sort, resolved once for the whole column. */
+type SortKey = { def: SortableDef; descending: boolean; collate: boolean };
 
 /** The item's value for `fieldId` as `kind`, or null when it carries none — the
  *  value's own kind has to match the definition's, since a wire shape that
@@ -147,6 +163,14 @@ function sortKeyFor(item: BoardItem, def: SortableDef): string | number | null {
       const at = def.options.findIndex((option) => option.id === optionId);
       return at === -1 ? null : at;
     }
+    // TITLE, the only system field `sortableDef` admits. The title lives on the
+    // item's CONTENT rather than in its field values, and a redacted item has
+    // none at all — which sorts it last, like any other absent value.
+    case "system": {
+      const title = "title" in item.content ? item.content.title.trim() : "";
+      return title === "" ? null : title;
+    }
+    // Iteration, the last kind admitted: its START date is the key.
     default: {
       const start = valueOfKind(item, def.id, "iteration")?.startDate;
       return start === undefined || start === "" ? null : start;
@@ -154,8 +178,8 @@ function sortKeyFor(item: BoardItem, def: SortableDef): string | number | null {
   }
 }
 
-/** Two keys off the SAME field, so they are always the same JS type. Text
- *  collates in the user's locale; dates and iteration starts are GitHub's bare
+/** Two keys off the SAME field, so they are always the same JS type. Words
+ *  collate in the user's locale; dates and iteration starts are GitHub's bare
  *  `YYYY-MM-DD`, where a plain string comparison IS chronological. */
 function compareKeys(
   a: string | number,
@@ -185,24 +209,38 @@ export function sortColumnItems(
   sortBy: ProjectViewSort[],
   fields: ProjectFieldDef[],
 ): BoardItem[] {
-  const keys: { sort: ProjectViewSort; def: SortableDef }[] = [];
+  const keys: SortKey[] = [];
   for (const sort of sortBy) {
     const def = sortableDef(fields.find((f) => f.id === sort.fieldId));
-    if (def !== null) keys.push({ sort, def });
+    if (def !== null)
+      keys.push({
+        def,
+        descending: sort.direction === "desc",
+        collate: collates(def),
+      });
   }
   if (keys.length === 0) return items;
-  return items.toSorted((a, b) => {
-    for (const { sort, def } of keys) {
-      const left = sortKeyFor(a, def);
-      const right = sortKeyFor(b, def);
-      if (left === null && right === null) continue;
-      if (left === null) return 1;
-      if (right === null) return -1;
-      const cmp = compareKeys(left, right, def.kind === "text");
-      if (cmp !== 0) return sort.direction === "desc" ? -cmp : cmp;
-    }
-    return 0;
-  });
+  // Keys are read ONCE per item, not once per comparison: reading one scans the
+  // item's field values, and a select also walks the field's options — work a
+  // comparator would repeat O(n log n) times over the same card.
+  const rows = items.map((item) => ({
+    item,
+    keys: keys.map(({ def }) => sortKeyFor(item, def)),
+  }));
+  return rows
+    .toSorted((a, b) => {
+      for (const [i, key] of keys.entries()) {
+        const left = a.keys[i];
+        const right = b.keys[i];
+        if (left === null && right === null) continue;
+        if (left === null) return 1;
+        if (right === null) return -1;
+        const cmp = compareKeys(left, right, key.collate);
+        if (cmp !== 0) return key.descending ? -cmp : cmp;
+      }
+      return 0;
+    })
+    .map((row) => row.item);
 }
 
 /**

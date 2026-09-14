@@ -330,7 +330,7 @@ export const capabilities: Capability[] = [
   {
     group: "Issues & discussions",
     label:
-      "Project boards — a GitHub Project as a kanban, grouped by any of its single-select fields, with right-click move between columns and its saved views as read-only lenses (server-side filter, sort & field chips)",
+      "Project boards — a GitHub Project as a kanban, grouped by any of its single-select fields, with right-click move between columns and its saved views as read-only lenses (GitHub applies the filter; the board honors the sort and shows the view's fields as chips)",
     highlight: true,
   },
   {

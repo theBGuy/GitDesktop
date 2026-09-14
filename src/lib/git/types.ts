@@ -2467,7 +2467,6 @@ export interface ProjectViewSort {
  *  filter" has to test both. */
 export interface ProjectViewDef {
   id: string;
-  number: number;
   name: string;
   layout: "board" | "table" | "roadmap" | "unknown";
   filter: string | null;

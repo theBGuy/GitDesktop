@@ -19,7 +19,6 @@ pub struct ProjectViews {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectViewDef {
     pub id: String,
-    pub number: i64,
     pub name: String,
     pub layout: String,
     pub filter: Option<String>,
@@ -52,7 +51,7 @@ fn map_scope_error(e: AppError) -> AppError {
 fn project_views_query() -> &'static str {
     "query($id:ID!){ node(id:$id){ ... on ProjectV2 { \
      views(first:50){ pageInfo{hasNextPage} nodes{ \
-     id number name layout filter \
+     id name layout filter \
      verticalGroupByFields(first:10){nodes{... on ProjectV2FieldCommon{id}}} \
      sortByFields(first:10){nodes{direction field{... on ProjectV2FieldCommon{id}}}} \
      fields(first:50){nodes{... on ProjectV2FieldCommon{id}}} \
@@ -87,7 +86,6 @@ fn parse_project_views(value: &Value) -> ProjectViews {
             let id = node["id"].as_str()?.to_string();
             Some(ProjectViewDef {
                 id,
-                number: node["number"].as_i64().unwrap_or_default(),
                 name: node["name"].as_str().unwrap_or_default().to_string(),
                 layout: match node["layout"].as_str() {
                     Some("BOARD_LAYOUT") => "board",
@@ -195,7 +193,6 @@ mod tests {
                     &views[index],
                     &[
                         "id",
-                        "number",
                         "name",
                         "layout",
                         "filter",
@@ -205,7 +202,6 @@ mod tests {
                     ],
                 );
                 assert_eq!(views[index]["id"], id);
-                assert_eq!(views[index]["number"], index + 1);
                 assert_eq!(views[index]["name"], name);
             }
             for (index, layout) in ["board", "table", "roadmap", "unknown"].iter().enumerate() {
@@ -275,7 +271,6 @@ mod tests {
             VIEWS_POINTER,
             "/pageInfo/hasNextPage",
             "/nodes/id",
-            "/nodes/number",
             "/nodes/name",
             "/nodes/layout",
             "/nodes/filter",

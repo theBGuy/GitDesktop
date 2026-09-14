@@ -1920,9 +1920,11 @@ Pick one and it becomes a lens over the board:
   afterwards and the board regroups with the view still on, filter, sort and chips intact.
   A view grouped by something that makes no columns here (an iteration field, say) leaves
   your current grouping alone.
-- Its **sort** orders the cards inside each column. A card with nothing in the sorted field
+- Its **sort** orders the cards inside each column, on the **Title** column or on a text,
+  number, date, single-select or iteration field. A card with nothing in the sorted field
   goes last whichever way the sort runs, and cards the sort can't separate keep the board's
-  own order.
+  own order. A view sorted by a multi-select, or by something GitHub owns on the issue
+  itself (assignees, labels), keeps the board's own order instead.
 - Its **visible fields** show as chips on the cards, in the view's order, skipping what the
   card already carries: the title, the assignees, and the field the columns are grouped by.
   Fields GitHub owns on the issue itself (labels, milestone) carry no chip either, and a

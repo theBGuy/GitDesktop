@@ -10,7 +10,8 @@
   **move it to another column**: the board re-draws where it lands and your keyboard place
   goes with it, while the write reaches GitHub behind you. The board's **saved views** come
   along as lenses: pick one under **View options** and GitHub filters the read for you, its
-  sort orders the cards in each column, its visible fields show as chips on the cards, and
+  sort orders the cards in each column (by **Title**, or by a text, number, date,
+  single-select or iteration field), its visible fields show as chips on the cards, and
   its grouping seeds **Group by** while you stay free to regroup. Views saved as a table or
   roadmap are drawn as a board, **Clear view** (or **Clear project view** in the command
   palette) brings the whole item set back in the board's own order with the chips off,

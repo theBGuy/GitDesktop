@@ -54,6 +54,7 @@ import {
 import {
   type BoardItem,
   type BoardItemContent,
+  type ProjectFieldDef,
   type ProjectViewDef,
   providerLabel,
 } from "@/lib/git/types";
@@ -104,9 +105,9 @@ const LOADING_VIEWS_REASON = "Loading this project's views…";
  *  for them and refuses while they are unreachable. The second names the read to
  *  retry rather than where its control is: that failure reaches the user as the
  *  strip's notice over a drawn board, and as the panel's error card without one. */
-const VIEWS_AWAIT_FIELDS_REASON = "Waiting for this board's fields…";
+const VIEWS_AWAIT_FIELDS_REASON = "Waiting for this project's fields…";
 const VIEWS_FIELDS_FAILED_REASON =
-  "Couldn't load this board's fields, which saved views need. Retry that read and they're selectable again.";
+  "Couldn't load this project's fields, which saved views need. Retry that read and they're selectable again.";
 const VIEWS_ERROR_REASON = "Couldn't load this project's views";
 const NO_VIEWS_REASON = "This project has no saved views";
 /** Said by every control that would otherwise speak for the board on screen: while
@@ -129,6 +130,9 @@ const GROUP_ROW_CLASS =
 /** The switcher's "no lens" row. Not a view id — it stands for the ABSENCE of
  *  one, the way the board's catch-all column stands for an unset field. */
 const NO_VIEW_ROW_ID = "__no_view__";
+/** One shared list for every render the definitions haven't arrived for. A fresh
+ *  `[]` would re-mint the chip memo, and through it every mounted card. */
+const NO_FIELD_DEFS: ProjectFieldDef[] = [];
 /** What the board says about a view it is drawing in the only layout it has. A
  *  BOARD view needs no note, and an unrecognised layout names no shape it can't
  *  vouch for. */
@@ -352,7 +356,7 @@ export function ProjectsBoardPanel({
     projectId ?? "",
     canRead && projectId !== null,
   );
-  const fieldDefs = fields.data?.fields ?? [];
+  const fieldDefs = fields.data?.fields ?? NO_FIELD_DEFS;
   const groupFields = groupableFields(fieldDefs);
   const [pickedFieldId, setPickedFieldId] = useState<string | null>(null);
   // "Status" by name is what a GitHub board means by its columns; anything else
@@ -376,6 +380,17 @@ export function ProjectsBoardPanel({
   const [activeViewId, setActiveViewId] = useState<string | null>(null);
   const view = viewList.find((v) => v.id === activeViewId) ?? null;
   const lensQuery = lensFilter(view);
+  // Imperative, because no render-derivable signal tells "this view is GONE" from
+  // "this read hasn't carried it yet": the lens above degrades either way, but a
+  // lingering id is re-adopted by the next list that happens to contain it —
+  // filter, sort and chips back on with no pick behind them and no grouping seed.
+  // A SETTLED list is the only thing that may retire it, so a pending or failed
+  // read touches nothing.
+  useEffect(() => {
+    if (activeViewId === null || views.data === undefined) return;
+    if (!views.data.views.some((v) => v.id === activeViewId))
+      setActiveViewId(null);
+  }, [activeViewId, views.data]);
 
   const items = useProjectItems(
     repoPath,
@@ -399,11 +414,12 @@ export function ProjectsBoardPanel({
           items: sortColumnItems(column.items, view.sortBy, fieldDefs),
         }));
   // Identity-stable for the memoized cards: a fresh array per render would
-  // re-render every mounted card whenever the keyboard cursor moves. Keyed on the
-  // query DATA rather than the derived list, which re-mints while it is absent.
+  // re-render every mounted card whenever the keyboard cursor moves. Every input
+  // is stable in its own right — the query's own array or the shared empty, and
+  // two values derived off it — so the dep list is the real one.
   const chipFields = useMemo(
-    () => chipFieldDefs(view, fields.data?.fields ?? [], groupField),
-    [view, fields.data, groupField],
+    () => chipFieldDefs(view, fieldDefs, groupField),
+    [view, fieldDefs, groupField],
   );
   // Counts the cards the board DRAWS, so it agrees with the column headers;
   // `totalCount` is the board's own figure and includes archived items, which is
@@ -1195,49 +1211,55 @@ export function ProjectsBoardPanel({
                           {viewsHeldReason}
                         </p>
                       ) : (
-                        <RadioGroup
-                          // Scrolls at its own edge: the server offers up to 50
-                          // views, and a popup that tall would run off screen.
-                          className="max-h-56 gap-0 overflow-y-auto"
-                          aria-labelledby={viewLabelId}
-                          value={view?.id ?? NO_VIEW_ROW_ID}
-                          onValueChange={(next) => {
-                            // Base UI types the group's value as `any`; the guard
-                            // narrows it back to the row ids these rows carry.
-                            if (typeof next !== "string") return;
-                            pickView(next === NO_VIEW_ROW_ID ? null : next);
-                          }}
-                        >
-                          <label className={GROUP_ROW_CLASS}>
-                            <Radio value={NO_VIEW_ROW_ID} />
-                            <span className="min-w-0 truncate">No view</span>
-                          </label>
-                          {viewList.map((v) => (
-                            <label key={v.id} className={GROUP_ROW_CLASS}>
-                              <Radio value={v.id} />
-                              <span
-                                className="min-w-0 truncate"
-                                onMouseEnter={clipTitleFromText}
-                              >
-                                {v.name === "" ? UNTITLED_VIEW : v.name}
-                              </span>
-                              {/* The layout the view was saved in, where it isn't
-                                  the one this board draws — the row says so up
-                                  front rather than leaving the strip to explain
-                                  it after the pick. */}
-                              {VIEW_LAYOUT_WORD[v.layout] !== undefined && (
-                                <span className="shrink-0 text-muted-foreground">
-                                  {VIEW_LAYOUT_WORD[v.layout]}
-                                </span>
-                              )}
+                        <>
+                          <RadioGroup
+                            // Scrolls at its own edge: the server offers up to 50
+                            // views, and a popup that tall would run off screen.
+                            className="max-h-56 gap-0 overflow-y-auto"
+                            aria-labelledby={viewLabelId}
+                            value={view?.id ?? NO_VIEW_ROW_ID}
+                            onValueChange={(next) => {
+                              // Base UI types the group's value as `any`; the
+                              // guard narrows it back to the row ids these rows
+                              // carry.
+                              if (typeof next !== "string") return;
+                              pickView(next === NO_VIEW_ROW_ID ? null : next);
+                            }}
+                          >
+                            <label className={GROUP_ROW_CLASS}>
+                              <Radio value={NO_VIEW_ROW_ID} />
+                              <span className="min-w-0 truncate">No view</span>
                             </label>
-                          ))}
-                        </RadioGroup>
-                      )}
-                      {views.data?.truncated === true && (
-                        <p className="px-1 text-[11px] text-muted-foreground">
-                          {VIEWS_TRUNCATED_NOTE}
-                        </p>
+                            {viewList.map((v) => (
+                              <label key={v.id} className={GROUP_ROW_CLASS}>
+                                <Radio value={v.id} />
+                                <span
+                                  className="min-w-0 truncate"
+                                  onMouseEnter={clipTitleFromText}
+                                >
+                                  {v.name === "" ? UNTITLED_VIEW : v.name}
+                                </span>
+                                {/* The layout the view was saved in, where it
+                                    isn't the one this board draws — the row says
+                                    so up front rather than leaving the strip to
+                                    explain it after the pick. */}
+                                {VIEW_LAYOUT_WORD[v.layout] !== undefined && (
+                                  <span className="shrink-0 text-muted-foreground">
+                                    {VIEW_LAYOUT_WORD[v.layout]}
+                                  </span>
+                                )}
+                              </label>
+                            ))}
+                          </RadioGroup>
+                          {/* Inside the rows' own branch: the note captions the
+                              LIST, so a held section has nothing for it to
+                              caption. */}
+                          {views.data?.truncated === true && (
+                            <p className="px-1 text-[11px] text-muted-foreground">
+                              {VIEWS_TRUNCATED_NOTE}
+                            </p>
+                          )}
+                        </>
                       )}
                     </div>
                     <div className="space-y-1">

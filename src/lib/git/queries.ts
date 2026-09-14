@@ -3613,8 +3613,9 @@ export function useAccountsHealth() {
  *  as do the six GitHub Projects reads (catalog, memberships, field values, a
  *  board's field definitions, its saved views, and its items): a granted `project`
  *  scope has to light the picker, the rail's field lines, the field editor and the
- *  Projects board up without a restart, and the work inbox's sources probe plus its pages
- *  (a `login` mode reconnect is how a forge becomes a source in the first place).
+ *  Projects board up without a restart, and the work inbox's sources probe plus
+ *  its pages (a `login` mode reconnect is how a forge becomes a source in the
+ *  first place).
  *  Call from a reconnect's `finished: ok` handler. */
 export function useInvalidateAfterReconnect() {
   const queryClient = useQueryClient();
