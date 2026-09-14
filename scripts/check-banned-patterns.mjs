@@ -529,12 +529,13 @@ const LOAD_STORE_NAME_CALL_RE = /\bload\s*\(\s*storeName\s*\(/g;
 const RAW_STORE_RELOAD_RE = /(?<!location)\.reload\s*\(/g;
 
 // The repo-identity query key, spelled as a literal anywhere but its factory —
-// which is the only way to observe that key without the factory's options. Both
-// quote styles, and the quotes are the anchor rather than a token boundary: the
-// unrelated `"notification-override-repo-identities"` key contains this string
-// but not as a complete literal. Blind to a key built from a CONSTANT, which no
+// which is the only way to observe that key without the factory's options. All
+// three quote styles (a template literal is as valid a key segment as either
+// quote), and the CLOSING quote is the anchor rather than a token boundary: a
+// longer key sharing this exact prefix (`"repo-identity-scope"`) would
+// substring-match without it. Blind to a key built from a CONSTANT, which no
 // site does today; comment stripping keeps the several doc mentions clean.
-const INLINE_REPO_IDENTITY_KEY_RE = /(["'])repo-identity\1/g;
+const INLINE_REPO_IDENTITY_KEY_RE = /(["'`])repo-identity\1/g;
 
 export const CHECKS = [
   {

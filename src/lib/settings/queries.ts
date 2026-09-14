@@ -34,10 +34,10 @@ export function useSettings() {
  * The scope/override lookup keys for a repo, most-preferred LAST: `[repoPath]`
  * while the identity is still resolving, or once it has FAILED for good (until a
  * remount refetches it); `[]` when null — no repo open; and `[repoPath, identity]`
- * (deduped) once the identity resolves. Feeds the MCP
- * scope helpers ({@link isServerAvailable} et al.) so a repo-scoped server or
- * per-repo override set from one checkout matches from a sibling worktree, while
- * a value still under a raw checkout path (pre-identity-keying) keeps matching.
+ * (deduped) once the identity resolves. Feeds the MCP scope helpers
+ * ({@link isServerAvailable} et al.) so a repo-scoped server or per-repo
+ * override set from one checkout matches from a sibling worktree, while a value
+ * still under a raw checkout path (pre-identity-keying) keeps matching.
  *
  * A plain query (the shared identity options), safe to read inside an
  * `<Activity>`-managed tab — no effects.

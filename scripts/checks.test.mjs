@@ -1519,9 +1519,14 @@ test("inline-repo-identity-query flags an inline observer of the shared key", ()
     ),
     [1],
   );
-  // Both quote styles: the anchor is the quote pair, not the house style.
+  // Every quote style: the anchor is the quote pair, not the house style — and a
+  // template literal is a valid key segment, so it must not slip past.
   assert.deepEqual(
     inlineRepoIdentityQuery("const k = ['repo-identity', r];"),
+    [1],
+  );
+  assert.deepEqual(
+    inlineRepoIdentityQuery("const k = [`repo-identity`, r];"),
     [1],
   );
 });
@@ -1530,8 +1535,9 @@ test("inline-repo-identity-query leaves the factory route and the longer key alo
   for (const source of [
     // The converted shape: the options come from the factory, key included.
     'import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";\nconst q = useQuery(repoIdentityQueryOptions(repoPath));',
-    // NotificationsSection's own key CONTAINS the string but is not that literal —
-    // the quote anchor is what keeps it clean, where a bare substring would not.
+    // A neighbouring repo-identity-flavoured key (NotificationsSection's own) that
+    // is not this literal; the closing-quote anchor is what would also keep out a
+    // longer key sharing this exact prefix, e.g. `"repo-identity-scope"`.
     'queryKey: ["notification-override-repo-identities", recentPaths],',
     // The hook consumers, which never name the key.
     "const identity = useRepoIdentity(repoPath).data;",

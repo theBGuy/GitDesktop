@@ -47,7 +47,7 @@ const pendingSaves = new Map<string, number>();
 // an `<Activity>` tab re-show REPLAYS effects, and a replayed transfer would copy the
 // older raw-path snapshot back over newer identity-side edits. Cleared when the key
 // drops back to the raw form, so a later failure→heal cycle transfers again; one
-// short string per repo visited in a failure state bounds it.
+// short string per repo visited bounds it.
 const transferredUpgrades = new Set<string>();
 
 /** A repo's persisted PR/issue filter prefs. The store is the source of truth —
