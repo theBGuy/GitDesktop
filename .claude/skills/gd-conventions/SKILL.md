@@ -398,9 +398,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   pending, and a MOUNTED observer sitting on `isError` with no data until a
   remount: a consumer gating on `data !== undefined` must treat the error as
   settled (fall back to the raw path, the key the swallowing `repoIdentity` and
-  the disk loaders use) or its gate never opens. Direct store/fold callers keep
-  the swallowing `repoIdentity`; the `inline-repo-identity-query` guard in
-  `pnpm run checks` fails on the key spelled anywhere but the factory.
+  the disk loaders use) or its gate never opens. A store's WRITER takes
+  `repoIdentityStrict` unless its reads heal through an `identityKeyFor` fold:
+  swallowing there mints a record no healed read consults (the exemplar is
+  `conversation-filters/store.ts`); loaders may still swallow, a defaults read
+  costing one session rather than a strand. The `inline-repo-identity-query`
+  guard in `pnpm run checks` fails on the key spelled anywhere but the factory.
 - **Hydrate gating** — a `hydrate` that swallows its read must NEVER set the
   ready flag, and a snapshot write gates on a RESOLVED `hydrate()`, not on the
   flag: `memoizedStoreLoader` retries after a transient failure, so a store

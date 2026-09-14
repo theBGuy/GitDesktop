@@ -1536,9 +1536,10 @@ test("inline-repo-identity-query leaves the factory route and the longer key alo
     // The converted shape: the options come from the factory, key included.
     'import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";\nconst q = useQuery(repoIdentityQueryOptions(repoPath));',
     // A neighbouring repo-identity-flavoured key (NotificationsSection's own) that
-    // is not this literal; the closing-quote anchor is what would also keep out a
-    // longer key sharing this exact prefix, e.g. `"repo-identity-scope"`.
+    // is not this literal, and a hypothetical one sharing this exact PREFIX — the
+    // closing-quote anchor is the only thing keeping the second out.
     'queryKey: ["notification-override-repo-identities", recentPaths],',
+    'queryKey: ["repo-identity-scope", repoPath],',
     // The hook consumers, which never name the key.
     "const identity = useRepoIdentity(repoPath).data;",
     // Comment stripping keeps the several doc mentions of the key clean.
