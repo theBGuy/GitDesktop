@@ -8,6 +8,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { MarkdownEditor } from "@/components/markdown-editor";
@@ -610,7 +611,12 @@ export function TagDetailView({
                 </DialogDescription>
               </DialogHeader>
               {/* Fields scroll; header and submit footer stay pinned. */}
-              <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
+              <div
+                className={cn(
+                  DIALOG_SCROLL,
+                  "flex min-h-0 flex-1 flex-col gap-4",
+                )}
+              >
                 <Input
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}

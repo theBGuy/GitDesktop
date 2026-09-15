@@ -309,7 +309,10 @@ in one click.
   header and set each board's **Status**, **Priority**, **Iteration** and
   custom fields right there, flip a PR between **draft and ready for review**
   either way on all three, and **create new PRs as drafts by default**
-  (Settings → General).
+  (Settings → General). A new PR is visible in the list it's headed for from
+  the moment you start creating it: a **pending entry** holds its place with
+  the title, branches and draft state, picks up the number as the PR opens,
+  and hands over to the real row once the list catches up.
 - **Linked issues**: link related issues when you open *or* edit a PR, as
   chips **auto-detected** from your branch name and commits (a `fix/123-…`
   branch seeds `#123`) or picked by hand. Each chip toggles between

@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { useEffectEvent } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,6 +34,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
@@ -338,7 +340,7 @@ export function CreateLocalPrDialog({
           </DialogHeader>
 
           {/* Fields scroll; header and submit footer stay pinned. */}
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
             <div className="flex items-end gap-2">
               <div className="min-w-0 flex-initial">
                 <form.AppField name="head">

@@ -3,6 +3,7 @@ import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useId, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -28,7 +29,12 @@ import type { JiraLink } from "@/lib/jira/store";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { cn } from "@/lib/utils";
 import { useGenerateIssueDraft } from "./useGenerateIssueDraft";
 
 /**
@@ -139,8 +145,7 @@ export function CreateJiraIssueDialog({
 
   const typeItems = Object.fromEntries(creatable.map((t) => [t.id, t.name]));
   const noTypes = !types.isPending && !types.isError && creatable.length === 0;
-  // Why the submit is disabled — shown via a span-wrapped title (a `title` on the
-  // Button itself never shows: disabled sets pointer-events-none).
+  // Why the submit is held, for both the hover wrapper and the sr-only node.
   const submitReason = generating
     ? "Wait for the AI draft to finish"
     : !issueTypeId
@@ -182,6 +187,8 @@ export function CreateJiraIssueDialog({
   // The one submit gate, shared by the button and the form's native submit:
   // Enter must submit exactly when the button would.
   const submitBlocked = generating || !issueTypeId;
+  const { blockedReason, reasonId, wrapperTitle, describedBy } =
+    useDisabledReason({ disabled: submitBlocked, reason: submitReason });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -207,7 +214,7 @@ export function CreateJiraIssueDialog({
           </DialogHeader>
 
           {/* Fields scroll; header and submit footer stay pinned. */}
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
             <form.AppField
               name="summary"
               validators={{ onChange: ({ value }) => required(value) }}
@@ -327,10 +334,26 @@ export function CreateJiraIssueDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <span className="inline-flex" title={submitReason ?? undefined}>
-                <form.SubmitButton disabled={submitBlocked}>
+              <span
+                className={cn(
+                  "inline-flex",
+                  blockedReason && "cursor-not-allowed",
+                )}
+                title={wrapperTitle}
+              >
+                <form.SubmitButton
+                  focusableWhenDisabled={!!blockedReason}
+                  disabled={submitBlocked}
+                  aria-describedby={describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
                   Create issue
                 </form.SubmitButton>
+                {blockedReason ? (
+                  <span id={reasonId} className="sr-only">
+                    {blockedReason}
+                  </span>
+                ) : null}
               </span>
             </form.AppForm>
           </DialogFooter>

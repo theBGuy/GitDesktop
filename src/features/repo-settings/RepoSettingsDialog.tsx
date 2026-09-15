@@ -11,6 +11,7 @@ import {
 import { AnimatePresence, m, useReducedMotion } from "motion/react";
 import { type ComponentType, useLayoutEffect, useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { NavRail, type NavRailGroup } from "@/components/NavRail";
 import { RelativeTime } from "@/components/relative-time";
@@ -423,10 +424,7 @@ export function RepoSettingsDialog({
             onSelect={(id) => setSection(id as SectionId)}
             className="w-40 overflow-y-auto"
           />
-          {/* Vertical-scroll only: overflow-y-auto alone lets overflow-x compute
-              to `auto`, so the vertical scrollbar's width tips shrink-to-fit
-              content into a phantom horizontal scrollbar. Clip x explicitly. */}
-          <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto pr-1">
+          <div className={cn(DIALOG_SCROLL_X_HIDDEN, "min-h-0 min-w-0 flex-1")}>
             {/* Crossfade the body on section change so the swap reads as one
                 quiet refresh, not a hard cut. Opacity only (content is tall and
                 scrolls); instant under reduced motion. */}

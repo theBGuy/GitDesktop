@@ -216,12 +216,12 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "issue-preset-all",
     () => listFilter.setPreset("all"),
-    onIssuesTab && canFilterMine,
+    onIssuesTab && canFilterMine && listFilter.prefsReady,
   );
   useHotkeyAction(
     "issue-preset-mine",
     () => listFilter.setPreset("mine"),
-    onIssuesTab && canFilterMine,
+    onIssuesTab && canFilterMine && listFilter.prefsReady,
   );
 
   // "Reference in new issue" / "Duplicate issue" seeds + opens the create dialog.
@@ -386,6 +386,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
             onPreset={listFilter.setPreset}
             canFilterMine={canFilterMine}
             canGroupByReview={false}
+            disabledReason={listFilter.prefsReason}
           />
         }
         lensControl={<RepoLensSwitcher repoPath={repoPath} />}
@@ -427,6 +428,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
             labelCount={labelCount}
             authorReason={authorReason}
             axisCap={axisCap}
+            disabledReason={listFilter.prefsReason}
             mine={{
               label: "Mine",
               disabledReason: mineReason,

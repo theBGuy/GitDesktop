@@ -1,15 +1,20 @@
 import {
+  ArrowLeftIcon,
   ArrowSquareOutIcon,
   GearSixIcon,
   GithubLogoIcon,
   TerminalIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { useEffect, useRef } from "react";
+import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { openInTerminal } from "@/lib/git/api";
 import {
   useForgeSessionHealth,
   useForgeStatus,
+  usePathPresent,
   useRemotes,
 } from "@/lib/git/queries";
 import { useSettings } from "@/lib/settings/queries";
@@ -27,6 +32,10 @@ const ATLASSIAN_TOKEN_URL =
  * blocker and pairs it with the one action that resolves it, so the tab is a
  * path forward instead of a dead end. `feature` is the noun the message reads
  * with ("pull requests", "workflow runs").
+ *
+ * A missing checkout folder outranks every provider arm: a repo-scoped read on a
+ * deleted path fails exactly like a signed-out CLI, so without this arm the panel
+ * would send the user to `gh auth status` for a folder that simply isn't there.
  *
  * Provider-aware, with the publish path taking precedence: when this repo has
  * no origin and ≥1 provider can publish it, the panel offers the shared
@@ -50,6 +59,29 @@ export function ForgeNotReady({
   const settings = useSettings();
   const openSettings = useUiStore((s) => s.openSettings);
   const openReconnect = useUiStore((s) => s.openReconnect);
+  const closeRepo = useUiStore((s) => s.closeRepo);
+  const queryClient = useQueryClient();
+  // Render precedence only — `useForgeStatus` and the panels' own reads stay
+  // ungated, so a pending probe changes nothing and only a measured `false`
+  // takes over the panel.
+  const present = usePathPresent(repoPath);
+  const prevPresent = useRef<{ repo: string; missing: boolean } | null>(null);
+  // A restored folder recovers without a restart: forge-status carries a 60s
+  // staleTime and remotes was read against the dead path, so this repo's own
+  // false → true transition re-reads both. The first resolve and a repo switch
+  // are not transitions — there is nothing poisoned to replace.
+  useEffect(() => {
+    if (present.data === undefined) return;
+    const prev = prevPresent.current;
+    prevPresent.current = { repo: repoPath, missing: !present.data };
+    if (!prev || prev.repo !== repoPath || !prev.missing || !present.data) {
+      return;
+    }
+    queryClient.invalidateQueries({
+      queryKey: ["repo", repoPath, "forge-status"],
+    });
+    queryClient.invalidateQueries({ queryKey: ["repo", repoPath, "remotes"] });
+  }, [present.data, repoPath, queryClient]);
   // A dead session shows as `broken`; "offline" (inconclusive probe) reads like
   // any non-broken state and changes nothing here, so a network blip never flips
   // the copy or the button mode (anti-flap).
@@ -74,6 +106,27 @@ export function ForgeNotReady({
     repoPath,
     provider == null && Boolean(forge.data) && noOrigin,
   );
+
+  // The folder is gone: name that and offer the one way out. Nothing about the
+  // forge is knowable from a dead path, so no provider copy runs. While the probe
+  // is pending the arms below render unchanged.
+  if (present.data === false) {
+    return (
+      <div className="space-y-2.5 px-3 py-4 text-xs text-muted-foreground">
+        <p>This repository's folder no longer exists on disk.</p>
+        <PathText path={repoPath} className="font-mono text-foreground" />
+        <Button
+          variant="outline"
+          size="sm"
+          className="cursor-pointer"
+          onClick={closeRepo}
+        >
+          <ArrowLeftIcon data-icon="inline-start" />
+          Back to repositories
+        </Button>
+      </div>
+    );
+  }
 
   // GitLab: `glab` is wired (status detects install + sign-in) — walk the glab
   // setup ladder (install → sign in). If glab is already ready, this repo just

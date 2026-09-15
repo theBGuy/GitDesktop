@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Button } from "@/components/ui/button";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import {
   ComboboxCollection,
   ComboboxContent,
@@ -114,6 +114,7 @@ export function ConversationFilterPopover({
   review,
   authorReason,
   axisCap,
+  disabledReason,
 }: {
   authors: string[];
   labels: string[];
@@ -134,6 +135,11 @@ export function ConversationFilterPopover({
   /** Ceiling on selections per axis, where the provider's filter fan-out has one.
    *  Omit and selection is unbounded. */
   axisCap?: AxisCap;
+  /** Why the whole popover is held — the stored prefs aren't read yet, so the
+   *  persisted rows inside have nothing to compose a write from. Held at the
+   *  TRIGGER: the rows would otherwise open on default values and swallow every
+   *  toggle, which reads as a filter that forgets what it was told. */
+  disabledReason?: string | null;
 }) {
   const authorReasonId = useId();
   const capReasonId = useId();
@@ -207,9 +213,11 @@ export function ConversationFilterPopover({
   }, [authors, labels, authorFilter, labelFilter]);
 
   const trigger = (
+    // `disabled` rides the BUTTON, never the Trigger: a disabled Trigger leaves
+    // the tab order and takes its reason out of keyboard and AT reach.
     <ComboboxPrimitive.Trigger
       render={
-        <Button
+        <DisabledReasonButton
           variant="outline"
           size="icon-sm"
           aria-label={
@@ -217,6 +225,8 @@ export function ConversationFilterPopover({
               ? `Filters (${activeFilterCount} active)`
               : "Filters"
           }
+          disabled={!!disabledReason}
+          reason={disabledReason}
           className="relative"
         />
       }
@@ -326,17 +336,26 @@ export function ConversationFilterPopover({
         className="flex w-64 flex-col"
         onKeyDown={cycleTabWithinPopup}
       >
+        {/* The popover-wide reason reaches the rows too, not just the trigger: a
+            popover already OPEN when the hold begins keeps rendering them, and a
+            persisted row that looks live while its write is refused loses the
+            user's change with nothing on screen to say so. */}
         {mine && (
-          <StaticSection group={mine}>
+          <StaticSection group={mine} inheritedReason={disabledReason ?? null}>
             {mine.teams && (
               <TeamsRow
                 teams={mine.teams}
-                inheritedReason={mine.disabledReason ?? null}
+                inheritedReason={mine.disabledReason ?? disabledReason ?? null}
               />
             )}
           </StaticSection>
         )}
-        {review && <StaticSection group={review} />}
+        {review && (
+          <StaticSection
+            group={review}
+            inheritedReason={disabledReason ?? null}
+          />
+        )}
         <ComboboxInput
           className="shrink-0"
           showTrigger={false}
@@ -543,11 +562,16 @@ function cycleTabWithinPopup(e: KeyboardEvent<HTMLDivElement>) {
 function StaticSection({
   group,
   children,
+  inheritedReason,
 }: {
   group: StaticFilterGroup;
   children?: ReactNode;
+  /** Why the whole popover is held, when nothing about this group's own axis is.
+   *  The group's reason outranks it: that one names a permanent limit, this one a
+   *  window that closes on its own. */
+  inheritedReason?: string | null;
 }) {
-  const reason = group.disabledReason ?? null;
+  const reason = group.disabledReason ?? inheritedReason ?? null;
   const captionId = useId();
   return (
     // role="group" + aria-labelledby: the caption is what tells a row apart from
@@ -791,8 +815,20 @@ function TeamsRow({
                         keepActivationLocal(e);
                       }}
                       onKeyUp={keepActivationLocal}
-                      onClick={() => teams.onToggle(team.slug, !checked)}
-                      className="flex w-full cursor-pointer items-center gap-2 py-1 text-left text-[11px] hover:text-foreground"
+                      // Held by the same reason as the disclosure above, pointing at
+                      // the one sentence it prints: an expanded list outlives the
+                      // hold beginning, and each row writes the saved prefs.
+                      onClick={
+                        reason
+                          ? undefined
+                          : () => teams.onToggle(team.slug, !checked)
+                      }
+                      aria-disabled={reason ? true : undefined}
+                      aria-describedby={reason ? reasonId : undefined}
+                      className={cn(
+                        "flex w-full cursor-pointer items-center gap-2 py-1 text-left text-[11px] hover:text-foreground",
+                        ARIA_DISABLED_CLASS,
+                      )}
                     >
                       <CheckBox checked={checked} />
                       {/* Static title (the org-qualified slug), never clipTitle —

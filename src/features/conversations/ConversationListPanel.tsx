@@ -35,7 +35,9 @@ export interface NewMenuConfig {
   onJira?: () => void;
 }
 
-const ROW_CLASS = "block w-full border-b px-3 py-2 text-left";
+/** The list row's box. Exported so a pinned non-row (a pending strip) wears the
+ *  same box and swaps slot-for-slot with the real row it stands in for. */
+export const ROW_CLASS = "block w-full border-b px-3 py-2 text-left";
 function rowClass(active: boolean) {
   return cn(
     ROW_CLASS,
@@ -176,6 +178,16 @@ export function ConversationListPanel<L, R, J = never>(props: {
   /** A muted line under the remote header, above its rows — e.g. why a requested
    *  grouping couldn't be applied. Omit (the default) and nothing renders. */
   remoteNote?: ReactNode;
+  /** Content pinned at the TOP of the remote section, above every ladder branch
+   *  (rows, groups, skeletons, the error slot, the empty copy) and hidden with
+   *  the section — e.g. a strip holding a running create's place. CONTRACT: the
+   *  content is presentational, carrying no `data-row` keys and nothing
+   *  focusable, so the caller's arrow-key registry and the tab order are the
+   *  same with and without it. While it is present the bare "No open X." empty
+   *  copy is suppressed (a section can't report none directly under a strip
+   *  making one); the "match the filter" variant still renders, being true
+   *  beside it. Omit (the default) and nothing changes. */
+  remotePinnedSlot?: ReactNode;
   /** Splits the remote rows into collapsible subsections, rendered in array order
    *  in place of the flat list. Omit (the default) and the flat list renders
    *  exactly as before. Every row keeps its `data-row` key, so the caller's
@@ -273,6 +285,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
     remoteError,
     remoteErrorSlot,
     remoteNote,
+    remotePinnedSlot,
     remoteGroups,
     localNoun,
     remoteNoun,
@@ -315,6 +328,16 @@ export function ConversationListPanel<L, R, J = never>(props: {
         </Fragment>
       ))
     : visibleRemote.map(remoteRow);
+
+  // The empty-state line, or null where the pinned slot contradicts it: a
+  // section saying it has no open pull requests directly under a strip that is
+  // creating one is a flat contradiction. The FILTERED variant is unaffected —
+  // "none match the filter" stays true beside a status strip.
+  const remoteEmptyCopy = (() => {
+    if (stateRemote.length > 0) return `No ${remoteNoun} match the filter.`;
+    if (remotePinnedSlot != null) return null;
+    return `No ${stateFilter} ${remoteNoun}.`;
+  })();
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -450,6 +473,7 @@ export function ConversationListPanel<L, R, J = never>(props: {
               {remoteNote}
             </p>
           )}
+          {!remoteCollapsed && remotePinnedSlot != null && remotePinnedSlot}
           {!remoteCollapsed &&
             (ghPending ? (
               <ListRowSkeletons
@@ -474,11 +498,11 @@ export function ConversationListPanel<L, R, J = never>(props: {
                 </p>
               ))
             ) : visibleRemote.length === 0 ? (
-              <p className="px-3 py-4 text-xs text-muted-foreground">
-                {stateRemote.length > 0
-                  ? `No ${remoteNoun} match the filter.`
-                  : `No ${stateFilter} ${remoteNoun}.`}
-              </p>
+              remoteEmptyCopy && (
+                <p className="px-3 py-4 text-xs text-muted-foreground">
+                  {remoteEmptyCopy}
+                </p>
+              )
             ) : (
               remoteBody
             ))}

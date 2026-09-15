@@ -1,3 +1,4 @@
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import {
   Dialog,
   DialogContent,
@@ -8,6 +9,7 @@ import {
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings } from "@/lib/hotkeys/hotkeys";
 import { ACTIONS, BUILT_IN_KEYS, CATEGORY_ORDER } from "@/lib/hotkeys/registry";
+import { cn } from "@/lib/utils";
 
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
@@ -42,7 +44,12 @@ export function ShortcutsDialog({
             {paletteBinding ? ` (${formatBinding(paletteBinding)})` : ""}.
           </DialogDescription>
         </DialogHeader>
-        <div className="grid max-h-[65vh] items-start gap-x-10 overflow-y-auto sm:grid-cols-2 pr-1">
+        <div
+          className={cn(
+            DIALOG_SCROLL,
+            "grid max-h-[65vh] items-start gap-x-10 sm:grid-cols-2",
+          )}
+        >
           {CATEGORY_ORDER.map((category) => (
             <section key={category} className="mb-5">
               <h3 className="mb-1.5 text-xs font-semibold">{category}</h3>

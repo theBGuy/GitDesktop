@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useId, useState } from "react";
 import { toast } from "sonner";
@@ -19,10 +20,14 @@ import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import {
+  LANE_BLOCKED_HINT,
+  markPrCreated,
+  prCreateStartedAt,
   settlePrCreate,
   startPrCreate,
-  useIsCreatingPr,
+  usePrCreatePhase,
 } from "@/lib/stores/pr-create";
+import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -48,6 +53,7 @@ export function PromoteLocalPrDialog({
 }) {
   const createPr = useCreatePr(repoPath);
   const update = useUpdateLocalPr(repoPath);
+  const queryClient = useQueryClient();
   const selectPr = useUiStore((s) => s.selectPr);
   const setLens = useSetRepoLens(repoPath);
   const forge = useForgeStatus(repoPath);
@@ -60,11 +66,18 @@ export function PromoteLocalPrDialog({
   const [posting, setPosting] = useState(false);
   const pending = createPr.isPending || update.isPending || posting;
   // Shares the PR-create lane with CreatePrDialog: both push the same head and
-  // open a PR for it, so either one running blocks the other (and paints the
-  // same strip above the panels). `!pending` narrows it to the RE-ENTRY case —
-  // promote claims the lane synchronously, so the flag is also true during this
-  // dialog's own run, where `pending` is the honest thing to show.
-  const creatingElsewhere = useIsCreatingPr(repoPath, pr.head) && !pending;
+  // open a PR for it, so either one holding the lane blocks the other (and
+  // paints the same strip above the panels). The lane is held through the whole
+  // catch-up window after the forge answers, not just while the call runs, so
+  // the hint reads the PHASE — a non-null one IS the lane. `!pending` narrows
+  // to the RE-ENTRY case: promote claims the lane synchronously, so a phase is
+  // also present during this dialog's own run, where `pending` is the honest
+  // thing to show.
+  const lanePhase = usePrCreatePhase(repoPath, pr.head);
+  const creatingElsewhere = lanePhase !== null && !pending;
+  const laneHint = creatingElsewhere
+    ? LANE_BLOCKED_HINT[lanePhase](prNoun)
+    : null;
   const creatingHintId = useId();
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
@@ -74,7 +87,13 @@ export function PromoteLocalPrDialog({
     // Fire-time admission, claimed before the first await: the push plus the
     // forge call outlives this dialog, and a second create for the same head
     // would queue on the repo lock and then open a duplicate PR.
-    const refusal = startPrCreate(repoPath, pr.head, pr.base);
+    const refusal = startPrCreate(repoPath, pr.head, pr.base, {
+      title: pr.title,
+      draft,
+      // Promotion always publishes to the fork's own remote.
+      lens: "origin",
+      noun: prNoun,
+    });
     if (refusal) {
       toast.error(refusal);
       return;
@@ -97,6 +116,10 @@ export function PromoteLocalPrDialog({
       });
       created = { number, url };
       outcome = "success";
+      // Flip the lane HERE, not in the finally: the comment carry-over below can
+      // run long, and the strip would sit on "creating" with the number already
+      // known. The watcher itself arms in the finally, once those steps are done.
+      markPrCreated(repoPath, pr.head, { number, url });
       // Carry the local comments over, in order, so none are lost.
       failedStep = "carrying over comments";
       setPosting(true);
@@ -151,7 +174,25 @@ export function PromoteLocalPrDialog({
         },
       );
     } finally {
-      settlePrCreate(repoPath, pr.head, outcome);
+      // The lane is also the duplicate-create admission guard, so the watcher
+      // arms only once this flow's last step is done — armed at the forge's
+      // answer, a fast list refetch could settle it mid-carry-over and a
+      // remounted dialog would re-arm Publish over a PR that already exists.
+      // Armed with the entry's OWN startedAt: a fresh clock read would let this
+      // watcher settle a later create that re-claimed the head.
+      if (outcome === "release") {
+        settlePrCreate(repoPath, pr.head, "release");
+      } else if (created) {
+        const startedAt = prCreateStartedAt(repoPath, pr.head);
+        if (startedAt !== null)
+          armPrCreateHandOff(queryClient, {
+            repoPath,
+            head: pr.head,
+            lens: "origin",
+            number: created.number,
+            startedAt,
+          });
+      }
     }
   }
 
@@ -173,9 +214,9 @@ export function PromoteLocalPrDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogFooter className="sm:items-center">
-          {creatingElsewhere && (
+          {laneHint && (
             <p id={creatingHintId} className="basis-full text-xs text-warning">
-              A pull request for this branch is already being created.
+              {laneHint}
             </p>
           )}
           <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
@@ -195,7 +236,7 @@ export function PromoteLocalPrDialog({
           <Button
             onClick={promote}
             disabled={pending || creatingElsewhere}
-            aria-describedby={creatingElsewhere ? creatingHintId : undefined}
+            aria-describedby={laneHint ? creatingHintId : undefined}
           >
             {pending && <Spinner data-icon="inline-start" />}
             {draft ? "Publish as draft" : `Publish to ${remoteLabel}`}

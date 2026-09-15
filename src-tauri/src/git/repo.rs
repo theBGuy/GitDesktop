@@ -295,6 +295,20 @@ pub async fn validate_repo(path: String) -> AppResult<RepoInfo> {
     Ok(RepoInfo { root, name })
 }
 
+/// Whether `path` is still a directory on disk — no git spawn, so "the folder is
+/// gone" stays separable from "git can't resolve this repo", which every
+/// repo-scoped read collapses into one failure. The `stat` rides tokio's blocking
+/// pool rather than `std`: polled repeatedly by several callers, a dropped network
+/// mount would otherwise hold the UI thread (sync command) or stack blocked
+/// runtime workers for the SMB timeout.
+#[tauri::command]
+pub async fn path_is_dir(path: String) -> bool {
+    tokio::fs::metadata(&path)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 pub async fn clone_repo(
     url: String,
@@ -526,6 +540,26 @@ fn time_year() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     (1970 + secs / 31_557_600).to_string()
+}
+
+#[cfg(test)]
+mod path_is_dir_tests {
+    use super::path_is_dir;
+
+    #[tokio::test]
+    async fn path_is_dir_is_true_only_for_a_live_directory() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-path-is-dir-")
+            .tempdir()
+            .expect("create temp dir");
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, b"x").expect("write temp file");
+        assert!(path_is_dir(dir.path().to_string_lossy().into_owned()).await);
+        // Callers read `true` as "the checkout is still there", which mere
+        // existence doesn't prove — a file at that path is not a checkout.
+        assert!(!path_is_dir(file.to_string_lossy().into_owned()).await);
+        assert!(!path_is_dir(dir.path().join("gone").to_string_lossy().into_owned()).await);
+    }
 }
 
 #[cfg(test)]

@@ -5,4 +5,6 @@
   review requests, and **Needs review** splits the open list into **Not reviewed yet**,
   **Updated since my review**, and **Reviewed**, so a review pass knows where to start.
   Every scope is in the command palette, and the scope you pick is remembered per
-  repository.
+  repository. While the saved scope is still loading, the controls wait with
+  "Loading saved filters", and a change that can't be saved names the filters the
+  list falls back to.

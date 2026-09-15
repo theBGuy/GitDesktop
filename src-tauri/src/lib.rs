@@ -140,6 +140,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             git::repo::check_git_installed,
             git::repo::validate_repo,
+            git::repo::path_is_dir,
             git::repo::clone_repo,
             git::repo::create_repo,
             git::repo::git_repo_owners,

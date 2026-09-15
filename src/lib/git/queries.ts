@@ -57,6 +57,7 @@ import type {
   GitLabRepoSettingsInput,
   GitLabTimeStats,
   IssueDetails,
+  IssueInfo,
   IssueReactions,
   IssueRelation,
   IssueType,
@@ -101,7 +102,9 @@ import {
  *  per-repo app-data the same across the main checkout and every worktree. Null or
  *  `""` means no repo, which disables the query. On an IPC failure `data` stays
  *  undefined with `isError` set, so consumers read `identity ?? repoPath` and
- *  treat the error as settled rather than waiting on a value that needs a remount. */
+ *  treat the error as settled rather than waiting on a value that needs a remount —
+ *  except surfaces that WRITE under the identity key, which hold their editable
+ *  body on `isError` (a Retry arm) rather than composing edits over the raw path. */
 export function useRepoIdentity(repo: string | null) {
   return useQuery(repoIdentityQueryOptions(repo || null));
 }
@@ -1016,6 +1019,26 @@ export function useObjectsPresent(repo: string | null, oids: string[]) {
   });
 }
 
+/** Whether the open repo's folder still exists — the probe empty states check
+ *  before blaming anything else, since a deleted checkout fails every repo-scoped
+ *  read the same way a missing or signed-out CLI does. Short `staleTime` so a
+ *  restored folder recovers on the next focus refetch; `retry: false` because an
+ *  fs check has nothing to retry. */
+export function usePathPresent(repo: string) {
+  return useQuery({
+    queryKey: ["repo", repo, "path-present"] as const,
+    queryFn: () => api.pathIsDir(repo),
+    staleTime: 5_000,
+    retry: false,
+    // Polled, not focus-only: the probe mounts only inside ForgeNotReady, so a deletion
+    // while that state is already on screen has no focus change to ride in on.
+    refetchInterval: 5_000,
+    // Local IPC read: the default "online" mode parks it while the OS reports no
+    // connection, which would hold the probe undefined for the whole session.
+    networkMode: "always",
+  });
+}
+
 export function useRemotes(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "remotes"] as const,
@@ -1242,7 +1265,10 @@ export function usePrListMergeability(
  * list NARROWLY (`["repo", repo, "pr-list", lens]` rather than the whole `["repo",
  * repo]` subtree) must invalidate `["repo", repo, "pr-review-state", lens]` alongside
  * it — `updatedAt` here is what sorts a PR into "Updated since my review", and
- * staleTime alone schedules no refetch.
+ * staleTime alone schedules no refetch. A mutation that changes CI STATE (approve,
+ * re-run, cancel, dispatch) owes {@link usePrListCi}'s `["repo", repo, "pr-ci"]` the
+ * same: it hydrates the list's check badges from its own key, and neither `pr` nor
+ * `pr-list` prefix-matches it.
  */
 export function usePrReviewState(
   repo: string,
@@ -2082,7 +2108,59 @@ export function usePrefetchIssue(repo: string, lens: RemoteLens) {
   );
 }
 
+/**
+ * Writes a just-created issue into the cached open list pages so the row is on
+ * screen under the closing dialog, a full list round trip ahead of the
+ * reconciling refetch that owns the authoritative row.
+ *
+ * Only UNFILTERED pages are written: whether a new issue matches an active
+ * server-side filter is the server's answer to give, so those pages are left to
+ * the invalidation. Within that, the match is deliberately wide — every cached
+ * page size for this repo, lens and the open state, so a sibling observer
+ * (relations, mention candidates, linked-issue chips) paints the row too.
+ *
+ * `repo`/`lens` must be the pair the create RAN under, which is why its mutation
+ * pins them as its key — an issue number is meaningless in another repo or lens.
+ */
+function insertCreatedIssue(
+  queryClient: QueryClient,
+  repo: string,
+  lens: RemoteLens,
+  row: IssueInfo,
+) {
+  const pages = queryClient.getQueriesData<IssueInfo[]>({
+    // `useIssueList`'s key, axis for axis: 3 = lens, 4 = state, 5 = limit,
+    // 6 = the filter key. Lens is pinned because a fork numbers its issues
+    // independently of its parent; state because "closed" is the only other
+    // spelling and a new issue is never that; limit stays free so every page
+    // size on screen is written.
+    predicate: (q) =>
+      q.queryKey[0] === "repo" &&
+      q.queryKey[1] === repo &&
+      q.queryKey[2] === "issue-list" &&
+      q.queryKey[3] === lens &&
+      q.queryKey[4] === "open" &&
+      q.queryKey[6] === remoteListFilterKey(null),
+  });
+  for (const [key, rows] of pages) {
+    // A refetch can land the real row first; a second copy would collide on the
+    // number-keyed React key rather than merely duplicating.
+    if (!rows || rows.some((r) => r.number === row.number)) continue;
+    // Both providers return the unfiltered list newest-created first, so the new
+    // issue belongs at the head — and trimming back to the page's own limit is
+    // what the refetch returns anyway, keeping "Load more" (a `length === limit`
+    // test) from blinking off while the page is momentarily one row over.
+    const limit = key[5];
+    const next = [row, ...rows];
+    queryClient.setQueryData<IssueInfo[]>(
+      key,
+      typeof limit === "number" ? next.slice(0, limit) : next,
+    );
+  }
+}
+
 export function useCreateIssue(repo: string, lens: RemoteLens) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
@@ -2103,6 +2181,29 @@ export function useCreateIssue(repo: string, lens: RemoteLens) {
         args.type,
         lens,
       ),
+    {
+      // Both the create call and the insert below close over `repo`/`lens`, and the
+      // dialog family stays mounted across a repo switch — pinning them as the
+      // mutation key is what detaches a pending create instead of retargeting it,
+      // so a switch mid-create can't post to, or write a row into, another repo.
+      identity: ["create-issue", repo, lens],
+      // Runs before the invalidation fires, so the insert is what paints and the
+      // refetch reconciles it. `author` stays null rather than guessing a login —
+      // the row type allows it and every list consumer reads it optionally.
+      onSuccess: (ref, args) => {
+        const now = new Date().toISOString();
+        insertCreatedIssue(queryClient, repo, lens, {
+          number: ref.number,
+          url: ref.url,
+          title: args.title,
+          state: "OPEN",
+          createdAt: now,
+          updatedAt: now,
+          author: null,
+          labels: args.labels.map((name) => ({ name })),
+        });
+      },
+    },
   );
 }
 
@@ -4707,6 +4808,17 @@ function useRepoMutation<TArgs, TData>(
      *  async callback's rejection escapes the containment; a synchronous throw
      *  is contained and logged, and the invalidation still runs. */
     onSuccess?: (data: TData, variables: TArgs) => void;
+    /**
+     * Identity axes this mutation's `mutationFn` and callbacks close over (repo,
+     * lens, …). Opt in wherever a mid-flight change of those would misdirect the
+     * work: a MOUNTED observer re-rendered with new props retargets its PENDING
+     * mutation's whole options object, so the call lands — and any cache patch
+     * writes — under the new identity. A changed mutation-key hash detaches the
+     * pending mutation instead, freezing its options; `mutateAsync` still settles,
+     * but the observer's own `isPending`/`data` go idle at the switch, so only
+     * award this to sites whose callers await the promise.
+     */
+    identity?: readonly unknown[];
   } = {},
 ) {
   const queryClient = useQueryClient();
@@ -4733,6 +4845,7 @@ function useRepoMutation<TArgs, TData>(
   };
   return useMutation({
     mutationFn,
+    ...(opts.identity ? { mutationKey: opts.identity } : {}),
     ...(opts.refetchBeforeSuccess
       ? {
           onSuccess: async (data: TData, variables: TArgs) => {
@@ -6427,6 +6540,9 @@ export function useApproveWorkflowRun(repo: string) {
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "actions"] });
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });
+      // `pr-ci` is a SIBLING key, not a child of `pr` — prefix matching compares
+      // segments whole, so the line above never reaches the PR list's CI badges.
+      queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr-ci"] });
     },
   });
 }

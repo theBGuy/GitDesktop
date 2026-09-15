@@ -1,6 +1,7 @@
 import { GithubLogoIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -33,6 +34,7 @@ import {
 import { ghBranchProtections } from "@/lib/git/api";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 
 export function BranchRulesDialog({
   repoPath,
@@ -246,7 +248,7 @@ export function BranchRulesDialog({
 
         {/* Header and footer stay pinned; the rules (many protections + merge
             toggles) scroll so the dialog can't outgrow the viewport. */}
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+        <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
           <div className="space-y-1.5">
             <div className="flex gap-1">
               <Button

@@ -1444,8 +1444,12 @@ GitLab the code reviews and security audits you start yourself read them too —
 deliberate, documented decision isn't re-flagged. Notes present here also ground the
 **AI-generated** description{{/ai}}. Creating a pull request pushes your branch first, so it
 can run for a while: close the dialog and it carries on — a line at the top of the repository
-view names the branch until it finishes, reopening the dialog keeps everything you had typed,
-and a second create for the same branch is refused while the first is still running.
+view names the branch until the new pull request has settled into the list. The PR list it's
+headed for holds its place meanwhile, with a **pending entry** at the top carrying its title,
+branches and draft state; the number appears there as the PR opens, and the real row takes
+over once the list catches up. Reopening the dialog while it runs keeps everything you had
+typed, and a second create for the same branch is refused until the first one has settled
+into the list.
 Press {{key:mod+enter}} from any field to submit either the
 **Create** or the **Edit** dialog. The **Edit** dialog also carries a **base branch**
 select, so you can **retarget** a pull request at a different branch without recreating it —
@@ -2883,8 +2887,10 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   arguments it accepts.{{/ai}} Either way it runs in the open repository's folder.
 - **Available in.** A new task belongs to the repository you have open. Switch
   **Available in** to **All repositories** for one you want everywhere (a general
-  cleanup script, say), and switch it back at any time from the same editor. Tasks
-  you saved before this choice existed stay available in every repository.
+  cleanup script, say), and switch it back at any time from the same editor. For an
+  all-repositories task, choosing a script file saves its full path, so it runs the
+  same file wherever you are. Tasks you saved before this choice existed stay
+  available in every repository.
 - **Tasks from your other repositories.** They stay listed in a collapsed **Other
   repositories** group, each with the repo it belongs to, so nothing you saved goes
   missing. A task's **⋮** menu there offers **Edit** and **Delete**; **Run** waits until
@@ -3021,7 +3027,12 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   to it, arrow-key through the list, and clear items or mark all read. A
   pull-request entry opens that PR on the tab its event happened on, under the
   fork/upstream view it belongs to, so a new comment or approval lands on
-  **Conversation** — and a review entry scrolls to the review itself.{{ai}} A review still running shows
+  **Conversation** — and a review entry scrolls to the review itself. The
+  pull-request list itself switches to **Open** or **Closed** to match the PR's
+  current state, so one merged since the event still arrives selected. When the
+  checkout an entry points to has been removed, GitDesktop opens another copy of
+  that repository when it knows one; with none left it says so and changes
+  nothing.{{ai}} A review still running shows
   a live **elapsed timer** so you can see how long it's taken. When an
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and

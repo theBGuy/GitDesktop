@@ -1,4 +1,5 @@
 import { useLayoutEffect } from "react";
+import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import {
   Dialog,
   DialogContent,
@@ -67,7 +68,7 @@ export function RepoSettingsDialogFallback({
           </div>
           <div
             aria-busy
-            className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto pr-1"
+            className={cn(DIALOG_SCROLL_X_HIDDEN, "min-h-0 min-w-0 flex-1")}
           >
             {/* aria-busy alone has no text; role="status" gives the busy
                 region words for readers that announce it. */}

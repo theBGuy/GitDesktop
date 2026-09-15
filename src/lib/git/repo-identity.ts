@@ -12,6 +12,12 @@ import { invoke } from "@/lib/tauri/invoke";
 // never disagree on the key.
 
 const identityCache = new Map<string, Promise<string>>();
+/** Resolved keys only, written where the IPC call succeeds — the synchronous view
+ *  of {@link identityCache}, whose entries are Promises a peek cannot inspect.
+ *  Holds whatever the resolver answered, including the Rust-side raw-path
+ *  fallback for a live-but-unresolvable repo — callers keep treating
+ *  `identity === repoPath` as "no identity". */
+const settledIdentities = new Map<string, string>();
 
 /** Resolve `repoPath` to its identity key (memoized per path), REJECTING when the
  *  IPC call fails. The Rust command owns the unresolvable-repo case itself and
@@ -22,12 +28,26 @@ const identityCache = new Map<string, Promise<string>>();
 export function repoIdentityStrict(repoPath: string): Promise<string> {
   const hit = identityCache.get(repoPath);
   if (hit) return hit;
-  const p = invoke<string>("git_repo_identity", { repoPath }).catch((e) => {
-    identityCache.delete(repoPath);
-    throw e;
-  });
+  const p = invoke<string>("git_repo_identity", { repoPath })
+    .then((id) => {
+      settledIdentities.set(repoPath, id);
+      return id;
+    })
+    .catch((e) => {
+      identityCache.delete(repoPath);
+      throw e;
+    });
   identityCache.set(repoPath, p);
   return p;
+}
+
+/** The identity this session already learned for `repoPath`, or undefined when it
+ *  has not resolved one. READ-ONLY on the memo: never resolves, never populates.
+ *  For callers that must not RESOLVE — a dead path answers the raw-path fallback
+ *  and would pin it for the session — but may honor an identity learned while the
+ *  path was still alive. */
+export function peekRepoIdentity(repoPath: string): string | undefined {
+  return settledIdentities.get(repoPath);
 }
 
 /** {@link repoIdentityStrict} for callers with nowhere to put a failure: never

@@ -11,6 +11,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { LabeledGroup } from "@/components/form/labeled-group";
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -504,7 +505,7 @@ export function CreateIssueDialog({
 
           {/* Fields scroll; the header and submit footer stay pinned so a long
               body or many metadata pickers can't push the dialog off-screen. */}
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
             {isUpstream && !subIssueParentId && (
               <p className="text-xs text-muted-foreground">
                 This opens an issue on the upstream repository, not your fork.

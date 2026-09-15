@@ -102,10 +102,21 @@ function elsewhereScopeCopy(scope: string): {
   };
 }
 
+/** What the **Script file** field means in each scope: a repo-scoped task keeps a
+ *  path relative to its own root, while one offered everywhere has no root to
+ *  resolve against, so a typed relative path follows whichever repo is open. */
+const PATH_HINT: Record<"repo" | "global", string> = {
+  repo: "Relative to the repository root — runs the live file, so edits to it take effect on the next run.",
+  global:
+    "Choosing a file saves its full path; a path you type resolves against whichever repository is open. Either way it runs the live file, so edits to it take effect on the next run.",
+};
+
 /** Make a picked absolute path relative to the repo root when it's inside it, so a
  *  task like `scripts/release.mjs` works in any repo that has it. Outside the repo,
- *  keep the absolute path (it's machine-specific). Windows and macOS paths
- *  compare case-insensitively; store forward slashes either way. */
+ *  keep the absolute path (it's machine-specific). A null `repoRoot` means there is
+ *  no root to be relative to — no repo open, or a draft scoped to every repository.
+ *  Windows and macOS paths compare case-insensitively; store forward slashes either
+ *  way. */
 function toRepoRelative(picked: string, repoRoot: string | null): string {
   const norm = (p: string) => p.replace(/\\/g, "/");
   const p = norm(picked);
@@ -175,15 +186,18 @@ export function TaskDialog({
   // matching what the store folds a written scope onto.
   const { keys: repoKeys } = useTaskRepoKeys(repoPath);
   const thisRepoKey = repoKeys.length ? repoKeys[repoKeys.length - 1] : null;
+  // A draft offered everywhere has no repo root to resolve a script path against
+  // — the one discriminant behind how the picker stores a path and how the field
+  // describes itself.
+  const isGlobalDraft = scope === TASK_SCOPE_GLOBAL;
   // A legacy raw-path scope for the OPEN repo reads as "this repository" too
   // (repoKeys carries both forms), so it selects that option rather than falling
   // through to the other-repository one.
-  const scopedToThisRepo =
-    scope !== TASK_SCOPE_GLOBAL && repoKeys.includes(scope);
+  const scopedToThisRepo = !isGlobalDraft && repoKeys.includes(scope);
   // The draft belongs to a repo that isn't the one open behind this dialog. Read
   // from the DRAFT, not the saved task, so re-scoping to this repository releases
   // the file-source controls in the same keystroke that adopts the task.
-  const scopedElsewhere = scope !== TASK_SCOPE_GLOBAL && !scopedToThisRepo;
+  const scopedElsewhere = !isGlobalDraft && !scopedToThisRepo;
   // One source for every string a foreign scope produces here — the option label
   // and both file-control reasons — so they can't disagree about what it is.
   const elsewhereCopy = elsewhereScopeCopy(scope);
@@ -305,7 +319,9 @@ export function TaskDialog({
       defaultPath: repoPath ?? undefined,
     });
     if (typeof picked !== "string") return;
-    setPath(toRepoRelative(picked, repoPath));
+    // Relativizing a global task's pick would store a path that resolves inside
+    // whichever repo happens to be open at run time, so it keeps the full path.
+    setPath(toRepoRelative(picked, isGlobalDraft ? null : repoPath));
     // Pre-select the interpreter from the extension (still overridable).
     const guess = interpreterForExt(picked);
     if (guess) setInterpreter(guess);
@@ -615,8 +631,7 @@ export function TaskDialog({
               </DisabledReasonButton>
             </div>
             <p className="text-xs text-muted-foreground">
-              Relative to the repository root — runs the live file, so edits to
-              it take effect on the next run.
+              {PATH_HINT[isGlobalDraft ? "global" : "repo"]}
             </p>
           </div>
         ) : (

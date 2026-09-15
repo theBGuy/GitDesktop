@@ -1,3 +1,5 @@
+import { pathIsDir } from "@/lib/git/api";
+import { peekRepoIdentity, repoIdentity } from "@/lib/git/repo-identity";
 import { notify, notifyIfUnfocused } from "@/lib/notify";
 import {
   DEFAULT_SETTINGS,
@@ -29,6 +31,10 @@ const lastEmit = new Map<string, number>();
 /** Bound on a long session's key churn; the oldest delivered key is evicted first
  *  (insertion order tracks delivery time, since every write re-inserts). */
 const MAX_DEDUPE_KEYS = 500;
+
+/** How long the identity stamp may hold up a delivery before the row ships without
+ *  one — the stamp is an optimization for the click-through, never a precondition. */
+const IDENTITY_STAMP_TIMEOUT_MS = 1_500;
 
 /** Check-and-set, synchronous by contract: two same-tick fires must not both pass
  *  the window. True = this key already holds the window and is suppressed. */
@@ -98,10 +104,41 @@ export function emitNotification(
   const claimedAt = Date.now();
   if (dedupeKey && seenRecently(dedupeKey, claimedAt)) return;
   void (async () => {
-    const [settings, override] = await Promise.all([
+    // Probe THEN resolve, bounded as a unit: the liveness check gates the resolve
+    // (resolving a DEAD path caches the raw-path fallback for the session, under
+    // the key every identity-keyed store reads), and both live on the timed side
+    // so a hung mount delays neither the inbox row nor the OS ping. Every arm that
+    // skips the resolver still PEEKS the memo — read-only, so no poisoning — because
+    // a repo muted under its identity key must stay muted once its checkout is gone.
+    let stampTimer: ReturnType<typeof setTimeout> | undefined;
+    const knownIdentity = () => peekRepoIdentity(row.repoPath) ?? row.repoPath;
+    const [settings, identity] = await Promise.all([
       loadSettings().catch(() => DEFAULT_SETTINGS),
-      overrideForRepo(row.repoPath).catch(() => undefined),
+      Promise.race([
+        (async () => {
+          const live = await pathIsDir(row.repoPath).catch(() => false);
+          return live ? repoIdentity(row.repoPath) : knownIdentity();
+        })(),
+        new Promise<string>((resolve) => {
+          stampTimer = setTimeout(
+            () => resolve(knownIdentity()),
+            IDENTITY_STAMP_TIMEOUT_MS,
+          );
+        }),
+      ]).finally(() => clearTimeout(stampTimer)),
     ]);
+    // A cold-cache dead path, hung probe, or unresolvable repo all answer the raw
+    // path, and an absent stamp is the honest answer for each: a checkout path
+    // posing as an identity key would mislead the click-time ladder.
+    const repoId = identity === row.repoPath ? undefined : identity;
+    // Sequenced after the race so the lookup reuses that key instead of resolving a
+    // second time; a raw path here reads the legacy override key only and never
+    // reaches the resolver. Costs this read the race's bound, and — on a cold
+    // memo — the identity key itself: a mute stored under the identity is missed
+    // for that one event, the price of never blocking delivery on a hung mount.
+    const override = await overrideForRepo(row.repoPath, identity).catch(
+      () => undefined,
+    );
     // The kind rides along for every source; the seam scopes it to the one source
     // that carries a kind axis.
     const channels = deliveredChannels(
@@ -112,7 +149,11 @@ export function emitNotification(
       row.kind,
     );
     if (channels.inApp) {
-      pushNotification(dedupeKey ? { ...row, dedupeKey } : row);
+      pushNotification({
+        ...row,
+        ...(dedupeKey ? { dedupeKey } : {}),
+        ...(repoId ? { repoId } : {}),
+      });
     }
     // Hiding AI features mutes the OS ping for AI-minted kinds — a hidden feature
     // must not tap you on the shoulder — but never the inbox row above, which the

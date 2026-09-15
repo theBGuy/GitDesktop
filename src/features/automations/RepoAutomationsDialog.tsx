@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,6 +27,7 @@ import {
 } from "@/lib/automations/types";
 import { useRepoIdentity } from "@/lib/git/queries";
 import { toastError } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 import {
   type CellPatch,
   type CellState,
@@ -212,9 +214,7 @@ export function RepoAutomationsDialog({
             override it for this repository only.
           </DialogDescription>
         </DialogHeader>
-        {/* overflow-x-hidden alongside overflow-y-auto so the vertical
-            scrollbar's width can't induce a phantom horizontal one. */}
-        <div className="min-h-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto pr-1">
+        <div className={cn(DIALOG_SCROLL_X_HIDDEN, "min-h-0 flex-1 space-y-3")}>
           {automations.isPending ? (
             <Skeleton className="h-40 w-full" />
           ) : (

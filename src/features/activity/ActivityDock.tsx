@@ -17,6 +17,7 @@ import {
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
+import { toast } from "sonner";
 import { ElapsedTime } from "@/components/elapsed-time";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { RelativeTime } from "@/components/relative-time";
@@ -29,11 +30,15 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { useAutomationHistoryDialog } from "@/features/automations/AutomationHistoryDialog";
 import { openAutomationResult } from "@/lib/automations/results";
+import { validateRepo } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
+import { normPath } from "@/lib/git/path";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
+import { loadSettings } from "@/lib/settings/api";
 import { useAiEnabled } from "@/lib/settings/queries";
 import {
   AI_NOTIFICATION_KINDS,
@@ -196,6 +201,142 @@ function ActivityBell({ variant }: { variant: "header" | "strip" }) {
   );
 }
 
+/** Click generation. Module-scoped because the panel unmounts as the click closes
+ *  the popover: against a component ref, a continuation from a previous mount
+ *  would compare with a fresh counter, pass its own check, and navigate the app by
+ *  itself. Read only from handlers and continuations, never in render. */
+let clickGen = 0;
+
+/** A live checkout a notification can be opened in. */
+interface LiveTarget {
+  repoPath: string;
+  repoName: string;
+}
+
+/** How far down the repo list the last rung looks. The scan is serial git work
+ *  behind an already-closed popover, so a match further back than this would read
+ *  as a dead click. */
+const MAX_RECENTS_SCANNED = 10;
+
+/** Split a path's parent off, or null when it has none — the identity key is the
+ *  repo's common git dir, so its parent is the main working tree. */
+function parentDir(p: string): string | null {
+  const cut = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return cut > 0 ? p.slice(0, cut) : null;
+}
+
+/** Whether a live checkout is the repository `stamp` names. Three-valued because
+ *  `repoIdentity` stands in the path it was asked about rather than rejecting, so
+ *  that equality is UNKNOWN, never a mismatch. Resolve only paths `validateRepo`
+ *  has proven live: a dead one caches that fallback for the session. Casefolded
+ *  `normPath` and the resolver's session-long memo are both the app-wide identity
+ *  idiom — diverging from either navigates by an identity no store keys on. */
+async function identityVerdict(
+  repoPath: string,
+  stamp: string,
+): Promise<"match" | "mismatch" | "unknown"> {
+  const id = await repoIdentity(repoPath);
+  if (normPath(id) === normPath(repoPath)) return "unknown";
+  return normPath(id) === normPath(stamp) ? "match" : "mismatch";
+}
+
+/**
+ * Resolve a live checkout for `n`. Its `repoPath` is the checkout captured at emit
+ * time, so a worktree removed since turns every row from it into a dangling
+ * pointer — following it opens the app in a directory that no longer exists.
+ * `repoId` (the worktree-stable identity key) is what survives that, so the ladder
+ * tries: the captured path, the repo on screen, the main checkout, then the repo
+ * list. Answers null when nothing live matches, which the caller reports instead
+ * of navigating — a refusal performs no git work and writes no state.
+ *
+ * `superseded` is consulted after every await: a later click must not have its
+ * navigation stomped by an earlier one settling. Every comparison goes through
+ * `normPath` — the keys are forward-slashed as git prints them while the ui store
+ * holds `validate_repo`'s backslashed spelling, and Windows compares paths
+ * case-insensitively.
+ */
+async function resolveLiveTarget(
+  n: AppNotification,
+  superseded: () => boolean,
+): Promise<LiveTarget | null> {
+  // Hydrated rows are untrusted, so narrow at use; a row from before the field
+  // existed carries none and can only take the captured path or be refused.
+  const stamp = typeof n.repoId === "string" ? n.repoId : undefined;
+  const captured = await validateRepo(n.repoPath).catch(() => null);
+  if (superseded()) return null;
+  if (captured) {
+    if (stamp === undefined) {
+      return { repoPath: captured.root, repoName: captured.name };
+    }
+    // Belt check: a folder recreated at the same path (or an enclosing repo the
+    // walk-up found) is a DIFFERENT repository, so a mismatch falls into the
+    // ladder rather than opening someone else's pull request. An unknown identity
+    // stands: this checkout is live, and it is the one the event named.
+    const verdict = await identityVerdict(captured.root, stamp);
+    if (superseded()) return null;
+    if (verdict !== "mismatch") {
+      return { repoPath: captured.root, repoName: captured.name };
+    }
+  }
+  if (stamp === undefined) return null;
+
+  // The repo on screen, retargeted in place: passing the ui store's own spelling
+  // keeps the navigators' repo compare equal, so no CROSS_REPO_RESET fires and
+  // the user's other selections survive. Validated first — it may ITSELF be the
+  // deleted worktree, and the resolver must only ever see a live path.
+  const cur = useUiStore.getState().repoPath;
+  if (cur) {
+    const info = await validateRepo(cur).catch(() => null);
+    if (superseded()) return null;
+    if (info) {
+      const verdict = await identityVerdict(cur, stamp);
+      if (superseded()) return null;
+      if (verdict === "match") {
+        return {
+          repoPath: cur,
+          repoName: useUiStore.getState().repoName ?? info.name,
+        };
+      }
+    }
+  }
+
+  // The main checkout, whose working tree is the identity key's parent. Navigate
+  // with the RETURNED root, never the raw parent: identity keys are
+  // forward-slashed while the ui store holds the backslashed spelling, and a
+  // mismatched target reads as a repo switch — firing a CROSS_REPO_RESET and
+  // re-keying every path-keyed derivative. Proven like any other candidate, since
+  // `validate_repo` walks UPWARD and can answer an enclosing repo.
+  const main = parentDir(stamp);
+  if (main) {
+    const info = await validateRepo(main).catch(() => null);
+    if (superseded()) return null;
+    if (info) {
+      const verdict = await identityVerdict(info.root, stamp);
+      if (superseded()) return null;
+      if (verdict === "match") {
+        return { repoPath: info.root, repoName: info.name };
+      }
+    }
+  }
+
+  // Any other clone in the repo list, most recent first.
+  const recents = await loadSettings()
+    .then((s) => s.recentRepos.slice(0, MAX_RECENTS_SCANNED))
+    .catch(() => []);
+  if (superseded()) return null;
+  for (const entry of recents) {
+    const info = await validateRepo(entry.path).catch(() => null);
+    if (superseded()) return null;
+    if (!info) continue;
+    const verdict = await identityVerdict(info.root, stamp);
+    if (superseded()) return null;
+    if (verdict === "match") {
+      return { repoPath: info.root, repoName: info.name };
+    }
+  }
+  return null;
+}
+
 function ActivityPanel({ onClose }: { onClose: () => void }) {
   const tasks = useReviewTasks();
   const notifs = useNotifications();
@@ -222,9 +363,68 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   }
 
   const navigate = (n: AppNotification) => {
-    markNotificationRead(n.id);
     const t = n.target;
-    if (t?.type === "pr") {
+    // Claimed before the first await AND before every early return, so each click
+    // supersedes a pending one. The store's `interactionEpoch` is the other half of
+    // the guard: every user navigation or selection action bumps it, so a settled
+    // continuation strands instead of yanking the user off a newer choice of theirs.
+    // The navigators bump only AFTER the final check below, so this click's own
+    // landing can't strand itself — a popover click that goes on to navigate is one
+    // user action, counted once.
+    const gen = ++clickGen;
+    const startEpoch = useUiStore.getState().interactionEpoch;
+    const superseded = () =>
+      gen !== clickGen || useUiStore.getState().interactionEpoch !== startEpoch;
+    // Synchronous, ahead of the awaits: the popover closes on the click itself,
+    // never a resolution later.
+    onClose();
+    if (t?.type === "automation-result") {
+      if (typeof t.id === "string") {
+        markNotificationRead(n.id);
+        // The stamped identity is the store key the result was written under, so
+        // a result stays readable after its checkout is gone.
+        void openAutomationResult(
+          n.repoPath,
+          t.id,
+          typeof n.repoId === "string" ? n.repoId : undefined,
+        );
+      }
+      return;
+    }
+    if (t?.type !== "pr" && t?.type !== "run" && t?.type !== "agent") {
+      // Nowhere to navigate (no target, or a kind this build doesn't route) —
+      // the click is still an acknowledgement, as it has always been.
+      markNotificationRead(n.id);
+      return;
+    }
+    void (async () => {
+      const target = await resolveLiveTarget(n, superseded);
+      if (superseded()) return;
+      if (!target) {
+        // Unread by design: the row is the retry affordance once the user has a
+        // checkout of that repo open again.
+        toast.info(
+          `The checkout for ${n.repoName} no longer exists, and no other copy was found — nothing was opened.`,
+        );
+        return;
+      }
+      markNotificationRead(n.id);
+      // The check above covers SCHEDULING this landing; `stillValid` re-checks at
+      // the deferred apply — generation for a later notification click, epoch for
+      // any OTHER user action in that window. The epoch is comparable only because
+      // the navigator hands back the value its own synchronous bump produced; this
+      // landing's beforeSelect bumps too, but runs after the check.
+      const stillValid = (epochAtRequest: number) =>
+        gen === clickGen &&
+        useUiStore.getState().interactionEpoch === epochAtRequest;
+      if (t.type === "run") {
+        openRun({ ...target, runId: t.runId, stillValid });
+        return;
+      }
+      if (t.type === "agent") {
+        openAgentTab({ ...target, stillValid });
+        return;
+      }
       // Land under the lens the event happened under — a fork's two lenses
       // surface different pull requests at the same ref. Session-only
       // (`persist: false`): a click is navigation, not a choice of lens, so the
@@ -233,21 +433,24 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
       // there would be a side effect its navigation never implied. Hydrated
       // rows are untrusted, so narrow the stored value the way the lens reader
       // does; a row from before the field existed carries none and keeps
-      // today's behavior (whichever lens the repo already sits on). No
-      // selection clears — the same call selects this PR.
+      // today's behavior (whichever lens the repo already sits on). Keyed on the
+      // RESOLVED checkout — the lens cache is per checkout path, so writing it
+      // under the captured one is a key nothing reads; every rung of the ladder
+      // shares this repo's common git dir, so the lens stays meaningful.
       let applyLens: (() => void) | undefined;
       if (t.kind === "remote" && t.lens !== undefined) {
         const lens: RemoteLens = t.lens === "upstream" ? "upstream" : "origin";
         applyLens = () =>
-          applyRepoLens(queryClient, n.repoPath, lens, {
-            clearSelections: false,
+          applyRepoLens(queryClient, target.repoPath, lens, {
+            // A sibling selection minted under the other lens would outlive the
+            // flip; openPr's own set lands this PR in the same commit.
+            clearSelections: true,
             persist: false,
           });
       }
       openPr({
+        ...target,
         kind: t.kind,
-        repoPath: n.repoPath,
-        repoName: n.repoName,
         ref: t.ref,
         section: KIND_SECTION[n.kind as NotificationKind] ?? null,
         // Hydrated rows are untrusted here too — a non-string can't address a
@@ -257,15 +460,11 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         // selection reach the same commit; applied here it would land a render
         // early and fetch the new lens against the OLD number.
         beforeSelect: applyLens,
+        stillValid,
       });
-    } else if (t?.type === "run") {
-      openRun({ repoPath: n.repoPath, repoName: n.repoName, runId: t.runId });
-    } else if (t?.type === "agent") {
-      openAgentTab({ repoPath: n.repoPath, repoName: n.repoName });
-    } else if (t?.type === "automation-result" && typeof t.id === "string") {
-      void openAutomationResult(n.repoPath, t.id);
-    }
-    onClose();
+    })().catch(() => {
+      // best-effort — an unexpected throw degrades the click to a no-op
+    });
   };
 
   // Keyboard delete: focus the neighbour that takes this row's place (next, else

@@ -156,10 +156,15 @@ export function useSaveConversationFilterPrefs(repo: string) {
     // write SNAPS the control back with no other sign. The note names that outcome
     // rather than leaving a silently reverted toggle, and names the ORIGINATING repo
     // from the variables: the user may have switched away by the time this fires.
+    // The note describes the fallback rather than reporting it done: this fires
+    // before the settle's re-read, which a concurrent save defers to the LAST
+    // settle. It names both landings because the loader swallows its own failures
+    // into the DEFAULTS, so the fault that rejected the write can leave the list
+    // wider than anything the user saved.
     onError: (e, vars) =>
       toastErrorWithNote(
         e,
-        `Your filter choice for ${repoNameFromPath(vars.repo)} wasn't saved.`,
+        `Your filter choice for ${repoNameFromPath(vars.repo)} wasn't saved. The list falls back to your saved filters — or to the defaults, if those can't be read either.`,
       ),
     // Counts against the CONTEXT, never the closure — see onMutate: this runs at
     // settle time, when the closure names whatever repo is open by then. Switching

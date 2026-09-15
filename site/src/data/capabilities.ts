@@ -197,6 +197,11 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
+      "A PR you're opening holds its place in its list — title, branches & draft state, then its number",
+  },
+  {
+    group: "Pull requests & review",
+    label:
       "Link related issues as you open or edit a PR — auto-detected from your branch and commits (GitHub & GitLab; Bitbucket via linked Jira)",
   },
   {

@@ -29,23 +29,54 @@ export function useRepoLensRaw(repo: string) {
   });
 }
 
+/** A lens input has answered AND is not re-answering: a cached-but-refetching read
+ *  serves a provisional value that the landing refetch can flip. An ERROR counts as
+ *  settled — it yields a stable "origin". */
+const lensReadSettled = (q: { isPending: boolean; isFetching: boolean }) =>
+  !q.isPending && !q.isFetching;
+
+/** Every async read the lens resolves from, in ONE body: the gate, the value, and
+ *  whether all of them have settled are derived side by side, so an input added to the
+ *  value necessarily joins the settled test — the two can't cover different sets. Each
+ *  hook is called unconditionally (a short-circuited `&&` would skip one and break hook
+ *  order). `settled` is owned here rather than re-derived by consumers — the reads behind
+ *  the lens are this module's implementation detail, and a consumer re-deriving them
+ *  drifts the moment the lens gains an input. The single-value exports below are
+ *  projections of this and nothing else; consumers needing more than one take this. */
+export function useLensState(repo: string): {
+  gate: boolean;
+  lens: RemoteLens;
+  settled: boolean;
+} {
+  const forge = useForgeStatus(repo);
+  const remotes = useRemotes(repo);
+  const raw = useRepoLensRaw(repo);
+  const gate =
+    forge.data?.provider === "github" &&
+    Boolean(remotes.data?.includes("upstream"));
+  return {
+    gate,
+    lens: gate && raw.data === "upstream" ? "upstream" : "origin",
+    settled:
+      lensReadSettled(forge) &&
+      lensReadSettled(remotes) &&
+      lensReadSettled(raw),
+  };
+}
+
 /** Whether the origin|upstream lens applies at all: a GitHub fork (an `upstream`
  *  remote present) is the only shape where the parent differs from origin. On
  *  GitLab/Bitbucket, or a repo with no upstream remote, the lens is a no-op and
  *  its UI stays hidden. Mirrors SyncControls' `hasUpstreamRemote` idiom. */
 export function useLensGate(repo: string): boolean {
-  const provider = useForgeStatus(repo).data?.provider;
-  const remotes = useRemotes(repo);
-  return provider === "github" && Boolean(remotes.data?.includes("upstream"));
+  return useLensState(repo).gate;
 }
 
 /** THE lens every PR/Issues surface consumes. Returns "origin" unless the gate
  *  passes AND the persisted value is "upstream" — so removing the upstream remote
  *  silently falls back to origin without touching the store. */
 export function useRepoLens(repo: string): RemoteLens {
-  const gate = useLensGate(repo);
-  const raw = useRepoLensRaw(repo).data;
-  return gate && raw === "upstream" ? "upstream" : "origin";
+  return useLensState(repo).lens;
 }
 
 /**
@@ -114,18 +145,23 @@ export function applyRepoLens(
   if (ui.selectedIssue?.kind === "remote") ui.selectIssue(null);
 }
 
-/** The switcher's setter — {@link applyRepoLens} with the selection clears and
- *  the disk write on, since this path is the user choosing the lens. */
+/** The switcher's setter — {@link applyRepoLens} with the selection clears and the disk
+ *  write on, since this path is the user choosing the lens. It is therefore the user's
+ *  door: the interaction is noted FIRST, or a settling navigation lands and applies ITS
+ *  lens over the choice just made. Direct {@link applyRepoLens} callers stay silent —
+ *  navigation-owned, and each is re-checked by its navigator's `stillValid`. */
 export function useSetRepoLens(repo: string) {
   const queryClient = useQueryClient();
+  const noteUserInteraction = useUiStore((s) => s.noteUserInteraction);
   return useCallback(
     (lens: RemoteLens) => {
+      noteUserInteraction();
       applyRepoLens(queryClient, repo, lens, {
         clearSelections: true,
         persist: true,
       });
     },
-    [queryClient, repo],
+    [queryClient, repo, noteUserInteraction],
   );
 }
 
