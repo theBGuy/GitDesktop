@@ -63,9 +63,15 @@ const lastFailed = new Set<string>();
 const failKey = (repoPath: string, head: string) =>
   `${normPath(repoPath)}\u0000${head}`;
 
-/** The refusal, per the BLOCKING lane's phase — it is that create the user is
- *  being told about, so it speaks with that lane's own noun. */
-const REFUSAL: Record<PrCreate["phase"], (noun: string) => string> = {
+/** Why a head branch is blocked, per the phase of the lane holding it — one
+ *  source for both readings of that fact: {@link startPrCreate}'s fire-time
+ *  refusal toast, and the inline hint a dialog shows beside its held submit.
+ *  It speaks with the BLOCKING lane's own noun, since that is the create the
+ *  user is being told about. */
+export const LANE_BLOCKED_HINT: Record<
+  PrCreate["phase"],
+  (noun: string) => string
+> = {
   creating: (noun) => `A ${noun} for this branch is already being created.`,
   created: (noun) => `A ${noun} for this branch was just created.`,
 };
@@ -90,7 +96,7 @@ export function startPrCreate(
 ): string | null {
   const repo = normPath(repoPath);
   const blocking = usePrCreateStore.getState().byRepo[repo]?.[head];
-  if (blocking) return REFUSAL[blocking.phase](blocking.noun);
+  if (blocking) return LANE_BLOCKED_HINT[blocking.phase](blocking.noun);
   usePrCreateStore.setState((s) => ({
     byRepo: {
       ...s.byRepo,

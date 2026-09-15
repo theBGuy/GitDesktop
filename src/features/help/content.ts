@@ -1444,11 +1444,12 @@ GitLab the code reviews and security audits you start yourself read them too —
 deliberate, documented decision isn't re-flagged. Notes present here also ground the
 **AI-generated** description{{/ai}}. Creating a pull request pushes your branch first, so it
 can run for a while: close the dialog and it carries on — a line at the top of the repository
-view names the branch until it finishes. The PR list it's headed for holds its place
-meanwhile, with a **pending entry** at the top carrying its title, branches and draft state;
-the number appears there as the PR opens, and the real row takes over once the list catches
-up. Reopening the dialog while it runs keeps everything you had typed, and a second create
-for the same branch is refused until the first one has settled into the list.
+view names the branch until the new pull request has settled into the list. The PR list it's
+headed for holds its place meanwhile, with a **pending entry** at the top carrying its title,
+branches and draft state; the number appears there as the PR opens, and the real row takes
+over once the list catches up. Reopening the dialog while it runs keeps everything you had
+typed, and a second create for the same branch is refused until the first one has settled
+into the list.
 Press {{key:mod+enter}} from any field to submit either the
 **Create** or the **Edit** dialog. The **Edit** dialog also carries a **base branch**
 select, so you can **retarget** a pull request at a different branch without recreating it —

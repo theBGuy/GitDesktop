@@ -20,8 +20,8 @@ import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import {
+  LANE_BLOCKED_HINT,
   markPrCreated,
-  type PrCreate,
   prCreateStartedAt,
   settlePrCreate,
   startPrCreate,
@@ -31,13 +31,6 @@ import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
-
-/** Why Publish is held, per lane phase — a lane in `created` is one whose PR
- *  already exists and is only waiting for the list. */
-const LANE_HINT: Record<PrCreate["phase"], (noun: string) => string> = {
-  creating: (noun) => `A ${noun} for this branch is already being created.`,
-  created: (noun) => `A ${noun} for this branch was just created.`,
-};
 
 /**
  * Publishes a local PR to the repo's provider (GitHub, GitLab, or Bitbucket):
@@ -82,7 +75,9 @@ export function PromoteLocalPrDialog({
   // thing to show.
   const lanePhase = usePrCreatePhase(repoPath, pr.head);
   const creatingElsewhere = lanePhase !== null && !pending;
-  const laneHint = creatingElsewhere ? LANE_HINT[lanePhase](prNoun) : null;
+  const laneHint = creatingElsewhere
+    ? LANE_BLOCKED_HINT[lanePhase](prNoun)
+    : null;
   const creatingHintId = useId();
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.

@@ -665,6 +665,9 @@ export function CreatePrDialog({
 
   // The one submit gate, shared by the button, the mod+enter chord, and the
   // form's native submit: Enter must submit exactly when the button would.
+  // The `existingPr` arm is ADVISORY: its page can lag a just-created PR for
+  // its staleTime, and the forge refuses duplicates authoritatively — the gate
+  // trades that window for never holding submit on a slow probe.
   const submitBlocked =
     generating ||
     nothingToMerge ||
