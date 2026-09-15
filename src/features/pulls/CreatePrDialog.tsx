@@ -57,12 +57,16 @@ import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import {
   consumeLastFailed,
-  isCreatingPrFor,
+  markPrCreated,
+  type PrCreate,
+  prCreatePhase,
+  prCreateStartedAt,
   settlePrCreate,
   startPrCreate,
-  useIsCreatingPr,
+  usePrCreates,
 } from "@/lib/stores/pr-create";
-import { toastError } from "@/lib/toast";
+import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { ReviewerNotesField } from "./ReviewerNotesField";
@@ -86,6 +90,16 @@ function droppedLabelsHint(names: string[]): string {
   const list = `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
   return `Suggested labels ${list} aren't repo labels.`;
 }
+
+/** Why the submit is held, per lane phase: the lane now survives the forge's
+ *  answer for the seconds the list takes to catch up, and a reopen in that
+ *  window must read as "it's done" rather than "still going". */
+const LANE_HINT: Record<PrCreate["phase"], (lane: PrCreate) => string> = {
+  creating: (lane) =>
+    `A ${lane.noun} for this branch is already being created.`,
+  created: (lane) =>
+    `A ${lane.noun} for this branch was just created — #${lane.number}.`,
+};
 
 export function CreatePrDialog({
   repoPath,
@@ -307,7 +321,14 @@ export function CreatePrDialog({
       // forge call runs for minutes and the user can dismiss the dialog the
       // moment it starts, so a second attempt on the same head would queue on
       // the repo lock and then open a duplicate PR.
-      const refusal = startPrCreate(repoPath, value.head, value.base);
+      const refusal = startPrCreate(repoPath, value.head, value.base, {
+        // The trimmed spelling is what the mutation sends below, so the strip
+        // shows the title the PR will actually carry.
+        title: value.title.trim(),
+        draft: value.draft,
+        lens: createLens,
+        noun: prNoun,
+      });
       if (refusal) {
         toast.error(refusal);
         return;
@@ -352,6 +373,21 @@ export function CreatePrDialog({
             : {}),
         });
         outcome = "success";
+        // The lane outlives the forge's answer: flip its phase so the list's
+        // strip can carry the number, and hand the settle to the watcher that
+        // waits for the list to actually contain the PR. Armed with the entry's
+        // OWN startedAt — a fresh clock read would let this watcher settle a
+        // later create that re-claimed the head.
+        markPrCreated(repoPath, value.head, { number, url });
+        const startedAt = prCreateStartedAt(repoPath, value.head);
+        if (startedAt !== null)
+          armPrCreateHandOff(queryClient, {
+            repoPath,
+            head: value.head,
+            lens: createLens,
+            number,
+            startedAt,
+          });
         const notes = value.notes.trim();
         track({
           name: "pull_request_created",
@@ -428,9 +464,20 @@ export function CreatePrDialog({
           });
         }
       } catch (e) {
-        toastError(e);
+        // Name the branch when the CREATE is what failed: two creates can be
+        // stacked, and a bare forge error doesn't say which one died. A throw
+        // from a step after the PR exists keeps the bare toast — that PR was
+        // created, whatever followed it.
+        if (outcome === "error")
+          toastErrorWithNote(
+            e,
+            `The ${prNoun} for ${value.head} wasn't created.`,
+          );
+        else toastError(e);
       } finally {
-        settlePrCreate(repoPath, value.head, outcome);
+        // Failure only. A successful lane is the hand-off watcher's to settle,
+        // once the list shows the PR (or its timeout fires).
+        if (outcome === "error") settlePrCreate(repoPath, value.head, "error");
       }
     },
   });
@@ -442,22 +489,24 @@ export function CreatePrDialog({
   const seedOnOpen = useEffectEvent(() => {
     const h = defaultHead ?? currentName ?? names[0] ?? "";
     // A generation still streaming — or one that settled while the dialog was
-    // closed — and a create still running in the background, or one that failed
+    // closed — and a create still RUNNING in the background, or one that failed
     // while closed, all leave everything the user typed in form state, and this
-    // reset would blank it on reopen. The draft's identity is the RETAINED form
-    // head, not this open's default: the user may have submitted a head that
-    // differs from the branch they are on now. The `||` short-circuit is
-    // deliberate — while a generation or create is in flight the pr-create
-    // latches stay unconsumed, so a later reopen after a failure still
-    // preserves the draft. A run discarded by a repo switch skips those arms
-    // entirely: the retained head is the OLD repo's, so keying this repo's
-    // latches on it would spend a latch that was never formed for it.
+    // reset would blank it on reopen. A lane in the `created` phase is the
+    // opposite case: the PR shipped, so the submitted draft must not come back.
+    // The draft's identity is the RETAINED form head, not this open's default:
+    // the user may have submitted a head that differs from the branch they are
+    // on now. The `||` short-circuit is deliberate — while a generation or
+    // create is in flight the pr-create latches stay unconsumed, so a later
+    // reopen after a failure still preserves the draft. A run discarded by a
+    // repo switch skips those arms entirely: the retained head is the OLD
+    // repo's, so keying this repo's latches on it would spend a latch that was
+    // never formed for it.
     if (seededRef.current) {
       const retained = form.state.values.head || h;
       if (
         surface.shouldSkipSeed(generating) ||
         (!surface.runDiscardedBySwitch() &&
-          (isCreatingPrFor(repoPath, retained) ||
+          (prCreatePhase(repoPath, retained) === "creating" ||
             consumeLastFailed(repoPath, retained)))
       )
         return;
@@ -515,13 +564,16 @@ export function CreatePrDialog({
   const notes = useSelector(form.store, (s) => s.values.notes);
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   // Survives this dialog closing, unlike `isSubmitting` — a create dismissed
-  // mid-flight still owns the head branch until it settles.
-  const creatingThisHead = useIsCreatingPr(repoPath, head);
+  // mid-flight still owns the head branch until it settles, which is now the
+  // whole catch-up window after the forge answers. The entry, not just a
+  // boolean, so the hint below can name the number it already has.
+  const lane = usePrCreates(repoPath).find((c) => c.head === head);
   // The RE-ENTRY case only. This submit claims the lane synchronously, so the
   // flag is also true during the user's own create — which `isSubmitting`
   // already covers, and where a "someone else is creating this" refusal would
   // be nonsense under a spinning button.
-  const creatingElsewhere = creatingThisHead && !isSubmitting;
+  const creatingElsewhere = lane !== undefined && !isSubmitting;
+  const laneHint = lane && !isSubmitting ? LANE_HINT[lane.phase](lane) : null;
 
   // Fork-side fallback base, mirroring the seed logic (default branch, else first
   // non-head) — reused when reconciling back from the parent target.
@@ -1136,7 +1188,7 @@ export function CreatePrDialog({
           </div>
 
           <DialogFooter className="sm:items-center">
-            {creatingElsewhere && (
+            {laneHint && (
               // Why the submit is disabled. It lives here rather than in the
               // scrollable body so it can't scroll out of view, and the button
               // points `aria-describedby` at it.
@@ -1144,7 +1196,7 @@ export function CreatePrDialog({
                 id={creatingHintId}
                 className="basis-full text-xs text-warning"
               >
-                A pull request for this branch is already being created.
+                {laneHint}
               </p>
             )}
             <form.AppField name="draft">
@@ -1167,9 +1219,7 @@ export function CreatePrDialog({
                 {(draft) => (
                   <form.SubmitButton
                     disabled={submitBlocked}
-                    aria-describedby={
-                      creatingElsewhere ? creatingHintId : undefined
-                    }
+                    aria-describedby={laneHint ? creatingHintId : undefined}
                     title={SUBMIT_HINT}
                   >
                     {draft ? "Create draft" : `Create ${prNoun}`}

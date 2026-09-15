@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useId, useState } from "react";
 import { toast } from "sonner";
@@ -19,13 +20,25 @@ import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import {
+  markPrCreated,
+  type PrCreate,
+  prCreateStartedAt,
   settlePrCreate,
   startPrCreate,
   useIsCreatingPr,
+  usePrCreatePhase,
 } from "@/lib/stores/pr-create";
+import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+
+/** Why Publish is held, per lane phase — a lane in `created` is one whose PR
+ *  already exists and is only waiting for the list. */
+const LANE_HINT: Record<PrCreate["phase"], (noun: string) => string> = {
+  creating: (noun) => `A ${noun} for this branch is already being created.`,
+  created: (noun) => `A ${noun} for this branch was just created.`,
+};
 
 /**
  * Publishes a local PR to the repo's provider (GitHub, GitLab, or Bitbucket):
@@ -48,6 +61,7 @@ export function PromoteLocalPrDialog({
 }) {
   const createPr = useCreatePr(repoPath);
   const update = useUpdateLocalPr(repoPath);
+  const queryClient = useQueryClient();
   const selectPr = useUiStore((s) => s.selectPr);
   const setLens = useSetRepoLens(repoPath);
   const forge = useForgeStatus(repoPath);
@@ -65,6 +79,11 @@ export function PromoteLocalPrDialog({
   // promote claims the lane synchronously, so the flag is also true during this
   // dialog's own run, where `pending` is the honest thing to show.
   const creatingElsewhere = useIsCreatingPr(repoPath, pr.head) && !pending;
+  // The lane survives the forge's answer until the list catches up, so the hint
+  // must not still say "being created" once the PR exists.
+  const lanePhase = usePrCreatePhase(repoPath, pr.head);
+  const laneHint =
+    creatingElsewhere && lanePhase ? LANE_HINT[lanePhase](prNoun) : null;
   const creatingHintId = useId();
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
@@ -74,7 +93,13 @@ export function PromoteLocalPrDialog({
     // Fire-time admission, claimed before the first await: the push plus the
     // forge call outlives this dialog, and a second create for the same head
     // would queue on the repo lock and then open a duplicate PR.
-    const refusal = startPrCreate(repoPath, pr.head, pr.base);
+    const refusal = startPrCreate(repoPath, pr.head, pr.base, {
+      title: pr.title,
+      draft,
+      // Promotion always publishes to the fork's own remote.
+      lens: "origin",
+      noun: prNoun,
+    });
     if (refusal) {
       toast.error(refusal);
       return;
@@ -97,6 +122,19 @@ export function PromoteLocalPrDialog({
       });
       created = { number, url };
       outcome = "success";
+      // Flip the lane HERE, not in the finally: the comment carry-over below can
+      // run long, and the strip would sit on "creating" with the number already
+      // known. The watcher then settles the lane when the list shows the PR.
+      markPrCreated(repoPath, pr.head, { number, url });
+      const startedAt = prCreateStartedAt(repoPath, pr.head);
+      if (startedAt !== null)
+        armPrCreateHandOff(queryClient, {
+          repoPath,
+          head: pr.head,
+          lens: "origin",
+          number,
+          startedAt,
+        });
       // Carry the local comments over, in order, so none are lost.
       failedStep = "carrying over comments";
       setPosting(true);
@@ -151,7 +189,9 @@ export function PromoteLocalPrDialog({
         },
       );
     } finally {
-      settlePrCreate(repoPath, pr.head, outcome);
+      // Failed-before-create only. Once the PR exists the lane belongs to the
+      // hand-off watcher, which holds it until the list shows the row.
+      if (outcome === "release") settlePrCreate(repoPath, pr.head, "release");
     }
   }
 
@@ -173,9 +213,9 @@ export function PromoteLocalPrDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogFooter className="sm:items-center">
-          {creatingElsewhere && (
+          {laneHint && (
             <p id={creatingHintId} className="basis-full text-xs text-warning">
-              A pull request for this branch is already being created.
+              {laneHint}
             </p>
           )}
           <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
@@ -195,7 +235,7 @@ export function PromoteLocalPrDialog({
           <Button
             onClick={promote}
             disabled={pending || creatingElsewhere}
-            aria-describedby={creatingElsewhere ? creatingHintId : undefined}
+            aria-describedby={laneHint ? creatingHintId : undefined}
           >
             {pending && <Spinner data-icon="inline-start" />}
             {draft ? "Publish as draft" : `Publish to ${remoteLabel}`}
