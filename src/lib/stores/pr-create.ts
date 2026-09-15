@@ -66,8 +66,9 @@ const failKey = (repoPath: string, head: string) =>
 /** Why a head branch is blocked, per the phase of the lane holding it — one
  *  source for both readings of that fact: {@link startPrCreate}'s fire-time
  *  refusal toast, and the inline hint a dialog shows beside its held submit.
- *  It speaks with the BLOCKING lane's own noun, since that is the create the
- *  user is being told about. */
+ *  The caller supplies the noun — the blocking lane's own at
+ *  {@link startPrCreate}, the dialog's own at a held-submit hint — identical
+ *  for a repo, since both read its forge provider. */
 export const LANE_BLOCKED_HINT: Record<
   PrCreate["phase"],
   (noun: string) => string
