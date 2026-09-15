@@ -133,8 +133,9 @@ export function emitNotification(
     const repoId = identity === row.repoPath ? undefined : identity;
     // Sequenced after the race so the lookup reuses that key instead of resolving a
     // second time; a raw path here reads the legacy override key only and never
-    // reaches the resolver. Costs this read the race's bound, and only on a path
-    // slow enough to hit it.
+    // reaches the resolver. Costs this read the race's bound, and — on a cold
+    // memo — the identity key itself: a mute stored under the identity is missed
+    // for that one event, the price of never blocking delivery on a hung mount.
     const override = await overrideForRepo(row.repoPath, identity).catch(
       () => undefined,
     );

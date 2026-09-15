@@ -13,9 +13,10 @@ import { invoke } from "@/lib/tauri/invoke";
 
 const identityCache = new Map<string, Promise<string>>();
 /** Resolved keys only, written where the IPC call succeeds — the synchronous view
- *  of {@link identityCache}, whose entries are Promises a peek cannot inspect. A
- *  swallowed failure never lands here, so this can only ever hold a real identity,
- *  never the raw-path fallback. */
+ *  of {@link identityCache}, whose entries are Promises a peek cannot inspect.
+ *  Holds whatever the resolver answered, including the Rust-side raw-path
+ *  fallback for a live-but-unresolvable repo — callers keep treating
+ *  `identity === repoPath` as "no identity". */
 const settledIdentities = new Map<string, string>();
 
 /** Resolve `repoPath` to its identity key (memoized per path), REJECTING when the
