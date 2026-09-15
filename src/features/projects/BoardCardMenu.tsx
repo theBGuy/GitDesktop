@@ -31,19 +31,25 @@ export interface BoardMenuActions {
   open: () => void;
   /** Where the card should land, as an index into `columns`. */
   move: (columnIndex: number) => void;
+  /** Turn a DRAFT into a real issue. Offered on draft cards alone. */
+  convert: () => void;
+  archive: () => void;
+  remove: () => void;
 }
 
 /**
- * The board's card menu: an optional Open row, then a flat "Move to" section
- * listing the current grouping's columns in board order. Presentational — the
- * panel records the target on right-click (capture phase) and hands it down here
- * with the labels and gates already resolved.
+ * The board's card menu: an optional Open row, a flat "Move to" section listing the
+ * current grouping's columns in board order, then the rows that change what the
+ * card IS — convert, archive, remove. Presentational — the panel records the target
+ * on right-click (capture phase) and hands it down here with the labels, the gates
+ * and the confirmations already resolved.
  */
 export function BoardCardMenuItems({
   target,
   columns,
   openLabel,
   heldReason,
+  actionHeldReason,
   actions,
 }: {
   target: BoardMenuTarget;
@@ -55,9 +61,19 @@ export function BoardCardMenuItems({
   openLabel: string | null;
   /** Why every move is held, or undefined when they're live. */
   heldReason: string | undefined;
+  /** Why convert/archive/remove are held, or undefined when they're live. Apart
+   *  from {@link heldReason} because a move can be held by something that leaves
+   *  these three fine — an ungrouped board, or a grouping GitHub owns on the issue
+   *  itself. */
+  actionHeldReason: string | undefined;
   actions: BoardMenuActions;
 }) {
   if (target === null) return null;
+  const isDraft = target.item.content.kind === "draft";
+  // A draft on an ungrouped board has neither an Open row nor a Move section, so
+  // its menu starts at these rows — and a separator with nothing above it reads as
+  // a rendering fault.
+  const hasRowsAbove = openLabel !== null || columns.length > 0;
   return (
     <>
       {openLabel !== null && (
@@ -117,6 +133,30 @@ export function BoardCardMenuItems({
             <ContextMenuItem disabled>{heldReason}</ContextMenuItem>
           </ContextMenuGroup>
         ))}
+      {hasRowsAbove && <ContextMenuSeparator />}
+      {actionHeldReason === undefined ? (
+        <>
+          {/* Drafts only: an issue or pull request is already the thing a convert
+              would make. The ellipsis is the house promise that a confirmation
+              comes first — all three of these ask. */}
+          {isDraft && (
+            <ContextMenuItem onClick={actions.convert}>
+              Convert to issue…
+            </ContextMenuItem>
+          )}
+          <ContextMenuItem onClick={actions.archive}>
+            Archive card…
+          </ContextMenuItem>
+          <ContextMenuItem variant="destructive" onClick={actions.remove}>
+            Remove from project…
+          </ContextMenuItem>
+        </>
+      ) : (
+        // One held row carrying the reason, the same shape the Move section takes
+        // when it is held: a disabled menu item can't hold a tooltip, so the
+        // reason has to BE the row.
+        <ContextMenuItem disabled>{actionHeldReason}</ContextMenuItem>
+      )}
     </>
   );
 }

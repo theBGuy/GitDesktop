@@ -362,6 +362,20 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  // Both of these have a toolbar button one Tab from the project name, so they
+  // ship palette-only for the same reason the row above does.
+  {
+    id: "add-board-item",
+    label: "Add issue or pull request to board…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "new-board-draft",
+    label: "New board draft…",
+    category: "Repository",
+    defaultBinding: null,
+  },
   {
     id: "create-discussion",
     label: "Create discussion",

@@ -2561,6 +2561,37 @@ export interface BoardItems {
   endCursor: string | null;
 }
 
+/** One issue or pull request the board could take, as the add-existing search
+ *  reports it. `id` is the CONTENT node id an add addresses — never a
+ *  {@link BoardItem}'s `itemId`, which only exists once the item is on a board.
+ *  `state`/`isDraft`/`stateReason` carry the same wire spellings
+ *  {@link BoardItemContent} does, so one presentation table serves both. */
+export interface BoardCandidate {
+  id: string;
+  kind: "issue" | "pr";
+  number: number;
+  title: string;
+  state: string;
+  isDraft: boolean;
+  stateReason: string | null;
+}
+
+/** One page of add-existing candidates. `truncated` reports that the search was
+ *  capped, the same claim {@link ProjectFieldDefs} and {@link ProjectViews} make
+ *  about their lists. */
+export interface BoardCandidates {
+  candidates: BoardCandidate[];
+  truncated: boolean;
+}
+
+/** What a converted draft became: the real issue's number and its web URL. The
+ *  draft's card keeps its item id across the conversion — only its content
+ *  changes — so nothing here addresses the board. */
+export interface ConvertedDraft {
+  number: number;
+  url: string;
+}
+
 export interface Reaction {
   /** GitHub ReactionContent enum value (THUMBS_UP, HEART, ROCKET, …). */
   content: string;

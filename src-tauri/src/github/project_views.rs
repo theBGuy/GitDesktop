@@ -49,6 +49,7 @@ fn map_scope_error(e: AppError) -> AppError {
 }
 
 fn project_views_query() -> &'static str {
+    // Keep views(first:50) paired with VIEWS_TRUNCATED_NOTE in ProjectsBoardPanel.tsx.
     "query($id:ID!){ node(id:$id){ ... on ProjectV2 { \
      views(first:50){ pageInfo{hasNextPage} nodes{ \
      id name layout filter \

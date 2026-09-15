@@ -13,6 +13,7 @@ pub mod pr;
 pub mod pr_search;
 pub mod project;
 pub mod project_fields;
+pub mod project_item_edits;
 pub mod project_items;
 pub mod project_views;
 pub mod release;

@@ -366,6 +366,7 @@ export const BoardCard = memo(function BoardCard({
   setSize,
   columnIndex,
   active,
+  busy,
   rovingTab,
   repoSlug,
   ghHost,
@@ -380,6 +381,10 @@ export const BoardCard = memo(function BoardCard({
   setSize: number;
   columnIndex: number;
   active: boolean;
+  /** A write is changing this card in place — today, a draft being converted to an
+   *  issue. BUSY, not disabled: the card is still a real card and still opens, and
+   *  the menu rows that could collide with the write are held by the panel. */
+  busy: boolean;
   /** Roving tabindex: one tab stop for the whole board, on the cursor's card. */
   rovingTab: number;
   /** The open repo under the ACTIVE lens; a card from another repo names its own. */
@@ -401,9 +406,17 @@ export const BoardCard = memo(function BoardCard({
     "aria-setsize": setSize,
     "aria-posinset": index + 1,
     tabIndex: rovingTab,
+    // Absent rather than `false` when nothing is in flight: `aria-busy="false"` is
+    // valid but says something on every card on the board, where the attribute is
+    // only meaningful on the one being written.
+    "aria-busy": busy || undefined,
     onFocus: () => onFocus(columnIndex, index),
   } as const;
   const toneClass = active && "bg-accent text-accent-foreground";
+  // Lighter than the app's 50% disabled dim on purpose: this card is BUSY, not
+  // disabled — it still opens, and `aria-busy` is what carries the state to a
+  // reader. Colour says nothing here that the attribute doesn't.
+  const busyClass = busy && "opacity-60";
 
   if (content.kind === "redacted") {
     return (
@@ -412,7 +425,12 @@ export const BoardCard = memo(function BoardCard({
       <div
         {...shared}
         aria-disabled
-        className={cn(CARD_CLASS, "text-muted-foreground", toneClass)}
+        className={cn(
+          CARD_CLASS,
+          "text-muted-foreground",
+          toneClass,
+          busyClass,
+        )}
       >
         <span className="flex items-start gap-1.5">
           <LockSimpleIcon className="size-3.5 shrink-0" />
@@ -438,7 +456,7 @@ export const BoardCard = memo(function BoardCard({
             <button
               type="button"
               {...shared}
-              className={cn(CARD_CLASS, "cursor-pointer", toneClass)}
+              className={cn(CARD_CLASS, "cursor-pointer", toneClass, busyClass)}
             />
           }
         >
@@ -500,7 +518,7 @@ export const BoardCard = memo(function BoardCard({
     <button
       type="button"
       {...shared}
-      className={cn(CARD_CLASS, "cursor-pointer", toneClass)}
+      className={cn(CARD_CLASS, "cursor-pointer", toneClass, busyClass)}
       onClick={() => onOpen(item)}
     >
       {content.kind === "pullRequest" ? (

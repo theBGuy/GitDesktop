@@ -1745,7 +1745,11 @@ duplicates, and same-project mentions.
   issue.
 - **Projects** — chips in the side rail show which **GitHub Projects** the issue belongs to,
   and a picker links or unlinks it across the repository's projects and the owner's; your
-  changes apply when the picker closes. Below the chips, one line per board reads out where
+  changes apply when the picker closes. The **New issue** dialog carries a **Projects**
+  band under its description — **Add to project** picks a board, each one becomes a chip
+  the arrows walk and **Delete** removes — so an issue can land on its boards as it's
+  created; if the issue opens but a board refuses it, the dialog closes and says which
+  part didn't happen. Below the chips, one line per board reads out where
   the issue stands: **Status**, **Priority**, **Iteration** (with the dates it covers), plus
   date, text, number, and multi-select fields, each named beside its value. A board is named
   on its own line once the issue sits on more than one. The **Project fields** row itself is
@@ -1896,6 +1900,7 @@ saved:
 
 - **Project** lists the open boards this repository and its owner have, the repository's own
   first. Closed boards aren't listed.
+- **Add item** puts work on the board (below).
 - **View options** gathers the controls for how the board is laid out. **View** picks one of
   the board's saved views as a lens over it (below). **Group by** picks which of the board's
   single-select fields becomes the columns, starting on **Status**, since that's what a
@@ -1908,6 +1913,34 @@ Beside them, the count says how much of the board you're looking at, and **Load 
 fetches the next page of a big one. Items the board has **archived** stay out of the columns
 and out of the per-column counts. The board's own total still counts them, so while a board
 is still paging in, that total can run ahead of the cards in front of you.
+
+## Adding items
+
+**Add item** offers two ways to put work on the board; the command palette carries both,
+as **Add issue or pull request to board…** and **New board draft…**.
+
+- **Add issue or pull request…** searches this repository: the one the board was opened
+  from, on whichever side of a fork's **Fork | Upstream** lens you're on. Each result
+  carries its state glyph, its number and its title. Pick one and its row says it's
+  being added, then that it was; the dialog stays open, so you can add several in a
+  row. A row that's already on the board says that instead of offering a second
+  copy — for the pages the board has loaded, which is why an item further down a big
+  board can still be offered (adding it again changes nothing). The arrows walk the
+  results, **Enter** adds the one you're on, and **Esc** ends the run — closing over an
+  add still in flight is fine, the board finishes it and says so above the columns.
+- **New draft…** writes a note that lives on this board and nowhere else. It takes a
+  title and **Markdown** notes, kept exactly as you write them — the card's own popover
+  renders them.
+
+While any of this is on its way, a line above the columns says what the board is waiting
+on. That line clears when GitHub accepts the write, which is a step ahead of the card
+appearing: under a filtered view the view's filter may leave the item out, and GitHub's
+search index takes a few seconds to catch up with its own write. **Clear view** shows the
+whole board either way.
+
+**Add item** is held with its reason on it when your GitHub sign-in can read projects but
+not change them, when you don't have write access to the board, and while **Load more** is
+still fetching a page.
 
 ## Saved views
 
@@ -1964,9 +1997,8 @@ matching the card's current value is ticked and can't be picked, so a move can't
 no-op; the **No {field}** column clears the field rather than setting it, and stays pickable
 for a card whose stored option the board no longer offers. Your keyboard place follows the
 card, so the arrows carry on from where it landed; if GitHub refuses the write, the card
-returns to its old column and a message says why. A **draft** card on a grouped board carries
-the **Move to** section alone, since its notes already open from the card itself, and a
-redacted item has no menu at all.
+returns to its old column and a message says why. A **draft** card carries no **Open** row,
+since its notes already open from the card itself.
 
 One move at a time: while a write is in flight the menu says so in place of the columns, and
 it waits the same way while **Load more** is still fetching, so a move can't cut the page you
@@ -1975,7 +2007,35 @@ the two never run at once, in either order. The section is held with its reason 
 your GitHub sign-in can read project fields but not change them, when you don't have write
 access to the board, and when the board is grouped by one of GitHub's own issue fields (those
 are edited on GitHub). An ungrouped board has no columns to move between, so its cards carry
-**Open** alone, and a draft card there has no menu at all.
+no **Move to** section.
+
+## Converting, archiving and removing
+
+Below **Move to**, the same menu holds the rows that change what a card is. Each one asks
+first, and each prompt says where the card goes:
+
+- **Convert to issue…** turns a **draft** into a real issue in this repository, and swaps
+  the card over to it in place — the draft's title and notes become the issue's. The swap
+  lands when GitHub answers; until then the card itself dims and a line above the columns
+  says what's happening. Drafts only: anything else on the board is already an issue or a
+  pull request.
+- **Archive card…** takes the card out of the columns and leaves it on the project, where
+  GitHub's own **archived items** view can restore it. Archived items stay out of the
+  columns and out of the per-column counts.
+- **Remove from project…** takes the card off this project. For an issue or a pull request
+  that unlinks the membership and nothing else — the issue itself is untouched, and you can
+  add it back from **Add item**. For a **draft** it's a deletion: a draft lives on this
+  project and nowhere else, and the prompt says so.
+
+After an archive or a removal your keyboard place lands on the card that took its slot, or
+on the board's first card when that column emptied. When nothing is left to stand on (an
+emptied board, or one this view's filter leaves empty), focus moves to **Add item** in the
+toolbar. A card whose contents you don't have access
+to still carries **Archive card…** and **Remove from project…**, since both reach it by its
+place on the board rather than by what's inside it; **Convert to issue…** isn't offered
+there. All three are held with their reason on them when your GitHub sign-in can read
+projects but not change them, when you don't have write access to the board, and while
+another card write or a **Load more** page is still finishing.
 
 ## Keyboard
 
@@ -1986,9 +2046,9 @@ Collapsing the sidebar ({{kbd:toggle-sidebar}}) hands the board its width.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
-and offers a one-click **Reconnect GitHub…**, which requests \`project\`. Moving a card needs
-the full \`project\` scope, so a \`read:project\` sign-in draws the board with its move rows
-held.`,
+and offers a one-click **Reconnect GitHub…**, which requests \`project\`. Every write here —
+adding, moving, converting, archiving, removing — needs the full \`project\` scope, so a
+\`read:project\` sign-in draws the board with those controls held.`,
   },
   {
     id: "discussions",
