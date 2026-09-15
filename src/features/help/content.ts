@@ -2030,12 +2030,12 @@ first, and each prompt says where the card goes:
 After an archive or a removal your keyboard place lands on the card that took its slot, or
 on the board's first card when that column emptied. When nothing is left to stand on (an
 emptied board, or one this view's filter leaves empty), focus moves to **Add item** in the
-toolbar. A card whose contents you don't have access
-to still carries **Archive card…** and **Remove from project…**, since both reach it by its
-place on the board rather than by what's inside it; **Convert to issue…** isn't offered
-there. All three are held with their reason on them when your GitHub sign-in can read
-projects but not change them, when you don't have write access to the board, and while
-another card write or a **Load more** page is still finishing.
+toolbar. A card whose contents you don't have access to still carries **Archive card…**
+and **Remove from project…**, since both reach it by its place on the board rather than by
+what's inside it; **Convert to issue…** isn't offered there. All three are held with their
+reason on them when your GitHub sign-in can read projects but not change them, when you
+don't have write access to the board, and while another card write or a **Load more**
+page is still finishing.
 
 ## Keyboard
 

@@ -78,8 +78,8 @@ fn graphql_input(document: &str, variables: Value) -> String {
 fn search_input(owner: &str, name: &str, search: &str) -> String {
     let search = search.trim();
     let mut q = format!("repo:{owner}/{name} sort:updated-desc");
-    // Group OR branches under the repo qualifier. Unbalanced user parentheses may
-    // be rejected by GitHub and surface through the existing query error path.
+    // Convenience grouping only: user parentheses can escape the repo qualifier.
+    // parse_candidate's repository check enforces that only matching rows reach the picker.
     if !search.is_empty() {
         q.push_str(&format!(" ({search})"));
     }
@@ -93,6 +93,7 @@ fn draft_input(project_id: &str, title: &str, body: &str) -> String {
     )
 }
 
+// Preserve CLI failures verbatim; project mutation callers own scope-hint mapping.
 async fn request(repo_path: &str, input: &str, surface: &str) -> AppResult<Value> {
     let out = run_gh_input(
         Some(repo_path),
@@ -100,8 +101,7 @@ async fn request(repo_path: &str, input: &str, surface: &str) -> AppResult<Value
         input,
         GH_NETWORK_TIMEOUT,
     )
-    .await
-    .map_err(map_scope_error)?;
+    .await?;
     serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
 }
@@ -187,6 +187,14 @@ fn parse_candidates(value: &Value, expected_repository: &str) -> AppResult<Board
     })
 }
 
+// Search failures retain the scopes GitHub names; project hints do not apply here.
+fn search_candidates_from_response(
+    response: AppResult<Value>,
+    expected_repository: &str,
+) -> AppResult<BoardCandidates> {
+    parse_candidates(&response?, expected_repository)
+}
+
 fn parse_converted(value: &Value) -> AppResult<ConvertedDraft> {
     let content = value.pointer(CONVERT_POINTER).unwrap_or(&Value::Null);
     if content["__typename"].as_str() != Some("Issue") {
@@ -220,16 +228,14 @@ pub async fn gh_search_board_candidates(
     search: String,
     lens: Option<String>,
 ) -> AppResult<BoardCandidates> {
-    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref())
-        .await
-        .map_err(map_scope_error)?;
-    let value = request(
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
+    let response = request(
         &repo_path,
         &search_input(&owner, &name, &search),
         "the board candidates",
     )
-    .await?;
-    parse_candidates(&value, &format!("{owner}/{name}"))
+    .await;
+    search_candidates_from_response(response, &format!("{owner}/{name}"))
 }
 
 #[tauri::command]
@@ -244,7 +250,8 @@ pub async fn gh_add_draft_item(
         &draft_input(&project_id, &title, &body),
         "the new project draft",
     )
-    .await?;
+    .await
+    .map_err(map_scope_error)?;
     response_id(&value, DRAFT_ID_POINTER, "the new project draft")
 }
 
@@ -254,9 +261,7 @@ pub async fn gh_convert_draft_item(
     item_id: String,
     lens: Option<String>,
 ) -> AppResult<ConvertedDraft> {
-    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref())
-        .await
-        .map_err(map_scope_error)?;
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     let input = graphql_input(REPOSITORY_QUERY, json!({"owner": owner, "name": name}));
     let value = request(&repo_path, &input, "the draft's destination repository").await?;
     // Resolve and parse the destination before issuing any mutation.
@@ -269,7 +274,9 @@ pub async fn gh_convert_draft_item(
         CONVERT_MUTATION,
         json!({"itemId": item_id, "repositoryId": repository_id}),
     );
-    let value = request(&repo_path, &input, "the converted draft").await?;
+    let value = request(&repo_path, &input, "the converted draft")
+        .await
+        .map_err(map_scope_error)?;
     parse_converted(&value)
 }
 
@@ -283,7 +290,9 @@ pub async fn gh_archive_board_item(
         ARCHIVE_MUTATION,
         json!({"projectId": project_id, "itemId": item_id}),
     );
-    let value = request(&repo_path, &input, "the archived project item").await?;
+    let value = request(&repo_path, &input, "the archived project item")
+        .await
+        .map_err(map_scope_error)?;
     require_payload(&value, ARCHIVE_POINTER, "the archived project item")
 }
 
@@ -297,7 +306,9 @@ pub async fn gh_remove_board_item(
         REMOVE_MUTATION,
         json!({"projectId": project_id, "itemId": item_id}),
     );
-    let value = request(&repo_path, &input, "the removed project item").await?;
+    let value = request(&repo_path, &input, "the removed project item")
+        .await
+        .map_err(map_scope_error)?;
     require_payload(&value, REMOVE_POINTER, "the removed project item")
 }
 
@@ -311,9 +322,7 @@ pub async fn gh_add_issue_to_projects(
     if add_project_ids.is_empty() {
         return Ok(());
     }
-    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref())
-        .await
-        .map_err(map_scope_error)?;
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
     let input = graphql_input(
         ISSUE_QUERY,
         json!({"owner": owner, "name": name, "number": number}),
@@ -326,7 +335,8 @@ pub async fn gh_add_issue_to_projects(
         &graphql_input(&document, json!({})),
         "the added project memberships",
     )
-    .await?;
+    .await
+    .map_err(map_scope_error)?;
     Ok(())
 }
 
@@ -473,7 +483,12 @@ mod tests {
             let input: Value = serde_json::from_str(&search_input("owner", "repo", text)).unwrap();
             assert_eq!(input["variables"]["q"], "repo:owner/repo sort:updated-desc");
         }
-        for text in ["label:bug", "bug OR regression", "repo:other/x"] {
+        for text in [
+            "label:bug",
+            "bug OR regression",
+            "repo:other/x",
+            "a) OR (repo:other/x",
+        ] {
             let input: Value =
                 serde_json::from_str(&search_input("owner", "repo", &format!("  {text}  ")))
                     .unwrap();
@@ -532,6 +547,25 @@ mod tests {
         let mut node = pr();
         node.as_object_mut().unwrap().remove("repository");
         assert!(parse_candidate(&node, "owner/repo").is_none());
+    }
+
+    #[test]
+    fn repository_filter_enforces_scope_after_parenthesis_escape() {
+        let input: Value =
+            serde_json::from_str(&search_input("owner", "repo", "a) OR (repo:other/x")).unwrap();
+        assert_eq!(
+            input["variables"]["q"],
+            "repo:owner/repo sort:updated-desc (a) OR (repo:other/x)"
+        );
+        let mut foreign = issue(Value::Null);
+        foreign["repository"]["nameWithOwner"] = json!("other/x");
+        let result = parse_candidates(
+            &page(json!([foreign, issue(Value::Null)]), false),
+            "owner/repo",
+        )
+        .unwrap();
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].id, "I_one");
     }
 
     #[test]
@@ -702,6 +736,15 @@ mod tests {
 
     #[test]
     fn scope_mapping_preserves_unrelated_errors() {
+        for message in [
+            "gh: required scopes: ['repo']",
+            "gh: requires one of the following scopes: ['repo']",
+        ] {
+            let error =
+                search_candidates_from_response(Err(AppError::Gh(message.into())), "owner/repo")
+                    .unwrap_err();
+            assert_eq!(error.to_string(), message);
+        }
         for message in ["gh: required scopes: project", "Missing READ:PROJECT"] {
             assert_eq!(
                 map_scope_error(AppError::Gh(message.into())).to_string(),

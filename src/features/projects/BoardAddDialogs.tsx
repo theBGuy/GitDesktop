@@ -332,7 +332,12 @@ export function AddExistingItemsDialog({
     switch (true) {
       case rows.length === 0 && inFlight:
         return <SearchingRows />;
-      case candidates.error !== null:
+      // Gated on having NOTHING to show. A refetch that failed over rows already
+      // on screen must not blank them: those rows are real, just possibly stale,
+      // and the full-pane error would trade a working list for a dead end. That
+      // case takes the inline notice in the rows arm instead — the board's own
+      // rule for a failed read over drawn cards.
+      case candidates.error !== null && rows.length === 0:
         return (
           <div className="space-y-2 px-1 py-6 text-xs">
             <p className="text-muted-foreground">
@@ -352,6 +357,26 @@ export function AddExistingItemsDialog({
       default:
         return (
           <div className="space-y-1">
+            {/* A failed read over rows that ARE on screen: the list stands and
+                says what went wrong beside it, with its own retry — the in-flow
+                notice shape the board uses for the same situation. Without this
+                the rows would just go quietly stale, since `retry: false` means
+                nothing tries again on its own. */}
+            {candidates.error !== null && (
+              <p className="flex flex-wrap items-center gap-1.5 px-1 pb-1 text-[11px]">
+                <span className="text-destructive">
+                  {presentError(candidates.error).summary}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Retry searching this repository"
+                  onClick={() => void candidates.refetch()}
+                  className="cursor-pointer text-muted-foreground underline hover:text-foreground"
+                >
+                  Retry
+                </button>
+              </p>
+            )}
             {rows.map((candidate, i) => (
               <CandidateRow
                 key={candidate.id}

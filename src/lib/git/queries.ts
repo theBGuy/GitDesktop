@@ -2663,13 +2663,12 @@ export type BoardWriteKind =
   | "add-draft";
 
 /**
- * The key every board write is tagged with: `["board-write", repo, group, kind]`.
+ * The key every board write is tagged with: `["board-write", group, kind]`.
  *
  * `group` is what makes the two gates prefix-matchable — the card writes change an
  * EXISTING card and so hold the menu rows against each other, where an add touches
  * no card and holds only pagination. Filters are partial matches, so
- * `["board-write", repo]` is every write on a board and `["board-write", repo,
- * "card"]` is the card half.
+ * `["board-write"]` is every write and `["board-write", "card"]` is the card half.
  *
  * Tagging exists because `useMutation().isPending` tracks one observer's LATEST
  * invocation only — `MutationObserver.mutate` drops its previous mutation and
@@ -2678,17 +2677,19 @@ export type BoardWriteKind =
  * add-existing picks. The key lets the panel count and enumerate the CACHE instead,
  * which sees every one.
  *
- * `repo` here selects which board's writes a panel watches; the write itself still
- * addresses `args.repo` from its call-time variables, never this.
+ * WHICH REPO a write belongs to is deliberately NOT in here. The key is built from
+ * the hook's render scope, and query-core re-applies a live observer's options on
+ * every render: a key carrying `repo` would change identity under a repo switch,
+ * which `MutationObserver.setOptions` answers by RESETTING the observer off its own
+ * pending mutation. The write's repo is its call-time `variables.repo` — one source
+ * of truth, fixed at fire time — so {@link usePendingBoardWrites} filters on that
+ * and the key stays a statement about KIND alone.
  */
-const boardWriteKey = (
-  repo: string,
-  group: "card" | "add",
-  kind: BoardWriteKind,
-) => ["board-write", repo, group, kind] as const;
+const boardWriteKey = (group: "card" | "add", kind: BoardWriteKind) =>
+  ["board-write", group, kind] as const;
 
-/** Filter prefix for EVERY board write on one repo — what pagination waits on. */
-const boardWritesKey = (repo: string) => ["board-write", repo] as const;
+/** Filter prefix for EVERY board write — narrowed to one repo by variables below. */
+const BOARD_WRITES_KEY = ["board-write"] as const;
 
 /** One pending board write, flattened for the panel's holds, strip and busy card.
  *  The two value fields are display-only reads off the write's own variables, and
@@ -2702,28 +2703,56 @@ export interface PendingBoardWrite {
   number: number | null;
 }
 
+/** Every board write's variables carry the repo it addresses; the rest are per-kind
+ *  and read only for labels. Untrusted at this boundary in the sense that the
+ *  filter sees `Mutation<any>`, so each field is `typeof`-guarded rather than
+ *  asserted. */
+function boardWriteVars(mutation: { state: { variables?: unknown } }): {
+  repo: string | null;
+  itemId: string | null;
+  number: number | null;
+} {
+  const vars = mutation.state.variables;
+  if (typeof vars !== "object" || vars === null)
+    return { repo: null, itemId: null, number: null };
+  const { repo, itemId, number } = vars as Record<string, unknown>;
+  return {
+    repo: typeof repo === "string" ? repo : null,
+    itemId: typeof itemId === "string" ? itemId : null,
+    number: typeof number === "number" ? number : null,
+  };
+}
+
 /**
- * Every board write on `repo` that is currently in flight, one entry per
+ * Every board write against `repo` that is currently in flight, one entry per
  * INVOCATION — the observer-independent reading the panel's gates and strip need.
  * `useMutationState` maps the mutation cache and diffs the result with
  * `replaceEqualDeep`, so the array keeps its identity while nothing changes.
+ *
+ * The repo match is a `predicate` over the write's own VARIABLES rather than a key
+ * segment: variables are fixed when the write fires, where a key is re-derived from
+ * whatever the hook's render scope holds later. That makes attribution correct by
+ * construction — a panel that outlives a repo switch (this one does; `RepositoryView`
+ * is a single instance across switches) can never count the previous repo's write.
  */
 export function usePendingBoardWrites(repo: string): PendingBoardWrite[] {
   return useMutationState({
-    filters: { mutationKey: boardWritesKey(repo), status: "pending" },
+    filters: {
+      mutationKey: BOARD_WRITES_KEY,
+      status: "pending",
+      predicate: (m) => boardWriteVars(m).repo === repo,
+    },
     select: (m): PendingBoardWrite => {
       // The key's own tail; unknown shapes degrade to a null kind rather than a
       // guessed one, which drops the write from the labelled lines but still
       // counts it for the holds.
-      const kind = m.options.mutationKey?.[3];
-      const vars = m.state.variables as
-        | { itemId?: string; number?: number }
-        | undefined;
+      const kind = m.options.mutationKey?.[2];
+      const vars = boardWriteVars(m);
       return {
         mutationId: m.mutationId,
         kind: typeof kind === "string" ? (kind as BoardWriteKind) : null,
-        itemId: vars?.itemId ?? null,
-        number: vars?.number ?? null,
+        itemId: vars.itemId,
+        number: vars.number,
       };
     },
   });
@@ -3021,10 +3050,10 @@ function restoreBoardItem(
  * whatever closure is current — so a repo or board switch mid-flight would
  * otherwise submit the old card against the new board.
  */
-export function useMoveBoardCard(repo: string) {
+export function useMoveBoardCard() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey(repo, "card", "move"),
+    mutationKey: boardWriteKey("card", "move"),
     mutationFn: (args: {
       repo: string;
       projectId: string;
@@ -3180,10 +3209,10 @@ export function useBoardCandidates(
  * mutate-scoped callbacks once the observer loses its listeners. Callers still see
  * the rejection through `mutateAsync`, which is what drives their own UI back.
  */
-export function useAddDraftItem(repo: string) {
+export function useAddDraftItem() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey(repo, "add", "add-draft"),
+    mutationKey: boardWriteKey("add", "add-draft"),
     mutationFn: (args: {
       repo: string;
       projectId: string;
@@ -3203,10 +3232,10 @@ export function useAddDraftItem(repo: string) {
 /** Turns a draft card into a real issue. The card keeps its item id, so only the
  *  board's own read changes — but the repo now has an issue that didn't exist, so
  *  the memberships families go stale with it. */
-export function useConvertDraftItem(repo: string) {
+export function useConvertDraftItem() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey(repo, "card", "convert"),
+    mutationKey: boardWriteKey("card", "convert"),
     mutationFn: (args: { repo: string; itemId: string; lens: RemoteLens }) =>
       trackBoardWrite(args.repo, () =>
         api.ghConvertDraftItem(args.repo, args.itemId, args.lens),
@@ -3257,7 +3286,6 @@ interface BoardItemWrite {
  * undefined.
  */
 function useBoardItemRemoval(
-  repo: string,
   kind: Extract<BoardWriteKind, "archive" | "remove">,
   call: (args: BoardItemWrite) => Promise<void>,
   /** Whether this write changes WHICH boards the item is on. An archive doesn't —
@@ -3266,7 +3294,7 @@ function useBoardItemRemoval(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey(repo, "card", kind),
+    mutationKey: boardWriteKey("card", kind),
     mutationFn: call,
     onMutate: async (args: BoardItemWrite) => {
       const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
@@ -3306,9 +3334,8 @@ function useBoardItemRemoval(
 
 /** Archives one card. Board-only: the item stays on the project (restorable from
  *  its archived items on GitHub), so no membership family is touched. */
-export function useArchiveBoardItem(repo: string) {
+export function useArchiveBoardItem() {
   return useBoardItemRemoval(
-    repo,
     "archive",
     (args) =>
       trackBoardWrite(args.repo, () =>
@@ -3320,9 +3347,8 @@ export function useArchiveBoardItem(repo: string) {
 
 /** Removes one card from the project — an unlink for an issue or pull request, a
  *  deletion for a draft. Membership-touching either way. */
-export function useRemoveBoardItem(repo: string) {
+export function useRemoveBoardItem() {
   return useBoardItemRemoval(
-    repo,
     "remove",
     (args) =>
       trackBoardWrite(args.repo, () =>
@@ -3335,10 +3361,10 @@ export function useRemoveBoardItem(repo: string) {
 /** Adds one existing issue or pull request to a board, through the same batched
  *  command the issue/PR picker uses: one add, no removes. `contentId` is the
  *  search result's CONTENT node id — a board item id addresses nothing here. */
-export function useAddExistingToBoard(repo: string) {
+export function useAddExistingToBoard() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey(repo, "add", "add-existing"),
+    mutationKey: boardWriteKey("add", "add-existing"),
     mutationFn: (args: {
       repo: string;
       projectId: string;

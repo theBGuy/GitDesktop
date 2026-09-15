@@ -214,6 +214,16 @@ export function CreateIssueDialog({
       mode: "refresh",
       scopes: ["project"],
     });
+  // One remedy, one wording. Both scope arms — a sign-in with no project scope at
+  // all, and a read-only one — are missing the same `project` scope and ask for it
+  // the same way; only WHERE the block renders differs.
+  const projectScopeRemedy = (
+    <ScopeGapBlock host={ghHost} onReconnect={reconnectForProjectScope}>
+      Adding an issue to a project needs the{" "}
+      <span className="font-mono">project</span> scope, which your GitHub
+      sign-in is missing.
+    </ScopeGapBlock>
+  );
 
   const form = useAppForm({
     defaultValues: { title: "", body: "" },
@@ -281,6 +291,12 @@ export function CreateIssueDialog({
           duration: 10000,
           action,
         });
+        // The issue EXISTS whatever the links did, so it still opens — the same
+        // navigate the clean path makes, under the same gate. A sub-issue keeps
+        // its parent on screen either way (GitHub's own behavior), and a forge
+        // that answered without a number names nothing to open.
+        if (!subIssueParentId && number > 0)
+          selectIssue({ kind: "remote", id: String(number) });
         return;
       }
       if (subIssueLinked) {
@@ -369,13 +385,7 @@ export function CreateIssueDialog({
   const projectsNotice = (() => {
     switch (true) {
       case projectScopeGap:
-        return (
-          <ScopeGapBlock host={ghHost} onReconnect={reconnectForProjectScope}>
-            Adding an issue to a project needs the{" "}
-            <span className="font-mono">project</span> scope, which your GitHub
-            sign-in is missing.
-          </ScopeGapBlock>
-        );
+        return projectScopeRemedy;
       case projects.error !== null:
         return (
           <div className="px-1 py-1 text-xs">
@@ -649,16 +659,9 @@ export function CreateIssueDialog({
                   projectReadOnly ? READ_ONLY_SCOPE_REASON : undefined
                 }
                 scopeNotice={
-                  projectReadOnly && !projectScopeGap ? (
-                    <ScopeGapBlock
-                      host={ghHost}
-                      onReconnect={reconnectForProjectScope}
-                    >
-                      Adding an issue to a project needs the{" "}
-                      <span className="font-mono">project</span> scope, which
-                      your GitHub sign-in is missing.
-                    </ScopeGapBlock>
-                  ) : null
+                  projectReadOnly && !projectScopeGap
+                    ? projectScopeRemedy
+                    : null
                 }
                 truncated={projects.data?.truncated === true}
                 rovingRowId={

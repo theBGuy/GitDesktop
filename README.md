@@ -561,12 +561,12 @@ work on the board without a trip to the browser: search this repository's
 issues and pull requests and add several in a row, or write a **draft** — a
 Markdown note that lives on the board alone until it earns an issue.
 **Right-click a card** (Shift+F10 on Windows and Linux) for its menu: open
-it, **move it to another column**, which writes the board's grouping field
-and re-draws the card where it lands, keyboard place and all, **convert a
-draft to a real issue**, **archive** the card (restorable from the project's
-archived items on GitHub), or **remove** it from the project. Creating an
-issue puts it straight on a board too: the **New issue** dialog carries a
-**Projects** picker of its own. The board's **saved views** come
+it, **move it to another column**, **convert a draft to a real issue**,
+**archive** the card (restorable from the project's archived items on
+GitHub), or **remove** it from the project. A move writes the board's
+grouping field and re-draws the card where it lands, keyboard place and all.
+Creating an issue puts it straight on a board too: the **New issue** dialog
+carries a **Projects** picker of its own. The board's **saved views** come
 along as lenses: pick one and GitHub filters the read for you, its sort
 orders the cards in each column (by **Title**, or by a text, number, date,
 single-select or iteration field), its visible fields ride along as chips on

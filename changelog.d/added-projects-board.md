@@ -9,9 +9,9 @@
   page in with **Load more**. **Add item** fills the board from the toolbar: search this
   repository's issues and pull requests and add several in a row, or write a **draft** —
   a Markdown note that lives on the board until it earns an issue. Right-click a card
-  (Shift+F10 on Windows and Linux) to **move it to another column**, where the board
-  re-draws where it lands and your keyboard place goes with it while the write reaches
-  GitHub behind you; the same menu **converts a draft into a real issue**, **archives**
+  (Shift+F10 on Windows and Linux) to **move it to another column**: the board re-draws
+  where it lands and your keyboard place goes with it while the write reaches GitHub
+  behind you. The same menu **converts a draft into a real issue**, **archives**
   a card (GitHub's archived items hold it for you), and **removes** one from the
   project, each confirming first. Creating an issue can put it on its boards in the same
   step: the **New issue** dialog gained a **Projects** picker. The board's **saved views** come

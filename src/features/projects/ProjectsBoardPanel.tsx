@@ -638,18 +638,21 @@ export function ProjectsBoardPanel({
   // while the reopened dialog submits another, consecutive add-existing picks). A
   // newer invocation settling first would drop the older one's flag and un-hold
   // everything while it was still in flight.
-  const move = useMoveBoardCard(repoPath);
-  const convertDraft = useConvertDraftItem(repoPath);
-  const archiveItem = useArchiveBoardItem(repoPath);
-  const removeItem = useRemoveBoardItem(repoPath);
+  const move = useMoveBoardCard();
+  const convertDraft = useConvertDraftItem();
+  const archiveItem = useArchiveBoardItem();
+  const removeItem = useRemoveBoardItem();
   // The add writes live HERE rather than inside the dialogs that fire them, so the
   // board can say what is in flight: a dialog closed mid-write would otherwise take
   // the only record of it with it.
-  const addExisting = useAddExistingToBoard(repoPath);
-  const addDraft = useAddDraftItem(repoPath);
+  const addExisting = useAddExistingToBoard();
+  const addDraft = useAddDraftItem();
   // So every gate, label and busy mark below reads the mutation CACHE instead,
-  // which holds every in-flight invocation whatever any observer is tracking. One
-  // subscription feeds all of them; the counts are just this list, filtered.
+  // which holds every in-flight invocation whatever any observer is tracking, and
+  // matches this board by each write's own call-time `variables.repo` — this panel
+  // is ONE instance across repo switches, so attribution can't ride anything the
+  // hooks re-derive from render scope. One subscription feeds all of them; the
+  // counts are just this list, filtered.
   const pendingWrites = usePendingBoardWrites(repoPath);
   const movePending = pendingWrites.some((w) => w.kind === "move");
   const cardWritePending = pendingWrites.some(
@@ -1621,8 +1624,8 @@ export function ProjectsBoardPanel({
                 // than ref'd, and ON the render element rather than the trigger:
                 // this button renders inside `DisabledReasonButton`'s wrapper span,
                 // so the attribute is what names the focusable node itself, and it
-                // rides the same prop path as the `variant`/`aria-label` beside it.
-                // Always focusable — a held Add item carries a reason, which takes
+                // rides the same prop path as the `variant` beside it. Always
+                // focusable — a held Add item carries a reason, which takes
                 // `focusableWhenDisabled` rather than leaving the tab order.
                 <DisabledReasonButton
                   data-board-add-trigger=""
