@@ -647,11 +647,13 @@ export function ProjectsBoardPanel({
   // the only record of it with it.
   const addExisting = useAddExistingToBoard();
   const addDraft = useAddDraftItem();
-  // So every gate, label and busy mark below reads the mutation CACHE instead,
-  // which holds every in-flight invocation whatever any observer is tracking, and
-  // matches this board by each write's own call-time `variables.repo` — this panel
-  // is ONE instance across repo switches, so attribution can't ride anything the
-  // hooks re-derive from render scope. One subscription feeds all of them; the
+  // So every gate, label and busy mark below derives from a snapshot COMPUTED off
+  // the mutation cache on each render, which holds every in-flight invocation
+  // whatever any observer is tracking, and matches this board by each write's own
+  // call-time `variables.repo` — this panel is ONE instance across repo switches,
+  // and it goes away under `<Activity>` without unmounting, so neither the repo nor
+  // a write that settled while the tab was hidden may reach the UI through anything
+  // a subscription had to be alive to record. One read feeds all of them; the
   // counts are just this list, filtered.
   const pendingWrites = usePendingBoardWrites(repoPath);
   const movePending = pendingWrites.some((w) => w.kind === "move");

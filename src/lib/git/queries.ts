@@ -1,15 +1,22 @@
 import {
   type InfiniteData,
+  notifyManager,
   type QueryClient,
   type QueryKey,
   queryOptions,
+  replaceEqualDeep,
   useInfiniteQuery,
   useMutation,
-  useMutationState,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { ignoreLines, REPLACEMENT_CHAR } from "@/lib/ai/ignore";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
@@ -2663,30 +2670,26 @@ export type BoardWriteKind =
   | "add-draft";
 
 /**
- * The key every board write is tagged with: `["board-write", group, kind]`.
- *
- * `group` is what makes the two gates prefix-matchable — the card writes change an
- * EXISTING card and so hold the menu rows against each other, where an add touches
- * no card and holds only pagination. Filters are partial matches, so
- * `["board-write"]` is every write and `["board-write", "card"]` is the card half.
+ * The key every board write is tagged with: `["board-write", kind]`. It says WHAT a
+ * write is and nothing else — the card-vs-add split the panel's gates need is a
+ * lookup over {@link BoardWriteKind} at the call site, not a key segment, so the key
+ * carries no group to fall out of sync with it.
  *
  * Tagging exists because `useMutation().isPending` tracks one observer's LATEST
  * invocation only — `MutationObserver.mutate` drops its previous mutation and
  * builds a new one (query-core 5.102.8) — while these flows deliberately allow a
  * second invocation over a first: an Esc'd draft whose write continues, consecutive
- * add-existing picks. The key lets the panel count and enumerate the CACHE instead,
- * which sees every one.
+ * add-existing picks. The key lets the panel enumerate the CACHE instead, which sees
+ * every one.
  *
  * WHICH REPO a write belongs to is deliberately NOT in here. The key is built from
  * the hook's render scope, and query-core re-applies a live observer's options on
  * every render: a key carrying `repo` would change identity under a repo switch,
  * which `MutationObserver.setOptions` answers by RESETTING the observer off its own
  * pending mutation. The write's repo is its call-time `variables.repo` — one source
- * of truth, fixed at fire time — so {@link usePendingBoardWrites} filters on that
- * and the key stays a statement about KIND alone.
+ * of truth, fixed at fire time — so {@link usePendingBoardWrites} matches on that.
  */
-const boardWriteKey = (group: "card" | "add", kind: BoardWriteKind) =>
-  ["board-write", group, kind] as const;
+const boardWriteKey = (kind: BoardWriteKind) => ["board-write", kind] as const;
 
 /** Filter prefix for EVERY board write — narrowed to one repo by variables below. */
 const BOARD_WRITES_KEY = ["board-write"] as const;
@@ -2726,36 +2729,64 @@ function boardWriteVars(mutation: { state: { variables?: unknown } }): {
 /**
  * Every board write against `repo` that is currently in flight, one entry per
  * INVOCATION — the observer-independent reading the panel's gates and strip need.
- * `useMutationState` maps the mutation cache and diffs the result with
- * `replaceEqualDeep`, so the array keeps its identity while nothing changes.
  *
- * The repo match is a `predicate` over the write's own VARIABLES rather than a key
- * segment: variables are fixed when the write fires, where a key is re-derived from
- * whatever the hook's render scope holds later. That makes attribution correct by
- * construction — a panel that outlives a repo switch (this one does; `RepositoryView`
- * is a single instance across switches) can never count the previous repo's write.
+ * `getSnapshot` COMPUTES from the cache rather than returning a value some
+ * subscription last wrote, which is the whole point of doing this by hand instead of
+ * through `useMutationState`. That hook keeps its result in a ref refreshed ONLY
+ * inside its cache subscription, so any window without a live subscription is a
+ * blind spot it never reconciles: this panel lives under `<Activity>`, which tears
+ * passive effects down on hide, and a write settling while the tab is away notifies
+ * nobody. On show, re-subscribing re-reads the same untouched ref, React sees no
+ * change, and the pre-hide list latches — holds and strip lines for writes that
+ * finished minutes ago. `useMutationState` has the same blind spot for `repo`, which
+ * reaches its filters through an options ref updated after render.
+ *
+ * Computing on demand makes both moot: React calls this on every render and again
+ * when it re-subscribes, and each call reads the live cache under the CURRENT
+ * `repo`. `replaceEqualDeep` keeps the identity stable when nothing changed, which
+ * is what `useSyncExternalStore` requires of a snapshot (and the library's own
+ * pattern for it).
+ *
+ * The repo match reads each write's own VARIABLES rather than a key segment:
+ * variables are fixed when the write fires, where a key is re-derived from whatever
+ * the hook's render scope holds later.
  */
 export function usePendingBoardWrites(repo: string): PendingBoardWrite[] {
-  return useMutationState({
-    filters: {
-      mutationKey: BOARD_WRITES_KEY,
-      status: "pending",
-      predicate: (m) => boardWriteVars(m).repo === repo,
-    },
-    select: (m): PendingBoardWrite => {
-      // The key's own tail; unknown shapes degrade to a null kind rather than a
-      // guessed one, which drops the write from the labelled lines but still
-      // counts it for the holds.
-      const kind = m.options.mutationKey?.[2];
-      const vars = boardWriteVars(m);
-      return {
-        mutationId: m.mutationId,
-        kind: typeof kind === "string" ? (kind as BoardWriteKind) : null,
-        itemId: vars.itemId,
-        number: vars.number,
-      };
-    },
-  });
+  const cache = useQueryClient().getMutationCache();
+  // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
+  // keeps returning one identity — `useSyncExternalStore` loops on a snapshot that
+  // is a fresh value every call.
+  const snapshot = useRef<PendingBoardWrite[]>([]);
+  const getSnapshot = useCallback(() => {
+    const next = cache
+      .findAll({ mutationKey: BOARD_WRITES_KEY, status: "pending" })
+      .flatMap((m): PendingBoardWrite[] => {
+        const vars = boardWriteVars(m);
+        if (vars.repo !== repo) return [];
+        // The key's own tail; an unknown shape degrades to a null kind rather
+        // than a guessed one, which drops the write from the labelled lines but
+        // still counts it for the holds.
+        const kind = m.options.mutationKey?.[1];
+        return [
+          {
+            mutationId: m.mutationId,
+            kind: typeof kind === "string" ? (kind as BoardWriteKind) : null,
+            itemId: vars.itemId,
+            number: vars.number,
+          },
+        ];
+      });
+    snapshot.current = replaceEqualDeep(snapshot.current, next);
+    return snapshot.current;
+  }, [cache, repo]);
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
+    [cache],
+  );
+  // Third argument is the server snapshot, which this desktop app never renders;
+  // the same computation answers it, as the library does for its own hooks.
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 /** How many of a repo's own board writes are between their request and their
@@ -3053,7 +3084,7 @@ function restoreBoardItem(
 export function useMoveBoardCard() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey("card", "move"),
+    mutationKey: boardWriteKey("move"),
     mutationFn: (args: {
       repo: string;
       projectId: string;
@@ -3212,7 +3243,7 @@ export function useBoardCandidates(
 export function useAddDraftItem() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey("add", "add-draft"),
+    mutationKey: boardWriteKey("add-draft"),
     mutationFn: (args: {
       repo: string;
       projectId: string;
@@ -3235,7 +3266,7 @@ export function useAddDraftItem() {
 export function useConvertDraftItem() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey("card", "convert"),
+    mutationKey: boardWriteKey("convert"),
     mutationFn: (args: { repo: string; itemId: string; lens: RemoteLens }) =>
       trackBoardWrite(args.repo, () =>
         api.ghConvertDraftItem(args.repo, args.itemId, args.lens),
@@ -3294,7 +3325,7 @@ function useBoardItemRemoval(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey("card", kind),
+    mutationKey: boardWriteKey(kind),
     mutationFn: call,
     onMutate: async (args: BoardItemWrite) => {
       const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
@@ -3364,7 +3395,7 @@ export function useRemoveBoardItem() {
 export function useAddExistingToBoard() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: boardWriteKey("add", "add-existing"),
+    mutationKey: boardWriteKey("add-existing"),
     mutationFn: (args: {
       repo: string;
       projectId: string;

@@ -833,6 +833,51 @@ function ProjectsField({
     chipRefs.current[clamped]?.focus();
   }
 
+  /**
+   * Move focus to whatever survives removing the chip at `index`, BEFORE it goes.
+   * Every removal route calls this and then removes — the keyboard's Delete and the
+   * pointer's ✕ alike, which is why the selection lives here rather than in either.
+   *
+   * INSIDE A MODAL, FOCUS THE NEXT TARGET SYNCHRONOUSLY, BEFORE UNMOUNTING THE
+   * FOCUSED ELEMENT. A deferred handoff loses: Base UI's dialog focus containment
+   * recaptures to the dialog CONTAINER the moment a focused child unmounts, and that
+   * recapture beat a one-rAF claim on both branches below (measured twice — the
+   * empty-band case, then the surviving-chip case). Moving focus first makes the
+   * race unwinnable rather than merely faster: nothing that is about to unmount is
+   * the active element, so the containment never fires. Both targets are already
+   * mounted here, which is what lets this do without `requestAnimationFrame`.
+   *
+   * The pointer path needs it for the same reason the keyboard path does, not a
+   * weaker one: Chromium focuses a button on mousedown, so a clicked ✕ IS the
+   * focused element when the removal unmounts it.
+   *
+   * `from` is any node still inside the band — the chip for Delete, the ✕ for a
+   * click — and only has to be in the tree long enough for the `closest` walk.
+   */
+  function handOffFocusBeforeRemoving(index: number, from: HTMLElement) {
+    const nextCount = picked.length - 1;
+    if (nextCount === 0) {
+      // Nothing survives in the row, so focus goes to the picker trigger — which is
+      // where re-adding starts anyway.
+      from
+        .closest<HTMLElement>('[role="group"]')
+        ?.querySelector<HTMLElement>("[data-add-project-trigger]")
+        ?.focus();
+      return;
+    }
+    // The chip that will slide into this slot, addressed at its CURRENT index:
+    // removing `index` shifts everything after it left by one, so the survivor is
+    // the next chip — except when the last of several goes, where it is the previous
+    // one. Both are mounted now; only their index changes.
+    const survivor = index < picked.length - 1 ? index + 1 : index - 1;
+    chipRefs.current[survivor]?.focus();
+    // The index that survivor will OCCUPY, so the roving tab stop still names the
+    // focused chip after the list re-renders. Set on the pointer path too: the tab
+    // stop and the focused chip must be the same chip whichever route removed one,
+    // or a later Tab back into the band lands somewhere the user never was.
+    setFocusIndex(Math.min(index, nextCount - 1));
+  }
+
   function onChipKeyDown(e: KeyboardEvent<HTMLButtonElement>, index: number) {
     const chip = picked[index];
     if (e.key === "ArrowLeft") {
@@ -843,36 +888,7 @@ function ProjectsField({
       if (index < picked.length - 1) focusChip(index + 1);
     } else if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
-      // INSIDE A MODAL, FOCUS THE NEXT TARGET SYNCHRONOUSLY, BEFORE UNMOUNTING THE
-      // FOCUSED ELEMENT. A deferred handoff loses: Base UI's dialog focus
-      // containment recaptures to the dialog CONTAINER the moment a focused child
-      // unmounts, and that recapture beat a one-rAF claim on both of these
-      // branches (measured twice — the empty-band case, then the surviving-chip
-      // case). Moving focus first makes the race unwinnable rather than merely
-      // faster: the chip is no longer the active element when it goes, so the
-      // containment has nothing to recapture and never fires. Every target below
-      // is already mounted at this point, which is what lets the whole handler do
-      // without `requestAnimationFrame`.
-      const nextCount = picked.length - 1;
-      if (nextCount === 0) {
-        // Nothing survives in the row, so focus goes to the picker trigger — which
-        // is where re-adding starts anyway. The band is walked from
-        // `e.currentTarget` while the chip is still in the tree.
-        e.currentTarget
-          .closest<HTMLElement>('[role="group"]')
-          ?.querySelector<HTMLElement>("[data-add-project-trigger]")
-          ?.focus();
-      } else {
-        // The chip that will slide into this slot, addressed at its CURRENT index:
-        // removing `index` shifts everything after it left by one, so the survivor
-        // is the next chip — except when the last of several goes, where it is the
-        // previous one. Both are mounted now; only their index changes.
-        const survivor = index < picked.length - 1 ? index + 1 : index - 1;
-        chipRefs.current[survivor]?.focus();
-        // The index that survivor will OCCUPY, so the roving tab stop still names
-        // the focused chip after the list re-renders.
-        setFocusIndex(Math.min(index, nextCount - 1));
-      }
+      handOffFocusBeforeRemoving(index, e.currentTarget);
       onRemove(chip.id);
     }
     // Enter/Space intentionally do nothing — a membership has no state to toggle.
@@ -978,13 +994,20 @@ function ProjectsField({
                     {project.title}
                   </span>
                 </button>
+                {/* Out of the tab order — the chip's own Delete is the keyboard
+                    route — but it still hands focus on before removing: a click
+                    FOCUSES this button first, so without the handoff it is the
+                    focused node being unmounted and the dialog recaptures. */}
                 <Button
                   variant="ghost"
                   size="icon-xs"
                   tabIndex={-1}
                   aria-label={`Remove ${project.title}`}
                   className="text-muted-foreground"
-                  onClick={() => onRemove(project.id)}
+                  onClick={(e) => {
+                    handOffFocusBeforeRemoving(index, e.currentTarget);
+                    onRemove(project.id);
+                  }}
                 >
                   <XIcon />
                 </Button>

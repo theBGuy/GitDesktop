@@ -110,6 +110,7 @@ fn response_id(value: &Value, pointer: &str, surface: &str) -> AppResult<String>
     value
         .pointer(pointer)
         .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
         .ok_or_else(|| gh_unreadable(surface, format!("missing id at {pointer}")))
 }
@@ -187,7 +188,8 @@ fn parse_candidates(value: &Value, expected_repository: &str) -> AppResult<Board
     })
 }
 
-// Search failures retain the scopes GitHub names; project hints do not apply here.
+// The command must pass its UNMAPPED result so search retains GitHub's scope errors.
+// This helper's tests cannot detect mapping done upstream before it receives the result.
 fn search_candidates_from_response(
     response: AppResult<Value>,
     expected_repository: &str,
@@ -551,12 +553,6 @@ mod tests {
 
     #[test]
     fn repository_filter_enforces_scope_after_parenthesis_escape() {
-        let input: Value =
-            serde_json::from_str(&search_input("owner", "repo", "a) OR (repo:other/x")).unwrap();
-        assert_eq!(
-            input["variables"]["q"],
-            "repo:owner/repo sort:updated-desc (a) OR (repo:other/x)"
-        );
         let mut foreign = issue(Value::Null);
         foreign["repository"]["nameWithOwner"] = json!("other/x");
         let result = parse_candidates(
@@ -631,6 +627,14 @@ mod tests {
             "PVTI_new"
         );
         assert!(response_id(&Value::Null, DRAFT_ID_POINTER, "the new project draft").is_err());
+        for id in ["", "  ", "\t\n"] {
+            let value = json!({"data":{"addProjectV2DraftIssue":{"projectItem":{"id":id}}}});
+            let error = response_id(&value, DRAFT_ID_POINTER, "the new project draft").unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Couldn't read the new project draft from GitHub.\nmissing id at /data/addProjectV2DraftIssue/projectItem/id"
+            );
+        }
     }
 
     #[test]

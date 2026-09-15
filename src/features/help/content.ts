@@ -1746,8 +1746,8 @@ duplicates, and same-project mentions.
 - **Projects** — chips in the side rail show which **GitHub Projects** the issue belongs to,
   and a picker links or unlinks it across the repository's projects and the owner's; your
   changes apply when the picker closes. The **New issue** dialog carries a **Projects**
-  band under its description — **Add to project** picks a board, each one becomes a chip
-  the arrows walk and **Delete** removes — so an issue can land on its boards as it's
+  band under its description (**Add to project** picks a board, each one becomes a chip
+  the arrows walk and **Delete** removes), so an issue can land on its boards as it's
   created; if the issue opens but a board refuses it, the dialog closes and says which
   part didn't happen. Below the chips, one line per board reads out where
   the issue stands: **Status**, **Priority**, **Iteration** (with the dates it covers), plus
@@ -2046,8 +2046,8 @@ Collapsing the sidebar ({{kbd:toggle-sidebar}}) hands the board its width.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
-and offers a one-click **Reconnect GitHub…**, which requests \`project\`. Every write here —
-adding, moving, converting, archiving, removing — needs the full \`project\` scope, so a
+and offers a one-click **Reconnect GitHub…**, which requests \`project\`. Every write here
+(adding, moving, converting, archiving, removing) needs the full \`project\` scope, so a
 \`read:project\` sign-in draws the board with those controls held.`,
   },
   {
