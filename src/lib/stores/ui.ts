@@ -374,16 +374,15 @@ interface UiState {
    *  a genuine branch switch or a repo switch clears the whole record. */
   draftKeyRemaps: Record<string, string>;
   /** Monotonic count of user navigation/selection actions; an async continuation
-   *  snapshots it and strands when it moved — the store-side half of the continuation
-   *  guard. Membership rule for the bump: every action that changes what is selected or
-   *  where the user is — including the overlay SCREENS (settings, help, explore, my
-   *  work), whose opens and closes both move `view`, which a landing navigation would
-   *  otherwise flip out from under the user — and nothing else (drafts, dialogs,
-   *  toggles, and the navigation-owned one-shots stay out). Every bump is SYNCHRONOUS at
-   *  request time, transition-backed actions included (their visual patch applies
-   *  deferred, which is far too late to fence a settling continuation), so a
-   *  continuation must claim its epoch BEFORE invoking any navigator — claim at the
-   *  click, land at the end — and must not re-read it after the invocation. */
+   *  snapshots it and strands when it moved. Bumped by every action a USER reaches that
+   *  changes what is selected or where they are, overlay screens included (their opens
+   *  and closes move `view`, which a landing navigation would flip out from under them);
+   *  never by drafts, dialogs, toggles, navigation-owned one-shots, a reactive PRUNE of
+   *  a selection the user didn't choose to drop, or an automatic correction the app
+   *  performs for itself. A user action whose state lives in a COMPONENT rather than
+   *  here bumps through {@link UiState.noteUserInteraction}. Every bump is synchronous at
+   *  request time, transition-backed actions included, so a continuation claims its epoch
+   *  BEFORE invoking a navigator and never re-reads it after. */
   interactionEpoch: number;
 
   openRepo: (info: RepoInfo) => void;
@@ -515,6 +514,14 @@ interface UiState {
     } | null,
   ) => void;
   selectFile: (file: SelectedFile | null) => void;
+  /** Drop the file selection because the file is GONE (a reactive prune against fresh
+   *  status), not because the user chose to. The non-bumping route: a background poll
+   *  must not advance {@link UiState.interactionEpoch} and strand a click's continuation. */
+  clearSelectedFile: () => void;
+  /** Advance {@link UiState.interactionEpoch} for a USER action whose state lives in a
+   *  component rather than this store — a panel-local tab pick is still "where the user
+   *  is". Call it BEFORE the local set, so a continuation strands before it can land. */
+  noteUserInteraction: () => void;
   selectCommit: (hash: string | null) => void;
   selectCompareCommit: (hash: string | null) => void;
   setCommitDraft: (title: string, body: string) => void;
@@ -935,6 +942,10 @@ export const useUiStore = create<UiState>()((set, get) => {
         selectedFile: file,
         interactionEpoch: s.interactionEpoch + 1,
       })),
+    clearSelectedFile: () => set({ selectedFile: null }),
+    noteUserInteraction: () => {
+      bumpEpochNow();
+    },
     setCommitDraft: (title, body) =>
       setDraftFields({ commitTitle: title, commitBody: body }),
     setCommitTitle: (title) => setDraftFields({ commitTitle: title }),

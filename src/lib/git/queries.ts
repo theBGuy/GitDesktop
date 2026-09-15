@@ -1018,6 +1018,9 @@ export function usePathPresent(repo: string) {
     queryFn: () => api.pathIsDir(repo),
     staleTime: 5_000,
     retry: false,
+    // Polled, not focus-only: the probe mounts only inside ForgeNotReady, so a deletion
+    // while that state is already on screen has no focus change to ride in on.
+    refetchInterval: 5_000,
     // Local IPC read: the default "online" mode parks it while the OS reports no
     // connection, which would hold the probe undefined for the whole session.
     networkMode: "always",

@@ -1,3 +1,4 @@
+import { pathIsDir } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { notify, notifyIfUnfocused } from "@/lib/notify";
 import {
@@ -30,6 +31,10 @@ const lastEmit = new Map<string, number>();
 /** Bound on a long session's key churn; the oldest delivered key is evicted first
  *  (insertion order tracks delivery time, since every write re-inserts). */
 const MAX_DEDUPE_KEYS = 500;
+
+/** How long the identity stamp may hold up a delivery before the row ships without
+ *  one — the stamp is an optimization for the click-through, never a precondition. */
+const IDENTITY_STAMP_TIMEOUT_MS = 1_500;
 
 /** Check-and-set, synchronous by contract: two same-tick fires must not both pass
  *  the window. True = this key already holds the window and is suppressed. */
@@ -99,17 +104,26 @@ export function emitNotification(
   const claimedAt = Date.now();
   if (dedupeKey && seenRecently(dedupeKey, claimedAt)) return;
   void (async () => {
-    const [settings, override, identity] = await Promise.all([
+    const [settings, override] = await Promise.all([
       loadSettings().catch(() => DEFAULT_SETTINGS),
       overrideForRepo(row.repoPath).catch(() => undefined),
-      // Alongside the reads already here, so stamping the row's worktree-stable
-      // identity costs no extra latency. Never rejects — it stands in the raw
-      // path, which the stamp below drops.
-      repoIdentity(row.repoPath),
     ]);
-    // The resolver's unknown-identity fallback IS the raw path, so stamping that
-    // would hand the click-time ladder a checkout path posing as an identity key
-    // — an absent stamp is the honest answer.
+    // Probe THEN resolve, bounded as a unit: the liveness check gates the resolve
+    // (resolving a DEAD path caches the raw-path fallback for the session, under
+    // the key every identity-keyed store reads), and both live on the timed side
+    // so a hung mount delays neither the inbox row nor the OS ping.
+    const identity = await Promise.race([
+      (async () => {
+        const live = await pathIsDir(row.repoPath).catch(() => false);
+        return live ? repoIdentity(row.repoPath) : row.repoPath;
+      })(),
+      new Promise<string>((resolve) => {
+        setTimeout(() => resolve(row.repoPath), IDENTITY_STAMP_TIMEOUT_MS);
+      }),
+    ]);
+    // Dead path, hung probe, and unresolvable identity all answer the raw path, and
+    // an absent stamp is the honest answer for each: a checkout path posing as an
+    // identity key would mislead the click-time ladder.
     const repoId = identity === row.repoPath ? undefined : identity;
     // The kind rides along for every source; the seam scopes it to the one source
     // that carries a kind axis.

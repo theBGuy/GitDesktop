@@ -53,11 +53,7 @@ import {
   useLocalPrs,
   useUpdateLocalPr,
 } from "@/lib/pulls/queries";
-import {
-  useRemoteSlug,
-  useRepoLens,
-  useRepoLensSettled,
-} from "@/lib/repo-lens/queries";
+import { useLensState, useRemoteSlug } from "@/lib/repo-lens/queries";
 import { usePrCreates } from "@/lib/stores/pr-create";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
@@ -123,10 +119,9 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const isGitLab = provider === "gitlab";
   // The origin|upstream lens (GitHub forks only; "origin" everywhere else). It
   // decides which repo the remote PR list + every PR read/write below target.
-  const lens = useRepoLens(repoPath);
-  // Whether that lens can still flip under a read keyed on it — every input behind it
-  // is async, so a fork's lens starts out provisionally "origin".
-  const lensSettled = useRepoLensSettled(repoPath);
+  // One call for both: each input behind the lens is async, so a fork's lens starts out
+  // provisionally "origin", and the value and its settledness must come from one read.
+  const { lens, settled: lensSettled } = useLensState(repoPath);
   // When browsing the parent, the section header names the parent slug (whose
   // data this is) — falling back to "Upstream" while the slug loads.
   const upstreamSlug = useRemoteSlug(repoPath, "upstream", lens === "upstream");
@@ -239,10 +234,19 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // itself is already done with the intent when it comes through here.
   const pendingPrAlign = useUiStore((s) => s.pendingPrAlign);
   const clearPendingPrAlign = useUiStore((s) => s.clearPendingPrAlign);
+  const noteUserInteraction = useUiStore((s) => s.noteUserInteraction);
   const onStateFilter = (s: PrStateFilter) => {
     setStateFilter(s);
     setLimit(PAGE_SIZE);
     clearPendingPrAlign();
+  };
+  // The user's own pick. `stateFilter` is panel state, so the epoch can only move
+  // through this door: bump FIRST, or a settling continuation lands, re-arms the align,
+  // and flips the list against the tab just chosen. The automatic align keeps the plain
+  // `onStateFilter` — a correction the app makes for itself is not a user action.
+  const onUserStateFilter = (s: PrStateFilter) => {
+    noteUserInteraction();
+    onStateFilter(s);
   };
   const localPrs = useLocalPrs(repoPath);
   // Mark local PRs merged when their branch was merged outside the app.
@@ -395,47 +399,44 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     }
   }, [pendingCreate, clearPendingCreate, canCreateGhPr, openLocalPrCreate]);
 
-  // Land on the tab that can CONTAIN the PR a navigation opened (a notification, My
-  // work, an Automation-history row): this tab is local state those routes can't
-  // reach, so a merged PR arrives selected on a tab that will never list it. The
-  // target comes from the PR's OWN state once known rather than from the event,
-  // which can't name it — a review posted on a PR that merged afterwards is the
-  // reported case. One-shot: the intent is retired as soon as it's answered.
-  // Gated on this tab like the panel's other reads: an intent left armed by a failed
-  // detail read would otherwise keep a live observer refetching on every window focus
-  // while the panel is hidden. The intent itself is store state, so it survives the
-  // hide and the align completes when the user comes back to the tab.
-  // `lensSettled` gates the ARMING, not just the consume: while the lens is still
-  // provisionally "origin" this would fetch a fork's ORIGIN pull request #N — a
-  // different PR — so the wrong-lens read must never fire at all.
+  // Land on the tab that can CONTAIN the PR a navigation opened: this tab is local
+  // state a notification / My work / Automation-history click can't reach, so a merged
+  // PR arrives selected on a tab that will never list it. The target comes from the PR's
+  // own state, which the event can't name — a review posted on a PR that merged
+  // afterwards is the reported case. One-shot, retired as soon as it's answered.
+  // Every term gates the ARMING, so no doomed or wrong read is ever issued: off-tab an
+  // armed intent would refetch on each window focus; under a provisional "origin" lens
+  // this would fetch a fork's ORIGIN pull request #N, a different PR; and a not-ready
+  // forge can only answer errors. Readiness also supplies the disabled→enabled
+  // transition the observer needs to fetch at all. The id is untrusted — a
+  // hand-editable store feeds one route — so only a positive integer arms.
+  const alignSelectedNumber =
+    selectedPr?.kind === "remote" ? Number(selectedPr.id) : Number.NaN;
   const alignRemoteNumber =
-    pendingPrAlign && onPullsTab && lensSettled && selectedPr?.kind === "remote"
-      ? Number(selectedPr.id)
+    pendingPrAlign &&
+    onPullsTab &&
+    ghReady &&
+    lensSettled &&
+    Number.isInteger(alignSelectedNumber) &&
+    alignSelectedNumber > 0
+      ? alignSelectedNumber
       : null;
-  // `usePrDetails`' observer with ONE delta: `staleTime: 0`, so data minted before this
-  // intent armed can't satisfy the gate below — a PR the row prefetched (or the detail
-  // view read) seconds ago is exactly the state a merged-PR notification contradicts,
-  // and within the shared 30s window nothing would refetch it. staleTime is per-OBSERVER,
-  // and the key is unchanged, so this still shares RemotePrView's cache entry while that
-  // view keeps its own window.
+  // `usePrDetails`' observer with ONE delta: `staleTime: 0`, so data minted before the
+  // intent armed can't satisfy the gate below — a prefetched or just-viewed PR is exactly
+  // the state a merged-PR notification contradicts, and nothing would refetch it inside
+  // the shared 30s window. staleTime is per-OBSERVER and the key is unchanged, so this
+  // still shares RemotePrView's cache entry while that view keeps its own window.
   const alignDetails = useQuery({
     ...prDetailsOptions(repoPath, alignRemoteNumber ?? 0, lens),
     enabled: alignRemoteNumber !== null,
     placeholderData: keepPreviousDataForKeyAxes(repoPath, [[3, lens]]),
     staleTime: 0,
   });
-  // The intent is consumed only once EVERY axis of this deciding read is settled:
-  // NUMBER (the armed gate above), LENS (`lensSettled` — a flip re-keys the query onto
-  // a different repo's PR), and DATA, the three terms below. The placeholder: the query
-  // keeps the previous number's data across a selection change, so aligning from it
-  // would move the tab on another PR's state. `isFetching`: a PR viewed earlier this
-  // session serves its cached (possibly pre-merge) state immediately while the
-  // background refetch is in flight, and consuming that would leave the tab on Open
-  // for a PR that has since merged — a first fetch isn't affected, `isSuccess` being
-  // false throughout. Any fetch FAILURE (first or refetch) flips status to error, so
-  // the intent stays armed until a retry succeeds or a reselection clears it. Together
-  // with the observer's `staleTime: 0` that is the whole rule: consume only once every
-  // axis has settled AND the state was fetched after the intent armed.
+  // Consume only once every axis of the deciding read has settled AND the state was
+  // fetched after the intent armed. `isPlaceholderData` refuses the previous number's
+  // retained data (it describes another PR); `isFetching` refuses a cached pre-merge
+  // state while its refetch is in flight. A fetch failure leaves status "error", so the
+  // intent stays armed for a retry rather than consuming stale truth.
   const alignDetailsSettled =
     alignDetails.isSuccess &&
     !alignDetails.isPlaceholderData &&
@@ -472,13 +473,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       clearPendingPrAlign();
       return;
     }
-    // `archived` is a visibility sub-filter WITHIN a tab, not a tab of its own, so
-    // the aligned tab keeps hiding the row until that toggle is on. The status is an
-    // untrusted stored string (the app-data file is hand-editable and a newer build
-    // can add a member), so a Record miss falls back to the current tab — a true
-    // no-op align that just retires the intent.
+    // `archived` is a visibility sub-filter WITHIN a tab, so the aligned tab keeps
+    // hiding the row until that toggle is on. The Record is declared TOTAL for
+    // exhaustiveness but READ as partial: the stored status is untrusted (the app-data
+    // file is hand-editable, a newer build can add a member), and a miss falls back to
+    // the current tab — a no-op align that just retires the intent.
     settleAlign(
-      LOCAL_ALIGN_TAB[selectedLocalPr.status] ?? stateFilter,
+      (LOCAL_ALIGN_TAB as Partial<Record<string, PrStateFilter>>)[
+        selectedLocalPr.status
+      ] ?? stateFilter,
       selectedLocalPr.archived === true,
     );
   }, [
@@ -663,7 +666,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         feature={remoteNoun}
         remoteLabel={remoteLabel}
         stateFilter={stateFilter}
-        onStateFilter={onStateFilter}
+        onStateFilter={onUserStateFilter}
         presetControl={
           <ConversationPresetSwitcher
             feature="pulls"

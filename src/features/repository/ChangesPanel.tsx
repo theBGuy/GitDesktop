@@ -241,6 +241,7 @@ export function ChangesPanel({
   const untrack = useUntrack(repoPath);
   const selectedFile = useUiStore((s) => s.selectedFile);
   const selectFile = useUiStore((s) => s.selectFile);
+  const clearSelectedFile = useUiStore((s) => s.clearSelectedFile);
   const startResolveOne = useConflictResolve((s) => s.startOne);
   const startResolveAll = useConflictResolve((s) => s.startAll);
   const aiEnabled = useAiEnabled();
@@ -662,7 +663,9 @@ export function ChangesPanel({
   }, []);
 
   // Drop the selection when the selected file leaves its section
-  // (e.g. it was staged, committed, or reverted externally).
+  // (e.g. it was staged, committed, or reverted externally). A REACTIVE prune keyed on
+  // polled status, so it takes the non-bumping route: the user chose nothing here, and
+  // advancing the interaction epoch would strand an in-flight click's continuation.
   useEffect(() => {
     if (!selectedFile || !status.data) return;
     const stillThere = status.data.entries.some(
@@ -670,8 +673,8 @@ export function ChangesPanel({
         e.path === selectedFile.path &&
         (selectedFile.staged ? e.staged !== null : e.unstaged !== null),
     );
-    if (!stillThere) selectFile(null);
-  }, [status.data, selectedFile, selectFile]);
+    if (!stillThere) clearSelectedFile();
+  }, [status.data, selectedFile, clearSelectedFile]);
   // Prune multi-selection keys for files that have left the working tree
   // (committed, discarded, etc.) so counts and highlights stay accurate.
   useEffect(() => {

@@ -226,19 +226,11 @@ function parentDir(p: string): string | null {
 }
 
 /** Whether a live checkout is the repository `stamp` names. Three-valued because
- *  `repoIdentity` never rejects: it stands in the path it was asked about, so that
- *  equality means UNKNOWN (the emit gate treats the same equality as an unresolved
- *  identity and omits the stamp) and must never read as a mismatch. Resolve only
- *  paths `validateRepo` has already proven live — a dead one would cache that
- *  fallback for the session, under the key every identity-keyed store reads.
- *  Compares via `normPath` (casefolded) on purpose: case sensitivity is a
- *  property of the app-wide identity idiom, decided in normPath itself — an
- *  unfolded compare here would let this ladder disagree with every
- *  identity-keyed store on what counts as the same repository. The session-long
- *  identity memo is equally deliberate: every identity-keyed store reads
- *  through the same resolver, so its cache lifetime is the resolver's contract
- *  — a fresh probe here would navigate by a different identity than the one
- *  those stores key records under. */
+ *  `repoIdentity` stands in the path it was asked about rather than rejecting, so
+ *  that equality is UNKNOWN, never a mismatch. Resolve only paths `validateRepo`
+ *  has proven live: a dead one caches that fallback for the session. Casefolded
+ *  `normPath` and the resolver's session-long memo are both the app-wide identity
+ *  idiom — diverging from either navigates by an identity no store keys on. */
 async function identityVerdict(
   repoPath: string,
   stamp: string,

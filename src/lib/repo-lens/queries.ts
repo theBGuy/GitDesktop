@@ -29,13 +29,19 @@ export function useRepoLensRaw(repo: string) {
   });
 }
 
+/** A lens input has answered AND is not re-answering: a cached-but-refetching read
+ *  serves a provisional value that the landing refetch can flip. An ERROR counts as
+ *  settled — it yields a stable "origin". */
+const lensReadSettled = (q: { isPending: boolean; isFetching: boolean }) =>
+  !q.isPending && !q.isFetching;
+
 /** Every async read the lens resolves from, in ONE body: the gate, the value, and
- *  whether all of them have answered are derived side by side, so an input added to
- *  the value necessarily joins the settled test — the two can't cover different sets.
- *  Each hook is called unconditionally (a short-circuited `&&` would skip one and break
- *  hook order), and a PENDING read is the only unsettled state: an ERRORED one yields a
- *  stable "origin". The three exports below are projections of this and nothing else. */
-function useLensInputs(repo: string): {
+ *  whether all of them have settled are derived side by side, so an input added to the
+ *  value necessarily joins the settled test — the two can't cover different sets. Each
+ *  hook is called unconditionally (a short-circuited `&&` would skip one and break hook
+ *  order). The three single-value exports below are projections of this and nothing
+ *  else; consumers needing more than one take this. */
+export function useLensState(repo: string): {
   gate: boolean;
   lens: RemoteLens;
   settled: boolean;
@@ -49,7 +55,10 @@ function useLensInputs(repo: string): {
   return {
     gate,
     lens: gate && raw.data === "upstream" ? "upstream" : "origin",
-    settled: !forge.isPending && !remotes.isPending && !raw.isPending,
+    settled:
+      lensReadSettled(forge) &&
+      lensReadSettled(remotes) &&
+      lensReadSettled(raw),
   };
 }
 
@@ -58,14 +67,14 @@ function useLensInputs(repo: string): {
  *  GitLab/Bitbucket, or a repo with no upstream remote, the lens is a no-op and
  *  its UI stays hidden. Mirrors SyncControls' `hasUpstreamRemote` idiom. */
 export function useLensGate(repo: string): boolean {
-  return useLensInputs(repo).gate;
+  return useLensState(repo).gate;
 }
 
 /** THE lens every PR/Issues surface consumes. Returns "origin" unless the gate
  *  passes AND the persisted value is "upstream" — so removing the upstream remote
  *  silently falls back to origin without touching the store. */
 export function useRepoLens(repo: string): RemoteLens {
-  return useLensInputs(repo).lens;
+  return useLensState(repo).lens;
 }
 
 /** Whether {@link useRepoLens} can still flip underneath a consumer that has already
@@ -73,7 +82,7 @@ export function useRepoLens(repo: string): RemoteLens {
  *  implementation detail — a consumer re-deriving them drifts the moment the lens
  *  gains an input. */
 export function useRepoLensSettled(repo: string): boolean {
-  return useLensInputs(repo).settled;
+  return useLensState(repo).settled;
 }
 
 /**

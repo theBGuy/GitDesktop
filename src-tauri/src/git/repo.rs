@@ -295,15 +295,11 @@ pub async fn validate_repo(path: String) -> AppResult<RepoInfo> {
     Ok(RepoInfo { root, name })
 }
 
-/// Whether `path` is still a directory on disk. Deliberately no git spawn: "the
-/// folder is gone" has to be separable from "git can't resolve this repo", and
-/// every other probe collapses the two — a repo-scoped read on a deleted path
-/// fails the same way a signed-out CLI does.
-///
-/// `async` for the thread it runs on, not for the body: a sync command is polled
-/// on the WebView2 UI thread, where this `stat` would freeze the window for the
-/// SMB timeout on a dropped network mount — exactly the population this probe
-/// exists to report on.
+/// Whether `path` is still a directory on disk — no git spawn, so "the folder is
+/// gone" stays separable from "git can't resolve this repo", which every
+/// repo-scoped read collapses into one failure. `async` for the thread, not the
+/// body: a sync command is polled on the WebView2 UI thread, where this `stat`
+/// would freeze the window for the SMB timeout on a dropped network mount.
 #[tauri::command]
 pub async fn path_is_dir(path: String) -> bool {
     Path::new(&path).is_dir()
@@ -547,12 +543,17 @@ mod path_is_dir_tests {
     use super::path_is_dir;
 
     #[tokio::test]
-    async fn path_is_dir_separates_a_live_directory_from_a_missing_one() {
+    async fn path_is_dir_is_true_only_for_a_live_directory() {
         let dir = tempfile::Builder::new()
             .prefix("gd-path-is-dir-")
             .tempdir()
             .expect("create temp dir");
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, b"x").expect("write temp file");
         assert!(path_is_dir(dir.path().to_string_lossy().into_owned()).await);
+        // Callers read `true` as "the checkout is still there", which mere
+        // existence doesn't prove — a file at that path is not a checkout.
+        assert!(!path_is_dir(file.to_string_lossy().into_owned()).await);
         assert!(!path_is_dir(dir.path().join("gone").to_string_lossy().into_owned()).await);
     }
 }

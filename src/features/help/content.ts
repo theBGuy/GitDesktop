@@ -2965,7 +2965,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   to it, arrow-key through the list, and clear items or mark all read. A
   pull-request entry opens that PR on the tab its event happened on, under the
   fork/upstream view it belongs to, so a new comment or approval lands on
-  **Conversation** — and a review entry scrolls to the review itself. When the
+  **Conversation** — and a review entry scrolls to the review itself. The
+  pull-request list itself switches to **Open** or **Closed** to match the PR's
+  current state, so one merged since the event still arrives selected. When the
   checkout an entry points to has been removed, GitDesktop opens another copy of
   that repository when it knows one; with none left it says so and changes
   nothing.{{ai}} A review still running shows
