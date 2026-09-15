@@ -93,9 +93,14 @@ async function readByKey(key: string): Promise<AutomationRunResult[]> {
 }
 
 /** Reads a repo's records, merging in any still under a legacy checkout-path key
- *  (folded onto the identity by the next write via `keyFor`). */
-async function readMerged(repo: string): Promise<AutomationRunResult[]> {
-  const id = await repoIdentity(repo);
+ *  (folded onto the identity by the next write via `keyFor`). `knownId` is an
+ *  identity key the caller already holds: pass it whenever `repo` may no longer
+ *  exist, since resolving it here would answer the raw path and read as pruned. */
+async function readMerged(
+  repo: string,
+  knownId?: string,
+): Promise<AutomationRunResult[]> {
+  const id = knownId ?? (await repoIdentity(repo));
   const primary = await readByKey(id);
   const legacy = id === repo ? [] : await readByKey(repo);
   return mergeById(primary, legacy);
@@ -189,10 +194,15 @@ export const useAutomationResults = create<AutomationResultsState>()((set) => ({
  * it. Reads the persisted copy when the session list doesn't hold the record, and
  * says so when it's gone (pruned, or cleared with the repo's app data) rather than
  * leaving a dead click.
+ *
+ * `repoId` is the repo's identity key when the caller carries one (a notification
+ * stamps it at emit time): `repoPath` is a single checkout, so a removed worktree
+ * can no longer answer its own key and the records would read as pruned.
  */
 export async function openAutomationResult(
   repoPath: string,
   id: string,
+  repoId?: string,
 ): Promise<void> {
   const state = useAutomationResults.getState();
   if (state.results.some((r) => r.id === id)) {
@@ -204,7 +214,7 @@ export async function openAutomationResult(
   // the cached snapshot and would read as pruned.
   const stored = await serialize(async () => {
     await reloadRaw();
-    return readMerged(repoPath);
+    return readMerged(repoPath, repoId);
   }).catch((): AutomationRunResult[] => []);
   const found = stored.find((r) => r.id === id);
   if (!found) {

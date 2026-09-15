@@ -96,6 +96,13 @@ export interface AppNotification {
   read: boolean;
   repoPath: string;
   repoName: string;
+  /** The repo's worktree-stable identity key (its common git dir) at emit time.
+   *  `repoPath` is one CHECKOUT, so a removed worktree leaves it dangling; this
+   *  key survives that and lets a click resolve some live checkout of the same
+   *  repository. Absent on rows emitted before the field existed, and omitted
+   *  when the resolver couldn't answer (it stands in the raw path, which would
+   *  read as an identity that matches nothing). */
+  repoId?: string;
   /** Author login for events that know one (e.g. a newly-opened PR) — shown with
    *  a small avatar on the row. Optional: most events have no author in scope. */
   authorLogin?: string;
@@ -161,6 +168,7 @@ function isValidNotification(x: unknown): x is AppNotification {
     // loading); present ones must be strings. `subtitle` renders as a React
     // child, so a non-string here would crash the row.
     (n.subtitle === undefined || typeof n.subtitle === "string") &&
+    (n.repoId === undefined || typeof n.repoId === "string") &&
     (n.authorLogin === undefined || typeof n.authorLogin === "string") &&
     (n.authorAvatarUrl === undefined ||
       typeof n.authorAvatarUrl === "string") &&
@@ -314,6 +322,9 @@ export function pushNotification(input: {
   subtitle?: string;
   repoPath: string;
   repoName: string;
+  /** The repo's worktree-stable identity key (see {@link AppNotification.repoId});
+   *  stamped by the emit gate, so producers never pass it themselves. */
+  repoId?: string;
   authorLogin?: string;
   authorAvatarUrl?: string;
   authorGhHost?: string;
@@ -342,6 +353,7 @@ export function pushNotification(input: {
     read: false,
     repoPath: input.repoPath,
     repoName: input.repoName,
+    repoId: input.repoId,
     authorLogin: input.authorLogin,
     authorAvatarUrl: input.authorAvatarUrl,
     authorGhHost: input.authorGhHost,

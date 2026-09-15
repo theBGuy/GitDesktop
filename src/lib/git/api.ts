@@ -168,6 +168,12 @@ export const checkGitInstalled = () => invoke<GitInfo>("check_git_installed");
 export const validateRepo = (path: string) =>
   invoke<RepoInfo>("validate_repo", { path });
 
+/** Whether a path is still a directory on disk — a bare fs check, no git. Lets a
+ *  deleted checkout be named as such instead of surfacing as whatever the
+ *  repo-scoped read failed with. */
+export const pathIsDir = (path: string) =>
+  invoke<boolean>("path_is_dir", { path });
+
 /** The checkout's origin host, namespace path, web authority and detection
  *  verdict, each `""` when unknown. Proves a checkout really is a given
  *  repository where a recents match key cannot: that key keeps only the segment

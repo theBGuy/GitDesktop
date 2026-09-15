@@ -7,7 +7,7 @@ import {
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
@@ -35,6 +35,7 @@ import {
   forgeFeatureReady,
   useForgeStatus,
   useHoverPrefetch,
+  usePrDetails,
   usePrefetchPr,
   usePrList,
   usePrListCi,
@@ -44,6 +45,7 @@ import {
 import { providerLabel, type ReviewStateEntry } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import type { LocalPrStatus } from "@/lib/pulls/local";
 import {
   useDeleteLocalPr,
   useLocalPrs,
@@ -78,6 +80,15 @@ const UNGROUPED_NOTE = {
   error: "Couldn't load your review state — the list is ungrouped.",
   truncated: "Couldn't check every review — the list is ungrouped.",
 } as const;
+
+/** Which tab a local PR's status belongs on — the Closed tab covers merged and
+ *  closed alike. Total over {@link LocalPrStatus}, so a new status has to be
+ *  classified here rather than silently reading as open. */
+const LOCAL_ALIGN_TAB: Record<LocalPrStatus, PrStateFilter> = {
+  open: "open",
+  merged: "closed",
+  closed: "closed",
+};
 
 /** The saved team filter couldn't be validated, so the list ran without it — a
  *  WIDER scope than the one saved, which the rows themselves can't show. */
@@ -212,9 +223,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     lens,
     listFilter.filter,
   );
+  // A pending align is one-shot and this is the single door to `stateFilter`, so
+  // an explicit tab pick retires it — the user's choice outranks it, and the align
+  // itself is already done with the intent when it comes through here.
+  const pendingPrAlign = useUiStore((s) => s.pendingPrAlign);
+  const clearPendingPrAlign = useUiStore((s) => s.clearPendingPrAlign);
   const onStateFilter = (s: PrStateFilter) => {
     setStateFilter(s);
     setLimit(PAGE_SIZE);
+    clearPendingPrAlign();
   };
   const localPrs = useLocalPrs(repoPath);
   // Mark local PRs merged when their branch was merged outside the app.
@@ -366,6 +383,73 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       clearPendingCreate();
     }
   }, [pendingCreate, clearPendingCreate, canCreateGhPr, openLocalPrCreate]);
+
+  // Land on the tab that can CONTAIN the PR a navigation opened (a notification, My
+  // work, an Automation-history row): this tab is local state those routes can't
+  // reach, so a merged PR arrives selected on a tab that will never list it. The
+  // target comes from the PR's OWN state once known rather than from the event,
+  // which can't name it — a review posted on a PR that merged afterwards is the
+  // reported case. One-shot: the intent is retired as soon as it's answered.
+  // Gated on this tab like the panel's other reads: an intent left armed by a failed
+  // detail read would otherwise keep a live observer refetching on every window focus
+  // while the panel is hidden. The intent itself is store state, so it survives the
+  // hide and the align completes when the user comes back to the tab.
+  const alignRemoteNumber =
+    pendingPrAlign && onPullsTab && selectedPr?.kind === "remote"
+      ? Number(selectedPr.id)
+      : null;
+  // The key RemotePrView's own mount builds, so the two share one cache entry.
+  const alignDetails = usePrDetails(repoPath, alignRemoteNumber, lens);
+  // The placeholder gate is what makes this the OPENED PR's state: this query keeps
+  // the previous number's data across a selection change, and aligning from it would
+  // move the tab on the wrong PR's state.
+  const alignDetailsSettled =
+    alignDetails.isSuccess && !alignDetails.isPlaceholderData;
+  const alignRemoteState = alignDetails.data?.state;
+  // The tab and the archived toggle are READ here rather than depended on: the align
+  // is keyed on the PR's state landing, not on the state it is correcting.
+  const settleAlign = useEffectEvent(
+    (target: PrStateFilter, revealArchived: boolean) => {
+      // Only when it differs — `onStateFilter` resets paging, so a no-op align would
+      // throw away however deep the user had loaded the list.
+      if (target !== stateFilter) onStateFilter(target);
+      if (revealArchived && !showArchived) setShowArchived(true);
+      clearPendingPrAlign();
+    },
+  );
+  useEffect(() => {
+    if (alignRemoteNumber === null || !alignDetailsSettled) return;
+    // Anything but OPEN lands on Closed, which holds merged and closed alike. An
+    // ERROR deliberately leaves the intent armed so a Retry still completes the
+    // align; it can't target a different PR, because any reselection clears it.
+    settleAlign(alignRemoteState === "OPEN" ? "open" : "closed", false);
+  }, [alignRemoteNumber, alignDetailsSettled, alignRemoteState]);
+  useEffect(() => {
+    if (!pendingPrAlign || selectedPr?.kind !== "local") return;
+    if (!localPrs.isSuccess) return;
+    // Settled without the record — deleted between the event and the click — disarms
+    // without moving the tab: no tab can show a record that is gone.
+    if (!selectedLocalPr) {
+      clearPendingPrAlign();
+      return;
+    }
+    // `archived` is a visibility sub-filter WITHIN a tab, not a tab of its own, so
+    // the aligned tab keeps hiding the row until that toggle is on. The status is an
+    // untrusted stored string (the app-data file is hand-editable and a newer build
+    // can add a member), so a Record miss falls back to the current tab — a true
+    // no-op align that just retires the intent.
+    settleAlign(
+      LOCAL_ALIGN_TAB[selectedLocalPr.status] ?? stateFilter,
+      selectedLocalPr.archived === true,
+    );
+  }, [
+    pendingPrAlign,
+    selectedPr,
+    localPrs.isSuccess,
+    selectedLocalPr,
+    stateFilter,
+    clearPendingPrAlign,
+  ]);
 
   const {
     localCollapsed,

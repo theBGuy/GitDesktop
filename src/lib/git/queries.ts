@@ -1007,6 +1007,23 @@ export function useObjectsPresent(repo: string | null, oids: string[]) {
   });
 }
 
+/** Whether the open repo's folder still exists — the probe empty states check
+ *  before blaming anything else, since a deleted checkout fails every repo-scoped
+ *  read the same way a missing or signed-out CLI does. Short `staleTime` so a
+ *  restored folder recovers on the next focus refetch; `retry: false` because an
+ *  fs check has nothing to retry. */
+export function usePathPresent(repo: string) {
+  return useQuery({
+    queryKey: ["repo", repo, "path-present"] as const,
+    queryFn: () => api.pathIsDir(repo),
+    staleTime: 5_000,
+    retry: false,
+    // Local IPC read: the default "online" mode parks it while the OS reports no
+    // connection, which would hold the probe undefined for the whole session.
+    networkMode: "always",
+  });
+}
+
 export function useRemotes(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "remotes"] as const,

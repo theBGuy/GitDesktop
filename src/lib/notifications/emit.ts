@@ -1,3 +1,4 @@
+import { repoIdentity } from "@/lib/git/repo-identity";
 import { notify, notifyIfUnfocused } from "@/lib/notify";
 import {
   DEFAULT_SETTINGS,
@@ -98,10 +99,18 @@ export function emitNotification(
   const claimedAt = Date.now();
   if (dedupeKey && seenRecently(dedupeKey, claimedAt)) return;
   void (async () => {
-    const [settings, override] = await Promise.all([
+    const [settings, override, identity] = await Promise.all([
       loadSettings().catch(() => DEFAULT_SETTINGS),
       overrideForRepo(row.repoPath).catch(() => undefined),
+      // Alongside the reads already here, so stamping the row's worktree-stable
+      // identity costs no extra latency. Never rejects — it stands in the raw
+      // path, which the stamp below drops.
+      repoIdentity(row.repoPath),
     ]);
+    // The resolver's unknown-identity fallback IS the raw path, so stamping that
+    // would hand the click-time ladder a checkout path posing as an identity key
+    // — an absent stamp is the honest answer.
+    const repoId = identity === row.repoPath ? undefined : identity;
     // The kind rides along for every source; the seam scopes it to the one source
     // that carries a kind axis.
     const channels = deliveredChannels(
@@ -112,7 +121,11 @@ export function emitNotification(
       row.kind,
     );
     if (channels.inApp) {
-      pushNotification(dedupeKey ? { ...row, dedupeKey } : row);
+      pushNotification({
+        ...row,
+        ...(dedupeKey ? { dedupeKey } : {}),
+        ...(repoId ? { repoId } : {}),
+      });
     }
     // Hiding AI features mutes the OS ping for AI-minted kinds — a hidden feature
     // must not tap you on the shoulder — but never the inbox row above, which the

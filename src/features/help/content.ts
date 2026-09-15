@@ -2928,7 +2928,10 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
   to it, arrow-key through the list, and clear items or mark all read. A
   pull-request entry opens that PR on the tab its event happened on, under the
   fork/upstream view it belongs to, so a new comment or approval lands on
-  **Conversation** — and a review entry scrolls to the review itself.{{ai}} A review still running shows
+  **Conversation** — and a review entry scrolls to the review itself. When the
+  checkout an entry points to has been removed, GitDesktop opens another copy of
+  that repository when it knows one; with none left it says so and changes
+  nothing.{{ai}} A review still running shows
   a live **elapsed timer** so you can see how long it's taken. When an
   **automated** review or security audit is cancelled or fails, it stays in the popover
   under a **Stopped** group with **Re-run** (re-fires exactly that run's mode) and

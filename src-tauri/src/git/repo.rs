@@ -295,6 +295,20 @@ pub async fn validate_repo(path: String) -> AppResult<RepoInfo> {
     Ok(RepoInfo { root, name })
 }
 
+/// Whether `path` is still a directory on disk. Deliberately no git spawn: "the
+/// folder is gone" has to be separable from "git can't resolve this repo", and
+/// every other probe collapses the two — a repo-scoped read on a deleted path
+/// fails the same way a signed-out CLI does.
+///
+/// `async` for the thread it runs on, not for the body: a sync command is polled
+/// on the WebView2 UI thread, where this `stat` would freeze the window for the
+/// SMB timeout on a dropped network mount — exactly the population this probe
+/// exists to report on.
+#[tauri::command]
+pub async fn path_is_dir(path: String) -> bool {
+    Path::new(&path).is_dir()
+}
+
 #[tauri::command]
 pub async fn clone_repo(
     url: String,
@@ -526,6 +540,21 @@ fn time_year() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     (1970 + secs / 31_557_600).to_string()
+}
+
+#[cfg(test)]
+mod path_is_dir_tests {
+    use super::path_is_dir;
+
+    #[tokio::test]
+    async fn path_is_dir_separates_a_live_directory_from_a_missing_one() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-path-is-dir-")
+            .tempdir()
+            .expect("create temp dir");
+        assert!(path_is_dir(dir.path().to_string_lossy().into_owned()).await);
+        assert!(!path_is_dir(dir.path().join("gone").to_string_lossy().into_owned()).await);
+    }
 }
 
 #[cfg(test)]

@@ -177,6 +177,7 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   selectedPr: null,
   pendingPrSection: null,
   pendingReviewId: null,
+  pendingPrAlign: false,
   selectedIssue: null,
   selectedDiscussion: null,
   pendingIssueDraft: null,
@@ -288,6 +289,13 @@ interface UiState {
    *  review. Consumed by the PR detail view, which hands it to its own reveal
    *  state rather than reading it per render. */
   pendingReviewId: string | null;
+  /** One-shot: the Pulls list should align its open/closed tab with the opened PR's
+   *  ACTUAL state once that state is known. Raised by `openPr`, the one door every
+   *  navigation from outside the list goes through, because that tab is panel state
+   *  no navigation can reach, and the event behind one (a review posted on a PR that
+   *  merged later) can't name the state either. Consumed by the panel once the state
+   *  lands; any reselection clears it, so it can only ever align the PR it opened. */
+  pendingPrAlign: boolean;
   /** Selected issue on the Issues tab. */
   selectedIssue: SelectedIssue | null;
   /** Selected discussion (by number) on the Discussions tab. */
@@ -441,6 +449,8 @@ interface UiState {
   selectPr: (pr: SelectedPr | null) => void;
   setPendingPrSection: (section: PrSection | null) => void;
   setPendingReviewId: (reviewId: string | null) => void;
+  /** Retire the pending tab align (consumed, or overridden by an explicit tab pick). */
+  clearPendingPrAlign: () => void;
   selectIssue: (issue: SelectedIssue | null) => void;
   selectDiscussion: (discussion: { number: number } | null) => void;
   setPendingIssueDraft: (
@@ -565,6 +575,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     selectedPr: null,
     pendingPrSection: null,
     pendingReviewId: null,
+    pendingPrAlign: false,
     selectedIssue: null,
     selectedDiscussion: null,
     pendingIssueDraft: null,
@@ -638,6 +649,10 @@ export const useUiStore = create<UiState>()((set, get) => {
           // (see openCommit's note), and the reveal target must land with the
           // selection it belongs to.
           pendingReviewId: target.reviewId ?? null,
+          // The list's open/closed tab can't contain every PR a navigation opens —
+          // arm the align here, where the selection lands, and let the panel resolve
+          // the PR's real state.
+          pendingPrAlign: true,
         });
       }),
     openIssue: (target) =>
@@ -688,12 +703,14 @@ export const useUiStore = create<UiState>()((set, get) => {
     // Atomic (a follow-up set() would be clobbered); rationale in the compareCommitHash doc.
     setCompareBranch: (branch) =>
       set({ compareBranch: branch, compareCommitHash: null }),
-    // Clears any armed reveal in the SAME set (openPr's atomicity): a review
-    // request belongs to the PR the notification opened, and picking another
-    // from the list would leave it armed to fire on a later return to that one.
-    selectPr: (pr) => set({ selectedPr: pr, pendingReviewId: null }),
+    // Clears any armed reveal AND tab align in the SAME set (openPr's atomicity):
+    // both belong to the PR the notification opened, and picking another from the
+    // list would leave them armed to fire on a later return to that one.
+    selectPr: (pr) =>
+      set({ selectedPr: pr, pendingReviewId: null, pendingPrAlign: false }),
     setPendingPrSection: (section) => set({ pendingPrSection: section }),
     setPendingReviewId: (reviewId) => set({ pendingReviewId: reviewId }),
+    clearPendingPrAlign: () => set({ pendingPrAlign: false }),
     selectIssue: (issue) => set({ selectedIssue: issue }),
     selectDiscussion: (discussion) => set({ selectedDiscussion: discussion }),
     setPendingIssueDraft: (draft) => set({ pendingIssueDraft: draft }),
