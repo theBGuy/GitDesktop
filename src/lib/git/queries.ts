@@ -2768,7 +2768,11 @@ export type BoardWriteKind =
   | "archive"
   | "remove"
   | "add-existing"
-  | "add-draft";
+  | "add-draft"
+  /** Fired from the create-issue dialog rather than the board, and it draws no
+   *  card of its own — but its settle invalidates the same board reads, so the
+   *  board's pagination has to wait on it like any other write here. */
+  | "add-issue-projects";
 
 /**
  * The key every board write is tagged with: `["board-write", kind]`. It says WHAT a
@@ -3526,6 +3530,11 @@ export function useAddExistingToBoard() {
 export function useAddIssueToProjects() {
   const queryClient = useQueryClient();
   return useMutation({
+    // Tagged into the board-write family even though no board fired it: this
+    // settles through `invalidateProjectBoards`, whose cancel matches the board's
+    // items key, so a Load more started during the round trip would be
+    // cancel-reverted. The board can only wait on what it can see.
+    mutationKey: boardWriteKey("add-issue-projects"),
     mutationFn: (args: {
       repo: string;
       number: number;

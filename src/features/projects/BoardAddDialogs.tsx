@@ -7,7 +7,7 @@ import {
   MagnifyingGlassIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { usePanelActive } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import {
@@ -187,6 +187,10 @@ function CandidateRow({
     </button>
   );
 }
+
+/** The draft dialog's single-flight hold, in the board's own "Finishing…" register
+ *  so the footer and the pending strip behind it name the same wait. */
+const DRAFT_PENDING_REASON = "Finishing your last draft…";
 
 const ON_BOARD_REASON = "Already on this board";
 const ADDED_REASON = "Added";
@@ -455,44 +459,41 @@ export function AddExistingItemsDialog({
 export function NewDraftDialog({
   projectTitle,
   open,
+  pending,
   onOpenChange,
   onCreate,
 }: {
   projectTitle: string;
   open: boolean;
+  /** A draft write is in flight for this board — from THIS run or an earlier one
+   *  the user closed over. Single-flight, the same contract the add-existing rows
+   *  keep: this dialog outlives its own submissions, so its form can't be the thing
+   *  that knows one is still going. */
+  pending: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Write the draft, resolving whether it landed. The panel owns it so the board
-   *  can report a write this dialog was closed over. `onSubmit` AWAITS it, which is
-   *  what drives the submit button's own spinner — the in-place feedback for the
-   *  window where this dialog covers the board's strip. */
-  onCreate: (title: string, body: string) => Promise<boolean>;
+  /** Write the draft. The panel owns it — so the board can report a write this
+   *  dialog was closed over, and so the CLOSE on success is decided by whoever
+   *  knows whether this run is still the one on screen. Resolves when the write
+   *  settles either way; `onSubmit` awaits it, which drives the submit button's own
+   *  spinner — the in-place feedback for the window where this dialog covers the
+   *  board's strip. */
+  onCreate: (title: string, body: string) => Promise<void>;
 }) {
-  // One continuous open period is one SESSION, and every edge of `open` starts a
-  // new one. A submit captures the session it belongs to and its continuation acts
-  // only if that session is still current — the write outlives this dialog (the
-  // panel owns it, so Esc mid-flight leaves it running), and the panel holds ONE
-  // `addDialog` value, so a stale `onOpenChange(false)` would close whichever add
-  // dialog is open by then and the reopen-reset would discard what was typed into
-  // it. Bumping on the OPEN transition alone would miss exactly that case: the
-  // dialog the stale close hits may be the sibling, which never re-opened this one.
-  const sessionRef = useRef(0);
-  useEffect(() => {
-    sessionRef.current += 1;
-  }, [open]);
-
   const form = useAppForm({
     defaultValues: { title: "", body: "" },
-    onSubmit: async ({ value }) => {
-      const session = sessionRef.current;
-      const ok = await onCreate(value.title.trim(), value.body);
-      // The panel reported the failure; the dialog stays open over the draft so the
-      // text isn't lost to a failed write.
-      if (!ok) return;
-      // Closed over, or reopened, while the write was in flight: this resolution
-      // belongs to a session that no longer owns the dialog, so it closes nothing.
-      if (session !== sessionRef.current) return;
-      onOpenChange(false);
-    },
+    // Awaited but not acted on: the panel owns both outcomes. It closes this dialog
+    // on success — and only if the run that submitted is still the one on screen,
+    // which is a question about state the panel holds, not this component — and
+    // leaves it open on failure, where the draft's text still is. The await is what
+    // drives the submit button's spinner.
+    onSubmit: ({ value }) => onCreate(value.title.trim(), value.body),
+  });
+  // Held rather than hidden, and explained where the user is looking. The reason is
+  // the board's own "Finishing…" register, so the footer and the strip behind the
+  // dialog describe the same wait.
+  const { blockedReason, reasonId, describedBy } = useDisabledReason({
+    disabled: pending,
+    reason: DRAFT_PENDING_REASON,
   });
 
   // keepDefaultValues: otherwise the per-render options sync clobbers the reset
@@ -508,6 +509,8 @@ export function NewDraftDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
+            // The same gate the button takes, so Enter can't walk around it.
+            if (pending) return;
             form.handleSubmit();
           }}
         >
@@ -539,6 +542,14 @@ export function NewDraftDialog({
             </form.AppField>
           </div>
           <DialogFooter>
+            {blockedReason !== null && (
+              <span
+                id={reasonId}
+                className="mr-auto self-center text-[11px] text-muted-foreground"
+              >
+                {blockedReason}
+              </span>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -547,7 +558,12 @@ export function NewDraftDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton>Create draft</form.SubmitButton>
+              <form.SubmitButton
+                disabled={pending}
+                aria-describedby={describedBy}
+              >
+                Create draft
+              </form.SubmitButton>
             </form.AppForm>
           </DialogFooter>
         </form>

@@ -29,6 +29,7 @@ import {
 } from "@/features/conversations/ProjectsPopover";
 import { LabelChip } from "@/features/conversations/Thread";
 import { useFinishAndSurface } from "@/features/conversations/useAiStream";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
 import { useActiveGhHost } from "@/lib/git/host";
@@ -748,7 +749,7 @@ function ProjectPickRow({
       data-row={project.id}
       tabIndex={rovingTab}
       onFocus={onFocus}
-      title={wrapperTitle ?? project.title}
+      title={wrapperTitle}
       aria-describedby={describedBy}
       className={cn(
         "flex w-full items-center gap-2 px-1 py-1.5 text-left text-xs outline-none hover:bg-muted/60 focus-visible:ring-1 focus-visible:ring-ring",
@@ -757,7 +758,12 @@ function ProjectPickRow({
       )}
     >
       <KanbanIcon className="size-3.5 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 flex-1 truncate">{project.title}</span>
+      <span
+        className="min-w-0 flex-1 truncate"
+        onMouseEnter={clipTitleFromText}
+      >
+        {project.title}
+      </span>
       {blockedReason !== null && (
         <span id={reasonId} className="sr-only">
           {blockedReason}

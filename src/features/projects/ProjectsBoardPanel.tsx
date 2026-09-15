@@ -143,13 +143,12 @@ const LENS_LOADING_REASON = "Loading this view of the board…";
 const VIEWS_TRUNCATED_NOTE = "Showing the first 50 views.";
 /** A view GitHub reports with no name. */
 const UNTITLED_VIEW = "Untitled view";
-/** Single-writer: two writes to one card's field settle in an order nothing
- *  promises, and an EARLIER move failing late puts the card back in a column a
- *  later write already moved it out of. */
-/** The two halves of the board-write family, as the panel's gates read them: a card
- *  write can collide with another write to the same CARD (so the menu rows hold on
- *  each other), where an add touches no existing card and holds only pagination.
- *  The split mirrors the `group` segment of the mutation keys these come from. */
+/** The two LABELLED halves of the board-write family, as the panel's gates read
+ *  them: a card write can collide with another write to the same CARD (so the menu
+ *  rows hold on each other), where an add touches no existing card and holds only
+ *  pagination. The split lives here as a lookup over {@link BoardWriteKind}, which
+ *  is all the mutation key carries. Neither set is exhaustive — a kind in neither
+ *  still counts as a board write for pagination, and says so generically. */
 const CARD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "move",
   "convert",
@@ -161,6 +160,9 @@ const ADD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "add-draft",
 ]);
 
+/** Single-writer: two writes to one card's field settle in an order nothing
+ *  promises, and an EARLIER move failing late puts the card back in a column a
+ *  later write already moved it out of. */
 const MOVING_REASON = "Moving your last card…";
 /** Single-writer past the move, for the same reason and one step wider: an archive,
  *  a removal and a convert all change WHICH cards the board draws, so a second
@@ -660,6 +662,12 @@ export function ProjectsBoardPanel({
   const cardWritePending = pendingWrites.some(
     (w) => w.kind !== null && CARD_WRITE_KINDS.has(w.kind),
   );
+  // The draft dialog's single-flight gate. Its own form can't provide one: the
+  // component persists across close/reopen, so an Esc'd submit and a later one share
+  // a form instance whose `isSubmitting` the FIRST settle clears unconditionally —
+  // re-enabling Create over a write still in flight. The cache knows about every
+  // invocation, so the hold is derived from that instead.
+  const draftWritePending = pendingWrites.some((w) => w.kind === "add-draft");
   const addPending = pendingWrites.some(
     (w) => w.kind !== null && ADD_WRITE_KINDS.has(w.kind),
   );
@@ -674,6 +682,25 @@ export function ProjectsBoardPanel({
   /** Which add dialog is open, or null for neither. One at a time: both write to
    *  the same board and the menu offers them as alternatives. */
   const [addDialog, setAddDialog] = useState<"existing" | "draft" | null>(null);
+  /** Which run of an add dialog is current. A write can outlive the dialog that
+   *  fired it (the panel owns the mutation, so Esc leaves it going), and this is
+   *  what tells a resolution whether the dialog it was started from is still the
+   *  one on screen — without it, a stale success closes whichever dialog the user
+   *  opened next and the reopen-reset discards what was typed into it.
+   *
+   *  Bumped only from the EVENT that actually moves `addDialog`, never from an
+   *  effect keyed on the dialog's own props: `<Activity>` replays effect setups on
+   *  show and runs their cleanups on hide, so a token maintained that way churns on
+   *  tab switches and retires sessions no user action ended. (The one effect that
+   *  bumps it is a real retirement and guards on the value having changed.) */
+  const dialogSessionRef = useRef(0);
+
+  /** Open or close an add dialog, retiring whatever session was running. Every
+   *  transition goes through here so the token can't drift from the state. */
+  function switchAddDialog(next: "existing" | "draft" | null) {
+    dialogSessionRef.current += 1;
+    setAddDialog(next);
+  }
   const [menuTarget, setMenuTarget] = useState<BoardMenuTarget>(null);
   // The same target, readable SYNCHRONOUSLY. Base UI decides whether to open from
   // inside the very dispatch the keyboard route records in, so the open gate below
@@ -829,11 +856,16 @@ export function ProjectsBoardPanel({
   // deliberate switch can't reach here (the Select sits behind the dialog's own
   // backdrop), so a change while one is open is always that silent re-point, and
   // closing is the only honest answer: the pick behind the dialog is gone.
+  //
+  //  The one effect allowed to retire a session, because the ref-compare below
+  //  means it acts ONLY on a real change of `projectId` — an `<Activity>` show
+  //  replays this setup with the same value and it returns before touching
+  //  anything.
   const dialogProjectRef = useRef(projectId);
   useEffect(() => {
     if (dialogProjectRef.current === projectId) return;
     dialogProjectRef.current = projectId;
-    setAddDialog(null);
+    switchAddDialog(null);
   }, [projectId]);
 
   // Ranked like the field editor's own holds, and for the same reasons — the two
@@ -1016,17 +1048,27 @@ export function ProjectsBoardPanel({
 
   /** Add a draft note to the board. Owned here for the same reasons as the add
    *  above; the dialog keeps the form and closes itself on `true`. */
-  async function createDraft(title: string, body: string): Promise<boolean> {
-    if (projectId === null || project === null) return false;
+  async function createDraft(title: string, body: string): Promise<void> {
+    if (projectId === null || project === null) return;
+    // The session this write belongs to, read before the round trip. The CLOSE is
+    // performed here rather than by the dialog because only this side outlives the
+    // dialog: the write keeps going through an Esc, a board re-point that remounts
+    // the dialogs, and an `<Activity>` hide, and in every one of those the question
+    // "is the run that started this still on screen?" is answered by state the
+    // panel holds.
+    const session = dialogSessionRef.current;
     try {
       await addDraft.mutateAsync({ repo: repoPath, projectId, title, body });
     } catch {
-      // The mutation reported it; the dialog stays open over the draft so the text
-      // isn't lost to a failed write.
-      return false;
+      // The mutation reported it. Nothing closes, so the dialog stays open over the
+      // draft and the text isn't lost to a failed write.
+      return;
     }
     toast.success(`Draft added to ${project.title}`);
-    return true;
+    // Only the run that fired this may be closed by it. A stale token means the
+    // user has since closed, reopened, or been moved to another dialog — closing
+    // then would shut whatever is open now and discard what was typed into it.
+    if (session === dialogSessionRef.current) switchAddDialog(null);
   }
 
   /** Turn a draft card into a real issue in the repo this lens points at. The card
@@ -1239,6 +1281,13 @@ export function ProjectsBoardPanel({
         return "Finishing your last card change…";
       case addPending:
         return "Finishing your last add…";
+      // The catch-all for the family, and the reason the two sets above don't have
+      // to be exhaustive: a board write the panel has no label for still holds
+      // pagination, because the click gate below refuses on `boardWritePending`
+      // whatever kind it is. Without this the button would render UNHELD and then
+      // silently do nothing — the one outcome the explain-disabled rule forbids.
+      case boardWritePending:
+        return "Finishing a board write…";
       // The post-failure half of the same hazard. A REFRESH that failed leaves
       // the pre-edit pages on screen with the invalidation still owed, and both
       // fetching guards above have released. Appending a continuation onto those
@@ -1556,12 +1605,12 @@ export function ProjectsBoardPanel({
   const canAdd = showBoardChrome && addHeldReason === undefined;
   useHotkeyAction(
     "add-board-item",
-    () => setAddDialog("existing"),
+    () => switchAddDialog("existing"),
     active && canAdd,
   );
   useHotkeyAction(
     "new-board-draft",
-    () => setAddDialog("draft"),
+    () => switchAddDialog("draft"),
     active && canAdd,
   );
   // The content node ids of every card LOADED so far, for the add dialog's
@@ -1642,10 +1691,10 @@ export function ProjectsBoardPanel({
               Add item
             </DropdownMenuTrigger>
             <DropdownMenuContent className="min-w-56">
-              <DropdownMenuItem onClick={() => setAddDialog("existing")}>
+              <DropdownMenuItem onClick={() => switchAddDialog("existing")}>
                 Add issue or pull request…
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setAddDialog("draft")}>
+              <DropdownMenuItem onClick={() => switchAddDialog("draft")}>
                 New draft…
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -1964,7 +2013,7 @@ export function ProjectsBoardPanel({
             projectTitle={project.title}
             lens={lens}
             open={addDialog === "existing"}
-            onOpenChange={(o) => setAddDialog(o ? "existing" : null)}
+            onOpenChange={(o) => switchAddDialog(o ? "existing" : null)}
             onBoardContentIds={loadedContentIds}
             onAdd={addExistingToBoard}
           />
@@ -1972,7 +2021,8 @@ export function ProjectsBoardPanel({
             key={`draft-${projectId}`}
             projectTitle={project.title}
             open={addDialog === "draft"}
-            onOpenChange={(o) => setAddDialog(o ? "draft" : null)}
+            pending={draftWritePending}
+            onOpenChange={(o) => switchAddDialog(o ? "draft" : null)}
             onCreate={createDraft}
           />
         </>
