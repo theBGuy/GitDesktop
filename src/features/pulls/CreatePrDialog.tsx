@@ -334,6 +334,9 @@ export function CreatePrDialog({
         return;
       }
       let outcome: "success" | "error" = "error";
+      // Hoisted so the `finally` can arm the hand-off for a PR that exists even
+      // when a step after it threw.
+      let created: { number: number; url: string } | null = null;
       try {
         // Append the linked-issue chips as their exact keyword lines via the shared
         // composer (the single ref-block composition used by every create/edit save
@@ -373,21 +376,10 @@ export function CreatePrDialog({
             : {}),
         });
         outcome = "success";
-        // The lane outlives the forge's answer: flip its phase so the list's
-        // strip can carry the number, and hand the settle to the watcher that
-        // waits for the list to actually contain the PR. Armed with the entry's
-        // OWN startedAt — a fresh clock read would let this watcher settle a
-        // later create that re-claimed the head.
+        created = { number, url };
+        // Flip here, arm in the `finally`: the lane outlives the forge's answer,
+        // so the strip needs the number now, while the steps below still run.
         markPrCreated(repoPath, value.head, { number, url });
-        const startedAt = prCreateStartedAt(repoPath, value.head);
-        if (startedAt !== null)
-          armPrCreateHandOff(queryClient, {
-            repoPath,
-            head: value.head,
-            lens: createLens,
-            number,
-            startedAt,
-          });
         const notes = value.notes.trim();
         track({
           name: "pull_request_created",
@@ -475,9 +467,25 @@ export function CreatePrDialog({
           );
         else toastError(e);
       } finally {
-        // Failure only. A successful lane is the hand-off watcher's to settle,
-        // once the list shows the PR (or its timeout fires).
-        if (outcome === "error") settlePrCreate(repoPath, value.head, "error");
+        // The lane is also the duplicate-create admission guard, so the watcher
+        // arms only once this flow's last step is done — armed at the forge's
+        // answer, a fast list refetch could settle it mid-continuation and a
+        // remounted dialog would re-arm Create over a PR that already exists.
+        // Armed with the entry's OWN startedAt: a fresh clock read would let
+        // this watcher settle a later create that re-claimed the head.
+        if (outcome === "error") {
+          settlePrCreate(repoPath, value.head, "error");
+        } else if (created) {
+          const startedAt = prCreateStartedAt(repoPath, value.head);
+          if (startedAt !== null)
+            armPrCreateHandOff(queryClient, {
+              repoPath,
+              head: value.head,
+              lens: createLens,
+              number: created.number,
+              startedAt,
+            });
+        }
       }
     },
   });

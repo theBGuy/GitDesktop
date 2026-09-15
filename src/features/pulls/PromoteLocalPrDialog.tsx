@@ -124,17 +124,8 @@ export function PromoteLocalPrDialog({
       outcome = "success";
       // Flip the lane HERE, not in the finally: the comment carry-over below can
       // run long, and the strip would sit on "creating" with the number already
-      // known. The watcher then settles the lane when the list shows the PR.
+      // known. The watcher itself arms in the finally, once those steps are done.
       markPrCreated(repoPath, pr.head, { number, url });
-      const startedAt = prCreateStartedAt(repoPath, pr.head);
-      if (startedAt !== null)
-        armPrCreateHandOff(queryClient, {
-          repoPath,
-          head: pr.head,
-          lens: "origin",
-          number,
-          startedAt,
-        });
       // Carry the local comments over, in order, so none are lost.
       failedStep = "carrying over comments";
       setPosting(true);
@@ -189,9 +180,25 @@ export function PromoteLocalPrDialog({
         },
       );
     } finally {
-      // Failed-before-create only. Once the PR exists the lane belongs to the
-      // hand-off watcher, which holds it until the list shows the row.
-      if (outcome === "release") settlePrCreate(repoPath, pr.head, "release");
+      // The lane is also the duplicate-create admission guard, so the watcher
+      // arms only once this flow's last step is done — armed at the forge's
+      // answer, a fast list refetch could settle it mid-carry-over and a
+      // remounted dialog would re-arm Publish over a PR that already exists.
+      // Armed with the entry's OWN startedAt: a fresh clock read would let this
+      // watcher settle a later create that re-claimed the head.
+      if (outcome === "release") {
+        settlePrCreate(repoPath, pr.head, "release");
+      } else if (created) {
+        const startedAt = prCreateStartedAt(repoPath, pr.head);
+        if (startedAt !== null)
+          armPrCreateHandOff(queryClient, {
+            repoPath,
+            head: pr.head,
+            lens: "origin",
+            number: created.number,
+            startedAt,
+          });
+      }
     }
   }
 
