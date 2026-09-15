@@ -297,12 +297,16 @@ pub async fn validate_repo(path: String) -> AppResult<RepoInfo> {
 
 /// Whether `path` is still a directory on disk — no git spawn, so "the folder is
 /// gone" stays separable from "git can't resolve this repo", which every
-/// repo-scoped read collapses into one failure. `async` for the thread, not the
-/// body: a sync command is polled on the WebView2 UI thread, where this `stat`
-/// would freeze the window for the SMB timeout on a dropped network mount.
+/// repo-scoped read collapses into one failure. The `stat` rides tokio's blocking
+/// pool rather than `std`: polled repeatedly by several callers, a dropped network
+/// mount would otherwise hold the UI thread (sync command) or stack blocked
+/// runtime workers for the SMB timeout.
 #[tauri::command]
 pub async fn path_is_dir(path: String) -> bool {
-    Path::new(&path).is_dir()
+    tokio::fs::metadata(&path)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
 }
 
 #[tauri::command]

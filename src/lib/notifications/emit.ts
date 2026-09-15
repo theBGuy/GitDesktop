@@ -1,5 +1,5 @@
 import { pathIsDir } from "@/lib/git/api";
-import { repoIdentity } from "@/lib/git/repo-identity";
+import { peekRepoIdentity, repoIdentity } from "@/lib/git/repo-identity";
 import { notify, notifyIfUnfocused } from "@/lib/notify";
 import {
   DEFAULT_SETTINGS,
@@ -104,27 +104,40 @@ export function emitNotification(
   const claimedAt = Date.now();
   if (dedupeKey && seenRecently(dedupeKey, claimedAt)) return;
   void (async () => {
-    const [settings, override] = await Promise.all([
-      loadSettings().catch(() => DEFAULT_SETTINGS),
-      overrideForRepo(row.repoPath).catch(() => undefined),
-    ]);
     // Probe THEN resolve, bounded as a unit: the liveness check gates the resolve
     // (resolving a DEAD path caches the raw-path fallback for the session, under
     // the key every identity-keyed store reads), and both live on the timed side
-    // so a hung mount delays neither the inbox row nor the OS ping.
-    const identity = await Promise.race([
-      (async () => {
-        const live = await pathIsDir(row.repoPath).catch(() => false);
-        return live ? repoIdentity(row.repoPath) : row.repoPath;
-      })(),
-      new Promise<string>((resolve) => {
-        setTimeout(() => resolve(row.repoPath), IDENTITY_STAMP_TIMEOUT_MS);
-      }),
+    // so a hung mount delays neither the inbox row nor the OS ping. Every arm that
+    // skips the resolver still PEEKS the memo — read-only, so no poisoning — because
+    // a repo muted under its identity key must stay muted once its checkout is gone.
+    let stampTimer: ReturnType<typeof setTimeout> | undefined;
+    const knownIdentity = () => peekRepoIdentity(row.repoPath) ?? row.repoPath;
+    const [settings, identity] = await Promise.all([
+      loadSettings().catch(() => DEFAULT_SETTINGS),
+      Promise.race([
+        (async () => {
+          const live = await pathIsDir(row.repoPath).catch(() => false);
+          return live ? repoIdentity(row.repoPath) : knownIdentity();
+        })(),
+        new Promise<string>((resolve) => {
+          stampTimer = setTimeout(
+            () => resolve(knownIdentity()),
+            IDENTITY_STAMP_TIMEOUT_MS,
+          );
+        }),
+      ]).finally(() => clearTimeout(stampTimer)),
     ]);
-    // Dead path, hung probe, and unresolvable identity all answer the raw path, and
-    // an absent stamp is the honest answer for each: a checkout path posing as an
-    // identity key would mislead the click-time ladder.
+    // A cold-cache dead path, hung probe, or unresolvable repo all answer the raw
+    // path, and an absent stamp is the honest answer for each: a checkout path
+    // posing as an identity key would mislead the click-time ladder.
     const repoId = identity === row.repoPath ? undefined : identity;
+    // Sequenced after the race so the lookup reuses that key instead of resolving a
+    // second time; a raw path here reads the legacy override key only and never
+    // reaches the resolver. Costs this read the race's bound, and only on a path
+    // slow enough to hit it.
+    const override = await overrideForRepo(row.repoPath, identity).catch(
+      () => undefined,
+    );
     // The kind rides along for every source; the seam scopes it to the one source
     // that carries a kind axis.
     const channels = deliveredChannels(

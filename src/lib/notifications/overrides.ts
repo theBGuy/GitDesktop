@@ -333,12 +333,19 @@ export async function loadNotificationOverrides(): Promise<
 }
 
 /** One repo's override. Reads the memoized store instance, so a same-process write
- *  is visible immediately; another window's is not (matching automations). */
+ *  is visible immediately; another window's is not (matching automations).
+ *  `knownIdentity` is an already-resolved key: pass it from any caller that may
+ *  hold a DEAD `repoPath`, since resolving one here caches the raw-path fallback
+ *  for the session under the key every identity-keyed store reads. Handing the raw
+ *  path through is well-defined — {@link overrideEntry} then reads the legacy key
+ *  alone. */
 export async function overrideForRepo(
   repoPath: string,
+  knownIdentity?: string,
 ): Promise<RepoNotificationOverride | undefined> {
   const map = await loadNotificationOverrides();
-  return overrideEntry(map, await repoIdentity(repoPath), repoPath);
+  const identity = knownIdentity ?? (await repoIdentity(repoPath));
+  return overrideEntry(map, identity, repoPath);
 }
 
 /** Serialized read-modify-write against fresh disk state. The force-save flushes

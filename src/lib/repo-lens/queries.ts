@@ -39,8 +39,10 @@ const lensReadSettled = (q: { isPending: boolean; isFetching: boolean }) =>
  *  whether all of them have settled are derived side by side, so an input added to the
  *  value necessarily joins the settled test — the two can't cover different sets. Each
  *  hook is called unconditionally (a short-circuited `&&` would skip one and break hook
- *  order). The three single-value exports below are projections of this and nothing
- *  else; consumers needing more than one take this. */
+ *  order). `settled` is owned here rather than re-derived by consumers — the reads behind
+ *  the lens are this module's implementation detail, and a consumer re-deriving them
+ *  drifts the moment the lens gains an input. The single-value exports below are
+ *  projections of this and nothing else; consumers needing more than one take this. */
 export function useLensState(repo: string): {
   gate: boolean;
   lens: RemoteLens;
@@ -75,14 +77,6 @@ export function useLensGate(repo: string): boolean {
  *  silently falls back to origin without touching the store. */
 export function useRepoLens(repo: string): RemoteLens {
   return useLensState(repo).lens;
-}
-
-/** Whether {@link useRepoLens} can still flip underneath a consumer that has already
- *  acted on it. Owned here because the reads behind the lens are this module's
- *  implementation detail — a consumer re-deriving them drifts the moment the lens
- *  gains an input. */
-export function useRepoLensSettled(repo: string): boolean {
-  return useLensState(repo).settled;
 }
 
 /**
@@ -151,18 +145,23 @@ export function applyRepoLens(
   if (ui.selectedIssue?.kind === "remote") ui.selectIssue(null);
 }
 
-/** The switcher's setter — {@link applyRepoLens} with the selection clears and
- *  the disk write on, since this path is the user choosing the lens. */
+/** The switcher's setter — {@link applyRepoLens} with the selection clears and the disk
+ *  write on, since this path is the user choosing the lens. It is therefore the user's
+ *  door: the interaction is noted FIRST, or a settling navigation lands and applies ITS
+ *  lens over the choice just made. Direct {@link applyRepoLens} callers stay silent —
+ *  navigation-owned, and each is re-checked by its navigator's `stillValid`. */
 export function useSetRepoLens(repo: string) {
   const queryClient = useQueryClient();
+  const noteUserInteraction = useUiStore((s) => s.noteUserInteraction);
   return useCallback(
     (lens: RemoteLens) => {
+      noteUserInteraction();
       applyRepoLens(queryClient, repo, lens, {
         clearSelections: true,
         persist: true,
       });
     },
-    [queryClient, repo],
+    [queryClient, repo, noteUserInteraction],
   );
 }
 
