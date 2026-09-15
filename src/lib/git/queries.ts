@@ -93,7 +93,9 @@ import {
  *  per-repo app-data the same across the main checkout and every worktree. Null or
  *  `""` means no repo, which disables the query. On an IPC failure `data` stays
  *  undefined with `isError` set, so consumers read `identity ?? repoPath` and
- *  treat the error as settled rather than waiting on a value that needs a remount. */
+ *  treat the error as settled rather than waiting on a value that needs a remount —
+ *  except surfaces that WRITE under the identity key, which hold their editable
+ *  body on `isError` (a Retry arm) rather than composing edits over the raw path. */
 export function useRepoIdentity(repo: string | null) {
   return useQuery(repoIdentityQueryOptions(repo || null));
 }

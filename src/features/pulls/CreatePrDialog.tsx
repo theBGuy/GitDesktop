@@ -11,6 +11,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -375,6 +376,10 @@ export function CreatePrDialog({
         if (duplicate) {
           toast.error(
             `A ${prNoun} for this branch already exists — #${duplicate.number}.`,
+            {
+              description: duplicate.url,
+              action: { label: "View", onClick: () => openUrl(duplicate.url) },
+            },
           );
           return;
         }
@@ -633,6 +638,12 @@ export function CreatePrDialog({
   // reflect the reviewer notes) and the ReviewerNotesField's seeding provenance.
   const notes = useSelector(form.store, (s) => s.values.notes);
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  // Why the identity controls freeze: they pick what the create targets, and the
+  // push plus the forge call can run for minutes, so the picker reads as dead
+  // without a reason. Null when idle, which is what re-enables the controls.
+  const identityLockReason = isSubmitting
+    ? `Creating the ${prNoun} — the target is locked until it finishes.`
+    : null;
   // Survives this dialog closing, unlike `isSubmitting` — a create dismissed
   // mid-flight still owns the head branch until it settles, which is now the
   // whole catch-up window after the forge answers. The entry, not just a
@@ -912,7 +923,7 @@ export function CreatePrDialog({
                       { value: "origin", label: "Fork", slug: forkSlug },
                     ] as const
                   ).map((b) => (
-                    <Button
+                    <DisabledReasonButton
                       key={b.value}
                       type="button"
                       variant={target === b.value ? "secondary" : "ghost"}
@@ -921,9 +932,10 @@ export function CreatePrDialog({
                       title={b.slug ?? undefined}
                       // Frozen while a submit runs: this and the head select are
                       // the create's identity axes, and a submit awaits before it
-                      // claims its lane — a mid-flight change would retarget the
-                      // duplicate probe away from what is being created.
+                      // claims its lane, so a mid-flight change would retarget
+                      // the duplicate probe away from what is being created.
                       disabled={isSubmitting}
+                      reason={identityLockReason}
                       onClick={() => setTarget(b.value)}
                     >
                       {b.label}
@@ -932,7 +944,7 @@ export function CreatePrDialog({
                           {b.slug}
                         </span>
                       ) : null}
-                    </Button>
+                    </DisabledReasonButton>
                   ))}
                 </div>
               </div>

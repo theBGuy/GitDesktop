@@ -173,16 +173,26 @@ async fn repo_token_vars_to_strip_for(repo: &RepoHost) -> &'static [&'static str
     let Some(token) = env_token() else {
         return &[];
     };
-    let target = account_hostname().await;
+    let paths = glab_config_paths();
+    let text = read_config_text(&paths).await;
+    let env_host = std::env::var("GITLAB_HOST")
+        .ok()
+        .and_then(|host| normalize_authority(&host));
+    let config_default = if env_host.is_none() {
+        text.as_deref().and_then(default_host_from_config)
+    } else {
+        None
+    };
+    let target = env_token_target(env_host.as_deref(), config_default.as_deref());
     // known_hosts also includes GITLAB_HOST; only its saved-config half counts here.
-    let saved = known_hosts_from(&glab_config_paths(), None).await;
+    let saved = known_hosts_from_text(text.as_deref(), None);
     let has_saved_host = repo
         .hostname()
         .and_then(normalize_host)
         .is_some_and(|host| saved.contains(&host));
     // Keep env-only setups working. A cross-host token still reaches a host
     // without a saved credential, as it did before this policy.
-    repo_token_vars_to_strip(repo, has_saved_host, &target, Some(&token))
+    repo_token_vars_to_strip(repo, has_saved_host, target, Some(&token))
 }
 
 /// Pin API and auth probes to the same origin used for token scoping. Porcelain
@@ -527,13 +537,12 @@ fn hosts_from_config(text: &str) -> Vec<String> {
 /// [`known_hosts`]: every environment read lives in that wrapper, so this stays
 /// testable without mutating process-global state.
 async fn known_hosts_from(paths: &[PathBuf], env_host: Option<&str>) -> Vec<String> {
-    let mut hosts = Vec::new();
-    for path in paths {
-        if let Ok(text) = tokio::fs::read_to_string(path).await {
-            hosts = hosts_from_config(&text);
-            break;
-        }
-    }
+    let text = read_config_text(paths).await;
+    known_hosts_from_text(text.as_deref(), env_host)
+}
+
+fn known_hosts_from_text(text: Option<&str>, env_host: Option<&str>) -> Vec<String> {
+    let mut hosts = text.map(hosts_from_config).unwrap_or_default();
     if let Some(host) = env_host.and_then(normalize_host) {
         if !hosts.contains(&host) {
             hosts.push(host);
@@ -922,6 +931,29 @@ pub async fn run_glab(
     require_success(run_glab_raw(repo_path, args, timeout).await?)
 }
 
+// An explicit API credential pins routing before origin resolution: a transient
+// git failure must not change the identity used to post the caller's request.
+async fn glab_ex_host(
+    repo_path: Option<&str>,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Option<RepoHost> {
+    if args.first() == Some(&"api") && envs.iter().any(|(key, _)| GLAB_TOKEN_VARS.contains(key)) {
+        if let Some(host) = envs
+            .iter()
+            .find(|(key, _)| *key == "GITLAB_HOST")
+            .and_then(|(_, host)| credential_host(host))
+            .filter(|host| is_addressable_host(host))
+        {
+            return Some(RepoHost::Resolved(host));
+        }
+    }
+    match repo_path {
+        Some(repo) => Some(repo_host(repo).await),
+        None => None,
+    }
+}
+
 fn apply_explicit_env(cmd: &mut Command, repo: Option<&RepoHost>, envs: &[(&str, &str)]) {
     let has_token = envs.iter().any(|(key, _)| GLAB_TOKEN_VARS.contains(key));
     let token_host = envs
@@ -959,7 +991,8 @@ fn apply_explicit_env(cmd: &mut Command, repo: Option<&RepoHost>, envs: &[(&str,
 ///    probe-proven). NEVER logged.
 ///
 /// A caller supplying any token variable must also supply `GITLAB_HOST`.
-/// A missing or mismatched host drops the entire explicit credential family;
+/// API calls pin an addressable credential host, independent of origin lookup.
+/// Otherwise, a missing, mismatched, or unresolved host drops the explicit family;
 /// an accepted token replaces all inherited token variables.
 pub async fn run_glab_ex(
     repo_path: Option<&str>,
@@ -968,10 +1001,7 @@ pub async fn run_glab_ex(
     envs: &[(&str, &str)],
     timeout: Duration,
 ) -> AppResult<GlabOutput> {
-    let host = match repo_path {
-        Some(repo) => Some(repo_host(repo).await),
-        None => None,
-    };
+    let host = glab_ex_host(repo_path, args, envs).await;
     let strip = match &host {
         Some(host) => repo_token_vars_to_strip_for(host).await,
         None => &[],
@@ -1055,6 +1085,48 @@ mod account_hosts_tests {
         cwd_host, default_host_from_config, normalize_authority, repo_token_vars_to_strip,
         token_vars_to_strip, RepoHost, GLAB_TOKEN_VARS,
     };
+
+    async fn repo_fixture(remote: Option<(&str, &str)>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_str().unwrap();
+        let run = |args| {
+            crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+        };
+        run(&["init", "-q"]).await.unwrap();
+        if let Some((name, url)) = remote {
+            run(&["remote", "add", name, url]).await.unwrap();
+        }
+        dir
+    }
+
+    #[tokio::test]
+    async fn repo_host_without_remotes_is_no_origin() {
+        let dir = repo_fixture(None).await;
+        assert!(matches!(
+            super::repo_host(dir.path().to_str().unwrap()).await,
+            RepoHost::NoOrigin
+        ));
+    }
+
+    #[tokio::test]
+    async fn repo_host_with_only_upstream_is_no_origin() {
+        let dir = repo_fixture(Some(("upstream", "https://gitlab.com/group/repo.git"))).await;
+        assert!(matches!(
+            super::repo_host(dir.path().to_str().unwrap()).await,
+            RepoHost::NoOrigin
+        ));
+    }
+
+    #[tokio::test]
+    async fn repo_host_with_unparseable_origin_is_unresolved() {
+        let remote = "https:///group/repo.git";
+        assert!(cwd_host(Some(remote)).is_none());
+        let dir = repo_fixture(Some(("origin", remote))).await;
+        assert!(matches!(
+            super::repo_host(dir.path().to_str().unwrap()).await,
+            RepoHost::Unresolved
+        ));
+    }
 
     #[test]
     fn cwd_calls_scope_tokens_to_the_resolved_remote_host() {
@@ -1169,14 +1241,45 @@ mod account_hosts_tests {
 
     #[test]
     fn explicit_token_mismatch_or_missing_host_removes_the_whole_family() {
-        let repo = RepoHost::Resolved("gitlab.corp.example".into());
-        for envs in [
-            vec![("GITLAB_TOKEN", "bot"), ("GITLAB_HOST", "gitlab.com")],
-            vec![("GITLAB_TOKEN", "bot")],
+        for repo in [
+            RepoHost::Resolved("gitlab.corp.example".into()),
+            RepoHost::NoOrigin,
+            RepoHost::Unresolved,
         ] {
-            let result = explicit_env(Some(&repo), &envs);
-            for var in GLAB_TOKEN_VARS.iter().copied().chain(["GITLAB_HOST"]) {
-                assert_eq!(result.get(var), Some(&None), "{var}");
+            for envs in [
+                vec![("GITLAB_TOKEN", "bot"), ("GITLAB_HOST", "gitlab.com")],
+                vec![("GITLAB_TOKEN", "bot")],
+            ] {
+                let result = explicit_env(Some(&repo), &envs);
+                for var in GLAB_TOKEN_VARS.iter().copied().chain(["GITLAB_HOST"]) {
+                    assert_eq!(result.get(var), Some(&None), "{var}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_api_token_pins_its_host_independently_of_origin() {
+        for remote in [
+            None,
+            Some(("origin", "https:///group/repo.git")),
+            Some(("origin", "https://gitlab.corp.example/group/repo.git")),
+        ] {
+            let dir = repo_fixture(remote).await;
+            for token_host in ["gitlab.com", "gitlab.com:443"] {
+                let envs = [("GITLAB_TOKEN", "bot"), ("GITLAB_HOST", token_host)];
+                let args = ["api", "projects/group%2Frepo/merge_requests/1/notes"];
+                let host = super::glab_ex_host(Some(dir.path().to_str().unwrap()), &args, &envs)
+                    .await
+                    .unwrap();
+                assert_eq!(host.hostname(), Some("gitlab.com"));
+                let mut expected = args.to_vec();
+                expected.extend(["--hostname", "gitlab.com"]);
+                assert_eq!(cwd_args(host.hostname(), &args), expected);
+                let result = explicit_env(Some(&host), &envs);
+                assert_eq!(result["GITLAB_TOKEN"].as_deref(), Some("bot"));
+                assert_eq!(result["GITLAB_ACCESS_TOKEN"], None);
+                assert_eq!(result["OAUTH_TOKEN"], None);
             }
         }
     }

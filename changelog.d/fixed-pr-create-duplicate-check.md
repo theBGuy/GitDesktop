@@ -1,3 +1,2 @@
-- Creating a pull request confirms the branch has no open one first, and offers
-  a link to the existing pull request when there is one, so the same branch
-  never opens twice.
+- Creating a pull request checks the branch for an open one first and, when it
+  finds one, offers the link instead of opening a duplicate.
