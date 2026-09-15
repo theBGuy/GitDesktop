@@ -29,23 +29,51 @@ export function useRepoLensRaw(repo: string) {
   });
 }
 
+/** Every async read the lens resolves from, in ONE body: the gate, the value, and
+ *  whether all of them have answered are derived side by side, so an input added to
+ *  the value necessarily joins the settled test — the two can't cover different sets.
+ *  Each hook is called unconditionally (a short-circuited `&&` would skip one and break
+ *  hook order), and a PENDING read is the only unsettled state: an ERRORED one yields a
+ *  stable "origin". The three exports below are projections of this and nothing else. */
+function useLensInputs(repo: string): {
+  gate: boolean;
+  lens: RemoteLens;
+  settled: boolean;
+} {
+  const forge = useForgeStatus(repo);
+  const remotes = useRemotes(repo);
+  const raw = useRepoLensRaw(repo);
+  const gate =
+    forge.data?.provider === "github" &&
+    Boolean(remotes.data?.includes("upstream"));
+  return {
+    gate,
+    lens: gate && raw.data === "upstream" ? "upstream" : "origin",
+    settled: !forge.isPending && !remotes.isPending && !raw.isPending,
+  };
+}
+
 /** Whether the origin|upstream lens applies at all: a GitHub fork (an `upstream`
  *  remote present) is the only shape where the parent differs from origin. On
  *  GitLab/Bitbucket, or a repo with no upstream remote, the lens is a no-op and
  *  its UI stays hidden. Mirrors SyncControls' `hasUpstreamRemote` idiom. */
 export function useLensGate(repo: string): boolean {
-  const provider = useForgeStatus(repo).data?.provider;
-  const remotes = useRemotes(repo);
-  return provider === "github" && Boolean(remotes.data?.includes("upstream"));
+  return useLensInputs(repo).gate;
 }
 
 /** THE lens every PR/Issues surface consumes. Returns "origin" unless the gate
  *  passes AND the persisted value is "upstream" — so removing the upstream remote
  *  silently falls back to origin without touching the store. */
 export function useRepoLens(repo: string): RemoteLens {
-  const gate = useLensGate(repo);
-  const raw = useRepoLensRaw(repo).data;
-  return gate && raw === "upstream" ? "upstream" : "origin";
+  return useLensInputs(repo).lens;
+}
+
+/** Whether {@link useRepoLens} can still flip underneath a consumer that has already
+ *  acted on it. Owned here because the reads behind the lens are this module's
+ *  implementation detail — a consumer re-deriving them drifts the moment the lens
+ *  gains an input. */
+export function useRepoLensSettled(repo: string): boolean {
+  return useLensInputs(repo).settled;
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime } from "@/components/relative-time";
@@ -33,9 +34,10 @@ import type { PrStateFilter } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
 import {
   forgeFeatureReady,
+  keepPreviousDataForKeyAxes,
+  prDetailsOptions,
   useForgeStatus,
   useHoverPrefetch,
-  usePrDetails,
   usePrefetchPr,
   usePrList,
   usePrListCi,
@@ -51,7 +53,11 @@ import {
   useLocalPrs,
   useUpdateLocalPr,
 } from "@/lib/pulls/queries";
-import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
+import {
+  useRemoteSlug,
+  useRepoLens,
+  useRepoLensSettled,
+} from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -116,6 +122,9 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // The origin|upstream lens (GitHub forks only; "origin" everywhere else). It
   // decides which repo the remote PR list + every PR read/write below target.
   const lens = useRepoLens(repoPath);
+  // Whether that lens can still flip under a read keyed on it — every input behind it
+  // is async, so a fork's lens starts out provisionally "origin".
+  const lensSettled = useRepoLensSettled(repoPath);
   // When browsing the parent, the section header names the parent slug (whose
   // data this is) — falling back to "Upstream" while the slug loads.
   const upstreamSlug = useRemoteSlug(repoPath, "upstream", lens === "upstream");
@@ -394,17 +403,41 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // detail read would otherwise keep a live observer refetching on every window focus
   // while the panel is hidden. The intent itself is store state, so it survives the
   // hide and the align completes when the user comes back to the tab.
+  // `lensSettled` gates the ARMING, not just the consume: while the lens is still
+  // provisionally "origin" this would fetch a fork's ORIGIN pull request #N — a
+  // different PR — so the wrong-lens read must never fire at all.
   const alignRemoteNumber =
-    pendingPrAlign && onPullsTab && selectedPr?.kind === "remote"
+    pendingPrAlign && onPullsTab && lensSettled && selectedPr?.kind === "remote"
       ? Number(selectedPr.id)
       : null;
-  // The key RemotePrView's own mount builds, so the two share one cache entry.
-  const alignDetails = usePrDetails(repoPath, alignRemoteNumber, lens);
-  // The placeholder gate is what makes this the OPENED PR's state: this query keeps
-  // the previous number's data across a selection change, and aligning from it would
-  // move the tab on the wrong PR's state.
+  // `usePrDetails`' observer with ONE delta: `staleTime: 0`, so data minted before this
+  // intent armed can't satisfy the gate below — a PR the row prefetched (or the detail
+  // view read) seconds ago is exactly the state a merged-PR notification contradicts,
+  // and within the shared 30s window nothing would refetch it. staleTime is per-OBSERVER,
+  // and the key is unchanged, so this still shares RemotePrView's cache entry while that
+  // view keeps its own window.
+  const alignDetails = useQuery({
+    ...prDetailsOptions(repoPath, alignRemoteNumber ?? 0, lens),
+    enabled: alignRemoteNumber !== null,
+    placeholderData: keepPreviousDataForKeyAxes(repoPath, [[3, lens]]),
+    staleTime: 0,
+  });
+  // The intent is consumed only once EVERY axis of this deciding read is settled:
+  // NUMBER (the armed gate above), LENS (`lensSettled` — a flip re-keys the query onto
+  // a different repo's PR), and DATA, the three terms below. The placeholder: the query
+  // keeps the previous number's data across a selection change, so aligning from it
+  // would move the tab on another PR's state. `isFetching`: a PR viewed earlier this
+  // session serves its cached (possibly pre-merge) state immediately while the
+  // background refetch is in flight, and consuming that would leave the tab on Open
+  // for a PR that has since merged — a first fetch isn't affected, `isSuccess` being
+  // false throughout. Any fetch FAILURE (first or refetch) flips status to error, so
+  // the intent stays armed until a retry succeeds or a reselection clears it. Together
+  // with the observer's `staleTime: 0` that is the whole rule: consume only once every
+  // axis has settled AND the state was fetched after the intent armed.
   const alignDetailsSettled =
-    alignDetails.isSuccess && !alignDetails.isPlaceholderData;
+    alignDetails.isSuccess &&
+    !alignDetails.isPlaceholderData &&
+    !alignDetails.isFetching;
   const alignRemoteState = alignDetails.data?.state;
   // The tab and the archived toggle are READ here rather than depended on: the align
   // is keyed on the PR's state landing, not on the state it is correcting.
@@ -426,7 +459,11 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   }, [alignRemoteNumber, alignDetailsSettled, alignRemoteState]);
   useEffect(() => {
     if (!pendingPrAlign || selectedPr?.kind !== "local") return;
-    if (!localPrs.isSuccess) return;
+    // Same hold as the remote arm, for the same reason: this query serves its cached
+    // records while refetching, so a status merged or archived since that snapshot
+    // would be consumed as final. A fetch failure keeps the intent armed (status
+    // flips to error), resolved by a later successful read or a reselection.
+    if (!localPrs.isSuccess || localPrs.isFetching) return;
     // Settled without the record — deleted between the event and the click — disarms
     // without moving the tab: no tab can show a record that is gone.
     if (!selectedLocalPr) {
@@ -446,6 +483,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     pendingPrAlign,
     selectedPr,
     localPrs.isSuccess,
+    localPrs.isFetching,
     selectedLocalPr,
     stateFilter,
     clearPendingPrAlign,

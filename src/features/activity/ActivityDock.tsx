@@ -230,7 +230,15 @@ function parentDir(p: string): string | null {
  *  equality means UNKNOWN (the emit gate treats the same equality as an unresolved
  *  identity and omits the stamp) and must never read as a mismatch. Resolve only
  *  paths `validateRepo` has already proven live — a dead one would cache that
- *  fallback for the session, under the key every identity-keyed store reads. */
+ *  fallback for the session, under the key every identity-keyed store reads.
+ *  Compares via `normPath` (casefolded) on purpose: case sensitivity is a
+ *  property of the app-wide identity idiom, decided in normPath itself — an
+ *  unfolded compare here would let this ladder disagree with every
+ *  identity-keyed store on what counts as the same repository. The session-long
+ *  identity memo is equally deliberate: every identity-keyed store reads
+ *  through the same resolver, so its cache lifetime is the resolver's contract
+ *  — a fresh probe here would navigate by a different identity than the one
+ *  those stores key records under. */
 async function identityVerdict(
   repoPath: string,
   stamp: string,
@@ -365,10 +373,16 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
   const navigate = (n: AppNotification) => {
     const t = n.target;
     // Claimed before the first await AND before every early return, so each click
-    // supersedes a pending one: a stale continuation strands rather than yanking
-    // the user back to the row they moved on from.
+    // supersedes a pending one. The store's `interactionEpoch` is the other half of
+    // the guard: every user navigation or selection action bumps it, so a settled
+    // continuation strands instead of yanking the user off a newer choice of theirs.
+    // The navigators bump only AFTER the final check below, so this click's own
+    // landing can't strand itself — a popover click that goes on to navigate is one
+    // user action, counted once.
     const gen = ++clickGen;
-    const superseded = () => gen !== clickGen;
+    const startEpoch = useUiStore.getState().interactionEpoch;
+    const superseded = () =>
+      gen !== clickGen || useUiStore.getState().interactionEpoch !== startEpoch;
     // Synchronous, ahead of the awaits: the popover closes on the click itself,
     // never a resolution later.
     onClose();
@@ -403,12 +417,20 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         return;
       }
       markNotificationRead(n.id);
+      // The check above covers SCHEDULING this landing; `stillValid` re-checks at
+      // the deferred apply — generation for a later notification click, epoch for
+      // any OTHER user action in that window. The epoch is comparable only because
+      // the navigator hands back the value its own synchronous bump produced; this
+      // landing's beforeSelect bumps too, but runs after the check.
+      const stillValid = (epochAtRequest: number) =>
+        gen === clickGen &&
+        useUiStore.getState().interactionEpoch === epochAtRequest;
       if (t.type === "run") {
-        openRun({ ...target, runId: t.runId });
+        openRun({ ...target, runId: t.runId, stillValid });
         return;
       }
       if (t.type === "agent") {
-        openAgentTab(target);
+        openAgentTab({ ...target, stillValid });
         return;
       }
       // Land under the lens the event happened under — a fork's two lenses
@@ -446,6 +468,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         // selection reach the same commit; applied here it would land a render
         // early and fetch the new lens against the OLD number.
         beforeSelect: applyLens,
+        stillValid,
       });
     })().catch(() => {
       // best-effort — an unexpected throw degrades the click to a no-op
