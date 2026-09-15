@@ -94,12 +94,20 @@ function droppedLabelsHint(names: string[]): string {
 /** Why the submit is held, per lane phase: the lane now survives the forge's
  *  answer for the seconds the list takes to catch up, and a reopen in that
  *  window must read as "it's done" rather than "still going". */
-const LANE_HINT: Record<PrCreate["phase"], (lane: PrCreate) => string> = {
+const LANE_HINT: {
+  [P in PrCreate["phase"]]: (lane: Extract<PrCreate, { phase: P }>) => string;
+} = {
   creating: (lane) =>
     `A ${lane.noun} for this branch is already being created.`,
   created: (lane) =>
     `A ${lane.noun} for this branch was just created — #${lane.number}.`,
 };
+
+function laneHintFor(lane: PrCreate): string {
+  return lane.phase === "created"
+    ? LANE_HINT.created(lane)
+    : LANE_HINT.creating(lane);
+}
 
 export function CreatePrDialog({
   repoPath,
@@ -581,7 +589,7 @@ export function CreatePrDialog({
   // already covers, and where a "someone else is creating this" refusal would
   // be nonsense under a spinning button.
   const creatingElsewhere = lane !== undefined && !isSubmitting;
-  const laneHint = lane && !isSubmitting ? LANE_HINT[lane.phase](lane) : null;
+  const laneHint = lane && !isSubmitting ? laneHintFor(lane) : null;
 
   // Fork-side fallback base, mirroring the seed logic (default branch, else first
   // non-head) — reused when reconciling back from the parent target.

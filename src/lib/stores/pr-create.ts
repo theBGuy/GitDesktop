@@ -2,8 +2,8 @@ import { create } from "zustand";
 import { normPath } from "@/lib/git/path";
 import type { RemoteLens } from "@/lib/git/types";
 
-/** A pull-request creation the app is still waiting on. */
-export interface PrCreate {
+/** What every lane entry carries, whatever phase it is in. */
+interface PrCreateBase {
   /** The head branch being pushed and proposed. */
   head: string;
   /** What it is being proposed against, as the dialog spelled it. */
@@ -19,13 +19,17 @@ export interface PrCreate {
   /** The provider's noun, recorded at claim time so the banner and the list
    *  strip read ONE source rather than each re-deriving it from forge status. */
   noun: "pull request" | "merge request";
-  /** `"created"` from the forge's answer until the list catches up: the lane
-   *  deliberately outlives success so the list can hold the row's place. */
-  phase: "creating" | "created";
-  /** Set at the phase flip. */
-  number?: number;
-  url?: string;
 }
+
+/**
+ * A pull-request creation the app is still waiting on. Discriminated on
+ * `phase`: the lane deliberately outlives the forge's answer, and `"created"`
+ * — the window where the list has yet to show the PR — is the only phase that
+ * HAS a number, so no reader has to defend against a missing one.
+ */
+export type PrCreate =
+  | (PrCreateBase & { phase: "creating" })
+  | (PrCreateBase & { phase: "created"; number: number; url: string });
 
 interface PrCreateState {
   /** repoPath → head branch → the create in flight. The repo key is ALWAYS a
@@ -59,6 +63,13 @@ const lastFailed = new Set<string>();
 const failKey = (repoPath: string, head: string) =>
   `${normPath(repoPath)}\u0000${head}`;
 
+/** The refusal, per the BLOCKING lane's phase — it is that create the user is
+ *  being told about, so it speaks with that lane's own noun. */
+const REFUSAL: Record<PrCreate["phase"], (noun: string) => string> = {
+  creating: (noun) => `A ${noun} for this branch is already being created.`,
+  created: (noun) => `A ${noun} for this branch was just created.`,
+};
+
 /**
  * Claims the lane for one head branch. Returns null once claimed, or the reason
  * it was refused. Call this SYNCHRONOUSLY before the first await: a `git push`
@@ -78,11 +89,8 @@ export function startPrCreate(
   },
 ): string | null {
   const repo = normPath(repoPath);
-  // The refusal names the BLOCKING lane's own noun, not this caller's: it is
-  // that create the user is being told about.
   const blocking = usePrCreateStore.getState().byRepo[repo]?.[head];
-  if (blocking)
-    return `A ${blocking.noun} for this branch is already being created.`;
+  if (blocking) return REFUSAL[blocking.phase](blocking.noun);
   usePrCreateStore.setState((s) => ({
     byRepo: {
       ...s.byRepo,
@@ -210,17 +218,8 @@ export function usePrCreates(repoPath: string): PrCreate[] {
   return Object.values(entries).sort((a, b) => a.startedAt - b.startedAt);
 }
 
-/** True while a pull request for this exact head branch is being created. */
-export function useIsCreatingPr(
-  repoPath: string,
-  head: string | undefined,
-): boolean {
-  return usePrCreateStore((s) =>
-    Boolean(head && s.byRepo[normPath(repoPath)]?.[head]),
-  );
-}
-
-/** Render twin of {@link prCreatePhase}. */
+/** Render twin of {@link prCreatePhase}. A non-null phase IS the lane's
+ *  existence, so this is also the render-time "a create owns this head" read. */
 export function usePrCreatePhase(
   repoPath: string,
   head: string | undefined,

@@ -25,7 +25,6 @@ import {
   prCreateStartedAt,
   settlePrCreate,
   startPrCreate,
-  useIsCreatingPr,
   usePrCreatePhase,
 } from "@/lib/stores/pr-create";
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
@@ -74,16 +73,16 @@ export function PromoteLocalPrDialog({
   const [posting, setPosting] = useState(false);
   const pending = createPr.isPending || update.isPending || posting;
   // Shares the PR-create lane with CreatePrDialog: both push the same head and
-  // open a PR for it, so either one running blocks the other (and paints the
-  // same strip above the panels). `!pending` narrows it to the RE-ENTRY case —
-  // promote claims the lane synchronously, so the flag is also true during this
-  // dialog's own run, where `pending` is the honest thing to show.
-  const creatingElsewhere = useIsCreatingPr(repoPath, pr.head) && !pending;
-  // The lane survives the forge's answer until the list catches up, so the hint
-  // must not still say "being created" once the PR exists.
+  // open a PR for it, so either one holding the lane blocks the other (and
+  // paints the same strip above the panels). The lane is held through the whole
+  // catch-up window after the forge answers, not just while the call runs, so
+  // the hint reads the PHASE — a non-null one IS the lane. `!pending` narrows
+  // to the RE-ENTRY case: promote claims the lane synchronously, so a phase is
+  // also present during this dialog's own run, where `pending` is the honest
+  // thing to show.
   const lanePhase = usePrCreatePhase(repoPath, pr.head);
-  const laneHint =
-    creatingElsewhere && lanePhase ? LANE_HINT[lanePhase](prNoun) : null;
+  const creatingElsewhere = lanePhase !== null && !pending;
+  const laneHint = creatingElsewhere ? LANE_HINT[lanePhase](prNoun) : null;
   const creatingHintId = useId();
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.

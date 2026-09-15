@@ -197,7 +197,7 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
-      "A PR you're opening holds its place in the list — title, branches & draft state, then its number",
+      "A PR you're opening holds its place in its list — title, branches & draft state, then its number",
   },
   {
     group: "Pull requests & review",

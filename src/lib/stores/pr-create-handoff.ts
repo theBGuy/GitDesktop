@@ -5,7 +5,10 @@ import { prCreateStartedAt, settlePrCreate } from "@/lib/stores/pr-create";
 
 /** Time after the create flow finishes before the lane force-settles even if the
  *  list never showed the PR — a failed refetch, a server-side filter that
- *  excludes it, or no observer on the pulls tab at all. */
+ *  excludes it, or no observer on the pulls tab at all. Settling also releases
+ *  the duplicate-create guard the lane doubles as: deliberate, since the forge
+ *  is the authority on duplicates, and holding the lane past this backstop is
+ *  exactly the stranded-banner failure the constant exists to prevent. */
 export const HANDOFF_TIMEOUT_MS = 20_000;
 
 /** `usePrList`'s key up to its state axis: index 3 is the lens, index 4 the

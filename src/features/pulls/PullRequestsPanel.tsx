@@ -446,7 +446,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // The containment test runs against the RAW page, not `visibleRemote`: a real
   // row hidden by the user's own text/label filter means the strip's job is
   // done, not that it should linger. Per entry by its OWN number, so one
-  // create's arrival never hides a numberless sibling.
+  // create's arrival never hides a still-creating sibling.
+  // Deliberately NOT gated on `isPlaceholderData`: the strip and the rows render
+  // from the SAME `prList.data`, so a placeholder page holding the number is
+  // already painting that row — gating here would show both at once.
   const creates = usePrCreates(repoPath);
   const pendingCreates =
     stateFilter === "open"
@@ -455,7 +458,6 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
             c.lens === lens &&
             !(
               c.phase === "created" &&
-              c.number != null &&
               (prList.data?.some((p) => p.number === c.number) ?? false)
             ),
         )

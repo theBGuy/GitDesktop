@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
+import { ROW_CLASS } from "@/features/conversations/ConversationListPanel";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { PrCreate } from "@/lib/stores/pr-create";
 
@@ -8,13 +9,11 @@ import type { PrCreate } from "@/lib/stores/pr-create";
  *  banner's verb so one screen never reads two words for one operation;
  *  `created` says what the spinner is still spinning for rather than claiming a
  *  completion the list can't show yet. */
-const PHASE_META: Record<PrCreate["phase"], (create: PrCreate) => string> = {
+const PHASE_META: {
+  [P in PrCreate["phase"]]: (create: Extract<PrCreate, { phase: P }>) => string;
+} = {
   creating: (create) => `Creating ${create.noun}…`,
-  // The number is optional on the type; the panel's hand-off derive guards it too.
-  created: (create) =>
-    create.number != null
-      ? `#${create.number} · updating list…`
-      : "Updating list…",
+  created: (create) => `#${create.number} · updating list…`,
 };
 
 /**
@@ -26,9 +25,9 @@ const PHASE_META: Record<PrCreate["phase"], (create: PrCreate) => string> = {
  */
 export function PendingPrRow({ create }: { create: PrCreate }) {
   return (
-    // The panel's row box, minus every interactive affordance: same borders and
-    // padding, so the hand-off to the real row is a slot-for-slot swap.
-    <div className="block w-full border-b px-3 py-2 text-left">
+    // The panel's own row box, minus every interactive affordance: same borders
+    // and padding, so the hand-off to the real row is a slot-for-slot swap.
+    <div className={ROW_CLASS}>
       <p className="flex items-center gap-1.5 text-xs font-medium">
         <Spinner aria-hidden className="size-3 shrink-0" />
         <span className="min-w-0 truncate" title={create.title}>
@@ -40,7 +39,9 @@ export function PendingPrRow({ create }: { create: PrCreate }) {
         className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground"
         onMouseEnter={clipTitleFromText}
       >
-        {PHASE_META[create.phase](create)}
+        {create.phase === "created"
+          ? PHASE_META.created(create)
+          : PHASE_META.creating(create)}
       </p>
       <p
         className="mt-0.5 truncate pl-4 text-[11px] text-muted-foreground"

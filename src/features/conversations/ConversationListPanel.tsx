@@ -35,7 +35,9 @@ export interface NewMenuConfig {
   onJira?: () => void;
 }
 
-const ROW_CLASS = "block w-full border-b px-3 py-2 text-left";
+/** The list row's box. Exported so a pinned non-row (a pending strip) wears the
+ *  same box and swaps slot-for-slot with the real row it stands in for. */
+export const ROW_CLASS = "block w-full border-b px-3 py-2 text-left";
 function rowClass(active: boolean) {
   return cn(
     ROW_CLASS,
