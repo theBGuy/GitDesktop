@@ -2,6 +2,7 @@ import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,6 +20,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { cn } from "@/lib/utils";
 import { useGenerateIssueDraft } from "./useGenerateIssueDraft";
 
 export function CreateLocalIssueDialog({
@@ -159,7 +161,7 @@ export function CreateLocalIssueDialog({
           </DialogHeader>
 
           {/* Fields scroll; header and submit footer stay pinned. */}
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
             <form.AppField
               name="title"
               validators={{ onChange: ({ value }) => required(value) }}

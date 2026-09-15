@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode, useId, useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Button } from "@/components/ui/button";
@@ -307,10 +308,11 @@ export function AutomationKindsRow(
 
 const EMPTY_OVERRIDE: RepoNotificationOverride = {};
 
-/** Which body the dialog shows. A failed load of EITHER half of the baseline —
- *  the stored overrides or the global settings they sit on — is its own state,
- *  never a slow one: the query settles with no data, so a loading placeholder
- *  would spin forever and an editable matrix would edit against nothing. */
+/** Which body the dialog shows. A failed load of ANY part of the baseline — the
+ *  stored overrides, the global settings they sit on, or the identity the entry is
+ *  keyed by — is its own state, never a slow one: the query settles with no data,
+ *  so a loading placeholder would spin forever and an editable matrix would edit
+ *  against nothing (or, for the identity, against the wrong key). */
 function bodyState({
   error,
   loaded,
@@ -327,9 +329,10 @@ function bodyState({
   return "ready";
 }
 
-/** Either half of the baseline failed to load. Retry reaches both halves: the
- *  overrides and settings files open through the shared memoized loader, which
- *  drops its memo on a rejected load, so a refetch re-opens the file itself. */
+/** Part of the baseline failed to load. Retry reaches every part: the overrides
+ *  and settings files open through the shared memoized loader, which drops its
+ *  memo on a rejected load, so a refetch re-opens the file itself, and the
+ *  identity query's own refetch re-runs the lookup. */
 function BaselineLoadFailed({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="space-y-2">
@@ -413,9 +416,10 @@ function RepoNotificationsBody({
   // the Watch row prints it under this id and the Notify-on row points at it.
   const checksReasonId = useId();
   // Worktree-stable identity, so a linked worktree edits the same entry as its
-  // main checkout. The `?? repoPath` below is this call site's own fallback for a
-  // lookup that FAILED, never a stand-in to edit against while one is still
-  // pending — see the skeleton gate below.
+  // main checkout. The `?? repoPath` below is the settled-error fallback every
+  // consumer of this query keeps (the key the disk loaders use), never a stand-in
+  // to edit against: a pending lookup holds the skeleton and a failed one holds the
+  // error arm, so no edit is ever composed over it.
   const identityQuery = useRepoIdentity(repoPath);
   const identity = identityQuery.data;
 
@@ -438,8 +442,10 @@ function RepoNotificationsBody({
   const state = bodyState({
     // Settings counts too: `global` is half the baseline, and a failed
     // loadSettings would otherwise leave it undefined behind a skeleton that
-    // never resolves.
-    error: overrides.isError || settings.isError,
+    // never resolves. So does the identity: it settles on error with no data and
+    // `isPending` false, so without it here an editable matrix would open on the
+    // raw-path baseline and save the repo's entry under that key.
+    error: overrides.isError || settings.isError || identityQuery.isError,
     loaded: global !== undefined && saved !== undefined,
     identityPending: identityQuery.isPending,
   });
@@ -583,16 +589,15 @@ function RepoNotificationsBody({
 
   return (
     <>
-      {/* overflow-x-hidden alongside overflow-y-auto so the vertical scrollbar's
-          width can't induce a phantom horizontal one. */}
-      <div className="min-h-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto pr-1">
-        {/* Retries BOTH halves: the arm fires for either failure, and refetching
-            only one leaves the other's error in place. */}
+      <div className={cn(DIALOG_SCROLL_X_HIDDEN, "min-h-0 flex-1 space-y-3")}>
+        {/* Retries EVERY part: the arm fires for any one failure, and refetching
+            only some leaves the others' errors in place. */}
         {state === "error" && (
           <BaselineLoadFailed
             onRetry={() => {
               overrides.refetch();
               settings.refetch();
+              identityQuery.refetch();
             }}
           />
         )}

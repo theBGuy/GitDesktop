@@ -48,6 +48,7 @@ import type {
   GitLabRepoSettingsInput,
   GitLabTimeStats,
   IssueDetails,
+  IssueInfo,
   IssueReactions,
   IssueRelation,
   IssueType,
@@ -1233,7 +1234,10 @@ export function usePrListMergeability(
  * list NARROWLY (`["repo", repo, "pr-list", lens]` rather than the whole `["repo",
  * repo]` subtree) must invalidate `["repo", repo, "pr-review-state", lens]` alongside
  * it — `updatedAt` here is what sorts a PR into "Updated since my review", and
- * staleTime alone schedules no refetch.
+ * staleTime alone schedules no refetch. A mutation that changes CI STATE (approve,
+ * re-run, cancel, dispatch) owes {@link usePrListCi}'s `["repo", repo, "pr-ci"]` the
+ * same: it hydrates the list's check badges from its own key, and neither `pr` nor
+ * `pr-list` prefix-matches it.
  */
 export function usePrReviewState(
   repo: string,
@@ -2073,7 +2077,56 @@ export function usePrefetchIssue(repo: string, lens: RemoteLens) {
   );
 }
 
+/**
+ * Writes a just-created issue into the cached open list pages so the row is on
+ * screen under the closing dialog, a full list round trip ahead of the
+ * reconciling refetch that owns the authoritative row.
+ *
+ * Only UNFILTERED pages are written: whether a new issue matches an active
+ * server-side filter is the server's answer to give, so those pages are left to
+ * the invalidation. Within that, the match is deliberately wide — every cached
+ * page size for this repo, lens and the open state, so a sibling observer
+ * (relations, mention candidates, linked-issue chips) paints the row too.
+ */
+function insertCreatedIssue(
+  queryClient: QueryClient,
+  repo: string,
+  lens: RemoteLens,
+  row: IssueInfo,
+) {
+  const pages = queryClient.getQueriesData<IssueInfo[]>({
+    // `useIssueList`'s key, axis for axis: 3 = lens, 4 = state, 5 = limit,
+    // 6 = the filter key. Lens is pinned because a fork numbers its issues
+    // independently of its parent; state because "closed" is the only other
+    // spelling and a new issue is never that; limit stays free so every page
+    // size on screen is written.
+    predicate: (q) =>
+      q.queryKey[0] === "repo" &&
+      q.queryKey[1] === repo &&
+      q.queryKey[2] === "issue-list" &&
+      q.queryKey[3] === lens &&
+      q.queryKey[4] === "open" &&
+      q.queryKey[6] === remoteListFilterKey(null),
+  });
+  for (const [key, rows] of pages) {
+    // A refetch can land the real row first; a second copy would collide on the
+    // number-keyed React key rather than merely duplicating.
+    if (!rows || rows.some((r) => r.number === row.number)) continue;
+    // Both providers return the unfiltered list newest-created first, so the new
+    // issue belongs at the head — and trimming back to the page's own limit is
+    // what the refetch returns anyway, keeping "Load more" (a `length === limit`
+    // test) from blinking off while the page is momentarily one row over.
+    const limit = key[5];
+    const next = [row, ...rows];
+    queryClient.setQueryData<IssueInfo[]>(
+      key,
+      typeof limit === "number" ? next.slice(0, limit) : next,
+    );
+  }
+}
+
 export function useCreateIssue(repo: string, lens: RemoteLens) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
@@ -2094,6 +2147,24 @@ export function useCreateIssue(repo: string, lens: RemoteLens) {
         args.type,
         lens,
       ),
+    {
+      // Runs before the invalidation fires, so the insert is what paints and the
+      // refetch reconciles it. `author` stays null rather than guessing a login —
+      // the row type allows it and every list consumer reads it optionally.
+      onSuccess: (ref, args) => {
+        const now = new Date().toISOString();
+        insertCreatedIssue(queryClient, repo, lens, {
+          number: ref.number,
+          url: ref.url,
+          title: args.title,
+          state: "OPEN",
+          createdAt: now,
+          updatedAt: now,
+          author: null,
+          labels: args.labels.map((name) => ({ name })),
+        });
+      },
+    },
   );
 }
 
@@ -5862,6 +5933,9 @@ export function useApproveWorkflowRun(repo: string) {
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "actions"] });
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });
+      // `pr-ci` is a SIBLING key, not a child of `pr` — prefix matching compares
+      // segments whole, so the line above never reaches the PR list's CI badges.
+      queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr-ci"] });
     },
   });
 }

@@ -4,6 +4,7 @@ import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -31,6 +32,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { cn } from "@/lib/utils";
 import {
   AssigneesPopover,
   IssueTypeMenu,
@@ -278,7 +280,7 @@ export function CreateIssueDialog({
 
           {/* Fields scroll; the header and submit footer stay pinned so a long
               body or many metadata pickers can't push the dialog off-screen. */}
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
             {isUpstream && !subIssueParentId && (
               <p className="text-xs text-muted-foreground">
                 This opens an issue on the upstream repository, not your fork.

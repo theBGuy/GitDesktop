@@ -15,6 +15,12 @@ import type { ConversationFeature } from "./useCollapsedSections";
  *  the review-state grouping on top of "mine". */
 export type ConversationPreset = "all" | "mine" | "needs-review";
 
+/** Why the filter controls are held before the stored prefs are in hand: every
+ *  write composes a whole prefs object from them, so there is nothing to compose
+ *  from yet and a click would do nothing. One sentence for all three surfaces —
+ *  the segments, the popover trigger, and the palette actions. */
+const PREFS_LOADING_REASON = "Loading saved filters";
+
 /** A provider's ceiling on how many values ONE filter axis may carry, with the
  *  copy that explains it to the user. */
 export interface AxisCap {
@@ -94,6 +100,9 @@ export function useRemoteListFilter(opts: {
   const prefsQuery = useConversationFilterPrefs(repoPath);
   const prefs = prefsQuery.data ?? DEFAULT_CONVERSATION_FILTER_PREFS;
   const savePrefs = useSaveConversationFilterPrefs(repoPath);
+  // Every persisted control is inert until this is true (see writePrefs), so the
+  // surfaces that drive them hold with the reason rather than swallowing clicks.
+  const prefsReady = prefsQuery.data !== undefined;
 
   // Author/label choices are deliberately not persisted — they name people and
   // labels this page happened to load — and their session ENDS AT A REPO SWITCH:
@@ -218,7 +227,7 @@ export function useRemoteListFilter(opts: {
    * the stored filter.
    */
   function writePrefs(next: ConversationFilterPrefs) {
-    if (!prefsQuery.data) return;
+    if (!prefsReady) return;
     // `repoPath` rides the payload so the write stays pinned to the repo on screen
     // now, whatever is open by the time it lands.
     savePrefs.mutate({ prefs: next, repo: repoPath });
@@ -307,7 +316,17 @@ export function useRemoteListFilter(opts: {
      * the team leg only applies where teams can be chosen at all, which the issue
      * panel never does.
      */
-    scopeReady: prefsQuery.data !== undefined && teamScopeSettled,
+    scopeReady: prefsReady && teamScopeSettled,
+    /** The stored prefs are in hand, so a write has something to compose from.
+     *  The palette/hotkey gate for every persisted filter action ANDs this in:
+     *  an action that can't act is not offered. */
+    prefsReady,
+    /** Non-null while the stored prefs are still being read — the reason the filter
+     *  surfaces hold. They must not merely swallow the click: a control that looks
+     *  live and does nothing reads as a broken filter, and this window re-opens on
+     *  every repo switch. Null once the prefs are in hand, however the read
+     *  ended — the loader resolves to the defaults on failure, so it always lands. */
+    prefsReason: prefsReady ? null : PREFS_LOADING_REASON,
     /** A saved team axis that will NOT be in the running filter, because it could not
      *  be validated (the query errored, or the token lacks the scope to read
      *  membership) — the list is showing a wider scope than the saved one and must say

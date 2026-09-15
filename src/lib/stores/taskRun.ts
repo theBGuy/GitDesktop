@@ -9,6 +9,7 @@ import { isRunConfirmedIn } from "@/lib/scripts/scope";
 import type { ResolvedTaskScript, TaskDef } from "@/lib/scripts/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { invoke } from "@/lib/tauri/invoke";
+import { toastError } from "@/lib/toast";
 
 export type RunStatus = "running" | "exited";
 
@@ -92,7 +93,7 @@ function begin(
             .then((r) => toast.info(`Running ${r.path}`))
             .catch(() => undefined);
         })
-        .catch((e) => toast.error(String(e)));
+        .catch(toastError);
     }
     return;
   }

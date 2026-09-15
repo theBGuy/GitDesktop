@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import type { ConversationFeature } from "./useCollapsedSections";
 import type { ConversationPreset } from "./useRemoteListFilter";
 
@@ -43,6 +43,7 @@ export function ConversationPresetSwitcher({
   onPreset,
   canFilterMine,
   canGroupByReview,
+  disabledReason,
 }: {
   feature: ConversationFeature;
   preset: ConversationPreset | null;
@@ -51,6 +52,11 @@ export function ConversationPresetSwitcher({
   /** Gates the "Needs review" segment: without the review timestamps the
    *  grouping can't happen, so the segment could never light up. */
   canGroupByReview: boolean;
+  /** Why the scope can't be switched right now — the stored prefs aren't read
+   *  yet, so `onPreset` has nothing to compose its write from. Held with the
+   *  reason rather than hidden: the segments are the panel's scope readout, and a
+   *  toolbar that empties on every repo switch is worse than one that waits. */
+  disabledReason?: string | null;
 }) {
   if (!canFilterMine) return null;
 
@@ -61,16 +67,18 @@ export function ConversationPresetSwitcher({
   return (
     <div className="flex items-center gap-1">
       {segments.map((s) => (
-        <Button
+        <DisabledReasonButton
           key={s.value}
           variant={preset === s.value ? "secondary" : "ghost"}
           size="xs"
           aria-pressed={preset === s.value}
           title={s.title}
+          disabled={!!disabledReason}
+          reason={disabledReason}
           onClick={() => onPreset(s.value)}
         >
           {s.label}
-        </Button>
+        </DisabledReasonButton>
       ))}
     </div>
   );

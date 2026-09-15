@@ -230,6 +230,10 @@
   }
   html {
     @apply font-mono;
+    /* JetBrains Mono ships programming ligatures on, and this rule puts the whole
+       document in it: literal text the app must render verbatim (`--flag`, `->`,
+       `!=`, `::` in diffs and inputs) would otherwise compose into one glyph. */
+    font-variant-ligatures: none;
   }
 }
 

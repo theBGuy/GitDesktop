@@ -9,6 +9,7 @@ import {
   ptyResize,
   ptyWrite,
 } from "@/lib/pty";
+import { errorMessage } from "@/lib/tauri/invoke";
 
 /** Decode a base64 PTY chunk to bytes for `term.write` (xterm reassembles any
  *  partial UTF-8 across chunks itself). */
@@ -106,7 +107,9 @@ export function Terminal({
         }
       },
     ).catch((err) => {
-      term.write(`\r\n\x1b[31m${String(err)}\x1b[0m\r\n`);
+      // `invoke` rejects with a plain AppError object, which stringifies to
+      // "[object Object]" — the message has to be unwrapped to reach the grid.
+      term.write(`\r\n\x1b[31m${errorMessage(err)}\x1b[0m\r\n`);
       // A spawn failure (bad interpreter, missing binary) is a terminal exit too.
       onExitRef.current?.(null);
     });

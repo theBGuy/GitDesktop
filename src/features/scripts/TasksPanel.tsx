@@ -43,6 +43,7 @@ import { INTERPRETERS, type TaskDef } from "@/lib/scripts/types";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useTaskRunStore } from "@/lib/stores/taskRun";
 import { useUiStore } from "@/lib/stores/ui";
+import { toastError } from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
@@ -118,7 +119,7 @@ export function TasksPanel() {
         setEditing(null);
         toast.success(isNew ? `Added "${task.name}"` : `Saved "${task.name}"`);
       },
-      onError: (e) => toast.error(String(e)),
+      onError: toastError,
     });
   }
 
@@ -131,7 +132,7 @@ export function TasksPanel() {
         setEditing(null);
         toast.success(`Deleted "${name}"`);
       },
-      onError: (e) => toast.error(String(e)),
+      onError: toastError,
     });
   }
 
@@ -234,7 +235,7 @@ export function TasksPanel() {
             disabled={setEnabled.isPending}
             onClick={() =>
               setEnabled.mutate(true, {
-                onError: (e) => toast.error(String(e)),
+                onError: toastError,
               })
             }
           >

@@ -10,6 +10,7 @@ import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -42,6 +43,7 @@ import {
 } from "@/lib/git/queries";
 import {
   type ForgeUserRef,
+  type PrInfo,
   providerLabel,
   type RemoteLens,
 } from "@/lib/git/types";
@@ -68,6 +70,7 @@ import {
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { ReviewersPopover } from "./ReviewersPopover";
@@ -107,6 +110,23 @@ function laneHintFor(lane: PrCreate): string {
   return lane.phase === "created"
     ? LANE_HINT.created(lane)
     : LANE_HINT.creating(lane);
+}
+
+/** The open PR a create into `base` would duplicate. The probe already keys on the
+ *  head, so only the base and the lens rule remain: the origin path skips
+ *  cross-repository rows for the same reason ComparePanel does — an origin-pinned
+ *  probe can only reach them via a contributor's same-named fork branch — while on
+ *  the upstream lens your own fork→parent duplicate IS cross-repository (that arm
+ *  reports the flag false for every row today, so the qualifier guards the future). */
+function duplicateOf(
+  prs: PrInfo[] | undefined,
+  base: string,
+  lens: RemoteLens,
+): PrInfo | undefined {
+  return (prs ?? []).find(
+    (p) =>
+      p.baseRefName === base && (lens === "upstream" || !p.crossRepository),
+  );
 }
 
 export function CreatePrDialog({
@@ -325,10 +345,30 @@ export function CreatePrDialog({
           : undefined,
     },
     onSubmit: async ({ value }) => {
-      // Fire-time admission, claimed before the first await: the push plus the
-      // forge call runs for minutes and the user can dismiss the dialog the
-      // moment it starts, so a second attempt on the same head would queue on
-      // the repo lock and then open a duplicate PR.
+      // The probe speaks only for duplicates it has FRESHLY seen: a submit during
+      // its first fetch, or on a page cached before the PR was opened on the forge,
+      // would push a head the forge then refuses. One awaited re-check closes that
+      // window and lands in the probe's own cache (so the View offer appears with
+      // the refusal); a fresh probe skips it. `cancelRefetch: false` joins an
+      // in-flight fetch rather than restarting it.
+      if (!probeFresh) {
+        const recheck = await branchPrs.refetch({ cancelRefetch: false });
+        // A failed re-check stays advisory: the forge refuses duplicates
+        // authoritatively, so a probe error must not hold a legitimate create.
+        const duplicate = recheck.isError
+          ? undefined
+          : duplicateOf(recheck.data, value.base, createLens);
+        if (duplicate) {
+          toast.error(
+            `A ${prNoun} for this branch already exists — #${duplicate.number}.`,
+          );
+          return;
+        }
+      }
+      // Fire-time admission, claimed before the create's first await: the push
+      // plus the forge call runs for minutes and the user can dismiss the dialog
+      // the moment it starts, so a second attempt on the same head would queue
+      // on the repo lock and then open a duplicate PR.
       const refusal = startPrCreate(repoPath, value.head, value.base, {
         // The trimmed spelling is what the mutation sends below, so the strip
         // shows the title the PR will actually carry.
@@ -651,23 +691,21 @@ export function CreatePrDialog({
 
   // Duplicate probe: an open PR from this head against the chosen target already
   // exists. Probe with the target's lens ("upstream" composes owner:branch
-  // Rust-side; pass the BARE head). The origin path skips cross-repository rows for
-  // the same reason ComparePanel does — an origin-pinned probe can only reach them
-  // via a contributor's same-named fork branch. The upstream lens keeps them,
-  // because there your own fork→parent duplicate IS cross-repository; that arm
-  // reports the flag false for every row today, so the qualifier guards the future.
+  // Rust-side; pass the BARE head).
   const branchPrs = usePrsForBranch(repoPath, head || null, open, createLens);
-  const existingPr = (branchPrs.data ?? []).find(
-    (p) =>
-      p.baseRefName === base &&
-      (createLens === "upstream" || !p.crossRepository),
-  );
+  const existingPr = duplicateOf(branchPrs.data, base, createLens);
+  // Read here rather than in the submit handler, so the staleness that decides
+  // whether submit re-checks is a tracked render input and refreshes on the
+  // observer's own stale timer.
+  const probeFresh = branchPrs.isSuccess && !branchPrs.isStale;
 
   // The one submit gate, shared by the button, the mod+enter chord, and the
   // form's native submit: Enter must submit exactly when the button would.
-  // The `existingPr` arm is ADVISORY: its page can lag a just-created PR for
-  // its staleTime, and the forge refuses duplicates authoritatively — the gate
-  // trades that window for never holding submit on a slow probe.
+  // The `existingPr` arm blocks on whatever rows the probe last RESOLVED — stale
+  // rows included, until their refetch clears them; a probe still awaiting its
+  // first result never holds submit, and the handler re-checks the head once
+  // before claiming the lane when freshness has lapsed. The gate itself stays
+  // zero-latency.
   const submitBlocked =
     generating ||
     nothingToMerge ||
@@ -839,7 +877,7 @@ export function CreatePrDialog({
 
           {/* Fields scroll; the header and submit footer stay pinned so a long
               body can't push the dialog off-screen. */}
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
             {/* Fork PR-create: choose the repo the PR opens against. Hidden unless
                 this is a GitHub fork with an upstream remote. Default = parent. */}
             {lensGate && (

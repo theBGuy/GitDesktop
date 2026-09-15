@@ -2827,8 +2827,10 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   arguments it accepts.{{/ai}} Either way it runs in the open repository's folder.
 - **Available in.** A new task belongs to the repository you have open. Switch
   **Available in** to **All repositories** for one you want everywhere (a general
-  cleanup script, say), and switch it back at any time from the same editor. Tasks
-  you saved before this choice existed stay available in every repository.
+  cleanup script, say), and switch it back at any time from the same editor. For an
+  all-repositories task, choosing a script file saves its full path, so it runs the
+  same file wherever you are. Tasks you saved before this choice existed stay
+  available in every repository.
 - **Tasks from your other repositories.** They stay listed in a collapsed **Other
   repositories** group, each with the repo it belongs to, so nothing you saved goes
   missing. A task's **⋮** menu there offers **Edit** and **Delete**; **Run** waits until

@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useId, useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ import type { JiraAccountInfo, JiraProject } from "@/lib/jira/types";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { cn } from "@/lib/utils";
 
 /** Where an Atlassian API token is created (same page the Bitbucket account
  *  section links to). */
@@ -270,7 +272,7 @@ export function RepoJiraDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-h-0 flex-1 space-y-4 overflow-x-hidden overflow-y-auto pr-1">
+        <div className={cn(DIALOG_SCROLL_X_HIDDEN, "min-h-0 flex-1 space-y-4")}>
           {/* ── Connect ─────────────────────────────────────────────────── */}
           <div className="space-y-2">
             <Label htmlFor="jira-site">Jira site</Label>

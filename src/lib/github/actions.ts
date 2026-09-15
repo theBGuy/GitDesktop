@@ -410,11 +410,17 @@ function useActionsMutation<TArgs>(
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn,
-    // Scope the refresh to Actions — re-run/cancel/dispatch don't touch git state.
-    onSettled: () =>
-      queryClient.invalidateQueries({
+    // The awaited refresh is Actions' own; re-run/cancel/dispatch don't touch git
+    // state. The two CI surfaces the `actions` prefix can't reach (a PR's own
+    // checks, the list's `pr-ci` badges) ride along UNAWAITED — neither should
+    // hold this button pending.
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });
+      void queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr-ci"] });
+      return queryClient.invalidateQueries({
         queryKey: ["repo", repo, "actions"],
-      }),
+      });
+    },
   });
 }
 

@@ -18,7 +18,12 @@ import type { ForgeProvider } from "@/lib/git/types";
 import { useAddRecentRepo, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { cn } from "@/lib/utils";
 
 /** The repo an Explore clone is pinned to. */
 export interface ExploreCloneTarget {
@@ -95,6 +100,11 @@ export function ExploreCloneDialog({
   }
 
   const canClone = values.destination.trim().length > 0;
+  const { blockedReason, reasonId, wrapperTitle, describedBy } =
+    useDisabledReason({
+      disabled: !canClone,
+      reason: "Choose a local path to clone into",
+    });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -168,17 +178,26 @@ export function ExploreCloneDialog({
               Cancel
             </Button>
             <form.AppForm>
-              {/* Wrap so the disabled reason still shows on hover — a
-                  native-disabled button swallows its `title`. */}
               <span
-                className="inline-flex"
-                title={
-                  canClone ? undefined : "Choose a local path to clone into"
-                }
+                className={cn(
+                  "inline-flex",
+                  blockedReason && "cursor-not-allowed",
+                )}
+                title={wrapperTitle}
               >
-                <form.SubmitButton disabled={!canClone}>
+                <form.SubmitButton
+                  focusableWhenDisabled={!!blockedReason}
+                  disabled={!canClone}
+                  aria-describedby={describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
                   Clone
                 </form.SubmitButton>
+                {blockedReason ? (
+                  <span id={reasonId} className="sr-only">
+                    {blockedReason}
+                  </span>
+                ) : null}
               </span>
             </form.AppForm>
           </DialogFooter>

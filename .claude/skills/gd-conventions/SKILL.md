@@ -219,6 +219,9 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   not a silent gap.
 - Never degrade a surface to dodge machinery: no plain `<pre>` where the app
   highlights, no spinner where skeletons exist.
+- Caught errors surface via `toastError` (`src/lib/toast.ts`), or `errorMessage`
+  (`src/lib/tauri/invoke.ts`) where a toast is wrong (a terminal buffer) — never
+  `String(e)`: `invoke` rejects a PLAIN AppError, stringified "[object Object]".
 - A caption over a GROUP of controls rides `LabeledGroup`
   (`src/components/form/labeled-group.tsx`), which ties the group to it via
   `role="group"` + `aria-labelledby` — a `<Label>` that associates with nothing

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
@@ -210,7 +211,7 @@ export function SubmitReviewDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-w-0 space-y-3 overflow-y-auto overflow-x-hidden">
+        <div className={cn(DIALOG_SCROLL_X_HIDDEN, "min-w-0 space-y-3")}>
           <RadioGroup
             value={effectiveVerdict}
             onValueChange={(v) => setVerdict(v as ReviewVerdict)}

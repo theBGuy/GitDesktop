@@ -3,6 +3,7 @@ import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent } from "react";
 import { toast } from "sonner";
+import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -24,6 +25,7 @@ import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
+import { cn } from "@/lib/utils";
 import { useGenerateRepoDescription } from "../repo-settings/useGenerateRepoDescription";
 
 /** Bitbucket repo slugs must start alphanumeric, then allow dot/underscore/hyphen.
@@ -395,7 +397,7 @@ export function PublishDialog({
             </DialogDescription>
           </DialogHeader>
           {/* Fields scroll; header and submit footer stay pinned. */}
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
             {/* GitHub creates the repo under an owner — pick it first. */}
             {ghPickerActive && (
               <form.AppField name="owner">

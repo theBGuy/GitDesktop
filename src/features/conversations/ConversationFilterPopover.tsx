@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Button } from "@/components/ui/button";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import {
   ComboboxCollection,
   ComboboxContent,
@@ -114,6 +114,7 @@ export function ConversationFilterPopover({
   review,
   authorReason,
   axisCap,
+  disabledReason,
 }: {
   authors: string[];
   labels: string[];
@@ -134,6 +135,11 @@ export function ConversationFilterPopover({
   /** Ceiling on selections per axis, where the provider's filter fan-out has one.
    *  Omit and selection is unbounded. */
   axisCap?: AxisCap;
+  /** Why the whole popover is held — the stored prefs aren't read yet, so the
+   *  persisted rows inside have nothing to compose a write from. Held at the
+   *  TRIGGER: the rows would otherwise open on default values and swallow every
+   *  toggle, which reads as a filter that forgets what it was told. */
+  disabledReason?: string | null;
 }) {
   const authorReasonId = useId();
   const capReasonId = useId();
@@ -207,9 +213,11 @@ export function ConversationFilterPopover({
   }, [authors, labels, authorFilter, labelFilter]);
 
   const trigger = (
+    // `disabled` rides the BUTTON, never the Trigger: a disabled Trigger leaves
+    // the tab order and takes its reason out of keyboard and AT reach.
     <ComboboxPrimitive.Trigger
       render={
-        <Button
+        <DisabledReasonButton
           variant="outline"
           size="icon-sm"
           aria-label={
@@ -217,6 +225,8 @@ export function ConversationFilterPopover({
               ? `Filters (${activeFilterCount} active)`
               : "Filters"
           }
+          disabled={!!disabledReason}
+          reason={disabledReason}
           className="relative"
         />
       }
