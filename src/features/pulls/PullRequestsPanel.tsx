@@ -58,12 +58,14 @@ import {
   useRepoLens,
   useRepoLensSettled,
 } from "@/lib/repo-lens/queries";
+import { usePrCreates } from "@/lib/stores/pr-create";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { CreatePrDialog } from "./CreatePrDialog";
 import { LocalPrContextMenu } from "./LocalPrContextMenu";
+import { PendingPrRow } from "./PendingPrRow";
 import { useReconcileLocalPrs } from "./useReconcileLocalPrs";
 
 /** The review-state subsections, in the order a triage pass wants them. */
@@ -558,6 +560,31 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       .filter(Boolean)
       .join(" ") || undefined;
 
+  // Running creates that still need a place held in this list. Derived at
+  // render, never in an effect: this panel lives under <Activity>, where an
+  // effect would be deferred while the tab is hidden — and the hand-off has to
+  // be exact, since a frame showing both the strip and the real row (or
+  // neither) is what the strip exists to prevent.
+  // The containment test runs against the RAW page, not `visibleRemote`: a real
+  // row hidden by the user's own text/label filter means the strip's job is
+  // done, not that it should linger. Per entry by its OWN number, so one
+  // create's arrival never hides a still-creating sibling.
+  // Deliberately NOT gated on `isPlaceholderData`: the strip and the rows render
+  // from the SAME `prList.data`, so a placeholder page holding the number is
+  // already painting that row — gating here would show both at once.
+  const creates = usePrCreates(repoPath);
+  const pendingCreates =
+    stateFilter === "open"
+      ? creates.filter(
+          (c) =>
+            c.lens === lens &&
+            !(
+              c.phase === "created" &&
+              (prList.data?.some((p) => p.number === c.number) ?? false)
+            ),
+        )
+      : [];
+
   // Arrow keys walk the visible rows, local section first like the list. A
   // collapsed section's body is unmounted, so its rows must leave the registry
   // too — otherwise an arrow key could select an invisible row. Grouped, the
@@ -806,6 +833,17 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         visibleRemote={visibleRemote}
         remoteGroups={remoteGroups}
         remoteNote={remoteNote}
+        // Oldest-first, the order `usePrCreates` already sorts — the same order
+        // the repo view's banner lists them in.
+        remotePinnedSlot={
+          pendingCreates.length > 0 ? (
+            <>
+              {pendingCreates.map((c) => (
+                <PendingPrRow key={c.head} create={c} />
+              ))}
+            </>
+          ) : undefined
+        }
         remoteKey={(pr) => String(pr.number)}
         isRemoteActive={(pr) =>
           selectedPr?.kind === "remote" && selectedPr.id === String(pr.number)

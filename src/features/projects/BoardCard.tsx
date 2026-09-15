@@ -14,9 +14,20 @@ import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Badge } from "@/components/ui/badge";
+import {
+  formatFieldDate,
+  iterationRange,
+  OptionValue,
+} from "@/features/conversations/ProjectFieldValues";
 import { StateIcon } from "@/features/issues/IssueRelations";
-import { clipTitleFromText } from "@/lib/clip-title";
-import type { AssigneeRef, BoardItem, BoardItemContent } from "@/lib/git/types";
+import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
+import type {
+  AssigneeRef,
+  BoardItem,
+  BoardItemContent,
+  ProjectFieldDef,
+  ProjectFieldValue,
+} from "@/lib/git/types";
 import { cn } from "@/lib/utils";
 
 /** How many assignee faces a card shows before the rest collapse into "+N" —
@@ -218,6 +229,122 @@ function CardMeta({
   );
 }
 
+/** One chip: a hairline box that stays quiet beside the card's own two lines. */
+const CHIP_CLASS =
+  "inline-flex min-w-0 max-w-full items-center gap-1 border px-1 py-px text-[10px] text-muted-foreground";
+
+/** The item's value for `def`, or undefined when it holds none. The value's own
+ *  kind has to match the definition's — a wire shape that disagrees is not a
+ *  value of this field — which is the same test `valueOfKind` makes in
+ *  board-model, so the chips and the sort read an item the same way. `unknown` is
+ *  the one value arm without a `fieldId`, and it matches no definition. */
+function valueFor(
+  item: BoardItem,
+  def: ProjectFieldDef,
+): ProjectFieldValue | undefined {
+  return item.fieldValues.find(
+    (value) =>
+      value.kind === def.kind && "fieldId" in value && value.fieldId === def.id,
+  );
+}
+
+/**
+ * One field's value as chip contents, or null when there is nothing to show —
+ * an unset field, a blank one, or a kind this build has no compact form for. A
+ * name with no value beside it reads as a broken render, so the whole chip drops
+ * rather than the value, which is the field rail's own contract.
+ *
+ * Only a NUMBER carries its field name: a select option, a date and an iteration
+ * all say what they are, where a bare `3` on a card means nothing.
+ */
+function chipNode(value: ProjectFieldValue): ReactNode {
+  switch (value.kind) {
+    case "singleSelect":
+      return value.name ? (
+        <OptionValue name={value.name} color={value.color} />
+      ) : null;
+    case "multiSelect": {
+      const options = value.options.filter((option) => option.name);
+      return options.length === 0 ? null : (
+        <span className="inline-flex min-w-0 items-center gap-x-1.5">
+          {options.map((option) => (
+            <OptionValue
+              key={option.id}
+              name={option.name}
+              color={option.color}
+            />
+          ))}
+        </span>
+      );
+    }
+    case "number":
+      return Number.isFinite(value.number) ? (
+        <>
+          {/* `truncate` rather than `shrink-0`: overflow-hidden zeroes the flex
+              auto-minimum, so a long field name clips inside the chip instead of
+              pushing the value past its width. */}
+          <span className="truncate" onMouseEnter={clipTitleFromText}>
+            {value.fieldName}
+          </span>
+          <span className="shrink-0 tabular-nums">
+            {value.number.toLocaleString(undefined, {
+              maximumFractionDigits: 20,
+            })}
+          </span>
+        </>
+      ) : null;
+    case "date":
+      return value.date === "" ? null : formatFieldDate(value.date);
+    case "iteration": {
+      // The title is the compact form; a board that left one unnamed still has
+      // its span, and one with neither has nothing to draw.
+      if (value.title !== "") return value.title;
+      const range = iterationRange(value.startDate, value.duration);
+      return range === "" ? null : range;
+    }
+    case "text": {
+      const text = value.text.trim();
+      return text === "" ? null : (
+        <span className="truncate" onMouseEnter={clipTitle(text)}>
+          {text}
+        </span>
+      );
+    }
+    // `unknown`, and any kind a later backend adds: silent rather than guessed at.
+    default:
+      return null;
+  }
+}
+
+/** The active view's visible fields, as chips under the card's meta line. The
+ *  field ORDER is the view's; a field the item hasn't filled in draws nothing, so
+ *  a card carries no empty chrome. Nothing at all with no view — `fields` is empty
+ *  then, which is the card exactly as it was. */
+function CardChips({
+  item,
+  fields,
+}: {
+  item: BoardItem;
+  fields: ProjectFieldDef[];
+}) {
+  const chips: { id: string; node: ReactNode }[] = [];
+  for (const def of fields) {
+    const value = valueFor(item, def);
+    const node = value === undefined ? null : chipNode(value);
+    if (node !== null) chips.push({ id: def.id, node });
+  }
+  if (chips.length === 0) return null;
+  return (
+    <span className="flex flex-wrap items-center gap-1">
+      {chips.map((chip) => (
+        <span key={chip.id} className={CHIP_CLASS}>
+          {chip.node}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 const CARD_CLASS =
   "flex w-full flex-col gap-1 border bg-background px-2 py-1.5 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
 
@@ -242,6 +369,7 @@ export const BoardCard = memo(function BoardCard({
   rovingTab,
   repoSlug,
   ghHost,
+  chipFields,
   onFocus,
   onOpen,
 }: {
@@ -257,6 +385,10 @@ export const BoardCard = memo(function BoardCard({
   /** The open repo under the ACTIVE lens; a card from another repo names its own. */
   repoSlug: string | null;
   ghHost: string | null;
+  /** The active view's visible fields, in its order — empty with no view. Held
+   *  identity-stable by the panel: this component is memoized, and a fresh array
+   *  every render would re-render every mounted card. */
+  chipFields: ProjectFieldDef[];
   onFocus: (columnIndex: number, index: number) => void;
   onOpen: (item: BoardItem) => void;
 }) {
@@ -321,6 +453,7 @@ export const BoardCard = memo(function BoardCard({
             <Badge variant="secondary">Draft</Badge>
             <Assignees assignees={content.assignees} ghHost={ghHost} />
           </span>
+          <CardChips item={item} fields={chipFields} />
         </Popover.Trigger>
         <Popover.Portal container={portalContainer}>
           <Popover.Positioner
@@ -381,6 +514,7 @@ export const BoardCard = memo(function BoardCard({
         assignees={content.assignees}
         ghHost={ghHost}
       />
+      <CardChips item={item} fields={chipFields} />
     </button>
   );
 });

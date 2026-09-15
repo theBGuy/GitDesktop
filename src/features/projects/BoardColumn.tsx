@@ -6,7 +6,7 @@ import {
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { OptionValue } from "@/features/conversations/ProjectFieldValues";
 import { clipTitleFromText } from "@/lib/clip-title";
-import type { BoardItem } from "@/lib/git/types";
+import type { BoardItem, ProjectFieldDef } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
 import { BoardCard } from "./BoardCard";
 import type { BoardColumnModel } from "./board-model";
@@ -33,6 +33,7 @@ export const BoardColumn = memo(function BoardColumn({
   focusNonce,
   repoSlug,
   ghHost,
+  chipFields,
   onCardFocus,
   onOpen,
 }: {
@@ -46,6 +47,9 @@ export const BoardColumn = memo(function BoardColumn({
   focusNonce: number;
   repoSlug: string | null;
   ghHost: string | null;
+  /** The active view's visible fields, passed straight to the cards; empty with
+   *  no view. Identity-stable, like every other prop this memoized column takes. */
+  chipFields: ProjectFieldDef[];
   onCardFocus: (columnIndex: number, index: number) => void;
   onOpen: (item: BoardItem) => void;
 }) {
@@ -201,6 +205,7 @@ export const BoardColumn = memo(function BoardColumn({
                   rovingTab={vi.index === tabStopIndex ? 0 : -1}
                   repoSlug={repoSlug}
                   ghHost={ghHost}
+                  chipFields={chipFields}
                   onFocus={onCardFocus}
                   onOpen={onOpen}
                 />

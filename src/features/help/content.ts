@@ -1444,8 +1444,12 @@ GitLab the code reviews and security audits you start yourself read them too —
 deliberate, documented decision isn't re-flagged. Notes present here also ground the
 **AI-generated** description{{/ai}}. Creating a pull request pushes your branch first, so it
 can run for a while: close the dialog and it carries on — a line at the top of the repository
-view names the branch until it finishes, reopening the dialog keeps everything you had typed,
-and a second create for the same branch is refused while the first is still running.
+view names the branch until the new pull request has settled into the list. The PR list it's
+headed for holds its place meanwhile, with a **pending entry** at the top carrying its title,
+branches and draft state; the number appears there as the PR opens, and the real row takes
+over once the list catches up. Reopening the dialog while it runs keeps everything you had
+typed, and a second create for the same branch is refused until the first one has settled
+into the list.
 Press {{key:mod+enter}} from any field to submit either the
 **Create** or the **Edit** dialog. The **Edit** dialog also carries a **base branch**
 select, so you can **retarget** a pull request at a different branch without recreating it —
@@ -1896,17 +1900,50 @@ saved:
 
 - **Project** lists the open boards this repository and its owner have, the repository's own
   first. Closed boards aren't listed.
-- **View options** gathers the controls for how the board is laid out. **Group by** is the
-  one there today: it picks which of the board's single-select fields becomes the columns,
-  starting on **Status**, since that's what a board's columns usually mean. Your pick applies
-  straight away, so you can try a few without closing the popup. Anything the field doesn't
-  cover collects in a final **No {field}** column, so nothing on the board is hidden from
-  you. A board with no single-select field at all shows every card in one column.
+- **View options** gathers the controls for how the board is laid out. **View** picks one of
+  the board's saved views as a lens over it (below). **Group by** picks which of the board's
+  single-select fields becomes the columns, starting on **Status**, since that's what a
+  board's columns usually mean. Both apply straight away, so you can try a few without
+  closing the popup. Anything the grouping field doesn't cover collects in a final
+  **No {field}** column, so nothing on the board is hidden from you. A board with no
+  single-select field at all shows every card in one column.
 
 Beside them, the count says how much of the board you're looking at, and **Load more**
 fetches the next page of a big one. Items the board has **archived** stay out of the columns
 and out of the per-column counts. The board's own total still counts them, so while a board
 is still paging in, that total can run ahead of the cards in front of you.
+
+## Saved views
+
+The views a board's owner set up on GitHub are listed under **View** in **View options**.
+Pick one and it becomes a lens over the board:
+
+- Its **filter** travels to GitHub with the read, so the columns and the count are the
+  filtered set rather than the whole board.
+- Its **grouping** seeds **Group by** at the moment you pick it. Change **Group by**
+  afterwards and the board regroups with the view still on, filter, sort and chips intact.
+  A view grouped by something that makes no columns here (an iteration field, say) leaves
+  your current grouping alone.
+- Its **sort** orders the cards inside each column, on the **Title** column or on a text,
+  number, date, single-select or iteration field. A card with nothing in the sorted field
+  goes last whichever way the sort runs, and cards the sort can't separate keep the board's
+  own order. A view sorted by a multi-select, or by something GitHub owns on the issue
+  itself (assignees, labels), keeps the board's own order instead.
+- Its **visible fields** show as chips on the cards, in the view's order, skipping what the
+  card already carries: the title, the assignees, and the field the columns are grouped by.
+  Fields GitHub owns on the issue itself (labels, milestone) carry no chip either, and a
+  field you haven't filled in draws nothing.
+
+A view saved as a **table** or a **roadmap** is drawn as a board here, and the strip above
+the columns says so. That strip names the view and its filter, and carries **Clear view**;
+the command palette's **Clear project view** does the same from the keyboard, and **No
+view** in the popover is the third route back. Views are read-only in GitDesktop: picking
+one changes what you see, never what GitHub has saved.
+
+While a view's read is on its way, the board you were already looking at stays put, with
+the count, **Load more**, and the card menu's move rows held until the new one lands. A
+filter that matches nothing says so in place of the columns, and offers **Clear view**
+there too.
 
 ## Reading a card
 

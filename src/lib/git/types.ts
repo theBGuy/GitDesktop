@@ -2452,6 +2452,36 @@ export interface ProjectFieldDefs {
   truncated: boolean;
 }
 
+/** One sort key of a saved view: the field it orders by, and the direction the
+ *  backend has already mapped off GitHub's own enum. */
+export interface ProjectViewSort {
+  fieldId: string;
+  direction: "asc" | "desc";
+}
+
+/** One of a board's SAVED VIEWS, as this build can honour it. `layout` is mapped
+ *  to the shapes the board knows plus `unknown` for one GitHub adds later, and
+ *  every id list is a plain field-id sequence in the view's own order. `filter`
+ *  is the board's own filter grammar for the server to parse — GitHub reports an
+ *  unfiltered view as either null or the empty string, so a caller testing "has a
+ *  filter" has to test both. */
+export interface ProjectViewDef {
+  id: string;
+  name: string;
+  layout: "board" | "table" | "roadmap" | "unknown";
+  filter: string | null;
+  verticalGroupFieldIds: string[];
+  sortBy: ProjectViewSort[];
+  visibleFieldIds: string[];
+}
+
+/** One board's saved views. `truncated` reports that the server capped the list,
+ *  the same claim {@link ProjectFieldDefs} makes about the fields. */
+export interface ProjectViews {
+  views: ProjectViewDef[];
+  truncated: boolean;
+}
+
 /** One field to SET on an item, tagged by the field's kind. These field names are
  *  the wire the backend deserializes by — a renamed one reads as absent there.
  *  Unsetting is not expressed here: a clear rides the write's separate id list. */

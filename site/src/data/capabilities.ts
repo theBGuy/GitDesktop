@@ -197,6 +197,11 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
+      "A PR you're opening holds its place in its list — title, branches & draft state, then its number",
+  },
+  {
+    group: "Pull requests & review",
+    label:
       "Link related issues as you open or edit a PR — auto-detected from your branch and commits (GitHub & GitLab; Bitbucket via linked Jira)",
   },
   {
@@ -330,7 +335,7 @@ export const capabilities: Capability[] = [
   {
     group: "Issues & discussions",
     label:
-      "Project boards — a GitHub Project as a kanban, grouped by any of its single-select fields, with right-click move between columns",
+      "Project boards — a GitHub Project as a kanban, grouped by any of its single-select fields, with right-click move between columns and its saved views as read-only lenses (GitHub applies the filter; the board honors the sort and shows the view's fields as chips)",
     highlight: true,
   },
   {

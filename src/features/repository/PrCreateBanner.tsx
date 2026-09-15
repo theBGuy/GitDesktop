@@ -8,6 +8,11 @@ import { usePrCreates } from "@/lib/stores/pr-create";
  * content down) rather than in a toast that expires or an overlay that covers
  * the header. There is nothing to press: `git push` has no clean mid-flight
  * cancel, so a create can only be waited out.
+ *
+ * The line is phase-STATIC by design: a lane lives on past the forge's answer
+ * until the list shows the PR, and rewriting this region's text there would
+ * re-announce it on top of the success toast. The list's own pending strip
+ * carries the number instead.
  */
 export function PrCreateBanner({ repoPath }: { repoPath: string }) {
   const creates = usePrCreates(repoPath);
@@ -27,7 +32,7 @@ export function PrCreateBanner({ repoPath }: { repoPath: string }) {
         >
           <Spinner aria-hidden className="size-3.5 shrink-0" />
           <span className="min-w-0 truncate">
-            Creating pull request <span className="font-mono">{c.head}</span> →{" "}
+            Creating {c.noun} <span className="font-mono">{c.head}</span> →{" "}
             <span className="font-mono">{c.base}</span>…
           </span>
         </div>
