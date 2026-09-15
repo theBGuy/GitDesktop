@@ -122,6 +122,25 @@ async fn account_hostname_from(paths: &[PathBuf], env_host: Option<&str>) -> Str
     env_token_target(env_host.as_deref(), config_default.as_deref()).to_string()
 }
 
+fn account_api_args<'a>(hostname: &'a str, args: &[&'a str]) -> Vec<&'a str> {
+    let mut argv = vec!["api"];
+    if is_addressable_host(hostname) {
+        argv.extend(["--hostname", hostname]);
+    }
+    argv.extend_from_slice(args);
+    argv
+}
+
+/// `hostname` must come from account_hostname. Ported defaults use glab's native
+/// routing: the bare request and inherited token share that same account target.
+pub async fn run_glab_api_for_account(
+    hostname: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GlabOutput> {
+    run_glab(None, &account_api_args(hostname, args), timeout).await
+}
+
 fn credential_host(host: &str) -> Option<String> {
     if host.contains("://") {
         cwd_host(Some(host))
@@ -581,29 +600,21 @@ pub(crate) fn is_addressable_host(host: &str) -> bool {
 
 /// The instance an environment token authenticates against, in GLAB'S OWN routing
 /// precedence: `GITLAB_HOST`, then the config file's top-level `host:`, then
-/// gitlab.com. Both arms carry the PORT ([`normalize_authority`]) — the token
-/// belongs to one authority, and a port-stripped spelling names a different one.
+/// gitlab.com. Ports survive source normalization; credential comparisons may
+/// elide the default HTTPS port, which names the same authority.
 fn env_token_target<'a>(env_host: Option<&'a str>, config_default: Option<&'a str>) -> &'a str {
     env_host.or(config_default).unwrap_or(GLAB_DEFAULT_HOST)
 }
 
-/// The one host an environment token may be sent to, or `None` when there isn't
-/// one. The single resolution [`account_hosts_from`] and [`token_vars_to_strip`]
-/// both read, so the host the token is ENUMERATED for can never disagree with the
-/// host it is SENT to.
-///
-/// `None` for a target this surface can't address — a PORTED `GITLAB_HOST` or
-/// config `host:`, say. The instance is then simply not fetchable here, which is
-/// the honest answer: resolving it to its port-stripped spelling would hand the
-/// credential to a stand-in authority the user never configured. `None` likewise
-/// for another provider's canonical host, which `known_hosts` already refuses to
-/// claim.
-fn addressable_token_target<'a>(
-    env_host: Option<&'a str>,
-    config_default: Option<&'a str>,
-) -> Option<&'a str> {
-    let target = env_token_target(env_host, config_default);
-    (is_gitlab_eligible_host(target) && is_addressable_host(target)).then_some(target)
+/// Enumeration and token scoping share the repository runner's authority
+/// normalization: HTTPS `:443` equals the bare host. Non-default ports remain
+/// unaddressable, and another provider's canonical host remains ineligible.
+fn addressable_token_target(
+    env_host: Option<&str>,
+    config_default: Option<&str>,
+) -> Option<String> {
+    let target = credential_host(env_token_target(env_host, config_default))?;
+    (is_gitlab_eligible_host(&target) && is_addressable_host(&target)).then_some(target)
 }
 
 /// The token variables a call addressing `hostname` must NOT inherit: all of
@@ -628,7 +639,7 @@ fn token_vars_to_strip(
     if env_token.is_none_or(|t| t.trim().is_empty()) {
         return &[];
     }
-    if addressable_token_target(env_host, config_default) == Some(hostname) {
+    if addressable_token_target(env_host, config_default).as_deref() == Some(hostname) {
         return &[];
     }
     GLAB_TOKEN_VARS
@@ -743,7 +754,7 @@ fn default_host_from_config(text: &str) -> Option<String> {
 /// `glab api user --hostname gitlab.com` reaches gitlab.com and 401s on a
 /// placeholder token, where the same call with none set refuses before any
 /// request. A target that this surface cannot address — another provider's
-/// canonical host, or a PORTED authority glab's `--hostname` refuses — is never
+/// canonical host, or a non-default port glab's `--hostname` refuses — is never
 /// appended ([`addressable_token_target`]): the instance is unreachable here, and
 /// substituting a spelling we CAN address would send the token somewhere else.
 ///
@@ -766,8 +777,8 @@ pub(crate) fn account_hosts_from(
         // Every host here is lowercased at its source (`normalize_host` /
         // `normalize_authority`, and the constant), so a plain compare dedupes.
         if let Some(target) = addressable_token_target(env_host, config_default) {
-            if !hosts.iter().any(|h| h == target) {
-                hosts.push(target.to_string());
+            if !hosts.contains(&target) {
+                hosts.push(target);
             }
         }
     }
@@ -789,13 +800,9 @@ async fn read_config_text(paths: &[PathBuf]) -> Option<String> {
 /// availability probe and its fetch both read, so the two can never disagree
 /// about whether GitLab has anything to offer.
 ///
-/// Unlike [`known_hosts`] this keeps the PORT on `GITLAB_HOST` and admits it only
-/// when addressable, so a ported env host is left out entirely rather than joining
-/// as its port-stripped stand-in. RESIDUAL: a ported `hosts:` KEY still arrives
-/// port-stripped from the config (`hosts_from_config`, which detection needs that
-/// way), so the fan-out may query a host the user only has a ported login for. It
-/// goes out with no environment token — glab's own store has no entry for that
-/// spelling — so it 401s in isolation and lands in `truncated`.
+/// Non-default ports on token targets remain unaddressable; HTTPS `:443` can
+/// authenticate the bare host. Saved `hosts:` keys still arrive port-stripped
+/// from detection's parser, so non-default-port logins may fail in isolation.
 pub async fn account_hosts() -> Vec<String> {
     let token = env_token();
     // `GITLAB_HOST` outranks the config file for the token's target, and it keeps
@@ -874,6 +881,21 @@ pub async fn run_glab_api_for_host(
     let mut argv: Vec<&str> = vec!["api", "--hostname", hostname];
     argv.extend_from_slice(args);
     let strip = token_vars_to_strip_for(hostname).await;
+    require_success(run_glab_raw_scoped(None, &argv, strip, timeout).await?)
+}
+
+/// Pin a repository API read to its resolved host while applying repository
+/// credential policy. `hostname` comes from the repository's own MR web URL;
+/// env-only logins remain usable when that host has no saved credential.
+pub async fn run_glab_api_for_repo_host(
+    hostname: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GlabOutput> {
+    let mut argv: Vec<&str> = vec!["api", "--hostname", hostname];
+    argv.extend_from_slice(args);
+    let host = RepoHost::Resolved(hostname.to_string());
+    let strip = repo_token_vars_to_strip_for(&host).await;
     require_success(run_glab_raw_scoped(None, &argv, strip, timeout).await?)
 }
 
@@ -1029,9 +1051,9 @@ pub async fn run_glab_ex(
 #[cfg(test)]
 mod account_hosts_tests {
     use super::{
-        account_hostname_from, account_hosts_from, apply_explicit_env, cwd_args, cwd_host,
-        default_host_from_config, normalize_authority, repo_token_vars_to_strip, token_vars_to_strip,
-        RepoHost, GLAB_TOKEN_VARS,
+        account_api_args, account_hostname_from, account_hosts_from, apply_explicit_env, cwd_args,
+        cwd_host, default_host_from_config, normalize_authority, repo_token_vars_to_strip,
+        token_vars_to_strip, RepoHost, GLAB_TOKEN_VARS,
     };
 
     #[test]
@@ -1104,6 +1126,24 @@ mod account_hosts_tests {
             "gitlab.env.example:8443",
         );
         assert_eq!(account_hostname_from(&[], None).await, "gitlab.com");
+    }
+
+    #[tokio::test]
+    async fn ported_account_defaults_use_bare_api_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "host: gitlab.corp.example:8443\n").unwrap();
+        let paths = [path];
+        for env_host in [None, Some("gitlab.env.example:8443")] {
+            let host = account_hostname_from(&paths, env_host).await;
+            for endpoint in ["user", "projects?membership=true&per_page=100"] {
+                assert_eq!(account_api_args(&host, &[endpoint]), ["api", endpoint]);
+            }
+        }
+        assert_eq!(
+            account_api_args("gitlab.corp.example", &["user"]),
+            ["api", "--hostname", "gitlab.corp.example", "user"],
+        );
     }
 
     fn explicit_env(
@@ -1476,6 +1516,42 @@ mod account_hosts_tests {
         );
     }
 
+    #[test]
+    fn ci_rollup_keeps_the_https_default_port_token() {
+        // The CI rollup pins gitlab.com; both token-target sources must agree
+        // with the repository runner even when the target spells out HTTPS :443.
+        let repo = RepoHost::Resolved("gitlab.com".to_string());
+        for (env_host, config_default) in [
+            (Some("gitlab.com:443"), None),
+            (None, Some("gitlab.com:443")),
+        ] {
+            let strip = token_vars_to_strip("gitlab.com", env_host, config_default, Some("t"));
+            assert!(strip.is_empty());
+            assert_eq!(
+                strip,
+                repo_token_vars_to_strip(&repo, true, "gitlab.com:443", Some("t")),
+            );
+            assert_eq!(
+                token_vars_to_strip("gitlab.other.example", env_host, config_default, Some("t")),
+                GLAB_TOKEN_VARS,
+            );
+        }
+    }
+
+    #[test]
+    fn ci_rollup_keeps_env_only_self_managed_credentials() {
+        let host = "gitlab.corp.example";
+        let repo = RepoHost::Resolved(host.to_string());
+        let target = super::env_token_target(None, None);
+        assert!(repo_token_vars_to_strip(&repo, false, target, Some("t")).is_empty());
+        assert_eq!(
+            repo_token_vars_to_strip(&repo, true, target, Some("t")),
+            GLAB_TOKEN_VARS,
+        );
+        // Account fan-out still scopes the same token to its account target.
+        assert_eq!(token_vars_to_strip(host, None, None, Some("t")), GLAB_TOKEN_VARS);
+    }
+
     /// No token in the environment means nothing to scope: the no-token session
     /// must spawn a bit-identical child to the one it always did. A blank variable
     /// is not a credential, matching the enumeration's own boundary.
@@ -1516,15 +1592,8 @@ mod account_hosts_tests {
         );
     }
 
-    /// The scrub and the enumeration must name the SAME target, or the fan-out
-    /// strips the token from the one leg that needed it. Both read
-    /// `addressable_token_target`, and this pins the agreement across the precedence
-    /// table: the set of hosts the enumeration APPENDS equals the set that KEEPS the
-    /// token, in every case including the ones that append nothing.
-    ///
-    /// Case spelling rides along: hosts are lowercased at every source, so an
-    /// unlowercased host is a different host to BOTH functions, never a silent match
-    /// in one and a miss in the other.
+    /// Enumeration and token scoping must agree across precedence, casing, and
+    /// default-port normalization, including targets that cannot be addressed.
     #[test]
     fn the_scrub_target_agrees_with_the_enumerated_target() {
         let cases: &[TargetCase] = &[
@@ -1548,10 +1617,22 @@ mod account_hosts_tests {
                 Some("gitlab.env.example"),
             ),
             (
-                "an unlowercased host is its own host",
+                "authority normalization lowercases the target",
                 None,
                 Some("GitLab.COM"),
-                Some("GitLab.COM"),
+                Some("gitlab.com"),
+            ),
+            (
+                "HTTPS default port in env host",
+                Some("gitlab.com:443"),
+                None,
+                Some("gitlab.com"),
+            ),
+            (
+                "HTTPS default port in config default",
+                None,
+                Some("gitlab.com:443"),
+                Some("gitlab.com"),
             ),
             // Unaddressable targets append nothing, so nothing keeps the token.
             (
@@ -1573,6 +1654,7 @@ mod account_hosts_tests {
         let probes = [
             "gitlab.acme.dev",
             "gitlab.com",
+            "gitlab.com:443",
             "gitlab.env.example",
             "gitlab.env.example:8443",
             "gitlab.file.example",
@@ -1605,12 +1687,8 @@ mod account_hosts_tests {
         }
     }
 
-    /// The redirect this closes: `normalize_host` strips ports, so a ported
-    /// `GITLAB_HOST` or config `host:` used to resolve to a DIFFERENT authority —
-    /// one the user never configured — which the enumeration then appended and the
-    /// scrub then handed the token to. glab can't address a ported host at all, so
-    /// the honest answer is that the instance is unreachable here: nothing is
-    /// appended, and every leg runs without the token.
+    /// A non-default port identifies a different authority that `--hostname`
+    /// cannot address; its token must never be sent to the bare host.
     #[test]
     fn a_ported_token_target_is_unaddressable_and_never_holds_the_token() {
         let saved_hosts = saved(&["gitlab.acme.dev", "gitlab.example"]);

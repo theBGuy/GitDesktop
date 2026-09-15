@@ -7,16 +7,17 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, FixedOffset};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::glab::{
-    account_hostname, run_glab, run_glab_api_for_host, run_glab_ex, run_glab_raw,
-    GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT,
+    account_hostname, run_glab, run_glab_api_for_account, run_glab_api_for_host,
+    run_glab_api_for_repo_host, run_glab_ex, run_glab_raw, GLAB_NETWORK_TIMEOUT, GLAB_TIMEOUT,
 };
 use crate::forge::model::{
     namespace_set, Capabilities, CompletedReviewerOut, ForgeForkActivity, ForgeForkEntry,
@@ -153,7 +154,7 @@ fn from_glab_project(p: GlabProject) -> ForgeRepo {
 /// Project listing and namespace ownership must resolve the same viewer on the
 /// same host. An unresolved probe answers empty (fail-open).
 async fn viewer_username(host: &str) -> String {
-    run_glab_api_for_host(host, &["user"], GLAB_TIMEOUT)
+    run_glab_api_for_account(host, &["user"], GLAB_TIMEOUT)
         .await
         .ok()
         .and_then(|o| serde_json::from_str::<GlabUser>(&o.stdout_lossy()).ok())
@@ -168,7 +169,7 @@ async fn viewer_username(host: &str) -> String {
 pub async fn list_repos() -> AppResult<ForgeRepoList> {
     let host = account_hostname().await;
     let viewer = viewer_username(&host).await;
-    let out = run_glab_api_for_host(
+    let out = run_glab_api_for_account(
         &host,
         &["projects?membership=true&order_by=last_activity_at&per_page=100"],
         GLAB_NETWORK_TIMEOUT,
@@ -1523,7 +1524,7 @@ pub async fn pr_list_ci(
         let query_arg = format!("query={query}");
         let path_arg = format!("path={full_path}");
         let args = ["graphql", "-f", &query_arg, "-f", &path_arg];
-        let Ok(out) = run_glab_api_for_host(&host, &args, GLAB_NETWORK_TIMEOUT).await else {
+        let Ok(out) = run_glab_api_for_repo_host(&host, &args, GLAB_NETWORK_TIMEOUT).await else {
             continue;
         };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()) else {
@@ -3438,12 +3439,19 @@ async fn current_user_login(repo_path: &str) -> Option<String> {
         .filter(|u| !u.is_empty())
 }
 
-type StatusLoginCell = Arc<OnceCell<String>>;
+struct StatusLogin {
+    login: String,
+    resolved_at: Instant,
+}
+
+const STATUS_LOGIN_TTL: Duration = Duration::from_secs(120);
+type StatusLoginCell = Arc<AsyncMutex<Option<StatusLogin>>>;
 static STATUS_LOGINS: LazyLock<Mutex<HashMap<String, StatusLoginCell>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Status keeps successful viewer resolutions for the process lifetime. Failed
-/// probes remain retryable after reconnecting or signing in.
+/// Re-probe on the next request after two minutes to bound stale ownership after
+/// reconnects or origin edits, at one spawn per repo per window. Failures retry;
+/// the per-repo async lock coalesces concurrent successful probes.
 async fn cached_status_login(repo_path: &str) -> Option<String> {
     let cell = {
         let mut cache = STATUS_LOGINS.lock().unwrap_or_else(|e| e.into_inner());
@@ -3453,13 +3461,23 @@ async fn cached_status_login(repo_path: &str) -> Option<String> {
 }
 
 async fn resolve_status_login(
-    cell: &OnceCell<String>,
+    cell: &AsyncMutex<Option<StatusLogin>>,
     resolve: impl std::future::Future<Output = Option<String>>,
 ) -> Option<String> {
-    cell.get_or_try_init(|| async { resolve.await.ok_or(()) })
-        .await
-        .ok()
-        .cloned()
+    let mut cached = cell.lock().await;
+    if let Some(entry) = cached
+        .as_ref()
+        .filter(|entry| entry.resolved_at.elapsed() < STATUS_LOGIN_TTL)
+    {
+        return Some(entry.login.clone());
+    }
+    *cached = None;
+    let login = resolve.await;
+    *cached = login.clone().map(|login| StatusLogin {
+        login,
+        resolved_at: Instant::now(),
+    });
+    login
 }
 
 /// Whether a note's author is the signed-in viewer. Pure (testable): an unknown
@@ -9637,9 +9655,9 @@ mod tests {
 
     #[tokio::test]
     async fn status_login_retries_failures_and_caches_success() {
-        let cell = OnceCell::new();
+        let cell = AsyncMutex::new(None);
         assert_eq!(resolve_status_login(&cell, async { None }).await, None);
-        assert!(cell.get().is_none());
+        assert!(cell.lock().await.is_none());
         assert_eq!(
             resolve_status_login(&cell, async { Some("alice".to_string()) }).await,
             Some("alice".to_string()),
@@ -9647,6 +9665,36 @@ mod tests {
         assert_eq!(
             resolve_status_login(&cell, async { panic!("cached login must not be probed") }).await,
             Some("alice".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn status_login_expiry_refreshes_the_viewer() {
+        let cell = AsyncMutex::new(Some(StatusLogin {
+            login: "alice".to_string(),
+            resolved_at: Instant::now() - STATUS_LOGIN_TTL,
+        }));
+        assert_eq!(
+            resolve_status_login(&cell, async { Some("bob".to_string()) }).await,
+            Some("bob".to_string()),
+        );
+        assert_eq!(
+            resolve_status_login(&cell, async { panic!("fresh login must be cached") }).await,
+            Some("bob".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn status_login_failed_refresh_discards_stale_viewer_and_retries() {
+        let cell = AsyncMutex::new(Some(StatusLogin {
+            login: "alice".to_string(),
+            resolved_at: Instant::now() - STATUS_LOGIN_TTL,
+        }));
+        assert_eq!(resolve_status_login(&cell, async { None }).await, None);
+        assert!(cell.lock().await.is_none());
+        assert_eq!(
+            resolve_status_login(&cell, async { Some("bob".to_string()) }).await,
+            Some("bob".to_string()),
         );
     }
 

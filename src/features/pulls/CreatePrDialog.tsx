@@ -68,6 +68,7 @@ import {
   usePrCreates,
 } from "@/lib/stores/pr-create";
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -348,16 +349,29 @@ export function CreatePrDialog({
       // The probe speaks only for duplicates it has FRESHLY seen: a submit during
       // its first fetch, or on a page cached before the PR was opened on the forge,
       // would push a head the forge then refuses. One awaited re-check closes that
-      // window and lands in the probe's own cache (so the View offer appears with
-      // the refusal); a fresh probe skips it. `cancelRefetch: false` joins an
-      // in-flight fetch rather than restarting it.
+      // window and lands in the probe's own cache, so the View offer appears with
+      // the refusal. Freezing the identity controls for the submit is what keeps
+      // the await from moving the target; the guards below are the backstop.
       if (!probeFresh) {
+        // `cancelRefetch: false` joins an in-flight fetch instead of restarting it.
         const recheck = await branchPrs.refetch({ cancelRefetch: false });
-        // A failed re-check stays advisory: the forge refuses duplicates
-        // authoritatively, so a probe error must not hold a legitimate create.
-        const duplicate = recheck.isError
-          ? undefined
-          : duplicateOf(recheck.data, value.base, createLens);
+        // This await is the flow's only pre-create window, and the hosts feed
+        // this dialog the store's repoPath in place: a repo switch across it
+        // retargets both observers, so the verdict below would describe the new
+        // repo and the create would open there. Abort before the lane claim, so
+        // an aborted submit owns nothing. Silent — the user navigated away.
+        if (useUiStore.getState().repoPath !== repoPath) return;
+        // The head select stays live across the await and is a probe KEY axis, so
+        // changing it retargets the observer and `recheck` then describes a head
+        // this submit isn't creating. `form.state` is a live getter on the stable
+        // form, unlike the render-snapshot `head`. Like a probe error, a moved
+        // head drops the verdict rather than refusing: the forge is the duplicate
+        // authority and the lane guard below still covers in-app attempts.
+        const sameHead = form.state.values.head === value.head;
+        const duplicate =
+          recheck.isError || !sameHead
+            ? undefined
+            : duplicateOf(recheck.data, value.base, createLens);
         if (duplicate) {
           toast.error(
             `A ${prNoun} for this branch already exists — #${duplicate.number}.`,
@@ -905,6 +919,11 @@ export function CreatePrDialog({
                       size="xs"
                       aria-pressed={target === b.value}
                       title={b.slug ?? undefined}
+                      // Frozen while a submit runs: this and the head select are
+                      // the create's identity axes, and a submit awaits before it
+                      // claims its lane — a mid-flight change would retarget the
+                      // duplicate probe away from what is being created.
+                      disabled={isSubmitting}
                       onClick={() => setTarget(b.value)}
                     >
                       {b.label}
@@ -956,6 +975,8 @@ export function CreatePrDialog({
                       label="Merge"
                       items={items}
                       annotations={annotations}
+                      // Frozen while a submit runs — see the "Create in" picker.
+                      disabled={isSubmitting}
                       sizeToContent
                     />
                   )}

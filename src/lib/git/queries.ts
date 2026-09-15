@@ -2087,6 +2087,9 @@ export function usePrefetchIssue(repo: string, lens: RemoteLens) {
  * the invalidation. Within that, the match is deliberately wide — every cached
  * page size for this repo, lens and the open state, so a sibling observer
  * (relations, mention candidates, linked-issue chips) paints the row too.
+ *
+ * `repo`/`lens` must be the pair the create RAN under, which is why its mutation
+ * pins them as its key — an issue number is meaningless in another repo or lens.
  */
 function insertCreatedIssue(
   queryClient: QueryClient,
@@ -2148,6 +2151,11 @@ export function useCreateIssue(repo: string, lens: RemoteLens) {
         lens,
       ),
     {
+      // Both the create call and the insert below close over `repo`/`lens`, and the
+      // dialog family stays mounted across a repo switch — pinning them as the
+      // mutation key is what detaches a pending create instead of retargeting it,
+      // so a switch mid-create can't post to, or write a row into, another repo.
+      identity: ["create-issue", repo, lens],
       // Runs before the invalidation fires, so the insert is what paints and the
       // refetch reconciles it. `author` stays null rather than guessing a login —
       // the row type allows it and every list consumer reads it optionally.
@@ -4213,6 +4221,17 @@ function useRepoMutation<TArgs, TData>(
      *  async callback's rejection escapes the containment; a synchronous throw
      *  is contained and logged, and the invalidation still runs. */
     onSuccess?: (data: TData, variables: TArgs) => void;
+    /**
+     * Identity axes this mutation's `mutationFn` and callbacks close over (repo,
+     * lens, …). Opt in wherever a mid-flight change of those would misdirect the
+     * work: a MOUNTED observer re-rendered with new props retargets its PENDING
+     * mutation's whole options object, so the call lands — and any cache patch
+     * writes — under the new identity. A changed mutation-key hash detaches the
+     * pending mutation instead, freezing its options; `mutateAsync` still settles,
+     * but the observer's own `isPending`/`data` go idle at the switch, so only
+     * award this to sites whose callers await the promise.
+     */
+    identity?: readonly unknown[];
   } = {},
 ) {
   const queryClient = useQueryClient();
@@ -4239,6 +4258,7 @@ function useRepoMutation<TArgs, TData>(
   };
   return useMutation({
     mutationFn,
+    ...(opts.identity ? { mutationKey: opts.identity } : {}),
     ...(opts.refetchBeforeSuccess
       ? {
           onSuccess: async (data: TData, variables: TArgs) => {

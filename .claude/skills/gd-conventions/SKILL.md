@@ -381,6 +381,14 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `queries.ts`; a hand-built key or raw-path key silently fails to
   co-invalidate siblings.
+- **Mutation identity pinning** — a `useRepoMutation` whose mutationFn or
+  callbacks close over repo/lens AND whose host survives a repo switch passes
+  `identity: ["<op>", repo, lens]`: react-query re-pushes hook options onto an
+  in-flight mutation on every render, so without the key a switch retargets the
+  create and its callbacks to the NEW repo; a changed key hash detaches the
+  mutation with its options frozen instead. Callers must consume the promise
+  (`mutateAsync`), since the observer's `isPending`/`data` go idle at the
+  switch. Exemplar: `useCreateIssue`.
 - **Plugin-store open/reload** — an app-data store opens via
   `memoizedStoreLoader` and re-reads via `reloadToleratingEmptyStore`
   (`src/lib/plugin-store.ts`), never a hand-rolled `??= load(storeName(…))` or a
