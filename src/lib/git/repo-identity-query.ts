@@ -7,10 +7,14 @@ import {
 
 /** How long this READ surface keeps serving an identity a re-validation could not
  *  confirm. Two windows: one failed re-validation is a hiccup worth riding out, a
- *  second says the condition isn't transient — past that an honest error beats a key
- *  nothing has confirmed in ten minutes. A bound is affordable HERE and nowhere else:
- *  running out of it shows an error body, whereas the same bound on `repoIdentity`'s
- *  fallback would silently redirect a store write to the raw path. */
+ *  second says the condition isn't transient, and past that an honest error beats a
+ *  key nothing has reconfirmed. The wall-clock bound is a BAND, not this number: a
+ *  grace-served answer settles as a success and restarts `staleTime`, so the error
+ *  surfaces on the first refetch at or after ten minutes from the last CONFIRMED
+ *  answer — typically ten to fifteen, later still if nothing mounts or refocuses to
+ *  trigger one. A bound is affordable HERE and nowhere else: running out of it shows
+ *  an error body, whereas the same bound on `repoIdentity`'s fallback would silently
+ *  redirect a store write to the raw path. */
 const IDENTITY_READ_GRACE_MS = IDENTITY_TTL_MS * 2;
 
 /** The ONE options factory for the `["repo-identity", repoPath]` query: the shared

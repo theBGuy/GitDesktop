@@ -1,5 +1,6 @@
 import type { Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@/lib/tauri/invoke";
+import { ttlMemo } from "./identity-memo";
 
 // A repository's *worktree-stable identity key*: the absolute path of its common
 // git directory (`git rev-parse --git-common-dir`), which is identical for the
@@ -20,24 +21,18 @@ import { invoke } from "@/lib/tauri/invoke";
  *  hitting the memo instead of minting a git spawn apiece. */
 export const IDENTITY_TTL_MS = 300_000;
 
-/** Ages come off the monotonic clock, never `Date.now()`: an NTP correction or a
- *  user clock change would otherwise make a fresh entry look arbitrarily old, or
- *  strand a stale one as fresh. Only differences are ever read. */
-const stamp = (): number => performance.now();
-
-type IdentityEntry = { at: number; id: Promise<string> };
-
-/** In-flight or already-answered resolve per path, stamped with the moment its IPC
- *  was issued — a hit older than {@link IDENTITY_TTL_MS} re-resolves rather than
- *  serving. */
-const identityCache = new Map<string, IdentityEntry>();
-/** Resolved keys only, written where the IPC call succeeds — the synchronous view
- *  of {@link identityCache}, whose entries are Promises a peek cannot inspect.
- *  Holds whatever the resolver answered, including the Rust-side raw-path
- *  fallback for a live-but-unresolvable repo — callers keep treating
- *  `identity === repoPath` as "no identity". Entries are stamped but never
- *  dropped; each reader decides what age it will honor. */
-const settledIdentities = new Map<string, { at: number; id: string }>();
+/** The memo itself is mechanics ({@link ttlMemo}, unit-tested there); this module
+ *  owns the policy. Ages come off the monotonic clock, never `Date.now()`: an NTP
+ *  correction or a user clock change would otherwise make a fresh entry look
+ *  arbitrarily old, or strand a stale one as fresh. The memo reads only
+ *  differences. It holds whatever the resolver answered, the Rust-side raw-path
+ *  fallback for a live-but-unresolvable repo included — callers keep treating
+ *  `identity === repoPath` as "no identity". */
+const memo = ttlMemo({
+  resolve: (repoPath) => invoke<string>("git_repo_identity", { repoPath }),
+  ttlMs: IDENTITY_TTL_MS,
+  now: () => performance.now(),
+});
 
 /** Resolve `repoPath` to its identity key (memoized per path for
  *  {@link IDENTITY_TTL_MS}), REJECTING when the IPC call fails. The Rust command
@@ -48,32 +43,7 @@ const settledIdentities = new Map<string, { at: number; id: string }>();
  *  have changed hands since. Readers that would rather show continuity than an
  *  error take {@link settledIdentityWithin} explicitly. */
 export function repoIdentityStrict(repoPath: string): Promise<string> {
-  const now = stamp();
-  const hit = identityCache.get(repoPath);
-  if (hit && now - hit.at < IDENTITY_TTL_MS) return hit.id;
-  const entry: IdentityEntry = {
-    at: now,
-    id: invoke<string>("git_repo_identity", { repoPath })
-      .then((id) => {
-        // Newest ANSWER wins, not newest arrival: the window re-issues while a slow
-        // probe is still out, so an older resolve can settle last and would
-        // otherwise restore the identity the re-issue just corrected.
-        const prev = settledIdentities.get(repoPath);
-        if (!prev || prev.at <= now)
-          settledIdentities.set(repoPath, { at: now, id });
-        return id;
-      })
-      .catch((e) => {
-        // Drop the failed attempt so the next call asks git again — but only if a
-        // re-issue hasn't already replaced it, which this one's failure says nothing
-        // about.
-        if (identityCache.get(repoPath) === entry)
-          identityCache.delete(repoPath);
-        throw e;
-      }),
-  };
-  identityCache.set(repoPath, entry);
-  return entry.id;
+  return memo.get(repoPath);
 }
 
 /** The identity this session learned for `repoPath`, at any age, or undefined when
@@ -85,7 +55,7 @@ export function repoIdentityStrict(repoPath: string): Promise<string> {
  *  outlive the folder, and {@link repoIdentity}'s fallback must never expire into a
  *  raw path that would redirect a write. */
 export function peekRepoIdentity(repoPath: string): string | undefined {
-  return settledIdentities.get(repoPath)?.id;
+  return memo.peek(repoPath);
 }
 
 /** {@link peekRepoIdentity} bounded by age — the seam for a query READER that would
@@ -97,8 +67,7 @@ export function settledIdentityWithin(
   repoPath: string,
   maxAgeMs: number,
 ): string | undefined {
-  const hit = settledIdentities.get(repoPath);
-  return hit && stamp() - hit.at < maxAgeMs ? hit.id : undefined;
+  return memo.within(repoPath, maxAgeMs);
 }
 
 /** {@link repoIdentityStrict} for callers with nowhere to put a failure: never

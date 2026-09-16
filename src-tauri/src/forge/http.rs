@@ -292,8 +292,10 @@ pub async fn bb_get_text(creds: &BbCredentials, path_or_url: &str) -> AppResult<
 
 /// GET a Bitbucket endpoint expecting JSON, deserializing into `T` (HTTP Basic,
 /// `Accept: application/json`, default redirect policy). Non-2xx → [`http_error`]; a
-/// 2xx body that won't parse uses "Couldn't read {what} from Bitbucket." on line
-/// one, with the original serde error on line two.
+/// 2xx body that won't parse takes [`bb_unreadable`]'s summary on line one, with the
+/// original serde error on line two. That summary reads `what` through the helper's
+/// article map, so a listed label gains its article and any other passes through as
+/// written.
 pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,
     path_or_url: &str,
@@ -373,8 +375,9 @@ pub async fn bb_send(
 
 /// POST JSON to a Bitbucket endpoint and deserialize the 2xx body into `T`.
 /// `Accept`/`Content-Type: application/json`, HTTP Basic auth. Non-2xx →
-/// [`http_error`]; a parse failure uses "Couldn't read {what} from Bitbucket." on
-/// line one, with the original serde error on line two.
+/// [`http_error`]; a parse failure takes [`bb_unreadable`]'s summary on line one
+/// (`what` article-mapped, unlisted labels passed through), with the original serde
+/// error on line two.
 pub async fn bb_post_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,
     path_or_url: &str,
@@ -390,7 +393,7 @@ pub async fn bb_post_json<T: serde::de::DeserializeOwned>(
 }
 
 /// PUT JSON to a Bitbucket endpoint and deserialize the 2xx body into `T`. Same shape
-/// as [`bb_post_json`]: "Couldn't read {what} from Bitbucket." on line one, with
+/// as [`bb_post_json`]: [`bb_unreadable`]'s article-mapped summary on line one, with
 /// the original serde error on line two.
 pub async fn bb_put_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,

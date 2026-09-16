@@ -697,7 +697,8 @@ const NO_BRANCH_PREFIX: &str = "(no prefix — bare names)";
 /// Branch names → `<prefix>/` counts, most used first, ties by prefix. A frequency
 /// table rather than a sample of names: any window of a branch list is ordered by
 /// something unrelated to convention, so it teaches the model whatever that window
-/// happened to hold. KEEP IN SYNC: `branchPrefixCounts` (src/lib/ai/prompt.ts).
+/// happened to hold. KEEP IN SYNC: `branchPrefixCounts`
+/// (src/lib/ai/branch-prefixes.ts), pinned by scripts/branch-prefixes.test.mjs.
 fn branch_prefix_counts(names: &[String]) -> Vec<(String, usize)> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for name in names {
@@ -716,7 +717,7 @@ fn branch_prefix_counts(names: &[String]) -> Vec<(String, usize)> {
 }
 
 /// The prefix evidence section, or `None` when there are no branches to count.
-/// KEEP IN SYNC: `branchPrefixSection` (src/lib/ai/prompt.ts).
+/// KEEP IN SYNC: `branchPrefixSection` (src/lib/ai/branch-prefixes.ts).
 fn branch_prefix_section(names: &[String]) -> Option<String> {
     let counts = branch_prefix_counts(names);
     if counts.is_empty() {

@@ -43,12 +43,14 @@ export function AmendForcePushDialog({
     // commit that no longer resolves, leaves the prompt that carried it in place.
     // `dontShowAgain` is the click-time value by design — the user's answer to
     // THIS prompt, not whatever the checkbox holds when the amend lands.
-    void onConfirm().then((amended) => {
-      if (!amended || !dontShowAgain || !settings.data) return;
-      void saveSettings
-        .mutateAsync({ ...settings.data, confirmAmendForcePush: false })
-        .catch(() => undefined);
-    });
+    void onConfirm()
+      .then((amended) => {
+        if (!amended || !dontShowAgain || !settings.data) return;
+        void saveSettings
+          .mutateAsync({ ...settings.data, confirmAmendForcePush: false })
+          .catch(() => undefined);
+      })
+      .catch(() => undefined);
   }
 
   return (

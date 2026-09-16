@@ -1213,6 +1213,9 @@ async fn filter_viewer(
 /// `row` reports each mapped row's `(id, created_at, author, labels)` — the id and
 /// timestamp feed the stop rule, and the author/labels let it count only rows that
 /// actually survive the client axes.
+///
+/// `what` is the user-facing noun for the error summary ("issues"), `parse_failure` the
+/// technical label in its detail line; they are adjacent `&str`s, so a swap compiles.
 async fn walk_filtered_legs<R, T>(
     repo_path: &str,
     plan: &GlFilterPlan,
@@ -6282,6 +6285,26 @@ pub async fn cli_ready() -> bool {
     }
 }
 
+/// The manual recovery a post-create failure hands the user, shared so every arm
+/// below the create states the same one.
+fn gl_created_project_hint(owner: &str, name: &str) -> String {
+    format!(
+        "the project WAS created at {owner}/{name} on GitLab — add it as a remote and \
+         push manually, or delete it there and retry"
+    )
+}
+
+/// The created project read back unparseably. The hint rides LINE ONE because the
+/// toast headline is the first line alone (`firstMeaningfulLine`,
+/// `src/lib/error-summary.ts`); appended after the detail it sits behind Details,
+/// where a user about to retry Publish never sees it.
+fn gl_created_project_unreadable(hint: &str, detail: String) -> AppError {
+    AppError::Glab(gl_error_message(
+        &format!("Couldn't read the new project back, but {hint}."),
+        detail,
+    ))
+}
+
 /// Publish a local repo to GitLab: create the project (in the user's namespace),
 /// add it as `origin`, and push the current branch with the one-shot glab
 /// credential helper. Returns the project's web URL. GitLab has no homepage
@@ -6382,33 +6405,30 @@ pub async fn publish_repo(
 
     // The project now exists — from here on, any failure must SAY so, or a
     // retry (which re-creates) reads as an inexplicable "name already taken".
-    let created_hint = format!(
-        "the project WAS created at {}/{name} on GitLab — add it as a remote and \
-         push manually, or delete it there and retry",
-        me.username
-    );
+    let created_hint = gl_created_project_hint(&me.username, name);
 
     // `glab repo create` does not wire a remote (validated live) — resolve the
     // created project's URLs and do it ourselves, then push the current branch.
     let enc = encode_project(&format!("{}/{name}", me.username));
-    let project: GlabProjectRef = match run_glab(
+    // Both failures carry the hint, by different routes: the parse failure builds it
+    // into its own line one (the toast headline), glab's keeps the appended
+    // parenthetical.
+    let out = match run_glab(
         Some(repo_path),
         &["api", &format!("projects/{enc}")],
         GLAB_NETWORK_TIMEOUT,
     )
     .await
-    .and_then(|out| {
-        serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| {
-                gl_unreadable(
-                    "the created project",
-                    format!("could not parse the created project: {e}"),
-                )
-            })
-    }) {
-        Ok(p) => p,
+    {
+        Ok(out) => out,
         Err(e) => return Err(AppError::Glab(format!("{e} ({created_hint})"))),
     };
+    let project: GlabProjectRef = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gl_created_project_unreadable(
+            &created_hint,
+            format!("could not parse the created project: {e}"),
+        )
+    })?;
 
     if let Err(e) = crate::git::runner::run_git_mutating(
         state,
@@ -9943,6 +9963,27 @@ mod tests {
         assert_eq!(
             gl_unreadable("the response", detail.into()).to_string(),
             "Couldn't read the response from GitLab.\ncould not parse GitLab response: boom"
+        );
+    }
+
+    #[test]
+    fn a_created_project_parse_failure_leads_with_the_was_created_fact() {
+        let hint = gl_created_project_hint("alice", "demo");
+        let message = gl_created_project_unreadable(
+            &hint,
+            "could not parse the created project: expected value at line 1 column 1".into(),
+        )
+        .to_string();
+        let mut lines = message.lines();
+        // The toast headline is line one alone (`firstMeaningfulLine`,
+        // `src/lib/error-summary.ts`), so a user who stops reading there still learns
+        // the project exists and a retry would collide with it.
+        let first = lines.next().unwrap_or_default();
+        assert!(first.contains("WAS created"), "first line: {first}");
+        assert!(first.contains("alice/demo"), "first line: {first}");
+        assert_eq!(
+            lines.next(),
+            Some("could not parse the created project: expected value at line 1 column 1"),
         );
     }
 

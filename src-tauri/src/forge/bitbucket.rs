@@ -5198,6 +5198,26 @@ struct BbCreatedRepo {
     links: Option<BbHtmlLinks>,
 }
 
+/// The create POST's response, read the way the publish flow must present it: a non-2xx
+/// created nothing and takes the ordinary API error, while a 2xx body that won't parse
+/// (a proxy-rewritten body, a truncated read) leaves a repository behind and says so on
+/// LINE ONE — the toast headline is the first line alone (`firstMeaningfulLine`,
+/// `src/lib/error-summary.ts`), and a user who never sees the fact retries the publish
+/// into "name already taken".
+fn parse_created_repo(status: u16, body: &str, created_at_url: &str) -> AppResult<BbCreatedRepo> {
+    if !(200..300).contains(&status) {
+        return Err(http::http_error(status, body));
+    }
+    serde_json::from_str(body).map_err(|e| {
+        AppError::Bitbucket(format!(
+            "Couldn't read the new repository back, but it WAS created at \
+             {created_at_url} — add it as a remote and push manually, or delete it \
+             there and retry.\n\
+             could not parse Bitbucket created repository: {e}"
+        ))
+    })
+}
+
 /// Publish a local repo to Bitbucket: create the repo in `workspace`, seed git's
 /// credential store, add `origin`, and push the current branch. Returns the repo's html
 /// URL. `website` maps to Bitbucket's website field; topics are dropped (Bitbucket has
@@ -5205,8 +5225,9 @@ struct BbCreatedRepo {
 ///
 /// Guard order mirrors `gitlab::publish_repo`: every locally-checkable precondition runs
 /// BEFORE the create POST — the failure to avoid is an orphaned repo whose slug then
-/// blocks retries. Any failure AFTER the create discloses the partial state ("The
-/// Bitbucket repository was created at <url>, but …").
+/// blocks retries. Every failure from the create's own response onward discloses the
+/// partial state on its first line — [`parse_created_repo`] for the response itself, the
+/// "The Bitbucket repository was created at <url>, but …" prefix for the arms after it.
 pub async fn publish_repo(
     state: &crate::state::AppState,
     repo_path: &str,
@@ -5286,8 +5307,15 @@ pub async fn publish_repo(
         encode_query_value(&slug),
     );
     let payload = build_publish_body(private, description, website);
-    let created: BbCreatedRepo =
-        http::bb_post_json(&creds, &create_path, &payload, "created repository").await?;
+    // The slug is ours before the server answers, so the disclosure exists before the
+    // POST does — the create's own parse failure is already past the point of no return.
+    let created_at_url = format!("https://bitbucket.org/{workspace}/{slug}");
+    // Split from the typed helper on purpose: `bb_post_json` folds a non-2xx and an
+    // unparseable 2xx into one error kind, and only the second one may claim a repo now
+    // exists.
+    let (status, _, body) =
+        http::bb_send(&creds, reqwest::Method::POST, &create_path, Some(&payload)).await?;
+    let created: BbCreatedRepo = parse_created_repo(status, &body, &created_at_url)?;
     let created_slug = if created.slug.is_empty() {
         slug.clone()
     } else {
@@ -7699,6 +7727,36 @@ definitions:
         assert_eq!(body["is_private"], false);
         assert_eq!(body["description"], "A repo");
         assert_eq!(body["website"], "https://x.dev");
+    }
+
+    #[test]
+    fn a_created_repository_that_wont_parse_leads_with_the_was_created_fact() {
+        let url = "https://bitbucket.org/acme/demo";
+        let Err(AppError::Bitbucket(message)) = parse_created_repo(200, "<html>proxy</html>", url)
+        else {
+            panic!("an unparseable 2xx body must be an error");
+        };
+        let mut lines = message.lines();
+        // The toast headline is line one alone (`firstMeaningfulLine`,
+        // `src/lib/error-summary.ts`), so the created fact has to ride it.
+        let first = lines.next().unwrap_or_default();
+        assert!(first.contains("WAS created"), "first line: {first}");
+        assert!(first.contains(url), "first line: {first}");
+        assert!(lines.next().is_some_and(|l| l.contains("could not parse")));
+
+        // A refused create made nothing, so this arm must never claim otherwise.
+        let Err(AppError::Bitbucket(rejected)) = parse_created_repo(
+            400,
+            r#"{"type":"error","error":{"message":"Repository with this Slug already exists."}}"#,
+            url,
+        ) else {
+            panic!("a non-2xx create must be an error");
+        };
+        assert!(
+            !rejected.to_ascii_lowercase().contains("was created"),
+            "rejected create: {rejected}"
+        );
+        assert_eq!(rejected, "Repository with this Slug already exists.");
     }
 
     #[test]

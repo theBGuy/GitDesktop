@@ -34,8 +34,9 @@ export async function loadRepoLens(repo: string): Promise<RemoteLens> {
 /** Persist a repo's lens under its identity. REJECTS when the identity can't be
  *  resolved, which the caller reports: the only address available then is the raw
  *  checkout path, and a preference written there is invisible to every read once
- *  the lookup heals. A settled answer always writes, the legitimate non-repo raw
- *  path included — git returns that as a success. */
+ *  the lookup heals. Store open/write failures reject through the same caller
+ *  path. A settled answer always writes, the legitimate non-repo raw path
+ *  included — git returns that as a success. */
 export async function saveRepoLens(
   repo: string,
   lens: RemoteLens,
@@ -48,8 +49,9 @@ export async function saveRepoLens(
 /** Drop the persisted lens for a repo (hygiene after detaching from a fork —
  *  the upstream remote is gone, so a stale "upstream" entry no longer applies).
  *  Any subsequent read safe-defaults to "origin". Rejects on an unresolved
- *  identity like {@link saveRepoLens} — a delete aimed at the raw path would
- *  report success while leaving the real entry in place. */
+ *  identity like {@link saveRepoLens} (store failures reject the same way) — a
+ *  delete aimed at the raw path would report success while leaving the real
+ *  entry in place. */
 export async function deleteRepoLens(repo: string): Promise<void> {
   const store = await getStore();
   const id = await repoIdentityStrict(repo);

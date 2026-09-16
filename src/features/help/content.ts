@@ -688,7 +688,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   it's clean, or you're renaming a branch you aren't on — it names it from that
   branch's own committed work instead: its diff and commit subjects vs. the default
   branch. (Creating from a base other than the branch you're on uses your in-progress
-  changes only, since the new branch won't carry that committed work.)
+  changes only, since the new branch won't carry that committed work.) The suggested
+  name follows the prefix convention your own branches show, so it picks up whatever
+  prefix you actually use — including no prefix, when bare names are your convention.
 {{/ai}}- Switching with **uncommitted changes** prompts you to bring them along or stash
   and switch. Tick **Reapply after switching** on that prompt to have the stashed changes
   put back for you once the switch lands; leave it unticked and they stay in the stash until

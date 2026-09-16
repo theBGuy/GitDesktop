@@ -438,8 +438,10 @@ async fn raw_request(
 /// GET a Jira endpoint expecting JSON, deserializing into `T` against the creds' resolved
 /// base. `Accept: application/json`, HTTP Basic auth. Non-2xx → [`http_error_for`] (field
 /// keys translated for the creds' site); a parse failure of a 2xx body →
-/// "Couldn't read {what} from Jira." on line one, with the original serde error
-/// on line two (never mapped into a specific-cause message).
+/// [`jira_unreadable`]'s summary on line one, with the original serde error on line two
+/// (never mapped into a specific-cause message). That summary reads `what` through the
+/// helper's article map, so a listed label gains its article and any other passes
+/// through as written.
 async fn get_json<T: serde::de::DeserializeOwned>(
     creds: &JiraCredentials,
     path: &str,
@@ -1526,8 +1528,8 @@ struct JiraBoardRef {
 
 /// GET a Jira AGILE endpoint (`…/rest/agile/1.0/…`) expecting JSON, deserializing into
 /// `T`. Mirrors [`get_json`] but resolves the agile base. Non-2xx → [`http_error`]; a
-/// parse failure uses "Couldn't read {what} from Jira." on line one, with the
-/// original serde error on line two. Used only by the
+/// parse failure takes [`jira_unreadable`]'s article-mapped summary on line one, with
+/// the original serde error on line two. Used only by the
 /// best-effort board-config override, whose caller swallows ANY error.
 async fn get_json_agile<T: serde::de::DeserializeOwned>(
     creds: &JiraCredentials,

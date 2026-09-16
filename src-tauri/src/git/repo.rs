@@ -210,8 +210,9 @@ pub async fn repo_origin_path(repo_path: String) -> AppResult<RepoOrigin> {
 }
 
 /// The common git directory, shared by every checkout of a repository. GUI and
-/// MCP stores use this same resolver. Confirmed non-repositories and dead paths
-/// return the input path; unavailable git on a live directory remains retryable.
+/// MCP stores use this same resolver. Confirmed non-repositories, and paths that
+/// are missing or not directories while their parent stays reachable, return the
+/// input path; unavailable git on a live directory remains retryable.
 pub async fn repo_identity(repo_path: &str) -> AppResult<String> {
     let result = identity_from_git(repo_path, identity_probe(repo_path).await);
     if matches!(result, Err(AppError::Timeout(_))) {
