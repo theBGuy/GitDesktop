@@ -2628,21 +2628,28 @@ export const ghAddBoardItem = (
 /** Rewrites one draft's title, notes and assignees, answering with the card's new
  *  content — the DRAFT arm of {@link BoardItemContent}, tag included, which is why
  *  this is typed as the whole union and narrowed at the patch site. `draftId` is the
- *  DRAFT's own CONTENT id (the card's `content.id`), never the membership's item id,
- *  and `assigneeLogins` REPLACES the set rather than adding to it. */
+ *  DRAFT's own CONTENT id (the card's `content.id`), never the membership's item id.
+ *
+ *  `assigneeLogins` is TRI-STATE, and the distinction is what keeps a title-only edit
+ *  from deleting people: a list REPLACES the set, `[]` clears it, and `undefined`
+ *  omits the field from the mutation so the draft's assignees are not touched at all.
+ *  The board reads a draft's assignees through a CAPPED selection, so a seeded list
+ *  that round-tripped as a replacement would drop everyone past the cap. */
 export const ghUpdateDraftItem = (
   repoPath: string,
   draftId: string,
   title: string,
   body: string,
-  assigneeLogins: string[],
+  assigneeLogins: string[] | undefined,
 ) =>
   invoke<BoardItemContent>("gh_update_draft_item", {
     repoPath,
     draftId,
     title,
     body,
-    assigneeLogins,
+    // Explicit null rather than a dropped key: both reach the backend's `Option` as
+    // `None`, and this one doesn't depend on the serializer omitting `undefined`.
+    assigneeLogins: assigneeLogins ?? null,
   });
 
 /** Turns a draft into a real issue in the repo the lens names, keeping the card's

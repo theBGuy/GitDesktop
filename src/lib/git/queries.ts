@@ -2984,6 +2984,13 @@ async function trackBoardWrite<T>(
  *
  * The cancel above stays unconditional either way: a read already in flight holds
  * pre-write values whether or not this call is the one that re-reads.
+ *
+ * The refetching branch RESTARTS what it cancelled — `refetchQueries` under the
+ * default active type re-runs every cancelled read that still has an enabled
+ * observer, dataless ones included. The deferred branch does not, and relies on the
+ * last write out to do it; when that last write settles through
+ * {@link markProjectBoardsStale} instead, its own repo-wide rescue is what covers
+ * the reads this branch left with nothing.
  */
 function invalidateProjectBoards(queryClient: QueryClient, repo: string): void {
   const queryKey = projectItemsRepoKey(repo);
@@ -3019,7 +3026,10 @@ function invalidateProjectBoards(queryClient: QueryClient, repo: string): void {
  *
  * No cancel of its own, unlike its sibling: this runs INSIDE a cancel that already
  * ran for the patch's sake, and query-core's cancel REVERTS what it cancels — a
- * second one here could undo the patch this is marking stale.
+ * second one here could undo the patch this is marking stale. The same caller owns
+ * the other half of that cancel's cost, restarting the reads it left with no data
+ * ({@link writeThroughBoards}); a stale mark alone would leave them on a skeleton,
+ * since `refetchType: "none"` returns before query-core reaches `refetchQueries`.
  */
 function markProjectBoardsStale(queryClient: QueryClient, repo: string): void {
   void queryClient.invalidateQueries({
@@ -3029,20 +3039,37 @@ function markProjectBoardsStale(queryClient: QueryClient, repo: string): void {
 }
 
 /**
- * Patch the boards a write changed IN PLACE instead of re-reading them, then mark
- * them stale for the next natural read.
+ * Patch the boards a write changed IN PLACE instead of re-reading them, mark them
+ * stale for the next natural read, and restart whatever the cancel left with nothing
+ * to show.
  *
- * Cancel FIRST, over the whole repo's board reads: a read already in flight would
- * otherwise resolve over the patch and put the pre-write board back. It has to land
- * BEFORE the patch rather than after it, since query-core cancels with `revert:
- * true` and a cancel run afterwards would revert the cache past what was just
- * written into it.
+ * CANCEL FIRST, and over exactly `patchKey`: a read already in flight would otherwise
+ * resolve over the patch and put the pre-write board back. It has to land BEFORE the
+ * patch rather than after it, since query-core cancels with `revert: true` and a
+ * cancel run afterwards would revert the cache past what was just written into it.
+ * The scope is the patch's own because that is the only cache this write can clobber
+ * — a read of a board `patchKey` doesn't reach can't resolve over a patch that never
+ * touches it, and cancelling it would cost that board its load for nothing.
  *
- * `patchKey` is the scope of the PATCH alone: one board's family for a write that
+ * `patchKey` is therefore both scopes at once: one board's family for a write that
  * adds a card, where a sibling board must not grow one; the repo-wide family for a
- * write addressed by an item id, which no other board holds. Every cached LENS under
- * it is patched, not just the one on screen — a view switched away from keeps its own
- * pages of the same item set, and the user can switch back before anything re-reads.
+ * write addressed by an item id, which no other board holds. Either way every cached
+ * LENS under it is covered — the lens sits past the board in the key — so a view
+ * switched away from is patched too, and the user can switch back before anything
+ * re-reads.
+ *
+ * RESTART LAST, wider than the cancel on purpose. A cancelled read that HAD data
+ * simply keeps showing it and reconciles on the stale mark; a read cancelled mid
+ * INITIAL load has nothing, and `revert: true` returns it to `status: "pending"` with
+ * `fetchStatus: "idle"` (query-core 5.102.8 `Query.#revertState`), which no observer
+ * re-runs on its own — a board left on its skeleton until a focus or a remount. The
+ * predicate is what makes the wider scope safe: it matches only a read that has never
+ * resolved AND is doing nothing, so a drawn board is never refetched, an errored one
+ * is never silently retried behind its own Retry control, and an offline-paused one
+ * (`fetchStatus: "paused"`) is left to resume on reconnect. Repo-wide rather than
+ * `patchKey` because {@link invalidateProjectBoards}'s deferred branch cancels that
+ * wide and cannot restart either, and the last write out of a burst may now be one of
+ * these rather than a refetching one.
  */
 function writeThroughBoards(
   queryClient: QueryClient,
@@ -3052,18 +3079,24 @@ function writeThroughBoards(
     data: InfiniteData<BoardItems, string | null> | undefined,
   ) => InfiniteData<BoardItems, string | null> | undefined,
 ): void {
-  void queryClient
-    .cancelQueries({ queryKey: projectItemsRepoKey(repo) })
-    .then(() => {
-      for (const [key] of queryClient.getQueriesData<
-        InfiniteData<BoardItems, string | null>
-      >({ queryKey: patchKey }))
-        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
-          key,
-          patch,
-        );
-      markProjectBoardsStale(queryClient, repo);
+  void queryClient.cancelQueries({ queryKey: patchKey }).then(() => {
+    for (const [key] of queryClient.getQueriesData<
+      InfiniteData<BoardItems, string | null>
+    >({ queryKey: patchKey }))
+      queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+        key,
+        patch,
+      );
+    markProjectBoardsStale(queryClient, repo);
+    void queryClient.refetchQueries({
+      queryKey: projectItemsRepoKey(repo),
+      // `active` is query-core's "some observer has `enabled !== false`", so a board
+      // behind a hidden tab keeps its Activity gate and is not woken here.
+      type: "active",
+      predicate: (query) =>
+        query.state.status === "pending" && query.state.fetchStatus === "idle",
     });
+  });
 }
 
 /** One board's items under one LENS, paged. Keyed on the board and the saved
@@ -3741,8 +3774,12 @@ export function useAddExistingToBoard() {
  * the card the panel marks busy, and the write's line in the pending strip — the
  * same display-only shape {@link useAddExistingToBoard}'s `number` keeps.
  *
- * `assigneeLogins` REPLACES the set. Logins throughout, which is what the assignable
- * users surface carries as its ids on GitHub.
+ * `assigneeLogins` is tri-state, the contract {@link api.ghUpdateDraftItem} states: a
+ * list replaces the set, `[]` clears it, and `undefined` leaves it alone. Callers send
+ * `undefined` unless the user actually changed the picker, because the seed those
+ * logins came from is a CAPPED read — replacing a set with its own truncated seed is
+ * how a title-only edit would delete the assignees past the cap. Logins throughout,
+ * which is what the assignable-users surface carries as its ids on GitHub.
  *
  * Reporting is the hook's, never the caller's `mutate` options: the dialog that
  * fires this can be closed over the write, and react-query drops mutate-scoped
@@ -3761,7 +3798,8 @@ export function useUpdateDraftItem() {
       title: string;
       /** Markdown, sent VERBATIM — the card's popover renders it as such. */
       body: string;
-      assigneeLogins: string[];
+      /** The replacing set, `[]` to clear it, or `undefined` to leave it untouched. */
+      assigneeLogins: string[] | undefined;
     }) =>
       trackBoardWrite(args.repo, () =>
         api.ghUpdateDraftItem(

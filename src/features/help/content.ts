@@ -2028,8 +2028,8 @@ Below **Move to**, the same menu holds the rows that change what a card is. The 
 ask first, and each prompt says where the card goes:
 
 - **Edit draft…** reopens a **draft** for rewriting: its title, its **Markdown** notes,
-  and who it's assigned to — the picker offers this repository's collaborators, and what
-  you leave checked becomes the draft's whole set. {{key:mod+enter}} saves from anywhere
+  and who it's assigned to — the picker offers this repository's collaborators, and
+  changing it replaces the draft's assignees. {{key:mod+enter}} saves from anywhere
   in the dialog, and the card carries the new text as soon as GitHub takes it. Drafts
   only: an issue or a pull request is edited on its own tab.
 - **Convert to issue…** turns a **draft** into a real issue in this repository, and swaps

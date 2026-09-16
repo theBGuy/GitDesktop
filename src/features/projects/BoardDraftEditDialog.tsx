@@ -23,6 +23,15 @@ import { cn } from "@/lib/utils";
  *  footer and the pending strip behind it name the same wait. */
 const EDIT_PENDING_REASON = "Finishing your last card change…";
 
+/** Whether two login lists name the same people, order ignored. Set-equality rather
+ *  than a dirty flag so opening the picker and closing it unchanged still counts as
+ *  untouched — what matters is whether the SET moved, not whether it was visited. */
+function sameLoginSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const held = new Set(a);
+  return b.every((login) => held.has(login));
+}
+
 /**
  * Rewrite one DRAFT card: its title, its Markdown notes, and who it's assigned to.
  * The assignees REPLACE the draft's set, which is what the write itself does.
@@ -64,11 +73,14 @@ export function BoardDraftEditDialog({
   /** Write the edit. The panel owns it — so the board can report a write this
    *  dialog was closed over, and so the CLOSE on success is decided by whoever knows
    *  whether this run is still the one on screen. Resolves when the write settles
-   *  either way; `onSubmit` awaits it, which drives the submit button's spinner. */
+   *  either way; `onSubmit` awaits it, which drives the submit button's spinner.
+   *
+   *  `assigneeLogins` is `undefined` when the user didn't change the picker, which
+   *  is what stops the write touching assignees at all. */
   onSave: (
     title: string,
     body: string,
-    assigneeLogins: string[],
+    assigneeLogins: string[] | undefined,
   ) => Promise<void>;
 }) {
   // Beside the form rather than in it: the picker deals in whole user records and
@@ -80,12 +92,20 @@ export function BoardDraftEditDialog({
     // Awaited but not acted on: the panel owns both outcomes — it closes this dialog
     // on success (and only if the run that submitted is still the one on screen),
     // and leaves it open on failure, where the edit still is.
-    onSubmit: ({ value }) =>
-      onSave(
+    onSubmit: ({ value }) => {
+      const picked = assignees.map((user) => user.id);
+      // An UNCHANGED set sends `undefined`, never the seed back again. The seed is
+      // read through a capped `assignees(first:N)` selection, so a draft with more
+      // assignees than the cap arrives here already truncated — and replacing the
+      // set with that truncation is how a title-only edit would delete the people it
+      // never showed. Only a set the user actually moved is worth sending.
+      const touched = !sameLoginSet(picked, seedAssigneeLogins);
+      return onSave(
         value.title.trim(),
         value.body,
-        assignees.map((user) => user.id),
-      ),
+        touched ? picked : undefined,
+      );
+    },
   });
   // Held rather than hidden, and explained where the user is looking. The submit
   // chord's hint rides the same wrapper, which is what keeps the reason from being

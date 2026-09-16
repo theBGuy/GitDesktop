@@ -94,7 +94,7 @@ fn map_scope_error(e: AppError) -> AppError {
     e
 }
 
-pub(crate) const DRAFT_CONTENT_SELECTION: &str = "id title body createdAt updatedAt assignees(first:8){ nodes{ login avatarUrl } }";
+pub(crate) const DRAFT_CONTENT_SELECTION: &str = "id title body createdAt updatedAt assignees(first:20){ nodes{ login avatarUrl } }";
 
 pub(crate) fn board_item_selection() -> String {
     let values = field_value_selection();
@@ -871,7 +871,9 @@ mod tests {
         assert!(query.contains(
             "items(first:100, after:$after, orderBy:{field:POSITION,direction:ASC}, query:$q)"
         ));
-        assert_eq!(query.matches("assignees(first:8)").count(), 3);
+        assert_eq!(query.matches("assignees(first:8)").count(), 2);
+        assert_eq!(query.matches("assignees(first:20)").count(), 1);
+        assert!(DRAFT_CONTENT_SELECTION.contains("assignees(first:20)"));
         assert_eq!(query.matches("createdAt").count(), 4);
         assert_eq!(query.matches("updatedAt").count(), 3);
         assert!(query.contains(&format!(

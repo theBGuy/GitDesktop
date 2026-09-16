@@ -114,17 +114,32 @@ fn convert_mutation() -> String {
     format!("mutation($itemId:ID!,$repositoryId:ID!){{ convertProjectV2DraftIssueItemToIssue(input:{{itemId:$itemId,repositoryId:$repositoryId}}){{ item{{ {item} content{{ ... on Issue {{ url }} }} }} }} }}")
 }
 
-fn update_draft_input(draft_id: &str, title: &str, body: &str, assignee_ids: &[String]) -> String {
-    let document = format!("mutation($draftIssueId:ID!,$title:String!,$body:String!,$assigneeIds:[ID!]!){{ updateProjectV2DraftIssue(input:{{draftIssueId:$draftIssueId,title:$title,body:$body,assigneeIds:$assigneeIds}}){{ draftIssue{{ __typename {DRAFT_CONTENT_SELECTION} }} }} }}");
-    graphql_input(
-        &document,
-        json!({"draftIssueId": draft_id, "title": title, "body": body, "assigneeIds": assignee_ids}),
-    )
+fn update_draft_input(
+    draft_id: &str,
+    title: &str,
+    body: &str,
+    assignee_ids: Option<&[String]>,
+) -> String {
+    let mut variables = json!({"draftIssueId": draft_id, "title": title, "body": body});
+    let (declaration, field) = if let Some(ids) = assignee_ids {
+        variables["assigneeIds"] = json!(ids);
+        (",$assigneeIds:[ID!]!", ",assigneeIds:$assigneeIds")
+    } else {
+        ("", "")
+    };
+    let document = format!("mutation($draftIssueId:ID!,$title:String!,$body:String!{declaration}){{ updateProjectV2DraftIssue(input:{{draftIssueId:$draftIssueId,title:$title,body:$body{field}}}){{ draftIssue{{ __typename {DRAFT_CONTENT_SELECTION} }} }} }}");
+    graphql_input(&document, variables)
 }
 
 fn assignee_lookup_input(logins: &[String]) -> AppResult<Option<String>> {
+    // Variables isolate login text from the document; this gate is input sanity
+    // and defense in depth, including underscores in Enterprise Managed User logins.
     for login in logins {
-        if login.is_empty() || !login.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+        if login.is_empty()
+            || !login
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+        {
             return Err(AppError::InvalidArgument(
                 "Invalid GitHub assignee login".into(),
             ));
@@ -133,11 +148,17 @@ fn assignee_lookup_input(logins: &[String]) -> AppResult<Option<String>> {
     if logins.is_empty() {
         return Ok(None);
     }
+    let mut declarations = Vec::new();
     let mut fields = String::new();
+    let mut variables = json!({});
     for (index, login) in logins.iter().enumerate() {
-        fields.push_str(&format!("u{index}:user(login:\"{login}\"){{id}} "));
+        let variable = format!("l{index}");
+        declarations.push(format!("${variable}:String!"));
+        fields.push_str(&format!("u{index}:user(login:${variable}){{id}} "));
+        variables[&variable] = json!(login);
     }
-    Ok(Some(graphql_input(&format!("query{{ {fields} }}"), json!({}))))
+    let document = format!("query({}){{ {fields} }}", declarations.join(","));
+    Ok(Some(graphql_input(&document, variables)))
 }
 
 fn parse_assignee_ids(value: &Value, count: usize) -> AppResult<Vec<String>> {
@@ -355,15 +376,20 @@ pub async fn gh_update_draft_item(
     draft_id: String,
     title: String,
     body: String,
-    assignee_logins: Vec<String>,
+    assignee_logins: Option<Vec<String>>,
 ) -> AppResult<BoardItemContent> {
-    let assignee_ids = if let Some(input) = assignee_lookup_input(&assignee_logins)? {
-        let value = request(&repo_path, &input, "the draft assignees").await?;
-        parse_assignee_ids(&value, assignee_logins.len())?
+    let assignee_ids = if let Some(logins) = assignee_logins {
+        let ids = if let Some(input) = assignee_lookup_input(&logins)? {
+            let value = request(&repo_path, &input, "the draft assignees").await?;
+            parse_assignee_ids(&value, logins.len())?
+        } else {
+            Vec::new()
+        };
+        Some(ids)
     } else {
-        Vec::new()
+        None
     };
-    let input = update_draft_input(&draft_id, &title, &body, &assignee_ids);
+    let input = update_draft_input(&draft_id, &title, &body, assignee_ids.as_deref());
     let value = request(&repo_path, &input, "the updated draft")
         .await
         .map_err(map_scope_error)?;
@@ -513,7 +539,7 @@ mod tests {
                 "DI_one",
                 wire["title"].as_str().unwrap(),
                 wire["body"].as_str().unwrap(),
-                &ids,
+                Some(&ids),
             ))
             .unwrap();
             assert_eq!(input["variables"], json!({"draftIssueId":"DI_one",
@@ -531,12 +557,46 @@ mod tests {
     }
 
     #[test]
+    fn omitted_assignees_preserve_the_set_and_empty_assignees_clear_it() {
+        let input: Value =
+            serde_json::from_str(&update_draft_input("DI_one", "Title", "Body", None)).unwrap();
+        assert_eq!(
+            input["variables"],
+            json!({"draftIssueId":"DI_one", "title":"Title", "body":"Body"}),
+        );
+        assert!(input["variables"].get("assigneeIds").is_none());
+        assert!(!input["query"].as_str().unwrap().contains("assigneeIds"));
+
+        let logins = Vec::new();
+        assert!(assignee_lookup_input(&logins).unwrap().is_none());
+        let input: Value = serde_json::from_str(&update_draft_input(
+            "DI_one", "Title", "Body", Some(&[]),
+        ))
+        .unwrap();
+        assert_eq!(input["variables"]["assigneeIds"], json!([]));
+        assert!(input["query"].as_str().unwrap().contains("assigneeIds:$assigneeIds"));
+    }
+
+    #[test]
     fn assignees_resolve_in_one_query_and_empty_lists_skip_lookup() {
         assert!(assignee_lookup_input(&[]).unwrap().is_none());
-        let logins = vec!["Octo-cat".into(), "hubot2".into()];
+        let logins = vec!["Octo-cat2".into(), "alice_acme".into()];
         let input: Value =
             serde_json::from_str(&assignee_lookup_input(&logins).unwrap().unwrap()).unwrap();
-        assert_eq!(input["query"], "query{ u0:user(login:\"Octo-cat\"){id} u1:user(login:\"hubot2\"){id}  }");
+        let document = input["query"].as_str().unwrap();
+        assert_eq!(
+            document,
+            "query($l0:String!,$l1:String!){ u0:user(login:$l0){id} u1:user(login:$l1){id}  }",
+        );
+        assert_eq!(input["variables"], json!({"l0":"Octo-cat2", "l1":"alice_acme"}));
+        for login in &logins {
+            assert!(!document.contains(login));
+            assert!(GRAPHQL_INPUT_ARGS.iter().all(|arg| !arg.contains(login)));
+        }
+        assert_eq!(
+            GRAPHQL_INPUT_ARGS,
+            ["api", "graphql", "--method", "POST", "--input", "-"],
+        );
         let value = json!({"data":{"u0":{"id":"U_one"},"u1":{"id":"U_two"}}});
         assert_eq!(parse_assignee_ids(&value, 2).unwrap(), ["U_one", "U_two"]);
         for user in [Value::Null, json!({}), json!({"id":" "})] {
@@ -552,7 +612,7 @@ mod tests {
                 "DI_one".into(),
                 "Title".into(),
                 "Body".into(),
-                vec!["valid-login".into(), login.into()],
+                Some(vec!["valid-login".into(), login.into()]),
             )
             .await;
             assert!(matches!(result, Err(AppError::InvalidArgument(_))));
@@ -568,7 +628,7 @@ mod tests {
                 &add_item_mutation(),
                 json!({"projectId":hostile,"contentId":hostile}),
             ),
-            update_draft_input(&hostile, &hostile, &hostile, &[hostile.clone()]),
+            update_draft_input(&hostile, &hostile, &hostile, Some(&[hostile.clone()])),
         ] {
             let payload: Value = serde_json::from_str(&input).unwrap();
             assert!(!payload["query"].as_str().unwrap().contains(&hostile));
@@ -654,7 +714,7 @@ mod tests {
             assert!(doc.contains(&board_item_selection()));
         }
         let update: Value =
-            serde_json::from_str(&update_draft_input("DI_one", "", "", &[])).unwrap();
+            serde_json::from_str(&update_draft_input("DI_one", "", "", Some(&[]))).unwrap();
         let doc = update["query"].as_str().unwrap();
         assert_pointer(doc, UPDATE_DRAFT_POINTER);
         assert!(doc.contains(DRAFT_CONTENT_SELECTION));

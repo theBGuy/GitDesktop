@@ -1151,11 +1151,13 @@ export function ProjectsBoardPanel({
 
   /** Write a draft's edit. Owned here for the same reasons the adds are: the write
    *  outlives the dialog, and only this side can say whether the run that fired it
-   *  is still the one on screen. */
+   *  is still the one on screen. `assigneeLogins` arrives `undefined` when the dialog
+   *  saw no change to the picker, which leaves the draft's assignees untouched rather
+   *  than replacing them with what the capped board read seeded. */
   async function saveDraftEdit(
     title: string,
     body: string,
-    assigneeLogins: string[],
+    assigneeLogins: string[] | undefined,
   ): Promise<void> {
     // Read before the round trip, like every other target here: a render landing
     // mid-flight must not change what the write addressed.
