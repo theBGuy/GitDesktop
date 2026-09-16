@@ -21,8 +21,8 @@
   hold it for you), and **removes** one from the project, the last three confirming
   first. Creating an issue can put it on its boards in the same step: the **New issue**
   dialog gained a **Projects** picker. The board's **saved views** come along as lenses:
-  pick one under **View options** and GitHub filters the read for you, its
-  sort orders the cards in each column (by **Title**, or by a text, number, date,
+  pick one under **View options** and GitHub filters the read for you, its sort
+  orders the cards in each column (by **Title**, or by a text, number, date,
   single-select or iteration field), its visible fields show as chips on the cards, and
   its grouping seeds **Group by** while you stay free to regroup. Views saved as a table or
   roadmap are drawn as a board, **Clear view** (or **Clear project view** in the command

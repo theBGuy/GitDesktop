@@ -2064,8 +2064,8 @@ reading a card's dates asks nothing of the board.
 The board is fully keyboard-operable: **↑ / ↓** move through a column, **← / →** step to
 the next column at the same height, **Home / End** jump to a column's first or last card,
 **Enter** opens the card you're on and {{key:space}} peeks at its details; on Windows and
-Linux, {{key:shift+f10}} opens its menu. Collapsing the sidebar
-({{kbd:toggle-sidebar}}) hands the board its width.
+Linux, {{key:shift+f10}} opens its menu. Collapsing the sidebar ({{kbd:toggle-sidebar}})
+hands the board its width.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
