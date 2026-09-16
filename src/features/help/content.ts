@@ -2011,7 +2011,7 @@ the two never run at once, in either order. The section is held with its reason 
 your GitHub sign-in can read project fields but not change them, when you don't have write
 access to the board, and when the board is grouped by one of GitHub's own issue fields (those
 are edited on GitHub). An ungrouped board has no columns to move between, so its cards carry
-no **Move to** section.
+no **Move to** section, and a card whose contents you can't see carries none either.
 
 ## Converting, archiving and removing
 
