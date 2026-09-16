@@ -9,7 +9,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useSaveSettings, useSettings } from "@/lib/settings/queries";
+import { loadSettings } from "@/lib/settings/api";
+import { useSaveSettings } from "@/lib/settings/queries";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 
 /**
@@ -31,7 +32,6 @@ export function AmendForcePushDialog({
   onConfirm: () => Promise<boolean>;
   onCancel: () => void;
 }) {
-  const settings = useSettings();
   const saveSettings = useSaveSettings();
   const [dontShowAgain, setDontShowAgain] = useState(false);
 
@@ -39,18 +39,21 @@ export function AmendForcePushDialog({
   useSeedOnOpen(open, () => setDontShowAgain(false));
 
   function confirm() {
-    // The preference waits on the amend having started: a refused confirm, or a
-    // commit that no longer resolves, leaves the prompt that carried it in place.
-    // `dontShowAgain` is the click-time value by design — the user's answer to
-    // THIS prompt, not whatever the checkbox holds when the amend lands.
-    void onConfirm()
-      .then((amended) => {
-        if (!amended || !dontShowAgain || !settings.data) return;
-        void saveSettings
-          .mutateAsync({ ...settings.data, confirmAmendForcePush: false })
-          .catch(() => undefined);
-      })
-      .catch(() => undefined);
+    // The preference waits on the amend having STARTED: a refusal or an
+    // unresolvable commit leaves the prompt in place. `dontShowAgain` stays the
+    // click-time value (the user's answer to THIS prompt); the settings object
+    // must not — the dialog closes before the amend resolves, so Settings is
+    // reachable during the wait and a snapshot from here would write back the
+    // pre-edit object. The write is best-effort; the amend already went ahead.
+    void (async () => {
+      if (!(await onConfirm())) return;
+      if (!dontShowAgain) return;
+      const fresh = await loadSettings();
+      await saveSettings.mutateAsync({
+        ...fresh,
+        confirmAmendForcePush: false,
+      });
+    })().catch(() => undefined);
   }
 
   return (

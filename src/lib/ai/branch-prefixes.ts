@@ -8,8 +8,9 @@
 // (src-tauri/src/mcp_server/generate.rs) render the same shape for the MCP
 // recipe tools.
 
-/** How many prefix rows the branch-name evidence carries. The rows are ordered
- *  by frequency, so a cap drops only the long tail of one-offs. */
+/** How many prefix rows the branch-name evidence carries. Rows descend by count,
+ *  so nothing past the cap is used more often than the last row shown — but a tie
+ *  can straddle the boundary, so the dropped rows are not necessarily rarer. */
 const BRANCH_PREFIX_ROWS = 12;
 
 /** What a branch carrying no `<prefix>/` segment is counted under — a real row,
@@ -59,6 +60,8 @@ export function branchPrefixSection(names: string[]): string | null {
   const rows = shown.map((c) => `${c.prefix} ${c.count}`).join("\n");
   const rest = counts.length - shown.length;
   return `## Branch name prefixes in this repository (most used first)\n${rows}${
-    rest > 0 ? `\n[${rest} more prefix(es) used by fewer branches]` : ""
+    rest > 0
+      ? `\n[${rest} more prefix(es), none used more often than the last row shown]`
+      : ""
   }`;
 }

@@ -62,7 +62,9 @@ export function peekRepoIdentity(repoPath: string): string | undefined {
  *  rather show the last identity than an error while a re-validation is failing.
  *  Reader-only by design: a bound is affordable where running out of it renders an
  *  error body, and unaffordable where it would silently redirect a write (see
- *  {@link repoIdentity}). `maxAgeMs` is the caller's policy. */
+ *  {@link repoIdentity}). `maxAgeMs` is the caller's policy — pick one comfortably
+ *  above the resolver's own timeout: ages run from the ISSUE stamp, so the window
+ *  can expire up to one resolver-timeout early. */
 export function settledIdentityWithin(
   repoPath: string,
   maxAgeMs: number,

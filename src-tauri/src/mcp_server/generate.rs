@@ -684,8 +684,9 @@ struct BranchPieces {
     global_instructions: String,
 }
 
-/// How many prefix rows the branch-name evidence carries. The rows are ordered by
-/// frequency, so a cap drops only the long tail of one-offs.
+/// How many prefix rows the branch-name evidence carries. Rows descend by count, so
+/// nothing past the cap is used more often than the last row shown — but a tie can
+/// straddle the boundary, so the dropped rows are not necessarily rarer.
 const BRANCH_PREFIX_ROWS: usize = 12;
 
 /// What a branch carrying no `<prefix>/` segment is counted under — a real row,
@@ -731,7 +732,9 @@ fn branch_prefix_section(names: &[String]) -> Option<String> {
         .join("\n");
     let more = match counts.len() - shown {
         0 => String::new(),
-        rest => format!("\n[{rest} more prefix(es) used by fewer branches]"),
+        rest => {
+            format!("\n[{rest} more prefix(es), none used more often than the last row shown]")
+        }
     };
     Some(format!(
         "## Branch name prefixes in this repository (most used first)\n{rows}{more}"
@@ -2158,8 +2161,10 @@ mod tests {
         );
     }
 
-    /// Past the row cap the tail is disclosed as a count — it is the least-used
-    /// prefixes that drop, so the conventions that govern always survive.
+    /// These 14 prefixes are all used once, so the cap cuts straight through a tie:
+    /// the two that fall off are exactly as common as the twelve kept. That is why
+    /// the disclosure bounds the tail ("none used more often") instead of calling it
+    /// rarer — the slice guarantees the bound, never the strict inequality.
     #[test]
     fn branch_prefix_section_caps_rows_and_discloses_the_tail() {
         let list: Vec<String> = (0..14).map(|i| format!("p{i:02}/x")).collect();
@@ -2168,7 +2173,8 @@ mod tests {
         assert!(section.contains("p11/ 1"), "section:\n{section}");
         assert!(!section.contains("p12/"), "section:\n{section}");
         assert!(
-            section.ends_with("\n[2 more prefix(es) used by fewer branches]"),
+            section
+                .ends_with("\n[2 more prefix(es), none used more often than the last row shown]"),
             "section:\n{section}"
         );
     }

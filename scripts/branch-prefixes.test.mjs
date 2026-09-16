@@ -44,10 +44,12 @@ test("counts descend, and bare names get their own row", () => {
   );
 });
 
-// Mirrors `branch_prefix_section_caps_rows_and_discloses_the_tail`. Rows are
-// ordered by frequency, so the cap drops only least-used prefixes — but the
-// count that fell off is disclosed rather than silently vanishing.
-test("rows cap at 12 and the dropped tail is disclosed", () => {
+// Mirrors `branch_prefix_section_caps_rows_and_discloses_the_tail`. These 14
+// prefixes are all used once, so the cap cuts straight through a tie: the two
+// that fall off are exactly as common as the twelve kept. That is why the
+// disclosure bounds the tail ("none used more often") instead of calling it
+// rarer — the slice guarantees the bound, never the strict inequality.
+test("rows cap at 12 and the dropped tail is disclosed without claiming it is rarer", () => {
   const names = [];
   for (let i = 0; i < 14; i++) {
     names.push(`p${String(i).padStart(2, "0")}/x`);
@@ -57,7 +59,9 @@ test("rows cap at 12 and the dropped tail is disclosed", () => {
   assert.ok(section.includes("p11/ 1"), section);
   assert.ok(!section.includes("p12/"), section);
   assert.ok(
-    section.endsWith("\n[2 more prefix(es) used by fewer branches]"),
+    section.endsWith(
+      "\n[2 more prefix(es), none used more often than the last row shown]",
+    ),
     section,
   );
 });

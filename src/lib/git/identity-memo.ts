@@ -19,7 +19,9 @@ export type TtlMemo = {
    *  Never resolves, never populates. */
   peek(key: string): string | undefined;
   /** {@link TtlMemo.peek} bounded by age — for a caller that would rather fail than
-   *  serve an answer nothing has confirmed lately. */
+   *  serve an answer nothing has confirmed lately. Ages from the ISSUE stamp (the
+   *  ordering guard's clock), so the bound is conservative by at most the resolver's
+   *  own timeout — pass a maxAgeMs comfortably above it. */
   within(key: string, maxAgeMs: number): string | undefined;
 };
 
