@@ -465,10 +465,12 @@ export function NewDraftDialog({
 }: {
   projectTitle: string;
   open: boolean;
-  /** A draft write is in flight for this board — from THIS run or an earlier one
-   *  the user closed over. Single-flight, the same contract the add-existing rows
-   *  keep: this dialog outlives its own submissions, so its form can't be the thing
-   *  that knows one is still going. */
+  /** A draft write is in flight for this repo's boards — from THIS run or an
+   *  earlier one the user closed over. Repo-level rather than per-board because the
+   *  hold explains itself either way, and threading a project id through the
+   *  write's variables to narrow it buys nothing. Single-flight, the same contract
+   *  the add-existing rows keep: this dialog outlives its own submissions, so its
+   *  form can't be the thing that knows one is still going. */
   pending: boolean;
   onOpenChange: (open: boolean) => void;
   /** Write the draft. The panel owns it — so the board can report a write this
@@ -491,10 +493,11 @@ export function NewDraftDialog({
   // Held rather than hidden, and explained where the user is looking. The reason is
   // the board's own "Finishing…" register, so the footer and the strip behind the
   // dialog describe the same wait.
-  const { blockedReason, reasonId, describedBy } = useDisabledReason({
-    disabled: pending,
-    reason: DRAFT_PENDING_REASON,
-  });
+  const { blockedReason, reasonId, wrapperTitle, describedBy } =
+    useDisabledReason({
+      disabled: pending,
+      reason: DRAFT_PENDING_REASON,
+    });
 
   // keepDefaultValues: otherwise the per-render options sync clobbers the reset
   // values back to empty on an untouched form.
@@ -558,12 +561,29 @@ export function NewDraftDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton
-                disabled={pending}
-                aria-describedby={describedBy}
+              {/* The reasoned hold keeps the button FOCUSABLE — a natively-disabled
+                  control leaves the tab order, and a description nothing can reach
+                  explains nothing. `focusableWhenDisabled` rides `blockedReason`
+                  alone, so the plain `!canSubmit || isSubmitting` disable that
+                  `SubmitButton` ORs in stays a native one: there is no reason to
+                  announce for an empty title. Activation is refused by the Button's
+                  own handler layer and again by the form's `pending` guard. */}
+              <span
+                className={cn(
+                  "inline-flex",
+                  blockedReason && "cursor-not-allowed",
+                )}
+                title={wrapperTitle}
               >
-                Create draft
-              </form.SubmitButton>
+                <form.SubmitButton
+                  focusableWhenDisabled={!!blockedReason}
+                  disabled={pending}
+                  aria-describedby={describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
+                  Create draft
+                </form.SubmitButton>
+              </span>
             </form.AppForm>
           </DialogFooter>
         </form>

@@ -8,6 +8,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useEffectEvent,
   useId,
   useMemo,
   useRef,
@@ -39,7 +40,12 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+// The read-only sentence arrives ALIASED: this panel says it about the BOARD, and
+// its own `READ_ONLY_SCOPE_REASON` below says a different thing about a card's
+// FIELDS. Two claims that happen to share a scope, so only the first is shared.
 import {
+  READ_ONLY_SCOPE_REASON as BOARD_READ_ONLY_SCOPE_REASON,
+  NO_ACCESS_REASON,
   projectScopeMissing,
   projectScopeReadOnly,
   ScopeGapBlock,
@@ -114,12 +120,6 @@ const FIELDS_ERROR_REASON = "Couldn't load this project's fields";
  *  differently (ProjectFieldsEditor.tsx). */
 const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read project fields but not change them (needs the project scope)";
-/** The same scope gap said about the BOARD rather than its fields, worded as the
- *  Projects picker already words it — adding, archiving and removing are changes
- *  to what the board holds, not to a field on a card. */
-const BOARD_READ_ONLY_SCOPE_REASON =
-  "Your GitHub sign-in can read projects but not change them (needs the project scope)";
-const NO_ACCESS_REASON = "You don't have write access to this project";
 const ISSUE_FIELD_REASON =
   "Issue fields are edited on GitHub — board editing arrives later";
 const LOADING_VIEWS_REASON = "Loading this project's views…";
@@ -862,10 +862,15 @@ export function ProjectsBoardPanel({
   //  replays this setup with the same value and it returns before touching
   //  anything.
   const dialogProjectRef = useRef(projectId);
+  // `switchAddDialog` is re-made every render, so it rides a `useEffectEvent`
+  // rather than the dep list: listing it would re-run this on every render (the
+  // ref-compare would refuse, but the effect is meant to fire on a board change
+  // alone), and a dep-suppression is the thing this repo replaced with this hook.
+  const retireAddDialog = useEffectEvent(() => switchAddDialog(null));
   useEffect(() => {
     if (dialogProjectRef.current === projectId) return;
     dialogProjectRef.current = projectId;
-    switchAddDialog(null);
+    retireAddDialog();
   }, [projectId]);
 
   // Ranked like the field editor's own holds, and for the same reasons — the two

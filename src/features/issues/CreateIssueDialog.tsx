@@ -10,8 +10,8 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
-import { LabeledGroup } from "@/components/form/labeled-group";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -23,8 +23,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  NO_ACCESS_REASON,
   projectScopeMissing,
   projectScopeReadOnly,
+  READ_ONLY_SCOPE_REASON,
   ScopeGapBlock,
 } from "@/features/conversations/ProjectsPopover";
 import { LabelChip } from "@/features/conversations/Thread";
@@ -79,11 +81,6 @@ const LINK_FAILED: Record<"project" | "projects" | "sub-issue", string> = {
   projects: "adding it to the projects failed",
   "sub-issue": "linking as a sub-issue failed",
 };
-/** Both worded as the shipped Projects picker words them: one claim about the
- *  sign-in, one about the board, and two surfaces must not say either differently. */
-const NO_ACCESS_REASON = "You don't have write access to this project";
-const READ_ONLY_SCOPE_REASON =
-  "Your GitHub sign-in can read projects but not change them (needs the project scope)";
 
 export function CreateIssueDialog({
   repoPath,
@@ -250,6 +247,22 @@ export function CreateIssueDialog({
       }
       const { number, url } = created;
       const action = { label: "View", onClick: () => openUrl(url) };
+      /** Open the new issue — but only if the app is still where it was created.
+       *  Every path below sits after at least one await, and the dialog is closed
+       *  by then; this one doesn't register the modal gate, so a chord can switch
+       *  repos inside that window. `selectIssue` carries NO repo identity, so it
+       *  would select this NUMBER in whatever repo is active now — somewhere else
+       *  that is an unrelated issue, or a missing-issue view. The guard is the
+       *  continuation rule's own shape, and the same one `CreateDiscussionDialog`
+       *  puts on its post-create navigate.
+       *
+       *  The TOAST stays unconditional wherever the user ended up: it names the
+       *  issue and carries its URL, which are true from any repo. */
+      function openCreatedIssue() {
+        if (number <= 0) return;
+        if (useUiStore.getState().repoPath !== repoPath) return;
+        selectIssue({ kind: "remote", id: String(number) });
+      }
       // The post-create links are INDEPENDENT of each other: a board refusing the
       // issue says nothing about whether its parent will take it, so each runs on
       // its own and reports into `failed` rather than throwing past the other. A
@@ -295,10 +308,8 @@ export function CreateIssueDialog({
         });
         // The issue EXISTS whatever the links did, so it still opens — the same
         // navigate the clean path makes, under the same gate. A sub-issue keeps
-        // its parent on screen either way (GitHub's own behavior), and a forge
-        // that answered without a number names nothing to open.
-        if (!subIssueParentId && number > 0)
-          selectIssue({ kind: "remote", id: String(number) });
+        // its parent on screen either way (GitHub's own behavior).
+        if (!subIssueParentId) openCreatedIssue();
         return;
       }
       if (subIssueLinked) {
@@ -311,7 +322,7 @@ export function CreateIssueDialog({
         return;
       }
       toast.success(`Opened issue #${number}`, { description: url, action });
-      if (number > 0) selectIssue({ kind: "remote", id: String(number) });
+      openCreatedIssue();
     },
   });
 
@@ -758,9 +769,19 @@ function ProjectPickRow({
       )}
     >
       <KanbanIcon className="size-3.5 shrink-0 text-muted-foreground" />
+      {/* No clip title while the row is HELD: it would land on the child and win
+          hover over the button's own `wrapperTitle`, hiding the reason behind the
+          project's name.
+
+          KEYED on that state because the flip is reachable in place — a scopes
+          refetch moves `lockedReason`, a catalog refetch moves `viewerCanUpdate` —
+          and `clipTitleFromText` writes the attribute IMPERATIVELY. A row hovered
+          while live and then held would keep that stale title with no mouse-enter
+          left to clear it, so the node itself is replaced instead. */}
       <span
+        key={blockedReason === null ? "live" : "held"}
         className="min-w-0 flex-1 truncate"
-        onMouseEnter={clipTitleFromText}
+        onMouseEnter={blockedReason === null ? clipTitleFromText : undefined}
       >
         {project.title}
       </span>
@@ -997,7 +1018,10 @@ function ProjectsField({
                   onKeyDown={(e) => onChipKeyDown(e, index)}
                   className="inline-flex cursor-default items-center gap-1 rounded-none outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
                 >
-                  <span className="max-w-40 truncate" title={project.title}>
+                  <span
+                    className="max-w-40 truncate"
+                    onMouseEnter={clipTitleFromText}
+                  >
                     {project.title}
                   </span>
                 </button>
