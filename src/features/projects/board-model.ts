@@ -32,6 +32,13 @@ export function groupableFields(fields: ProjectFieldDef[]): GroupField[] {
  *  value, which is what makes it the column a clear writes to. */
 export const UNSET_COLUMN_ID = "__unset__";
 
+/** Single-writer past the move, for the same reason and one step wider: an archive,
+ *  a removal, a convert and a draft edit all change what the board draws, so a
+ *  second write fired over one in flight would settle against a board neither of
+ *  them saw. Lives here rather than in either surface because both the panel's hold
+ *  and the edit dialog's footer say it, and a copy each is a copy that can drift. */
+export const CARD_WRITE_REASON = "Finishing your last card change…";
+
 /** The option a board item sits under for `field`, or null when the field is
  *  unset on it. Matched on `optionId`, never the name: options are renamable.
  *  Exported so a surface acting on the VALUE reads it the same way the bucketing

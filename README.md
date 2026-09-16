@@ -571,8 +571,9 @@ card is there as the write lands, drawn from GitHub's own answer to it.
 issue or pull request or **show its details**, **move the card to another
 column**, **edit a draft** (title, Markdown notes and assignees) or
 **convert it to a real issue**, **archive** the card (restorable from the
-project's archived items on GitHub), or **remove** it from the project. A move writes the board's
-grouping field and re-draws the card where it lands, keyboard place and all.
+project's archived items on GitHub), or **remove** it from the project. A
+move writes the board's grouping field and re-draws the card where it lands,
+keyboard place and all.
 Creating an issue puts it straight on a board too: the **New issue** dialog
 carries a **Projects** picker of its own. The board's **saved views** come
 along as lenses: pick one and GitHub filters the read for you, its sort
@@ -582,9 +583,10 @@ the cards, and its grouping seeds **Group by** while you stay free to
 regroup. Table and roadmap views are drawn as a board, and **Clear view**
 brings the whole item set back in the board's own order with the chips off,
 leaving the grouping where you last put it. Nothing here writes to the view.
-Adding, moving, converting, archiving and removing all need write access to
-the board and the `project` sign-in scope; reading one needs only the
-`project` or `read:project` scope the Projects picker already asks for.
+Adding, moving, editing a draft, converting, archiving and removing all need
+write access to the board and the `project` sign-in scope; reading one needs
+only the `project` or `read:project` scope the Projects picker already asks
+for.
 
 ### Code TODOs
 

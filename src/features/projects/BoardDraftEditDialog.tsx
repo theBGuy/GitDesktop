@@ -18,10 +18,7 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
-// The panel imports this dialog, so this direction closes a cycle. Safe because the
-// binding is only read during RENDER — nothing here touches it at module scope, by
-// which time both modules have finished evaluating.
-import { CARD_WRITE_REASON } from "./ProjectsBoardPanel";
+import { CARD_WRITE_REASON } from "./board-model";
 
 /** Whether two login lists name the same people, order ignored. Set-equality rather
  *  than a dirty flag so opening the picker and closing it unchanged still counts as
@@ -106,8 +103,8 @@ export function BoardDraftEditDialog({
     },
   });
   // Held rather than hidden, and explained where the user is looking. The reason is
-  // the PANEL's own, read at render rather than re-spelled here, so this footer and
-  // the strip behind it can't drift apart. The submit chord's hint rides the same
+  // the board's shared one rather than a copy spelled here, so this footer and the
+  // strip behind it can't drift apart. The submit chord's hint rides the same
   // wrapper, which keeps the reason from being overwritten by it while held.
   const { blockedReason, reasonId, wrapperTitle, describedBy } =
     useDisabledReason({

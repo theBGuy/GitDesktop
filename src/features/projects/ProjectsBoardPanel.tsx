@@ -93,6 +93,7 @@ import { BoardDraftEditDialog } from "./BoardDraftEditDialog";
 import {
   type BoardColumnModel,
   buildColumns,
+  CARD_WRITE_REASON,
   chipFieldDefs,
   firstCardPosition,
   groupableFields,
@@ -171,11 +172,6 @@ type BoardDialog = "existing" | "draft" | "edit-draft";
  *  promises, and an EARLIER move failing late puts the card back in a column a
  *  later write already moved it out of. */
 const MOVING_REASON = "Moving your last card…";
-/** Single-writer past the move, for the same reason and one step wider: an archive,
- *  a removal, a convert and a draft edit all change what the board draws, so a
- *  second write fired over one in flight would settle against a board neither of
- *  them saw. */
-export const CARD_WRITE_REASON = "Finishing your last card change…";
 /** An archive is reversible and a removal is not, so the two prompts say different
  *  things — and a removal says a THIRD thing for a draft, which lives on this
  *  project alone and has nowhere to survive. Every one names where the card goes
@@ -957,9 +953,9 @@ export function ProjectsBoardPanel({
         return undefined;
     }
   })();
-  /** Why convert, archive and remove are held. Ranked like the move rows, and the
-   *  first two arms are the SAME permission flags — but the grouping arms are
-   *  absent: these three address the membership's item id alone, so an ungrouped
+  /** Why edit-draft, convert, archive and remove are held. Ranked like the move rows,
+   *  and the first two arms are the SAME permission flags — but the grouping arms are
+   *  absent: these four address the membership's item id alone, so an ungrouped
    *  board and a GitHub-owned grouping field hold neither of them. So does a lens
    *  still loading: the card under the pointer was recorded off the cards on
    *  screen, and its item id is its item id whichever view drew it. */

@@ -1994,10 +1994,10 @@ your browser instead.
 
 {{key:space}} peeks at an issue or pull request card instead of opening it: a small panel
 with the title, what the card is, and its dates — when it was opened, when it joined this
-board, and when it last changed. Hover any of them for the exact time. **Enter** still opens the
-item, {{secondaryclick}} → **Show details** is the same peek from the pointer, and **Esc**
-closes it and leaves you back on the card. Drafts have no separate peek, since their card
-already opens their notes, and a **redacted** card has nothing to show.
+board, and when it last changed. Hover any of them for the exact time. **Enter** still
+opens the item, {{secondaryclick}} → **Show details** is the same peek from the pointer,
+and **Esc** closes it and leaves you back on the card. Drafts have no separate peek,
+since their card already opens their notes, and a **redacted** card has nothing to show.
 
 ## Moving a card
 
@@ -2049,20 +2049,23 @@ After an archive or a removal your keyboard place lands on the card that took it
 on the board's first card when that column emptied. When nothing is left to stand on (an
 emptied board, or one this view's filter leaves empty), focus moves to **Add item** in the
 toolbar. A card whose contents you don't have access to still carries **Archive card…**
-and **Remove from project…**, since both reach it by its place on the board rather than by
-what's inside it; **Show details**, **Edit draft…** and **Convert to issue…** aren't
-offered there. Every
-one of these rows is held with its reason on it when your GitHub sign-in can read projects
-but not change them, when you don't have write access to the board, and while another card
-write or a **Load more** page is still finishing.
+and **Remove from project…**, since both reach it by its place on the board rather than
+by what's inside it; **Show details**, **Edit draft…** and **Convert to issue…** aren't
+offered there.
+
+**Edit draft…**, **Convert to issue…**, **Archive card…** and **Remove from project…**
+are each held with their reason on them when your GitHub sign-in can read projects but
+not change them, when you don't have write access to the board, and while another card
+write or a **Load more** page is still finishing. **Show details** is never held:
+reading a card's dates asks nothing of the board.
 
 ## Keyboard
 
-The board is fully keyboard-operable: **↑ / ↓** move through a column, **← / →** step to the
-next column at the same height, **Home / End** jump to a column's first or last card,
+The board is fully keyboard-operable: **↑ / ↓** move through a column, **← / →** step to
+the next column at the same height, **Home / End** jump to a column's first or last card,
 **Enter** opens the card you're on and {{key:space}} peeks at its details; on Windows and
-Linux, {{key:shift+f10}} opens its menu.
-Collapsing the sidebar ({{kbd:toggle-sidebar}}) hands the board its width.
+Linux, {{key:shift+f10}} opens its menu. Collapsing the sidebar
+({{kbd:toggle-sidebar}}) hands the board its width.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
