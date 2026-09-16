@@ -567,11 +567,11 @@ the board without a trip to the browser: search this repository's issues and
 pull requests and add several in a row, or write a **draft** — a Markdown
 note that lives on the board alone until it earns an issue. Either way the
 card is there as the write lands, drawn from GitHub's own answer to it.
-**Right-click a card** (Shift+F10 on Windows and Linux) for its menu: open
-it, **show its details**, **move it to another column**, **edit a draft**
-(title, Markdown notes and assignees), **convert a draft to a real issue**,
-**archive** the card (restorable from the project's archived items on
-GitHub), or **remove** it from the project. A move writes the board's
+**Right-click a card** (Shift+F10 on Windows and Linux) for its menu: open an
+issue or pull request or **show its details**, **move the card to another
+column**, **edit a draft** (title, Markdown notes and assignees) or
+**convert it to a real issue**, **archive** the card (restorable from the
+project's archived items on GitHub), or **remove** it from the project. A move writes the board's
 grouping field and re-draws the card where it lands, keyboard place and all.
 Creating an issue puts it straight on a board too: the **New issue** dialog
 carries a **Projects** picker of its own. The board's **saved views** come

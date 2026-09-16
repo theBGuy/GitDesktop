@@ -1992,9 +1992,9 @@ Open an issue or pull request from its card and it lands on its own tab. One fro
 repository, or from the other side of a fork's **Fork | Upstream** lens, opens on GitHub in
 your browser instead.
 
-{{key:space}} peeks at the card you're on instead of opening it: a small panel with the
-title, what the card is, and its dates — when it was opened, when it joined this board,
-and when it last changed. Hover any of them for the exact time. **Enter** still opens the
+{{key:space}} peeks at an issue or pull request card instead of opening it: a small panel
+with the title, what the card is, and its dates — when it was opened, when it joined this
+board, and when it last changed. Hover any of them for the exact time. **Enter** still opens the
 item, {{secondaryclick}} → **Show details** is the same peek from the pointer, and **Esc**
 closes it and leaves you back on the card. Drafts have no separate peek, since their card
 already opens their notes, and a **redacted** card has nothing to show.
@@ -2050,7 +2050,8 @@ on the board's first card when that column emptied. When nothing is left to stan
 emptied board, or one this view's filter leaves empty), focus moves to **Add item** in the
 toolbar. A card whose contents you don't have access to still carries **Archive card…**
 and **Remove from project…**, since both reach it by its place on the board rather than by
-what's inside it; **Edit draft…** and **Convert to issue…** aren't offered there. Every
+what's inside it; **Show details**, **Edit draft…** and **Convert to issue…** aren't
+offered there. Every
 one of these rows is held with its reason on it when your GitHub sign-in can read projects
 but not change them, when you don't have write access to the board, and while another card
 write or a **Load more** page is still finishing.

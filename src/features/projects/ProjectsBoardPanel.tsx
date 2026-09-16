@@ -175,7 +175,7 @@ const MOVING_REASON = "Moving your last card…";
  *  a removal, a convert and a draft edit all change what the board draws, so a
  *  second write fired over one in flight would settle against a board neither of
  *  them saw. */
-const CARD_WRITE_REASON = "Finishing your last card change…";
+export const CARD_WRITE_REASON = "Finishing your last card change…";
 /** An archive is reversible and a removal is not, so the two prompts say different
  *  things — and a removal says a THIRD thing for a draft, which lives on this
  *  project alone and has nowhere to survive. Every one names where the card goes
@@ -1100,8 +1100,9 @@ export function ProjectsBoardPanel({
       return false;
     }
     // Neutral on purpose: under a filtered view the item may not appear in the
-    // columns at all, and GitHub's search index can lag its own write by seconds —
-    // so this says what happened, never where to look for it.
+    // columns at all, so this says what happened rather than where to look for it.
+    // The card itself lands with the write's own answer, so nothing here has to
+    // account for a read lagging behind it.
     toast.success(`Added to ${project.title}`);
     return true;
   }

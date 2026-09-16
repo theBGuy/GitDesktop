@@ -45,10 +45,11 @@ export interface BoardMenuActions {
 
 /**
  * The board's card menu: an optional Open row, a flat "Move to" section listing the
- * current grouping's columns in board order, then the rows that change what the
- * card IS — convert, archive, remove. Presentational — the panel records the target
- * on right-click (capture phase) and hands it down here with the labels, the gates
- * and the confirmations already resolved.
+ * current grouping's columns in board order, a read-only "Show details" peek for an
+ * issue or pull request, then the rows that change what the card IS — edit a draft,
+ * convert it, archive, remove. Presentational — the panel records the target on
+ * right-click (capture phase) and hands it down here with the labels, the gates and
+ * the confirmations already resolved.
  */
 export function BoardCardMenuItems({
   target,

@@ -6,7 +6,10 @@
   (when a board spans several) and assignees; **draft** items open their notes in place,
   dated with when the note was written and when it last changed; issues and pull requests
   from this repository open on their own tab (cards from elsewhere open on GitHub), and
-  the whole board answers to the arrow keys. Large boards page in with **Load more**.
+  the whole board answers to the arrow keys. **Space** on an issue or pull request card,
+  or **Show details** from its menu, peeks at its title, what it is, and when it was
+  opened, joined the board and last changed, without leaving the columns. Large boards
+  page in with **Load more**.
   **Add item** fills the board from the toolbar: search this repository's issues and pull
   requests and add several in a row, or write a **draft** — a Markdown note that lives on
   the board until it earns an issue (**Ctrl/Cmd+Enter** creates it). Either way the card

@@ -18,10 +18,10 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
-
-/** The edit's single-flight hold, in the board's own "Finishing…" register so this
- *  footer and the pending strip behind it name the same wait. */
-const EDIT_PENDING_REASON = "Finishing your last card change…";
+// The panel imports this dialog, so this direction closes a cycle. Safe because the
+// binding is only read during RENDER — nothing here touches it at module scope, by
+// which time both modules have finished evaluating.
+import { CARD_WRITE_REASON } from "./ProjectsBoardPanel";
 
 /** Whether two login lists name the same people, order ignored. Set-equality rather
  *  than a dirty flag so opening the picker and closing it unchanged still counts as
@@ -33,14 +33,12 @@ function sameLoginSet(a: string[], b: string[]): boolean {
 }
 
 /**
- * Rewrite one DRAFT card: its title, its Markdown notes, and who it's assigned to.
- * The assignees REPLACE the draft's set, which is what the write itself does.
+ * Rewrite one DRAFT card: title, Markdown notes, and assignees, which REPLACE the
+ * draft's set rather than adding to it.
  *
- * Every starting value arrives as a prop, seeded by the panel at the moment the menu
- * row was clicked. This component holds no session of its own: it stays mounted
- * across open and close, and `<Activity>` replays effect setups on show, so anything
- * it worked out for itself would either churn on a tab switch or describe the card
- * the user opened two edits ago.
+ * Every starting value arrives as a prop the panel seeded at the menu click: this
+ * dialog stays mounted across open and close and `<Activity>` replays its effect
+ * setups on show, so a value it derived for itself would describe an earlier card.
  */
 export function BoardDraftEditDialog({
   repoPath,
@@ -107,13 +105,14 @@ export function BoardDraftEditDialog({
       );
     },
   });
-  // Held rather than hidden, and explained where the user is looking. The submit
-  // chord's hint rides the same wrapper, which is what keeps the reason from being
-  // overwritten by it while held.
+  // Held rather than hidden, and explained where the user is looking. The reason is
+  // the PANEL's own, read at render rather than re-spelled here, so this footer and
+  // the strip behind it can't drift apart. The submit chord's hint rides the same
+  // wrapper, which keeps the reason from being overwritten by it while held.
   const { blockedReason, reasonId, wrapperTitle, describedBy } =
     useDisabledReason({
       disabled: pending,
-      reason: EDIT_PENDING_REASON,
+      reason: CARD_WRITE_REASON,
       title: SUBMIT_HINT,
     });
 

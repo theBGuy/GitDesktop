@@ -9,7 +9,7 @@ import {
   NoteIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
-import { Fragment, memo, type ReactNode, useRef } from "react";
+import { Fragment, memo, type ReactNode, useId, useRef } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
 import { usePanelPortalContainer } from "@/components/panel-portal";
@@ -483,6 +483,11 @@ export const BoardCard = memo(function BoardCard({
   // card is deliberately NOT the popover's trigger — Base UI would toggle on click,
   // and click belongs to opening the item.
   const cardRef = useRef<HTMLButtonElement>(null);
+  // Not being the trigger also costs the popup relationship Base UI wires for free,
+  // so the card states it itself. The id overrides the Popup's internal `floatingId`
+  // (caller props merge last), which is safe here precisely BECAUSE there is no
+  // trigger holding the old one in an `aria-controls`.
+  const peekId = useId();
   const content = item.content;
   const shared = {
     "data-card-index": index,
@@ -614,6 +619,14 @@ export const BoardCard = memo(function BoardCard({
         type="button"
         {...shared}
         ref={cardRef}
+        // The three attributes Base UI's own `Popover.Trigger` renders (its
+        // `aria-haspopup`/`aria-expanded`/`aria-controls` trio), stated by hand so an
+        // issue card announces its peek the way a draft card announces its notes.
+        // `aria-controls` only while open: the popup is unmounted otherwise, and a
+        // reference to a missing id is worse than none.
+        aria-haspopup="dialog"
+        aria-expanded={peek}
+        aria-controls={peek ? peekId : undefined}
         className={cn(CARD_CLASS, "cursor-pointer", toneClass, busyClass)}
         onClick={() => onOpen(item)}
         // Space peeks where Enter opens. These cards are `role="option"` in a roving
@@ -653,6 +666,7 @@ export const BoardCard = memo(function BoardCard({
           className="isolate z-50"
         >
           <Popover.Popup
+            id={peekId}
             finalFocus={cardRef}
             className="max-h-96 w-80 overflow-y-auto rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10"
           >

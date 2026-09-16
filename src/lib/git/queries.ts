@@ -2813,7 +2813,7 @@ const BOARD_WRITES_KEY = ["board-write"] as const;
 export interface PendingBoardWrite {
   mutationId: number;
   kind: BoardWriteKind | null;
-  /** The card a convert is swapping in place. */
+  /** The card a write is rewriting in place — a convert, or a draft edit. */
   itemId: string | null;
   /** The issue/PR number an add-existing is putting on the board. */
   number: number | null;

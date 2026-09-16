@@ -161,9 +161,19 @@ fn assignee_lookup_input(logins: &[String]) -> AppResult<Option<String>> {
     Ok(Some(graphql_input(&document, variables)))
 }
 
-fn parse_assignee_ids(value: &Value, count: usize) -> AppResult<Vec<String>> {
-    (0..count)
-        .map(|index| response_id(value, &format!("/data/u{index}/id"), "the draft assignees"))
+fn parse_assignee_ids(value: &Value, logins: &[String]) -> AppResult<Vec<String>> {
+    logins
+        .iter()
+        .enumerate()
+        .map(|(index, login)| {
+            response_id(value, &format!("/data/u{index}/id"), "the draft assignees")
+                .map_err(|_| {
+                    gh_unreadable(
+                        "the draft assignees",
+                        format!("could not resolve assignee '{login}'"),
+                    )
+                })
+        })
         .collect()
 }
 
@@ -279,11 +289,12 @@ fn parse_converted(value: &Value) -> AppResult<ConvertedDraft> {
             "conversion did not return an issue".into(),
         ));
     };
-    let url = response_id(
-        value,
-        &format!("{CONVERT_POINTER}/content/url"),
-        "the converted draft",
-    )?;
+    let url = value
+        .pointer(&format!("{CONVERT_POINTER}/content/url"))
+        .and_then(Value::as_str)
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| gh_unreadable("the converted draft", "missing the issue's url".into()))?
+        .to_string();
     Ok(ConvertedDraft {
         number: *number,
         url,
@@ -381,7 +392,7 @@ pub async fn gh_update_draft_item(
     let assignee_ids = if let Some(logins) = assignee_logins {
         let ids = if let Some(input) = assignee_lookup_input(&logins)? {
             let value = request(&repo_path, &input, "the draft assignees").await?;
-            parse_assignee_ids(&value, logins.len())?
+            parse_assignee_ids(&value, &logins)?
         } else {
             Vec::new()
         };
@@ -598,9 +609,17 @@ mod tests {
             ["api", "graphql", "--method", "POST", "--input", "-"],
         );
         let value = json!({"data":{"u0":{"id":"U_one"},"u1":{"id":"U_two"}}});
-        assert_eq!(parse_assignee_ids(&value, 2).unwrap(), ["U_one", "U_two"]);
+        assert_eq!(parse_assignee_ids(&value, &logins).unwrap(), ["U_one", "U_two"]);
         for user in [Value::Null, json!({}), json!({"id":" "})] {
-            assert!(parse_assignee_ids(&json!({"data":{"u0":{"id":"U_one"},"u1":user}}), 2).is_err());
+            let error = parse_assignee_ids(
+                &json!({"data":{"u0":{"id":"U_one"},"u1":user}}),
+                &logins,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Couldn't read the draft assignees from GitHub.\ncould not resolve assignee 'alice_acme'",
+            );
         }
     }
 
@@ -985,6 +1004,11 @@ mod tests {
     #[test]
     fn convert_payload_parses_issue_and_rejects_other_content() {
         let payload = |content: Value| json!({"data":{"convertProjectV2DraftIssueItemToIssue":{"item":board_item("ISSUE", content)}}});
+        let error = parse_converted(&payload(issue(Value::Null))).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Couldn't read the converted draft from GitHub.\nmissing the issue's url",
+        );
         let mut content = issue(Value::Null);
         content["number"] = json!(42);
         content["url"] = json!("https://github.com/o/r/issues/42");
