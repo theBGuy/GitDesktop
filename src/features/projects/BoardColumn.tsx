@@ -30,12 +30,14 @@ export const BoardColumn = memo(function BoardColumn({
   columnIndex,
   activeIndex,
   busyItemId,
+  peekItemId,
   tabStopIndex,
   focusNonce,
   repoSlug,
   ghHost,
   chipFields,
   onCardFocus,
+  onPeekChange,
   onOpen,
 }: {
   column: BoardColumnModel;
@@ -47,6 +49,9 @@ export const BoardColumn = memo(function BoardColumn({
    *  primitive on purpose: this component is memoized, and the comparison is the
    *  default shallow one. */
   busyItemId: string | null;
+  /** The card whose details peek is open, board-wide — one at a time, and the same
+   *  id-not-index shape {@link busyItemId} keeps, for the same memo reason. */
+  peekItemId: string | null;
   /** The board's single tab stop, when it is in this column. */
   tabStopIndex: number | null;
   /** Bumped once per arrow press. The only thing that may move DOM focus. */
@@ -57,6 +62,7 @@ export const BoardColumn = memo(function BoardColumn({
    *  no view. Identity-stable, like every other prop this memoized column takes. */
   chipFields: ProjectFieldDef[];
   onCardFocus: (columnIndex: number, index: number) => void;
+  onPeekChange: (itemId: string | null) => void;
   onOpen: (item: BoardItem) => void;
 }) {
   // State-backed, never a ref: with a plain RefObject the virtualizer captures
@@ -209,11 +215,13 @@ export const BoardColumn = memo(function BoardColumn({
                   columnIndex={columnIndex}
                   active={vi.index === activeIndex}
                   busy={items[vi.index].itemId === busyItemId}
+                  peek={items[vi.index].itemId === peekItemId}
                   rovingTab={vi.index === tabStopIndex ? 0 : -1}
                   repoSlug={repoSlug}
                   ghHost={ghHost}
                   chipFields={chipFields}
                   onFocus={onCardFocus}
+                  onPeekChange={onPeekChange}
                   onOpen={onOpen}
                 />
               </div>

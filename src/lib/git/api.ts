@@ -24,6 +24,8 @@ import type {
   BitbucketWorkspace,
   BlameLine,
   BoardCandidates,
+  BoardItem,
+  BoardItemContent,
   BoardItems,
   Branch,
   BranchComparison,
@@ -2601,18 +2603,52 @@ export const ghSearchBoardCandidates = (
     lens,
   });
 
-/** Adds a DRAFT item — a note that lives only on this board — and returns its new
- *  item id. `body` rides verbatim as Markdown; the card's popover renders it. */
+/** Adds a DRAFT item — a note that lives only on this board — and returns the CARD
+ *  the board now holds. `body` rides verbatim as Markdown; the card's popover
+ *  renders it. The card comes back rather than a bare id because GitHub's read
+ *  replicas lag their own writes by seconds: the answer to the write is the only
+ *  reading of the new item that is guaranteed to exist. */
 export const ghAddDraftItem = (
   repoPath: string,
   projectId: string,
   title: string,
   body: string,
-) => invoke<string>("gh_add_draft_item", { repoPath, projectId, title, body });
+) =>
+  invoke<BoardItem>("gh_add_draft_item", { repoPath, projectId, title, body });
+
+/** Puts one existing issue or pull request on a board and returns the card it
+ *  became. `contentId` is the issue/PR node id — a board item id addresses nothing
+ *  here. The card comes back for the reason {@link ghAddDraftItem} states. */
+export const ghAddBoardItem = (
+  repoPath: string,
+  projectId: string,
+  contentId: string,
+) => invoke<BoardItem>("gh_add_board_item", { repoPath, projectId, contentId });
+
+/** Rewrites one draft's title, notes and assignees, answering with the card's new
+ *  content — the DRAFT arm of {@link BoardItemContent}, tag included, which is why
+ *  this is typed as the whole union and narrowed at the patch site. `draftId` is the
+ *  DRAFT's own CONTENT id (the card's `content.id`), never the membership's item id,
+ *  and `assigneeLogins` REPLACES the set rather than adding to it. */
+export const ghUpdateDraftItem = (
+  repoPath: string,
+  draftId: string,
+  title: string,
+  body: string,
+  assigneeLogins: string[],
+) =>
+  invoke<BoardItemContent>("gh_update_draft_item", {
+    repoPath,
+    draftId,
+    title,
+    body,
+    assigneeLogins,
+  });
 
 /** Turns a draft into a real issue in the repo the lens names, keeping the card's
  *  place on the board. Addressed by the membership's `itemId` — a draft's own
- *  content id is a different thing and the backend rejects it. */
+ *  content id is a different thing and the backend rejects it. Answers with the
+ *  swapped card as well as the issue, for the reason {@link ghAddDraftItem} states. */
 export const ghConvertDraftItem = (
   repoPath: string,
   itemId: string,

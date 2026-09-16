@@ -1934,12 +1934,12 @@ as **Add issue or pull request to board…** and **New board draft…**.
   add still in flight is fine, the board finishes it and says so above the columns.
 - **New draft…** writes a note that lives on this board and nowhere else. It takes a
   title and **Markdown** notes, kept exactly as you write them — the card's own popover
-  renders them.
+  renders them. {{key:mod+enter}} creates it from anywhere in the dialog.
 
 While any of this is on its way, a line above the columns says what the board is waiting
-on. That line clears when GitHub accepts the write, which is a step ahead of the card
-appearing: under a filtered view the view's filter may leave the item out, and GitHub's
-search index takes a few seconds to catch up with its own write. **Clear view** shows the
+on. The card is there as that line clears: the board draws it from GitHub's own answer to
+the write rather than waiting on a fresh read of the project. Under a saved view, the next
+refresh settles whether that view's filter really keeps the item; **Clear view** shows the
 whole board either way.
 
 **Add item** is held with its reason on it when your GitHub sign-in can read projects but
@@ -1983,12 +1983,21 @@ there too.
 A card carries its type and state glyph, its title, its number, and up to three assignee
 faces (with a **+N** for any beyond that). A card from another repository names that
 repository, so a board that spans several stays readable. **Draft** items (the notes that
-live only on the board) say so, and open their text in place. An item you don't have
-access to shows as **redacted** and says so, rather than silently thinning the board.
+live only on the board) say so, and open their text in place, with when the note was
+written and when it last changed under it — hover either for the exact time. An item you
+don't have access to shows as **redacted** and says so, rather than silently thinning the
+board.
 
 Open an issue or pull request from its card and it lands on its own tab. One from another
 repository, or from the other side of a fork's **Fork | Upstream** lens, opens on GitHub in
 your browser instead.
+
+{{key:space}} peeks at the card you're on instead of opening it: a small panel with the
+title, what the card is, and its dates — when it was opened, when it joined this board,
+and when it last changed. Hover any of them for the exact time. **Enter** still opens the
+item, {{secondaryclick}} → **Show details** is the same peek from the pointer, and **Esc**
+closes it and leaves you back on the card. Drafts have no separate peek, since their card
+already opens their notes, and a **redacted** card has nothing to show.
 
 ## Moving a card
 
@@ -2013,11 +2022,16 @@ access to the board, and when the board is grouped by one of GitHub's own issue 
 are edited on GitHub). An ungrouped board has no columns to move between, so its cards carry
 no **Move to** section, and a card whose contents you can't see carries none either.
 
-## Converting, archiving and removing
+## Editing, converting, archiving and removing
 
-Below **Move to**, the same menu holds the rows that change what a card is. Each one asks
-first, and each prompt says where the card goes:
+Below **Move to**, the same menu holds the rows that change what a card is. The last three
+ask first, and each prompt says where the card goes:
 
+- **Edit draft…** reopens a **draft** for rewriting: its title, its **Markdown** notes,
+  and who it's assigned to — the picker offers this repository's collaborators, and what
+  you leave checked becomes the draft's whole set. {{key:mod+enter}} saves from anywhere
+  in the dialog, and the card carries the new text as soon as GitHub takes it. Drafts
+  only: an issue or a pull request is edited on its own tab.
 - **Convert to issue…** turns a **draft** into a real issue in this repository, and swaps
   the card over to it in place — the draft's title and notes become the issue's. The swap
   lands when GitHub answers; until then the card itself dims and a line above the columns
@@ -2036,23 +2050,24 @@ on the board's first card when that column emptied. When nothing is left to stan
 emptied board, or one this view's filter leaves empty), focus moves to **Add item** in the
 toolbar. A card whose contents you don't have access to still carries **Archive card…**
 and **Remove from project…**, since both reach it by its place on the board rather than by
-what's inside it; **Convert to issue…** isn't offered there. All three are held with their
-reason on them when your GitHub sign-in can read projects but not change them, when you
-don't have write access to the board, and while another card write or a **Load more**
-page is still finishing.
+what's inside it; **Edit draft…** and **Convert to issue…** aren't offered there. Every
+one of these rows is held with its reason on it when your GitHub sign-in can read projects
+but not change them, when you don't have write access to the board, and while another card
+write or a **Load more** page is still finishing.
 
 ## Keyboard
 
 The board is fully keyboard-operable: **↑ / ↓** move through a column, **← / →** step to the
-next column at the same height, **Home / End** jump to a column's first or last card, and
-**Enter** opens the card you're on; on Windows and Linux, {{key:shift+f10}} opens its menu.
+next column at the same height, **Home / End** jump to a column's first or last card,
+**Enter** opens the card you're on and {{key:space}} peeks at its details; on Windows and
+Linux, {{key:shift+f10}} opens its menu.
 Collapsing the sidebar ({{kbd:toggle-sidebar}}) hands the board its width.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
 and offers a one-click **Reconnect GitHub…**, which requests \`project\`. Every write here
-(adding, moving, converting, archiving, removing) needs the full \`project\` scope, so a
-\`read:project\` sign-in draws the board with those controls held.`,
+(adding, moving, editing a draft, converting, archiving, removing) needs the full
+\`project\` scope, so a \`read:project\` sign-in draws the board with those controls held.`,
   },
   {
     id: "discussions",

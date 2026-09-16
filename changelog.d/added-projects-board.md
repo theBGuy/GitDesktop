@@ -4,17 +4,20 @@
   (**Status** to start with), and anything that field doesn't cover collects in a column
   of its own so nothing is hidden. Cards carry their state, number, owning repository
   (when a board spans several) and assignees; **draft** items open their notes in place,
-  issues and pull requests from this repository open on their own tab (cards from
-  elsewhere open on GitHub), and the whole board answers to the arrow keys. Large boards
-  page in with **Load more**. **Add item** fills the board from the toolbar: search this
-  repository's issues and pull requests and add several in a row, or write a **draft** —
-  a Markdown note that lives on the board until it earns an issue. Right-click a card
-  (Shift+F10 on Windows and Linux) to **move it to another column**: the board re-draws
-  where it lands and your keyboard place goes with it while the write reaches GitHub
-  behind you. The same menu **converts a draft into a real issue**, **archives**
-  a card (GitHub's archived items hold it for you), and **removes** one from the
-  project, each confirming first. Creating an issue can put it on its boards in the same
-  step: the **New issue** dialog gained a **Projects** picker. The board's **saved views** come
+  dated with when the note was written and when it last changed; issues and pull requests
+  from this repository open on their own tab (cards from elsewhere open on GitHub), and
+  the whole board answers to the arrow keys. Large boards page in with **Load more**.
+  **Add item** fills the board from the toolbar: search this repository's issues and pull
+  requests and add several in a row, or write a **draft** — a Markdown note that lives on
+  the board until it earns an issue (**Ctrl/Cmd+Enter** creates it). Either way the card
+  is there as the write lands, drawn from GitHub's own answer to it. Right-click a
+  card (Shift+F10 on Windows and Linux) to **move it to another column**: the board
+  re-draws where it lands and your keyboard place goes with it while the write reaches
+  GitHub behind you. The same menu **edits a draft** (its title, its Markdown notes and
+  its assignees, saved with **Ctrl/Cmd+Enter**), **converts a draft into a real issue**,
+  **archives** a card (GitHub's archived items hold it for you), and **removes** one from
+  the project, the last three confirming first. Creating an issue can put it on its boards
+  in the same step: the **New issue** dialog gained a **Projects** picker. The board's **saved views** come
   along as lenses: pick one under **View options** and GitHub filters the read for you, its
   sort orders the cards in each column (by **Title**, or by a text, number, date,
   single-select or iteration field), its visible fields show as chips on the cards, and

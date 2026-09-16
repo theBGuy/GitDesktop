@@ -25,6 +25,7 @@ pub struct BoardItems {
 #[serde(rename_all = "camelCase")]
 pub struct BoardItem {
     pub item_id: String,
+    pub added_at: String,
     pub is_archived: bool,
     pub content: BoardItemContent,
     pub field_values: Vec<ProjectFieldValue>,
@@ -45,6 +46,8 @@ pub enum BoardItemContent {
         state_reason: Option<String>,
         repo_name_with_owner: String,
         assignees: Vec<AssigneeRef>,
+        created_at: String,
+        updated_at: String,
     },
     PullRequest {
         id: String,
@@ -54,12 +57,16 @@ pub enum BoardItemContent {
         is_draft: bool,
         repo_name_with_owner: String,
         assignees: Vec<AssigneeRef>,
+        created_at: String,
+        updated_at: String,
     },
     Draft {
         id: String,
         title: String,
         body: String,
         assignees: Vec<AssigneeRef>,
+        created_at: String,
+        updated_at: String,
     },
     /// A REDACTED item or content the parser could not read.
     Redacted {},
@@ -87,21 +94,28 @@ fn map_scope_error(e: AppError) -> AppError {
     e
 }
 
-fn project_items_query() -> String {
+pub(crate) const DRAFT_CONTENT_SELECTION: &str = "id title body createdAt updatedAt assignees(first:8){ nodes{ login avatarUrl } }";
+
+pub(crate) fn board_item_selection() -> String {
     let values = field_value_selection();
+    format!(
+        "id createdAt isArchived type content{{ __typename \
+         ... on Issue {{ id number title state stateReason createdAt updatedAt \
+           repository{{ nameWithOwner }} assignees(first:8){{ nodes{{ login avatarUrl }} }} }} \
+         ... on PullRequest {{ id number title state isDraft createdAt updatedAt \
+           repository{{ nameWithOwner }} assignees(first:8){{ nodes{{ login avatarUrl }} }} }} \
+         ... on DraftIssue {{ {DRAFT_CONTENT_SELECTION} }} }} \
+         fieldValues(first:50){{ nodes{{ {values} }} }}"
+    )
+}
+
+fn project_items_query() -> String {
+    let item = board_item_selection();
     format!(
         "query($id:ID!,$after:String,$q:String){{ node(id:$id){{ ... on ProjectV2 {{ \
          items(first:100, after:$after, orderBy:{{field:POSITION,direction:ASC}}, query:$q){{ \
          totalCount pageInfo{{ hasNextPage endCursor }} \
-         nodes{{ id isArchived type content{{ __typename \
-         ... on Issue {{ id number title state stateReason \
-           repository{{ nameWithOwner }} assignees(first:8){{ nodes{{ login avatarUrl }} }} }} \
-         ... on PullRequest {{ id number title state isDraft \
-           repository{{ nameWithOwner }} assignees(first:8){{ nodes{{ login avatarUrl }} }} }} \
-         ... on DraftIssue {{ id title body \
-           assignees(first:8){{ nodes{{ login avatarUrl }} }} }} }} \
-         fieldValues(first:50){{ nodes{{ {values} }} }} \
-         }} }} }} }} }}"
+         nodes{{ {item} }} }} }} }} }}"
     )
 }
 
@@ -127,7 +141,7 @@ fn build_items_args(project_id: &str, after: Option<&str>, query: Option<&str>) 
 struct ItemsPage {
     total_count: u64,
     page_info: PageInfo,
-    nodes: Option<Vec<Option<ItemResponse>>>,
+    nodes: Option<Vec<Option<Value>>>,
 }
 
 #[derive(Deserialize)]
@@ -141,6 +155,7 @@ struct PageInfo {
 #[serde(rename_all = "camelCase")]
 struct ItemResponse {
     id: String,
+    created_at: Option<String>,
     is_archived: bool,
     #[serde(rename = "type")]
     item_type: String,
@@ -164,6 +179,8 @@ enum ContentResponse {
         state_reason: Option<String>,
         repository: RepositoryRef,
         assignees: Option<AssigneesResponse>,
+        created_at: Option<String>,
+        updated_at: Option<String>,
     },
     PullRequest {
         id: String,
@@ -173,12 +190,16 @@ enum ContentResponse {
         is_draft: bool,
         repository: RepositoryRef,
         assignees: Option<AssigneesResponse>,
+        created_at: Option<String>,
+        updated_at: Option<String>,
     },
     DraftIssue {
         id: String,
         title: String,
         body: Option<String>,
         assignees: Option<AssigneesResponse>,
+        created_at: Option<String>,
+        updated_at: Option<String>,
     },
 }
 
@@ -206,7 +227,7 @@ fn unreadable(detail: impl ToString) -> AppError {
     gh_unreadable("the project items", detail.to_string())
 }
 
-fn parse_content(item_type: &str, content: Option<Value>) -> BoardItemContent {
+pub(crate) fn parse_content(item_type: &str, content: Option<Value>) -> BoardItemContent {
     let Some(content) = content else {
         return BoardItemContent::Redacted {};
     };
@@ -230,6 +251,8 @@ fn parse_content(item_type: &str, content: Option<Value>) -> BoardItemContent {
             state_reason,
             repository,
             assignees,
+            created_at,
+            updated_at,
         } => BoardItemContent::Issue {
             id,
             number,
@@ -238,6 +261,8 @@ fn parse_content(item_type: &str, content: Option<Value>) -> BoardItemContent {
             state_reason,
             repo_name_with_owner: repository.name_with_owner,
             assignees: assignee_refs(assignees),
+            created_at: created_at.unwrap_or_default(),
+            updated_at: updated_at.unwrap_or_default(),
         },
         ContentResponse::PullRequest {
             id,
@@ -247,6 +272,8 @@ fn parse_content(item_type: &str, content: Option<Value>) -> BoardItemContent {
             is_draft,
             repository,
             assignees,
+            created_at,
+            updated_at,
         } => BoardItemContent::PullRequest {
             id,
             number,
@@ -255,19 +282,46 @@ fn parse_content(item_type: &str, content: Option<Value>) -> BoardItemContent {
             is_draft,
             repo_name_with_owner: repository.name_with_owner,
             assignees: assignee_refs(assignees),
+            created_at: created_at.unwrap_or_default(),
+            updated_at: updated_at.unwrap_or_default(),
         },
         ContentResponse::DraftIssue {
             id,
             title,
             body,
             assignees,
+            created_at,
+            updated_at,
         } => BoardItemContent::Draft {
             id,
             title,
             body: body.unwrap_or_default(),
             assignees: assignee_refs(assignees),
+            created_at: created_at.unwrap_or_default(),
+            updated_at: updated_at.unwrap_or_default(),
         },
     }
+}
+
+pub(crate) fn parse_board_item(value: Value) -> Result<BoardItem, String> {
+    let node: ItemResponse = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    if node.id.trim().is_empty() {
+        return Err("missing project item id".into());
+    }
+    Ok(BoardItem {
+        item_id: node.id,
+        added_at: node.created_at.unwrap_or_default(),
+        is_archived: node.is_archived,
+        content: parse_content(&node.item_type, node.content),
+        field_values: node
+            .field_values
+            .and_then(|values| values.nodes)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|value| parse_field_value(&value))
+            .collect(),
+    })
 }
 
 fn parse_page(output: &str) -> AppResult<BoardItems> {
@@ -286,20 +340,8 @@ fn parse_page(output: &str) -> AppResult<BoardItems> {
         .into_iter()
         .flatten()
         .flatten()
-        .map(|node| BoardItem {
-            item_id: node.id,
-            is_archived: node.is_archived,
-            content: parse_content(&node.item_type, node.content),
-            field_values: node
-                .field_values
-                .and_then(|values| values.nodes)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|value| parse_field_value(&value))
-                .collect(),
-        })
-        .collect();
+        .map(|node| parse_board_item(node).map_err(unreadable))
+        .collect::<AppResult<Vec<_>>>()?;
     Ok(BoardItems {
         items,
         total_count: page.total_count,
@@ -433,7 +475,10 @@ mod tests {
         let items = wire["items"].as_array().unwrap();
         assert_eq!(items.len(), 6);
         for item in items {
-            assert_keys(item, &["itemId", "isArchived", "content", "fieldValues"]);
+            assert_keys(
+                item,
+                &["itemId", "addedAt", "isArchived", "content", "fieldValues"],
+            );
             assert_eq!(item["isArchived"], false);
             assert_eq!(item["fieldValues"], json!([]));
         }
@@ -450,6 +495,8 @@ mod tests {
                     "stateReason",
                     "repoNameWithOwner",
                     "assignees",
+                    "createdAt",
+                    "updatedAt",
                 ],
             );
             assert_eq!(issue["kind"], "issue");
@@ -472,6 +519,8 @@ mod tests {
                     "isDraft",
                     "repoNameWithOwner",
                     "assignees",
+                    "createdAt",
+                    "updatedAt",
                 ],
             );
             assert_eq!(pr["kind"], "pullRequest");
@@ -483,7 +532,10 @@ mod tests {
         assert_eq!(items[3]["content"]["state"], "MERGED");
         assert_eq!(items[3]["content"]["isDraft"], false);
         let draft = &items[4]["content"];
-        assert_keys(draft, &["kind", "id", "title", "body", "assignees"]);
+        assert_keys(
+            draft,
+            &["kind", "id", "title", "body", "assignees", "createdAt", "updatedAt"],
+        );
         assert_eq!(draft["kind"], "draft");
         assert_eq!(draft["body"], "**Draft**\n\nMarkdown");
         for item in &items[..5] {
@@ -499,6 +551,49 @@ mod tests {
         }
         assert_keys(&items[5]["content"], &["kind"]);
         assert_eq!(items[5]["content"], json!({"kind": "redacted"}));
+    }
+
+    #[test]
+    fn item_parse_errors_keep_the_board_read_surface() {
+        for (node, detail) in [
+            (item("  ", "ISSUE", content("Issue")), "missing project item id"),
+            (json!({}), "missing field `id`"),
+        ] {
+            let error = parse_page(&page(json!([node]), false, None)).err().unwrap();
+            assert_eq!(
+                error.to_string(),
+                format!("Couldn't read the project items from GitHub.\n{detail}"),
+            );
+        }
+    }
+
+    #[test]
+    fn item_and_content_dates_tolerate_absent_and_null_values() {
+        for (item_type, typename) in [
+            ("ISSUE", "Issue"),
+            ("PULL_REQUEST", "PullRequest"),
+            ("DRAFT_ISSUE", "DraftIssue"),
+        ] {
+            for dates in [
+                None,
+                Some(Value::Null),
+                Some(json!("2026-09-16T12:00:00Z")),
+            ] {
+                let mut node = item("one", item_type, content(typename));
+                if let Some(date) = &dates {
+                    node["createdAt"] = date.clone();
+                    node["content"]["createdAt"] = date.clone();
+                    node["content"]["updatedAt"] = date.clone();
+                }
+                let board = parse_page(&page(json!([node]), false, None)).unwrap();
+                let wire = serde_json::to_value(&board.items[0]).unwrap();
+                let expected = dates.as_ref().and_then(Value::as_str).unwrap_or_default();
+                assert_eq!(wire["addedAt"], expected);
+                assert_eq!(wire["content"]["createdAt"], expected);
+                assert_eq!(wire["content"]["updatedAt"], expected);
+                assert_ne!(wire["content"]["kind"], "redacted");
+            }
+        }
     }
 
     #[test]
@@ -743,6 +838,7 @@ mod tests {
             "/pageInfo/hasNextPage",
             "/pageInfo/endCursor",
             "/nodes/id",
+            "/nodes/createdAt",
             "/nodes/isArchived",
             "/nodes/type",
             "/content/__typename",
@@ -753,6 +849,8 @@ mod tests {
             "/content/stateReason",
             "/content/isDraft",
             "/content/body",
+            "/content/createdAt",
+            "/content/updatedAt",
             "/content/repository/nameWithOwner",
             "/content/assignees/nodes/login",
             "/content/assignees/nodes/avatarUrl",
@@ -774,6 +872,8 @@ mod tests {
             "items(first:100, after:$after, orderBy:{field:POSITION,direction:ASC}, query:$q)"
         ));
         assert_eq!(query.matches("assignees(first:8)").count(), 3);
+        assert_eq!(query.matches("createdAt").count(), 4);
+        assert_eq!(query.matches("updatedAt").count(), 3);
         assert!(query.contains(&format!(
             "fieldValues(first:50){{ nodes{{ {} }} }}",
             field_value_selection()

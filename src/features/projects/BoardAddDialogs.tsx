@@ -26,6 +26,7 @@ import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
 import { useBoardCandidates } from "@/lib/git/queries";
 import type { BoardCandidate, RemoteLens } from "@/lib/git/types";
+import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
@@ -492,11 +493,13 @@ export function NewDraftDialog({
   });
   // Held rather than hidden, and explained where the user is looking. The reason is
   // the board's own "Finishing…" register, so the footer and the strip behind the
-  // dialog describe the same wait.
+  // dialog describe the same wait. The submit chord's hint rides the same wrapper,
+  // which is what keeps the reason from being overwritten by it while held.
   const { blockedReason, reasonId, wrapperTitle, describedBy } =
     useDisabledReason({
       disabled: pending,
       reason: DRAFT_PENDING_REASON,
+      title: SUBMIT_HINT,
     });
 
   // keepDefaultValues: otherwise the per-render options sync clobbers the reset
@@ -507,7 +510,21 @@ export function NewDraftDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+      <DialogContent
+        className="flex max-h-[85vh] flex-col sm:max-w-2xl"
+        // mod+enter submits from anywhere in the dialog, the Notes textarea
+        // included. Captured on DialogContent (the Popup) rather than the <form>:
+        // the X close renders as a SIBLING of the form inside the Popup, so a chord
+        // pressed with focus on X would bypass a form-level handler and reach the
+        // global mod+enter action. ALWAYS swallow the chord here; submit only under
+        // the gate the button takes.
+        onKeyDown={(e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+            e.preventDefault();
+            if (!pending) form.handleSubmit();
+          }
+        }}
+      >
         <form
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {

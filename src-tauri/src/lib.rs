@@ -575,6 +575,8 @@ pub fn run() {
             github::project::gh_edit_item_projects,
             github::project_item_edits::gh_search_board_candidates,
             github::project_item_edits::gh_add_draft_item,
+            github::project_item_edits::gh_add_board_item,
+            github::project_item_edits::gh_update_draft_item,
             github::project_item_edits::gh_convert_draft_item,
             github::project_item_edits::gh_archive_board_item,
             github::project_item_edits::gh_remove_board_item,

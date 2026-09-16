@@ -9,10 +9,11 @@ import {
   NoteIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
-import { memo, type ReactNode } from "react";
+import { Fragment, memo, type ReactNode, useRef } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
 import { usePanelPortalContainer } from "@/components/panel-portal";
+import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import {
   formatFieldDate,
@@ -28,6 +29,7 @@ import type {
   ProjectFieldDef,
   ProjectFieldValue,
 } from "@/lib/git/types";
+import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 /** How many assignee faces a card shows before the rest collapse into "+N" —
@@ -345,6 +347,76 @@ function CardChips({
   );
 }
 
+/** One dated fact about a card, as the popover reads it out. */
+interface CardDate {
+  label: string;
+  date: string;
+}
+
+/** A forge timestamp this build can actually format, or null. Three ways it isn't
+ *  one, all tested rather than trusted: the backend serializes an absent date as the
+ *  EMPTY STRING (its dates are `unwrap_or_default`ed), a build older than these
+ *  fields answers without them at all, and an unparseable date formats as "in NaN
+ *  years". `parseableDate("")` is false, so the sentinel and the garbage share an
+ *  arm. */
+function usableDate(value: string | undefined): string | null {
+  return typeof value === "string" && parseableDate(value) ? value : null;
+}
+
+/** The pairs that have a date, in the order given. */
+function dated(pairs: [string, string | null][]): CardDate[] {
+  return pairs.flatMap(([label, date]) =>
+    date === null ? [] : [{ label, date }],
+  );
+}
+
+/** What a card's popover says about WHEN, per kind. An issue or pull request carries
+ *  three dates that mean three different things — when it was opened, when it joined
+ *  THIS board, and when it last changed. A draft was created by being added, so its
+ *  membership date repeats its own. */
+function cardDates(item: BoardItem): CardDate[] {
+  const content = item.content;
+  switch (content.kind) {
+    // A redacted card is inert: no popover, no menu, so there is nowhere for a date
+    // to be read. Copy written for a surface that doesn't exist can't be kept true.
+    case "redacted":
+      return [];
+    case "draft":
+      return dated([
+        ["Created", usableDate(content.createdAt)],
+        ["Updated", usableDate(content.updatedAt)],
+      ]);
+    case "issue":
+    case "pullRequest":
+      return dated([
+        ["Opened", usableDate(content.createdAt)],
+        ["Added to board", usableDate(item.addedAt)],
+        ["Updated", usableDate(content.updatedAt)],
+      ]);
+  }
+}
+
+/** A card's dates, muted under its popover's own content — the draft's notes, or an
+ *  issue/pull request peek. Labelled every one: three relative times in a row say
+ *  nothing about each other without the words. `RelativeTime` rides the shared
+ *  ticker and carries the absolute local time as its own tooltip. */
+function CardDates({ item }: { item: BoardItem }) {
+  const dates = cardDates(item);
+  if (dates.length === 0) return null;
+  return (
+    <p className="mt-2 flex flex-wrap items-center gap-x-1.5 px-1 text-xs text-muted-foreground">
+      {dates.map((entry, i) => (
+        <Fragment key={entry.label}>
+          {i > 0 && <span aria-hidden>·</span>}
+          <span className="whitespace-nowrap">
+            {entry.label} <RelativeTime date={entry.date} />
+          </span>
+        </Fragment>
+      ))}
+    </p>
+  );
+}
+
 const CARD_CLASS =
   "flex w-full flex-col gap-1 border bg-background px-2 py-1.5 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
 
@@ -367,11 +439,13 @@ export const BoardCard = memo(function BoardCard({
   columnIndex,
   active,
   busy,
+  peek,
   rovingTab,
   repoSlug,
   ghHost,
   chipFields,
   onFocus,
+  onPeekChange,
   onOpen,
 }: {
   item: BoardItem;
@@ -381,10 +455,14 @@ export const BoardCard = memo(function BoardCard({
   setSize: number;
   columnIndex: number;
   active: boolean;
-  /** A write is changing this card in place — today, a draft being converted to an
-   *  issue. BUSY, not disabled: the card is still a real card and still opens, and
-   *  the menu rows that could collide with the write are held by the panel. */
+  /** A write is changing this card in place — a draft being converted to an issue, or
+   *  one being edited. BUSY, not disabled: the card is still a real card and still
+   *  opens, and the menu rows that could collide with the write are held by the
+   *  panel. */
   busy: boolean;
+  /** This card's details peek is the one open. Drafts ignore it — their popover is
+   *  the card's own trigger and Base UI owns its state. */
+  peek: boolean;
   /** Roving tabindex: one tab stop for the whole board, on the cursor's card. */
   rovingTab: number;
   /** The open repo under the ACTIVE lens; a card from another repo names its own. */
@@ -395,9 +473,16 @@ export const BoardCard = memo(function BoardCard({
    *  every render would re-render every mounted card. */
   chipFields: ProjectFieldDef[];
   onFocus: (columnIndex: number, index: number) => void;
+  /** Which card's peek is open, by item id — null closes. Board-wide state so only
+   *  one is ever open, the shape `busy` already keeps. */
+  onPeekChange: (itemId: string | null) => void;
   onOpen: (item: BoardItem) => void;
 }) {
   const portalContainer = usePanelPortalContainer();
+  // The peek's anchor AND its focus return. Explicit on both counts because this
+  // card is deliberately NOT the popover's trigger — Base UI would toggle on click,
+  // and click belongs to opening the item.
+  const cardRef = useRef<HTMLButtonElement>(null);
   const content = item.content;
   const shared = {
     "data-card-index": index,
@@ -497,6 +582,7 @@ export const BoardCard = memo(function BoardCard({
               ) : (
                 <Markdown className="px-1 text-xs">{body}</Markdown>
               )}
+              <CardDates item={item} />
             </Popover.Popup>
           </Popover.Positioner>
         </Popover.Portal>
@@ -514,25 +600,76 @@ export const BoardCard = memo(function BoardCard({
     content.repoNameWithOwner.toLowerCase() !== repoSlug.toLowerCase()
       ? content.repoNameWithOwner
       : null;
+  // The same pair the head line draws, needed again as the peek's own sentence.
+  const stateWord =
+    content.kind === "pullRequest"
+      ? prPill(content.state, content.isDraft).word
+      : issueStateWord(content.state, content.stateReason);
   return (
-    <button
-      type="button"
-      {...shared}
-      className={cn(CARD_CLASS, "cursor-pointer", toneClass, busyClass)}
-      onClick={() => onOpen(item)}
+    <Popover.Root
+      open={peek}
+      onOpenChange={(open) => onPeekChange(open ? item.itemId : null)}
     >
-      {content.kind === "pullRequest" ? (
-        <PullRequestHead content={content} />
-      ) : (
-        <IssueHead content={content} />
-      )}
-      <CardMeta
-        number={content.number}
-        repoLabel={repoLabel}
-        assignees={content.assignees}
-        ghHost={ghHost}
-      />
-      <CardChips item={item} fields={chipFields} />
-    </button>
+      <button
+        type="button"
+        {...shared}
+        ref={cardRef}
+        className={cn(CARD_CLASS, "cursor-pointer", toneClass, busyClass)}
+        onClick={() => onOpen(item)}
+        // Space peeks where Enter opens. These cards are `role="option"` in a roving
+        // listbox, where Space previews and Enter activates, and `preventDefault` on
+        // the KEYDOWN is what stops the click the browser would otherwise fire on
+        // keyup — the native activation this has to get in front of. Bare `e.key`,
+        // no modifier read, the shape every list handler here keeps
+        // (`listKeyboardNav`): no action binds a modified Space, and the global
+        // listener still sees the event either way.
+        onKeyDown={(e) => {
+          if (e.key !== " ") return;
+          e.preventDefault();
+          onPeekChange(item.itemId);
+        }}
+      >
+        {content.kind === "pullRequest" ? (
+          <PullRequestHead content={content} />
+        ) : (
+          <IssueHead content={content} />
+        )}
+        <CardMeta
+          number={content.number}
+          repoLabel={repoLabel}
+          assignees={content.assignees}
+          ghHost={ghHost}
+        />
+        <CardChips item={item} fields={chipFields} />
+      </button>
+      <Popover.Portal container={portalContainer}>
+        {/* Anchored to the card rather than triggered by it, and `finalFocus` says
+            where Esc lands for the same reason: with no trigger there is nothing for
+            Base UI to infer a focus return from. */}
+        <Popover.Positioner
+          align="start"
+          sideOffset={4}
+          anchor={cardRef}
+          className="isolate z-50"
+        >
+          <Popover.Popup
+            finalFocus={cardRef}
+            className="max-h-96 w-80 overflow-y-auto rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10"
+          >
+            {/* The caption IS the popup's accessible name: Popup takes its
+                `aria-labelledby` from whatever Title registers. `render` keeps it a
+                <p> — Title's own default element is an <h2>. */}
+            <Popover.Title
+              render={<p />}
+              className="px-1 pb-1.5 text-xs font-medium"
+            >
+              {content.title}
+            </Popover.Title>
+            <p className="px-1 text-xs text-muted-foreground">{stateWord}</p>
+            <CardDates item={item} />
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
   );
 });

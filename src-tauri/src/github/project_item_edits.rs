@@ -7,6 +7,10 @@ use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::issue::repo_owner_name;
 use crate::github::project::build_edit_projects_mutation;
+use crate::github::project_items::{
+    board_item_selection, parse_board_item, parse_content, BoardItem, BoardItemContent,
+    DRAFT_CONTENT_SELECTION,
+};
 use crate::github::runner::{run_gh_input, GH_NETWORK_TIMEOUT};
 
 #[derive(Debug, Serialize)]
@@ -28,11 +32,12 @@ pub struct BoardCandidates {
     pub truncated: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConvertedDraft {
     pub number: u64,
     pub url: String,
+    pub item: BoardItem,
 }
 
 const ITEM_EDITS_SCOPE_HINT: &str =
@@ -42,9 +47,8 @@ const SEARCH_QUERY: &str = "query($q:String!){ search(query:$q, type: ISSUE_ADVA
 const REPOSITORY_QUERY: &str =
     "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ id } }";
 const ISSUE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ issue(number:$number){ id } } }";
-const ADD_DRAFT_MUTATION: &str = "mutation($projectId:ID!,$title:String!,$body:String){ addProjectV2DraftIssue(input:{projectId:$projectId,title:$title,body:$body}){ projectItem{ id } } }";
-// Conversion, archive, and removal address PVTI_ item ids, never DI_ content ids.
-const CONVERT_MUTATION: &str = "mutation($itemId:ID!,$repositoryId:ID!){ convertProjectV2DraftIssueItemToIssue(input:{itemId:$itemId,repositoryId:$repositoryId}){ item{ content{ __typename ... on Issue { number url } } } } }";
+// Conversion, archive, and removal address PVTI_ item ids; updates take DI_ content ids.
+// Add-board takes issue/PR content ids; add-draft returns both PVTI_ and DI_ ids.
 const ARCHIVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ archiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ item{ id } } }";
 const REMOVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ deleteProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ deletedItemId } }";
 
@@ -52,8 +56,10 @@ const SEARCH_POINTER: &str = "/data/search";
 const CANDIDATE_REPOSITORY_POINTER: &str = "/repository/nameWithOwner";
 const REPOSITORY_ID_POINTER: &str = "/data/repository/id";
 const ISSUE_ID_POINTER: &str = "/data/repository/issue/id";
-const DRAFT_ID_POINTER: &str = "/data/addProjectV2DraftIssue/projectItem/id";
-const CONVERT_POINTER: &str = "/data/convertProjectV2DraftIssueItemToIssue/item/content";
+const DRAFT_POINTER: &str = "/data/addProjectV2DraftIssue/projectItem";
+const ADD_ITEM_POINTER: &str = "/data/addProjectV2ItemById/item";
+const CONVERT_POINTER: &str = "/data/convertProjectV2DraftIssueItemToIssue/item";
+const UPDATE_DRAFT_POINTER: &str = "/data/updateProjectV2DraftIssue/draftIssue";
 const ARCHIVE_POINTER: &str = "/data/archiveProjectV2Item";
 const REMOVE_POINTER: &str = "/data/deleteProjectV2Item";
 
@@ -88,9 +94,56 @@ fn search_input(owner: &str, name: &str, search: &str) -> String {
 
 fn draft_input(project_id: &str, title: &str, body: &str) -> String {
     graphql_input(
-        ADD_DRAFT_MUTATION,
+        &add_draft_mutation(),
         json!({"projectId": project_id, "title": title, "body": body}),
     )
+}
+
+fn add_draft_mutation() -> String {
+    let item = board_item_selection();
+    format!("mutation($projectId:ID!,$title:String!,$body:String){{ addProjectV2DraftIssue(input:{{projectId:$projectId,title:$title,body:$body}}){{ projectItem{{ {item} }} }} }}")
+}
+
+fn add_item_mutation() -> String {
+    let item = board_item_selection();
+    format!("mutation($projectId:ID!,$contentId:ID!){{ addProjectV2ItemById(input:{{projectId:$projectId,contentId:$contentId}}){{ item{{ {item} }} }} }}")
+}
+
+fn convert_mutation() -> String {
+    let item = board_item_selection();
+    format!("mutation($itemId:ID!,$repositoryId:ID!){{ convertProjectV2DraftIssueItemToIssue(input:{{itemId:$itemId,repositoryId:$repositoryId}}){{ item{{ {item} content{{ ... on Issue {{ url }} }} }} }} }}")
+}
+
+fn update_draft_input(draft_id: &str, title: &str, body: &str, assignee_ids: &[String]) -> String {
+    let document = format!("mutation($draftIssueId:ID!,$title:String!,$body:String!,$assigneeIds:[ID!]!){{ updateProjectV2DraftIssue(input:{{draftIssueId:$draftIssueId,title:$title,body:$body,assigneeIds:$assigneeIds}}){{ draftIssue{{ __typename {DRAFT_CONTENT_SELECTION} }} }} }}");
+    graphql_input(
+        &document,
+        json!({"draftIssueId": draft_id, "title": title, "body": body, "assigneeIds": assignee_ids}),
+    )
+}
+
+fn assignee_lookup_input(logins: &[String]) -> AppResult<Option<String>> {
+    for login in logins {
+        if login.is_empty() || !login.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+            return Err(AppError::InvalidArgument(
+                "Invalid GitHub assignee login".into(),
+            ));
+        }
+    }
+    if logins.is_empty() {
+        return Ok(None);
+    }
+    let mut fields = String::new();
+    for (index, login) in logins.iter().enumerate() {
+        fields.push_str(&format!("u{index}:user(login:\"{login}\"){{id}} "));
+    }
+    Ok(Some(graphql_input(&format!("query{{ {fields} }}"), json!({}))))
+}
+
+fn parse_assignee_ids(value: &Value, count: usize) -> AppResult<Vec<String>> {
+    (0..count)
+        .map(|index| response_id(value, &format!("/data/u{index}/id"), "the draft assignees"))
+        .collect()
 }
 
 // Preserve CLI failures verbatim; project mutation callers own scope-hint mapping.
@@ -198,19 +251,42 @@ fn search_candidates_from_response(
 }
 
 fn parse_converted(value: &Value) -> AppResult<ConvertedDraft> {
-    let content = value.pointer(CONVERT_POINTER).unwrap_or(&Value::Null);
-    if content["__typename"].as_str() != Some("Issue") {
+    let item = response_item(value, CONVERT_POINTER, "the converted draft")?;
+    let BoardItemContent::Issue { number, .. } = &item.content else {
         return Err(gh_unreadable(
             "the converted draft",
             "conversion did not return an issue".into(),
         ));
-    }
-    serde_json::from_value(content.clone()).map_err(|e| {
-        gh_unreadable(
-            "the converted draft",
-            format!("could not parse the issue: {e}"),
-        )
+    };
+    let url = response_id(
+        value,
+        &format!("{CONVERT_POINTER}/content/url"),
+        "the converted draft",
+    )?;
+    Ok(ConvertedDraft {
+        number: *number,
+        url,
+        item,
     })
+}
+
+fn response_item(value: &Value, pointer: &str, surface: &str) -> AppResult<BoardItem> {
+    let node = value.pointer(pointer).cloned().unwrap_or(Value::Null);
+    parse_board_item(node).map_err(|detail| gh_unreadable(surface, detail))
+}
+
+fn parse_updated_draft(value: &Value) -> AppResult<BoardItemContent> {
+    let content = value.pointer(UPDATE_DRAFT_POINTER).cloned();
+    let draft = parse_content("DRAFT_ISSUE", content);
+    if let BoardItemContent::Draft { ref id, .. } = draft {
+        if !id.trim().is_empty() {
+            return Ok(draft);
+        }
+    }
+    Err(gh_unreadable(
+        "the updated draft",
+        "missing draft content".into(),
+    ))
 }
 
 fn require_payload(value: &Value, pointer: &str, surface: &str) -> AppResult<()> {
@@ -246,7 +322,7 @@ pub async fn gh_add_draft_item(
     project_id: String,
     title: String,
     body: String,
-) -> AppResult<String> {
+) -> AppResult<BoardItem> {
     let value = request(
         &repo_path,
         &draft_input(&project_id, &title, &body),
@@ -254,7 +330,44 @@ pub async fn gh_add_draft_item(
     )
     .await
     .map_err(map_scope_error)?;
-    response_id(&value, DRAFT_ID_POINTER, "the new project draft")
+    response_item(&value, DRAFT_POINTER, "the new project draft")
+}
+
+#[tauri::command]
+pub async fn gh_add_board_item(
+    repo_path: String,
+    project_id: String,
+    content_id: String,
+) -> AppResult<BoardItem> {
+    let input = graphql_input(
+        &add_item_mutation(),
+        json!({"projectId": project_id, "contentId": content_id}),
+    );
+    let value = request(&repo_path, &input, "the added project item")
+        .await
+        .map_err(map_scope_error)?;
+    response_item(&value, ADD_ITEM_POINTER, "the added project item")
+}
+
+#[tauri::command]
+pub async fn gh_update_draft_item(
+    repo_path: String,
+    draft_id: String,
+    title: String,
+    body: String,
+    assignee_logins: Vec<String>,
+) -> AppResult<BoardItemContent> {
+    let assignee_ids = if let Some(input) = assignee_lookup_input(&assignee_logins)? {
+        let value = request(&repo_path, &input, "the draft assignees").await?;
+        parse_assignee_ids(&value, assignee_logins.len())?
+    } else {
+        Vec::new()
+    };
+    let input = update_draft_input(&draft_id, &title, &body, &assignee_ids);
+    let value = request(&repo_path, &input, "the updated draft")
+        .await
+        .map_err(map_scope_error)?;
+    parse_updated_draft(&value)
 }
 
 #[tauri::command]
@@ -273,7 +386,7 @@ pub async fn gh_convert_draft_item(
         "the draft's destination repository",
     )?;
     let input = graphql_input(
-        CONVERT_MUTATION,
+        &convert_mutation(),
         json!({"itemId": item_id, "repositoryId": repository_id}),
     );
     let value = request(&repo_path, &input, "the converted draft")
@@ -355,6 +468,120 @@ mod tests {
         json!({"__typename":"PullRequest","id":"PR_two","number":2,"title":"PR","state":"OPEN","isDraft":true,"repository":{"nameWithOwner":"owner/repo"}})
     }
 
+    fn draft_content(assignees: Value) -> Value {
+        json!({"__typename":"DraftIssue", "id":"DI_one", "title":"Draft title",
+            "body":"**Draft**\nBody", "assignees":{"nodes":assignees},
+            "createdAt":"2026-09-15T12:00:00Z", "updatedAt":"2026-09-16T13:00:00Z"})
+    }
+
+    fn board_item(item_type: &str, mut content: Value) -> Value {
+        if content.is_object() {
+            content["createdAt"] = json!("2026-09-15T12:00:00Z");
+            content["updatedAt"] = json!("2026-09-16T13:00:00Z");
+        }
+        json!({"id":"PVTI_one", "type":item_type, "isArchived":false,
+            "createdAt":"2026-09-16T12:00:00Z", "content":content,
+            "fieldValues":{"nodes":[{"__typename":"ProjectV2ItemFieldTextValue",
+                "text":"Keep me", "field":{"id":"notes", "name":"Notes",
+                    "dataType":"TEXT", "isIssueField":false}}]}})
+    }
+
+    #[test]
+    fn draft_updates_round_trip_content_and_replace_assignees() {
+        for assignees in [
+            json!([]),
+            json!([{"login":"octocat","avatarUrl":"https://example.com/one"},
+                {"login":"hubot","avatarUrl":"https://example.com/two"}]),
+        ] {
+            let content = draft_content(assignees.clone());
+            let value = json!({"data":{"updateProjectV2DraftIssue":{"draftIssue":content}}});
+            let wire = serde_json::to_value(parse_updated_draft(&value).unwrap()).unwrap();
+            assert_keys(
+                wire.clone(),
+                &["kind", "id", "title", "body", "assignees", "createdAt", "updatedAt"],
+            );
+            assert_eq!(wire["kind"], "draft");
+            assert_eq!(wire["id"], "DI_one");
+            for key in ["title", "body", "createdAt", "updatedAt"] {
+                assert_eq!(wire[key], content[key]);
+            }
+            assert_eq!(wire["assignees"], assignees);
+            let ids: Vec<String> = (0..assignees.as_array().unwrap().len())
+                .map(|index| format!("U_{index}"))
+                .collect();
+            let input: Value = serde_json::from_str(&update_draft_input(
+                "DI_one",
+                wire["title"].as_str().unwrap(),
+                wire["body"].as_str().unwrap(),
+                &ids,
+            ))
+            .unwrap();
+            assert_eq!(input["variables"], json!({"draftIssueId":"DI_one",
+                "title":wire["title"], "body":wire["body"], "assigneeIds":ids}));
+            let added = parse_board_item(board_item("DRAFT_ISSUE", content)).unwrap();
+            assert_eq!(serde_json::to_value(added.content).unwrap(), wire);
+        }
+        for content in [Value::Null, json!({}), draft_content(json!([]))] {
+            let mut value = json!({"data":{"updateProjectV2DraftIssue":{"draftIssue":content}}});
+            if content.is_object() {
+                value.pointer_mut(UPDATE_DRAFT_POINTER).unwrap()["id"] = json!("  ");
+            }
+            assert!(parse_updated_draft(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn assignees_resolve_in_one_query_and_empty_lists_skip_lookup() {
+        assert!(assignee_lookup_input(&[]).unwrap().is_none());
+        let logins = vec!["Octo-cat".into(), "hubot2".into()];
+        let input: Value =
+            serde_json::from_str(&assignee_lookup_input(&logins).unwrap().unwrap()).unwrap();
+        assert_eq!(input["query"], "query{ u0:user(login:\"Octo-cat\"){id} u1:user(login:\"hubot2\"){id}  }");
+        let value = json!({"data":{"u0":{"id":"U_one"},"u1":{"id":"U_two"}}});
+        assert_eq!(parse_assignee_ids(&value, 2).unwrap(), ["U_one", "U_two"]);
+        for user in [Value::Null, json!({}), json!({"id":" "})] {
+            assert!(parse_assignee_ids(&json!({"data":{"u0":{"id":"U_one"},"u1":user}}), 2).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn hostile_logins_fail_at_command_boundary_before_network() {
+        for login in ["a&b", "a\"b", "a b", "", "é", "a\nb"] {
+            let result = gh_update_draft_item(
+                "missing-repo".into(),
+                "DI_one".into(),
+                "Title".into(),
+                "Body".into(),
+                vec!["valid-login".into(), login.into()],
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::InvalidArgument(_))));
+        }
+    }
+
+    #[test]
+    fn new_mutations_keep_user_text_in_stdin() {
+        let hostile = "@file\n\"a&b\"\\path".repeat(4000);
+        assert!(hostile.encode_utf16().count() > 32_767);
+        for input in [
+            graphql_input(
+                &add_item_mutation(),
+                json!({"projectId":hostile,"contentId":hostile}),
+            ),
+            update_draft_input(&hostile, &hostile, &hostile, &[hostile.clone()]),
+        ] {
+            let payload: Value = serde_json::from_str(&input).unwrap();
+            assert!(!payload["query"].as_str().unwrap().contains(&hostile));
+            for value in payload["variables"].as_object().unwrap().values() {
+                assert!(value == &json!(hostile) || value == &json!([hostile]));
+            }
+            assert_eq!(
+                GRAPHQL_INPUT_ARGS,
+                ["api", "graphql", "--method", "POST", "--input", "-"],
+            );
+        }
+    }
+
     fn page(nodes: Value, truncated: bool) -> Value {
         json!({"data":{"search":{"nodes":nodes,"pageInfo":{"hasNextPage":truncated}}}})
     }
@@ -410,18 +637,29 @@ mod tests {
     #[test]
     fn mutation_payload_pointers_match_selected_fields() {
         for (doc, pointer) in [
-            (ADD_DRAFT_MUTATION, DRAFT_ID_POINTER),
-            (CONVERT_MUTATION, CONVERT_POINTER),
+            (add_draft_mutation().as_str(), DRAFT_POINTER),
+            (add_item_mutation().as_str(), ADD_ITEM_POINTER),
+            (convert_mutation().as_str(), CONVERT_POINTER),
             (ARCHIVE_MUTATION, ARCHIVE_POINTER),
             (REMOVE_MUTATION, REMOVE_POINTER),
         ] {
             assert_pointer(doc, pointer);
         }
-        for doc in [CONVERT_MUTATION, ARCHIVE_MUTATION, REMOVE_MUTATION] {
+        for doc in [convert_mutation().as_str(), ARCHIVE_MUTATION, REMOVE_MUTATION] {
             assert!(doc.contains("itemId:$itemId"));
             assert!(!doc.contains("draftIssueId"));
         }
-        assert!(!ADD_DRAFT_MUTATION.contains("assigneeIds"));
+        assert!(!add_draft_mutation().contains("assigneeIds"));
+        for doc in [add_draft_mutation(), add_item_mutation(), convert_mutation()] {
+            assert!(doc.contains(&board_item_selection()));
+        }
+        let update: Value =
+            serde_json::from_str(&update_draft_input("DI_one", "", "", &[])).unwrap();
+        let doc = update["query"].as_str().unwrap();
+        assert_pointer(doc, UPDATE_DRAFT_POINTER);
+        assert!(doc.contains(DRAFT_CONTENT_SELECTION));
+        assert!(doc.contains("draftIssueId:$draftIssueId"));
+        assert!(doc.contains("assigneeIds:$assigneeIds"));
     }
 
     #[test]
@@ -584,7 +822,7 @@ mod tests {
                 ),
                 (
                     draft_input(hostile, hostile, hostile),
-                    ADD_DRAFT_MUTATION,
+                    add_draft_mutation().as_str(),
                     json!({"projectId": hostile, "title": hostile, "body": hostile}),
                 ),
             ] {
@@ -595,7 +833,7 @@ mod tests {
             }
         }
         assert!(SEARCH_QUERY.contains("query:$q"));
-        assert!(ADD_DRAFT_MUTATION.contains("title:$title,body:$body"));
+        assert!(add_draft_mutation().contains("title:$title,body:$body"));
     }
 
     #[test]
@@ -605,7 +843,7 @@ mod tests {
         let draft: Value = serde_json::from_str(&draft_input("PVT_one", &text, &text)).unwrap();
         assert_eq!(
             draft,
-            json!({"query": ADD_DRAFT_MUTATION, "variables": {"projectId": "PVT_one", "title": text, "body": text}})
+            json!({"query": add_draft_mutation(), "variables": {"projectId": "PVT_one", "title": text, "body": text}})
         );
         let search: Value = serde_json::from_str(&search_input("owner", "repo", &text)).unwrap();
         assert_eq!(
@@ -620,20 +858,46 @@ mod tests {
     }
 
     #[test]
-    fn draft_payload_returns_the_project_item_id() {
-        let value = json!({"data":{"addProjectV2DraftIssue":{"projectItem":{"id":"PVTI_new","content":{"id":"DI_draft"}}}}});
-        assert_eq!(
-            response_id(&value, DRAFT_ID_POINTER, "the new project draft").unwrap(),
-            "PVTI_new"
-        );
-        assert!(response_id(&Value::Null, DRAFT_ID_POINTER, "the new project draft").is_err());
-        for id in ["", "  ", "\t\n"] {
-            let value = json!({"data":{"addProjectV2DraftIssue":{"projectItem":{"id":id}}}});
-            let error = response_id(&value, DRAFT_ID_POINTER, "the new project draft").unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "Couldn't read the new project draft from GitHub.\nmissing id at /data/addProjectV2DraftIssue/projectItem/id"
-            );
+    fn add_responses_return_full_items_and_reject_missing_ids() {
+        for (pointer, item_type, content) in [
+            (DRAFT_POINTER, "DRAFT_ISSUE", draft_content(json!([]))),
+            (ADD_ITEM_POINTER, "ISSUE", issue(Value::Null)),
+            (ADD_ITEM_POINTER, "PULL_REQUEST", pr()),
+        ] {
+            let surface = if pointer == DRAFT_POINTER {
+                "the new project draft"
+            } else {
+                "the added project item"
+            };
+            let node = board_item(item_type, content);
+            let mut value = json!({"data": {
+                "addProjectV2DraftIssue": {"projectItem": node},
+                "addProjectV2ItemById": {"item": node}
+            }});
+            let wire =
+                serde_json::to_value(response_item(&value, pointer, surface).unwrap())
+                    .unwrap();
+            assert_eq!(wire["itemId"], "PVTI_one");
+            assert_eq!(wire["addedAt"], "2026-09-16T12:00:00Z");
+            assert_eq!(wire["content"]["createdAt"], "2026-09-15T12:00:00Z");
+            assert_eq!(wire["content"]["updatedAt"], "2026-09-16T13:00:00Z");
+            assert_eq!(wire["fieldValues"][0]["text"], "Keep me");
+            for id in ["", "  ", "\t\n"] {
+                value.pointer_mut(pointer).unwrap()["id"] = json!(id);
+                let error = response_item(&value, pointer, surface).err().unwrap();
+                assert_single_read_error(&error, surface);
+                assert_eq!(
+                    error.to_string(),
+                    format!("Couldn't read {surface} from GitHub.\nmissing project item id"),
+                );
+            }
+            for node in [Value::Null, json!({})] {
+                *value.pointer_mut(pointer).unwrap() = node;
+                let error = response_item(&value, pointer, surface).err().unwrap();
+                assert_single_read_error(&error, surface);
+            }
+            let error = response_item(&Value::Null, pointer, surface).err().unwrap();
+            assert_single_read_error(&error, surface);
         }
     }
 
@@ -660,13 +924,19 @@ mod tests {
 
     #[test]
     fn convert_payload_parses_issue_and_rejects_other_content() {
-        let payload = |content: Value| json!({"data":{"convertProjectV2DraftIssueItemToIssue":{"item":{"content":content}}}});
-        let result = parse_converted(&payload(
-            json!({"__typename":"Issue","number":42,"url":"https://github.com/o/r/issues/42"}),
-        ))
-        .unwrap();
+        let payload = |content: Value| json!({"data":{"convertProjectV2DraftIssueItemToIssue":{"item":board_item("ISSUE", content)}}});
+        let mut content = issue(Value::Null);
+        content["number"] = json!(42);
+        content["url"] = json!("https://github.com/o/r/issues/42");
+        let result = parse_converted(&payload(content)).unwrap();
         assert_eq!(result.number, 42);
         assert_eq!(result.url, "https://github.com/o/r/issues/42");
+        let wire = serde_json::to_value(result).unwrap();
+        assert_keys(wire.clone(), &["number", "url", "item"]);
+        assert_eq!(wire["item"]["fieldValues"][0]["text"], "Keep me");
+        assert_eq!(wire["item"]["addedAt"], "2026-09-16T12:00:00Z");
+        assert_eq!(wire["item"]["content"]["createdAt"], "2026-09-15T12:00:00Z");
+        assert_eq!(wire["item"]["content"]["updatedAt"], "2026-09-16T13:00:00Z");
         for content in [
             Value::Null,
             json!({"__typename":"DraftIssue","id":"DI_one"}),
@@ -675,6 +945,32 @@ mod tests {
         ] {
             assert!(parse_converted(&payload(content)).is_err());
         }
+        for id in ["", "  ", "\t\n"] {
+            let mut value = payload(issue(Value::Null));
+            value.pointer_mut(CONVERT_POINTER).unwrap()["id"] = json!(id);
+            let error = parse_converted(&value).err().unwrap();
+            assert_single_read_error(&error, "the converted draft");
+            assert_eq!(
+                error.to_string(),
+                "Couldn't read the converted draft from GitHub.\nmissing project item id",
+            );
+        }
+        for node in [Value::Null, json!({})] {
+            let value = json!({"data":{"convertProjectV2DraftIssueItemToIssue":{"item":node}}});
+            let error = parse_converted(&value).err().unwrap();
+            assert_single_read_error(&error, "the converted draft");
+        }
+        let error = parse_converted(&Value::Null).err().unwrap();
+        assert_single_read_error(&error, "the converted draft");
+    }
+
+    fn assert_single_read_error(error: &AppError, surface: &str) {
+        let message = error.to_string();
+        assert_eq!(message.matches("Couldn't read").count(), 1, "{message}");
+        assert_eq!(
+            message.lines().next().unwrap(),
+            format!("Couldn't read {surface} from GitHub."),
+        );
     }
 
     #[test]
@@ -707,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn page_and_conversion_wire_keys_are_camel_case() {
+    fn page_wire_keys_are_camel_case() {
         assert_keys(
             serde_json::to_value(BoardCandidates {
                 candidates: vec![],
@@ -715,14 +1011,6 @@ mod tests {
             })
             .unwrap(),
             &["candidates", "truncated"],
-        );
-        assert_keys(
-            serde_json::to_value(ConvertedDraft {
-                number: 1,
-                url: "url".into(),
-            })
-            .unwrap(),
-            &["number", "url"],
         );
     }
 

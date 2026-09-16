@@ -575,6 +575,8 @@ export const CHECKS = [
       "src/features/discussions/DiscussionView.tsx",
       "src/features/history/HistoryPanel.tsx",
       "src/features/plan/PlanView.tsx",
+      "src/features/projects/BoardAddDialogs.tsx",
+      "src/features/projects/BoardDraftEditDialog.tsx",
       "src/features/pulls/CommitComments.tsx",
       "src/features/pulls/CreateLocalPrDialog.tsx",
       "src/features/pulls/CreatePrDialog.tsx",

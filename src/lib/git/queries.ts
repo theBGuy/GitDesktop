@@ -39,6 +39,7 @@ import type {
   BitbucketHookInput,
   BitbucketRepoSettingsInput,
   BoardItem,
+  BoardItemContent,
   BoardItems,
   CiStatus,
   CommitCommentOut,
@@ -2749,6 +2750,12 @@ export function useProjectFields(
 const projectItemsFamilyKey = (repo: string, projectId: string) =>
   ["repo", repo, "project-items", projectId] as const;
 
+/** EVERY cached board read in one repo — every board, every lens of each. The
+ *  scope a board write settles against: a write changes what an item IS, which no
+ *  board's filter makes untrue. */
+const projectItemsRepoKey = (repo: string) =>
+  ["repo", repo, "project-items"] as const;
+
 const projectItemsKey = (
   repo: string,
   projectId: string,
@@ -2769,6 +2776,7 @@ export type BoardWriteKind =
   | "remove"
   | "add-existing"
   | "add-draft"
+  | "edit-draft"
   /** Fired from the create-issue dialog rather than the board, and it draws no
    *  card of its own — but its settle invalidates the same board reads, so the
    *  board's pagination has to wait on it like any other write here. */
@@ -2957,14 +2965,18 @@ async function trackBoardWrite<T>(
  * of every board goes stale together — a write changes what the item is, which no
  * filter makes untrue.
  *
- * LAST WRITE REFETCHES. While another board write on THIS repo is still in flight
- * this marks stale WITHOUT fetching (`refetchType: "none"`), because the answer a
- * refetch would bring back has not seen that sibling yet: server truth fetched
- * mid-flight puts an archived card back on the board, or a moved one in its old
- * column, until the sibling's own settle re-reads. Deferring costs nothing —
- * {@link trackBoardWrite} decrements before any `onSettled` runs, so the LAST write
- * out always sees a clear count and performs the one real refetch. A lone write
- * sees zero and refetches immediately, exactly as before.
+ * LAST WRITE REFETCHES, with one named gap. While another board write on THIS repo
+ * is still in flight this marks stale WITHOUT fetching (`refetchType: "none"`),
+ * because the answer a refetch would bring back has not seen that sibling yet:
+ * server truth fetched mid-flight puts an archived card back on the board, or a
+ * moved one in its old column, until the sibling's own settle re-reads. Deferring
+ * costs nothing while the last write out is one of THESE —
+ * {@link trackBoardWrite} decrements before any `onSettled` runs, so it sees a
+ * clear count and performs the one real refetch. The gap: when the last one out
+ * settles through {@link markProjectBoardsStale} instead, nothing refetches at all.
+ * That is the point of that mode — its own patch is already on screen, and the
+ * boards stay marked stale for the next natural read. A lone write here sees zero
+ * and refetches immediately, exactly as before.
  *
  * Read PER REPO, matching the key this invalidates: a write pending in another
  * repository must not defer this one, whose stale mark that write's own settle
@@ -2974,7 +2986,7 @@ async function trackBoardWrite<T>(
  * pre-write values whether or not this call is the one that re-reads.
  */
 function invalidateProjectBoards(queryClient: QueryClient, repo: string): void {
-  const queryKey = ["repo", repo, "project-items"];
+  const queryKey = projectItemsRepoKey(repo);
   const deferred = (pendingBoardWrites.get(repo) ?? 0) > 0;
   void queryClient
     .cancelQueries({ queryKey })
@@ -2983,6 +2995,75 @@ function invalidateProjectBoards(queryClient: QueryClient, repo: string): void {
         deferred ? { queryKey, refetchType: "none" } : { queryKey },
       ),
     );
+}
+
+/**
+ * {@link invalidateProjectBoards}'s STALE-ONLY mode, as its own function rather
+ * than a flag at the call site: the settle for a write that has already patched the
+ * cards it changed ({@link writeThroughBoards}).
+ *
+ * Stale-only because the refetch is the very thing those patches exist to avoid.
+ * GitHub answers a board read off replicas that lag its own writes by seconds, so a
+ * read fired at settle can return the PRE-write list — and a resolved read clears
+ * `isInvalidated`, stamping that stale answer fresh for the rest of the 60s
+ * staleTime. The card the user just created would then not appear until something
+ * unrelated invalidated the board.
+ *
+ * NAMED ACCEPTED EDGE: the mode is per WRITE, not per board. A sibling write of
+ * another kind settling inside that same replica window still refetches, and such a
+ * refetch can drop a just-patched card until the next natural read — a window focus,
+ * a tab return, the next write. Rare, self-healing, and deliberately not covered:
+ * the alternative is a recently-inserted-ids overlay that has to decide when an id
+ * stops being recent, which is this same replica-lag guess moved somewhere harder to
+ * see.
+ *
+ * No cancel of its own, unlike its sibling: this runs INSIDE a cancel that already
+ * ran for the patch's sake, and query-core's cancel REVERTS what it cancels — a
+ * second one here could undo the patch this is marking stale.
+ */
+function markProjectBoardsStale(queryClient: QueryClient, repo: string): void {
+  void queryClient.invalidateQueries({
+    queryKey: projectItemsRepoKey(repo),
+    refetchType: "none",
+  });
+}
+
+/**
+ * Patch the boards a write changed IN PLACE instead of re-reading them, then mark
+ * them stale for the next natural read.
+ *
+ * Cancel FIRST, over the whole repo's board reads: a read already in flight would
+ * otherwise resolve over the patch and put the pre-write board back. It has to land
+ * BEFORE the patch rather than after it, since query-core cancels with `revert:
+ * true` and a cancel run afterwards would revert the cache past what was just
+ * written into it.
+ *
+ * `patchKey` is the scope of the PATCH alone: one board's family for a write that
+ * adds a card, where a sibling board must not grow one; the repo-wide family for a
+ * write addressed by an item id, which no other board holds. Every cached LENS under
+ * it is patched, not just the one on screen — a view switched away from keeps its own
+ * pages of the same item set, and the user can switch back before anything re-reads.
+ */
+function writeThroughBoards(
+  queryClient: QueryClient,
+  repo: string,
+  patchKey: QueryKey,
+  patch: (
+    data: InfiniteData<BoardItems, string | null> | undefined,
+  ) => InfiniteData<BoardItems, string | null> | undefined,
+): void {
+  void queryClient
+    .cancelQueries({ queryKey: projectItemsRepoKey(repo) })
+    .then(() => {
+      for (const [key] of queryClient.getQueriesData<
+        InfiniteData<BoardItems, string | null>
+      >({ queryKey: patchKey }))
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          patch,
+        );
+      markProjectBoardsStale(queryClient, repo);
+    });
 }
 
 /** One board's items under one LENS, paged. Keyed on the board and the saved
@@ -3091,6 +3172,95 @@ function patchBoardItem(
         item.itemId === itemId ? { ...item, fieldValues: values } : item,
       ),
     })),
+  };
+}
+
+/** One new item appended to the LAST loaded page, which is where the board itself
+ *  puts it: the pages are in the board's own position order, and a fresh item lands
+ *  at the end of it. Never twice — a refetch that already carried the card wins, and
+ *  a second copy would be a card the menu and the move path can both target.
+ *
+ *  `totalCount` moves with the insert, unlike {@link dropBoardItem}'s deliberate
+ *  refusal to touch it: the figure counts ARCHIVED items too, so an archive really
+ *  doesn't change it where an add really does. A cache with no pages is left alone —
+ *  there is no board drawn to append to. */
+function appendBoardItem(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  item: BoardItem,
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (data === undefined) return undefined;
+  const last = data.pages.length - 1;
+  if (last < 0) return data;
+  if (
+    data.pages.some((page) => page.items.some((i) => i.itemId === item.itemId))
+  )
+    return data;
+  return {
+    ...data,
+    pages: data.pages.map((page, i) =>
+      i === last
+        ? {
+            ...page,
+            items: [...page.items, item],
+            totalCount: page.totalCount + 1,
+          }
+        : page,
+    ),
+  };
+}
+
+/** One item REPLACED wholesale wherever a page holds its id — the write's own answer
+ *  standing in for what the cache had. {@link patchBoardItem}'s rule for the card
+ *  whose CONTENT changed (a draft that became an issue), which a field-values patch
+ *  would leave reading as the old thing. Pages that don't hold it keep their identity,
+ *  so no column re-renders for a card it doesn't draw. */
+function replaceBoardItem(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  item: BoardItem,
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (data === undefined) return undefined;
+  return {
+    ...data,
+    pages: data.pages.map((page) =>
+      page.items.some((cur) => cur.itemId === item.itemId)
+        ? {
+            ...page,
+            items: page.items.map((cur) =>
+              cur.itemId === item.itemId ? item : cur,
+            ),
+          }
+        : page,
+    ),
+  };
+}
+
+/** One DRAFT card's content replaced in place, keeping its field values and its slot.
+ *  Refuses on a card that is no longer a draft: a convert settling first has already
+ *  swapped the content, and an edit's answer describes a note that card no longer
+ *  holds. */
+function patchDraftContent(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  itemId: string,
+  content: Extract<BoardItemContent, { kind: "draft" }>,
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (data === undefined) return undefined;
+  // ONE predicate for both levels: a page whose only match is a card that has since
+  // become an issue would otherwise take a fresh identity for a map that changed
+  // nothing, re-rendering a column for a no-op.
+  const rewritable = (item: BoardItem) =>
+    item.itemId === itemId && item.content.kind === "draft";
+  return {
+    ...data,
+    pages: data.pages.map((page) =>
+      page.items.some(rewritable)
+        ? {
+            ...page,
+            items: page.items.map((cur) =>
+              rewritable(cur) ? { ...cur, content } : cur,
+            ),
+          }
+        : page,
+    ),
   };
 }
 
@@ -3335,10 +3505,17 @@ export function useBoardCandidates(
  * options on every re-render, and an offline write pauses before `mutationFn` and
  * resumes through whatever closure is current.
  *
- * No optimistic patch on any of them: an add has no item id until GitHub mints
- * one, and a removal's settle refetch is what the board reads. The settle is
+ * The writes that MINT or REWRITE a card settle through {@link writeThroughBoards}:
+ * each answers with the card itself, and that answer is the only reading of it
+ * guaranteed to exist — a re-read fired at settle can come off a replica still
+ * serving the pre-write board, and a resolved read stamps that answer fresh for the
+ * whole staleTime. The two REMOVALS keep the opposite shape: their patch is the
+ * card's absence, applied at `onMutate`, and their settle is
  * {@link invalidateProjectBoards} verbatim — cancel, then invalidate, no forced
  * refetch — so the Activity gate still owns when a hidden board re-reads.
+ *
+ * A write that FAILED patches nothing and falls back to that same invalidation: a
+ * rejection is not proof the board is unchanged.
  *
  * Reporting lives in the hooks whose host closes on fire (the card menu, the add
  * dialogs), never in the caller's `mutate` options, since react-query drops
@@ -3360,14 +3537,25 @@ export function useAddDraftItem() {
         api.ghAddDraftItem(args.repo, args.projectId, args.title, args.body),
       ),
     onError: toastError,
-    onSettled: (_d, _e, args) =>
-      invalidateProjectBoards(queryClient, args.repo),
+    onSettled: (item, _e, args) => {
+      if (item === undefined) {
+        invalidateProjectBoards(queryClient, args.repo);
+        return;
+      }
+      writeThroughBoards(
+        queryClient,
+        args.repo,
+        projectItemsFamilyKey(args.repo, args.projectId),
+        (data) => appendBoardItem(data, item),
+      );
+    },
   });
 }
 
-/** Turns a draft card into a real issue. The card keeps its item id, so only the
- *  board's own read changes — but the repo now has an issue that didn't exist, so
- *  the memberships families go stale with it. */
+/** Turns a draft card into a real issue. The card keeps its item id and its slot —
+ *  the answer's item is the same membership with issue content under it, which is
+ *  what the patch swaps in — but the repo now has an issue that didn't exist, so the
+ *  memberships families go stale with it. */
 export function useConvertDraftItem() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -3377,8 +3565,19 @@ export function useConvertDraftItem() {
         api.ghConvertDraftItem(args.repo, args.itemId, args.lens),
       ),
     onError: toastError,
-    onSettled: (_d, _e, args) => {
-      invalidateProjectBoards(queryClient, args.repo);
+    onSettled: (converted, _e, args) => {
+      // Repo-wide as the patch scope, not one board's family: a convert addresses
+      // the membership's item id alone and never carries a project id, and an id no
+      // other board holds makes the wider scope a no-op everywhere else.
+      if (converted === undefined)
+        invalidateProjectBoards(queryClient, args.repo);
+      else
+        writeThroughBoards(
+          queryClient,
+          args.repo,
+          projectItemsRepoKey(args.repo),
+          (data) => replaceBoardItem(data, converted.item),
+        );
       invalidateItemMemberships(queryClient, args.repo);
       // A convert CREATES a repo issue, so the Issues tab has to learn about it
       // the way every other membership-changing issue write tells it: the
@@ -3494,9 +3693,11 @@ export function useRemoveBoardItem() {
   );
 }
 
-/** Adds one existing issue or pull request to a board, through the same batched
- *  command the issue/PR picker uses: one add, no removes. `contentId` is the
- *  search result's CONTENT node id — a board item id addresses nothing here. */
+/** Adds one existing issue or pull request to a board and draws the card it became.
+ *  `contentId` is the search result's CONTENT node id — a board item id addresses
+ *  nothing here. Through the board's own single-item add rather than the issue
+ *  picker's batched edit, because only the single-item command answers with the
+ *  membership it minted. */
 export function useAddExistingToBoard() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -3514,12 +3715,81 @@ export function useAddExistingToBoard() {
       number: number;
     }) =>
       trackBoardWrite(args.repo, () =>
-        api.ghEditItemProjects(args.repo, args.contentId, [args.projectId], []),
+        api.ghAddBoardItem(args.repo, args.projectId, args.contentId),
       ),
     onError: toastError,
-    onSettled: (_d, _e, args) => {
-      invalidateProjectBoards(queryClient, args.repo);
+    onSettled: (item, _e, args) => {
+      if (item === undefined) invalidateProjectBoards(queryClient, args.repo);
+      else
+        writeThroughBoards(
+          queryClient,
+          args.repo,
+          projectItemsFamilyKey(args.repo, args.projectId),
+          (data) => appendBoardItem(data, item),
+        );
       invalidateItemMemberships(queryClient, args.repo);
+    },
+  });
+}
+
+/**
+ * Rewrites one draft's title, notes and assignees, and patches the card with what
+ * GitHub answered.
+ *
+ * `draftId` is the DRAFT's own content id, which is the id the write addresses;
+ * `itemId` rides alongside for the board's own use — the card the patch lands on,
+ * the card the panel marks busy, and the write's line in the pending strip — the
+ * same display-only shape {@link useAddExistingToBoard}'s `number` keeps.
+ *
+ * `assigneeLogins` REPLACES the set. Logins throughout, which is what the assignable
+ * users surface carries as its ids on GitHub.
+ *
+ * Reporting is the hook's, never the caller's `mutate` options: the dialog that
+ * fires this can be closed over the write, and react-query drops mutate-scoped
+ * callbacks once the observer loses its listeners.
+ */
+export function useUpdateDraftItem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey("edit-draft"),
+    mutationFn: (args: {
+      repo: string;
+      /** The membership's item id — display and patch target, not the write's. */
+      itemId: string;
+      /** The DRAFT's content id (`DI_…`), which is what the write addresses. */
+      draftId: string;
+      title: string;
+      /** Markdown, sent VERBATIM — the card's popover renders it as such. */
+      body: string;
+      assigneeLogins: string[];
+    }) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghUpdateDraftItem(
+          args.repo,
+          args.draftId,
+          args.title,
+          args.body,
+          args.assigneeLogins,
+        ),
+      ),
+    onError: toastError,
+    onSettled: (content, _e, args) => {
+      // A failed write, or an answer that isn't a draft arm at all, falls back to
+      // the re-read: only a draft's content may be patched onto a draft card, and a
+      // rejection is not proof the board is unchanged.
+      if (content === undefined || content.kind !== "draft") {
+        invalidateProjectBoards(queryClient, args.repo);
+        return;
+      }
+      // Repo-wide as the patch scope for {@link useConvertDraftItem}'s reason: the
+      // write carries no project id, and an item id no other board holds makes the
+      // wider scope a no-op everywhere else.
+      writeThroughBoards(
+        queryClient,
+        args.repo,
+        projectItemsRepoKey(args.repo),
+        (data) => patchDraftContent(data, args.itemId, content),
+      );
     },
   });
 }

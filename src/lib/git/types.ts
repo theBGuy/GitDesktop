@@ -2501,10 +2501,28 @@ export interface AssigneeRef {
   avatarUrl: string;
 }
 
+/** A DRAFT card's own content — the note that lives on this board and nowhere
+ *  else. Named apart from the union arm below because the draft EDIT command
+ *  answers with exactly these fields: the `kind` tag is the union's, not the
+ *  payload's. */
+export interface BoardDraftContent {
+  id: string;
+  title: string;
+  body: string;
+  assignees: AssigneeRef[];
+  /** When the draft was written, and when it last changed. ISO-8601 from the
+   *  forge, so a reader validates before formatting. */
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** What a board item IS. `draft` is a project-only note with no issue behind it,
  *  and `redacted` is an item whose content the viewer may not see — a private
  *  repo on a public board — which arrives with no fields at all rather than
- *  being dropped, so the board's counts stay honest. */
+ *  being dropped, so the board's counts stay honest.
+ *
+ *  Every arm but `redacted` carries `createdAt`/`updatedAt` — the CONTENT's own
+ *  dates, which is a different claim from the membership's {@link BoardItem.addedAt}. */
 export type BoardItemContent =
   | {
       kind: "issue";
@@ -2519,6 +2537,8 @@ export type BoardItemContent =
       stateReason: string | null;
       repoNameWithOwner: string;
       assignees: AssigneeRef[];
+      createdAt: string;
+      updatedAt: string;
     }
   | {
       kind: "pullRequest";
@@ -2529,14 +2549,10 @@ export type BoardItemContent =
       isDraft: boolean;
       repoNameWithOwner: string;
       assignees: AssigneeRef[];
+      createdAt: string;
+      updatedAt: string;
     }
-  | {
-      kind: "draft";
-      id: string;
-      title: string;
-      body: string;
-      assignees: AssigneeRef[];
-    }
+  | ({ kind: "draft" } & BoardDraftContent)
   | { kind: "redacted" };
 
 /** One card on a board: the membership's own id, whether the board has archived
@@ -2548,6 +2564,10 @@ export interface BoardItem {
   isArchived: boolean;
   content: BoardItemContent;
   fieldValues: ProjectFieldValue[];
+  /** When this item JOINED the board — the membership's own date, which for an
+   *  issue or pull request is nothing like the content's `createdAt`. ISO-8601
+   *  from the forge, so a reader validates before formatting. */
+  addedAt: string;
 }
 
 /** One page of a board's items, in the board's own POSITION order. `totalCount`
@@ -2584,12 +2604,14 @@ export interface BoardCandidates {
   truncated: boolean;
 }
 
-/** What a converted draft became: the real issue's number and its web URL. The
- *  draft's card keeps its item id across the conversion — only its content
- *  changes — so nothing here addresses the board. */
+/** What a converted draft became: the real issue's number, its web URL, and the
+ *  card as the board now holds it. The draft's card keeps its item id across the
+ *  conversion — only its content changes — so `item` is the board's own answer for
+ *  that same id, which is what lets the card flip without a re-read. */
 export interface ConvertedDraft {
   number: number;
   url: string;
+  item: BoardItem;
 }
 
 export interface Reaction {

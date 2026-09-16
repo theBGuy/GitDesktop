@@ -556,15 +556,20 @@ board the repository or its owner has, and pick which of its single-select
 fields makes the columns (**Status** to start with), with a trailing column
 for anything the field doesn't cover. Cards carry their type and state, the
 number, the owning repository when the board spans several, and up to three
-assignees; **draft** items open their notes in place, and an item you can't
-see says so rather than thinning the board silently. Open an issue or pull
-request straight from its card, page through a large board with **Load
-more**, and move around the whole thing from the keyboard. **Add item** puts
-work on the board without a trip to the browser: search this repository's
-issues and pull requests and add several in a row, or write a **draft** — a
-Markdown note that lives on the board alone until it earns an issue.
+assignees; **draft** items open their notes in place, dated with when the
+note was written and when it last changed, and an item you can't see says so
+rather than thinning the board silently. Open an issue or pull request
+straight from its card, or press **Space** for a **details peek**: its title,
+what it is, and when it was opened, joined this board, and last changed,
+without leaving the columns. Page through a large board with **Load more**,
+and move around the whole thing from the keyboard. **Add item** puts work on
+the board without a trip to the browser: search this repository's issues and
+pull requests and add several in a row, or write a **draft** — a Markdown
+note that lives on the board alone until it earns an issue. Either way the
+card is there as the write lands, drawn from GitHub's own answer to it.
 **Right-click a card** (Shift+F10 on Windows and Linux) for its menu: open
-it, **move it to another column**, **convert a draft to a real issue**,
+it, **show its details**, **move it to another column**, **edit a draft**
+(title, Markdown notes and assignees), **convert a draft to a real issue**,
 **archive** the card (restorable from the project's archived items on
 GitHub), or **remove** it from the project. A move writes the board's
 grouping field and re-draws the card where it lands, keyboard place and all.

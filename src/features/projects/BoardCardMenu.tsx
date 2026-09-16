@@ -29,8 +29,14 @@ export type BoardMenuTarget = {
  *  the board's field definitions, and the one move mutation. */
 export interface BoardMenuActions {
   open: () => void;
+  /** Open the card's details peek — the pointer route to what Space does from the
+   *  keyboard. Issue/PR cards alone: a draft's popover is its own card. */
+  showDetails: () => void;
   /** Where the card should land, as an index into `columns`. */
   move: (columnIndex: number) => void;
+  /** Rewrite a DRAFT's title, notes and assignees. Offered on draft cards alone —
+   *  an issue or pull request is edited on its own tab. */
+  editDraft: () => void;
   /** Turn a DRAFT into a real issue. Offered on draft cards alone. */
   convert: () => void;
   archive: () => void;
@@ -69,7 +75,11 @@ export function BoardCardMenuItems({
   actions: BoardMenuActions;
 }) {
   if (target === null) return null;
-  const isDraft = target.item.content.kind === "draft";
+  const kind = target.item.content.kind;
+  const isDraft = kind === "draft";
+  // Only these two have a peek: a draft's notes open from the card itself, and a
+  // redacted card has nothing to tell.
+  const isPeekable = kind === "issue" || kind === "pullRequest";
   // A draft on an ungrouped board has neither an Open row nor a Move section, so
   // its menu starts at these rows — and a separator with nothing above it reads as
   // a rendering fault.
@@ -134,15 +144,35 @@ export function BoardCardMenuItems({
           </ContextMenuGroup>
         ))}
       {hasRowsAbove && <ContextMenuSeparator />}
+      {/* Above the write rows and OUTSIDE their permission gate: reading a card's
+          dates asks nothing of the board, so a viewer who can't change it still
+          gets this one. `onClick`, never `onSelect` — Base UI's `onSelect` is the
+          DOM text-selection event and never fires. */}
+      {isPeekable && (
+        <>
+          <ContextMenuItem onClick={actions.showDetails}>
+            Show details
+          </ContextMenuItem>
+          {/* Its own rule: reading a card's dates belongs nowhere near Archive and
+              Remove, and one unbroken group would read as a single family. */}
+          <ContextMenuSeparator />
+        </>
+      )}
       {actionHeldReason === undefined ? (
         <>
           {/* Drafts only: an issue or pull request is already the thing a convert
-              would make. The ellipsis is the house promise that a confirmation
-              comes first — all three of these ask. */}
+              would make, and is edited on its own tab. The ellipsis is the house
+              promise that a further step comes first — a dialog for the edit, a
+              confirmation for the other three. */}
           {isDraft && (
-            <ContextMenuItem onClick={actions.convert}>
-              Convert to issue…
-            </ContextMenuItem>
+            <>
+              <ContextMenuItem onClick={actions.editDraft}>
+                Edit draft…
+              </ContextMenuItem>
+              <ContextMenuItem onClick={actions.convert}>
+                Convert to issue…
+              </ContextMenuItem>
+            </>
           )}
           <ContextMenuItem onClick={actions.archive}>
             Archive card…
