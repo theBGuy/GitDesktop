@@ -581,11 +581,15 @@ mod lock_key_tests {
         std::fs::create_dir(&sub).unwrap();
         let sub = sub.to_string_lossy().into_owned();
         let state = AppState::default();
+        // Compare checkout keys across two resolutions rather than against a
+        // hand-normalized input: git answers with the long path form, and a CI
+        // runner's 8.3-shortened temp dir diverges from the input spelling.
+        let root_keys = state.resolve_lock_keys(&repo).await;
         let root_lock = state.working_tree_lock(&repo).await;
         crate::git::repo::TEST_IDENTITY_ERROR
             .scope(|| AppError::Timeout(30), async {
                 let keys = state.resolve_lock_keys(&sub).await;
-                assert_eq!(keys.checkout, normalize_wt_path(&repo));
+                assert_eq!(keys.checkout, root_keys.checkout);
                 assert_eq!(keys.shared, normalize_wt_path(&sub));
                 assert!(same(&root_lock, &state.working_tree_lock(&sub).await));
                 assert!(!state.lock_keys.lock().await.contains_key(&sub));

@@ -13,9 +13,9 @@ import {
  *  surfaces on the first refetch at or after ten minutes from the last CONFIRMED
  *  answer — typically ten to fifteen, later still if nothing mounts or refocuses to
  *  trigger one, and up to one resolver-timeout shorter at the floor (the memo
- *  stamps at issue time). A bound is affordable HERE and nowhere else: running out of it shows
- *  an error body, whereas the same bound on `repoIdentity`'s fallback would silently
- *  redirect a store write to the raw path. */
+ *  stamps at issue time). A bound is affordable HERE and nowhere else: running
+ *  out of it shows an error body, whereas the same bound on `repoIdentity`'s
+ *  fallback would silently redirect a store write to the raw path. */
 const IDENTITY_READ_GRACE_MS = IDENTITY_TTL_MS * 2;
 
 /** The ONE options factory for the `["repo-identity", repoPath]` query: the shared

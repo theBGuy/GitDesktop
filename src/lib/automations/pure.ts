@@ -13,6 +13,9 @@ import type { AutomationRunResult } from "./results";
  * that moved, or a base whose own upstream tracking can't vouch for it.
  * `sameSha` is injected because its home (`./sync`) reaches Tauri — tolerating
  * short-vs-full shas is the caller's contract, not this predicate's.
+ *
+ * `headSha`, `base` and `head` are three adjacent strings — a swapped call site
+ * compiles, so keep the argument order matched against the runner's call.
  */
 export function localRefsFresh(
   tips: Record<string, string>,
