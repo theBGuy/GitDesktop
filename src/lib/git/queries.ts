@@ -1,14 +1,22 @@
 import {
   type InfiniteData,
+  notifyManager,
   type QueryClient,
   type QueryKey,
   queryOptions,
+  replaceEqualDeep,
   useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { ignoreLines, REPLACEMENT_CHAR } from "@/lib/ai/ignore";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
@@ -30,6 +38,7 @@ import type {
   BbEnvironment,
   BitbucketHookInput,
   BitbucketRepoSettingsInput,
+  BoardItem,
   BoardItems,
   CiStatus,
   CommitCommentOut,
@@ -2567,12 +2576,18 @@ export function useAvailableProjects(
   });
 }
 
+/** Every item's board memberships in one repo — the prefix {@link itemProjectsKey}
+ *  extends, and the only handle a writer without an item's lens/kind/number has.
+ *  The BOARD's own add/remove are exactly that writer. */
+const itemProjectsFamilyKey = (repo: string) =>
+  ["repo", repo, "item-projects"] as const;
+
 const itemProjectsKey = (
   repo: string,
   lens: RemoteLens,
   kind: "issue" | "pr",
   number: number,
-) => ["repo", repo, "item-projects", lens, kind, number] as const;
+) => [...itemProjectsFamilyKey(repo), lens, kind, number] as const;
 
 /** One issue/PR's board memberships. Shorter staleTime than the catalog: the
  *  memberships are what the picker edits, the catalog only what it offers. */
@@ -2726,16 +2741,199 @@ export function useProjectFields(
  *  `query` is the saved view's filter, and it is an identity axis rather than an
  *  option: the server answers a filtered read with a DIFFERENT set of items, so
  *  two lenses over one board are two caches. Null is the unfiltered board. */
+/** Every cached LENS of ONE board's items — the prefix {@link projectItemsKey}
+ *  extends, and the handle a write that changes which cards EXIST has to patch:
+ *  the board on screen is one lens, and a view switched away from still holds its
+ *  own pages of the same item set. Narrower than the family
+ *  {@link invalidateProjectBoards} addresses, which spans every board. */
+const projectItemsFamilyKey = (repo: string, projectId: string) =>
+  ["repo", repo, "project-items", projectId] as const;
+
 const projectItemsKey = (
   repo: string,
   projectId: string,
   query: string | null,
-) => ["repo", repo, "project-items", projectId, query] as const;
+) => [...projectItemsFamilyKey(repo, projectId), query] as const;
 
 /** One board's saved views. Repo + board and no account axis, the family contract
  *  {@link projectItemsKey} states. */
 const projectViewsKey = (repo: string, projectId: string) =>
   ["repo", repo, "project-views", projectId] as const;
+
+/** Which board write a mutation IS. Rides its `mutationKey` so the panel can tell
+ *  the kinds apart without holding a flag per hook. */
+export type BoardWriteKind =
+  | "move"
+  | "convert"
+  | "archive"
+  | "remove"
+  | "add-existing"
+  | "add-draft"
+  /** Fired from the create-issue dialog rather than the board, and it draws no
+   *  card of its own — but its settle invalidates the same board reads, so the
+   *  board's pagination has to wait on it like any other write here. */
+  | "add-issue-projects";
+
+/**
+ * The key every board write is tagged with: `["board-write", kind]`. It says WHAT a
+ * write is and nothing else — the card-vs-add split the panel's gates need is a
+ * lookup over {@link BoardWriteKind} at the call site, not a key segment, so the key
+ * carries no group to fall out of sync with it.
+ *
+ * Tagging exists because `useMutation().isPending` tracks one observer's LATEST
+ * invocation only — `MutationObserver.mutate` drops its previous mutation and
+ * builds a new one (query-core 5.102.8) — while these flows deliberately allow a
+ * second invocation over a first: an Esc'd draft whose write continues, consecutive
+ * add-existing picks. The key lets the panel enumerate the CACHE instead, which sees
+ * every one.
+ *
+ * WHICH REPO a write belongs to is deliberately NOT in here. The key is built from
+ * the hook's render scope, and query-core re-applies a live observer's options on
+ * every render: a key carrying `repo` would change identity under a repo switch,
+ * which `MutationObserver.setOptions` answers by RESETTING the observer off its own
+ * pending mutation. The write's repo is its call-time `variables.repo` — one source
+ * of truth, fixed at fire time — so {@link usePendingBoardWrites} matches on that.
+ */
+const boardWriteKey = (kind: BoardWriteKind) => ["board-write", kind] as const;
+
+/** Filter prefix for EVERY board write — narrowed to one repo by variables below. */
+const BOARD_WRITES_KEY = ["board-write"] as const;
+
+/** One pending board write, flattened for the panel's holds, strip and busy card.
+ *  The two value fields are display-only reads off the write's own variables, and
+ *  absent on the kinds that don't carry them. */
+export interface PendingBoardWrite {
+  mutationId: number;
+  kind: BoardWriteKind | null;
+  /** The card a convert is swapping in place. */
+  itemId: string | null;
+  /** The issue/PR number an add-existing is putting on the board. */
+  number: number | null;
+}
+
+/** Every board write's variables carry the repo it addresses; the rest are per-kind
+ *  and read only for labels. Untrusted at this boundary in the sense that the
+ *  filter sees `Mutation<any>`, so each field is `typeof`-guarded rather than
+ *  asserted. */
+function boardWriteVars(mutation: { state: { variables?: unknown } }): {
+  repo: string | null;
+  itemId: string | null;
+  number: number | null;
+} {
+  const vars = mutation.state.variables;
+  if (typeof vars !== "object" || vars === null)
+    return { repo: null, itemId: null, number: null };
+  const { repo, itemId, number } = vars as Record<string, unknown>;
+  return {
+    repo: typeof repo === "string" ? repo : null,
+    itemId: typeof itemId === "string" ? itemId : null,
+    number: typeof number === "number" ? number : null,
+  };
+}
+
+/**
+ * Every board write against `repo` that is currently in flight, one entry per
+ * INVOCATION — the observer-independent reading the panel's gates and strip need.
+ *
+ * `getSnapshot` COMPUTES from the cache rather than returning a value some
+ * subscription last wrote, which is the whole point of doing this by hand instead of
+ * through `useMutationState`. That hook keeps its result in a ref refreshed ONLY
+ * inside its cache subscription, so any window without a live subscription is a
+ * blind spot it never reconciles: this panel lives under `<Activity>`, which tears
+ * passive effects down on hide, and a write settling while the tab is away notifies
+ * nobody. On show, re-subscribing re-reads the same untouched ref, React sees no
+ * change, and the pre-hide list latches — holds and strip lines for writes that
+ * finished minutes ago. `useMutationState` has the same blind spot for `repo`, which
+ * reaches its filters through an options ref updated after render.
+ *
+ * Computing on demand makes both moot: React calls this on every render and again
+ * when it re-subscribes, and each call reads the live cache under the CURRENT
+ * `repo`. `replaceEqualDeep` keeps the identity stable when nothing changed, which
+ * is what `useSyncExternalStore` requires of a snapshot (and the library's own
+ * pattern for it).
+ *
+ * The repo match reads each write's own VARIABLES rather than a key segment:
+ * variables are fixed when the write fires, where a key is re-derived from whatever
+ * the hook's render scope holds later.
+ */
+export function usePendingBoardWrites(repo: string): PendingBoardWrite[] {
+  const cache = useQueryClient().getMutationCache();
+  // The previous snapshot `replaceEqualDeep` diffs against, so an unchanged cache
+  // keeps returning one identity — `useSyncExternalStore` loops on a snapshot that
+  // is a fresh value every call.
+  const snapshot = useRef<PendingBoardWrite[]>([]);
+  const getSnapshot = useCallback(() => {
+    const next = cache
+      .findAll({ mutationKey: BOARD_WRITES_KEY, status: "pending" })
+      .flatMap((m): PendingBoardWrite[] => {
+        const vars = boardWriteVars(m);
+        if (vars.repo !== repo) return [];
+        // The key's own tail; an unknown shape degrades to a null kind rather
+        // than a guessed one, which drops the write from the labelled lines but
+        // still counts it for the holds.
+        const kind = m.options.mutationKey?.[1];
+        return [
+          {
+            mutationId: m.mutationId,
+            kind: typeof kind === "string" ? (kind as BoardWriteKind) : null,
+            itemId: vars.itemId,
+            number: vars.number,
+          },
+        ];
+      });
+    snapshot.current = replaceEqualDeep(snapshot.current, next);
+    return snapshot.current;
+  }, [cache, repo]);
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      cache.subscribe(notifyManager.batchCalls(onStoreChange)),
+    [cache],
+  );
+  // Third argument is the server snapshot, which this desktop app never renders;
+  // the same computation answers it, as the library does for its own hooks.
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** How many of a repo's own board writes are between their request and their
+ *  answer, PER REPO — keyed by the same `repo` string the invalidation targets,
+ *  because that is the scope the deferral decides. One shared number would let a
+ *  write in one repository defer another's settle-refetch, and since each settle
+ *  invalidates only its own repo, the deferred one's stale mark would never be
+ *  flushed: a board left stale after its own successful write.
+ *
+ *  Module-scoped rather than a `mutationKey` + `isMutating` count because a
+ *  mutation is still `pending` while its own `onSettled` runs (query-core 5.102.8
+ *  dispatches `success` AFTER the callbacks), so an `isMutating` reading would
+ *  have to subtract a self that only SOME callers of
+ *  {@link invalidateProjectBoards} contribute — the issue-side callers are not in
+ *  the family. A count the writes hold across their own request has one meaning
+ *  for every caller: "someone else is mid-write on THIS repo". */
+const pendingBoardWrites = new Map<string, number>();
+
+/**
+ * Run one board write with its repo's {@link pendingBoardWrites} count held up for
+ * the duration. Wraps the REQUEST rather than pairing `onMutate`/`onSettled` hooks:
+ * the `finally` is what makes the decrement unmissable on the throw path, and it
+ * lands before query-core continues into the settle callbacks, so a write never
+ * counts itself. The entry is DELETED at zero rather than left at 0, so the map
+ * holds only repos with work in flight.
+ *
+ * `repo` rides the call-time mutation variables at every wrap site, never a hook's
+ * render scope — the same rule the writes' own targets follow.
+ */
+async function trackBoardWrite<T>(
+  repo: string,
+  write: () => Promise<T>,
+): Promise<T> {
+  pendingBoardWrites.set(repo, (pendingBoardWrites.get(repo) ?? 0) + 1);
+  try {
+    return await write();
+  } finally {
+    const left = (pendingBoardWrites.get(repo) ?? 1) - 1;
+    if (left > 0) pendingBoardWrites.set(repo, left);
+    else pendingBoardWrites.delete(repo);
+  }
+}
 
 /**
  * Mark every board this repo has opened stale, for any write that changes what a
@@ -2758,12 +2956,33 @@ const projectViewsKey = (repo: string, projectId: string) =>
  * The key stops SHORT of the board id and its lens, so every saved view's cache
  * of every board goes stale together — a write changes what the item is, which no
  * filter makes untrue.
+ *
+ * LAST WRITE REFETCHES. While another board write on THIS repo is still in flight
+ * this marks stale WITHOUT fetching (`refetchType: "none"`), because the answer a
+ * refetch would bring back has not seen that sibling yet: server truth fetched
+ * mid-flight puts an archived card back on the board, or a moved one in its old
+ * column, until the sibling's own settle re-reads. Deferring costs nothing —
+ * {@link trackBoardWrite} decrements before any `onSettled` runs, so the LAST write
+ * out always sees a clear count and performs the one real refetch. A lone write
+ * sees zero and refetches immediately, exactly as before.
+ *
+ * Read PER REPO, matching the key this invalidates: a write pending in another
+ * repository must not defer this one, whose stale mark that write's own settle
+ * would never come back to flush.
+ *
+ * The cancel above stays unconditional either way: a read already in flight holds
+ * pre-write values whether or not this call is the one that re-reads.
  */
 function invalidateProjectBoards(queryClient: QueryClient, repo: string): void {
   const queryKey = ["repo", repo, "project-items"];
+  const deferred = (pendingBoardWrites.get(repo) ?? 0) > 0;
   void queryClient
     .cancelQueries({ queryKey })
-    .then(() => queryClient.invalidateQueries({ queryKey }));
+    .then(() =>
+      queryClient.invalidateQueries(
+        deferred ? { queryKey, refetchType: "none" } : { queryKey },
+      ),
+    );
 }
 
 /** One board's items under one LENS, paged. Keyed on the board and the saved
@@ -2875,6 +3094,80 @@ function patchBoardItem(
   };
 }
 
+/** Where one item sits in a board's cached pages, plus the item itself — what a
+ *  removal has to remember to be able to put it back exactly where it was. The
+ *  `key` is the LENS this record belongs to: one removal patches every cached lens
+ *  of the board, and each needs its own place. */
+interface RemovedBoardItem {
+  key: QueryKey;
+  pageIndex: number;
+  itemIndex: number;
+  item: BoardItem;
+}
+
+/** `itemId`'s page and slot in `data`, or null when this lens doesn't draw it. */
+function findBoardItem(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  itemId: string,
+): { pageIndex: number; itemIndex: number; item: BoardItem } | null {
+  if (data === undefined) return null;
+  for (const [pageIndex, page] of data.pages.entries()) {
+    const itemIndex = page.items.findIndex((item) => item.itemId === itemId);
+    if (itemIndex !== -1)
+      return { pageIndex, itemIndex, item: page.items[itemIndex] };
+  }
+  return null;
+}
+
+/** One item dropped from every cached page, leaving every OTHER item and every page
+ *  the caller never read exactly as they are — {@link patchBoardItem}'s rule, for
+ *  the other kind of write. `totalCount` is deliberately untouched: it is the
+ *  board's own figure and COUNTS ARCHIVED ITEMS, so an archive must not move it and
+ *  a removal's correction rides the settle refetch rather than a guess made here. */
+function dropBoardItem(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  itemId: string,
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (data === undefined) return undefined;
+  return {
+    ...data,
+    pages: data.pages.map((page) =>
+      page.items.some((item) => item.itemId === itemId)
+        ? { ...page, items: page.items.filter((i) => i.itemId !== itemId) }
+        : page,
+    ),
+  };
+}
+
+/** {@link dropBoardItem}'s inverse: the one item back at the page and slot it left,
+ *  onto the CURRENT cache rather than a snapshot of the world — restoring a whole
+ *  tree would revert a concurrent write to a sibling card and drop a `Load more`
+ *  page that landed while this one was in flight.
+ *
+ *  Three ways the board can have moved on underneath, each left alone rather than
+ *  forced: a refetch already put the item back (never insert it twice), the page it
+ *  sat on no longer exists, or that page is now shorter than its old slot (the
+ *  splice clamps to the end). */
+function restoreBoardItem(
+  data: InfiniteData<BoardItems, string | null> | undefined,
+  at: RemovedBoardItem,
+): InfiniteData<BoardItems, string | null> | undefined {
+  if (data === undefined) return undefined;
+  const held = data.pages.some((page) =>
+    page.items.some((item) => item.itemId === at.item.itemId),
+  );
+  const page = data.pages[at.pageIndex];
+  if (held || page === undefined) return data;
+  const items = [...page.items];
+  items.splice(Math.min(at.itemIndex, items.length), 0, at.item);
+  return {
+    ...data,
+    pages: data.pages.map((p, i) =>
+      i === at.pageIndex ? { ...page, items } : p,
+    ),
+  };
+}
+
 /**
  * The board's own move: one item's grouped single-select field, written through the
  * same command the field editor uses, with an optimistic patch of the board's item
@@ -2896,6 +3189,7 @@ function patchBoardItem(
 export function useMoveBoardCard() {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: boardWriteKey("move"),
     mutationFn: (args: {
       repo: string;
       projectId: string;
@@ -2910,20 +3204,22 @@ export function useMoveBoardCard() {
        *  because anything cancels the write. */
       query: string | null;
     }) =>
-      api.ghSetItemFieldValues(
-        args.repo,
-        args.projectId,
-        args.itemId,
-        args.option === null
-          ? []
-          : [
-              {
-                kind: "singleSelect",
-                fieldId: args.field.id,
-                optionId: args.option.id,
-              },
-            ],
-        args.option === null ? [args.field.id] : [],
+      trackBoardWrite(args.repo, () =>
+        api.ghSetItemFieldValues(
+          args.repo,
+          args.projectId,
+          args.itemId,
+          args.option === null
+            ? []
+            : [
+                {
+                  kind: "singleSelect",
+                  fieldId: args.field.id,
+                  optionId: args.option.id,
+                },
+              ],
+          args.option === null ? [args.field.id] : [],
+        ),
       ),
     onMutate: async (args) => {
       // Derived from the variables, like every other target here: `onMutate` runs
@@ -2978,6 +3274,284 @@ export function useMoveBoardCard() {
       void queryClient
         .cancelQueries({ queryKey: ctx.railKey })
         .then(() => queryClient.invalidateQueries({ queryKey: ctx.railKey }));
+    },
+  });
+}
+
+/**
+ * Mark one repo's per-item board memberships and project field values stale, for a
+ * write that changed WHICH boards an item is on. The same two families
+ * {@link useEditItemProjects} reconciles, addressed by their PREFIX: a write fired
+ * from the board holds an item id and a project id, never the item's lens, kind and
+ * number, so the per-item keys are out of reach.
+ *
+ * Cancel before invalidate on both, for the reason {@link invalidateProjectBoards}
+ * states: a read already in flight would otherwise resolve afterwards and stamp
+ * itself fresh, erasing the invalidation.
+ */
+function invalidateItemMemberships(
+  queryClient: QueryClient,
+  repo: string,
+): void {
+  for (const queryKey of [
+    itemProjectsFamilyKey(repo),
+    itemFieldValuesFamilyKey(repo),
+  ]) {
+    void queryClient
+      .cancelQueries({ queryKey })
+      .then(() => queryClient.invalidateQueries({ queryKey }));
+  }
+}
+
+/** The issues and pull requests in this repo a board could take, for the
+ *  add-existing search. `search` is an identity axis and the LENS is the other:
+ *  previous results stay on screen while a new query lands, so the list doesn't
+ *  blink to a skeleton on every keystroke — which is why callers gate what they
+ *  DERIVE from the data on `!isPlaceholderData`. `retry: false` for the family's
+ *  own reason: the common failure is a missing `project` scope, which no retry
+ *  fixes. */
+export function useBoardCandidates(
+  repo: string,
+  search: string,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
+  return useQuery({
+    queryKey: ["repo", repo, "board-candidates", lens, search] as const,
+    queryFn: () => api.ghSearchBoardCandidates(repo, search, lens),
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+    // The lens is an axis (index 3 above); the SEARCH at index 4 deliberately is
+    // not — holding the previous query's rows is the whole point.
+    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
+  });
+}
+
+/**
+ * The board's add/convert/archive/remove writes. Each carries its target in the
+ * call-time VARIABLES rather than this hook's scope, for the reason
+ * {@link useMoveBoardCard} states: query-core re-applies a pending mutation's
+ * options on every re-render, and an offline write pauses before `mutationFn` and
+ * resumes through whatever closure is current.
+ *
+ * No optimistic patch on any of them: an add has no item id until GitHub mints
+ * one, and a removal's settle refetch is what the board reads. The settle is
+ * {@link invalidateProjectBoards} verbatim — cancel, then invalidate, no forced
+ * refetch — so the Activity gate still owns when a hidden board re-reads.
+ *
+ * Reporting lives in the hooks whose host closes on fire (the card menu, the add
+ * dialogs), never in the caller's `mutate` options, since react-query drops
+ * mutate-scoped callbacks once the observer loses its listeners. Callers still see
+ * the rejection through `mutateAsync`, which is what drives their own UI back.
+ */
+export function useAddDraftItem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey("add-draft"),
+    mutationFn: (args: {
+      repo: string;
+      projectId: string;
+      title: string;
+      /** Markdown, sent VERBATIM — the card's popover renders it as such. */
+      body: string;
+    }) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghAddDraftItem(args.repo, args.projectId, args.title, args.body),
+      ),
+    onError: toastError,
+    onSettled: (_d, _e, args) =>
+      invalidateProjectBoards(queryClient, args.repo),
+  });
+}
+
+/** Turns a draft card into a real issue. The card keeps its item id, so only the
+ *  board's own read changes — but the repo now has an issue that didn't exist, so
+ *  the memberships families go stale with it. */
+export function useConvertDraftItem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey("convert"),
+    mutationFn: (args: { repo: string; itemId: string; lens: RemoteLens }) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghConvertDraftItem(args.repo, args.itemId, args.lens),
+      ),
+    onError: toastError,
+    onSettled: (_d, _e, args) => {
+      invalidateProjectBoards(queryClient, args.repo);
+      invalidateItemMemberships(queryClient, args.repo);
+      // A convert CREATES a repo issue, so the Issues tab has to learn about it
+      // the way every other membership-changing issue write tells it: the
+      // issue-list family under the lens the write ran on, which is the same key
+      // `useIssueLifecycleMutation` invalidates for a transfer or a delete. The
+      // issue's own DETAIL key needs nothing — it had no cache entry to go stale,
+      // the issue not having existed until now.
+      void queryClient.invalidateQueries({
+        queryKey: ["repo", args.repo, "issue-list", args.lens],
+      });
+    },
+  });
+}
+
+/** What both card-removing writes address: the board, and the membership on it. */
+interface BoardItemWrite {
+  repo: string;
+  projectId: string;
+  /** The membership's item id — never the content id behind it. */
+  itemId: string;
+}
+
+/**
+ * The shared shape of the two writes that take a card OFF the board, with an
+ * optimistic removal of it. The card vanishing is the feedback: the round trip runs
+ * seconds, and a board that sits unchanged that long reads as a click gone nowhere.
+ *
+ * Every cached LENS of the board is patched, not just the one on screen — a view
+ * switched away from holds its own pages of the same item set, and the user can
+ * switch back before the settle refetch lands. Cancel comes FIRST, for the reason
+ * {@link invalidateProjectBoards} states: a read already in flight would otherwise
+ * resolve over the patch and put the card back.
+ *
+ * The rollback re-inserts exactly what was taken, at the page and slot it left, onto
+ * the CURRENT cache. Never a snapshot of the tree: that would revert a concurrent
+ * write to a sibling card and drop a `Load more` page that landed mid-flight.
+ *
+ * The write TARGET rides the call-time variables, never this hook's scope — the rule
+ * {@link useMoveBoardCard} states, and the reason `onSettled` reads `args` rather
+ * than the context, which a mutation that never reached `onMutate` would leave
+ * undefined.
+ */
+function useBoardItemRemoval(
+  kind: Extract<BoardWriteKind, "archive" | "remove">,
+  call: (args: BoardItemWrite) => Promise<void>,
+  /** Whether this write changes WHICH boards the item is on. An archive doesn't —
+   *  the item stays on the project, restorable from its archived items. */
+  membership: boolean,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey(kind),
+    mutationFn: call,
+    onMutate: async (args: BoardItemWrite) => {
+      const queryKey = projectItemsFamilyKey(args.repo, args.projectId);
+      await queryClient.cancelQueries({ queryKey });
+      const removed: RemovedBoardItem[] = [];
+      for (const [key, data] of queryClient.getQueriesData<
+        InfiniteData<BoardItems, string | null>
+      >({ queryKey })) {
+        const at = findBoardItem(data, args.itemId);
+        if (at === null) continue;
+        removed.push({ key, ...at });
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          key,
+          (cur) => dropBoardItem(cur, args.itemId),
+        );
+      }
+      return { removed };
+    },
+    // Reporting and rollback live here, not in the caller's `mutate` options: the
+    // menu that fires this closes as it does, and react-query drops mutate-scoped
+    // callbacks once the observer loses its listeners.
+    onError: (e, _args, ctx) => {
+      for (const at of ctx?.removed ?? []) {
+        queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
+          at.key,
+          (cur) => restoreBoardItem(cur, at),
+        );
+      }
+      toastError(e);
+    },
+    onSettled: (_d, _e, args) => {
+      invalidateProjectBoards(queryClient, args.repo);
+      if (membership) invalidateItemMemberships(queryClient, args.repo);
+    },
+  });
+}
+
+/** Archives one card. Board-only: the item stays on the project (restorable from
+ *  its archived items on GitHub), so no membership family is touched. */
+export function useArchiveBoardItem() {
+  return useBoardItemRemoval(
+    "archive",
+    (args) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghArchiveBoardItem(args.repo, args.projectId, args.itemId),
+      ),
+    false,
+  );
+}
+
+/** Removes one card from the project — an unlink for an issue or pull request, a
+ *  deletion for a draft. Membership-touching either way. */
+export function useRemoveBoardItem() {
+  return useBoardItemRemoval(
+    "remove",
+    (args) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghRemoveBoardItem(args.repo, args.projectId, args.itemId),
+      ),
+    true,
+  );
+}
+
+/** Adds one existing issue or pull request to a board, through the same batched
+ *  command the issue/PR picker uses: one add, no removes. `contentId` is the
+ *  search result's CONTENT node id — a board item id addresses nothing here. */
+export function useAddExistingToBoard() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: boardWriteKey("add-existing"),
+    mutationFn: (args: {
+      repo: string;
+      projectId: string;
+      contentId: string;
+      /** The item's number, for the board's pending strip alone — the write
+       *  addresses the content id. Carried as a variable rather than looked up
+       *  later because the strip reads `variables` off the in-flight mutation, and
+       *  the search result it came from lives in a dialog that may be closed by
+       *  then. (The same display-only shape {@link useSetIssueMilestone}'s `title`
+       *  keeps.) */
+      number: number;
+    }) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghEditItemProjects(args.repo, args.contentId, [args.projectId], []),
+      ),
+    onError: toastError,
+    onSettled: (_d, _e, args) => {
+      invalidateProjectBoards(queryClient, args.repo);
+      invalidateItemMemberships(queryClient, args.repo);
+    },
+  });
+}
+
+/** Adds a freshly created issue to boards, by number. No `onError` on purpose: the
+ *  create dialog composes its own disclosure ("Created issue #N, but …"), and a
+ *  toast here would report the same failure twice. */
+export function useAddIssueToProjects() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    // Tagged into the board-write family even though no board fired it: this
+    // settles through `invalidateProjectBoards`, whose cancel matches the board's
+    // items key, so a Load more started during the round trip would be
+    // cancel-reverted. The board can only wait on what it can see.
+    mutationKey: boardWriteKey("add-issue-projects"),
+    mutationFn: (args: {
+      repo: string;
+      number: number;
+      addProjectIds: string[];
+      lens: RemoteLens;
+    }) =>
+      trackBoardWrite(args.repo, () =>
+        api.ghAddIssueToProjects(
+          args.repo,
+          args.number,
+          args.addProjectIds,
+          args.lens,
+        ),
+      ),
+    onSettled: (_d, _e, args) => {
+      invalidateProjectBoards(queryClient, args.repo);
+      invalidateItemMemberships(queryClient, args.repo);
     },
   });
 }

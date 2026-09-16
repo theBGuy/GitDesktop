@@ -559,10 +559,17 @@ number, the owning repository when the board spans several, and up to three
 assignees; **draft** items open their notes in place, and an item you can't
 see says so rather than thinning the board silently. Open an issue or pull
 request straight from its card, page through a large board with **Load
-more**, and move around the whole thing from the keyboard. **Right-click a
-card** (Shift+F10 on Windows and Linux) for its menu: open it, or **move it to
-another column**, which writes the board's grouping field and re-draws the
-card where it lands, keyboard place and all. The board's **saved views** come
+more**, and move around the whole thing from the keyboard. **Add item** puts
+work on the board without a trip to the browser: search this repository's
+issues and pull requests and add several in a row, or write a **draft** — a
+Markdown note that lives on the board alone until it earns an issue.
+**Right-click a card** (Shift+F10 on Windows and Linux) for its menu: open
+it, **move it to another column**, **convert a draft to a real issue**,
+**archive** the card (restorable from the project's archived items on
+GitHub), or **remove** it from the project. A move writes the board's
+grouping field and re-draws the card where it lands, keyboard place and all.
+Creating an issue puts it straight on a board too: the **New issue** dialog
+carries a **Projects** picker of its own. The board's **saved views** come
 along as lenses: pick one and GitHub filters the read for you, its sort
 orders the cards in each column (by **Title**, or by a text, number, date,
 single-select or iteration field), its visible fields ride along as chips on
@@ -570,9 +577,9 @@ the cards, and its grouping seeds **Group by** while you stay free to
 regroup. Table and roadmap views are drawn as a board, and **Clear view**
 brings the whole item set back in the board's own order with the chips off,
 leaving the grouping where you last put it. Nothing here writes to the view.
-Moving needs write access to the board and the `project` sign-in scope;
-reading one needs only the `project` or `read:project` scope the Projects
-picker already asks for.
+Adding, moving, converting, archiving and removing all need write access to
+the board and the `project` sign-in scope; reading one needs only the
+`project` or `read:project` scope the Projects picker already asks for.
 
 ### Code TODOs
 

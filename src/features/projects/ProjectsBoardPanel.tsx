@@ -1,5 +1,5 @@
 import { Popover } from "@base-ui/react/popover";
-import { FadersHorizontalIcon } from "@phosphor-icons/react";
+import { FadersHorizontalIcon, PlusIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type KeyboardEvent,
@@ -8,11 +8,13 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useEffectEvent,
   useId,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { SelectClipText } from "@/components/select-clip-text";
@@ -22,6 +24,12 @@ import {
   ContextMenuContent,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import {
   Select,
@@ -31,7 +39,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
+// The read-only sentence arrives ALIASED: this panel says it about the BOARD, and
+// its own `READ_ONLY_SCOPE_REASON` below says a different thing about a card's
+// FIELDS. Two claims that happen to share a scope, so only the first is shared.
 import {
+  READ_ONLY_SCOPE_REASON as BOARD_READ_ONLY_SCOPE_REASON,
+  NO_ACCESS_REASON,
   projectScopeMissing,
   projectScopeReadOnly,
   ScopeGapBlock,
@@ -41,17 +55,25 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { presentError } from "@/lib/error-summary";
 import { useActiveGhHost, useForgeGhHost } from "@/lib/git/host";
+import type { BoardWriteKind } from "@/lib/git/queries";
 import {
   forgeReady,
+  useAddDraftItem,
+  useAddExistingToBoard,
+  useArchiveBoardItem,
   useAvailableProjects,
+  useConvertDraftItem,
   useForgeStatus,
   useGhScopes,
   useMoveBoardCard,
+  usePendingBoardWrites,
   useProjectFields,
   useProjectItems,
   useProjectViews,
+  useRemoveBoardItem,
 } from "@/lib/git/queries";
 import {
+  type BoardCandidate,
   type BoardItem,
   type BoardItemContent,
   type ProjectFieldDef,
@@ -60,8 +82,10 @@ import {
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { AddExistingItemsDialog, NewDraftDialog } from "./BoardAddDialogs";
 import { BoardCardMenuItems, type BoardMenuTarget } from "./BoardCardMenu";
 import { BoardColumn } from "./BoardColumn";
 import {
@@ -96,7 +120,6 @@ const FIELDS_ERROR_REASON = "Couldn't load this project's fields";
  *  differently (ProjectFieldsEditor.tsx). */
 const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read project fields but not change them (needs the project scope)";
-const NO_ACCESS_REASON = "You don't have write access to this project";
 const ISSUE_FIELD_REASON =
   "Issue fields are edited on GitHub — board editing arrives later";
 const LOADING_VIEWS_REASON = "Loading this project's views…";
@@ -113,13 +136,54 @@ const NO_VIEWS_REASON = "This project has no saved views";
 /** Said by every control that would otherwise speak for the board on screen: while
  *  a new lens loads, those cards are the PREVIOUS view's. */
 const LENS_LOADING_REASON = "Loading this view of the board…";
+/** The number here is the BACKEND's cap, not this file's choice: `project_views.rs`
+ *  asks GitHub for `views(first: 50)` and reports the overflow as `truncated`.
+ *  Neither side may change alone — a wider query with this sentence left behind
+ *  would state a limit the read no longer has. */
 const VIEWS_TRUNCATED_NOTE = "Showing the first 50 views.";
 /** A view GitHub reports with no name. */
 const UNTITLED_VIEW = "Untitled view";
+/** The two LABELLED halves of the board-write family, as the panel's gates read
+ *  them: a card write can collide with another write to the same CARD (so the menu
+ *  rows hold on each other), where an add touches no existing card and holds only
+ *  pagination. The split lives here as a lookup over {@link BoardWriteKind}, which
+ *  is all the mutation key carries. Neither set is exhaustive — a kind in neither
+ *  still counts as a board write for pagination, and says so generically. */
+const CARD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
+  "move",
+  "convert",
+  "archive",
+  "remove",
+]);
+const ADD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
+  "add-existing",
+  "add-draft",
+]);
+
 /** Single-writer: two writes to one card's field settle in an order nothing
  *  promises, and an EARLIER move failing late puts the card back in a column a
  *  later write already moved it out of. */
 const MOVING_REASON = "Moving your last card…";
+/** Single-writer past the move, for the same reason and one step wider: an archive,
+ *  a removal and a convert all change WHICH cards the board draws, so a second
+ *  write fired over one in flight would settle against a board neither of them saw. */
+const CARD_WRITE_REASON = "Finishing your last card change…";
+/** An archive is reversible and a removal is not, so the two prompts say different
+ *  things — and a removal says a THIRD thing for a draft, which lives on this
+ *  project alone and has nowhere to survive. Every one names where the card goes
+ *  rather than asking the user to infer it. */
+const ARCHIVE_BODY =
+  "The card leaves the board. You can restore it from the project's archived items on GitHub.";
+const REMOVE_BODY: Record<BoardItemContent["kind"], string> = {
+  draft:
+    "This deletes the draft permanently — drafts live on this project and nowhere else.",
+  issue:
+    "The card leaves this project. The issue itself is untouched, and you can add it back later.",
+  pullRequest:
+    "The card leaves this project. The pull request itself is untouched, and you can add it back later.",
+  redacted:
+    "The card leaves this project. The item itself is untouched, and you can add it back later.",
+};
 /** Held rather than queued: a move cancels the board's reads, and query-core's
  *  cancel REVERTS an in-flight one. */
 const LOADING_PAGE_REASON = "Finishing the board's next page…";
@@ -569,15 +633,83 @@ export function ProjectsBoardPanel({
     setFocusNonce((n) => n + 1);
   }
 
-  // The board's one write. ONE instance, which is what makes `isPending` a real
-  // single-flight gate — the menu's stated contract, and what keeps two writes to
-  // one card's field from settling in an order that leaves it in the wrong column.
+  // The board's writes. ONE instance each — the single-flight contract the menu
+  // rows state — but their `isPending` flags are NOT what gates anything here: a
+  // mutation observer tracks only its LATEST invocation, and these flows
+  // deliberately allow a second over a first (an Esc'd draft whose write continues
+  // while the reopened dialog submits another, consecutive add-existing picks). A
+  // newer invocation settling first would drop the older one's flag and un-hold
+  // everything while it was still in flight.
   const move = useMoveBoardCard();
+  const convertDraft = useConvertDraftItem();
+  const archiveItem = useArchiveBoardItem();
+  const removeItem = useRemoveBoardItem();
+  // The add writes live HERE rather than inside the dialogs that fire them, so the
+  // board can say what is in flight: a dialog closed mid-write would otherwise take
+  // the only record of it with it.
+  const addExisting = useAddExistingToBoard();
+  const addDraft = useAddDraftItem();
+  // So every gate, label and busy mark below derives from a snapshot COMPUTED off
+  // the mutation cache on each render, which holds every in-flight invocation
+  // whatever any observer is tracking, and matches this board by each write's own
+  // call-time `variables.repo` — this panel is ONE instance across repo switches,
+  // and it goes away under `<Activity>` without unmounting, so neither the repo nor
+  // a write that settled while the tab was hidden may reach the UI through anything
+  // a subscription had to be alive to record. One read feeds all of them; the
+  // counts are just this list, filtered.
+  const pendingWrites = usePendingBoardWrites(repoPath);
+  const movePending = pendingWrites.some((w) => w.kind === "move");
+  const cardWritePending = pendingWrites.some(
+    (w) => w.kind !== null && CARD_WRITE_KINDS.has(w.kind),
+  );
+  // The draft dialog's single-flight gate. Its own form can't provide one: the
+  // component persists across close/reopen, so an Esc'd submit and a later one share
+  // a form instance whose `isSubmitting` the FIRST settle clears unconditionally —
+  // re-enabling Create over a write still in flight. The cache knows about every
+  // invocation, so the hold is derived from that instead.
+  const draftWritePending = pendingWrites.some((w) => w.kind === "add-draft");
+  const addPending = pendingWrites.some(
+    (w) => w.kind !== null && ADD_WRITE_KINDS.has(w.kind),
+  );
+  // The one card a write changes IN PLACE. An archive and a removal take their card
+  // off the board outright, so the card's absence is already their feedback and
+  // there is nothing left to mark; a convert swaps the content under a card that
+  // stays put, which is the case that needs saying. The FIRST pending convert: the
+  // menu holds every card row while one runs, so a second is unreachable in
+  // practice, and the column prop stays the primitive its memo compares.
+  const convertingItemId =
+    pendingWrites.find((w) => w.kind === "convert")?.itemId ?? null;
+  /** Which add dialog is open, or null for neither. One at a time: both write to
+   *  the same board and the menu offers them as alternatives. */
+  const [addDialog, setAddDialog] = useState<"existing" | "draft" | null>(null);
+  /** Which run of an add dialog is current. A write can outlive the dialog that
+   *  fired it (the panel owns the mutation, so Esc leaves it going), and this is
+   *  what tells a resolution whether the dialog it was started from is still the
+   *  one on screen — without it, a stale success closes whichever dialog the user
+   *  opened next and the reopen-reset discards what was typed into it.
+   *
+   *  Bumped only from the EVENT that actually moves `addDialog`, never from an
+   *  effect keyed on the dialog's own props: `<Activity>` replays effect setups on
+   *  show and runs their cleanups on hide, so a token maintained that way churns on
+   *  tab switches and retires sessions no user action ended. (The one effect that
+   *  bumps it is a real retirement and guards on the value having changed.) */
+  const dialogSessionRef = useRef(0);
+
+  /** Open or close an add dialog, retiring whatever session was running. Every
+   *  transition goes through here so the token can't drift from the state. */
+  function switchAddDialog(next: "existing" | "draft" | null) {
+    dialogSessionRef.current += 1;
+    setAddDialog(next);
+  }
   const [menuTarget, setMenuTarget] = useState<BoardMenuTarget>(null);
   // The same target, readable SYNCHRONOUSLY. Base UI decides whether to open from
   // inside the very dispatch the keyboard route records in, so the open gate below
   // can't wait for this render's state to commit.
   const menuTargetRef = useRef<BoardMenuTarget>(null);
+  // Scopes the one DOM lookup this panel makes for focus (the emptied-board
+  // landing) to THIS board: several repo tabs mount their own panel, and a
+  // document-wide query would hand focus to another one's toolbar.
+  const rootRef = useRef<HTMLDivElement>(null);
   // True from the moment the menu opens until its close has fully SETTLED, which
   // is why the completion callback owns the falling edge: Base UI returns focus to
   // the trigger from the popup's unmount cleanup, and that unmount is what fires
@@ -593,7 +725,13 @@ export function ProjectsBoardPanel({
   const chasePos = chase === null ? null : findCard(columns, chase);
   const chaseCol = chasePos?.col ?? null;
   const chaseIdx = chasePos?.idx ?? null;
-  const movePending = move.isPending;
+  // EVERY write this board can fire, which is the set whose settle
+  // cancel-invalidates its reads. Named apart from `cardWritePending` because the
+  // two answer different questions: that one asks whether a write could collide
+  // with another write to the same CARD, this one whether a page fetch started now
+  // would be thrown away at settle. An add collides with no existing card, but its
+  // settle cancels the same reads, so pagination has to wait on it too.
+  const boardWritePending = pendingWrites.length > 0;
   useEffect(() => {
     if (chase === null || menuBusy) return;
     const settled = !movePending;
@@ -620,6 +758,121 @@ export function ProjectsBoardPanel({
     return () => cancelAnimationFrame(frame);
   }, [chase, chaseCol, chaseIdx, menuBusy, movePending]);
 
+  // The card an archive or a removal took off the board, and where it sat. The
+  // ABSENCE of it from the columns is the arming edge, not the write settling: the
+  // write settles, THEN the invalidation's refetch lands, and only that redraw says
+  // the board agrees. A failed refetch leaves the card drawn and this latched, so
+  // the dead arm below disarms it rather than re-scanning the columns every render.
+  const [retired, setRetired] = useState<{
+    itemId: string;
+    col: number;
+    idx: number;
+  } | null>(null);
+  const retiredGone =
+    retired !== null && findCard(columns, retired.itemId) === null;
+  const retiredDead = retired !== null && items.isError && !items.isFetching;
+  // The third way a retirement never lands: the tab goes away before the settle
+  // refetch, which takes the board's reads `enabled` false and parks them. That
+  // one can't be an arm beside `retiredDead` — `<Activity>` DEFERS this panel's
+  // effects while hidden, so a dep-driven arm wouldn't run until the show replay,
+  // by which time `active` is true again and the latch reads live. The cleanup is
+  // what actually fires on hide, and a retirement belongs to the visit that caused
+  // it: focus landing on a board the user came back to minutes later is a steal,
+  // and a null latch is what stops the scan below running behind a hidden panel.
+  // `setRetired` is useState's own, so the effect runs once and only its cleanup
+  // does the work — the shape {@link MenuLatchRelease} uses for the menu's latches.
+  useEffect(() => () => setRetired(null), []);
+  // Where focus goes once the card is gone: its own slot in the column it left,
+  // clamped to whatever still stands there, and the board's first card when that
+  // column emptied. Derived here so the effect's deps are the primitives that
+  // actually decide the landing, not a freshly built columns array.
+  const landing = (() => {
+    if (!retiredGone || retired === null) return null;
+    const left = columns[retired.col]?.items.length ?? 0;
+    return left > 0
+      ? { col: retired.col, idx: Math.min(retired.idx, left - 1) }
+      : firstCardPosition(columns);
+  })();
+  const landingCol = landing?.col ?? null;
+  const landingIdx = landing?.idx ?? null;
+  useEffect(() => {
+    if (!retiredGone && !retiredDead) return;
+    if (!retiredGone) {
+      setRetired(null);
+      return;
+    }
+    if (landingCol === null || landingIdx === null) {
+      // No card left anywhere to stand on — the removal emptied the board, or
+      // emptied what this view's filter draws of it. The cursor has nothing to
+      // address, and DOM focus has to be MOVED rather than merely released: the
+      // confirm dialog restores focus to the row that fired it, which unmounted
+      // with the card, so leaving it alone drops a keyboard user to <body>. The
+      // toolbar's Add item is where the board's own recovery starts and is the
+      // nearest thing still standing, so focus lands there, a frame past the
+      // dialog's own restore.
+      //
+      // The latch is released INSIDE the frame, never beside it: `setRetired`
+      // flips `retiredGone`, which is one of this effect's deps, so clearing it
+      // here would re-run the effect and fire the cleanup below — cancelling the
+      // very frame that does the work. The move's chase keeps its own release in
+      // its callback for the same reason. That leaves the cleanup owning the
+      // cancel for the cases it should: an unmount, an `<Activity>` hide, or a
+      // card arriving that gives the cursor a real landing after all.
+      setCursor(null);
+      const frame = requestAnimationFrame(() => {
+        rootRef.current
+          ?.querySelector<HTMLElement>("[data-board-add-trigger]")
+          ?.focus();
+        setRetired(null);
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+    setRetired(null);
+    setCursor({ col: landingCol, idx: landingIdx });
+    setFocusNonce((n) => n + 1);
+  }, [retiredGone, retiredDead, landingCol, landingIdx]);
+
+  // The menu's own retirement site, the discipline the stale-view-id effect keeps:
+  // a SETTLED list that no longer draws the recorded card is the only thing that
+  // may retire it, so a pending or failed read touches nothing. Without it the
+  // latch holds a card that has left the board, and the next menu opened from the
+  // keyboard would act on a dead reference.
+  const menuItemId = menuTarget?.item.itemId ?? null;
+  const menuItemGone =
+    menuItemId !== null &&
+    items.data !== undefined &&
+    !items.isFetching &&
+    findCard(columns, menuItemId) === null;
+  useEffect(() => {
+    if (!menuItemGone) return;
+    menuTargetRef.current = null;
+    setMenuTarget(null);
+  }, [menuItemGone]);
+
+  // The add dialogs' retirement site. `projectId` is DERIVED, not stored — a
+  // catalog refetch that drops the picked board re-points it to the first one
+  // going, with nothing on screen saying so — and an open dialog would go on
+  // adding under the previous board's title, against the new board's id. A
+  // deliberate switch can't reach here (the Select sits behind the dialog's own
+  // backdrop), so a change while one is open is always that silent re-point, and
+  // closing is the only honest answer: the pick behind the dialog is gone.
+  //
+  //  The one effect allowed to retire a session, because the ref-compare below
+  //  means it acts ONLY on a real change of `projectId` — an `<Activity>` show
+  //  replays this setup with the same value and it returns before touching
+  //  anything.
+  const dialogProjectRef = useRef(projectId);
+  // `switchAddDialog` is re-made every render, so it rides a `useEffectEvent`
+  // rather than the dep list: listing it would re-run this on every render (the
+  // ref-compare would refuse, but the effect is meant to fire on a board change
+  // alone), and a dep-suppression is the thing this repo replaced with this hook.
+  const retireAddDialog = useEffectEvent(() => switchAddDialog(null));
+  useEffect(() => {
+    if (dialogProjectRef.current === projectId) return;
+    dialogProjectRef.current = projectId;
+    retireAddDialog();
+  }, [projectId]);
+
   // Ranked like the field editor's own holds, and for the same reasons — the two
   // surfaces gate on the same flags, so they say it the same way. The last two arms
   // rank at the tail because they are the only ones that clear on their own.
@@ -639,6 +892,8 @@ export function ProjectsBoardPanel({
         return LENS_LOADING_REASON;
       case movePending:
         return MOVING_REASON;
+      case cardWritePending:
+        return CARD_WRITE_REASON;
       // A move's own `cancelQueries` REVERTS an in-flight fetch (query-core cancels
       // with `revert: true` by default), so starting one now would silently undo
       // the page the user just asked for.
@@ -648,11 +903,52 @@ export function ProjectsBoardPanel({
         return undefined;
     }
   })();
+  /** Why convert, archive and remove are held. Ranked like the move rows, and the
+   *  first two arms are the SAME permission flags — but the grouping arms are
+   *  absent: these three address the membership's item id alone, so an ungrouped
+   *  board and a GitHub-owned grouping field hold neither of them. So does a lens
+   *  still loading: the card under the pointer was recorded off the cards on
+   *  screen, and its item id is its item id whichever view drew it. */
+  const cardActionHeldReason = (() => {
+    switch (true) {
+      case projectScopeReadOnly(scopes.data):
+        return BOARD_READ_ONLY_SCOPE_REASON;
+      case project !== null && !project.viewerCanUpdate:
+        return NO_ACCESS_REASON;
+      case movePending:
+        return MOVING_REASON;
+      case cardWritePending:
+        return CARD_WRITE_REASON;
+      case items.isFetchingNextPage:
+        return LOADING_PAGE_REASON;
+      default:
+        return undefined;
+    }
+  })();
+  /** Why the toolbar's Add item is held. The same two permission arms the card
+   *  actions take, plus the page-fetch one for the same reason a move takes it —
+   *  an add's settle cancels this board's reads, and query-core's cancel REVERTS
+   *  an in-flight one. A card write already running holds nothing here: the two
+   *  address different items, and the dialogs are their own surface. */
+  const addHeldReason = (() => {
+    switch (true) {
+      case projectScopeReadOnly(scopes.data):
+        return BOARD_READ_ONLY_SCOPE_REASON;
+      case project !== null && !project.viewerCanUpdate:
+        return NO_ACCESS_REASON;
+      case items.isFetchingNextPage:
+        return LOADING_PAGE_REASON;
+      default:
+        return undefined;
+    }
+  })();
 
   /** Record what a menu opened over `el` would act on, and report whether that is
    *  anything at all. Null — and so no menu — for board chrome and empty column
-   *  space, for a redacted card (nothing to open, nothing to move), and for a draft
-   *  on an UNGROUPED board, whose Open row and Move section are both absent. */
+   *  space alone: every CARD now carries rows of its own. A redacted item and a
+   *  draft on an ungrouped board used to have an empty menu and so no menu; archive
+   *  and remove reach both off the membership's item id, which is a thing the
+   *  viewer can do about a card whose content they may not even read. */
   function recordMenuTarget(el: Element | null): boolean {
     const at = el === null ? null : cardAt(el);
     const item = at === null ? undefined : columns[at.col]?.items[at.idx];
@@ -661,12 +957,8 @@ export function ProjectsBoardPanel({
     // History lists select their pressed row the same way). The nonce stays put:
     // this sets where the arrows resume, never where focus goes.
     if (at !== null && item !== undefined) setCursor(at);
-    const kind = item?.content.kind;
     const next: BoardMenuTarget =
-      at === null ||
-      item === undefined ||
-      kind === "redacted" ||
-      (kind === "draft" && groupField === null)
+      at === null || item === undefined
         ? null
         : {
             item,
@@ -726,6 +1018,136 @@ export function ProjectsBoardPanel({
       option,
       query: lensQuery,
     });
+  }
+
+  /** Put one searched issue or pull request on the board. Owned here rather than in
+   *  the dialog so the pending strip can see it, and so the toast names the board
+   *  from the same place every other message about it does. Reports whether it
+   *  landed: the dialog flips its row on `true` and leaves it pickable on `false`.
+   *
+   *  NOT optimistic, unlike the removals. An add has no item id until GitHub mints
+   *  one, and a fabricated card is a card the menu and the move path can target —
+   *  the strip is the honest form of the same feedback. */
+  async function addExistingToBoard(
+    candidate: BoardCandidate,
+  ): Promise<boolean> {
+    if (projectId === null || project === null) return false;
+    try {
+      await addExisting.mutateAsync({
+        repo: repoPath,
+        projectId,
+        contentId: candidate.id,
+        number: candidate.number,
+      });
+    } catch {
+      // The mutation reported it; the row stays pickable so a retry is one Enter
+      // away.
+      return false;
+    }
+    // Neutral on purpose: under a filtered view the item may not appear in the
+    // columns at all, and GitHub's search index can lag its own write by seconds —
+    // so this says what happened, never where to look for it.
+    toast.success(`Added to ${project.title}`);
+    return true;
+  }
+
+  /** Add a draft note to the board. Owned here for the same reasons as the add
+   *  above; the dialog keeps the form and closes itself on `true`. */
+  async function createDraft(title: string, body: string): Promise<void> {
+    if (projectId === null || project === null) return;
+    // The session this write belongs to, read before the round trip. The CLOSE is
+    // performed here rather than by the dialog because only this side outlives the
+    // dialog: the write keeps going through an Esc, a board re-point that remounts
+    // the dialogs, and an `<Activity>` hide, and in every one of those the question
+    // "is the run that started this still on screen?" is answered by state the
+    // panel holds.
+    const session = dialogSessionRef.current;
+    try {
+      await addDraft.mutateAsync({ repo: repoPath, projectId, title, body });
+    } catch {
+      // The mutation reported it. Nothing closes, so the dialog stays open over the
+      // draft and the text isn't lost to a failed write.
+      return;
+    }
+    toast.success(`Draft added to ${project.title}`);
+    // Only the run that fired this may be closed by it. A stale token means the
+    // user has since closed, reopened, or been moved to another dialog — closing
+    // then would shut whatever is open now and discard what was typed into it.
+    if (session === dialogSessionRef.current) switchAddDialog(null);
+  }
+
+  /** Turn a draft card into a real issue in the repo this lens points at. The card
+   *  keeps its item id and its place; only its content changes, so nothing here
+   *  retires a cursor. */
+  async function convertCard(item: BoardItem) {
+    // Every read this needs happens BEFORE the first await, so a render landing
+    // under the prompt can't change what the write addresses. Belt-and-braces with
+    // the row's own hold, which is derived at render.
+    if (cardActionHeldReason !== undefined) return;
+    if (item.content.kind !== "draft") return;
+    const target = repoSlug ?? "this repository";
+    const ok = await useConfirm.getState().ask({
+      title: "Convert this draft to an issue?",
+      body: `Creates a real issue in ${target} from the draft's title and notes, and swaps the card over to it. The draft itself is gone once it lands.`,
+      confirmLabel: "Convert",
+    });
+    if (!ok) return;
+    try {
+      const { number, url } = await convertDraft.mutateAsync({
+        repo: repoPath,
+        itemId: item.itemId,
+        lens,
+      });
+      toast.success(`Converted to issue #${number}`, {
+        description: url,
+        action: { label: "View", onClick: () => openUrl(url) },
+      });
+    } catch {
+      // The mutation reported it; the card is untouched and the row is live again.
+    }
+  }
+
+  /** Archive or remove a card, and hand the keyboard somewhere it can still stand.
+   *  Both writes address the membership's item id alone, which is what lets them
+   *  reach a redacted card the viewer can't otherwise act on. */
+  async function retireCard(item: BoardItem, action: "archive" | "remove") {
+    if (cardActionHeldReason !== undefined || projectId === null) return;
+    // Read before the prompt: where the card sits is what the cursor lands beside
+    // once the refetch drops it, and the board can re-draw while the prompt is up.
+    const at = findCard(columns, item.itemId);
+    // Reversible and irreversible read differently, so each names where the card
+    // goes; the removal's own body then differs again by what the card HOLDS,
+    // since a draft has nowhere else to survive.
+    const prompt = {
+      archive: {
+        title: "Archive this card?",
+        body: ARCHIVE_BODY,
+        confirmLabel: "Archive",
+      },
+      remove: {
+        title: "Remove this card from the project?",
+        body: REMOVE_BODY[item.content.kind],
+        confirmLabel: "Remove",
+        confirmVariant: "destructive" as const,
+      },
+    }[action];
+    const ok = await useConfirm.getState().ask(prompt);
+    if (!ok) return;
+    // Armed BEFORE the write, not after it. The write's own `onMutate` patches the
+    // card out within a microtask, so the cursor has to follow it THERE — waiting
+    // for the round trip would leave the keyboard parked on a card that is already
+    // off the board for seconds. The latch still only lands when the columns stop
+    // drawing the card, which is the effect's own gate.
+    setRetired(at === null ? null : { itemId: item.itemId, ...at });
+    const vars = { repo: repoPath, projectId, itemId: item.itemId };
+    try {
+      if (action === "archive") await archiveItem.mutateAsync(vars);
+      else await removeItem.mutateAsync(vars);
+    } catch {
+      // The mutation reported it and its rollback put the card back. The cursor
+      // has already moved to the neighbour by then — a restored card doesn't pull
+      // focus back, since the user's attention is on the message saying why.
+    }
   }
 
   // Ranked, because the popup can be opened before the fields read settles and
@@ -852,12 +1274,25 @@ export function ProjectsBoardPanel({
       case items.isFetching:
         return "Refreshing the board…";
       // The mirror of the menu's own page-fetch hold, and the same mechanism read
-      // from the other side: a move's settle cancels this query's family to force
-      // the reconciliation, and query-core's cancel REVERTS whatever is in flight —
-      // so a continuation started during the write window would be thrown away
-      // between its request and the pages it was meant to extend.
+      // from the other side: EVERY write here settles by cancelling this query's
+      // family to force the reconciliation, and query-core's cancel REVERTS
+      // whatever is in flight — so a continuation started during any write's window
+      // would be thrown away between its request and the pages it was meant to
+      // extend. One arm per kind rather than one shared sentence: the wait is the
+      // same, but what the user is waiting ON is not.
       case movePending:
         return "Finishing your last card move…";
+      case cardWritePending:
+        return "Finishing your last card change…";
+      case addPending:
+        return "Finishing your last add…";
+      // The catch-all for the family, and the reason the two sets above don't have
+      // to be exhaustive: a board write the panel has no label for still holds
+      // pagination, because the click gate below refuses on `boardWritePending`
+      // whatever kind it is. Without this the button would render UNHELD and then
+      // silently do nothing — the one outcome the explain-disabled rule forbids.
+      case boardWritePending:
+        return "Finishing a board write…";
       // The post-failure half of the same hazard. A REFRESH that failed leaves
       // the pre-edit pages on screen with the invalidation still owed, and both
       // fetching guards above have released. Appending a continuation onto those
@@ -1075,6 +1510,7 @@ export function ProjectsBoardPanel({
                   column={column}
                   columnIndex={i}
                   activeIndex={liveCursor?.col === i ? liveCursor.idx : null}
+                  busyItemId={convertingItemId}
                   tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
                   focusNonce={focusNonce}
                   repoSlug={repoSlug}
@@ -1089,10 +1525,19 @@ export function ProjectsBoardPanel({
               <BoardCardMenuItems
                 target={menuTarget}
                 // An ungrouped board has one column standing for the whole
-                // board, which is no move target at all.
-                columns={groupField === null ? [] : columns}
+                // board, which is no move target at all. A REDACTED card has none
+                // either: its rows reach it by its place on the board, and a
+                // column pick is a claim about an item whose contents this viewer
+                // may not read.
+                columns={
+                  groupField === null ||
+                  menuTarget?.item.content.kind === "redacted"
+                    ? []
+                    : columns
+                }
                 openLabel={openLabelFor(menuTarget?.item, repoSlug)}
                 heldReason={moveHeldReason}
+                actionHeldReason={cardActionHeldReason}
                 actions={{
                   open: () => {
                     if (menuTarget !== null) openItem(menuTarget.item);
@@ -1100,6 +1545,20 @@ export function ProjectsBoardPanel({
                   move: (columnIndex) => {
                     if (menuTarget !== null)
                       moveCard(menuTarget.item, columnIndex);
+                  },
+                  // Each reads `menuTarget` at CLICK time and hands the item down
+                  // by value: the menu closes as it fires, and the prompt each of
+                  // these raises outlives the target the latch is about to drop.
+                  convert: () => {
+                    if (menuTarget !== null) void convertCard(menuTarget.item);
+                  },
+                  archive: () => {
+                    if (menuTarget !== null)
+                      void retireCard(menuTarget.item, "archive");
+                  },
+                  remove: () => {
+                    if (menuTarget !== null)
+                      void retireCard(menuTarget.item, "remove");
                   },
                 }}
               />
@@ -1109,12 +1568,67 @@ export function ProjectsBoardPanel({
     }
   })();
 
+  // What the board is waiting on, ONE LINE PER IN-FLIGHT WRITE, read off each
+  // write's own variables so the copy names the thing rather than the operation.
+  // Only the kinds whose result lands LATER get a line: an archive and a removal
+  // patch the card out on the spot, so the card's absence is already their feedback.
+  //
+  // STACKED rather than pluralized, and per INVOCATION rather than per kind — two
+  // drafts really can be in flight at once (Esc over one, submit another), and two
+  // lines each naming their own item beat one that names neither. The mutation id
+  // keys them, since the labels themselves can be identical.
+  const pendingLines: { key: number; label: string }[] = [];
+  for (const write of pendingWrites) {
+    if (write.kind === "add-existing") {
+      pendingLines.push({
+        key: write.mutationId,
+        label:
+          write.number === null
+            ? "Adding an item…"
+            : `Adding #${write.number} to the board…`,
+      });
+    } else if (write.kind === "add-draft") {
+      pendingLines.push({ key: write.mutationId, label: "Adding a draft…" });
+    } else if (write.kind === "convert") {
+      pendingLines.push({
+        key: write.mutationId,
+        label: "Converting a draft to an issue…",
+      });
+    }
+  }
+
   const showBoardChrome = isGitHub && !scopeGap && projectId !== null;
   const cappedNotes: string[] = [];
   if (catalogTruncated)
     cappedNotes.push("Some of this owner's projects aren't listed above.");
   if (fields.data?.truncated === true)
     cappedNotes.push("Some of this board's fields aren't offered above.");
+
+  // Both palette rows land exactly where the toolbar button does — one action, two
+  // entry points, one gate. Palette-only, like the view switcher's own row: the add
+  // menu is one Tab from the project name and a chord would cost more than it saves.
+  const canAdd = showBoardChrome && addHeldReason === undefined;
+  useHotkeyAction(
+    "add-board-item",
+    () => switchAddDialog("existing"),
+    active && canAdd,
+  );
+  useHotkeyAction(
+    "new-board-draft",
+    () => switchAddDialog("draft"),
+    active && canAdd,
+  );
+  // The content node ids of every card LOADED so far, for the add dialog's
+  // already-on-this-board rows. Off `items.data` rather than the derived `loaded`
+  // array, which is re-minted each render and would defeat the memo.
+  const loadedContentIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const page of items.data?.pages ?? [])
+      for (const item of page.items)
+        if ("id" in item.content) ids.add(item.content.id);
+    return ids;
+  }, [items.data]);
+
   return (
     // `h-full`, not `min-h-0 flex-1`: the content pane (<main>) is a BLOCK box,
     // so a flex-item sizing chain never engages there and this root would take
@@ -1122,7 +1636,7 @@ export function ProjectsBoardPanel({
     // virtualizers rendering every row. `min-h-0 flex-1` is the SIDEBAR idiom
     // (that aside really is a flex column); the content-pane idiom is this one
     // (RemoteIssueView, RemotePrView, DiffViewer).
-    <div className="flex h-full flex-col p-2">
+    <div ref={rootRef} className="flex h-full flex-col p-2">
       {project !== null && (
         <h2 className="sr-only">{project.title} project board</h2>
       )}
@@ -1155,6 +1669,41 @@ export function ProjectsBoardPanel({
               ))}
             </SelectContent>
           </Select>
+          {/* Two ways in rather than a per-column add: what a card joins is the
+              BOARD, and which column it lands in is the grouping's answer — the
+              same answer a move writes. Held with its reason rather than hidden,
+              so a read-only sign-in learns why instead of missing the control. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                // The landing the emptied-board retirement focuses. Marked rather
+                // than ref'd, and ON the render element rather than the trigger:
+                // this button renders inside `DisabledReasonButton`'s wrapper span,
+                // so the attribute is what names the focusable node itself, and it
+                // rides the same prop path as the `variant` beside it. Always
+                // focusable — a held Add item carries a reason, which takes
+                // `focusableWhenDisabled` rather than leaving the tab order.
+                <DisabledReasonButton
+                  data-board-add-trigger=""
+                  variant="outline"
+                  size="sm"
+                  disabled={addHeldReason !== undefined}
+                  reason={addHeldReason}
+                />
+              }
+            >
+              <PlusIcon data-icon="inline-start" />
+              Add item
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="min-w-56">
+              <DropdownMenuItem onClick={() => switchAddDialog("existing")}>
+                Add issue or pull request…
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => switchAddDialog("draft")}>
+                New draft…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           {/* Every control that shapes HOW the board is laid out lives behind
               this one trigger, so later slices add rows here rather than more
               toolbar chrome. The project switcher stays outside it: a project
@@ -1361,7 +1910,8 @@ export function ProjectsBoardPanel({
                   // Belt-and-braces with the `disabled` above: the held state is
                   // derived at render, and a click racing the render that sets it
                   // must not get through either.
-                  if (items.isFetching || movePending || lensLoading) return;
+                  if (items.isFetching || boardWritePending || lensLoading)
+                    return;
                   void items.fetchNextPage();
                 }}
               >
@@ -1429,7 +1979,59 @@ export function ProjectsBoardPanel({
           <ClearViewButton onClear={clearView} />
         </div>
       )}
+      {/* What the board is waiting on, in the layout FLOW like every other strip
+          here — a status that floated over the chrome would cover the controls it
+          is about. Last of the three, against the columns it describes: a failed
+          read is actionable and the lens is a standing claim, where this is a
+          statement about right now. `role="status"` so it is announced without
+          taking focus; `aria-live` is polite by default there, which is what a
+          write the user just fired should be. */}
+      {showBoardChrome && pendingLines.length > 0 && (
+        <div
+          role="status"
+          className="mb-2 shrink-0 space-y-1 border-b pb-1.5 text-[11px] text-muted-foreground"
+        >
+          {pendingLines.map((pending) => (
+            <p key={pending.key} className="flex items-center gap-1.5">
+              <Spinner className="size-3 shrink-0" />
+              {pending.label}
+            </p>
+          ))}
+        </div>
+      )}
       {body}
+      {/* Mounted only with a board to add to — both dialogs address one by id, and
+          `projectId` is what the whole toolbar is gated on anyway. KEYED on it as
+          well: the condition alone reconciles in place, so a board change would
+          hand the same instances a new id while they still held the previous
+          board's search and "Added" flags. The key is what drops that state; the
+          effect above is what closes a dialog the change happened under. Each key
+          carries its dialog's own prefix: keys have to be unique among SIBLINGS
+          whatever their component type, and a bare `projectId` on both made a
+          duplicate pair — a dev warning, and keyed reconciliation this design
+          leans on to remount rather than retain. */}
+      {projectId !== null && project !== null && (
+        <>
+          <AddExistingItemsDialog
+            key={`existing-${projectId}`}
+            repoPath={repoPath}
+            projectTitle={project.title}
+            lens={lens}
+            open={addDialog === "existing"}
+            onOpenChange={(o) => switchAddDialog(o ? "existing" : null)}
+            onBoardContentIds={loadedContentIds}
+            onAdd={addExistingToBoard}
+          />
+          <NewDraftDialog
+            key={`draft-${projectId}`}
+            projectTitle={project.title}
+            open={addDialog === "draft"}
+            pending={draftWritePending}
+            onOpenChange={(o) => switchAddDialog(o ? "draft" : null)}
+            onCreate={createDraft}
+          />
+        </>
+      )}
     </div>
   );
 }

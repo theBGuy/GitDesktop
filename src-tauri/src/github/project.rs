@@ -296,7 +296,7 @@ pub async fn gh_item_projects(
 /// embed charset first; `a`/`r` prefixes keep the two alias runs disjoint.
 /// Both lists empty yields an operation-less document — the caller short-circuits
 /// before that can be sent.
-fn build_edit_projects_mutation(
+pub(crate) fn build_edit_projects_mutation(
     content_id: &str,
     add_project_ids: &[String],
     removes: &[ProjectItemRemove],

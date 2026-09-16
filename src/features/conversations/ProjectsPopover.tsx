@@ -32,8 +32,12 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 
-const NO_ACCESS_REASON = "You don't have write access to this project";
-const READ_ONLY_SCOPE_REASON =
+/** The two holds every Projects surface states the same way — exported beside
+ *  {@link projectScopeReadOnly} for the same reason that predicate is: a claim
+ *  about the sign-in, or about one board, must not be worded differently depending
+ *  on which picker the user happens to be looking at. */
+export const NO_ACCESS_REASON = "You don't have write access to this project";
+export const READ_ONLY_SCOPE_REASON =
   "Your GitHub sign-in can read projects but not change them (needs the project scope)";
 const UNSETTLED_REASON =
   "Can't load this item's projects yet — use Retry above";

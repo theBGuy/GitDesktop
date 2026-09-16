@@ -6,9 +6,15 @@
   (when a board spans several) and assignees; **draft** items open their notes in place,
   issues and pull requests from this repository open on their own tab (cards from
   elsewhere open on GitHub), and the whole board answers to the arrow keys. Large boards
-  page in with **Load more**. Right-click a card (Shift+F10 on Windows and Linux) to
-  **move it to another column**: the board re-draws where it lands and your keyboard place
-  goes with it, while the write reaches GitHub behind you. The board's **saved views** come
+  page in with **Load more**. **Add item** fills the board from the toolbar: search this
+  repository's issues and pull requests and add several in a row, or write a **draft** —
+  a Markdown note that lives on the board until it earns an issue. Right-click a card
+  (Shift+F10 on Windows and Linux) to **move it to another column**: the board re-draws
+  where it lands and your keyboard place goes with it while the write reaches GitHub
+  behind you. The same menu **converts a draft into a real issue**, **archives**
+  a card (GitHub's archived items hold it for you), and **removes** one from the
+  project, each confirming first. Creating an issue can put it on its boards in the same
+  step: the **New issue** dialog gained a **Projects** picker. The board's **saved views** come
   along as lenses: pick one under **View options** and GitHub filters the read for you, its
   sort orders the cards in each column (by **Title**, or by a text, number, date,
   single-select or iteration field), its visible fields show as chips on the cards, and
@@ -17,5 +23,5 @@
   palette) brings the whole item set back in the board's own order with the chips off,
   leaving the grouping wherever you last put it, and nothing here writes to the view.
   GitHub only; reading a board needs the same `project` or `read:project` sign-in scope
-  the Projects picker already asks for, and moving a card needs the `project` scope plus
-  write access to the board.
+  the Projects picker already asks for, and every write here needs the `project` scope
+  plus write access to the board.

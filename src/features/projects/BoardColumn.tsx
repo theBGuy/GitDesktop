@@ -29,6 +29,7 @@ export const BoardColumn = memo(function BoardColumn({
   column,
   columnIndex,
   activeIndex,
+  busyItemId,
   tabStopIndex,
   focusNonce,
   repoSlug,
@@ -41,6 +42,11 @@ export const BoardColumn = memo(function BoardColumn({
   columnIndex: number;
   /** The keyboard cursor's row in THIS column, or null when it sits elsewhere. */
   activeIndex: number | null;
+  /** The card a write is changing in place, wherever it is on the board — the
+   *  item ID rather than an index, since this column may not hold it at all. A
+   *  primitive on purpose: this component is memoized, and the comparison is the
+   *  default shallow one. */
+  busyItemId: string | null;
   /** The board's single tab stop, when it is in this column. */
   tabStopIndex: number | null;
   /** Bumped once per arrow press. The only thing that may move DOM focus. */
@@ -202,6 +208,7 @@ export const BoardColumn = memo(function BoardColumn({
                   setSize={items.length}
                   columnIndex={columnIndex}
                   active={vi.index === activeIndex}
+                  busy={items[vi.index].itemId === busyItemId}
                   rovingTab={vi.index === tabStopIndex ? 0 : -1}
                   repoSlug={repoSlug}
                   ghHost={ghHost}

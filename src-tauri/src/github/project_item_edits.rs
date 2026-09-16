@@ -1,0 +1,767 @@
+//! GitHub-only Projects v2 item creation, conversion, and membership edits.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::error::{AppError, AppResult};
+use crate::github::gh_unreadable;
+use crate::github::issue::repo_owner_name;
+use crate::github::project::build_edit_projects_mutation;
+use crate::github::runner::{run_gh_input, GH_NETWORK_TIMEOUT};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardCandidate {
+    pub id: String,
+    pub kind: String,
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub is_draft: bool,
+    pub state_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardCandidates {
+    pub candidates: Vec<BoardCandidate>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertedDraft {
+    pub number: u64,
+    pub url: String,
+}
+
+const ITEM_EDITS_SCOPE_HINT: &str =
+    "GitHub project item edits need the project scope. Run:  gh auth refresh -s project";
+
+const SEARCH_QUERY: &str = "query($q:String!){ search(query:$q, type: ISSUE_ADVANCED, first:25){ pageInfo{hasNextPage} nodes{ __typename ... on Issue { id number title state stateReason repository { nameWithOwner } } ... on PullRequest { id number title state isDraft repository { nameWithOwner } } } } }";
+const REPOSITORY_QUERY: &str =
+    "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ id } }";
+const ISSUE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ issue(number:$number){ id } } }";
+const ADD_DRAFT_MUTATION: &str = "mutation($projectId:ID!,$title:String!,$body:String){ addProjectV2DraftIssue(input:{projectId:$projectId,title:$title,body:$body}){ projectItem{ id } } }";
+// Conversion, archive, and removal address PVTI_ item ids, never DI_ content ids.
+const CONVERT_MUTATION: &str = "mutation($itemId:ID!,$repositoryId:ID!){ convertProjectV2DraftIssueItemToIssue(input:{itemId:$itemId,repositoryId:$repositoryId}){ item{ content{ __typename ... on Issue { number url } } } } }";
+const ARCHIVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ archiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ item{ id } } }";
+const REMOVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ deleteProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ deletedItemId } }";
+
+const SEARCH_POINTER: &str = "/data/search";
+const CANDIDATE_REPOSITORY_POINTER: &str = "/repository/nameWithOwner";
+const REPOSITORY_ID_POINTER: &str = "/data/repository/id";
+const ISSUE_ID_POINTER: &str = "/data/repository/issue/id";
+const DRAFT_ID_POINTER: &str = "/data/addProjectV2DraftIssue/projectItem/id";
+const CONVERT_POINTER: &str = "/data/convertProjectV2DraftIssueItemToIssue/item/content";
+const ARCHIVE_POINTER: &str = "/data/archiveProjectV2Item";
+const REMOVE_POINTER: &str = "/data/deleteProjectV2Item";
+
+fn map_scope_error(e: AppError) -> AppError {
+    if let AppError::Gh(ref msg) = e {
+        let lower = msg.to_lowercase();
+        if lower.contains("required scopes") || lower.contains("read:project") {
+            return AppError::Gh(ITEM_EDITS_SCOPE_HINT.to_string());
+        }
+    }
+    e
+}
+
+const GRAPHQL_INPUT_ARGS: [&str; 6] = ["api", "graphql", "--method", "POST", "--input", "-"];
+
+// Stdin keeps bodies, titles, search text, and batched documents outside Windows'
+// command-line limit. JSON variables preserve strings without gh's -F coercion.
+fn graphql_input(document: &str, variables: Value) -> String {
+    json!({"query": document, "variables": variables}).to_string()
+}
+
+fn search_input(owner: &str, name: &str, search: &str) -> String {
+    let search = search.trim();
+    let mut q = format!("repo:{owner}/{name} sort:updated-desc");
+    // Convenience grouping only: user parentheses can escape the repo qualifier.
+    // parse_candidate's repository check enforces that only matching rows reach the picker.
+    if !search.is_empty() {
+        q.push_str(&format!(" ({search})"));
+    }
+    graphql_input(SEARCH_QUERY, json!({"q": q}))
+}
+
+fn draft_input(project_id: &str, title: &str, body: &str) -> String {
+    graphql_input(
+        ADD_DRAFT_MUTATION,
+        json!({"projectId": project_id, "title": title, "body": body}),
+    )
+}
+
+// Preserve CLI failures verbatim; project mutation callers own scope-hint mapping.
+async fn request(repo_path: &str, input: &str, surface: &str) -> AppResult<Value> {
+    let out = run_gh_input(
+        Some(repo_path),
+        &GRAPHQL_INPUT_ARGS,
+        input,
+        GH_NETWORK_TIMEOUT,
+    )
+    .await?;
+    serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
+}
+
+fn response_id(value: &Value, pointer: &str, surface: &str) -> AppResult<String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| gh_unreadable(surface, format!("missing id at {pointer}")))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCandidate {
+    id: String,
+    number: u64,
+    title: String,
+    state: String,
+    state_reason: Option<String>,
+    is_draft: Option<bool>,
+}
+
+fn parse_candidate(node: &Value, expected_repository: &str) -> Option<BoardCandidate> {
+    // Search syntax can widen scope; only a matching repository may reach the picker.
+    let repository = node.pointer(CANDIDATE_REPOSITORY_POINTER)?.as_str()?;
+    if !repository.eq_ignore_ascii_case(expected_repository) {
+        return None;
+    }
+    let kind = match node["__typename"].as_str()? {
+        "Issue" => "issue",
+        "PullRequest" => "pr",
+        _ => return None,
+    };
+    let raw: RawCandidate = serde_json::from_value(node.clone()).ok()?;
+    Some(BoardCandidate {
+        id: raw.id,
+        kind: kind.into(),
+        number: raw.number,
+        title: raw.title,
+        state: raw.state,
+        is_draft: if kind == "pr" { raw.is_draft? } else { false },
+        state_reason: if kind == "issue" {
+            raw.state_reason
+        } else {
+            None
+        },
+    })
+}
+
+fn parse_candidates(value: &Value, expected_repository: &str) -> AppResult<BoardCandidates> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PageInfo {
+        has_next_page: bool,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Page {
+        nodes: Option<Vec<Value>>,
+        page_info: PageInfo,
+    }
+    let page: Page = serde_json::from_value(
+        value
+            .pointer(SEARCH_POINTER)
+            .cloned()
+            .unwrap_or(Value::Null),
+    )
+    .map_err(|e| {
+        gh_unreadable(
+            "the board candidates",
+            format!("could not parse search: {e}"),
+        )
+    })?;
+    Ok(BoardCandidates {
+        candidates: page
+            .nodes
+            .into_iter()
+            .flatten()
+            .filter_map(|node| parse_candidate(&node, expected_repository))
+            .collect(),
+        truncated: page.page_info.has_next_page,
+    })
+}
+
+// The command must pass its UNMAPPED result so search retains GitHub's scope errors.
+// This helper's tests cannot detect mapping done upstream before it receives the result.
+fn search_candidates_from_response(
+    response: AppResult<Value>,
+    expected_repository: &str,
+) -> AppResult<BoardCandidates> {
+    parse_candidates(&response?, expected_repository)
+}
+
+fn parse_converted(value: &Value) -> AppResult<ConvertedDraft> {
+    let content = value.pointer(CONVERT_POINTER).unwrap_or(&Value::Null);
+    if content["__typename"].as_str() != Some("Issue") {
+        return Err(gh_unreadable(
+            "the converted draft",
+            "conversion did not return an issue".into(),
+        ));
+    }
+    serde_json::from_value(content.clone()).map_err(|e| {
+        gh_unreadable(
+            "the converted draft",
+            format!("could not parse the issue: {e}"),
+        )
+    })
+}
+
+fn require_payload(value: &Value, pointer: &str, surface: &str) -> AppResult<()> {
+    if value.pointer(pointer).is_some_and(Value::is_object) {
+        Ok(())
+    } else {
+        Err(gh_unreadable(
+            surface,
+            format!("missing payload at {pointer}"),
+        ))
+    }
+}
+
+#[tauri::command]
+pub async fn gh_search_board_candidates(
+    repo_path: String,
+    search: String,
+    lens: Option<String>,
+) -> AppResult<BoardCandidates> {
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
+    let response = request(
+        &repo_path,
+        &search_input(&owner, &name, &search),
+        "the board candidates",
+    )
+    .await;
+    search_candidates_from_response(response, &format!("{owner}/{name}"))
+}
+
+#[tauri::command]
+pub async fn gh_add_draft_item(
+    repo_path: String,
+    project_id: String,
+    title: String,
+    body: String,
+) -> AppResult<String> {
+    let value = request(
+        &repo_path,
+        &draft_input(&project_id, &title, &body),
+        "the new project draft",
+    )
+    .await
+    .map_err(map_scope_error)?;
+    response_id(&value, DRAFT_ID_POINTER, "the new project draft")
+}
+
+#[tauri::command]
+pub async fn gh_convert_draft_item(
+    repo_path: String,
+    item_id: String,
+    lens: Option<String>,
+) -> AppResult<ConvertedDraft> {
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
+    let input = graphql_input(REPOSITORY_QUERY, json!({"owner": owner, "name": name}));
+    let value = request(&repo_path, &input, "the draft's destination repository").await?;
+    // Resolve and parse the destination before issuing any mutation.
+    let repository_id = response_id(
+        &value,
+        REPOSITORY_ID_POINTER,
+        "the draft's destination repository",
+    )?;
+    let input = graphql_input(
+        CONVERT_MUTATION,
+        json!({"itemId": item_id, "repositoryId": repository_id}),
+    );
+    let value = request(&repo_path, &input, "the converted draft")
+        .await
+        .map_err(map_scope_error)?;
+    parse_converted(&value)
+}
+
+#[tauri::command]
+pub async fn gh_archive_board_item(
+    repo_path: String,
+    project_id: String,
+    item_id: String,
+) -> AppResult<()> {
+    let input = graphql_input(
+        ARCHIVE_MUTATION,
+        json!({"projectId": project_id, "itemId": item_id}),
+    );
+    let value = request(&repo_path, &input, "the archived project item")
+        .await
+        .map_err(map_scope_error)?;
+    require_payload(&value, ARCHIVE_POINTER, "the archived project item")
+}
+
+#[tauri::command]
+pub async fn gh_remove_board_item(
+    repo_path: String,
+    project_id: String,
+    item_id: String,
+) -> AppResult<()> {
+    let input = graphql_input(
+        REMOVE_MUTATION,
+        json!({"projectId": project_id, "itemId": item_id}),
+    );
+    let value = request(&repo_path, &input, "the removed project item")
+        .await
+        .map_err(map_scope_error)?;
+    require_payload(&value, REMOVE_POINTER, "the removed project item")
+}
+
+#[tauri::command]
+pub async fn gh_add_issue_to_projects(
+    repo_path: String,
+    number: u64,
+    add_project_ids: Vec<String>,
+    lens: Option<String>,
+) -> AppResult<()> {
+    if add_project_ids.is_empty() {
+        return Ok(());
+    }
+    let (owner, name) = repo_owner_name(&repo_path, lens.as_deref()).await?;
+    let input = graphql_input(
+        ISSUE_QUERY,
+        json!({"owner": owner, "name": name, "number": number}),
+    );
+    let value = request(&repo_path, &input, "the issue to add to projects").await?;
+    let issue_id = response_id(&value, ISSUE_ID_POINTER, "the issue to add to projects")?;
+    let document = build_edit_projects_mutation(&issue_id, &add_project_ids, &[])?;
+    request(
+        &repo_path,
+        &graphql_input(&document, json!({})),
+        "the added project memberships",
+    )
+    .await
+    .map_err(map_scope_error)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn issue(reason: Value) -> Value {
+        json!({"__typename":"Issue","id":"I_one","number":1,"title":"Issue","state":"CLOSED","stateReason":reason,"repository":{"nameWithOwner":"owner/repo"}})
+    }
+
+    fn pr() -> Value {
+        json!({"__typename":"PullRequest","id":"PR_two","number":2,"title":"PR","state":"OPEN","isDraft":true,"repository":{"nameWithOwner":"owner/repo"}})
+    }
+
+    fn page(nodes: Value, truncated: bool) -> Value {
+        json!({"data":{"search":{"nodes":nodes,"pageInfo":{"hasNextPage":truncated}}}})
+    }
+
+    fn assert_keys(value: Value, expected: &[&str]) {
+        let mut keys: Vec<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+    }
+
+    fn assert_pointer(document: &str, pointer: &str) {
+        let compact: String = document.chars().filter(|c| !c.is_whitespace()).collect();
+        for field in pointer.split('/').filter(|s| !s.is_empty() && *s != "data") {
+            assert!(
+                compact.contains(&format!("{field}("))
+                    || compact.contains(&format!("{field}{{"))
+                    || compact.contains(&format!("{field}}}")),
+                "{document} must select {field} for {pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_payload_pointers_match_selected_fields() {
+        for (doc, pointer) in [
+            (SEARCH_QUERY, SEARCH_POINTER),
+            (REPOSITORY_QUERY, REPOSITORY_ID_POINTER),
+            (ISSUE_QUERY, ISSUE_ID_POINTER),
+        ] {
+            assert_pointer(doc, pointer);
+        }
+        assert!(SEARCH_QUERY.contains("type: ISSUE_ADVANCED, first:25"));
+        assert!(SEARCH_QUERY.contains("pageInfo{hasNextPage}"));
+        for kind in ["Issue", "PullRequest"] {
+            let arm = SEARCH_QUERY
+                .split_once(&format!("... on {kind} {{"))
+                .unwrap()
+                .1
+                .split("... on ")
+                .next()
+                .unwrap();
+            assert_pointer(arm, CANDIDATE_REPOSITORY_POINTER);
+        }
+    }
+
+    #[test]
+    fn mutation_payload_pointers_match_selected_fields() {
+        for (doc, pointer) in [
+            (ADD_DRAFT_MUTATION, DRAFT_ID_POINTER),
+            (CONVERT_MUTATION, CONVERT_POINTER),
+            (ARCHIVE_MUTATION, ARCHIVE_POINTER),
+            (REMOVE_MUTATION, REMOVE_POINTER),
+        ] {
+            assert_pointer(doc, pointer);
+        }
+        for doc in [CONVERT_MUTATION, ARCHIVE_MUTATION, REMOVE_MUTATION] {
+            assert!(doc.contains("itemId:$itemId"));
+            assert!(!doc.contains("draftIssueId"));
+        }
+        assert!(!ADD_DRAFT_MUTATION.contains("assigneeIds"));
+    }
+
+    #[test]
+    fn search_mixed_page_skips_unknown_nodes() {
+        let result = parse_candidates(
+            &page(
+                json!([issue(Value::Null), pr(), {"__typename":"FutureType"}]),
+                false,
+            ),
+            "owner/repo",
+        )
+        .unwrap();
+        assert_eq!(result.candidates.len(), 2);
+        assert_eq!(result.candidates[0].kind, "issue");
+        assert!(!result.candidates[0].is_draft);
+        assert!(result.candidates[0].state_reason.is_none());
+        assert_eq!(result.candidates[1].kind, "pr");
+        assert!(result.candidates[1].is_draft);
+        assert!(result.candidates[1].state_reason.is_none());
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn search_skips_malformed_nodes_without_losing_valid_rows() {
+        let mut missing_draft = pr();
+        missing_draft.as_object_mut().unwrap().remove("isDraft");
+        let result = parse_candidates(&page(json!([issue(json!("COMPLETED")), missing_draft, {"__typename":"Issue","number":"bad","repository":{"nameWithOwner":"owner/repo"}}, null, pr()]), true), "owner/repo").unwrap();
+        assert_eq!(result.candidates.len(), 2);
+        assert_eq!(
+            result.candidates[0].state_reason.as_deref(),
+            Some("COMPLETED")
+        );
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn search_empty_and_nullable_nodes_preserve_truncation() {
+        for nodes in [json!([]), Value::Null] {
+            for truncated in [false, true] {
+                let result =
+                    parse_candidates(&page(nodes.clone(), truncated), "owner/repo").unwrap();
+                assert!(result.candidates.is_empty());
+                assert_eq!(result.truncated, truncated);
+            }
+        }
+    }
+
+    #[test]
+    fn unreadable_search_is_an_error_with_a_human_surface() {
+        for value in [Value::Null, page(json!({"bad":"shape"}), false)] {
+            let error = parse_candidates(&value, "owner/repo").unwrap_err();
+            assert!(error
+                .to_string()
+                .starts_with("Couldn't read the board candidates from GitHub.\n"));
+        }
+    }
+
+    #[test]
+    fn search_is_repo_scoped_and_trims_empty_text() {
+        for text in ["", " \n "] {
+            let input: Value = serde_json::from_str(&search_input("owner", "repo", text)).unwrap();
+            assert_eq!(input["variables"]["q"], "repo:owner/repo sort:updated-desc");
+        }
+        for text in [
+            "label:bug",
+            "bug OR regression",
+            "repo:other/x",
+            "a) OR (repo:other/x",
+        ] {
+            let input: Value =
+                serde_json::from_str(&search_input("owner", "repo", &format!("  {text}  ")))
+                    .unwrap();
+            assert_eq!(
+                input["variables"]["q"],
+                format!("repo:owner/repo sort:updated-desc ({text})")
+            );
+        }
+    }
+
+    #[test]
+    fn search_keeps_only_matching_repositories_case_insensitively() {
+        let mut foreign_issue = issue(Value::Null);
+        foreign_issue["repository"]["nameWithOwner"] = json!("other/repo");
+        let mut foreign_pr = pr();
+        foreign_pr["repository"]["nameWithOwner"] = json!("owner/elsewhere");
+        let mut case_issue = issue(Value::Null);
+        case_issue["id"] = json!("I_case");
+        case_issue["repository"]["nameWithOwner"] = json!("OWNER/Repo");
+        let mut case_pr = pr();
+        case_pr["id"] = json!("PR_case");
+        case_pr["repository"]["nameWithOwner"] = json!("Owner/REPO");
+        let result = parse_candidates(
+            &page(
+                json!([
+                    foreign_issue,
+                    issue(Value::Null),
+                    case_issue,
+                    foreign_pr,
+                    pr(),
+                    case_pr
+                ]),
+                true,
+            ),
+            "owner/repo",
+        )
+        .unwrap();
+        let ids: Vec<_> = result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect();
+        assert_eq!(ids, ["I_one", "I_case", "PR_two", "PR_case"]);
+        assert!(result.truncated);
+
+        for repository in [
+            Value::Null,
+            json!({}),
+            json!({"nameWithOwner":null}),
+            json!({"nameWithOwner":42}),
+        ] {
+            let mut node = issue(Value::Null);
+            node["repository"] = repository;
+            assert!(parse_candidate(&node, "owner/repo").is_none());
+        }
+        let mut node = pr();
+        node.as_object_mut().unwrap().remove("repository");
+        assert!(parse_candidate(&node, "owner/repo").is_none());
+    }
+
+    #[test]
+    fn repository_filter_enforces_scope_after_parenthesis_escape() {
+        let mut foreign = issue(Value::Null);
+        foreign["repository"]["nameWithOwner"] = json!("other/x");
+        let result = parse_candidates(
+            &page(json!([foreign, issue(Value::Null)]), false),
+            "owner/repo",
+        )
+        .unwrap();
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].id, "I_one");
+    }
+
+    #[test]
+    fn hostile_user_text_stays_in_stdin_variables() {
+        assert_eq!(
+            GRAPHQL_INPUT_ARGS,
+            ["api", "graphql", "--method", "POST", "--input", "-"]
+        );
+        for hostile in [
+            "@host-file",
+            "true",
+            "123",
+            "\"} mutation { hostile }\n\\text",
+        ] {
+            for (input, document, variables) in [
+                (
+                    search_input("owner", "repo", hostile),
+                    SEARCH_QUERY,
+                    json!({"q": format!("repo:owner/repo sort:updated-desc ({hostile})")}),
+                ),
+                (
+                    draft_input(hostile, hostile, hostile),
+                    ADD_DRAFT_MUTATION,
+                    json!({"projectId": hostile, "title": hostile, "body": hostile}),
+                ),
+            ] {
+                let payload: Value = serde_json::from_str(&input).unwrap();
+                assert_eq!(payload, json!({"query": document, "variables": variables}));
+                assert!(!document.contains(hostile));
+                assert!(GRAPHQL_INPUT_ARGS.iter().all(|arg| !arg.contains(hostile)));
+            }
+        }
+        assert!(SEARCH_QUERY.contains("query:$q"));
+        assert!(ADD_DRAFT_MUTATION.contains("title:$title,body:$body"));
+    }
+
+    #[test]
+    fn long_draft_and_search_text_round_trip_through_stdin() {
+        let text = "# Markdown\n\"quoted\" \\path @file\n".repeat(3000);
+        assert!(text.encode_utf16().count() > 32_767);
+        let draft: Value = serde_json::from_str(&draft_input("PVT_one", &text, &text)).unwrap();
+        assert_eq!(
+            draft,
+            json!({"query": ADD_DRAFT_MUTATION, "variables": {"projectId": "PVT_one", "title": text, "body": text}})
+        );
+        let search: Value = serde_json::from_str(&search_input("owner", "repo", &text)).unwrap();
+        assert_eq!(
+            search,
+            json!({"query": SEARCH_QUERY, "variables": {"q": format!("repo:owner/repo sort:updated-desc ({})", text.trim())}})
+        );
+        assert_eq!(
+            GRAPHQL_INPUT_ARGS,
+            ["api", "graphql", "--method", "POST", "--input", "-"]
+        );
+        assert!(GRAPHQL_INPUT_ARGS.iter().all(|arg| !arg.contains(&text)));
+    }
+
+    #[test]
+    fn draft_payload_returns_the_project_item_id() {
+        let value = json!({"data":{"addProjectV2DraftIssue":{"projectItem":{"id":"PVTI_new","content":{"id":"DI_draft"}}}}});
+        assert_eq!(
+            response_id(&value, DRAFT_ID_POINTER, "the new project draft").unwrap(),
+            "PVTI_new"
+        );
+        assert!(response_id(&Value::Null, DRAFT_ID_POINTER, "the new project draft").is_err());
+        for id in ["", "  ", "\t\n"] {
+            let value = json!({"data":{"addProjectV2DraftIssue":{"projectItem":{"id":id}}}});
+            let error = response_id(&value, DRAFT_ID_POINTER, "the new project draft").unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Couldn't read the new project draft from GitHub.\nmissing id at /data/addProjectV2DraftIssue/projectItem/id"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_and_issue_resolution_require_ids() {
+        let value = json!({"data":{"repository":{"id":"R_repo","issue":{"id":"I_issue"}}}});
+        assert_eq!(
+            response_id(&value, REPOSITORY_ID_POINTER, "the repository").unwrap(),
+            "R_repo"
+        );
+        assert_eq!(
+            response_id(&value, ISSUE_ID_POINTER, "the issue").unwrap(),
+            "I_issue"
+        );
+        for pointer in [REPOSITORY_ID_POINTER, ISSUE_ID_POINTER] {
+            assert!(response_id(
+                &json!({"data":{"repository":null}}),
+                pointer,
+                "the repository"
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn convert_payload_parses_issue_and_rejects_other_content() {
+        let payload = |content: Value| json!({"data":{"convertProjectV2DraftIssueItemToIssue":{"item":{"content":content}}}});
+        let result = parse_converted(&payload(
+            json!({"__typename":"Issue","number":42,"url":"https://github.com/o/r/issues/42"}),
+        ))
+        .unwrap();
+        assert_eq!(result.number, 42);
+        assert_eq!(result.url, "https://github.com/o/r/issues/42");
+        for content in [
+            Value::Null,
+            json!({"__typename":"DraftIssue","id":"DI_one"}),
+            json!({"__typename":"PullRequest","number":42,"url":"url"}),
+            json!({"__typename":"Issue","number":42}),
+        ] {
+            assert!(parse_converted(&payload(content)).is_err());
+        }
+    }
+
+    #[test]
+    fn archive_and_remove_require_mutation_payloads() {
+        let value = json!({"data":{"archiveProjectV2Item":{"item":{"id":"PVTI_one"}},"deleteProjectV2Item":{"deletedItemId":"PVTI_one"}}});
+        for pointer in [ARCHIVE_POINTER, REMOVE_POINTER] {
+            assert!(require_payload(&value, pointer, "the project item").is_ok());
+            assert!(require_payload(&Value::Null, pointer, "the project item").is_err());
+        }
+    }
+
+    #[test]
+    fn candidate_wire_keys_are_camel_case() {
+        // These are structs, not tagged unions: rename_all_fields does not apply.
+        let candidate = parse_candidate(&issue(Value::Null), "owner/repo").unwrap();
+        let wire = serde_json::to_value(candidate).unwrap();
+        assert_eq!(wire["stateReason"], Value::Null);
+        assert_keys(
+            wire,
+            &[
+                "id",
+                "kind",
+                "number",
+                "title",
+                "state",
+                "isDraft",
+                "stateReason",
+            ],
+        );
+    }
+
+    #[test]
+    fn page_and_conversion_wire_keys_are_camel_case() {
+        assert_keys(
+            serde_json::to_value(BoardCandidates {
+                candidates: vec![],
+                truncated: false,
+            })
+            .unwrap(),
+            &["candidates", "truncated"],
+        );
+        assert_keys(
+            serde_json::to_value(ConvertedDraft {
+                number: 1,
+                url: "url".into(),
+            })
+            .unwrap(),
+            &["number", "url"],
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_adds_return_before_repo_resolution_or_network() {
+        gh_add_issue_to_projects(
+            "missing-repo".into(),
+            1,
+            vec![],
+            Some("invalid-lens".into()),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn scope_mapping_preserves_unrelated_errors() {
+        for message in [
+            "gh: required scopes: ['repo']",
+            "gh: requires one of the following scopes: ['repo']",
+        ] {
+            let error =
+                search_candidates_from_response(Err(AppError::Gh(message.into())), "owner/repo")
+                    .unwrap_err();
+            assert_eq!(error.to_string(), message);
+        }
+        for message in ["gh: required scopes: project", "Missing READ:PROJECT"] {
+            assert_eq!(
+                map_scope_error(AppError::Gh(message.into())).to_string(),
+                ITEM_EDITS_SCOPE_HINT
+            );
+        }
+        assert_eq!(
+            map_scope_error(AppError::Gh("connection reset".into())).to_string(),
+            "connection reset"
+        );
+        assert!(matches!(
+            map_scope_error(AppError::InvalidArgument("read:project".into())),
+            AppError::InvalidArgument(_)
+        ));
+    }
+}

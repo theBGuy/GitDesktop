@@ -23,6 +23,7 @@ import type {
   BitbucketRepoSettingsInput,
   BitbucketWorkspace,
   BlameLine,
+  BoardCandidates,
   BoardItems,
   Branch,
   BranchComparison,
@@ -40,6 +41,7 @@ import type {
   CommitSummary,
   CommunityInsights,
   ContributorChurn,
+  ConvertedDraft,
   DeltaDiff,
   DiffStatEntry,
   DiscussionDetails,
@@ -2583,6 +2585,72 @@ export const ghSetItemFieldValues = (
     itemId,
     updates,
     clears,
+  });
+
+/** Issues and pull requests in THIS repository a board could take, matching
+ *  `search`. Repo-scoped by design: an owner-wide search would offer items from
+ *  repositories this window isn't showing. The lens picks which repo "this" is. */
+export const ghSearchBoardCandidates = (
+  repoPath: string,
+  search: string,
+  lens: RemoteLens,
+) =>
+  invoke<BoardCandidates>("gh_search_board_candidates", {
+    repoPath,
+    search,
+    lens,
+  });
+
+/** Adds a DRAFT item — a note that lives only on this board — and returns its new
+ *  item id. `body` rides verbatim as Markdown; the card's popover renders it. */
+export const ghAddDraftItem = (
+  repoPath: string,
+  projectId: string,
+  title: string,
+  body: string,
+) => invoke<string>("gh_add_draft_item", { repoPath, projectId, title, body });
+
+/** Turns a draft into a real issue in the repo the lens names, keeping the card's
+ *  place on the board. Addressed by the membership's `itemId` — a draft's own
+ *  content id is a different thing and the backend rejects it. */
+export const ghConvertDraftItem = (
+  repoPath: string,
+  itemId: string,
+  lens: RemoteLens,
+) =>
+  invoke<ConvertedDraft>("gh_convert_draft_item", { repoPath, itemId, lens });
+
+/** Archives one card: it leaves the board's columns but stays on the project,
+ *  restorable from the project's archived items on GitHub. Takes the
+ *  membership's `itemId`. */
+export const ghArchiveBoardItem = (
+  repoPath: string,
+  projectId: string,
+  itemId: string,
+) => invoke<void>("gh_archive_board_item", { repoPath, projectId, itemId });
+
+/** Removes one card from the project. For an issue or pull request that unlinks
+ *  the membership alone; for a DRAFT it destroys the note, which exists nowhere
+ *  else. Takes the membership's `itemId`. */
+export const ghRemoveBoardItem = (
+  repoPath: string,
+  projectId: string,
+  itemId: string,
+) => invoke<void>("gh_remove_board_item", { repoPath, projectId, itemId });
+
+/** Adds one issue to boards by project id, addressed by issue NUMBER rather than
+ *  node id — the create flow has the number before it has anything else. */
+export const ghAddIssueToProjects = (
+  repoPath: string,
+  number: number,
+  addProjectIds: string[],
+  lens: RemoteLens,
+) =>
+  invoke<void>("gh_add_issue_to_projects", {
+    repoPath,
+    number,
+    addProjectIds,
+    lens,
   });
 
 /** Third-party AI-reviewer findings on a PR/MR (Copilot/CodeRabbit/…), behind the
