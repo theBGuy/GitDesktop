@@ -80,17 +80,19 @@ export function repoIdentityStrict(repoPath: string): Promise<string> {
  *  it never resolved one. READ-ONLY on the memo: never resolves, never populates.
  *  For callers that must not RESOLVE — a dead path answers the raw-path fallback and
  *  would pin it — but may honor an identity learned while the path was still alive.
- *  Deliberately unaged: its consumer asks about checkouts that are GONE, which never
- *  re-stamp, and an identity-keyed mute has to outlive the folder it was set on. */
+ *  Deliberately unaged, for both its consumers: the notification ladder asks about
+ *  checkouts that are GONE, which never re-stamp and whose identity-keyed mute has to
+ *  outlive the folder, and {@link repoIdentity}'s fallback must never expire into a
+ *  raw path that would redirect a write. */
 export function peekRepoIdentity(repoPath: string): string | undefined {
   return settledIdentities.get(repoPath)?.id;
 }
 
-/** {@link peekRepoIdentity} bounded by age — the seam for a READ surface that would
+/** {@link peekRepoIdentity} bounded by age — the seam for a query READER that would
  *  rather show the last identity than an error while a re-validation is failing.
- *  Writers must not use it: an unconfirmed answer is exactly what a write during an
- *  outage has to refuse. `maxAgeMs` is the caller's policy, and it is what caps how
- *  long a path that changed hands can serve the previous repo's key. */
+ *  Reader-only by design: a bound is affordable where running out of it renders an
+ *  error body, and unaffordable where it would silently redirect a write (see
+ *  {@link repoIdentity}). `maxAgeMs` is the caller's policy. */
 export function settledIdentityWithin(
   repoPath: string,
   maxAgeMs: number,
@@ -99,26 +101,24 @@ export function settledIdentityWithin(
   return hit && stamp() - hit.at < maxAgeMs ? hit.id : undefined;
 }
 
-/** How long a non-refusing caller keeps serving an identity a re-validation could
- *  not confirm. Two windows: one failed re-validation is a hiccup worth riding out,
- *  a second says the condition isn't transient — past that an honest fallback beats
- *  a key nothing has confirmed in ten minutes. This bound, not {@link
- *  IDENTITY_TTL_MS}, is what caps how long a reused checkout path can serve the
- *  previous repo's identity, and every non-refusing surface shares the one number. */
-export const IDENTITY_READ_GRACE_MS = IDENTITY_TTL_MS * 2;
-
 /** {@link repoIdentityStrict} for callers with nowhere to put a failure: never
- *  rejects, standing in the raw path when the IPC call fails — the same key the
- *  Rust fallback produces. For one-shot store/fold callers; observers that can
- *  retry use the strict form. */
+ *  rejects, standing in the LAST KNOWN identity when the IPC call fails, and in the
+ *  raw path only for a path this session never resolved — the same key the Rust
+ *  fallback produces. For one-shot store/fold callers; observers that can retry use
+ *  the strict form. */
 export async function repoIdentity(repoPath: string): Promise<string> {
   try {
     return await repoIdentityStrict(repoPath);
   } catch {
-    // Both branches answer rather than refuse, so prefer the remembered identity:
-    // it is where this path's records already live, while the raw path addresses
-    // nothing. Bounded like every other non-refusing surface.
-    return settledIdentityWithin(repoPath, IDENTITY_READ_GRACE_MS) ?? repoPath;
+    // Unaged, unlike the query reader's bounded grace, because the two non-refusing
+    // surfaces lose differently. Here a fallback REDIRECTS a write: a raw-path
+    // record is one that healed reads never consult once an identity-keyed record
+    // exists, and identityKeyFor's once-per-session guard won't migrate it — the
+    // write is lost with nothing on screen. A reader running out of grace only
+    // renders an error body, which is visible and self-corrects. So a path resolved
+    // once never answers the raw path again; the TTL still heals a reused path
+    // within its window whenever git is answering at all.
+    return peekRepoIdentity(repoPath) ?? repoPath;
   }
 }
 

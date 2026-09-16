@@ -1,10 +1,17 @@
 import { queryOptions } from "@tanstack/react-query";
 import {
-  IDENTITY_READ_GRACE_MS,
   IDENTITY_TTL_MS,
   repoIdentityStrict,
   settledIdentityWithin,
 } from "./repo-identity";
+
+/** How long this READ surface keeps serving an identity a re-validation could not
+ *  confirm. Two windows: one failed re-validation is a hiccup worth riding out, a
+ *  second says the condition isn't transient — past that an honest error beats a key
+ *  nothing has confirmed in ten minutes. A bound is affordable HERE and nowhere else:
+ *  running out of it shows an error body, whereas the same bound on `repoIdentity`'s
+ *  fallback would silently redirect a store write to the raw path. */
+const IDENTITY_READ_GRACE_MS = IDENTITY_TTL_MS * 2;
 
 /** The ONE options factory for the `["repo-identity", repoPath]` query: the shared
  *  fetch takes its options from whichever observer starts it, so an inline copy
