@@ -4,10 +4,11 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
-import { toast } from "sonner";
 import { useForgeStatus, useRemotes, useRemoteUrl } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
+import { toastErrorWithNote } from "@/lib/toast";
 import { loadRepoLens, saveRepoLens } from "./store";
 
 // Deliberately OUTSIDE the ["repo", …] subtree (like `useRepoIdentity`'s key):
@@ -26,6 +27,9 @@ export function useRepoLensRaw(repo: string) {
     queryFn: () => loadRepoLens(repo),
     // The store is the source of truth; there's no server to go stale against.
     staleTime: Number.POSITIVE_INFINITY,
+    // A local read behind an IPC call: without this it parks while the browser
+    // reports offline, and the retries that heal a rejected identity never run.
+    networkMode: "always",
   });
 }
 
@@ -130,8 +134,14 @@ export function applyRepoLens(
   // Ahead of the cache short-circuit, never behind it: an explicit choice has to
   // reach disk even when the cache already shows that lens.
   if (persist) {
-    void saveRepoLens(repo, lens).catch(() => {
-      toast.error("Couldn't save the fork/upstream view preference.");
+    // `saveRepoLens` refuses to write under a transiently unknown identity, so the
+    // toast names the state left behind: the cache write below keeps the lens for
+    // this session while disk still holds the previous choice.
+    void saveRepoLens(repo, lens).catch((e) => {
+      toastErrorWithNote(
+        e,
+        `Your fork/upstream view choice for ${repoNameFromPath(repo)} wasn't saved. This session keeps it; your next one opens on the previously saved choice.`,
+      );
     });
   }
   const current = queryClient.getQueryData<RemoteLens>(lensKey(repo));
@@ -148,7 +158,9 @@ export function applyRepoLens(
 /** The switcher's setter — {@link applyRepoLens} with the selection clears and the disk
  *  write on, since this path is the user choosing the lens. It is therefore the user's
  *  door: the interaction is noted FIRST, or a settling navigation lands and applies ITS
- *  lens over the choice just made. Direct {@link applyRepoLens} callers stay silent —
+ *  lens over the choice just made. One exception: a call from inside a navigator's
+ *  `beforeSelect` (the branch-chip route) is covered by that navigator's own
+ *  request-time epoch bump instead. Direct {@link applyRepoLens} callers stay silent —
  *  navigation-owned, and each is re-checked by its navigator's `stillValid`. */
 export function useSetRepoLens(repo: string) {
   const queryClient = useQueryClient();

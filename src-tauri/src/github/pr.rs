@@ -1107,7 +1107,7 @@ async fn gh_delete_remote_head_branch(
     // (the DELETE below then targets the PR's OWN head repository — see its note).
     let slug = crate::github::gh_lens_slug(repo_path, lens).await.map_err(|e| {
         AppError::Gh(format!(
-            "Merged #{number}, but couldn't clean up the remote head branch: {e}"
+            "Merged #{number}, but couldn't clean up the remote head branch.\n{e}"
         ))
     })?;
     let out = run_gh(
@@ -1126,12 +1126,12 @@ async fn gh_delete_remote_head_branch(
     .await
     .map_err(|e| {
         AppError::Gh(format!(
-            "Merged #{number}, but couldn't clean up the remote head branch: {e}"
+            "Merged #{number}, but couldn't clean up the remote head branch.\n{e}"
         ))
     })?;
     let head: RawMergeHead = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         AppError::Gh(format!(
-            "Merged #{number}, but couldn't clean up the remote head branch: {e}"
+            "Merged #{number}, but couldn't clean up the remote head branch.\n{e}"
         ))
     })?;
 

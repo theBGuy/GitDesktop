@@ -68,6 +68,7 @@ import {
   recordAutomationActivity,
   updateAutomationActivity,
 } from "./history";
+import { localRefsFresh as refsFresh } from "./pure";
 import { type AutomationRunResult, useAutomationResults } from "./results";
 import {
   loadAutomations,
@@ -1385,22 +1386,15 @@ async function resolveDiff(
       return { text, truncated: false, files: filesFromDiff(text) };
     };
     const localRefsFresh = async (): Promise<boolean> => {
+      // Short-circuit before the probes: with no head sha the answer is false
+      // and the two IPC round-trips would be wasted.
       if (!headSha) return false;
       try {
         const [tips, branches] = await Promise.all([
           gitBranchTips(repoPath, [head]),
           gitBranches(repoPath),
         ]);
-        const tip = tips[head];
-        if (!tip || !sameSha(tip, headSha)) return false;
-        const baseBranch = branches.find((b) => b.name === base);
-        return (
-          baseBranch !== undefined &&
-          baseBranch.upstream !== null &&
-          !baseBranch.upstreamGone &&
-          baseBranch.upstreamAhead === 0 &&
-          baseBranch.upstreamBehind === 0
-        );
+        return refsFresh(tips, branches, headSha, base, head, sameSha);
       } catch {
         return false;
       }

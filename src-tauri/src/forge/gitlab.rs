@@ -43,6 +43,18 @@ use crate::github::pr::{
 use crate::github::release::{ReleaseAsset, ReleaseDetails, ReleaseInfo};
 use crate::state::AppState;
 
+/// Keep the summary on line one and the original detail available on line two.
+fn gl_error_message(summary: &str, detail: String) -> String {
+    format!("{summary}\n{detail}")
+}
+
+pub(crate) fn gl_unreadable(what: &str, detail: String) -> AppError {
+    AppError::Glab(gl_error_message(
+        &format!("Couldn't read {what} from GitLab."),
+        detail,
+    ))
+}
+
 /// GitLab via the `glab` CLI. Carries the repo's resolved host — gitlab.com or any
 /// self-managed host glab is signed in to (detected via `forge::glab::known_hosts`).
 pub struct GitLabForge {
@@ -176,7 +188,12 @@ pub async fn list_repos() -> AppResult<ForgeRepoList> {
     )
     .await?;
     let projects: Vec<GlabProject> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse your GitLab projects: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "your projects",
+                format!("could not parse your GitLab projects: {e}"),
+            )
+        })?;
     Ok(ForgeRepoList {
         // A GitLab username IS the personal namespace's full path. Groups you own are a
         // separate namespace and aren't resolved here, so Fork still shows on those.
@@ -326,7 +343,12 @@ async fn my_work_leg(
 ) -> AppResult<MyWorkLeg> {
     let out = run_glab_api_for_host(hostname, &[endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let raw: Vec<serde_json::Value> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse your GitLab work items: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "your work items",
+                format!("could not parse your GitLab work items: {e}"),
+            )
+        })?;
     let capped = raw.len() >= GITLAB_MY_WORK_PER_PAGE;
     Ok(MyWorkLeg {
         items: raw
@@ -352,7 +374,12 @@ async fn my_work_for_host(hostname: &str) -> AppResult<Vec<MyWorkLeg>> {
     // can afford to fail open.
     let out = run_glab_api_for_host(hostname, &["user"], GLAB_NETWORK_TIMEOUT).await?;
     let user: GlabUser = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not read your GitLab identity: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "your identity",
+                format!("could not read your GitLab identity: {e}"),
+            )
+        })?;
     // Fails this HOST rather than skipping it: the instance answered, so its items
     // are real and their loss must show up as `truncated`, not vanish silently.
     let reviewer = reviewer_filter(&user.username)?;
@@ -455,7 +482,12 @@ pub async fn pr_head_ref(repo_path: &str, number: u64) -> AppResult<PrHeadRef> {
     let endpoint = format!("projects/{}/merge_requests/{number}", encode_project(&path));
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the MR head branch: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the merge request branch",
+                format!("could not parse the MR head branch: {e}"),
+            )
+        })?;
     let source = value
         .get("source_project_id")
         .and_then(serde_json::Value::as_u64);
@@ -1185,6 +1217,7 @@ async fn walk_filtered_legs<R, T>(
     repo_path: &str,
     plan: &GlFilterPlan,
     limit: Option<u32>,
+    what: &str,
     parse_failure: &str,
     map: impl Fn(R) -> T,
     row: impl Fn(&T) -> (u64, &str, Option<&PrAuthor>, &[PrListLabel]),
@@ -1224,7 +1257,12 @@ where
             .await?;
             requests += 1;
             let raw: Vec<R> = serde_json::from_str(&out.stdout_lossy())
-                .map_err(|e| AppError::Glab(format!("{parse_failure}: {e}")))?;
+                .map_err(|e| {
+                    gl_unreadable(
+                        what,
+                        format!("{parse_failure}: {e}"),
+                    )
+                })?;
             let exhausted = (raw.len() as u32) < FILTER_PAGE_SIZE;
             let start = fetched.len();
             fetched.extend(raw.into_iter().map(&map));
@@ -1304,6 +1342,7 @@ async fn filtered_mr_page(
         repo_path,
         plan,
         limit,
+        "merge requests",
         "could not parse GitLab merge requests",
         from_glab_mr,
         |p: &PrInfo| {
@@ -1330,6 +1369,7 @@ async fn filtered_issue_page(
         repo_path,
         plan,
         limit,
+        "issues",
         "could not parse GitLab issues",
         from_glab_issue,
         |i: &IssueInfo| {
@@ -1403,7 +1443,12 @@ pub async fn list_prs(
         let endpoint = format!("projects/{enc}/merge_requests?state={s}&per_page={per_page}");
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
         let mrs: Vec<GlabMr> = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Glab(format!("could not parse GitLab merge requests: {e}")))?;
+            .map_err(|e| {
+                gl_unreadable(
+                    "merge requests",
+                    format!("could not parse GitLab merge requests: {e}"),
+                )
+            })?;
         prs.extend(mrs.into_iter().map(from_glab_mr));
     }
     // Chains are inferred over the open set only — a closed list's rows describe
@@ -1434,7 +1479,12 @@ pub async fn prs_for_branch(repo_path: &str, head: &str) -> AppResult<Vec<PrInfo
     );
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let mrs: Vec<GlabMr> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab merge requests: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "merge requests",
+                format!("could not parse GitLab merge requests: {e}"),
+            )
+        })?;
     Ok(mrs.into_iter().map(from_glab_mr).collect())
 }
 
@@ -1472,8 +1522,9 @@ fn parse_mr_url_project(url: &str) -> AppResult<(String, String)> {
     let path = after.split_once('/').map(|(_, p)| p).unwrap_or("");
     // The project full path is everything before the `/-/merge_requests/` marker.
     let Some((full_path, _)) = path.split_once("/-/merge_requests/") else {
-        return Err(AppError::InvalidArgument(format!(
-            "could not parse project path from MR url: {url}"
+        return Err(AppError::InvalidArgument(gl_error_message(
+            "Couldn't make sense of the merge request link.",
+            format!("could not parse project path from MR url: {url}"),
         )));
     };
     let segments: Vec<&str> = full_path.split('/').collect();
@@ -1484,8 +1535,9 @@ fn parse_mr_url_project(url: &str) -> AppResult<(String, String)> {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     };
     if segments.len() < 2 || !segments.iter().all(|s| valid_seg(s)) {
-        return Err(AppError::InvalidArgument(format!(
-            "could not parse project path from MR url: {url}"
+        return Err(AppError::InvalidArgument(gl_error_message(
+            "Couldn't make sense of the merge request link.",
+            format!("could not parse project path from MR url: {url}"),
         )));
     }
     Ok((host, full_path.to_string()))
@@ -1630,7 +1682,12 @@ pub async fn poll_prs(repo_path: &str) -> AppResult<Vec<PrPollInfo>> {
         format!("projects/{enc}/merge_requests?state=all&order_by=updated_at&per_page=20");
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let mrs: Vec<GlabPollMr> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab MR poll: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the merge request status",
+                format!("could not parse the GitLab MR poll: {e}"),
+            )
+        })?;
     Ok(mrs.into_iter().map(from_glab_poll_mr).collect())
 }
 
@@ -1988,7 +2045,12 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
     let out = out?;
     let (stack, stack_members) = mr_stack_from_rows(&open_prs, number);
     let mr: GlabMrChanges = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab merge request: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the merge request",
+                format!("could not parse GitLab merge request: {e}"),
+            )
+        })?;
 
     let mut additions = 0;
     let mut deletions = 0;
@@ -2772,7 +2834,10 @@ pub async fn diff_pr(repo_path: &str, number: u64) -> AppResult<String> {
     )
     .await?;
     let mr: GlabMrChanges = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
-        AppError::Glab(format!("could not parse GitLab merge request changes: {e}"))
+        gl_unreadable(
+            "merge request changes",
+            format!("could not parse GitLab merge request changes: {e}"),
+        )
     })?;
     let mut diff = String::new();
     for c in &mr.changes {
@@ -2812,7 +2877,12 @@ pub async fn commit_diff(repo_path: &str, sha: &str) -> AppResult<String> {
     )
     .await?;
     let changes: Vec<GlabChange> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab commit diff: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the commit diff",
+                format!("could not parse GitLab commit diff: {e}"),
+            )
+        })?;
     let mut diff = String::new();
     for c in &changes {
         diff.push_str(&reconstruct_file_diff(c));
@@ -2923,7 +2993,12 @@ pub async fn commit_comments(repo_path: &str, sha: &str) -> AppResult<Vec<Commit
     )
     .await?;
     let discussions: Vec<GlabCommitDiscussion> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab commit discussions: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "commit discussions",
+                format!("could not parse GitLab commit discussions: {e}"),
+            )
+        })?;
     let mut items = Vec::new();
     for d in discussions {
         for n in d.notes {
@@ -2977,7 +3052,12 @@ async fn commit_parent_sha(repo_path: &str, enc: &str, sha: &str) -> AppResult<S
     )
     .await?;
     let c: GlabCommitParents = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab commit: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the commit",
+                format!("could not parse the GitLab commit: {e}"),
+            )
+        })?;
     c.parent_ids.into_iter().next().ok_or_else(|| {
         AppError::InvalidArgument(
             "can't anchor a comment on this commit — it has no parent commit to diff against."
@@ -3192,7 +3272,7 @@ pub async fn review_token_set(token: String) -> AppResult<String> {
     )
     .await?;
     let user: GlabUser = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab user: {e}")))?;
+        .map_err(|e| gl_unreadable("the user", format!("could not parse the GitLab user: {e}")))?;
     if user.username.is_empty() {
         return Err(AppError::Glab(
             "the token validated but returned no username.".into(),
@@ -3417,14 +3497,14 @@ async fn mr_reviewers(repo_path: &str, enc: &str, number: u64) -> AppResult<Vec<
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab reviewers: {e}")))
+        .map_err(|e| gl_unreadable("reviewers", format!("could not parse GitLab reviewers: {e}")))
 }
 
 /// The signed-in user's id + username (`glab api user`).
 async fn current_user(repo_path: &str) -> AppResult<GlabReviewerUser> {
     let out = run_glab(Some(repo_path), &["api", "user"], GLAB_NETWORK_TIMEOUT).await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab user: {e}")))
+        .map_err(|e| gl_unreadable("the user", format!("could not parse the GitLab user: {e}")))
 }
 
 /// The signed-in user's username, resolved TOLERANTLY for the read views — any
@@ -3506,7 +3586,7 @@ pub async fn pr_approvals(repo_path: &str, number: u64) -> AppResult<ApprovalSta
     )
     .await?;
     let a: GlabApprovals = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab approvals: {e}")))?;
+        .map_err(|e| gl_unreadable("approvals", format!("could not parse GitLab approvals: {e}")))?;
     let me = current_user(repo_path).await?;
     let viewer_requested_changes = mr_reviewers(repo_path, &enc, number)
         .await?
@@ -3684,7 +3764,12 @@ pub async fn request_changes_mr(repo_path: &str, number: u64, body: &str) -> App
     .await;
     let mutation_result = result.and_then(|out| {
         let env: GlabGqlRequestChangesEnvelope = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Glab(format!("could not parse the GitLab response: {e}")))?;
+            .map_err(|e| {
+                gl_unreadable(
+                    "the response",
+                    format!("could not parse the GitLab response: {e}"),
+                )
+            })?;
         if !env.errors.is_empty() {
             let msgs: Vec<String> = env
                 .errors
@@ -3972,7 +4057,12 @@ pub async fn mr_merge_state(repo_path: &str, number: u64) -> AppResult<GitLabMrM
     )
     .await?;
     let mr: GlabMrMergeState = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab merge state: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the merge state",
+                format!("could not parse GitLab merge state: {e}"),
+            )
+        })?;
     let (pipeline_status, pipeline_url) = mr
         .head_pipeline
         .map(|p| (p.status, p.web_url))
@@ -4059,7 +4149,12 @@ pub async fn mr_mergeability(repo_path: &str, number: u64) -> AppResult<PrMergea
     )
     .await?;
     let mr: GlabMrMergeability = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab merge status: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the merge status",
+                format!("could not parse GitLab merge status: {e}"),
+            )
+        })?;
     Ok(map_gl_mergeability(
         &mr.state,
         mr.has_conflicts,
@@ -4090,7 +4185,12 @@ pub async fn mr_list_mergeability(
     );
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let rows: Vec<GlabMrMergeability> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab merge requests: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "merge requests",
+                format!("could not parse GitLab merge requests: {e}"),
+            )
+        })?;
     let mut out_map: HashMap<u64, String> = HashMap::new();
     for r in rows {
         let m = map_gl_mergeability(
@@ -4299,7 +4399,7 @@ pub async fn list_issues(
     let endpoint = format!("projects/{enc}/issues?state={gl_state}&per_page={per_page}");
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let issues: Vec<GlabIssue> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab issues: {e}")))?;
+        .map_err(|e| gl_unreadable("issues", format!("could not parse GitLab issues: {e}")))?;
     Ok(issues.into_iter().map(from_glab_issue).collect())
 }
 
@@ -4317,7 +4417,7 @@ pub async fn view_issue(repo_path: &str, number: u64) -> AppResult<IssueDetails>
     )
     .await?;
     let issue: GlabIssueDetail = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab issue: {e}")))?;
+        .map_err(|e| gl_unreadable("the issue", format!("could not parse GitLab issue: {e}")))?;
 
     // Resolve the signed-in user once (tolerant — a failure just hides every
     // comment's edit/delete; it must not fail the view). Drives the truthful
@@ -4599,7 +4699,12 @@ pub async fn move_issue(repo_path: &str, number: u64, destination: &str) -> AppR
         ))
     })?;
     let target: GlabMoveTarget = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the destination project: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the destination project",
+                format!("could not parse the destination project: {e}"),
+            )
+        })?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}/move");
     let target_arg = format!("to_project_id={}", target.id);
@@ -4620,7 +4725,12 @@ pub async fn move_issue(repo_path: &str, number: u64, destination: &str) -> AppR
         other => other,
     })?;
     let issue: GlabMovedIssue = serde_json::from_str(&moved.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the moved issue: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the moved issue",
+                format!("could not parse the moved issue: {e}"),
+            )
+        })?;
     Ok(issue.web_url)
 }
 
@@ -4643,7 +4753,12 @@ pub async fn member_projects(repo_path: &str) -> AppResult<Vec<String>> {
         path_with_namespace: String,
     }
     let projects: Vec<GlabProjectPath> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab projects: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the projects",
+                format!("could not parse the GitLab projects: {e}"),
+            )
+        })?;
     Ok(projects
         .into_iter()
         .map(|p| p.path_with_namespace)
@@ -4679,7 +4794,12 @@ pub async fn list_milestones(repo_path: &str) -> AppResult<Vec<Milestone>> {
         format!("projects/{enc}/milestones?state=active&include_ancestor_groups=true&per_page=100");
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let milestones: Vec<GlabMilestone> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab milestones: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "milestones",
+                format!("could not parse GitLab milestones: {e}"),
+            )
+        })?;
     Ok(milestones
         .into_iter()
         .map(|m| Milestone {
@@ -4929,7 +5049,7 @@ async fn award_read(
     )
     .await?;
     let env: GqlAwardEnvelope = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab awards: {e}")))?;
+        .map_err(|e| gl_unreadable("awards", format!("could not parse GitLab awards: {e}")))?;
     let data = env
         .data
         .ok_or_else(|| AppError::Glab("could not load GitLab awards".into()))?;
@@ -4978,7 +5098,7 @@ pub async fn issue_reactions(repo_path: &str, number: u64) -> AppResult<IssueRea
     )
     .await?;
     let awards: Vec<GlabAward> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab awards: {e}")))?;
+        .map_err(|e| gl_unreadable("awards", format!("could not parse GitLab awards: {e}")))?;
     reactions.body = tally_awards(awards, &viewer);
     Ok(reactions)
 }
@@ -5397,7 +5517,12 @@ async fn mr_diff_refs(repo_path: &str, enc: &str, number: u64) -> AppResult<Glab
     )
     .await?;
     let mr: GlabMrDiffRefs = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab merge request: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the merge request",
+                format!("could not parse the GitLab merge request: {e}"),
+            )
+        })?;
     mr.diff_refs.ok_or_else(|| {
         AppError::Glab("this merge request has no diff refs to anchor a comment against.".into())
     })
@@ -5699,7 +5824,7 @@ pub async fn remove_reaction(
     )
     .await?;
     let awards: Vec<GlabAward> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab awards: {e}")))?;
+        .map_err(|e| gl_unreadable("awards", format!("could not parse GitLab awards: {e}")))?;
     let viewer = current_user(repo_path).await?.username;
     let Some(mine) = awards.into_iter().find(|a| {
         a.name == award
@@ -5742,7 +5867,7 @@ pub async fn repo_labels(repo_path: &str) -> AppResult<Vec<RepoLabel>> {
     )
     .await?;
     let labels: Vec<GlabLabel> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab labels: {e}")))?;
+        .map_err(|e| gl_unreadable("labels", format!("could not parse GitLab labels: {e}")))?;
     Ok(labels
         .into_iter()
         .map(|l| RepoLabel {
@@ -5775,7 +5900,12 @@ async fn project_members(repo_path: &str) -> AppResult<Vec<GlabMember>> {
     )
     .await?;
     serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab project members: {e}")))
+        .map_err(|e| {
+            gl_unreadable(
+                "project members",
+                format!("could not parse GitLab project members: {e}"),
+            )
+        })
 }
 
 /// Resolve assignee usernames to GitLab's numeric ids via the project members.
@@ -6037,7 +6167,12 @@ pub async fn repo_visibility(repo_path: &str) -> AppResult<crate::forge::RepoVis
     )
     .await?;
     let p: GlabProjectVisibility = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab project: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the project",
+                format!("could not parse the GitLab project: {e}"),
+            )
+        })?;
     let is_fork = p.forked_from_project.is_some();
     let parent = p
         .forked_from_project
@@ -6091,7 +6226,12 @@ pub async fn repo_star_status(repo_path: &str) -> AppResult<bool> {
         );
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
         let starred: Vec<GlabStarredProject> = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Glab(format!("could not parse GitLab starred projects: {e}")))?;
+            .map_err(|e| {
+                gl_unreadable(
+                    "starred projects",
+                    format!("could not parse GitLab starred projects: {e}"),
+                )
+            })?;
         if starred.iter().any(|p| p.path_with_namespace == path) {
             return Ok(true);
         }
@@ -6259,7 +6399,12 @@ pub async fn publish_repo(
     .await
     .and_then(|out| {
         serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Glab(format!("could not parse the created project: {e}")))
+            .map_err(|e| {
+                gl_unreadable(
+                    "the created project",
+                    format!("could not parse the created project: {e}"),
+                )
+            })
     }) {
         Ok(p) => p,
         Err(e) => return Err(AppError::Glab(format!("{e} ({created_hint})"))),
@@ -6380,7 +6525,12 @@ pub async fn create_issue(
     }
     let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
     let created: GlabCreated = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the created issue: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the created issue",
+                format!("could not parse the created issue: {e}"),
+            )
+        })?;
     Ok(PrRef {
         number: created.iid,
         url: created.web_url,
@@ -6496,7 +6646,12 @@ pub async fn create_mr(
     }
     let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
     let created: GlabCreated = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the created merge request: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the created merge request",
+                format!("could not parse the created merge request: {e}"),
+            )
+        })?;
     Ok(PrRef {
         number: created.iid,
         url: created.web_url,
@@ -6805,7 +6960,7 @@ pub async fn run_page(
     }
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let pipelines: Vec<GlabPipeline> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab pipelines: {e}")))?;
+        .map_err(|e| gl_unreadable("pipelines", format!("could not parse GitLab pipelines: {e}")))?;
     let has_more = pipelines.len() == per_page as usize;
     Ok(CiRunPage {
         runs: pipelines.into_iter().map(from_glab_pipeline).collect(),
@@ -6834,7 +6989,12 @@ pub async fn view_run(repo_path: &str, run_id: u64) -> AppResult<RunDetail> {
     )
     .await?;
     let p: GlabPipeline = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab pipeline: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the pipeline",
+                format!("could not parse GitLab pipeline: {e}"),
+            )
+        })?;
 
     // Jobs — GitLab returns newest-first; reverse to execution order (stage order),
     // matching how view_pr reorders commits oldest-first.
@@ -7189,7 +7349,7 @@ pub async fn list_releases(repo_path: &str) -> AppResult<Vec<ReleaseInfo>> {
     )
     .await?;
     let releases: Vec<GlabRelease> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab releases: {e}")))?;
+        .map_err(|e| gl_unreadable("releases", format!("could not parse GitLab releases: {e}")))?;
     Ok(releases_to_infos(&releases))
 }
 
@@ -7210,7 +7370,7 @@ pub async fn view_release(repo_path: &str, tag: &str) -> AppResult<ReleaseDetail
     )
     .await?;
     let r: GlabRelease = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab release: {e}")))?;
+        .map_err(|e| gl_unreadable("the release", format!("could not parse GitLab release: {e}")))?;
     Ok(release_details(r))
 }
 
@@ -7251,7 +7411,12 @@ pub async fn create_release(
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run_glab(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT).await?;
     let r: GlabRelease = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse created GitLab release: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the created release",
+                format!("could not parse created GitLab release: {e}"),
+            )
+        })?;
     Ok(r.links.self_url)
 }
 
@@ -7365,7 +7530,12 @@ pub async fn delete_release_asset(repo_path: &str, tag: &str, asset_name: &str) 
     )
     .await?;
     let links: Vec<Link> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab release assets: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "release assets",
+                format!("could not parse GitLab release assets: {e}"),
+            )
+        })?;
     let link = links
         .into_iter()
         .find(|l| l.name == asset_name)
@@ -7423,17 +7593,41 @@ struct EffectiveAccess {
     ambiguous: Option<String>,
 }
 
+/// Access uncertainty is rendered as plain text; omit AppError summaries and
+/// flatten multiline CLI details before they enter the wire field.
+fn access_error_detail(error: &AppError) -> String {
+    let message = error.to_string();
+    let detail = if message.starts_with("Couldn't read ") {
+        message
+            .split_once('\n')
+            .map_or(message.as_str(), |(_, detail)| detail)
+    } else {
+        &message
+    };
+    detail.lines().collect::<Vec<_>>().join(" ")
+}
+
 /// The viewer's access level from the effective-membership endpoint:
 /// `Ok(Some(level))` when it answered, `Ok(None)` on a 404 (GitLab saying the
 /// viewer is genuinely not a member), `Err(reason)` when it couldn't answer.
 async fn membership_access_level(repo_path: &str, enc: &str) -> Result<Option<u8>, String> {
     let user = current_user(repo_path)
         .await
-        .map_err(|e| format!("could not identify the signed-in GitLab user: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "could not identify the signed-in GitLab user: {}",
+                access_error_detail(&e),
+            )
+        })?;
     let endpoint = format!("projects/{enc}/members/all/{}", user.id);
     let out = run_glab_raw(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT)
         .await
-        .map_err(|e| format!("could not read GitLab project membership: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "could not read GitLab project membership: {}",
+                access_error_detail(&e),
+            )
+        })?;
     if out.code != 0 {
         let stdout = out.stdout_lossy();
         if glab_output_is_404(&out.stderr, &stdout) {
@@ -7443,7 +7637,7 @@ async fn membership_access_level(repo_path: &str, enc: &str) -> Result<Option<u8
         return Err(if msg.is_empty() {
             format!("glab exited with code {} reading project membership", out.code)
         } else {
-            msg.to_string()
+            msg.lines().collect::<Vec<_>>().join(" ")
         });
     }
     serde_json::from_str::<GlabAccessLevel>(&out.stdout_lossy())
@@ -7463,7 +7657,12 @@ async fn effective_access_level(repo_path: &str, enc: &str) -> AppResult<Effecti
     )
     .await?;
     let p: GlabProjectPermissions = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab project: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the project",
+                format!("could not parse the GitLab project: {e}"),
+            )
+        })?;
     let mut level = p
         .permissions
         .map(|perms| {
@@ -7655,7 +7854,12 @@ pub async fn repo_settings(repo_path: &str) -> AppResult<GitLabRepoSettings> {
     )
     .await?;
     let p: GlabProjectSettings = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab project: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the project",
+                format!("could not parse the GitLab project: {e}"),
+            )
+        })?;
     Ok(settings_from_project(p))
 }
 
@@ -7769,7 +7973,12 @@ pub async fn update_repo_settings(
     }
     let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
     let p: GlabProjectSettings = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the updated project: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the updated project",
+                format!("could not parse the updated project: {e}"),
+            )
+        })?;
     Ok(settings_from_project(p))
 }
 
@@ -7916,7 +8125,7 @@ async fn member_pages(repo_path: &str, enc: &str, path: &str) -> AppResult<Vec<G
         let endpoint = format!("projects/{enc}/{path}?per_page=100&page={page}");
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
         let batch: Vec<GlabProjectMember> = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Glab(format!("could not parse GitLab members: {e}")))?;
+            .map_err(|e| gl_unreadable("members", format!("could not parse GitLab members: {e}")))?;
         let done = batch.len() < 100;
         members.extend(batch);
         if done {
@@ -7984,7 +8193,12 @@ pub async fn add_member(repo_path: &str, username: &str, access_level: u8) -> Ap
         username: String,
     }
     let users: Vec<GlabUser> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab user lookup: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the user lookup",
+                format!("could not parse the GitLab user lookup: {e}"),
+            )
+        })?;
     let user = users
         .into_iter()
         .find(|u| u.username.eq_ignore_ascii_case(username))
@@ -8112,7 +8326,7 @@ pub async fn list_hooks(repo_path: &str) -> AppResult<Vec<GitLabHook>> {
     )
     .await?;
     let hooks: Vec<serde_json::Value> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab webhooks: {e}")))?;
+        .map_err(|e| gl_unreadable("webhooks", format!("could not parse GitLab webhooks: {e}")))?;
     // Per-item so one malformed hook doesn't sink the list.
     Ok(hooks.iter().filter_map(hook_from_value).collect())
 }
@@ -8284,7 +8498,12 @@ pub async fn hook_events(repo_path: &str, hook_id: &str) -> AppResult<Vec<GitLab
     let endpoint = format!("projects/{enc}/hooks/{hook_id}/events?per_page=20");
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the delivery log: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the delivery log",
+                format!("could not parse the delivery log: {e}"),
+            )
+        })?;
     Ok(events
         .iter()
         .filter_map(|v| {
@@ -8385,7 +8604,12 @@ pub async fn list_variables(repo_path: &str) -> AppResult<Vec<GitLabVariable>> {
         let endpoint = format!("projects/{enc}/variables?per_page=100&page={page}");
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
         let batch: Vec<GlabVariable> = serde_json::from_str(&out.stdout_lossy())
-            .map_err(|e| AppError::Glab(format!("could not parse GitLab variables: {e}")))?;
+            .map_err(|e| {
+                gl_unreadable(
+                    "variables",
+                    format!("could not parse GitLab variables: {e}"),
+                )
+            })?;
         let done = batch.len() < 100;
         vars.extend(batch);
         if done {
@@ -8616,7 +8840,10 @@ pub async fn list_protected_branches(repo_path: &str) -> AppResult<Vec<GitLabPro
         let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
         let batch: Vec<GlabProtectedBranch> =
             serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
-                AppError::Glab(format!("could not parse GitLab protected branches: {e}"))
+                gl_unreadable(
+                    "protected branches",
+                    format!("could not parse GitLab protected branches: {e}"),
+                )
             })?;
         let done = batch.len() < 100;
         branches.extend(batch);
@@ -8794,7 +9021,12 @@ async fn time_stats(
     let endpoint = format!("projects/{enc}/{}/{number}/time_stats", target.segment());
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let s: GlabTimeStats = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab time stats: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "time stats",
+                format!("could not parse GitLab time stats: {e}"),
+            )
+        })?;
     Ok(from_glab_time_stats(s))
 }
 
@@ -8823,7 +9055,12 @@ async fn write_time(
     }
     let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
     let s: GlabTimeStats = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab time stats: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "time stats",
+                format!("could not parse GitLab time stats: {e}"),
+            )
+        })?;
     Ok(from_glab_time_stats(s))
 }
 
@@ -8962,7 +9199,12 @@ pub async fn issue_links(repo_path: &str, number: u64) -> AppResult<Vec<GitLabLi
     let endpoint = format!("projects/{enc}/issues/{number}/links");
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let links: Vec<GlabLinkedIssue> = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab issue links: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "issue links",
+                format!("could not parse GitLab issue links: {e}"),
+            )
+        })?;
     Ok(links.into_iter().map(from_glab_linked_issue).collect())
 }
 
@@ -9101,7 +9343,12 @@ pub async fn search_repos(query: &str, sort: &str, page: u32) -> AppResult<Forge
     };
     let out = run_glab(None, &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse GitLab project search: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the project search results",
+                format!("could not parse GitLab project search: {e}"),
+            )
+        })?;
     let items = value.as_array().cloned().unwrap_or_default();
     let returned = items.len();
     let repos = items.iter().filter_map(gl_search_repo_from_value).collect();
@@ -9140,7 +9387,12 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
         }));
     }
     let fork: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the forked project: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the forked project",
+                format!("could not parse the forked project: {e}"),
+            )
+        })?;
     let full_name = fork
         .get("path_with_namespace")
         .and_then(Value::as_str)
@@ -9230,7 +9482,12 @@ pub async fn starred(owner: &str, name: &str) -> AppResult<bool> {
     let endpoint = format!("projects?starred=true&search={enc}&per_page=100");
     let out = run_glab(None, &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let value: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse starred projects: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "starred projects",
+                format!("could not parse starred projects: {e}"),
+            )
+        })?;
     let hit = value
         .as_array()
         .map(|arr| {
@@ -9331,7 +9588,12 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
         run_glab(Some(repo_path), &forks_args, GLAB_NETWORK_TIMEOUT),
     );
     let list: serde_json::Value = serde_json::from_str(&forks?.stdout_lossy())
-        .map_err(|e| AppError::Glab(format!("could not parse the GitLab fork list: {e}")))?;
+        .map_err(|e| {
+            gl_unreadable(
+                "the fork list",
+                format!("could not parse the GitLab fork list: {e}"),
+            )
+        })?;
     let forks: Vec<ForgeForkEntry> = list
         .as_array()
         .map(|items| items.iter().filter_map(fork_entry_from_project).collect())
@@ -9652,6 +9914,37 @@ mod my_work_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_uncertainty_keeps_only_single_line_technical_detail() {
+        let error = gl_unreadable("the user", "could not parse the GitLab user: boom".into());
+        let reason = format!(
+            "could not identify the signed-in GitLab user: {}",
+            access_error_detail(&error),
+        );
+        let access = write_access_fields(0, Some(reason));
+        assert_eq!(
+            access.unknown_reason.as_deref(),
+            Some("could not identify the signed-in GitLab user: could not parse the GitLab user: boom"),
+        );
+        assert_eq!(
+            access_error_detail(&AppError::Glab("HTTP 500\nupstream unavailable".into())),
+            "HTTP 500 upstream unavailable",
+        );
+        assert_eq!(
+            access_error_detail(&gl_unreadable("the user", "line one\nline two".into())),
+            "line one line two",
+        );
+    }
+
+    #[test]
+    fn gitlab_unreadable_keeps_the_detail_on_its_own_line() {
+        let detail = "could not parse GitLab response: boom";
+        assert_eq!(
+            gl_unreadable("the response", detail.into()).to_string(),
+            "Couldn't read the response from GitLab.\ncould not parse GitLab response: boom"
+        );
+    }
 
     #[tokio::test]
     async fn status_login_retries_failures_and_caches_success() {
@@ -11610,6 +11903,18 @@ mod tests {
         assert!(
             parse_mr_url_project("https://gitlab.com/-evil/project/-/merge_requests/1").is_err()
         );
+        for url in [
+            "https://gitlab.com/gitlab-org/gitlab/-/issues/1",
+            "https://gitlab.com/only/-/merge_requests/1",
+        ] {
+            let AppError::InvalidArgument(message) = parse_mr_url_project(url).unwrap_err() else {
+                panic!("expected the existing invalid-argument classification");
+            };
+            assert_eq!(
+                message,
+                format!("Couldn't make sense of the merge request link.\ncould not parse project path from MR url: {url}"),
+            );
+        }
         assert!(parse_mr_url_project("not a url").is_err());
     }
 

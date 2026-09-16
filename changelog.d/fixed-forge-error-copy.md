@@ -1,0 +1,1 @@
+- Errors from GitLab, Bitbucket, and Jira reads lead with a plain-language summary; open Details to see the original technical message.

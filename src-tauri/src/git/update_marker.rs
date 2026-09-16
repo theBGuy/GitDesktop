@@ -169,20 +169,15 @@ impl MarkerRoots {
 /// cross-worktree blindness this keying closes, and these are user-action paths where
 /// one `rev-parse` is affordable. Bulk guard sites take [`roots_for_cached`] instead,
 /// which hashes the same RAW identity spelling this one does — a normalized copy would
-/// key a third root. `repo_identity` answers with its input when git cannot resolve it,
-/// so a failure degrades to plain checkout-path keying and the two roots collapse into
-/// one.
+/// key a third root. An unavailable identity propagates without selecting a root.
 ///
 /// Under `cfg(test)` an installed override is the ONLY resolution and is the whole root
 /// set: with none, this ERRORS instead of falling through to the real app data,
 /// mirroring [`crate::app_store`]'s "under `cfg!(test)`, NO store, whatever the
 /// environment says". The override is process-wide, so a test that never installed one
 /// must neither read a concurrently-scheduled sibling's root nor mint under the
-/// developer's own app data. Every GUARD caller fails open on an unresolvable root —
-/// refusals answer `Ok`, claims and sweeps return, `clear_update_holder` answers
-/// `Ok(false)` — which is exactly what an un-overridden test should see. The MINT is the
-/// loud exception: `branches.rs::update_worktree_path` propagates the error rather than
-/// place a checkout somewhere nobody is guarding.
+/// developer's own app data. Mints propagate resolution errors; claims and sweeps
+/// take no action without a resolved root.
 pub(crate) async fn roots_for(repo_path: &str) -> AppResult<MarkerRoots> {
     #[cfg(test)]
     {
@@ -203,7 +198,7 @@ pub(crate) async fn roots_for(repo_path: &str) -> AppResult<MarkerRoots> {
     }
     #[cfg(not(test))]
     {
-        let identity = crate::git::repo::repo_identity(repo_path).await;
+        let identity = crate::git::repo::repo_identity(repo_path).await?;
         Ok(MarkerRoots::new(
             crate::git::ops::identity_worktree_root_dir(&identity)?,
             crate::git::ops::worktree_root_dir(repo_path)?,
@@ -214,8 +209,8 @@ pub(crate) async fn roots_for(repo_path: &str) -> AppResult<MarkerRoots> {
 /// [`roots_for`] with the identity served from AppState's lock-key cache — for
 /// guard and claim sites that run in bulk (branch cleanup deletes one branch per
 /// call). The MINT (`branches.rs::update_worktree_path` via [`root_for`]) stays on
-/// the uncached resolver: a checkout must never be placed under a stale root, while
-/// a guard reading one degrades fail-open like every other unresolvable root.
+/// the uncached resolver: a checkout must never be placed under a stale root.
+/// Identity errors propagate to each caller's advisory or mint policy.
 ///
 /// Staleness shares the lock-key cache's own lifetime: an identity that changes
 /// mid-process already splits every lock domain for the repo, and a guard missing a
@@ -230,7 +225,7 @@ pub(crate) async fn roots_for_cached(state: &AppState, repo_path: &str) -> AppRe
     }
     #[cfg(not(test))]
     {
-        let identity = state.repo_identity_cached(repo_path).await;
+        let identity = state.repo_identity_cached(repo_path).await?;
         Ok(MarkerRoots::new(
             crate::git::ops::identity_worktree_root_dir(&identity)?,
             crate::git::ops::worktree_root_dir(repo_path)?,
@@ -599,6 +594,8 @@ pub(crate) fn refuse_if_branch_updating_in(roots: &MarkerRoots, branch: &str) ->
 }
 
 async fn refuse_and_heal(state: &AppState, repo_path: &str, branch: Option<&str>) -> AppResult<()> {
+    // Refusal guards are advisory and fail open: transient probe failures must
+    // not block branch operations.
     let Ok(roots) = roots_for(repo_path).await else {
         return Ok(());
     };
@@ -1073,7 +1070,7 @@ mod tests {
     /// [`roots_for`]'s non-test arm chains. Callable here because the mapping takes an
     /// already-resolved identity, so the `cfg(test)` override never stands in the way.
     async fn primary_root_of(repo_path: &str) -> PathBuf {
-        let identity = crate::git::repo::repo_identity(repo_path).await;
+        let identity = crate::git::repo::repo_identity(repo_path).await.unwrap();
         crate::git::ops::identity_worktree_root_dir(&identity).expect("the marker root resolves")
     }
 
@@ -1362,6 +1359,12 @@ mod tests {
             root_for("C:/repos/app").await.is_err(),
             "an un-overridden test must never resolve the real worktree root"
         );
+        let state = AppState::default();
+        assert!(refuse_if_branch_updating(&state, "C:/repos/app", "feature").await.is_ok());
+        assert!(refuse_if_any_updating(&state, "C:/repos/app").await.is_ok());
+        assert!(refuse_if_branch_updating_no_heal(&state, "C:/repos/app", "feature")
+            .await
+            .is_ok());
     }
 
     /// The cached variant resolves through the SAME test seam, so every guard test in

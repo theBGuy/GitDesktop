@@ -35,6 +35,9 @@ export function useAmendCommit(repoPath: string) {
 const RULES_SETTLING_MESSAGE =
   "Branch rules are still loading — try again in a moment";
 
+const STATUS_SETTLING_MESSAGE =
+  "Still reading this branch's state — try again in a moment";
+
 const protectedBranchMessage = (name: string) =>
   `${name} is protected: force-pushing (amending a pushed commit) is blocked by a branch rule`;
 
@@ -51,7 +54,7 @@ export function useAmendWithConfirm(repoPath: string) {
   // While either rules scope is on its FIRST read the effective config stands in
   // as empty, so `isForcePushBlocked` is vacuously false — the force-push arm
   // holds on this instead. A plain amend never consults the rules, so it never
-  // holds.
+  // holds on them.
   const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
   const amend = useAmendCommit(repoPath);
   const [pendingHash, setPendingHash] = useState<string | null>(null);
@@ -63,10 +66,21 @@ export function useAmendWithConfirm(repoPath: string) {
   // force-push.
   const needsForcePush =
     upstream !== null && !branch?.upstreamGone && (branch?.ahead ?? 0) === 0;
+  // The same stand-in problem one axis out: with no status data there is no
+  // branch, so `needsForcePush` reads vacuously false and the whole force-push
+  // arm is skipped. An ERRORED read is the same blind state and holds too — the
+  // query's 5s interval keeps asking, so the hold lifts itself as soon as any
+  // read lands, and from then on the gate reads measured values.
+  const statusSettling = status.data === undefined;
 
   // Amending an already-pushed commit means force-pushing it. Shared by request
   // and confirm so the two refusal paths can't drift.
   function forcePushRefused(): boolean {
+    // Ahead of the `needsForcePush` test, which is the value this hold protects.
+    if (statusSettling) {
+      toast.error(STATUS_SETTLING_MESSAGE);
+      return true;
+    }
     if (!needsForcePush) return false;
     if (rulesSettling) {
       toast.error(RULES_SETTLING_MESSAGE);
@@ -88,13 +102,24 @@ export function useAmendWithConfirm(repoPath: string) {
     }
   }
 
-  function confirmAmend() {
+  /** True once the amend has actually STARTED — the gate accepted it AND the
+   *  commit loaded into the box. The dialog keys its "Don't show again" write on
+   *  this, so neither a refusal nor a failed lookup (a commit gc'd or rewritten
+   *  under the open dialog) turns off the prompt. */
+  async function confirmAmend(): Promise<boolean> {
     const hash = pendingHash;
     setPendingHash(null);
     // The gate can flip under an open dialog: the rules may have settled to
-    // blocked, or may still be settling.
-    if (forcePushRefused()) return;
-    if (hash) amend(hash).catch(toastError);
+    // blocked, or may still be settling. Every read it takes is pre-await.
+    if (forcePushRefused()) return false;
+    if (!hash) return false;
+    try {
+      await amend(hash);
+    } catch (e) {
+      toastError(e);
+      return false;
+    }
+    return true;
   }
 
   return {

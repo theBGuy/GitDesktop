@@ -226,11 +226,12 @@ function parentDir(p: string): string | null {
 }
 
 /** Whether a live checkout is the repository `stamp` names. Three-valued because
- *  `repoIdentity` stands in the path it was asked about rather than rejecting, so
- *  that equality is UNKNOWN, never a mismatch. Resolve only paths `validateRepo`
- *  has proven live: a dead one caches that fallback for the session. Casefolded
- *  `normPath` and the resolver's session-long memo are both the app-wide identity
- *  idiom — diverging from either navigates by an identity no store keys on. */
+ *  `repoIdentity` answers from memory or with a path stand-in rather than
+ *  rejecting, so that equality is UNKNOWN, never a mismatch. Resolve only paths
+ *  `validateRepo` has proven live: a dead one's answer is not a fresh fact.
+ *  Casefolded `normPath` and the resolver's shared bounded memo are both the
+ *  app-wide identity idiom — diverging from either navigates by an identity no
+ *  store keys on. */
 async function identityVerdict(
   repoPath: string,
   stamp: string,

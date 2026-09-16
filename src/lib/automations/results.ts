@@ -10,6 +10,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { isStoredResult, pruneByCreatedAt } from "./pure";
 
 /**
  * A finished automated COMMIT review — the one review target with no comment
@@ -67,25 +68,6 @@ async function reloadRaw(): Promise<void> {
   await reloadToleratingEmptyStore(await getStore());
 }
 
-/** Shape-guard one record out of untrusted store JSON: a hand-edited (or older)
- *  `automation-results.json` reaches the dialog verbatim, so a malformed record is
- *  dropped rather than blanking the list or throwing mid-render. Every field left
- *  unchecked is guarded at its consumer instead: `mode` / `phase` / `timedOut` are
- *  compared by exact value in `AutomationResultDialog` and `error` is typeof-guarded
- *  at its render site there, `repoPath` is dereferenced only on the write path
- *  (`persist`, whose caller is runner-typed), and `schemaVersion` is write-only. */
-function isStoredResult(x: unknown): x is AutomationRunResult {
-  if (typeof x !== "object" || x === null) return false;
-  const r = x as Record<string, unknown>;
-  return (
-    typeof r.id === "string" &&
-    typeof r.text === "string" &&
-    typeof r.subject === "string" &&
-    typeof r.createdAt === "string" &&
-    typeof r.hash === "string"
-  );
-}
-
 async function readByKey(key: string): Promise<AutomationRunResult[]> {
   const store = await getStore();
   const raw = await store.get<unknown>(key);
@@ -119,26 +101,6 @@ async function keyFor(repo: string): Promise<string> {
   );
 }
 
-/** Newest {@link MAX_PER_REPO} by `createdAt`. A record whose stamp doesn't parse
- *  can't be ordered, so those sort after the dated ones and keep their insertion
- *  order — a junk stamp costs its own position, never someone else's. */
-function prune(records: AutomationRunResult[]): AutomationRunResult[] {
-  return records
-    .map((record, index) => {
-      const ts = new Date(record.createdAt).getTime();
-      return { record, index, ts: Number.isNaN(ts) ? null : ts };
-    })
-    .sort((a, b) => {
-      if (a.ts === null || b.ts === null) {
-        if (a.ts !== b.ts) return a.ts === null ? 1 : -1;
-        return a.index - b.index;
-      }
-      return b.ts - a.ts;
-    })
-    .slice(0, MAX_PER_REPO)
-    .map((x) => x.record);
-}
-
 /** Upserts a record by id under its repo's identity key, then prunes. */
 async function persist(result: AutomationRunResult): Promise<void> {
   return serialize(async () => {
@@ -147,7 +109,7 @@ async function persist(result: AutomationRunResult): Promise<void> {
     const key = await keyFor(result.repoPath);
     const all = await readByKey(key);
     const without = all.filter((r) => r.id !== result.id);
-    await store.set(key, prune([result, ...without]));
+    await store.set(key, pruneByCreatedAt([result, ...without], MAX_PER_REPO));
     // Flush now instead of on autoSave's debounce, so the next serialized reload
     // can't re-read a pre-write disk snapshot and drop this record.
     await store.save();

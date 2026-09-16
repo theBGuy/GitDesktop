@@ -19,6 +19,8 @@
 //! sites use, and the truncation flag is set when EITHER the git cap or budgeting
 //! truncated — matching the TS `budgeted.truncated || diffTruncated`.
 
+use std::collections::HashMap;
+
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, GetPromptResult, PromptMessage, Role};
 use rmcp::{prompt, prompt_router, schemars, tool, tool_router, ErrorData as McpError};
@@ -44,7 +46,8 @@ Do not wrap the message in markdown fences. Do not add commentary before or afte
 const BRANCH_SYSTEM: &str = "You generate a single git branch name for a set of code changes.\n\
 Output ONLY the branch name — one line, nothing else: no quotes, no explanation, no markdown, no trailing period.\n\
 Use lowercase kebab-case, 2-5 words, specific to what the change does (avoid generic names like \"updates\" or \"changes\").\n\
-If the existing branch names below show a prefix convention (e.g. \"feature/\", \"fix/\", \"chore/\"), follow it; otherwise pick a fitting type prefix such as \"feature/\" or \"fix/\".\n\
+When branch-prefix counts are listed below, take the prefix that fits this change from that list rather than inventing one; where the bare-names row leads, a bare name is the fitting choice.\n\
+When no counts are listed, just name the change clearly — a conventional type prefix is optional there, neither required nor forbidden.\n\
 Never use spaces, uppercase, or characters invalid in a git ref name.";
 
 /// Mirrors `PR_SYSTEM` in src/lib/ai/prompt.ts (the GitHub base). KEEP IN SYNC.
@@ -681,6 +684,59 @@ struct BranchPieces {
     global_instructions: String,
 }
 
+/// How many prefix rows the branch-name evidence carries. The rows are ordered by
+/// frequency, so a cap drops only the long tail of one-offs.
+const BRANCH_PREFIX_ROWS: usize = 12;
+
+/// What a branch carrying no `<prefix>/` segment is counted under — a real row,
+/// since "most branches here are unprefixed" is itself the convention. The label
+/// says what it means rather than naming a token, so it can't be copied into a
+/// branch name the way a real prefix row can.
+const NO_BRANCH_PREFIX: &str = "(no prefix — bare names)";
+
+/// Branch names → `<prefix>/` counts, most used first, ties by prefix. A frequency
+/// table rather than a sample of names: any window of a branch list is ordered by
+/// something unrelated to convention, so it teaches the model whatever that window
+/// happened to hold. KEEP IN SYNC: `branchPrefixCounts` (src/lib/ai/prompt.ts).
+fn branch_prefix_counts(names: &[String]) -> Vec<(String, usize)> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for name in names {
+        let prefix = match name.find('/') {
+            Some(i) if i > 0 => &name[..=i],
+            _ => NO_BRANCH_PREFIX,
+        };
+        *counts.entry(prefix).or_insert(0) += 1;
+    }
+    let mut rows: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(p, c)| (p.to_string(), c))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
+/// The prefix evidence section, or `None` when there are no branches to count.
+/// KEEP IN SYNC: `branchPrefixSection` (src/lib/ai/prompt.ts).
+fn branch_prefix_section(names: &[String]) -> Option<String> {
+    let counts = branch_prefix_counts(names);
+    if counts.is_empty() {
+        return None;
+    }
+    let shown = counts.len().min(BRANCH_PREFIX_ROWS);
+    let rows = counts[..shown]
+        .iter()
+        .map(|(prefix, count)| format!("{prefix} {count}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let more = match counts.len() - shown {
+        0 => String::new(),
+        rest => format!("\n[{rest} more prefix(es) used by fewer branches]"),
+    };
+    Some(format!(
+        "## Branch name prefixes in this repository (most used first)\n{rows}{more}"
+    ))
+}
+
 /// Assemble the branch-name recipe. Mirrors `buildBranchNamePrompt`
 /// (src/lib/ai/prompt.ts). KEEP IN SYNC.
 fn assemble_branch_recipe(p: BranchPieces) -> Recipe {
@@ -728,11 +784,8 @@ fn assemble_branch_recipe(p: BranchPieces) -> Recipe {
         ));
     }
     let mut prompt_parts = vec![files_section];
-    if !p.recent_branches.is_empty() {
-        prompt_parts.push(format!(
-            "## Existing branch names (convention reference)\n{}",
-            p.recent_branches.join("\n")
-        ));
+    if let Some(section) = branch_prefix_section(&p.recent_branches) {
+        prompt_parts.push(section);
     }
     if !p.commit_subjects.is_empty() {
         prompt_parts.push(format!(
@@ -2070,9 +2123,9 @@ mod tests {
         });
         assert!(recipe.prompt.contains("logo.png (binary)"));
         assert!(recipe.prompt.contains("new.rs (new file)"));
-        assert!(recipe
-            .prompt
-            .contains("## Existing branch names (convention reference)\nfeature/a\nfix/b"));
+        assert!(recipe.prompt.contains(
+            "## Branch name prefixes in this repository (most used first)\nfeature/ 1\nfix/ 1"
+        ));
         // Empty diff → the placeholder body.
         assert!(recipe
             .prompt
@@ -2084,8 +2137,87 @@ mod tests {
         assert!(!recipe.prompt.contains("## Commits on this branch"));
     }
 
-    /// The committed-work signal: the commits section sits AFTER the existing branch
-    /// names and BEFORE the diff, one subject per line (mirrors the TS builder).
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The convention evidence is a frequency table, so the dominant prefix leads
+    /// however the branch list happened to be ordered, and unprefixed branches are a
+    /// row of their own rather than a silent absence.
+    #[test]
+    fn branch_prefix_section_counts_descending_with_unprefixed_row() {
+        let section = branch_prefix_section(&names(&[
+            "release", "fix/x", "feat/a", "main", "feat/b", "fix/y", "feat/c",
+        ]))
+        .unwrap();
+        assert_eq!(
+            section,
+            "## Branch name prefixes in this repository (most used first)\n\
+             feat/ 3\n(no prefix — bare names) 2\nfix/ 2"
+        );
+    }
+
+    /// Past the row cap the tail is disclosed as a count — it is the least-used
+    /// prefixes that drop, so the conventions that govern always survive.
+    #[test]
+    fn branch_prefix_section_caps_rows_and_discloses_the_tail() {
+        let list: Vec<String> = (0..14).map(|i| format!("p{i:02}/x")).collect();
+        let section = branch_prefix_section(&list).unwrap();
+        assert!(section.contains("p00/ 1\np01/ 1"), "section:\n{section}");
+        assert!(section.contains("p11/ 1"), "section:\n{section}");
+        assert!(!section.contains("p12/"), "section:\n{section}");
+        assert!(
+            section.ends_with("\n[2 more prefix(es) used by fewer branches]"),
+            "section:\n{section}"
+        );
+    }
+
+    /// Tie-break parity with the TS mirror. Rust compares UTF-8 bytes, which is
+    /// code-POINT order, so a BMP prefix leads an astral one; the TS side compares
+    /// code points explicitly to reach the same answer, since UTF-16 `<` would
+    /// order the surrogate pair first.
+    #[test]
+    fn branch_prefix_section_ties_break_in_code_point_order() {
+        let section = branch_prefix_section(&names(&["\u{10000}/a", "\u{e000}/b"])).unwrap();
+        let bmp_at = section.find('\u{e000}').unwrap();
+        let astral_at = section.find('\u{10000}').unwrap();
+        assert!(bmp_at < astral_at, "section:\n{section}");
+    }
+
+    /// No branches ⇒ no section at all; the system prompt's no-counts arm is what
+    /// covers a fresh repository.
+    #[test]
+    fn branch_prefix_section_absent_without_branches() {
+        assert!(branch_prefix_section(&[]).is_none());
+    }
+
+    /// The system prompt must name no prefix of its own: a worked example there
+    /// outvotes the repository's real convention whenever the evidence is thin. The
+    /// `/`-free assertion is the ratchet — it catches any example token, not just
+    /// the four spelled out here.
+    #[test]
+    fn branch_system_prompt_names_no_default_prefix() {
+        for token in ["feature/", "feat/", "fix/", "chore/"] {
+            assert!(!BRANCH_SYSTEM.contains(token), "prompt names {token}");
+        }
+        assert!(
+            !BRANCH_SYSTEM.contains('/'),
+            "no prefix token belongs in the system prompt:\n{BRANCH_SYSTEM}"
+        );
+    }
+
+    /// With no counts to read, the choice stays the model's — prescribing a bare
+    /// name there is a default in disguise, the bias this evidence shape removes.
+    #[test]
+    fn branch_system_prompt_leaves_the_no_counts_case_open() {
+        assert!(
+            BRANCH_SYSTEM.contains("optional there, neither required nor forbidden"),
+            "prompt:\n{BRANCH_SYSTEM}"
+        );
+    }
+
+    /// The committed-work signal: the commits section sits AFTER the branch-prefix
+    /// counts and BEFORE the diff, one subject per line (mirrors the TS builder).
     #[test]
     fn branch_recipe_renders_commit_subjects_between_branches_and_diff() {
         let recipe = assemble_branch_recipe(BranchPieces {
@@ -2106,7 +2238,7 @@ mod tests {
         assert!(recipe
             .prompt
             .contains("## Commits on this branch (newest first)\nfix: newest\nfeat: older"));
-        let branches_at = recipe.prompt.find("## Existing branch names").unwrap();
+        let branches_at = recipe.prompt.find("## Branch name prefixes").unwrap();
         let commits_at = recipe.prompt.find("## Commits on this branch").unwrap();
         let diff_at = recipe.prompt.find("## Changes diff").unwrap();
         assert!(

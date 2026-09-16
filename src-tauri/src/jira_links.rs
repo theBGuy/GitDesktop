@@ -153,7 +153,7 @@ fn lookup(store: &Map<String, Value>, identity: &str, legacy: &str) -> Option<Ji
 /// ([`crate::git::repo::repo_identity`]) and looks that up first, then the raw
 /// `repo_path` as a tolerant legacy fallback — mirroring the GUI's `getJiraLink`.
 pub async fn get_link(repo_path: &str) -> AppResult<Option<JiraLinkEntry>> {
-    let identity = crate::git::repo::repo_identity(repo_path).await;
+    let identity = crate::git::repo::repo_identity(repo_path).await?;
     let path = store_path()?;
     let store = read_store(&path)?;
     Ok(lookup(&store, &identity, repo_path))

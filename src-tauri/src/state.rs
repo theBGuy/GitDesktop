@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, OnceCell};
 
+use crate::error::{AppError, AppResult};
 use crate::git::types::GitInfo;
 use crate::git::worktree::normalize_wt_path;
 
@@ -146,42 +147,57 @@ impl AppState {
     /// queues every other repo's behind a git spawn. Two callers racing a first touch
     /// both resolve and the first insert wins — the same value either way.
     ///
-    /// Each resolver degrades to the raw spelling when git can't answer, and an
-    /// UNRESOLVED pair is deliberately never cached: a transient failure (a timeout,
-    /// an antivirus hold) would otherwise pin that spelling to raw-path keys for the
-    /// process lifetime, permanently outside the domains of the repo it names.
-    async fn resolve_lock_keys(&self, repo_path: &str) -> LockKeys {
+    /// Only settled identities enter the cache; failures remain retryable.
+    async fn try_resolve_lock_keys(
+        &self,
+        repo_path: &str,
+    ) -> Result<LockKeys, (LockKeys, Box<AppError>)> {
         if let Some(keys) = self.lock_keys.lock().await.get(repo_path) {
-            return keys.clone();
+            return Ok(keys.clone());
         }
         let toplevel = crate::git::runner::worktree_toplevel(repo_path).await;
-        let identity = crate::git::repo::repo_identity(repo_path).await;
-        // `repo_identity` answers with its input on failure, so equality with the
-        // input is the fallback-detection seam. A caller passing the common git dir
-        // ITSELF can read as unresolved (when the spellings match exactly) — a
-        // re-probe per call at worst, never a wrong key.
-        let resolved = toplevel.is_ok() && identity != repo_path;
+        let (identity, error) = match crate::git::repo::repo_identity(repo_path).await {
+            Ok(identity) => (identity, None),
+            Err(error) => (repo_path.to_string(), Some(error)),
+        };
+        let resolved = error.is_none() && toplevel.is_ok() && identity != repo_path;
         let keys = LockKeys {
             checkout: normalize_wt_path(toplevel.as_deref().unwrap_or(repo_path)),
             shared: normalize_wt_path(&identity),
             identity,
         };
         if !resolved {
-            return keys;
+            return match error {
+                Some(error) => Err((keys, Box::new(error))),
+                None => Ok(keys),
+            };
         }
-        self.lock_keys
+        Ok(self
+            .lock_keys
             .lock()
             .await
             .entry(repo_path.to_string())
             .or_insert(keys)
-            .clone()
+            .clone())
+    }
+
+    async fn resolve_lock_keys(&self, repo_path: &str) -> LockKeys {
+        // Keep a resolved checkout even if identity fails, so subdirectories
+        // still share its lock. Unsettled shared keys never enter the cache.
+        self.try_resolve_lock_keys(repo_path)
+            .await
+            .unwrap_or_else(|(keys, _)| keys)
     }
 
     /// The repository identity (`git::repo::repo_identity` output, un-normalized), served
     /// from the lock-key cache once resolved. An unresolved spelling re-probes per call —
     /// the same cost as the uncached path, never a wrong answer.
-    pub(crate) async fn repo_identity_cached(&self, repo_path: &str) -> String {
-        self.resolve_lock_keys(repo_path).await.identity
+    pub(crate) async fn repo_identity_cached(&self, repo_path: &str) -> AppResult<String> {
+        Ok(self
+            .try_resolve_lock_keys(repo_path)
+            .await
+            .map_err(|(_, error)| *error)?
+            .identity)
     }
 
     /// The two shared-identity domains for `repo_path`, created on first use.
@@ -543,15 +559,46 @@ mod lock_key_tests {
         assert!(same(&present.2, &via_sub.2), "network");
     }
 
-    /// The identity is cached RAW: `update_marker`'s roots hash `repo_identity`'s own
-    /// spelling, and `repo_hash` lower-cases without touching separators, so caching a
-    /// `normalize_wt_path`ed copy would key a marker root no stateless resolver reads.
-    /// Both the resolve path and the cache-hit path are checked, since only the second
-    /// can hand back a transformed value.
+    #[tokio::test]
+    async fn an_identity_error_is_not_cached_and_the_next_call_retries() {
+        let (_dir, path) = setup_repo("identity-retry").await;
+        let state = AppState::default();
+        let result = crate::git::repo::TEST_IDENTITY_ERROR
+            .scope(|| AppError::Timeout(30), state.repo_identity_cached(&path))
+            .await;
+        assert!(matches!(result, Err(AppError::Timeout(30))));
+        assert!(state.lock_keys.lock().await.is_empty());
+        assert_eq!(
+            state.repo_identity_cached(&path).await.unwrap(),
+            crate::git::repo::repo_identity(&path).await.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_identity_error_preserves_the_resolved_checkout_lock() {
+        let (_dir, repo) = setup_repo("identity-error-subdir").await;
+        let sub = std::path::Path::new(&repo).join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let sub = sub.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let root_lock = state.working_tree_lock(&repo).await;
+        crate::git::repo::TEST_IDENTITY_ERROR
+            .scope(|| AppError::Timeout(30), async {
+                let keys = state.resolve_lock_keys(&sub).await;
+                assert_eq!(keys.checkout, normalize_wt_path(&repo));
+                assert_eq!(keys.shared, normalize_wt_path(&sub));
+                assert!(same(&root_lock, &state.working_tree_lock(&sub).await));
+                assert!(!state.lock_keys.lock().await.contains_key(&sub));
+            })
+            .await;
+    }
+
+    /// Marker roots hash the raw identity spelling, including separators.
+    /// Both the initial resolution and a cache hit must preserve it.
     #[tokio::test]
     async fn the_cached_identity_is_the_raw_resolver_spelling() {
         let (_dir, repo) = setup_repo("identity").await;
-        let expected = crate::git::repo::repo_identity(&repo).await;
+        let expected = crate::git::repo::repo_identity(&repo).await.unwrap();
 
         let state = AppState::default();
         let first = state.resolve_lock_keys(&repo).await;
@@ -565,7 +612,7 @@ mod lock_key_tests {
             "while the lock key keeps its normalization"
         );
         assert_eq!(
-            state.repo_identity_cached(&repo).await,
+            state.repo_identity_cached(&repo).await.unwrap(),
             expected,
             "the accessor is the same spelling"
         );

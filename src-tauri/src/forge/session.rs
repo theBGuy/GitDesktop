@@ -1010,12 +1010,9 @@ async fn run_reconnect_child(
     if is_github {
         cmd.env("GH_NO_UPDATE_NOTIFIER", "1");
     } else {
-        // An update notice lands on stderr, which this child scans for the
-        // one-time code. glab's switch is inverted from gh's and is ParseBool'd
-        // (see `glab::run_glab_raw`), so it must read "false", not "" or "1".
-        cmd.env("GLAB_PAGER", "")
-            .env("PAGER", "")
-            .env("GLAB_CHECK_UPDATE", "false");
+        // Share glab's runner seam for token scoping and quiet CLI settings;
+        // see glab::configure_child_env for the update switch's measured contract.
+        super::glab::configure_reconnect_child(&mut cmd, args).await;
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())

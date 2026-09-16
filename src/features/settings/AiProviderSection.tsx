@@ -63,6 +63,7 @@ import {
   type ReviewContextSize,
 } from "@/lib/ai/review-context-size";
 import {
+  EFFORT_LEVEL_LABELS,
   REVIEW_EFFORTS,
   type ReviewEffort,
   reviewEffortCapable,
@@ -360,13 +361,11 @@ const REVIEW_TIMEOUT_ITEMS: Record<ReviewTimeout, string> = {
   "60": "60 minutes",
 };
 
-/** Review-effort labels — same `items` contract as the maps above. */
+/** Review-effort labels — same `items` contract as the maps above. Only the
+ *  "no level" row is local: this picker spells it as the CLI's own default. */
 const REVIEW_EFFORT_ITEMS: Record<ReviewEffort, string> = {
   auto: "Default — the CLI's own setting",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Max",
+  ...EFFORT_LEVEL_LABELS,
 };
 
 type DefaultAgentId = (typeof DEFAULT_AGENT_IDS)[number];

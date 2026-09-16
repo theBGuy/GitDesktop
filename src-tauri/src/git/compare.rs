@@ -480,7 +480,7 @@ async fn persistent_review_path(repo_path: &str) -> Option<std::path::PathBuf> {
     }
     #[cfg(not(test))]
     {
-        let identity = crate::git::repo::repo_identity(repo_path).await;
+        let identity = crate::git::repo::repo_identity(repo_path).await.ok()?;
         crate::git::ops::identity_worktree_root_dir(&identity)
             .ok()
             .map(|root| root.join(PERSISTENT_REVIEW_DIR))

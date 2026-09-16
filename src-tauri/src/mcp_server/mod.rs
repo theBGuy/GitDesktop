@@ -350,7 +350,9 @@ impl GitDesktopMcp {
     /// points at. One shared resolver (`git::repo::repo_identity`, also behind the GUI's
     /// `git_repo_identity`) so the two can never diverge.
     async fn local_pr_key(&self) -> Result<String, McpError> {
-        let identity = crate::git::repo::repo_identity(&self.repo).await;
+        let identity = crate::git::repo::repo_identity(&self.repo)
+            .await
+            .map_err(app_err)?;
         // Fold once per session (the server is bound to one repo). The flag is set only
         // AFTER a successful fold, so a transient failure retries next call. BOTH
         // spellings are probed as legacy keys — see [`Self::raw_repo`].

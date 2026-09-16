@@ -48,7 +48,11 @@ import {
   PROVIDER_LABELS,
   PROVIDERS_REQUIRING_KEY,
 } from "@/lib/ai/providers";
-import type { AiProviderId, ReviewMode } from "@/lib/ai/types";
+import {
+  type AiProviderId,
+  REVIEW_MODES,
+  type ReviewMode,
+} from "@/lib/ai/types";
 import { copyText } from "@/lib/clipboard";
 import { useForgeStatus } from "@/lib/git/queries";
 import { quickTransition } from "@/lib/motion";
@@ -658,7 +662,7 @@ export function PrReviewPanel({
             </button>
           </div>
         )}
-        {(["general", "security"] as ReviewMode[]).map((m) => {
+        {REVIEW_MODES.map((m) => {
           const prior = latestByMode[m];
           if (!prior) return null;
           const ignored = ignoredModes.has(m);

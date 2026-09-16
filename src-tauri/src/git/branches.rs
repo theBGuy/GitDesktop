@@ -269,8 +269,12 @@ pub(crate) async fn git_rename_branch_core(
     // `rename_branch` tool); a terminal `git branch -m` has no hook, the same accepted
     // gap as the commit-draft migration. Cold-start test mode is out of reach too — the
     // GUI aliases its store file there (`storeName` in src/lib/test-mode.ts).
-    let identity = crate::git::repo::repo_identity(&repo_path).await;
-    if let Err(e) = crate::review_notes::rename_branch(&identity, &old_name, &new_name).await {
+    let note_result = async {
+        let identity = crate::git::repo::repo_identity(&repo_path).await?;
+        crate::review_notes::rename_branch(&identity, &old_name, &new_name).await
+    }
+    .await;
+    if let Err(e) = note_result {
         eprintln!("gitdesktop: reviewer-note rename failed (branch renamed anyway): {e}");
     }
     Ok(())
@@ -2061,7 +2065,7 @@ mod tests {
         init_repo(&repo_s, "r.txt").await;
         run(&repo_s, &["branch", "feature"]).await;
 
-        let identity = crate::git::repo::repo_identity(&repo_s).await;
+        let identity = crate::git::repo::repo_identity(&repo_s).await.unwrap();
         crate::review_notes::set(&identity, "feature", "look at the migration")
             .await
             .expect("deposit the note");
@@ -2087,6 +2091,46 @@ mod tests {
             None,
             "and is gone under the old one"
         );
+    }
+
+    #[tokio::test]
+    async fn rename_succeeds_without_migrating_notes_when_identity_is_unavailable() {
+        let (_base, base) = temp_base("rename-identity-error");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        run(&repo, &["branch", "feature"]).await;
+        let identity = crate::git::repo::repo_identity(&repo).await.unwrap();
+        crate::review_notes::set(&identity, "feature", "keep this note")
+            .await
+            .unwrap();
+        let state = AppState::default();
+        crate::git::repo::TEST_IDENTITY_ERROR
+            .scope(
+                || AppError::Timeout(30),
+                git_rename_branch_core(
+                    &state,
+                    repo.clone(),
+                    "feature".into(),
+                    "renamed".into(),
+                ),
+            )
+            .await
+            .expect("identity failure does not turn a completed rename into an error");
+        assert!(run(&repo, &["branch", "--list", "renamed"])
+            .await
+            .contains("renamed"));
+        assert!(run(&repo, &["branch", "--list", "feature"])
+            .await
+            .trim()
+            .is_empty());
+        assert_eq!(
+            crate::review_notes::note_body(&identity, "feature").as_deref(),
+            Some("keep this note")
+        );
+        assert_eq!(crate::review_notes::note_body(&identity, "renamed"), None);
+        assert_eq!(crate::review_notes::note_body(&repo, "renamed"), None);
     }
 
     // --- Rewrite-aware divergence (`git_branch_rewrite_status`). ---

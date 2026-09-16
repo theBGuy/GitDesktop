@@ -20,6 +20,7 @@ import {
   useClearReviewDrafts,
   useReviewDrafts,
 } from "@/lib/pulls/review-drafts";
+import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -174,7 +175,7 @@ export function SubmitReviewDialog({
       // which the user needs to see in full). Unmounted mid-submit, that surface is
       // gone, so the failure rides a toast rather than vanishing.
       if (mounted.current) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(errorMessage(e));
       } else {
         toastError(e);
       }

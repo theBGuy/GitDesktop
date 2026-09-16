@@ -897,7 +897,8 @@ export function persistRepoOwners(
     const settings = await loadSettings();
     // Index the probes by repo IDENTITY and resolve each existing row's identity too, so a
     // row matches an entry for a sibling worktree of the same repo. repoIdentity is
-    // promise-memoized per path — one IPC round per path per session, not per probe.
+    // promise-memoized per path — one IPC round per path per re-validation window,
+    // not per probe.
     const byIdentity = new Map(
       await Promise.all(
         owners.map(async (o) => [await repoIdentity(o.path), o] as const),

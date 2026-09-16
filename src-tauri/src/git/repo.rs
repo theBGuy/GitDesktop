@@ -209,38 +209,81 @@ pub async fn repo_origin_path(repo_path: String) -> AppResult<RepoOrigin> {
     })
 }
 
-/// A repository's worktree-stable identity key: the absolute path of its common
-/// git directory (`git rev-parse --path-format=absolute --git-common-dir`), which
-/// is identical for the main checkout and every linked worktree of the same repo
-/// (verified: main and a `gd/session/*` worktree both resolve to `<repo>/.git`).
-/// The per-repo app-data stores (local PRs/issues, review history + drafts, branch
-/// rules, automations) key their records on this so a PR created inside a worktree
-/// is visible from the main checkout and vice-versa, instead of being split by
-/// checkout path — the worktree-unaware bug. Falls back to the input path when git
-/// can't resolve it (a non-repo path, or git missing) so the key is always a
-/// stable, usable string that matches the frontend's own fallback (`repoIdentity`
-/// in `src/lib/git/repo-identity.ts`). The GUI reaches this via the
-/// `git_repo_identity` command; the MCP server calls it directly — ONE shared
-/// resolver so the two processes can never disagree on the key.
-pub async fn repo_identity(repo_path: &str) -> String {
-    match run_git(
+/// The common git directory, shared by every checkout of a repository. GUI and
+/// MCP stores use this same resolver. Confirmed non-repositories and dead paths
+/// return the input path; unavailable git on a live directory remains retryable.
+pub async fn repo_identity(repo_path: &str) -> AppResult<String> {
+    let result = identity_from_git(repo_path, identity_probe(repo_path).await);
+    if matches!(result, Err(AppError::Timeout(_))) {
+        return result;
+    }
+    if result.is_err() {
+        // Missing git on a live directory remains a retryable GitNotFound.
+        let missing = match tokio::fs::metadata(repo_path).await {
+            Ok(metadata) => !metadata.is_dir(),
+            Err(err) => matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ),
+        };
+        // A tree deleted with its parent stays retryable, like an unavailable volume.
+        if missing {
+            if let Some(parent) = Path::new(repo_path).parent() {
+                let parent = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
+                if tokio::fs::metadata(parent).await.is_ok_and(|m| m.is_dir()) {
+                    return Ok(repo_path.to_string());
+                }
+            }
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_IDENTITY_ERROR: fn() -> AppError;
+}
+
+async fn identity_probe(repo_path: &str) -> AppResult<crate::git::runner::GitOutput> {
+    #[cfg(test)]
+    if let Ok(err) = TEST_IDENTITY_ERROR.try_with(|make_error| make_error()) {
+        return Err(err);
+    }
+    run_git(
         Some(repo_path),
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         DEFAULT_TIMEOUT,
     )
     .await
-    {
+}
+
+fn identity_from_git(
+    repo_path: &str,
+    result: AppResult<crate::git::runner::GitOutput>,
+) -> AppResult<String> {
+    match result {
         Ok(out) => {
             let dir = out.stdout_lossy().trim().to_string();
             if dir.is_empty() {
-                repo_path.to_string()
+                Err(AppError::Command(
+                    "git returned an empty repository identity".to_string(),
+                ))
             } else {
-                dir
+                Ok(dir)
             }
         }
-        // Not a git repo, git missing, timeout — degrade to the raw path so the
-        // caller still gets a stable key (matches the frontend fallback exactly).
-        Err(_) => repo_path.to_string(),
+        // The runner pins LC_ALL=C; other exit-128 failures (permissions, unsafe
+        // ownership, corrupt metadata) do not prove this is a non-repository.
+        Err(AppError::Git { code: 128, stderr })
+            if stderr.lines().any(|line| line.contains("not a git repository")) =>
+        {
+            Ok(repo_path.to_string())
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -248,7 +291,7 @@ pub async fn repo_identity(repo_path: &str) -> String {
 /// [`repo_identity`]).
 #[tauri::command]
 pub async fn git_repo_identity(repo_path: String) -> AppResult<String> {
-    Ok(repo_identity(&repo_path).await)
+    repo_identity(&repo_path).await
 }
 
 #[tauri::command]
@@ -540,6 +583,168 @@ fn time_year() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     (1970 + secs / 31_557_600).to_string()
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::git::runner::GitOutput;
+
+    #[tokio::test]
+    async fn non_repo_directory_keeps_the_input_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dunce::canonicalize(dir.path()).unwrap();
+        let git = crate::agent::resolve_named(&["git"], None).await.unwrap();
+        let output = tokio::process::Command::new(git)
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(&path)
+            .env("GIT_CEILING_DIRECTORIES", path.parent().unwrap())
+            .env("LC_ALL", "C")
+            .output()
+            .await
+            .unwrap();
+        let path = path.to_string_lossy().into_owned();
+        assert_eq!(
+            identity_from_git(
+                &path,
+                Err(AppError::Git {
+                    code: output.status.code().unwrap(),
+                    stderr: String::from_utf8(output.stderr).unwrap(),
+                }),
+            )
+            .unwrap(),
+            path
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deleted_checkout_path_is_settled() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(parent.path()).unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        dir.close().unwrap();
+        assert_eq!(repo_identity(&path).await.unwrap(), path);
+        assert_eq!(git_repo_identity(path.clone()).await.unwrap(), path);
+    }
+
+    #[tokio::test]
+    async fn a_missing_checkout_and_parent_remain_transient() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("checkout");
+        std::fs::create_dir(&path).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        parent.close().unwrap();
+        assert!(repo_identity(&path).await.is_err());
+        assert!(git_repo_identity(path).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_timeout_does_not_probe_a_deleted_checkout() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(parent.path()).unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        dir.close().unwrap();
+        let result = TEST_IDENTITY_ERROR
+            .scope(|| AppError::Timeout(30), repo_identity(&path))
+            .await;
+        assert!(matches!(result, Err(AppError::Timeout(30))));
+    }
+
+    #[tokio::test]
+    async fn a_file_path_is_settled_but_an_outage_on_a_live_directory_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, "content").unwrap();
+        let file = file.to_string_lossy().into_owned();
+        assert_eq!(repo_identity(&file).await.unwrap(), file);
+        let path = dir.path().to_string_lossy().into_owned();
+        let result = TEST_IDENTITY_ERROR
+            .scope(|| AppError::GitNotFound, repo_identity(&path))
+            .await;
+        assert!(matches!(result, Err(AppError::GitNotFound)));
+    }
+
+    #[test]
+    fn missing_git_remains_an_error_naming_the_cause() {
+        let err = identity_from_git("checkout", Err(AppError::GitNotFound)).unwrap_err();
+        assert!(matches!(err, AppError::GitNotFound));
+        assert_eq!(err.to_string(), "git executable not found");
+    }
+
+    #[test]
+    fn spawn_io_failure_remains_an_error() {
+        let err = identity_from_git(
+            "checkout",
+            Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "git spawn denied",
+            ))),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::Io(_)));
+        assert_eq!(err.to_string(), "io error: git spawn denied");
+    }
+
+    #[tokio::test]
+    async fn runner_timeout_remains_an_error_naming_the_budget() {
+        let result = run_git(None, &["--version"], std::time::Duration::ZERO).await;
+        assert!(matches!(
+            identity_from_git("checkout", result),
+            Err(AppError::Timeout(0))
+        ));
+        let err =
+            identity_from_git("checkout", Err(AppError::Timeout(DEFAULT_TIMEOUT.as_secs())))
+                .unwrap_err();
+        assert!(matches!(err, AppError::Timeout(30)));
+        assert_eq!(err.to_string(), "git operation timed out after 30s");
+    }
+
+    #[test]
+    fn only_a_confirmed_non_repository_exit_is_settled() {
+        for stderr in [
+            "fatal: not a git repository (or any of the parent directories): .git\n",
+            "fatal: not a git repository: 'checkout'\n",
+            "warning: unable to access config\nfatal: not a git repository (or any of the parent directories): .git\n",
+            "warning: unable to access config\nfatal: not a git repository: 'checkout'\n",
+        ] {
+            let not_repo = AppError::Git {
+                code: 128,
+                stderr: stderr.into(),
+            };
+            assert_eq!(
+                identity_from_git("checkout", Err(not_repo)).unwrap(),
+                "checkout"
+            );
+        }
+        let unsafe_repo = AppError::Git {
+            code: 128,
+            stderr: "fatal: detected dubious ownership in repository".into(),
+        };
+        assert!(matches!(
+            identity_from_git("checkout", Err(unsafe_repo)),
+            Err(AppError::Git { .. })
+        ));
+    }
+
+    #[test]
+    fn successful_identity_stays_a_string_and_empty_output_is_inconclusive() {
+        for (stdout, expected) in [("/repo/.git\n", Some("/repo/.git")), ("\n", None)] {
+            let result = identity_from_git(
+                "checkout",
+                Ok(GitOutput {
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: String::new(),
+                    code: 0,
+                }),
+            );
+            match expected {
+                Some(identity) => {
+                    assert_eq!(serde_json::to_value(result.unwrap()).unwrap(), identity);
+                }
+                None => assert!(matches!(result, Err(AppError::Command(_)))),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

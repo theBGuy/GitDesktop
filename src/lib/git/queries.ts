@@ -252,6 +252,9 @@ export function useRepoStatus(repo: string) {
   return useQuery({
     queryKey: repoKeys.status(repo),
     queryFn: () => api.gitStatus(repo),
+    // A local git read, so it must not park on the default "online" mode the way
+    // a forge call does — gates that hold until this answers would never lift.
+    networkMode: "always",
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
   });

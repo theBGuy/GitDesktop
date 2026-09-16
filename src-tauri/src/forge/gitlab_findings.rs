@@ -1581,9 +1581,11 @@ mod tests {
             None,
             now(),
         );
+        let (availability, detail) = not_readable.unwrap_err();
+        assert_eq!(availability, GlFindingAvailability::ReportNotReadable);
         assert_eq!(
-            not_readable.unwrap_err().0,
-            GlFindingAvailability::ReportNotReadable
+            detail.as_deref(),
+            Some("the job lists this report but GitLab returned 404 for the file"),
         );
         // An expiry still in the future can't explain it either.
         let future = artifact_outcome(

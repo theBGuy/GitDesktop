@@ -96,6 +96,7 @@ import {
   useSettings,
 } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { type SelectedPr, useUiStore } from "@/lib/stores/ui";
 import {
   isWorktreePromoting,
@@ -448,9 +449,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     "origin",
   );
   const localPrs = useLocalPrs(repoPath);
-  const selectPr = useUiStore((s) => s.selectPr);
+  const openPr = useUiStore((s) => s.openPr);
+  const repoName = useUiStore((s) => s.repoName);
   const setLens = useSetRepoLens(repoPath);
-  const setRepoTab = useUiStore((s) => s.setRepoTab);
 
   const prByBranch = useMemo(() => {
     const map = new Map<string, BranchPr>();
@@ -510,12 +511,22 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     return map;
   }, [prByBranch, defaultName]);
 
-  const openPr = (select: SelectedPr) => {
-    // A remote PR here is a fork (origin) PR — force the origin lens (which also
-    // clears any stale upstream remote selection) before navigating to it.
-    if (select.kind === "remote") setLens("origin");
-    selectPr(select);
-    setRepoTab("pulls");
+  const openPrChip = (select: SelectedPr) => {
+    // Through the store's navigator rather than a bare select + tab switch: these
+    // chips badge merged and closed PRs too, and only this door arms the align
+    // that moves the Pulls list to the tab the PR is actually on.
+    openPr({
+      kind: select.kind,
+      repoPath,
+      repoName: repoName ?? repoNameFromPath(repoPath),
+      ref: select.id,
+      section: null,
+      // A remote PR here is a fork (origin) PR — force the origin lens (which also
+      // clears any stale upstream remote selection) before navigating to it. Inside
+      // the navigator's callback, so the lens and the selection land together.
+      beforeSelect:
+        select.kind === "remote" ? () => setLens("origin") : undefined,
+    });
     setOpen(false);
   };
 
@@ -1952,13 +1963,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       )}
                       onClick={(e) => {
                         e.stopPropagation();
-                        openPr(pr.select);
+                        openPrChip(pr.select);
                       }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           e.stopPropagation();
-                          openPr(pr.select);
+                          openPrChip(pr.select);
                         }
                       }}
                     >

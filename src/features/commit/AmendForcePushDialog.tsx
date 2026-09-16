@@ -25,7 +25,10 @@ export function AmendForcePushDialog({
 }: {
   open: boolean;
   upstream: string | null;
-  onConfirm: () => void;
+  /** Starts the amend, resolving true once it actually began. False covers both
+   *  a gate refusal (a branch rule, or a read still settling) and a commit that
+   *  couldn't be loaded — either one holds the "Don't show again" write back. */
+  onConfirm: () => Promise<boolean>;
   onCancel: () => void;
 }) {
   const settings = useSettings();
@@ -36,12 +39,16 @@ export function AmendForcePushDialog({
   useSeedOnOpen(open, () => setDontShowAgain(false));
 
   function confirm() {
-    if (dontShowAgain && settings.data) {
+    // The preference waits on the amend having started: a refused confirm, or a
+    // commit that no longer resolves, leaves the prompt that carried it in place.
+    // `dontShowAgain` is the click-time value by design — the user's answer to
+    // THIS prompt, not whatever the checkbox holds when the amend lands.
+    void onConfirm().then((amended) => {
+      if (!amended || !dontShowAgain || !settings.data) return;
       void saveSettings
         .mutateAsync({ ...settings.data, confirmAmendForcePush: false })
         .catch(() => undefined);
-    }
-    onConfirm();
+    });
   }
 
   return (

@@ -83,6 +83,7 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { AddExistingItemsDialog, NewDraftDialog } from "./BoardAddDialogs";
@@ -236,7 +237,7 @@ function ClearViewButton({ onClear }: { onClear: () => void }) {
 }
 
 /** Whether a card's issue or pull request opens IN-APP rather than in the browser.
- *  `selectIssue`/`selectPr` hand over a bare number the destination resolves under
+ *  `selectIssue`/`openPr` hand over a bare number the destination resolves under
  *  the repo's ACTIVE lens, so only a card from the repo that lens points at can be
  *  opened here. An unresolved slug (`null`) takes the browser branch deliberately:
  *  that is the SAFE direction, since an in-app open on an unconfirmed match would
@@ -396,7 +397,8 @@ export function ProjectsBoardPanel({
   const repoSlug = useRemoteSlug(repoPath, lens, canRead);
   const openReconnect = useUiStore((s) => s.openReconnect);
   const selectIssue = useUiStore((s) => s.selectIssue);
-  const selectPr = useUiStore((s) => s.selectPr);
+  const openPr = useUiStore((s) => s.openPr);
+  const repoName = useUiStore((s) => s.repoName);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
 
   const projects = useAvailableProjects(repoPath, canRead, lens);
@@ -549,16 +551,29 @@ export function ProjectsBoardPanel({
       // reference links follow.
       if (opensInApp(content, repoSlug)) {
         const id = String(content.number);
-        if (content.kind === "issue") selectIssue({ kind: "remote", id });
-        else selectPr({ kind: "remote", id });
-        setRepoTab(target.tab);
+        if (content.kind === "issue") {
+          selectIssue({ kind: "remote", id });
+          setRepoTab(target.tab);
+          return;
+        }
+        // The PR arm takes the store's navigator, which lands the tab itself and
+        // arms the align the Pulls list needs — a board carries merged and closed
+        // cards, and those can't show on the Open tab. `opensInApp` already pinned
+        // the card to the repo the ACTIVE lens points at, so no lens write.
+        openPr({
+          kind: "remote",
+          repoPath,
+          repoName: repoName ?? repoNameFromPath(repoPath),
+          ref: id,
+          section: null,
+        });
         return;
       }
       void openUrl(
         `https://${host}/${content.repoNameWithOwner}/${target.webPath}/${content.number}`,
       ).catch(toastError);
     },
-    [host, repoSlug, selectIssue, selectPr, setRepoTab],
+    [host, openPr, repoName, repoPath, repoSlug, selectIssue, setRepoTab],
   );
 
   /** The card `el` sits in, resolved from the DOM rather than from state: a bare

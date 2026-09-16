@@ -16,6 +16,37 @@ use tauri_plugin_http::reqwest::{self, Client};
 
 use crate::error::{AppError, AppResult};
 
+/// Keep the summary on line one and the original detail available on line two.
+pub(crate) fn bb_unreadable(what: &str, detail: String) -> AppError {
+    // Diagnostic labels remain unchanged in detail; only the summary needs an article.
+    let what = match what {
+        "branch restriction" => "the branch restriction",
+        "comment" => "the comment",
+        "commit comment" => "the commit comment",
+        "created pull request" => "the created pull request",
+        "created repository" => "the created repository",
+        "created task" => "the created task",
+        "default reviewer" => "the default reviewer",
+        "fork" => "the fork",
+        "pipeline" => "the pipeline",
+        "pipeline schedule" => "the pipeline schedule",
+        "pipeline variable" => "the pipeline variable",
+        "pull request" => "the pull request",
+        "pull request activity" => "the pull request activity",
+        "reply" => "the reply",
+        "repository" => "the repository",
+        "review comment" => "the review comment",
+        "review summary" => "the review summary",
+        "task" => "the task",
+        "user" => "the user",
+        "webhook" => "the webhook",
+        "diffstat" => "the file changes",
+        "pipelines config" => "the pipeline settings",
+        _ => what,
+    };
+    AppError::Bitbucket(format!("Couldn't read {what} from Bitbucket.\n{detail}"))
+}
+
 /// The Bitbucket Cloud REST base. Every relative path the provider passes is
 /// resolved against this; absolute URLs (e.g. a pagination `next`) are used as-is.
 pub const BB_API_BASE: &str = "https://api.bitbucket.org/2.0/";
@@ -239,7 +270,12 @@ pub async fn bb_get_text_status(
     let body = resp
         .text()
         .await
-        .map_err(|e| AppError::Bitbucket(format!("could not read Bitbucket response: {e}")))?;
+        .map_err(|e| {
+            bb_unreadable(
+                "the response",
+                format!("could not read Bitbucket response: {e}"),
+            )
+        })?;
     Ok((status, body))
 }
 
@@ -256,8 +292,8 @@ pub async fn bb_get_text(creds: &BbCredentials, path_or_url: &str) -> AppResult<
 
 /// GET a Bitbucket endpoint expecting JSON, deserializing into `T` (HTTP Basic,
 /// `Accept: application/json`, default redirect policy). Non-2xx → [`http_error`]; a
-/// 2xx body that won't parse → `Bitbucket("could not parse …")` carrying the serde
-/// error.
+/// 2xx body that won't parse uses "Couldn't read {what} from Bitbucket." on line
+/// one, with the original serde error on line two.
 pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,
     path_or_url: &str,
@@ -275,12 +311,17 @@ pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
     let body = resp
         .text()
         .await
-        .map_err(|e| AppError::Bitbucket(format!("could not read Bitbucket response: {e}")))?;
+        .map_err(|e| {
+            bb_unreadable(
+                "the response",
+                format!("could not read Bitbucket response: {e}"),
+            )
+        })?;
     if !(200..300).contains(&status) {
         return Err(http_error(status, &body));
     }
     serde_json::from_str(&body)
-        .map_err(|e| AppError::Bitbucket(format!("could not parse Bitbucket {what}: {e}")))
+        .map_err(|e| bb_unreadable(what, format!("could not parse Bitbucket {what}: {e}")))
 }
 
 /// The low-level write primitive: send `method` to `path_or_url` with an optional JSON
@@ -321,13 +362,19 @@ pub async fn bb_send(
     let body = resp
         .text()
         .await
-        .map_err(|e| AppError::Bitbucket(format!("could not read Bitbucket response: {e}")))?;
+        .map_err(|e| {
+            bb_unreadable(
+                "the response",
+                format!("could not read Bitbucket response: {e}"),
+            )
+        })?;
     Ok((status, location, body))
 }
 
 /// POST JSON to a Bitbucket endpoint and deserialize the 2xx body into `T`.
 /// `Accept`/`Content-Type: application/json`, HTTP Basic auth. Non-2xx →
-/// [`http_error`]; a parse failure of a 2xx body → `Bitbucket("could not parse …")`.
+/// [`http_error`]; a parse failure uses "Couldn't read {what} from Bitbucket." on
+/// line one, with the original serde error on line two.
 pub async fn bb_post_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,
     path_or_url: &str,
@@ -339,11 +386,12 @@ pub async fn bb_post_json<T: serde::de::DeserializeOwned>(
         return Err(http_error(status, &body));
     }
     serde_json::from_str(&body)
-        .map_err(|e| AppError::Bitbucket(format!("could not parse Bitbucket {what}: {e}")))
+        .map_err(|e| bb_unreadable(what, format!("could not parse Bitbucket {what}: {e}")))
 }
 
 /// PUT JSON to a Bitbucket endpoint and deserialize the 2xx body into `T`. Same shape
-/// as [`bb_post_json`].
+/// as [`bb_post_json`]: "Couldn't read {what} from Bitbucket." on line one, with
+/// the original serde error on line two.
 pub async fn bb_put_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,
     path_or_url: &str,
@@ -355,7 +403,7 @@ pub async fn bb_put_json<T: serde::de::DeserializeOwned>(
         return Err(http_error(status, &body));
     }
     serde_json::from_str(&body)
-        .map_err(|e| AppError::Bitbucket(format!("could not parse Bitbucket {what}: {e}")))
+        .map_err(|e| bb_unreadable(what, format!("could not parse Bitbucket {what}: {e}")))
 }
 
 /// POST to a Bitbucket endpoint with NO request body (decline / approve /
@@ -382,6 +430,15 @@ pub async fn bb_delete(creds: &BbCredentials, path_or_url: &str) -> AppResult<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bitbucket_unreadable_keeps_the_detail_on_its_own_line() {
+        let detail = "could not parse Bitbucket response: boom";
+        assert_eq!(
+            bb_unreadable("the response", detail.into()).to_string(),
+            "Couldn't read the response from Bitbucket.\ncould not parse Bitbucket response: boom"
+        );
+    }
 
     #[test]
     fn resolve_url_joins_relative_and_passes_absolute() {

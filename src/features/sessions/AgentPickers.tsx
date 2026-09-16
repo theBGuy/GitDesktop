@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/select";
 import { type AgentKind, isAgentKind } from "@/lib/ai/agent";
 import { modelPickerEmptyText, useAgentModels } from "@/lib/ai/models";
+import { EFFORT_LEVEL_LABELS, EFFORT_LEVELS } from "@/lib/ai/review-effort";
 import type { McpServer } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
@@ -131,19 +132,13 @@ export function ModelPicker({
 }
 
 const DEFAULT_EFFORT = "default";
-const EFFORT_LEVELS = [
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "Max" },
-] as const;
 
 /** Labels for the effort Select — without them Base UI shows the raw stored
  *  value ("xhigh") in the trigger. Same `items` contract as the settings selects,
  *  and the popup renders from it too so the two can never drift. */
 const EFFORT_ITEMS: Record<string, string> = {
   [DEFAULT_EFFORT]: "Default",
-  ...Object.fromEntries(EFFORT_LEVELS.map((l) => [l.value, l.label])),
+  ...EFFORT_LEVEL_LABELS,
 };
 
 /** Reasoning/effort level for the next turn. Mapped per-CLI in Rust (Codex
@@ -262,12 +257,14 @@ function Segmented<T extends string>({
   );
 }
 
+/** The empty value is this surface's "no level" row — the composer stores an
+ *  absent effort as `""`, not the Select's `"default"` sentinel. */
 const EFFORT_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "Auto" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Med" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "Max" },
+  ...EFFORT_LEVELS.map((value) => ({
+    value,
+    label: EFFORT_LEVEL_LABELS[value],
+  })),
 ];
 
 const RUN_MODE_OPTIONS: { value: RunMode; label: string }[] = [

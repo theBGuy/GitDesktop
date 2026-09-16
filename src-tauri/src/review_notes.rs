@@ -196,7 +196,7 @@ pub async fn review_notes_set_branch(
     branch: String,
     body: String,
 ) -> AppResult<bool> {
-    let identity = crate::git::repo::repo_identity(&repo_path).await;
+    let identity = crate::git::repo::repo_identity(&repo_path).await?;
     set(&identity, &branch, &body).await
 }
 
@@ -205,7 +205,7 @@ pub async fn review_notes_set_branch(
 /// one locked implementation. A branch with no note is a harmless no-op.
 #[tauri::command]
 pub async fn review_notes_delete_branch(repo_path: String, branch: String) -> AppResult<()> {
-    let identity = crate::git::repo::repo_identity(&repo_path).await;
+    let identity = crate::git::repo::repo_identity(&repo_path).await?;
     set(&identity, &branch, "").await?;
     Ok(())
 }

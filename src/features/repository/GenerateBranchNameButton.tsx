@@ -61,7 +61,9 @@ export function useBranchNameGenerateAction({
   hasChanges: boolean;
   headExists: boolean;
   entries: FileEntry[];
-  /** Existing branch names, used as a naming-convention reference (capped). */
+  /** Every existing branch name — the prompt aggregates them into prefix counts,
+   *  so the whole list goes in: any window of it samples ref order, not
+   *  convention. */
   recentBranches: string[];
   nameTarget: BranchNameTarget;
   committedFallback: CommittedNameSource | null;
@@ -78,7 +80,7 @@ export function useBranchNameGenerateAction({
     run: () =>
       gen.generate({
         entries,
-        recentBranches: recentBranches.slice(0, 20),
+        recentBranches,
         useWorkingTree,
         // Only when naming the very branch those commits sit on.
         workingTreeSubjects:

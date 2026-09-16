@@ -1,15 +1,28 @@
 import type { AiProviderId } from "./types";
 
+/** The reasoning levels that carry a real setting, in render order. Every effort
+ *  surface derives its rows from this list, so a rename can't drift between
+ *  them; the "no level" row stays per-surface, since both its stored value and
+ *  its copy differ (`""`, a `"default"` sentinel, "the CLI's own setting"). */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const;
+
+/** A reasoning level with a setting behind it — `ReviewEffort` minus `"auto"`. */
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+/** The words every effort picker shows. Record-typed against the derived union,
+ *  so a level without a label and a label without a level are both compile
+ *  errors. */
+export const EFFORT_LEVEL_LABELS: Record<EffortLevel, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Max",
+};
+
 /** The Review-effort choices offered in Settings, in render order. The
  *  `ReviewEffort` union derives from this list, so the Settings labels map
  *  stays exhaustive and the menu can't silently drop an option. */
-export const REVIEW_EFFORTS = [
-  "auto",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-] as const;
+export const REVIEW_EFFORTS = ["auto", ...EFFORT_LEVELS] as const;
 
 /** How hard an agent-CLI review reasons. `"auto"` sends nothing — the CLI's
  *  own configured default governs, exactly as before the setting existed. */

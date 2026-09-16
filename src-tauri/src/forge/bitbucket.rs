@@ -771,7 +771,10 @@ fn my_work_column(pages: Vec<AppResult<BbPage<serde_json::Value>>>) -> AppResult
     }
     if !any_ok {
         return Err(last_err.unwrap_or_else(|| {
-            AppError::Bitbucket("could not read your Bitbucket pull requests".into())
+            http::bb_unreadable(
+                "your pull requests",
+                "could not read your Bitbucket pull requests".into(),
+            )
         }));
     }
     let mut page = merge_legs(legs, MY_WORK_LIMIT);
@@ -2234,7 +2237,12 @@ async fn resolve_pipeline(
     let (status, body) = http::bb_get_text_status(creds, &primary).await?;
     if (200..300).contains(&status) {
         serde_json::from_str::<BbPipeline>(&body)
-            .map_err(|e| AppError::Bitbucket(format!("could not parse Bitbucket pipeline: {e}")))
+            .map_err(|e| {
+                http::bb_unreadable(
+                    "the pipeline",
+                    format!("could not parse Bitbucket pipeline: {e}"),
+                )
+            })
     } else if status == 404 {
         // Fallback: query by build_number and take the single match.
         let q = format!(
@@ -2876,7 +2884,10 @@ async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()>
             return Err(http::http_error(status, &body));
         }
         let task: BbMergeTask = serde_json::from_str(&body).map_err(|e| {
-            AppError::Bitbucket(format!("could not parse Bitbucket merge status: {e}"))
+            http::bb_unreadable(
+                "the merge status",
+                format!("could not parse Bitbucket merge status: {e}"),
+            )
         })?;
         match task.task_status.as_str() {
             "SUCCESS" => return Ok(()),
@@ -4522,7 +4533,10 @@ pub async fn repo_visibility(repo_path: &str) -> AppResult<crate::forge::RepoVis
     let base = repo_base(repo_path).await?;
     let raw: BbRepoVisibility = http::bb_get_json(&creds, &base, "repository").await?;
     let is_private = raw.is_private.ok_or_else(|| {
-        AppError::Bitbucket("could not read the repository's visibility".into())
+        http::bb_unreadable(
+            "the repository's visibility",
+            "could not read the repository's visibility".into(),
+        )
     })?;
     let is_fork = raw.parent.is_some();
     let parent = raw
@@ -4820,7 +4834,10 @@ fn parse_pipelines_config(status: u16, body: &str) -> AppResult<BitbucketPipelin
         return Err(http::http_error(status, body));
     }
     let raw: BbPipelinesConfigRaw = serde_json::from_str(body).map_err(|e| {
-        AppError::Bitbucket(format!("could not parse Bitbucket pipelines config: {e}"))
+        http::bb_unreadable(
+            "the pipeline settings",
+            format!("could not parse Bitbucket pipelines config: {e}"),
+        )
     })?;
     Ok(BitbucketPipelinesConfig {
         enabled: raw.enabled,
@@ -5871,6 +5888,43 @@ mod my_work_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn read_error_summaries_use_natural_nouns_and_keep_raw_detail() {
+        for (label, phrase) in [
+            ("branch restriction", "the branch restriction"),
+            ("comment", "the comment"),
+            ("commit comment", "the commit comment"),
+            ("created pull request", "the created pull request"),
+            ("created repository", "the created repository"),
+            ("created task", "the created task"),
+            ("default reviewer", "the default reviewer"),
+            ("fork", "the fork"),
+            ("pipeline", "the pipeline"),
+            ("pipeline schedule", "the pipeline schedule"),
+            ("pipeline variable", "the pipeline variable"),
+            ("pull request", "the pull request"),
+            ("pull request activity", "the pull request activity"),
+            ("reply", "the reply"),
+            ("repository", "the repository"),
+            ("review comment", "the review comment"),
+            ("review summary", "the review summary"),
+            ("task", "the task"),
+            ("user", "the user"),
+            ("webhook", "the webhook"),
+            ("diffstat", "the file changes"),
+            ("pipelines config", "the pipeline settings"),
+            ("pull requests", "pull requests"),
+            ("labels", "labels"),
+            ("pipelines", "pipelines"),
+        ] {
+            let detail = format!("could not parse Bitbucket {label}: boom");
+            assert_eq!(
+                http::bb_unreadable(label, detail.clone()).to_string(),
+                format!("Couldn't read {phrase} from Bitbucket.\n{detail}"),
+            );
+        }
+    }
+
     /// The web URL resolves purely from `origin` for both https and scp-style ssh
     /// (real repo, temp_dir, git on PATH) — Bitbucket has no subgroup or
     /// self-managed host concept here, so `bitbucket.org` stays fixed.
@@ -6343,6 +6397,20 @@ mod tests {
         let cfg =
             parse_pipelines_config(200, r#"{"enabled":false}"#).expect("200 body should parse");
         assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn unreadable_pipeline_config_and_empty_work_keep_the_detail() {
+        let body = "not json";
+        let detail = serde_json::from_str::<BbPipelinesConfigRaw>(body).err().unwrap();
+        assert_eq!(
+            parse_pipelines_config(200, body).err().unwrap().to_string(),
+            format!("Couldn't read the pipeline settings from Bitbucket.\ncould not parse Bitbucket pipelines config: {detail}"),
+        );
+        assert_eq!(
+            my_work_column(vec![]).err().unwrap().to_string(),
+            "Couldn't read your pull requests from Bitbucket.\ncould not read your Bitbucket pull requests",
+        );
     }
 
     #[test]

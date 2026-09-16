@@ -23,6 +23,22 @@ use tauri_plugin_http::reqwest::{self, Client};
 use crate::error::{AppError, AppResult};
 use crate::forge::model::ForgeUserRef;
 
+/// Keep the summary on line one and the original detail available on line two.
+fn jira_unreadable(what: &str, detail: String) -> AppError {
+    // Diagnostic labels remain unchanged in detail; only the summary needs an article.
+    let what = match what {
+        "account" => "the account",
+        "board" => "the board",
+        "comment" => "the comment",
+        "created issue" => "the created issue",
+        "issue" => "the issue",
+        "worklog" => "the worklog",
+        "board config" => "the board settings",
+        _ => what,
+    };
+    AppError::Jira(format!("Couldn't read {what} from Jira.\n{detail}"))
+}
+
 // ── HTTP transport (Jira-local) ────────────────────────────────────────────────
 
 /// Keyring credential keys under `forge/<site>/*`.
@@ -410,15 +426,20 @@ async fn raw_request(
     let body = resp
         .text()
         .await
-        .map_err(|e| AppError::Jira(format!("could not read Jira response: {e}")))?;
+        .map_err(|e| {
+            jira_unreadable(
+                "the response",
+                format!("could not read Jira response: {e}"),
+            )
+        })?;
     Ok((status, body))
 }
 
 /// GET a Jira endpoint expecting JSON, deserializing into `T` against the creds' resolved
 /// base. `Accept: application/json`, HTTP Basic auth. Non-2xx → [`http_error_for`] (field
 /// keys translated for the creds' site); a parse failure of a 2xx body →
-/// `Jira("could not parse …")` carrying the serde error verbatim (never mapped into a
-/// specific-cause message).
+/// "Couldn't read {what} from Jira." on line one, with the original serde error
+/// on line two (never mapped into a specific-cause message).
 async fn get_json<T: serde::de::DeserializeOwned>(
     creds: &JiraCredentials,
     path: &str,
@@ -429,7 +450,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
         return Err(http_error_for(status, &body, &creds.site));
     }
     serde_json::from_str(&body)
-        .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
+        .map_err(|e| jira_unreadable(what, format!("could not parse Jira {what}: {e}")))
 }
 
 /// POST JSON to a Jira endpoint and deserialize the 2xx body into `T`. Same error
@@ -445,7 +466,7 @@ async fn post_json<T: serde::de::DeserializeOwned>(
         return Err(http_error_for(status, &resp_body, &creds.site));
     }
     serde_json::from_str(&resp_body)
-        .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
+        .map_err(|e| jira_unreadable(what, format!("could not parse Jira {what}: {e}")))
 }
 
 /// Send a write with an optional JSON body, expecting a no-content (or don't-care) 2xx.
@@ -640,7 +661,12 @@ async fn fetch_cloud_id(site: &str) -> AppResult<String> {
     let body = resp
         .text()
         .await
-        .map_err(|e| AppError::Jira(format!("could not read Jira response: {e}")))?;
+        .map_err(|e| {
+            jira_unreadable(
+                "the response",
+                format!("could not read Jira response: {e}"),
+            )
+        })?;
     if !(200..300).contains(&status) {
         return Err(AppError::Jira(format!(
             "couldn't resolve the site's cloud id (HTTP {status})"
@@ -712,7 +738,12 @@ async fn resolve_base(
     match decide_after_direct(status) {
         DirectProbeStep::UseDirect => {
             let me: JiraUser = serde_json::from_str(&body)
-                .map_err(|e| AppError::Jira(format!("could not parse Jira account: {e}")))?;
+                .map_err(|e| {
+                    jira_unreadable(
+                        "your account",
+                        format!("could not parse Jira account: {e}"),
+                    )
+                })?;
             Ok((direct.base, account_info_from_myself(me, email)))
         }
         DirectProbeStep::Fail => Err(http_error(status, &body)),
@@ -729,7 +760,12 @@ async fn resolve_base(
                 raw_request(&gateway, reqwest::Method::GET, "myself", None).await?;
             if (200..300).contains(&g_status) {
                 let me: JiraUser = serde_json::from_str(&g_body)
-                    .map_err(|e| AppError::Jira(format!("could not parse Jira account: {e}")))?;
+                    .map_err(|e| {
+                        jira_unreadable(
+                            "your account",
+                            format!("could not parse Jira account: {e}"),
+                        )
+                    })?;
                 Ok((gateway.base, account_info_from_myself(me, email)))
             } else {
                 // Both bases failed — surface the gateway status (the token can't reach
@@ -1490,7 +1526,8 @@ struct JiraBoardRef {
 
 /// GET a Jira AGILE endpoint (`…/rest/agile/1.0/…`) expecting JSON, deserializing into
 /// `T`. Mirrors [`get_json`] but resolves the agile base. Non-2xx → [`http_error`]; a
-/// parse failure of a 2xx body → `Jira("could not parse …")`. Used only by the
+/// parse failure uses "Couldn't read {what} from Jira." on line one, with the
+/// original serde error on line two. Used only by the
 /// best-effort board-config override, whose caller swallows ANY error.
 async fn get_json_agile<T: serde::de::DeserializeOwned>(
     creds: &JiraCredentials,
@@ -1509,12 +1546,17 @@ async fn get_json_agile<T: serde::de::DeserializeOwned>(
     let body = resp
         .text()
         .await
-        .map_err(|e| AppError::Jira(format!("could not read Jira response: {e}")))?;
+        .map_err(|e| {
+            jira_unreadable(
+                "the response",
+                format!("could not read Jira response: {e}"),
+            )
+        })?;
     if !(200..300).contains(&status) {
         return Err(http_error(status, &body));
     }
     serde_json::from_str(&body)
-        .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
+        .map_err(|e| jira_unreadable(what, format!("could not parse Jira {what}: {e}")))
 }
 
 /// Best-effort story-points override from the project's first Agile board configuration.
@@ -2912,13 +2954,44 @@ async fn put_json<T: serde::de::DeserializeOwned>(
         return Err(http_error_for(status, &resp_body, &creds.site));
     }
     serde_json::from_str(&resp_body)
-        .map_err(|e| AppError::Jira(format!("could not parse Jira {what}: {e}")))
+        .map_err(|e| jira_unreadable(what, format!("could not parse Jira {what}: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn read_error_summaries_use_natural_nouns_and_keep_raw_detail() {
+        for (label, phrase) in [
+            ("account", "the account"),
+            ("board", "the board"),
+            ("comment", "the comment"),
+            ("created issue", "the created issue"),
+            ("issue", "the issue"),
+            ("worklog", "the worklog"),
+            ("board config", "the board settings"),
+            ("issues", "issues"),
+            ("labels", "labels"),
+            ("projects", "projects"),
+        ] {
+            let detail = format!("could not parse Jira {label}: boom");
+            assert_eq!(
+                jira_unreadable(label, detail.clone()).to_string(),
+                format!("Couldn't read {phrase} from Jira.\n{detail}"),
+            );
+        }
+    }
+
+    #[test]
+    fn jira_unreadable_keeps_the_detail_on_its_own_line() {
+        let detail = "could not parse Jira response: boom";
+        assert_eq!(
+            jira_unreadable("the response", detail.into()).to_string(),
+            "Couldn't read the response from Jira.\ncould not parse Jira response: boom"
+        );
+    }
 
     #[test]
     fn normalize_site_strips_scheme_slash_and_lowercases() {

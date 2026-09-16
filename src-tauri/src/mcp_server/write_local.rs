@@ -269,7 +269,9 @@ impl GitDesktopMcp {
         // Pre-mutation guard FIRST: the branch must resolve as a local branch, else error
         // naming it — before any app-data write.
         verify_branch(&self.repo, &args.branch).await?;
-        let repo = crate::git::repo::repo_identity(&self.repo).await;
+        let repo = crate::git::repo::repo_identity(&self.repo)
+            .await
+            .map_err(app_err)?;
         let saved = crate::review_notes::set(&repo, &args.branch, &args.body)
             .await
             .map_err(app_err)?;
@@ -408,7 +410,9 @@ impl GitDesktopMcp {
     /// no-op after the first. The flag is set only AFTER both folds succeed, so a
     /// transient failure retries on the next call.
     async fn local_issue_key(&self) -> Result<String, McpError> {
-        let identity = crate::git::repo::repo_identity(&self.repo).await;
+        let identity = crate::git::repo::repo_identity(&self.repo)
+            .await
+            .map_err(app_err)?;
         if !self.issues_consolidated.load(Ordering::Relaxed) {
             crate::local_issues::consolidate(&identity, &self.repo)
                 .await

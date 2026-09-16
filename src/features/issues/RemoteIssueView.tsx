@@ -83,6 +83,7 @@ import { providerLabel, type RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { lensKey, useRepoLens } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
@@ -212,8 +213,8 @@ export function RemoteIssueView({
   const transferIssue = useTransferIssue(repoPath, lens);
   const deleteIssue = useDeleteIssue(repoPath, lens);
   const selectIssue = useUiStore((s) => s.selectIssue);
-  const selectPr = useUiStore((s) => s.selectPr);
-  const setRepoTab = useUiStore((s) => s.setRepoTab);
+  const openPr = useUiStore((s) => s.openPr);
+  const repoName = useUiStore((s) => s.repoName);
   const selectedIssue = useUiStore((s) => s.selectedIssue);
   const setPendingIssueDraft = useUiStore((s) => s.setPendingIssueDraft);
   // Whether this view owns the current selection: the mounted view lags the
@@ -549,8 +550,17 @@ export function RemoteIssueView({
    *  navigation its own surface uses (Development panel / related issues). */
   function openRef(kind: "pr" | "issue", refNumber: number) {
     if (kind === "pr") {
-      selectPr({ kind: "remote", id: String(refNumber) });
-      setRepoTab("pulls");
+      // The store's navigator, so the Pulls list aligns its open/closed tab with
+      // the referenced PR's real state — a timeline reference points at merged
+      // and closed ones as often as open ones. No lens write: this handler is
+      // wired only under the origin lens, which is the lens the number came from.
+      openPr({
+        kind: "remote",
+        repoPath,
+        repoName: repoName ?? repoNameFromPath(repoPath),
+        ref: String(refNumber),
+        section: null,
+      });
       return;
     }
     selectIssue({ kind: "remote", id: String(refNumber) });

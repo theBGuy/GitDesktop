@@ -120,7 +120,10 @@ export interface BranchNamePromptInput {
   /** Subjects of the commits already on this branch, newest first — the branch's
    *  committed work. Empty when there are none (or when it isn't resolvable). */
   commitSubjects: string[];
-  /** Existing branch names, as a naming-convention / style reference. */
+  /**
+   * ALL branch names — the prompt builder aggregates them into a prefix
+   * histogram, so a sampled subset silently mis-weights the convention.
+   */
   recentBranches: string[];
   repoInstructions: string | null;
   globalInstructions: string;

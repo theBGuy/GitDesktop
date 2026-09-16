@@ -50,6 +50,7 @@ import {
 import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
 import { useRepoIdentity } from "@/lib/git/queries";
 import { repoIdentity } from "@/lib/git/repo-identity";
+import { useModalGateRegistration } from "@/lib/hotkeys/modal-gate";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
@@ -401,6 +402,11 @@ export function AutomationHistoryDialogHost() {
   // Retained so the body keeps its repo through the close fade instead of
   // blanking the dialog as it animates out.
   const shownRepo = useRetained(openFor);
+  // App's repo/settings actions stay reachable from the macOS menu bar, which
+  // sits outside this dialog's modal overlay — register so they refuse while it
+  // owns the screen. Keyed on the live flag, not the retained one, so the close
+  // fade releases the gate.
+  useModalGateRegistration(openFor !== null);
 
   // Mark the pause and the resume in the log itself, so a repository whose
   // automations went quiet says why in line. It watches the SAVED setting, not

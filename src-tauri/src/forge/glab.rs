@@ -111,15 +111,12 @@ pub(crate) async fn account_hostname() -> String {
 }
 
 async fn account_hostname_from(paths: &[PathBuf], env_host: Option<&str>) -> String {
-    let env_host = env_host.and_then(normalize_authority);
-    let config_default = if env_host.is_none() {
-        read_config_text(paths)
-            .await
-            .and_then(|text| default_host_from_config(&text))
+    let text = if env_host.and_then(normalize_authority).is_none() {
+        read_config_text(paths).await
     } else {
         None
     };
-    env_token_target(env_host.as_deref(), config_default.as_deref()).to_string()
+    token_target_from(text.as_deref(), env_host)
 }
 
 fn account_api_args<'a>(hostname: &'a str, args: &[&'a str]) -> Vec<&'a str> {
@@ -175,15 +172,8 @@ async fn repo_token_vars_to_strip_for(repo: &RepoHost) -> &'static [&'static str
     };
     let paths = glab_config_paths();
     let text = read_config_text(&paths).await;
-    let env_host = std::env::var("GITLAB_HOST")
-        .ok()
-        .and_then(|host| normalize_authority(&host));
-    let config_default = if env_host.is_none() {
-        text.as_deref().and_then(default_host_from_config)
-    } else {
-        None
-    };
-    let target = env_token_target(env_host.as_deref(), config_default.as_deref());
+    let env_host = std::env::var("GITLAB_HOST").ok();
+    let target = token_target_from(text.as_deref(), env_host.as_deref());
     // known_hosts also includes GITLAB_HOST; only its saved-config half counts here.
     let saved = known_hosts_from_text(text.as_deref(), None);
     let has_saved_host = repo
@@ -192,7 +182,7 @@ async fn repo_token_vars_to_strip_for(repo: &RepoHost) -> &'static [&'static str
         .is_some_and(|host| saved.contains(&host));
     // Keep env-only setups working. A cross-host token still reaches a host
     // without a saved credential, as it did before this policy.
-    repo_token_vars_to_strip(repo, has_saved_host, target, Some(&token))
+    repo_token_vars_to_strip(repo, has_saved_host, &target, Some(&token))
 }
 
 /// Pin API and auth probes to the same origin used for token scoping. Porcelain
@@ -220,9 +210,40 @@ pub async fn run_glab_raw_for_repo(
     run_glab_raw_scoped(Some(repo_path), &argv, strip, timeout).await
 }
 
-/// [`run_glab_raw`] with `strip_env` removed from the child's environment. The
-/// one seam that can keep an inherited variable off a glab child, used by
-/// [`run_glab_api_for_host`] to scope environment tokens to their own instance.
+/// Reconnect keeps streaming/cancellation in session.rs and shares the runner's
+/// account token policy. The caller must sanitize the child before setting env.
+pub(crate) async fn configure_reconnect_child(cmd: &mut Command, args: &[String]) {
+    let strip = match reconnect_hostname(args) {
+        Some(host) => token_vars_to_strip_for(&host).await,
+        None => GLAB_TOKEN_VARS,
+    };
+    configure_child_env(cmd, strip);
+}
+
+fn reconnect_hostname(args: &[String]) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == "--hostname")
+        .and_then(|pair| credential_host(&pair[1]))
+}
+
+fn configure_child_env(cmd: &mut Command, strip_env: &[&str]) {
+    // GLAB_CHECK_UPDATE is inverted relative to GH_NO_UPDATE_NOTIFIER:
+    // cmd/glab/main.go isUpdateCheckEnabled checks for true (verified v1.105.0).
+    // It uses strconv.ParseBool: an empty string logs a parse warning to stderr.
+    // Use "false" so neither that warning nor update notices enter reconnect's
+    // merged stderr scan for the one-time code.
+    cmd.env("GLAB_PAGER", "")
+        .env("PAGER", "")
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .env("GLAB_CHECK_UPDATE", "false");
+    for var in strip_env {
+        cmd.env_remove(var);
+    }
+}
+
+/// [`run_glab_raw`] with `strip_env` removed through the shared child environment
+/// seam, keeping environment tokens scoped to their own instance.
 async fn run_glab_raw_scoped(
     repo_path: Option<&str>,
     args: &[&str],
@@ -232,25 +253,10 @@ async fn run_glab_raw_scoped(
     let glab = glab_bin().await?;
     let mut cmd = Command::new(&glab);
     crate::agent::sanitize_child_env(&mut cmd);
+    configure_child_env(&mut cmd, strip_env);
     cmd.args(args);
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
-    }
-    // Keep glab non-interactive + quiet (stdin null already blocks prompts).
-    // GLAB_CHECK_UPDATE is glab's update-notice switch and its polarity is
-    // inverted from gh's GH_NO_UPDATE_NOTIFIER — glab gates on the value being
-    // TRUE (cmd/glab/main.go `isUpdateCheckEnabled`, verified against v1.105.0).
-    // The value is `strconv.ParseBool`'d, so it must be a bool literal: an empty
-    // string logs a parse warning to stderr instead of disabling anything, and
-    // the notice it suppresses writes to stderr, where it would ride along in
-    // AppError::Glab and in the reconnect child's merged line scan.
-    cmd.env("GLAB_PAGER", "")
-        .env("PAGER", "")
-        .env("NO_COLOR", "1")
-        .env("CLICOLOR", "0")
-        .env("GLAB_CHECK_UPDATE", "false");
-    for var in strip_env {
-        cmd.env_remove(var);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -615,6 +621,17 @@ fn env_token_target<'a>(env_host: Option<&'a str>, config_default: Option<&'a st
     env_host.or(config_default).unwrap_or(GLAB_DEFAULT_HOST)
 }
 
+/// Resolve raw sources once; ports remain part of the token's authority.
+fn token_target_from(config_text: Option<&str>, env_host: Option<&str>) -> String {
+    let env_host = env_host.and_then(normalize_authority);
+    let config_default = if env_host.is_none() {
+        config_text.and_then(default_host_from_config)
+    } else {
+        None
+    };
+    env_token_target(env_host.as_deref(), config_default.as_deref()).to_string()
+}
+
 /// Enumeration and token scoping share the repository runner's authority
 /// normalization: HTTPS `:443` equals the bare host. Non-default ports remain
 /// unaddressable, and another provider's canonical host remains ineligible.
@@ -816,9 +833,8 @@ pub async fn account_hosts() -> Vec<String> {
     let token = env_token();
     // `GITLAB_HOST` outranks the config file for the token's target, and it keeps
     // its port: the token belongs to one authority, not to its host half.
-    let env_host = std::env::var("GITLAB_HOST")
-        .ok()
-        .and_then(|h| normalize_authority(&h));
+    let raw_env_host = std::env::var("GITLAB_HOST").ok();
+    let env_host = raw_env_host.as_deref().and_then(normalize_authority);
     // `known_hosts` is bypassed for the env half only — it port-strips, which is
     // right for detection and wrong here. Feeding it the addressable spelling (or
     // nothing) leaves detection's view untouched while keeping the phantom out.
@@ -826,19 +842,13 @@ pub async fn account_hosts() -> Vec<String> {
     let known = known_hosts_from(&glab_config_paths(), env_known).await;
     // The file default is only consulted when a token exists AND no env host
     // outranks it, so an ordinary session never pays for the read.
-    let config_default = if token.is_some() && env_host.is_none() {
-        read_config_text(&glab_config_paths())
-            .await
-            .and_then(|text| default_host_from_config(&text))
+    let text = if token.is_some() && env_host.is_none() {
+        read_config_text(&glab_config_paths()).await
     } else {
         None
     };
-    account_hosts_from(
-        known,
-        env_host.as_deref(),
-        config_default.as_deref(),
-        token.as_deref(),
-    )
+    let target = token_target_from(text.as_deref(), raw_env_host.as_deref());
+    account_hosts_from(known, Some(&target), None, token.as_deref())
 }
 
 /// [`token_vars_to_strip`] against the live environment: which variables a call
@@ -856,24 +866,8 @@ async fn token_vars_to_strip_for(hostname: &str) -> &'static [&'static str] {
     let Some(token) = env_token() else {
         return &[];
     };
-    // Normalized exactly as `account_hosts` normalizes it — port and all — so the
-    // two agree on which authority the token's target is.
-    let env_host = std::env::var("GITLAB_HOST")
-        .ok()
-        .and_then(|h| normalize_authority(&h));
-    let config_default = if env_host.is_none() {
-        read_config_text(&glab_config_paths())
-            .await
-            .and_then(|text| default_host_from_config(&text))
-    } else {
-        None
-    };
-    token_vars_to_strip(
-        hostname,
-        env_host.as_deref(),
-        config_default.as_deref(),
-        Some(&token),
-    )
+    let target = account_hostname().await;
+    token_vars_to_strip(hostname, Some(&target), None, Some(&token))
 }
 
 /// Runs a HOST-ADDRESSED `glab api` call — the runner every account-scoped fan-out
@@ -1085,6 +1079,133 @@ mod account_hosts_tests {
         cwd_host, default_host_from_config, normalize_authority, repo_token_vars_to_strip,
         token_vars_to_strip, RepoHost, GLAB_TOKEN_VARS,
     };
+
+    #[tokio::test]
+    async fn token_target_precedence_agrees_across_account_repo_and_enumeration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        for port in ["", ":443", ":8443"] {
+            let env_value = format!("https://GitLab.Env.Example{port}/");
+            let config_value = format!("host: 'GitLab.Corp.Example{port}' # default\n");
+            for text in ["", config_value.as_str(), "host: -invalid\n"] {
+                std::fs::write(&path, text).unwrap();
+                for env in [
+                    None,
+                    Some(""),
+                    Some(env_value.as_str()),
+                    Some("https://https://Host"),
+                ] {
+                    let normalized_env = env.and_then(normalize_authority);
+                    let config_default = if normalized_env.is_none() {
+                        default_host_from_config(text)
+                    } else {
+                        None
+                    };
+                    let expected = super::env_token_target(
+                        normalized_env.as_deref(),
+                        config_default.as_deref(),
+                    );
+                    let target = super::token_target_from(Some(text), env);
+                    assert_eq!(target, expected);
+                    assert_eq!(
+                        account_hostname_from(std::slice::from_ref(&path), env).await,
+                        target,
+                    );
+                    assert_eq!(
+                        account_hosts_from(vec![], Some(&target), None, Some("t")),
+                        account_hosts_from(
+                            vec![],
+                            normalized_env.as_deref(),
+                            config_default.as_deref(),
+                            Some("t"),
+                        ),
+                    );
+                    for host in ["gitlab.com", "gitlab.env.example", "gitlab.corp.example:8443"] {
+                        let repo = RepoHost::Resolved(host.into());
+                        for saved in [false, true] {
+                            assert_eq!(
+                                repo_token_vars_to_strip(&repo, saved, &target, Some("t")),
+                                repo_token_vars_to_strip(&repo, saved, expected, Some("t")),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(super::token_target_from(None, None), "gitlab.com");
+        assert_eq!(
+            super::token_target_from(
+                Some("host: gitlab.config.example\n"),
+                Some("gitlab.env.example"),
+            ),
+            "gitlab.env.example",
+        );
+        assert_eq!(
+            super::token_target_from(Some("host: gitlab.config.example\n"), None),
+            "gitlab.config.example",
+        );
+    }
+
+    #[test]
+    fn reconnect_child_env_scopes_tokens_even_without_saved_credentials() {
+        for target in ["gitlab.com", "gitlab.corp.example"] {
+            // Empty saved-host input models connecting a new account.
+            assert_eq!(
+                account_hosts_from(vec![], Some(target), None, Some("t")),
+                vec![target.to_string()],
+            );
+            for host in ["gitlab.com", "gitlab.corp.example", "gitlab.com:8443"] {
+                for token in [None, Some("t")] {
+                    let strip = token_vars_to_strip(host, Some(target), None, token);
+                    let mut cmd = tokio::process::Command::new("unused-test-command");
+                    for var in GLAB_TOKEN_VARS {
+                        cmd.env(var, "placeholder");
+                    }
+                    super::configure_child_env(&mut cmd, strip);
+                    let env: std::collections::BTreeMap<_, _> = cmd.as_std().get_envs().collect();
+                    let should_strip = token.is_some() && host != target;
+                    for var in GLAB_TOKEN_VARS {
+                        assert_eq!(
+                            env.get(std::ffi::OsStr::new(var)).unwrap().is_none(),
+                            should_strip,
+                            "{var}: host={host}, target={target}, token={token:?}",
+                        );
+                    }
+                    assert_eq!(
+                        env.get(std::ffi::OsStr::new("GLAB_CHECK_UPDATE")),
+                        Some(&Some(std::ffi::OsStr::new("false"))),
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_hostname_scan_fails_closed_when_absent_or_unparseable() {
+        for (args, expected) in [
+            (
+                vec!["auth", "login", "--hostname", "GitLab.Example", "--web"],
+                Some("gitlab.example"),
+            ),
+            (vec!["auth", "login", "--web"], None),
+            (vec!["auth", "login", "--hostname", "https:///"], None),
+            (vec!["auth", "login", "--hostname"], None),
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            assert_eq!(super::reconnect_hostname(&args).as_deref(), expected);
+            if expected.is_none() {
+                let mut cmd = tokio::process::Command::new("unused-test-command");
+                for var in GLAB_TOKEN_VARS {
+                    cmd.env(var, "placeholder");
+                }
+                super::configure_reconnect_child(&mut cmd, &args).await;
+                let env: std::collections::BTreeMap<_, _> = cmd.as_std().get_envs().collect();
+                for var in GLAB_TOKEN_VARS {
+                    assert_eq!(env.get(std::ffi::OsStr::new(var)), Some(&None));
+                }
+            }
+        }
+    }
 
     async fn repo_fixture(remote: Option<(&str, &str)>) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

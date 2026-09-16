@@ -109,6 +109,9 @@ type Probe = (
 static PROBES: [Probe; 7] = [
     ("git", &["git"], None),
     ("gh", &["gh"], Some(&["auth", "status"])),
+    // run_capture_parts already applies sanitize_child_env; only token stripping
+    // is exempt here. Bare `glab auth status` follows glab's own precedence to the
+    // token's target, so this probe cannot address a foreign host.
     ("glab", &["glab"], Some(&["auth", "status"])),
     ("claude", &["claude"], Some(&["auth", "status"])),
     ("codex", &["codex"], Some(&["login", "status"])),

@@ -27,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { useCreateLinkedBranch, useIssueDevelopment } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -95,8 +96,8 @@ export function IssueDevelopment({
 }) {
   const dev = useIssueDevelopment(repoPath, number, lens);
   const createBranch = useCreateLinkedBranch(repoPath, lens);
-  const selectPr = useUiStore((s) => s.selectPr);
-  const setRepoTab = useUiStore((s) => s.setRepoTab);
+  const openPr = useUiStore((s) => s.openPr);
+  const repoName = useUiStore((s) => s.repoName);
   const [branchOpen, setBranchOpen] = useState(false);
   const [branchName, setBranchName] = useState("");
 
@@ -104,9 +105,19 @@ export function IssueDevelopment({
   const branches = dev.data?.branches ?? [];
   const loaded = dev.data !== undefined;
 
-  function openPr(n: number) {
-    selectPr({ kind: "remote", id: String(n) });
-    setRepoTab("pulls");
+  function openLinkedPr(n: number) {
+    // Through the store's navigator: the PRs listed here are usually the ones
+    // that CLOSED the issue, so the Pulls list has to align its open/closed tab
+    // with the PR's real state rather than land on whichever tab was showing.
+    // The numbers come from `dev`, read under this view's live `lens`, so they
+    // resolve under the lens that produced them without a lens write.
+    openPr({
+      kind: "remote",
+      repoPath,
+      repoName: repoName ?? repoNameFromPath(repoPath),
+      ref: String(n),
+      section: null,
+    });
   }
 
   async function submitBranch() {
@@ -166,7 +177,7 @@ export function IssueDevelopment({
           <button
             key={pr.number}
             type="button"
-            onClick={() => openPr(pr.number)}
+            onClick={() => openLinkedPr(pr.number)}
             className="flex w-full cursor-pointer items-center gap-1.5 text-left text-xs hover:underline"
             title={`#${pr.number} ${pr.title}`}
           >

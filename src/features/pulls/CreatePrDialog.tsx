@@ -70,6 +70,7 @@ import {
 } from "@/lib/stores/pr-create";
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
+import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -299,7 +300,7 @@ export function CreatePrDialog({
         await api.gitFetchRemote(repoPath, "upstream");
       } catch (e) {
         // Keep going with the refs already on disk; report the fetch failure.
-        fetchError = e instanceof Error ? e.message : String(e);
+        fetchError = errorMessage(e);
       }
       const remoteBranches = await api.gitRemoteBranches(repoPath);
       const upstreamNames = remoteBranches

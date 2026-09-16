@@ -26,6 +26,7 @@ import {
   pathLauncherRemove,
   pathLauncherStatus,
 } from "@/lib/git/api";
+import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 
@@ -133,9 +134,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   // Actionable message when the launcher can't be prepared (e.g. antivirus
   // quarantine) — surface it, never emit a config against a wrong/absent path.
   const launcherErrorMessage = launcherPathError
-    ? launcherPathError instanceof Error
-      ? launcherPathError.message
-      : String(launcherPathError)
+    ? errorMessage(launcherPathError)
     : null;
   // No config embedding the absolute launcher path may be emitted until that path resolves —
   // writing a stale/absent path silently keeps locking the old binary. The global installs

@@ -544,7 +544,7 @@ async function runPromote(
           ? `Removed the worktree, but couldn't stash your main workspace changes — commit or stash them, then check out ${branch} manually.`
           : `Removed the worktree, but couldn't check out ${branch} in your main workspace — switch to it there manually.${stashedClause}`;
       toast.error(message, {
-        description: e instanceof Error ? e.message : String(e),
+        description: errorMessage(e),
       });
     } else {
       toastError(e);
