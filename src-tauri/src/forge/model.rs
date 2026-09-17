@@ -727,8 +727,8 @@ pub struct ForgeUserRef {
 /// an `Option` that is genuinely absent from the wire when unset.
 ///
 /// `rename_all` renames VARIANT tags only, so `rename_all_fields` is load-bearing
-/// for the TS mirror (`src/lib/git/types.ts`): without it `Merged.commit_oid` reaches
-/// TS as `undefined` and a merged PR silently loses its merge commit.
+/// for the TS mirror (`src/lib/git/types/timeline.ts`): without it `Merged.commit_oid`
+/// reaches TS as `undefined` and a merged PR silently loses its merge commit.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ForgeTimelineEventOut {
@@ -1181,9 +1181,9 @@ mod tests {
         }
     }
 
-    /// Pins the IPC contract with the TS mirror (src/lib/git/types.ts): `commit_oid` is
-    /// the variant's multi-word field (read as `commitOid`), and `actor` is a nested
-    /// object whose own keys are camelCase too.
+    /// Pins the IPC contract with the TS mirror (src/lib/git/types/timeline.ts):
+    /// `commit_oid` is the variant's multi-word field (read as `commitOid`), and
+    /// `actor` is a nested object whose own keys are camelCase too.
     #[test]
     fn merged_timeline_event_wire_shape_is_camel_case() {
         let merged = serde_json::to_value(ForgeTimelineEventOut::Merged {

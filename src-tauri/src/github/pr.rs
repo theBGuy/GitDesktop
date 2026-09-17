@@ -2472,7 +2472,7 @@ async fn gh_pr_list_filtered(
 
 /// One PR's rolled-up CI signal, keyed by number — the hydration payload for the
 /// PR-list row icons. `ci_status` is one of `"passing" | "failing" | "pending" |
-/// "neutral" | "none"`, mirrored by `CiStatus` in the frontend's types.ts; every
+/// "neutral" | "none"`, mirrored by `CiStatus` in `src/lib/git/types/prs.ts`; every
 /// forge arm producing this struct emits only those five.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

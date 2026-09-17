@@ -36,7 +36,7 @@ export type AppError =
   /** A rebase pull refused because replaying would rewrite local commits away.
    *  Only `message` is declared here: the seven-key decision payload is read
    *  exclusively through `isPullWouldDrop`, which narrows to `PullWouldDrop`
-   *  (lib/git/api.ts) — declaring it twice would let the two shapes drift. */
+   *  (lib/git/api/sync.ts) — declaring it twice would let the two shapes drift. */
   | { kind: "pullRebaseWouldDrop"; message: string }
   /** A bounded wait for one of a repo's locks expired. `holder` names what was
    *  running in the user's terms ("a worktree removal"), never the lock itself;

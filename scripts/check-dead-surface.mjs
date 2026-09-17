@@ -69,7 +69,7 @@ function readRegistered() {
   return parseRegistered(readFileSync(LIB_RS, "utf8"), LIB_RS);
 }
 
-// Two traps this pattern exists to survive, both live in src/lib/git/api.ts:
+// Two traps this pattern exists to survive, both live in src/lib/git/api/:
 //   1. The call can be split across lines — `invoke<T>(\n  "forge_publish_targets"`
 //      — so the gap before the literal must match newlines (`\s*`, not ` *`).
 //   2. Type arguments nest: `invoke<Record<string, string>>("git_branch_tips")`.

@@ -573,7 +573,7 @@ pub async fn git_push(
 ///
 /// Crosses the IPC boundary as `git_push`'s return value, so the caller's
 /// success toast can name a degraded guarantee instead of overclaiming. The
-/// camelCase wire strings mirror the `PushGuard` union in `src/lib/git/api.ts`
+/// camelCase wire strings mirror the `PushGuard` union in `src/lib/git/api/sync.ts`
 /// and are pinned by `push_guard_serializes_to_the_camel_case_wire_values`.
 #[derive(Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2533,7 +2533,7 @@ fatal: unable to access 'https://bitbucket.org/atlassian/python-bitbucket.git/':
         }
     }
 
-    /// The wire values the TS `PushGuard` union (src/lib/git/api.ts) mirrors: the
+    /// The wire values the TS `PushGuard` union (src/lib/git/api/sync.ts) mirrors: the
     /// success toast keys on these exact strings, so a variant rename that skips
     /// the mirror would silently stop reporting a degraded force push.
     #[test]
