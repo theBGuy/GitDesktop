@@ -582,7 +582,7 @@ export function reachesGitQueriesInternal(spec) {
 
 /** The same question asked from INSIDE the package, where internal.ts is reached
  *  as the bare sibling `./internal` — a form that carries no `queries/` segment. */
-export function reachesQueriesInternalFromBarrel(spec) {
+export function reachesQueriesInternalFromSibling(spec) {
   const path = normalizeSpecifier(spec);
   return (
     path === "internal" ||
@@ -605,7 +605,7 @@ const queriesInternalSpecifiers = ({ text, starts }) => {
 const barrelInternalSpecifiers = ({ text, starts }) => {
   const hits = new Set();
   for (const m of text.matchAll(MODULE_SPECIFIER_RE)) {
-    if (reachesQueriesInternalFromBarrel(m[2]))
+    if (reachesQueriesInternalFromSibling(m[2]))
       hits.add(lineAt(starts, m.index));
   }
   return [...hits];
@@ -618,11 +618,16 @@ const barrelInternalSpecifiers = ({ text, starts }) => {
 const REEXPORT_SPECIFIER_RE =
   /\bexport\b(?:(?!\bimport\b)[^;])*?\bfrom\s*(["'`])([^"'`]+)\1/g;
 
-// An import statement's clause plus its specifier, for binding analysis.
+// An import statement's clause plus its specifier, for binding analysis. The clause
+// capture already spans `type { … }` and the inline `{ type a }` modifier, whose
+// keyword clauseNames strips per entry.
 const IMPORT_CLAUSE_RE = /\bimport\s+([^;]*?)\s*\bfrom\s*(["'`])([^"'`]+)\2/g;
 // A bare `export { … }` clause; group 2 is non-empty when a `from` follows, which
-// makes it a re-export the specifier arm above already owns.
-const EXPORT_CLAUSE_RE = /\bexport\s*\{([^}]*)\}\s*(from\s*["'`])?/g;
+// makes it a re-export the specifier arm above already owns. `type` is optional
+// because a TYPE-only re-export still publishes the name — erased at runtime, but
+// `export type { workingTreeKeys }` puts it in the barrel's type space all the same.
+const EXPORT_CLAUSE_RE =
+  /\bexport\s*(?:type\s+)?\{([^}]*)\}\s*(from\s*["'`])?/g;
 const EXPORT_DEFAULT_RE = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;/g;
 
 /** The LOCAL binding each clause entry introduces or re-exports: `a as b` binds b
@@ -651,7 +656,7 @@ function clauseNames(clause, side) {
 const reexportsInternalSpecifiers = ({ text, starts }) => {
   const hits = new Set();
   for (const m of text.matchAll(REEXPORT_SPECIFIER_RE)) {
-    if (reachesQueriesInternalFromBarrel(m[2]))
+    if (reachesQueriesInternalFromSibling(m[2]))
       hits.add(lineAt(starts, m.index));
   }
 
@@ -659,7 +664,7 @@ const reexportsInternalSpecifiers = ({ text, starts }) => {
   // spelling that makes the split form look innocent at the export site.
   const fromInternal = new Set();
   for (const m of text.matchAll(IMPORT_CLAUSE_RE)) {
-    if (!reachesQueriesInternalFromBarrel(m[3])) continue;
+    if (!reachesQueriesInternalFromSibling(m[3])) continue;
     const clause = m[1].replace(/[{}]/g, " ").replace(/^\s*\*\s*as\s+/, "");
     for (const name of clauseNames(clause, "import")) fromInternal.add(name);
   }
@@ -1155,6 +1160,18 @@ export const CHECKS = [
   },
 ];
 
+/**
+ * The one-line "OK" a clean check prints, or null when it has nothing to claim.
+ * A scope-pin failure suppresses it: a check whose path moved scans nothing and
+ * would otherwise print a pass, which is the exact silent fail-open this file
+ * exists to prevent. Extracted so that suppression is assertable.
+ */
+export function okReportLine(check, result, pinFailure) {
+  if (pinFailure) return null;
+  if (result.violations.length > 0 || result.stale.length > 0) return null;
+  return `${check.name}: OK (${result.scanned.length} files scanned)\n`;
+}
+
 /** Every .ts/.tsx file under `dir`, as repo-relative POSIX paths. */
 function walk(dir, out = []) {
   for (const entry of readdirSync(dir)) {
@@ -1213,10 +1230,13 @@ function main() {
       failed = true;
       process.stderr.write(`${pinFailure}\n`);
     }
-    if (!pinFailure && violations.length === 0 && stale.length === 0) {
-      process.stdout.write(
-        `${check.name}: OK (${scanned.length} files scanned)\n`,
-      );
+    const okLine = okReportLine(
+      check,
+      { scanned, violations, stale },
+      pinFailure,
+    );
+    if (okLine) {
+      process.stdout.write(okLine);
       continue;
     }
     failed = true;

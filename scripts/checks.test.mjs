@@ -16,6 +16,9 @@ import { fileURLToPath } from "node:url";
 
 import {
   CHECKS,
+  okReportLine,
+  reachesGitQueriesInternal,
+  reachesQueriesInternalFromSibling,
   runCheck,
   scopePinFailure,
   stripComments,
@@ -1727,6 +1730,52 @@ test("queries-internal-reexport catches a re-export SPLIT across two statements"
     );
 });
 
+test("queries-internal-reexport catches TYPE-only re-exports of internal", () => {
+  // Erased at runtime, but a type-only re-export still publishes the NAME through
+  // the barrel's type space, so `export type { workingTreeKeys }` widens the
+  // public surface exactly like the value form.
+  for (const source of [
+    // Statement-level `export type { … }` — the form that carries no specifier.
+    'import { a } from "./internal";\nexport type { a };',
+    'import type { a } from "./internal";\nexport type { a };',
+    // The inline `type` modifier, on either side of the split.
+    'import { type a } from "./internal";\nexport { a };',
+    'import { a } from "./internal";\nexport { type a };',
+    'import type { a } from "./internal";\nexport { a };',
+  ])
+    assert.deepEqual(
+      queriesInternalReexport(source),
+      [2],
+      `should flag ${source}`,
+    );
+  // The specifier arm already owns the `from` spellings — it matches on `from`,
+  // which `export type *` and `export type { … } from` both carry.
+  assert.deepEqual(
+    queriesInternalReexport('export type * from "./internal";'),
+    [1],
+  );
+  assert.deepEqual(
+    queriesInternalReexport('export type { A } from "./internal";'),
+    [1],
+  );
+});
+
+test("queries-internal-reexport leaves unrelated type exports alone", () => {
+  for (const source of [
+    // A type-only export with no internal import in the file.
+    "export type { LocalType };",
+    // A type re-exported from a PUBLIC sibling.
+    'import { a } from "./core";\nexport type { a };',
+    // A type ALIAS declaration is not an export clause at all.
+    "export type Foo = { a: string };",
+  ])
+    assert.deepEqual(
+      queriesInternalReexport(source),
+      [],
+      `should ignore ${source}`,
+    );
+});
+
 test("queries-internal-reexport ignores exports unrelated to internal", () => {
   for (const source of [
     // A bare export clause with no internal import in the file at all.
@@ -1823,6 +1872,86 @@ test("a path-pinned check fails loudly instead of going inert", () => {
   assert.match(scopePinFailure(pkg, 5), /SCOPE PIN FAILED/);
   // A check with no pin is unaffected.
   assert.equal(scopePinFailure({ name: "unpinned" }, 0), null);
+});
+
+test("reachesGitQueriesInternal pins what counts as the package's internals", () => {
+  // Asserted directly, not just through a scanner: this predicate is the semantic
+  // core of the whole boundary family, and a scanner refactor must not be able to
+  // quietly change what "reaches internal" means.
+  for (const spec of [
+    "@/lib/git/queries/internal",
+    "@/lib/git/queries/internal.ts",
+    "@/lib/git/queries/internal/keys", // internal.ts may become internal/
+    "@/lib/git/queries/./internal", // non-normalized, still resolves there
+    "@/lib/git/queries/core/../internal",
+    "@/lib/git/queries/internal?raw", // vite suffixes address the same file
+    "../../lib/git/queries/internal",
+    "queries/internal", // the in-package relative spelling
+  ])
+    assert.equal(
+      reachesGitQueriesInternal(spec),
+      true,
+      `should reach: ${spec}`,
+    );
+
+  for (const spec of [
+    "@/lib/git/queries", // the barrel is the supported route
+    "@/lib/git/queries/core",
+    "@/lib/git/queries/internal-helpers", // segment boundary, not a prefix match
+    "@/lib/settings/queries/internal", // another package's internals
+    "@/lib/scripts/queries/internal",
+    "@/lib/local-git/queries/internal", // a dir merely ENDING in git
+    "my-git/queries/internal",
+    "./internal", // a bare sibling belongs to whoever imports it
+  ])
+    assert.equal(reachesGitQueriesInternal(spec), false, `should not: ${spec}`);
+});
+
+test("reachesQueriesInternalFromSibling adds the in-package sibling spelling", () => {
+  // Inside the package internal.ts is reached as `./internal`, a form carrying no
+  // `queries/` segment at all — so this predicate is strictly wider than the one
+  // above, and never narrower.
+  for (const spec of [
+    "./internal",
+    "./internal.ts",
+    "./././internal",
+    "./core/../internal",
+    "./internal/keys",
+  ])
+    assert.equal(
+      reachesQueriesInternalFromSibling(spec),
+      true,
+      `sibling should reach: ${spec}`,
+    );
+  for (const spec of ["./core", "./internal-ish", "./internals", "./worktrees"])
+    assert.equal(
+      reachesQueriesInternalFromSibling(spec),
+      false,
+      `sibling should not: ${spec}`,
+    );
+  // Strictly wider: everything the outside-facing predicate accepts, this does too.
+  for (const spec of ["@/lib/git/queries/internal", "queries/internal"])
+    assert.equal(reachesQueriesInternalFromSibling(spec), true, spec);
+});
+
+test("okReportLine suppresses the OK line for a check that went inert", () => {
+  const check = { name: "x" };
+  const clean = { scanned: [1, 2], violations: [], stale: [] };
+  assert.equal(okReportLine(check, clean, null), "x: OK (2 files scanned)\n");
+  // The whole point: a moved path must never read as a pass.
+  assert.equal(okReportLine(check, clean, "SCOPE PIN FAILED — …"), null);
+  assert.equal(
+    okReportLine(check, { scanned: [1], violations: ["a:1"], stale: [] }, null),
+    null,
+  );
+  assert.equal(
+    okReportLine(
+      check,
+      { scanned: [1], violations: [], stale: ["f.ts"] },
+      null,
+    ),
+    null,
+  );
 });
 
 test("queries-internal-present pins the module the whole family is named around", () => {
