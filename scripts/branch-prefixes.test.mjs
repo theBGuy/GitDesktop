@@ -126,3 +126,20 @@ test("a name with no leading segment counts as bare", () => {
     { prefix: "(no prefix — bare names)", count: 1 },
   ]);
 });
+
+// ---------------------------------------------------------- the shipped prompt
+
+// The GUI-side BRANCH_SYSTEM must stay example-free like its Rust mirror, whose
+// branch_system_prompt_names_no_default_prefix test bans '/' outright. This is
+// the TS twin of that ratchet: read the shipped source and hold the template to
+// the same rule, so a reintroduced example prefix fails here instead of shipping.
+test("the shipped BRANCH_SYSTEM template names no prefix token", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../src/lib/ai/prompt.ts", import.meta.url),
+    "utf8",
+  );
+  const match = source.match(/const BRANCH_SYSTEM = `([^`]*)`/);
+  assert.ok(match, "BRANCH_SYSTEM template literal not found in prompt.ts");
+  assert.ok(!match[1].includes("/"), "BRANCH_SYSTEM must not name any prefix");
+});

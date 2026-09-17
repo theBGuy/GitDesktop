@@ -231,7 +231,8 @@ fn configure_child_env(cmd: &mut Command, strip_env: &[&str]) {
     // cmd/glab/main.go isUpdateCheckEnabled checks for true (verified v1.105.0).
     // It uses strconv.ParseBool: an empty string logs a parse warning to stderr.
     // Use "false" so neither that warning nor update notices enter reconnect's
-    // merged stderr scan for the one-time code.
+    // merged stderr scan for the one-time code, or ride a runner call's stderr
+    // into an AppError::Glab message.
     cmd.env("GLAB_PAGER", "")
         .env("PAGER", "")
         .env("NO_COLOR", "1")
