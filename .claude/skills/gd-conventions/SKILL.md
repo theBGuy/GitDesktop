@@ -310,9 +310,9 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   (`comment-${id}`, `event-${id}`) — bare cross-type ids collide and React
   keeps the earlier duplicate's DOM alive.
 - Queries with identity axes beyond the repo (entity id, lens, state) keep
-  previous data via `keepPreviousDataForKeyAxes` (`src/lib/git/queries.ts`),
-  and callers gate derived UI on `!isPlaceholderData` — a disabled query
-  still renders its placeholder.
+  previous data via `keepPreviousDataForKeyAxes`
+  (`src/lib/git/queries/core.ts`), and callers gate derived UI on
+  `!isPlaceholderData` — a disabled query still renders its placeholder.
 - Virtualized lists: a variable-height first row races `measureElement` —
   mount the virtualizer in a child gated on data (`docs/list-virtualization.md`).
 - Multi-toggle settings batch behind a Save/Discard bar (draft + dirty), not
@@ -379,8 +379,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   surfaces set the documented `networkMode`; the default PARKS offline and the
   query never resolves.
 - **Invalidation keys** — cache invalidation goes through the shared key
-  builders in `queries.ts`; a hand-built key or raw-path key silently fails to
-  co-invalidate siblings.
+  builders in `src/lib/git/queries/`; a hand-built key or raw-path key
+  silently fails to co-invalidate siblings.
 - **Mutation identity pinning** — a `useRepoMutation` whose mutationFn or
   callbacks close over repo/lens AND whose host survives a repo switch passes
   `identity: ["<op>", repo, lens]`: react-query re-pushes hook options onto an
