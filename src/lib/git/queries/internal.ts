@@ -27,12 +27,13 @@ export const workingTreeKeys = (repo: string) =>
   ] as const;
 
 /**
- * The shared skeleton behind the optimistic-cache mutations here: cancel in-flight
- * fetches on the target key, snapshot it, apply an optimistic `setQueryData` patch, roll
- * the snapshot back on error, reconcile on settle. Wrappers differ only in `keyFor(args)`
- * (the key is derived from the args AT MUTATE TIME, so a mid-flight repo/number/sha
- * switch can never corrupt another key's cache), `patch`, and `reconcile`. `TCache` is
- * the shape stored at the key; the rollback context carries the exact key + prior value.
+ * The shared skeleton behind the optimistic-cache mutations in prs.ts and pr-actions.ts:
+ * cancel in-flight fetches on the target key, snapshot it, apply an optimistic
+ * `setQueryData` patch, roll the snapshot back on error, reconcile on settle. Wrappers
+ * differ only in `keyFor(args)` (the key is derived from the args AT MUTATE TIME, so a
+ * mid-flight repo/number/sha switch can never corrupt another key's cache), `patch`, and
+ * `reconcile`. `TCache` is the shape stored at the key; the rollback context carries the
+ * exact key + prior value.
  */
 export function useOptimisticCacheMutation<TArgs, TData, TCache>(
   mutationFn: (args: TArgs) => Promise<TData>,
@@ -104,7 +105,7 @@ export const pendingBoardWrites = new Map<string, number>();
  * pre-mutation cards for the rest of the staleTime window. There is no second
  * chance: `invalidateQueries` refetches ACTIVE queries only, and a board behind
  * the Projects tab's Activity gate is not active. (The repo's cancel-then-
- * invalidate class, same as the item-field-values chains above.)
+ * invalidate class, same as the item-field-values chains in projects.ts.)
  *
  * Invalidate-only past that: no forced refetch, so the Activity gate still owns
  * WHEN a hidden board re-reads.

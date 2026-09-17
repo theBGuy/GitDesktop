@@ -29,3 +29,4 @@ export * from "./sync";
 export * from "./tags-releases";
 export * from "./webhooks";
 export * from "./workingtree";
+export * from "./worktrees";

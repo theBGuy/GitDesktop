@@ -51,3 +51,41 @@ export function usePublishTargets(repo: string, enabled: boolean) {
     retry: false,
   });
 }
+
+export function useRemoteUrl(repo: string, name: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["repo", repo, "remote-url", name] as const,
+    queryFn: () => api.gitRemoteUrl(repo, name),
+    enabled,
+    // Always-visible consumers (RepoLensSwitcher + CreatePrDialog via useRemoteSlug), so
+    // it needs a staleTime at all — without one every window focus re-spawned
+    // `git remote get-url` twice. Not Infinity: the Rust cache's 5s TTL exists so an
+    // external `git remote set-url` is picked up promptly, and in-app edits invalidate
+    // this key eagerly (useSetRemoteUrl).
+    staleTime: 30_000,
+  });
+}
+
+export function useSetRemoteUrl(repo: string) {
+  return useRepoMutation(repo, (args: { name: string; url: string }) =>
+    api.gitRemoteSetUrl(repo, args.name, args.url),
+  );
+}
+
+/** Adds a remote (e.g. `upstream` on a fork cloned without one). The default broad
+ *  invalidation prefix-covers `remotes`/`remote-url`, so `useLensGate` re-reads and the
+ *  fork/upstream UI lights up live. */
+export function useAddRemote(repo: string) {
+  return useRepoMutation(repo, (args: { name: string; url: string }) =>
+    api.gitRemoteAdd(repo, args.name, args.url),
+  );
+}
+
+/** Removes a remote. The default broad invalidation prefix-covers
+ *  `remotes`/`remote-url`, so `useLensGate` re-reads and every fork-identity surface
+ *  collapses live. */
+export function useRemoveRemote(repo: string) {
+  return useRepoMutation(repo, (args: { name: string }) =>
+    api.gitRemoteRemove(repo, args.name),
+  );
+}

@@ -22,8 +22,8 @@ export function useRepoIdentity(repo: string | null) {
  * skeleton. `repoKeyIndex` is where the repo sits in the key (index 1 for every key
  * passed to it).
  * A key that also varies on an identity axis beyond repo (lens, state) needs
- * `keepPreviousDataForKeyAxes` instead (the PR and issue list hooks below do):
- * matching repo alone would serve another axis's data.
+ * `keepPreviousDataForKeyAxes` instead (e.g. the PR and issue list hooks in
+ * prs.ts and issues.ts): matching repo alone would serve another axis's data.
  */
 export function keepPreviousDataForRepo(repo: string, repoKeyIndex = 1) {
   return <T>(

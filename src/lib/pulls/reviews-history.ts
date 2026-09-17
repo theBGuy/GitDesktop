@@ -227,8 +227,8 @@ export async function getLatestReview(
 
 /** Query key for {@link listReviews}. Homed here beside the read it keys, for the
  *  same reason as {@link reviewPartialKey}: the review store and the automations
- *  runner both invalidate it after a write, and neither may pull `queries.ts`'s
- *  react-query/forge-status graph in to do so. */
+ *  runner both invalidate it after a write, and neither may pull
+ *  `src/lib/pulls/queries.ts`'s react-query/forge-status graph in to do so. */
 export const reviewHistoryKey = (
   repo: string,
   lens: RemoteLens,
@@ -239,9 +239,9 @@ export const reviewHistoryKey = (
 /** Query key for {@link getLatestPartialReview}. Lives here, beside the read it keys,
  *  so all three consumers share one builder: any writer that can remove a partial
  *  record (history clear, per-record delete) must invalidate it, and a hand-written
- *  copy that drifts leaves deleted output on screen. Homed in this module rather than
- *  `queries.ts` so the review store can use it without pulling that module's
- *  react-query/forge-status graph in. */
+ *  copy that drifts leaves deleted output on screen. Homed here rather than in
+ *  `src/lib/pulls/queries.ts` so the review store can use it without pulling that
+ *  module's react-query/forge-status graph in. */
 export const reviewPartialKey = (
   repo: string,
   lens: RemoteLens,

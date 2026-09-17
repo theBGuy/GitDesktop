@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import {
   CHECKS,
   runCheck,
+  scopePinFailure,
   stripComments,
   view,
 } from "./check-banned-patterns.mjs";
@@ -86,6 +87,9 @@ const ungatedProducer = scanner("ungated-notification-producer");
 const handRolledStoreOpen = scanner("hand-rolled-store-open");
 const rawStoreReload = scanner("raw-store-reload");
 const inlineRepoIdentityQuery = scanner("inline-repo-identity-query");
+const queriesInternalImport = scanner("queries-internal-import");
+const queriesBarrelInternal = scanner("queries-barrel-internal-reference");
+const queriesInternalReexport = scanner("queries-internal-reexport");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -1557,9 +1561,352 @@ test("inline-repo-identity-query exempts the factory module only", () => {
     (c) => c.name === "inline-repo-identity-query",
   );
   assert.equal(appliesTo("src/lib/git/repo-identity-query.ts"), false);
-  assert.equal(appliesTo("src/lib/git/queries.ts"), true);
+  assert.equal(appliesTo("src/lib/git/queries/core.ts"), true);
   assert.equal(appliesTo("src/lib/settings/queries.ts"), true);
   assert.equal(appliesTo("src/lib/scripts/queries.ts"), true);
+});
+
+test("queries-internal-import flags every spelling that reaches the private module", () => {
+  // The alias route, which is how a feature file would most likely reach it.
+  assert.deepEqual(
+    queriesInternalImport(
+      'import { useRepoMutation } from "@/lib/git/queries/internal";',
+    ),
+    [1],
+  );
+  // Relative routes of any depth, including a sibling inside src/lib/git/.
+  assert.deepEqual(
+    queriesInternalImport(
+      'import { workingTreeKeys } from "./queries/internal";',
+    ),
+    [1],
+  );
+  assert.deepEqual(
+    queriesInternalImport(
+      'import { useRepoMutation } from "../../lib/git/queries/internal";',
+    ),
+    [1],
+  );
+  // An explicit extension, and the dynamic-import spelling, reach the same module.
+  assert.deepEqual(
+    queriesInternalImport('export { x } from "@/lib/git/queries/internal.ts";'),
+    [1],
+  );
+  assert.deepEqual(
+    queriesInternalImport(
+      'const m = await import("@/lib/git/queries/internal");',
+    ),
+    [1],
+  );
+  // Non-normalized spellings that still RESOLVE to the private module. A pattern
+  // matched against the raw path misses both; segment normalization is why these
+  // are caught.
+  assert.deepEqual(
+    queriesInternalImport('import { x } from "@/lib/git/queries/./internal";'),
+    [1],
+  );
+  assert.deepEqual(
+    queriesInternalImport(
+      'import { x } from "@/lib/git/queries/core/../internal";',
+    ),
+    [1],
+  );
+  // A subpath: internal.ts splitting into an internal/ directory is exactly the
+  // move this package just made, so the boundary has to survive it.
+  assert.deepEqual(
+    queriesInternalImport(
+      'import { x } from "@/lib/git/queries/internal/keys";',
+    ),
+    [1],
+  );
+});
+
+test("queries-internal-import leaves the barrel and other packages' aliases alone", () => {
+  for (const source of [
+    // The supported route: the barrel, which never re-exports internal.ts.
+    'import { useStage, useRepoStatus } from "@/lib/git/queries";',
+    // A deeper public module of the same package is not the private one.
+    'import { repoKeys } from "@/lib/git/queries/core";',
+    // A longer name sharing the prefix — the segment boundary keeps it out.
+    'import { x } from "@/lib/git/queries/internal-helpers";',
+    // Some OTHER package's own internal module: the `git/queries/` anchor is what
+    // scopes this check, so an unrelated sibling import must not trip it.
+    'import { y } from "./internal";',
+    'import { z } from "@/lib/notifications/internal";',
+    // ANOTHER package's queries/internal, by alias. settings/ and scripts/ each own
+    // a queries.ts that could split into a directory the same way this one did, and
+    // an unanchored `queries/internal` tail would then flag their private module
+    // as if it were this package's.
+    'import { a } from "@/lib/settings/queries/internal";',
+    'import { b } from "@/lib/scripts/queries/internal";',
+    // A directory whose name merely ENDS in git is a different package.
+    'import { c } from "@/lib/local-git/queries/internal";',
+    'import { d } from "my-git/queries/internal";',
+    // Comment stripping keeps the doc mentions of the boundary clean.
+    '// never import from "@/lib/git/queries/internal" outside the package',
+  ])
+    assert.deepEqual(
+      queriesInternalImport(source),
+      [],
+      `should ignore ${source}`,
+    );
+});
+
+test("queries-internal-import over-reaches on a RELATIVE queries/internal", () => {
+  // Documented bound, pinned so it stays deliberate: a bare `queries/internal`
+  // tail has to flag, because that is how a file inside src/lib/git/ reaches this
+  // package. The scanner sees a specifier, never the file it sits in, so the same
+  // spelling from some other package's subdirectory flags too. The cost is a
+  // false positive that an allowlist entry documents; the alternative is missing
+  // the likeliest real violation.
+  assert.deepEqual(
+    queriesInternalImport('import { x } from "../queries/internal";'),
+    [1],
+  );
+  assert.deepEqual(
+    queriesInternalImport('import { x } from "./queries/internal";'),
+    [1],
+  );
+});
+
+test("queries-internal-import exempts the queries package itself", () => {
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "queries-internal-import",
+  );
+  // The package's own modules are the sanctioned consumers.
+  assert.equal(appliesTo("src/lib/git/queries/internal.ts"), false);
+  assert.equal(appliesTo("src/lib/git/queries/workingtree.ts"), false);
+  assert.equal(appliesTo("src/lib/git/queries/index.ts"), false);
+  // Everything outside it is scanned, including its immediate neighbours.
+  assert.equal(appliesTo("src/lib/git/host.ts"), true);
+  assert.equal(appliesTo("src/features/repository/FileRow.tsx"), true);
+});
+
+test("queries-internal-reexport catches a DOMAIN module republishing internals", () => {
+  // `export *` chains republish, so one of these in any package module rides the
+  // barrel's own `export * from "./<module>";` onto the public surface.
+  for (const source of [
+    'export * from "./internal";',
+    'export { useRepoMutation } from "./internal";',
+    'export * as internals from "./internal";',
+    // The long ways round, and the subpath for when internal.ts becomes internal/.
+    'export * from "@/lib/git/queries/internal";',
+    'export * from "./core/../internal";',
+    'export * from "./internal/keys";',
+    // Vite suffixes address the same module.
+    'export * from "./internal?raw";',
+    'export * from "./internal.js?worker";',
+  ])
+    assert.deepEqual(
+      queriesInternalReexport(source),
+      [1],
+      `should flag ${source}`,
+    );
+});
+
+test("queries-internal-reexport catches a re-export SPLIT across two statements", () => {
+  // The evasion a specifier-matching pattern can never see: the export clause
+  // carries no module path at all, so the binding has to be tracked from its
+  // import. index.ts's `export *` republishes it exactly like a direct re-export.
+  // Line 2 every time: the report points at the offending EXPORT, not the
+  // import, which is legal on its own and is not what needs removing.
+  for (const source of [
+    'import { workingTreeKeys } from "./internal";\nexport { workingTreeKeys };',
+    // Aliased on the way in — the spelling that makes the export site look local.
+    'import { useRepoMutation as m } from "./internal";\nexport { m };',
+    'import { useRepoMutation as m } from "./internal";\nexport default m;',
+    // Renamed on the way out; the LOCAL name is what ties it to the import.
+    'import { a } from "./internal";\nexport { a as publicName };',
+    // The alias spelling of the import reaches the same module.
+    'import { x } from "@/lib/git/queries/internal";\nexport { x };',
+  ])
+    assert.deepEqual(
+      queriesInternalReexport(source),
+      [2],
+      `should flag ${source}`,
+    );
+});
+
+test("queries-internal-reexport ignores exports unrelated to internal", () => {
+  for (const source of [
+    // A bare export clause with no internal import in the file at all.
+    "export { localThing };",
+    // Imports internal, but exports only its own symbols — the legal shape.
+    'import { workingTreeKeys } from "./internal";\nexport { myOwnHelper };',
+    'import { workingTreeKeys } from "./internal";\nexport const x = 1;',
+    // A split re-export of a PUBLIC sibling is ordinary package work.
+    'import { a } from "./core";\nexport { a };',
+  ])
+    assert.deepEqual(
+      queriesInternalReexport(source),
+      [],
+      `should ignore ${source}`,
+    );
+});
+
+test("queries-internal-reexport does not pair an export DECLARATION with a later import", () => {
+  // `export enum E { A }` ends without a semicolon, so a `;`-bounded gap alone
+  // would run past it and pair with the next plain import's specifier. The gap is
+  // bounded by the `import` keyword too, which is what keeps these clean.
+  for (const source of [
+    'export enum E { A }\nimport { workingTreeKeys } from "./internal";',
+    'export interface I { a: string }\nimport { x } from "./internal";',
+  ])
+    assert.deepEqual(
+      queriesInternalReexport(source),
+      [],
+      `should ignore ${source}`,
+    );
+  // And the bound costs no real detections: a re-exported name may CONTAIN
+  // "import" without the word boundary matching.
+  assert.deepEqual(
+    queriesInternalReexport(
+      'export { default as importedThing } from "./internal";',
+    ),
+    [1],
+  );
+});
+
+test("queries-internal-reexport leaves plain imports of internal alone", () => {
+  // Importing the shared helpers is the whole point of internal.ts; only
+  // RE-exporting them widens the barrel's surface.
+  for (const source of [
+    'import { useRepoMutation } from "./internal";',
+    'import { workingTreeKeys, repoSettingsKey } from "./internal";',
+    'import { useRepoMutation } from "@/lib/git/queries/internal";',
+    // A re-export of a PUBLIC sibling is ordinary barrel work.
+    'export * from "./core";',
+    // An export statement cannot pair with a later import's specifier: the gap
+    // between `export` and `from` may not cross a `;`.
+    'export const x = 1; import y from "./internal";',
+  ])
+    assert.deepEqual(
+      queriesInternalReexport(source),
+      [],
+      `should ignore ${source}`,
+    );
+});
+
+test("queries-internal-reexport covers the package but exempts internal.ts", () => {
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "queries-internal-reexport",
+  );
+  // Every module in the package, the barrel included — export * chains from any
+  // of them reach the public surface.
+  assert.equal(appliesTo("src/lib/git/queries/core.ts"), true);
+  assert.equal(appliesTo("src/lib/git/queries/workingtree.ts"), true);
+  assert.equal(appliesTo("src/lib/git/queries/index.ts"), true);
+  // internal.ts is the module in question, so it cannot re-export itself.
+  assert.equal(appliesTo("src/lib/git/queries/internal.ts"), false);
+  // Outside the package, queries-internal-import owns the boundary instead.
+  assert.equal(appliesTo("src/lib/git/host.ts"), false);
+});
+
+test("a path-pinned check fails loudly instead of going inert", () => {
+  // The silent fail-open this file exists to prevent: a pinned check whose path
+  // moved scans nothing and prints OK. The pin turns that into a failure.
+  const barrel = CHECKS.find(
+    (c) => c.name === "queries-barrel-internal-reference",
+  );
+  assert.equal(scopePinFailure(barrel, 1), null);
+  const moved = scopePinFailure(barrel, 0);
+  assert.match(moved, /SCOPE PIN FAILED/);
+  // The message has to name the path to re-point, or it cannot be acted on.
+  assert.match(moved, /src\/lib\/git\/queries\/index\.ts/);
+
+  const pkg = CHECKS.find((c) => c.name === "queries-internal-reexport");
+  assert.equal(scopePinFailure(pkg, 29), null);
+  assert.match(scopePinFailure(pkg, 1), /SCOPE PIN FAILED/);
+  // The floor sits near the real module count: a QUERIES_DIR typo that left only a
+  // handful of files matching would otherwise pass while scanning almost nothing.
+  assert.equal(pkg.expectScanned.atLeast, 20);
+  assert.match(scopePinFailure(pkg, 5), /SCOPE PIN FAILED/);
+  // A check with no pin is unaffected.
+  assert.equal(scopePinFailure({ name: "unpinned" }, 0), null);
+});
+
+test("queries-internal-present pins the module the whole family is named around", () => {
+  // Renaming internal.ts makes every other rule vacuously green: the re-export
+  // check simply starts treating the renamed module as an ordinary one, and its
+  // floor is still met. This pin is the only thing that notices.
+  const present = CHECKS.find((c) => c.name === "queries-internal-present");
+  const { appliesTo } = present;
+  assert.equal(appliesTo("src/lib/git/queries/internal.ts"), true);
+  assert.equal(appliesTo("src/lib/git/queries/core.ts"), false);
+  assert.equal(appliesTo("src/lib/settings/internal.ts"), false);
+  // It carries no pattern of its own — existence is the whole assertion.
+  assert.deepEqual(present.scan(view('export * from "./internal";')), []);
+  assert.equal(scopePinFailure(present, 1), null);
+  const renamed = scopePinFailure(present, 0);
+  assert.match(renamed, /SCOPE PIN FAILED/);
+  assert.match(renamed, /src\/lib\/git\/queries\/internal\.ts/);
+});
+
+test("queries-barrel-internal-reference catches the barrel naming its internals", () => {
+  // The one line that undoes the package boundary, and the spellings around it.
+  for (const source of [
+    'export * from "./internal";',
+    'export { useRepoMutation } from "./internal";',
+    'export * from "./internal.ts";',
+    // An import is no better: index.ts is a pure export list, so a reference to
+    // internal there is a re-export or one edit from becoming one.
+    'import { workingTreeKeys } from "./internal";',
+    // The barrel can also name its own private module the long way round. A raw
+    // `./internal` pattern misses every one of these.
+    'export * from "@/lib/git/queries/internal";',
+    'export * from "../queries/internal";',
+    'export * from "./././internal";',
+    'export * from "./core/../internal";',
+    // And the subpath, for when internal.ts becomes internal/.
+    'export * from "./internal/keys";',
+  ])
+    assert.deepEqual(
+      queriesBarrelInternal(source),
+      [1],
+      `should flag ${source}`,
+    );
+});
+
+test("queries-barrel-internal-reference leaves the real barrel lines alone", () => {
+  for (const source of [
+    'export * from "./core";',
+    'export * from "./workingtree";',
+    'export * from "./worktrees";',
+    // Domain modules whose names merely start the same way.
+    'export * from "./internal-ish";',
+    'export * from "./internals";',
+    // Comment stripping keeps the barrel's own explanatory header clean.
+    "// internal.ts is intentionally absent — see its header.",
+  ])
+    assert.deepEqual(
+      queriesBarrelInternal(source),
+      [],
+      `should ignore ${source}`,
+    );
+});
+
+test("queries-barrel-internal-reference is pinned to the barrel file only", () => {
+  const { appliesTo } = CHECKS.find(
+    (c) => c.name === "queries-barrel-internal-reference",
+  );
+  assert.equal(appliesTo("src/lib/git/queries/index.ts"), true);
+  // A domain module is out of THIS check's scope, because importing internal
+  // there is legal — but re-exporting it is not, and queries-internal-reexport
+  // covers that half. The two together are what make the boundary hold.
+  assert.equal(appliesTo("src/lib/git/queries/workingtree.ts"), false);
+  assert.deepEqual(
+    queriesInternalReexport('import { useRepoMutation } from "./internal";'),
+    [],
+    "a domain module may IMPORT internal",
+  );
+  assert.deepEqual(
+    queriesInternalReexport('export * from "./internal";'),
+    [1],
+    "a domain module may NOT re-export internal",
+  );
+  assert.equal(appliesTo("src/lib/git/queries/internal.ts"), false);
+  // And no other barrel in the repo is this one.
+  assert.equal(appliesTo("src/lib/settings/index.ts"), false);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {

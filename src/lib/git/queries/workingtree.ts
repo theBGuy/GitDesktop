@@ -51,48 +51,57 @@ const commitAftermathKeys = (repo: string) =>
     ["repo", repo, "insights", "punch-card"],
   ] as const;
 
+export function useFileDiff(
+  repo: string,
+  file: { path: string; staged: boolean; untracked: boolean } | null,
+) {
+  return useQuery({
+    // `untracked` is in the key so the untracked→tracked flip (after staging part
+    // of a new file) subscribes to a fresh query — the `--no-index` "all new"
+    // diff and the normal remainder diff must not share a cache entry, or an
+    // invalidation race could leave the stale all-lines view on screen.
+    queryKey: [
+      ...repoKeys.diff(repo, file?.path ?? "", file?.staged ?? false),
+      file?.untracked ?? false,
+    ] as const,
+    queryFn: () =>
+      api.gitDiffFile(
+        repo,
+        file?.path ?? "",
+        file?.staged ?? false,
+        file?.untracked ?? false,
+      ),
+    enabled: file !== null,
+  });
+}
+
+/**
+ * A file's cumulative diff in an agent session worktree vs the session's base commit.
+ * `base` is in the key so a restarted session's new base can't cache-hit; idle until
+ * `enabled` (the step is expanded). While `live` it polls: the agent edits the worktree
+ * through its own CLI, outside any app mutation that could invalidate this, so an open
+ * diff would otherwise freeze.
+ */
+export function useSessionFileDiff(
+  repo: string,
+  filePath: string,
+  base: string,
+  enabled: boolean,
+  live: boolean,
+) {
+  return useQuery({
+    queryKey: [...repoKeys.diff(repo, filePath, false), "session-base", base],
+    queryFn: () => api.gitSessionFileDiff(repo, filePath, base),
+    enabled: enabled && Boolean(repo && filePath && base),
+    refetchInterval: enabled && live ? 1500 : false,
+    refetchIntervalInBackground: false,
+  });
+}
+
 export function useStage(repo: string) {
   return useRepoMutation(repo, (paths: string[]) => api.gitStage(repo, paths), {
     invalidate: workingTreeKeys(repo),
   });
-}
-
-export function useRemoteUrl(repo: string, name: string, enabled: boolean) {
-  return useQuery({
-    queryKey: ["repo", repo, "remote-url", name] as const,
-    queryFn: () => api.gitRemoteUrl(repo, name),
-    enabled,
-    // Always-visible consumers (RepoLensSwitcher + CreatePrDialog via useRemoteSlug), so
-    // it needs a staleTime at all — without one every window focus re-spawned
-    // `git remote get-url` twice. Not Infinity: the Rust cache's 5s TTL exists so an
-    // external `git remote set-url` is picked up promptly, and in-app edits invalidate
-    // this key eagerly (useSetRemoteUrl).
-    staleTime: 30_000,
-  });
-}
-
-export function useSetRemoteUrl(repo: string) {
-  return useRepoMutation(repo, (args: { name: string; url: string }) =>
-    api.gitRemoteSetUrl(repo, args.name, args.url),
-  );
-}
-
-/** Adds a remote (e.g. `upstream` on a fork cloned without one). The default broad
- *  invalidation prefix-covers `remotes`/`remote-url`, so `useLensGate` re-reads and the
- *  fork/upstream UI lights up live. */
-export function useAddRemote(repo: string) {
-  return useRepoMutation(repo, (args: { name: string; url: string }) =>
-    api.gitRemoteAdd(repo, args.name, args.url),
-  );
-}
-
-/** Removes a remote. The default broad invalidation prefix-covers
- *  `remotes`/`remote-url`, so `useLensGate` re-reads and every fork-identity surface
- *  collapses live. */
-export function useRemoveRemote(repo: string) {
-  return useRepoMutation(repo, (args: { name: string }) =>
-    api.gitRemoteRemove(repo, args.name),
-  );
 }
 
 export function useOpState(repo: string) {
@@ -228,37 +237,6 @@ export function useCommit(repo: string) {
       invalidateAfter: commitAftermathKeys(repo),
       refetchBeforeSuccess: true,
     },
-  );
-}
-
-export function useCheckoutBranch(repo: string) {
-  return useRepoMutation(repo, (name: string) =>
-    api.gitCheckoutBranch(repo, name),
-  );
-}
-
-export function useCheckoutRemoteBranch(repo: string) {
-  return useRepoMutation(repo, (args: { remote: string; name: string }) =>
-    api.gitCheckoutRemoteBranch(repo, args.remote, args.name),
-  );
-}
-
-export function useCreateBranch(repo: string) {
-  return useRepoMutation(
-    repo,
-    (args: {
-      name: string;
-      checkout: boolean;
-      startPoint?: string;
-      noTrack?: boolean;
-    }) =>
-      api.gitCreateBranch(
-        repo,
-        args.name,
-        args.checkout,
-        args.startPoint,
-        args.noTrack,
-      ),
   );
 }
 

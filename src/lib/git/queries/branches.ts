@@ -5,6 +5,56 @@ import * as api from "../api";
 import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
 
+export function useBranches(repo: string) {
+  return useQuery({
+    queryKey: repoKeys.branches(repo),
+    queryFn: () => api.gitBranches(repo),
+  });
+}
+
+/** Branches that exist on a remote (reflecting the last fetch), for the switcher's
+ *  "Remote" group. `enabled` gates the fetch so it only runs while the menu is
+ *  open, like the divergence/worktree queries. */
+export function useRemoteBranches(repo: string, enabled = true) {
+  return useQuery({
+    queryKey: ["repo", repo, "remote-branches"] as const,
+    queryFn: () => api.gitRemoteBranches(repo),
+    enabled: enabled && Boolean(repo),
+    staleTime: 30_000,
+  });
+}
+
+export function useCheckoutBranch(repo: string) {
+  return useRepoMutation(repo, (name: string) =>
+    api.gitCheckoutBranch(repo, name),
+  );
+}
+
+export function useCheckoutRemoteBranch(repo: string) {
+  return useRepoMutation(repo, (args: { remote: string; name: string }) =>
+    api.gitCheckoutRemoteBranch(repo, args.remote, args.name),
+  );
+}
+
+export function useCreateBranch(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: {
+      name: string;
+      checkout: boolean;
+      startPoint?: string;
+      noTrack?: boolean;
+    }) =>
+      api.gitCreateBranch(
+        repo,
+        args.name,
+        args.checkout,
+        args.startPoint,
+        args.noTrack,
+      ),
+  );
+}
+
 export function useDefaultBranch(repo: string) {
   return useQuery({
     queryKey: ["repo", repo, "default-branch"] as const,

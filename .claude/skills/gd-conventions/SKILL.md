@@ -381,6 +381,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.
+- **Queries package boundary** — import the git query layer through the
+  `@/lib/git/queries` barrel; `queries/internal.ts` is package-private. Modules
+  inside the package may import it but never re-export it, since `export *`
+  chains would republish it through the barrel. Guards: `queries-internal-import`
+  (callers outside), `queries-internal-reexport` (re-exports anywhere inside),
+  `queries-barrel-internal-reference` (the barrel may not name it at all).
 - **Mutation identity pinning** — a `useRepoMutation` whose mutationFn or
   callbacks close over repo/lens AND whose host survives a repo switch passes
   `identity: ["<op>", repo, lens]`: react-query re-pushes hook options onto an

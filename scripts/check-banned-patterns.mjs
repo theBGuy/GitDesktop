@@ -537,6 +537,166 @@ const RAW_STORE_RELOAD_RE = /(?<!location)\.reload\s*\(/g;
 // site does today; comment stripping keeps the several doc mentions clean.
 const INLINE_REPO_IDENTITY_KEY_RE = /(["'`])repo-identity\1/g;
 
+// Every module specifier in an import/export position, captured for path analysis.
+// Matching the specifier and normalizing it beats one big pattern: `.`/`..` segments
+// that still resolve to the target are what a regex silently misses.
+const MODULE_SPECIFIER_RE = /\b(?:from|import)\s*\(?\s*(["'`])([^"'`]+)\1/g;
+
+/** A specifier with any vite query/fragment suffix dropped, `.`/`..` segments
+ *  collapsed and the extension removed, so every spelling that RESOLVES to one
+ *  module compares equal. `?raw` / `?worker` still address the same file. */
+function normalizeSpecifier(spec) {
+  const segments = [];
+  for (const part of spec.replace(/[?#].*$/, "").split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") segments.pop();
+    else segments.push(part);
+  }
+  return segments.join("/").replace(/\.[jt]sx?$/, "");
+}
+
+/**
+ * Whether a module specifier resolves to the git-queries package's private
+ * internals, from OUTSIDE the package. Normalized first, so `queries/./internal`
+ * and `queries/core/../internal` cannot slip past. The `git/` anchor is
+ * segment-aligned (`local-git/queries/internal` is a different package), and the
+ * trailing boundary admits subpaths, so internal.ts growing into an internal/
+ * directory stays covered.
+ * Known bound: a string LITERAL holding one of these paths counts as a use —
+ * only comments are stripped.
+ * Known bound: the bare `queries/internal` arm also fires on another package's
+ * `../queries/internal`, since a relative specifier's landing site is invisible here.
+ */
+export function reachesGitQueriesInternal(spec) {
+  const path = normalizeSpecifier(spec);
+  // This literal spells the same package as QUERIES_DIR but matches SPECIFIERS
+  // rather than repo paths, so it cannot reuse the constant — moving the package
+  // means updating both, and the queries-internal-present pin fails loudly if only
+  // one of them is updated.
+  return (
+    /(^|\/)git\/queries\/internal(\/|$)/.test(path) ||
+    path === "queries/internal" ||
+    path.startsWith("queries/internal/")
+  );
+}
+
+/** The same question asked from INSIDE the package, where internal.ts is reached
+ *  as the bare sibling `./internal` — a form that carries no `queries/` segment. */
+export function reachesQueriesInternalFromBarrel(spec) {
+  const path = normalizeSpecifier(spec);
+  return (
+    path === "internal" ||
+    path.startsWith("internal/") ||
+    reachesGitQueriesInternal(spec)
+  );
+}
+
+/** Scanner: import/export specifiers that reach the git-queries internals. */
+const queriesInternalSpecifiers = ({ text, starts }) => {
+  const hits = new Set();
+  for (const m of text.matchAll(MODULE_SPECIFIER_RE)) {
+    if (reachesGitQueriesInternal(m[2])) hits.add(lineAt(starts, m.index));
+  }
+  return [...hits];
+};
+
+/** Scanner: the barrel naming its own private module, in any spelling — the
+ *  sibling form and every absolute/relative path that resolves to it. */
+const barrelInternalSpecifiers = ({ text, starts }) => {
+  const hits = new Set();
+  for (const m of text.matchAll(MODULE_SPECIFIER_RE)) {
+    if (reachesQueriesInternalFromBarrel(m[2]))
+      hits.add(lineAt(starts, m.index));
+  }
+  return [...hits];
+};
+
+// RE-EXPORT positions only: `export * from "x"`, `export * as ns from "x"`, and
+// `export { a, b } from "x"`. The gap is bounded by BOTH `;` and the `import`
+// keyword: a semicolon-less export DECLARATION (`export enum E { A }`) would
+// otherwise reach past itself and pair with a later plain import's specifier.
+const REEXPORT_SPECIFIER_RE =
+  /\bexport\b(?:(?!\bimport\b)[^;])*?\bfrom\s*(["'`])([^"'`]+)\1/g;
+
+// An import statement's clause plus its specifier, for binding analysis.
+const IMPORT_CLAUSE_RE = /\bimport\s+([^;]*?)\s*\bfrom\s*(["'`])([^"'`]+)\2/g;
+// A bare `export { … }` clause; group 2 is non-empty when a `from` follows, which
+// makes it a re-export the specifier arm above already owns.
+const EXPORT_CLAUSE_RE = /\bexport\s*\{([^}]*)\}\s*(from\s*["'`])?/g;
+const EXPORT_DEFAULT_RE = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;/g;
+
+/** The LOCAL binding each clause entry introduces or re-exports: `a as b` binds b
+ *  on import and re-exports local `a` on export, so the side that matters differs. */
+function clauseNames(clause, side) {
+  const names = [];
+  for (const raw of clause.split(",")) {
+    const entry = raw.trim().replace(/^type\s+/, "");
+    if (!entry) continue;
+    const parts = entry.split(/\s+as\s+/);
+    const name = side === "import" ? parts.at(-1) : parts[0];
+    if (/^[A-Za-z_$][\w$]*$/.test(name)) names.push(name);
+  }
+  return names;
+}
+
+/** Scanner: a package module RE-EXPORTING the private internals. `export *` chains
+ *  republish, so one of these anywhere in the package puts every internal helper on
+ *  the barrel's public surface — while a plain `import` of it stays legal.
+ *
+ *  Two arms, because a re-export can be SPLIT across two statements: the specifier
+ *  arm catches `export … from "./internal"`, and the binding arm catches
+ *  `import { x } from "./internal"` paired with a later bare `export { x }` or
+ *  `export default x` — a form that carries no specifier at all, so no
+ *  specifier-matching pattern can ever see it. */
+const reexportsInternalSpecifiers = ({ text, starts }) => {
+  const hits = new Set();
+  for (const m of text.matchAll(REEXPORT_SPECIFIER_RE)) {
+    if (reachesQueriesInternalFromBarrel(m[2]))
+      hits.add(lineAt(starts, m.index));
+  }
+
+  // Locals bound from internal in THIS file — including aliases, which is the
+  // spelling that makes the split form look innocent at the export site.
+  const fromInternal = new Set();
+  for (const m of text.matchAll(IMPORT_CLAUSE_RE)) {
+    if (!reachesQueriesInternalFromBarrel(m[3])) continue;
+    const clause = m[1].replace(/[{}]/g, " ").replace(/^\s*\*\s*as\s+/, "");
+    for (const name of clauseNames(clause, "import")) fromInternal.add(name);
+  }
+  if (fromInternal.size === 0) return [...hits];
+
+  for (const m of text.matchAll(EXPORT_CLAUSE_RE)) {
+    if (m[2]) continue; // `export { … } from "…"` — the specifier arm owns it
+    if (clauseNames(m[1], "export").some((n) => fromInternal.has(n)))
+      hits.add(lineAt(starts, m.index));
+  }
+  for (const m of text.matchAll(EXPORT_DEFAULT_RE)) {
+    if (fromInternal.has(m[1])) hits.add(lineAt(starts, m.index));
+  }
+  return [...hits];
+};
+
+const QUERIES_DIR = "src/lib/git/queries/";
+const QUERIES_BARREL = `${QUERIES_DIR}index.ts`;
+const QUERIES_INTERNAL = `${QUERIES_DIR}internal.ts`;
+
+/**
+ * A path-pinned check goes inert the moment its path moves: it scans nothing and
+ * prints OK, which is the silent fail-open this file exists to prevent. Returns a
+ * failure message when the scanned count leaves the pinned range, else null.
+ */
+export function scopePinFailure(check, scannedCount) {
+  const pin = check.expectScanned;
+  if (!pin) return null;
+  if (pin.exactly !== undefined && scannedCount !== pin.exactly) {
+    return `${check.name}: SCOPE PIN FAILED — expected to scan exactly ${pin.exactly} file(s) matching ${pin.hint}, scanned ${scannedCount}; the path moved or was renamed, so this check is inert — re-point its appliesTo`;
+  }
+  if (pin.atLeast !== undefined && scannedCount < pin.atLeast) {
+    return `${check.name}: SCOPE PIN FAILED — expected to scan at least ${pin.atLeast} file(s) matching ${pin.hint}, scanned ${scannedCount}; the path moved or was renamed, so this check is inert — re-point its appliesTo`;
+  }
+  return null;
+}
+
 export const CHECKS = [
   {
     name: "hover-reveal",
@@ -940,6 +1100,59 @@ export const CHECKS = [
     message:
       "every observer of the repo-identity query spreads repoIdentityQueryOptions (src/lib/git/repo-identity-query.ts) — the shared fetch takes its options from whichever observer starts it, so an inline copy splits networkMode and the retry ladder across observers of one key, and a queryFn that swallows the IPC failure caches the raw-path fallback under an infinite staleTime, mis-scoping repo-scoped servers and per-repo app-data for the whole session; import the factory, or add an allowlist entry with rationale",
   },
+  {
+    name: "queries-internal-import",
+    // The package's own modules ARE the sanctioned consumers of its internals.
+    appliesTo: (file) => !file.startsWith(QUERIES_DIR),
+    scan: queriesInternalSpecifiers,
+    allowlist: [],
+    message:
+      "src/lib/git/queries/internal.ts is private to the queries package — it is deliberately the one module the barrel does not re-export, so importing it from outside widens the public @/lib/git/queries surface by a back door and pins callers to helpers whose signatures the package expects to change freely; import the public symbol from @/lib/git/queries instead, or promote the helper into a barrel-re-exported module (which makes the widening a reviewable decision rather than an import-path accident)",
+  },
+  {
+    name: "queries-internal-present",
+    // Pure existence pin, no pattern of its own. Every other rule in this family is
+    // written around internal.ts BY NAME, so renaming the file makes all of them
+    // vacuously pass — queries-internal-reexport would simply start scanning the
+    // renamed module as an ordinary one, and its floor would still be met.
+    appliesTo: (file) => file === QUERIES_INTERNAL,
+    scan: () => [],
+    allowlist: [],
+    expectScanned: { exactly: 1, hint: QUERIES_INTERNAL },
+    message:
+      "src/lib/git/queries/internal.ts is the module the queries boundary is defined around — if it moved or was renamed, re-point QUERIES_INTERNAL and the reaches-internal predicate together, because the other checks in this family go vacuously green without it",
+  },
+  {
+    name: "queries-internal-reexport",
+    // Package-wide, because `export *` chains republish: an `export * from
+    // "./internal"` in ANY module rides the barrel's `export * from "./<module>"`
+    // and lands every internal helper on the public surface. internal.ts is exempt
+    // — it IS the module. A plain `import` stays legal everywhere in the package.
+    appliesTo: (file) =>
+      file.startsWith(QUERIES_DIR) && file !== QUERIES_INTERNAL,
+    scan: reexportsInternalSpecifiers,
+    allowlist: [],
+    // Floor set near the real module count (29): a low floor would let a typo in
+    // QUERIES_DIR leave the scan almost entirely inert and still pass.
+    expectScanned: {
+      atLeast: 20,
+      hint: `${QUERIES_DIR}*.ts (minus internal.ts)`,
+    },
+    message:
+      'no module in the queries package may RE-EXPORT ./internal — `export *` chains republish, so `export * from "./internal";` in any domain module reaches the barrel through its own `export * from "./<module>";` and publishes every shared helper as part of @/lib/git/queries, with nothing else failing (tsc and biome both accept it); importing internal helpers is still fine — it is re-exporting them that widens the surface, so promote a helper into a domain module if it should be public, which makes the widening reviewable',
+  },
+  {
+    name: "queries-barrel-internal-reference",
+    // The barrel is stricter than the rest of the package: it is a pure export
+    // list, so ANY mention of internal there — import or re-export — is a
+    // re-export or one edit away from becoming one.
+    appliesTo: (file) => file === QUERIES_BARREL,
+    scan: barrelInternalSpecifiers,
+    allowlist: [],
+    expectScanned: { exactly: 1, hint: QUERIES_BARREL },
+    message:
+      "the queries barrel must never name ./internal at all — internal.ts is the one module deliberately left out of index.ts, and index.ts holds nothing but re-exports, so even an import of it there is a re-export waiting to happen; promote a helper into a domain module if it should be public",
+  },
 ];
 
 /** Every .ts/.tsx file under `dir`, as repo-relative POSIX paths. */
@@ -995,7 +1208,12 @@ function main() {
 
   for (const check of CHECKS) {
     const { scanned, violations, stale } = runCheck(check, files, views);
-    if (violations.length === 0 && stale.length === 0) {
+    const pinFailure = scopePinFailure(check, scanned.length);
+    if (pinFailure) {
+      failed = true;
+      process.stderr.write(`${pinFailure}\n`);
+    }
+    if (!pinFailure && violations.length === 0 && stale.length === 0) {
       process.stdout.write(
         `${check.name}: OK (${scanned.length} files scanned)\n`,
       );
