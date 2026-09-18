@@ -3236,6 +3236,8 @@ test("mismatchedPairs skips a half with no counterpart", () => {
 // missed skipped the check entirely and the run stayed green).
 
 test("cardRefOf reads every YAML quoting form", () => {
+  // Every key/value quoting form must reach the check — a form the regex
+  // misses is skipped silently, not rejected.
   assert.equal(cardRefOf('ogImage: "/og/a.png"'), "/og/a.png");
   assert.equal(cardRefOf("ogImage: '/og/b.png'"), "/og/b.png");
   assert.equal(cardRefOf("ogImage: /og/c.png"), "/og/c.png");
@@ -3243,6 +3245,9 @@ test("cardRefOf reads every YAML quoting form", () => {
     cardRefOf("ogImage: https://cdn.example/d.png"),
     "https://cdn.example/d.png",
   );
+  assert.equal(cardRefOf('"ogImage": "/og/f.png"'), "/og/f.png");
+  assert.equal(cardRefOf("'ogImage': '/og/g.png'"), "/og/g.png");
+  assert.equal(cardRefOf('ogImage : "/og/h.png"'), "/og/h.png");
 });
 
 test("cardRefOf does not fire on other keys or mid-line mentions", () => {
@@ -3284,14 +3289,6 @@ test("og-blog.mjs's shared-predicate import resolves on disk", () => {
     existsSync(resolve(dirname(ogBlog), spec)),
     `og-blog.mjs's import "${spec}" resolves to a real file`,
   );
-});
-
-test("cardRefOf reads quoted keys and spaced colons too", () => {
-  // Third hardening round of the same fail-open class: values first, then
-  // unquoted scalars, now quoted KEYS — every YAML form must reach the check.
-  assert.equal(cardRefOf('"ogImage": "/og/f.png"'), "/og/f.png");
-  assert.equal(cardRefOf("'ogImage': '/og/g.png'"), "/og/g.png");
-  assert.equal(cardRefOf('ogImage : "/og/h.png"'), "/og/h.png");
 });
 
 test("servedRelPathsFor rejects refs that escape public/", () => {

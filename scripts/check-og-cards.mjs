@@ -20,8 +20,8 @@ export function frontmatterOf(mdText) {
 
 // Quote-agnostic on BOTH sides of the colon: YAML accepts quoted keys,
 // quoted or plain scalars, and space before the colon, and any form the
-// regex misses skips the reference check entirely (a scanner's worst
-// failure is fail-open — this line's third hardening round).
+// regex misses skips the reference check entirely — a scanner's worst
+// failure is fail-open.
 export function cardRefOf(frontmatter) {
   return frontmatter.match(/^['"]?ogImage['"]?\s*:\s*['"]?([^'"\s]+)/m)?.[1];
 }
@@ -91,7 +91,17 @@ async function main() {
       continue;
     }
 
-    for (const rel of servedRelPathsFor(cardRef)) {
+    // The containment throw joins the same failure channel as a missing
+    // file — a stack trace would also skip the orphan and fallback checks.
+    let rels;
+    try {
+      rels = servedRelPathsFor(cardRef);
+    } catch (err) {
+      console.error(`og-cards: ${slug}: ${err.message}`);
+      failed = true;
+      continue;
+    }
+    for (const rel of rels) {
       checked++;
       if (!existsSync(join(publicDir, rel))) {
         console.error(

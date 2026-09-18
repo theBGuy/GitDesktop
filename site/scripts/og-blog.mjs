@@ -87,8 +87,16 @@ for (const slug of slugs) {
   }
 
   // The reference check runs on the frontmatter VALUE, not the slug: a
-  // typo'd path 404s even when <slug>.png derived fine.
-  for (const rel of servedRelPathsFor(cardRef)) {
+  // typo'd path 404s even when <slug>.png derived fine. A containment
+  // throw joins the failure list so the remaining posts still derive.
+  let rels;
+  try {
+    rels = servedRelPathsFor(cardRef);
+  } catch (err) {
+    failures.push(`${slug}: ${err.message}`);
+    rels = [];
+  }
+  for (const rel of rels) {
     if (!existsSync(path.join(site, "public", rel))) {
       failures.push(`${slug}: ogImage "${cardRef}" needs public/${rel}`);
     }
