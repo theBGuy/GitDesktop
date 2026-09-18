@@ -3285,3 +3285,23 @@ test("og-blog.mjs's shared-predicate import resolves on disk", () => {
     `og-blog.mjs's import "${spec}" resolves to a real file`,
   );
 });
+
+test("cardRefOf reads quoted keys and spaced colons too", () => {
+  // Third hardening round of the same fail-open class: values first, then
+  // unquoted scalars, now quoted KEYS — every YAML form must reach the check.
+  assert.equal(cardRefOf('"ogImage": "/og/f.png"'), "/og/f.png");
+  assert.equal(cardRefOf("'ogImage': '/og/g.png'"), "/og/g.png");
+  assert.equal(cardRefOf('ogImage : "/og/h.png"'), "/og/h.png");
+});
+
+test("servedRelPathsFor rejects refs that escape public/", () => {
+  // The backslash arm is built char-by-char: an inline "\\" here has been
+  // collapsed by tooling escape layers into a broken \x escape before.
+  const bs = String.fromCharCode(92);
+  assert.throws(() => servedRelPathsFor("/og/../package.json"));
+  assert.throws(() => servedRelPathsFor("../secrets.txt"));
+  assert.throws(() => servedRelPathsFor(`/og/..${bs}..${bs}x.png`));
+  assert.throws(() => servedRelPathsFor("/./og/a.png"));
+  // The legal shapes still pass untouched.
+  assert.deepEqual(servedRelPathsFor("/og/a.png"), ["og/a.png", "og/a.webp"]);
+});

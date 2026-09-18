@@ -18,10 +18,12 @@ export function frontmatterOf(mdText) {
   return mdText.split(/^---\s*$/m)[1] ?? "";
 }
 
-// Quote-agnostic on purpose: a plain or single-quoted YAML scalar must not
-// slip past the reference check (a scanner's worst failure is fail-open).
+// Quote-agnostic on BOTH sides of the colon: YAML accepts quoted keys,
+// quoted or plain scalars, and space before the colon, and any form the
+// regex misses skips the reference check entirely (a scanner's worst
+// failure is fail-open — this line's third hardening round).
 export function cardRefOf(frontmatter) {
-  return frontmatter.match(/^ogImage:\s*['"]?([^'"\s]+)/m)?.[1];
+  return frontmatter.match(/^['"]?ogImage['"]?\s*:\s*['"]?([^'"\s]+)/m)?.[1];
 }
 
 // Absolute-URL cards are exempt from the on-disk check: nothing local backs
@@ -36,6 +38,12 @@ export function isAbsoluteRef(ref) {
 export function servedRelPathsFor(ref) {
   if (isAbsoluteRef(ref)) return [];
   const rel = ref.replace(/^\//, "");
+  // Containment: a `.`/`..` segment (either slash kind — this runs on
+  // Windows too) would make the existence check read outside public/ while
+  // Head.astro serves a different URL entirely.
+  if (rel.split(/[\\/]/).some((seg) => seg === "." || seg === "..")) {
+    throw new Error(`ogImage must stay under public/: ${ref}`);
+  }
   return rel.endsWith(".png") ? [rel, rel.replace(/\.png$/, ".webp")] : [rel];
 }
 
@@ -62,6 +70,9 @@ async function main() {
   let failed = false;
   let checked = 0;
 
+  // ::warning:: renders as a checks-tab annotation; plain text locally.
+  const note = process.env.GITHUB_ACTIONS ? "::warning::" : "note: ";
+
   for (const slug of slugs) {
     const md = await readFile(join(blogDir, `${slug}.md`), "utf8");
     const cardRef = cardRefOf(frontmatterOf(md));
@@ -74,7 +85,7 @@ async function main() {
         existsSync(join(ogDir, `${slug}.webp`))
       ) {
         console.warn(
-          `note: ${slug} has a card on disk but no ogImage frontmatter`,
+          `${note}${slug} has a card on disk but no ogImage frontmatter`,
         );
       }
       continue;
@@ -97,9 +108,19 @@ async function main() {
   if (existsSync(ogDir)) {
     for (const f of await readdir(ogDir)) {
       if (!slugSet.has(basename(f).replace(/\.(png|webp)$/, ""))) {
-        console.warn(`note: public/og/${f} matches no post — orphaned card?`);
+        console.warn(`${note}public/og/${f} matches no post — orphaned card?`);
       }
     }
+  }
+
+  // Every non-post page falls back to this card (Head.astro's default), so
+  // its absence is a sitewide 404 no per-post walk would notice.
+  checked++;
+  if (!existsSync(join(publicDir, "og-default.png"))) {
+    console.error(
+      "og-cards: public/og-default.png is missing — every page's fallback card 404s",
+    );
+    failed = true;
   }
 
   if (!failed) {
