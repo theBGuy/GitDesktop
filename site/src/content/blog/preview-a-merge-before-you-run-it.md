@@ -5,6 +5,8 @@ pubDate: 2026-07-29
 author: theBGuy
 pillar: git-safety
 tags: ["git", "merge", "conflicts"]
+ogImage: "/og/preview-a-merge-before-you-run-it.png"
+ogImageAlt: "GitDesktop blog card reading “Will This Merge Conflict? Find Out Without Merging” — git merge --no-commit passing through your working tree versus git merge-tree --write-tree in memory: the same answer."
 ---
 
 You're about to merge a long-running branch and you'd like to know, first,

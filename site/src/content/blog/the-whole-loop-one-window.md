@@ -5,6 +5,8 @@ pubDate: 2026-07-26
 author: theBGuy
 pillar: review-loop
 tags: ["git", "workflow", "pull-requests"]
+ogImage: "/og/the-whole-loop-one-window.png"
+ogImageAlt: "GitDesktop blog card reading “The Whole Loop, One Window: Why I Built This Git Client” — commit, pull request, review, checks, merge, and next branch arranged as one loop inside a single window."
 ---
 
 I've spent years working with Git. Not just using it, but living in it — feature

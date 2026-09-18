@@ -5,6 +5,8 @@ pubDate: 2026-08-19
 author: theBGuy
 pillar: git-safety
 tags: ["git", "worktrees", "workflow"]
+ogImage: "/og/work-on-two-branches-at-once.png"
+ogImageAlt: "GitDesktop blog card reading “Work on Two Branches at Once with git worktree” — two folders, one on feature and one on fix-crash, sharing one repository labeled: not a second clone."
 ---
 
 You're an hour into a parser rework. Half the call sites are on the new

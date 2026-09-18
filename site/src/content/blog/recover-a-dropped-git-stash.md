@@ -5,6 +5,8 @@ pubDate: 2026-07-25
 author: theBGuy
 pillar: git-safety
 tags: ["git", "recovery", "stash"]
+ogImage: "/og/recover-a-dropped-git-stash.png"
+ogImageAlt: "GitDesktop blog card reading “Recovering a Dropped Stash: What git fsck Can Still Find” — a commit graph where stash@{0} is struck out as dropped but the two-parent stash commit is still reachable by hash."
 ---
 
 You stashed something, moved on, and now it's gone. Maybe you ran `git stash

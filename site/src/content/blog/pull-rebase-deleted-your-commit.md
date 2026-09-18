@@ -5,6 +5,8 @@ pubDate: 2026-09-02
 author: theBGuy
 pillar: git-safety
 tags: ["git", "rebase", "recovery"]
+ogImage: "/og/pull-rebase-deleted-your-commit.png"
+ogImageAlt: "GitDesktop blog card reading “git pull --rebase Deleted Your Commit. Nothing Failed.” — a commit timeline contrasting git merge-base, which replays your commit, with --fork-point, which replays nothing at all."
 ---
 
 This morning `git pull --rebase` printed a success line and deleted the

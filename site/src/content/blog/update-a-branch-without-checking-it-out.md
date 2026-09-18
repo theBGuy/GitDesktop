@@ -5,6 +5,8 @@ pubDate: 2026-08-12
 author: theBGuy
 pillar: git-safety
 tags: ["git", "branches", "workflow"]
+ogImage: "/og/update-a-branch-without-checking-it-out.png"
+ogImageAlt: "GitDesktop blog card reading “Update a Git Branch Without Checking It Out” — git fetch origin main:main annotated with source, a ref on the remote, and destination, a ref in your repository."
 ---
 
 Your pull request just merged. You're already on the next branch, and

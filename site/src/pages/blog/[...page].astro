@@ -28,6 +28,17 @@ const base = import.meta.env.BASE_URL;
 // Named so the "N AI posts hidden" line can state a real number rather than
 // leaving a Just-Git reader staring at a list that silently lost rows.
 const aiCount = page.data.filter((p) => p.data.ai).length;
+
+// Page 1 promotes the newest post to a featured card when it has one; the
+// slot degrades to a plain row on later pages or a cardless post.
+const featured =
+  page.currentPage === 1 && page.data[0]?.data.ogImage
+    ? page.data[0]
+    : undefined;
+const listed = featured ? page.data.slice(1) : page.data;
+const featuredCard = featured
+  ? base.replace(/\/$/, "") + featured.data.ogImage
+  : undefined;
 ---
 
 <SiteLayout
@@ -77,6 +88,58 @@ const aiCount = page.data.filter((p) => p.data.ai).length;
           </p>
         ) : (
           <>
+            {featured && (
+              /* The card art restates the title, so the image is decorative
+                 here (alt="") — the link's own text names the post. An AI
+                 featured post hides whole in Just Git; list-only is that
+                 view's fallback, same honesty line as the rows. */
+              <a
+                href={postUrl(featured)}
+                data-view={featured.data.ai ? "ai" : undefined}
+                class="group grid gap-8 border-b border-line py-10 lg:grid-cols-2 lg:items-center"
+              >
+                <div>
+                  <p class="text-sm text-faint">
+                    <span class="text-add">//</span> latest
+                  </p>
+                  <div class="mt-4 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted">
+                    <time datetime={isoDate(featured.data.pubDate)}>
+                      {formatDate(featured.data.pubDate)}
+                    </time>
+                    <span aria-hidden="true" class="text-faint">
+                      ·
+                    </span>
+                    <span>{readingTime(featured)} min read</span>
+                    {featured.data.ai && (
+                      <span class="key-chip">
+                        <span class="text-mint" aria-hidden="true">
+                          ✦
+                        </span>
+                        AI
+                      </span>
+                    )}
+                  </div>
+                  <h2 class="mt-3 max-w-[26ch] text-[clamp(1.5rem,3vw,1.75rem)] font-semibold tracking-tight underline decoration-line-2 underline-offset-4 transition-colors group-hover:decoration-mint">
+                    {featured.data.title}
+                  </h2>
+                  <p class="mt-4 max-w-[68ch] text-[15px] leading-relaxed text-body">
+                    {featured.data.description}
+                  </p>
+                </div>
+                <figure class="overflow-hidden rounded-lg border border-line bg-surface">
+                  <img
+                    src={featuredCard}
+                    alt=""
+                    width="1200"
+                    height="630"
+                    loading="eager"
+                    decoding="async"
+                    class="block h-auto w-full"
+                  />
+                </figure>
+              </a>
+            )}
+
             {aiCount > 0 && (
               /* Only rendered in the Just-Git view, where those rows are gone:
                  an index that silently drops half its entries reads as broken. */
@@ -96,7 +159,7 @@ const aiCount = page.data.filter((p) => p.data.ai).length;
             {/* A ruled list, not a card grid: this system reserves boxes and
                 shadows for .window, i.e. real product screenshots. */}
             <ul class="divide-y divide-line border-y border-line">
-              {page.data.map((post) => (
+              {listed.map((post) => (
                 <li data-view={post.data.ai ? "ai" : undefined}>
                   <a href={postUrl(post)} class="group block py-7">
                     <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted">

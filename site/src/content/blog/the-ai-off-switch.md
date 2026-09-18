@@ -5,6 +5,8 @@ pubDate: 2026-08-05
 author: theBGuy
 pillar: ai-you-own
 tags: ["ai", "workflow"]
+ogImage: "/og/the-ai-off-switch.png"
+ogImageAlt: "GitDesktop blog card reading “I Use AI Every Day. My Git Client Has an Off Switch” — the Hide AI features checkbox beside the list of surfaces it removes rather than grays out."
 ---
 
 I use AI constantly. It helps write commit messages, draft pull request

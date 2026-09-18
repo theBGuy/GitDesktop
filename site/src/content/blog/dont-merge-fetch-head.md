@@ -5,6 +5,8 @@ pubDate: 2026-09-09
 author: theBGuy
 pillar: git-safety
 tags: ["git", "merge", "recovery"]
+ogImage: "/og/dont-merge-fetch-head.png"
+ogImageAlt: "GitDesktop blog card reading “You Merged FETCH_HEAD. It Wasn't Your Fetch.” — two reads of .git/FETCH_HEAD returning different commits, labeled your fetch and what merge reads."
 ---
 
 Somebody opens a pull request from a fork, and you want to run the

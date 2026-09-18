@@ -5,6 +5,8 @@ pubDate: 2026-08-26
 author: theBGuy
 pillar: git-safety
 tags: ["git", "force-push", "workflow"]
+ogImage: "/og/force-push-without-overwriting-work.png"
+ogImageAlt: "GitDesktop blog card reading “Force Push Without Overwriting Your Teammate's Work” — --force-with-lease asks if the remote is still where I last saw it; --force-if-includes asks if my branch ever contained the remote's tip."
 ---
 
 You pushed a commit, then spotted what it was missing: the config file

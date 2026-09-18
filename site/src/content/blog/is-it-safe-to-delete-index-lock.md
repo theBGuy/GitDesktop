@@ -5,6 +5,8 @@ pubDate: 2026-09-16
 author: theBGuy
 pillar: git-safety
 tags: ["git", "recovery"]
+ogImage: "/og/is-it-safe-to-delete-index-lock.png"
+ogImageAlt: "GitDesktop blog card reading “Is It Safe to Delete .git/index.lock?” over Git's own refusal message, ending with the highlighted line: remove the file manually to continue."
 ---
 
 You ran an ordinary Git command and got a refusal with a file path
