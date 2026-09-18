@@ -44,7 +44,7 @@ jobs:
           node-version: 24
 
       # One step per script so a failure names its own check in the UI. The same
-      # six scripts plus the self-tests below run locally via package.json's
+      # seven scripts plus the self-tests below run locally via package.json's
       # `checks` alias — a new guard is added in BOTH places. Exception: a guard
       # needing a built artifact (check-built-whitespace.mjs) runs from the
       # workflow that builds it, and reaches this job only via its fixtures.
@@ -62,6 +62,9 @@ jobs:
 
       - name: Rule-mirror drift
         run: node scripts/check-rule-mirrors.mjs
+
+      - name: Skill-mirror drift
+        run: node scripts/check-skill-mirrors.mjs
 
       - name: Tauri npm/crate parity
         run: node scripts/check-tauri-plugin-parity.mjs

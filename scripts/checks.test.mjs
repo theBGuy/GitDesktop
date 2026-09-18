@@ -9,7 +9,16 @@
 // Node's stdlib test runner and node: imports only, no dev dependency, so the
 // CI `guards` job runs `node --test "scripts/*.test.mjs"` with no install step.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -54,6 +63,13 @@ import {
   enclosingFn,
   staleAllowlistEntries,
 } from "./check-rust-invariants.mjs";
+import {
+  diffTrees,
+  EXEMPT,
+  isTextFile,
+  normalize as normalizeSkill,
+  SINGLE_TREE,
+} from "./check-skill-mirrors.mjs";
 import {
   crateNameFor,
   declaredNpmAliases,
@@ -3183,11 +3199,7 @@ test("verdict fails closed on a declared package that produced no comparison", (
   // The lockfile half lost one entry — a shape a format change makes, and one
   // the pair COUNT cannot see: the remaining pairs still look healthy.
   const degraded = verdict(crates, new Map([["@tauri-apps/api", "2.11.1"]]), {
-    declared: [
-      "@tauri-apps/api",
-      "@tauri-apps/plugin-http",
-      "@tauri-apps/cli",
-    ],
+    declared: ["@tauri-apps/api", "@tauri-apps/plugin-http", "@tauri-apps/cli"],
   });
   assert.equal(degraded.empty, false);
   assert.equal(degraded.missingCore, false);
@@ -3301,4 +3313,209 @@ test("servedRelPathsFor rejects refs that escape public/", () => {
   assert.throws(() => servedRelPathsFor("/./og/a.png"));
   // The legal shapes still pass untouched.
   assert.deepEqual(servedRelPathsFor("/og/a.png"), ["og/a.png", "og/a.webp"]);
+});
+
+// ---------------------------------------------------------- check-skill-mirrors
+
+/** Two one-file skill copies, as the gate reads them off disk. */
+const copies = (claudeBody, agentsBody) => [
+  new Map([["SKILL.md", claudeBody]]),
+  new Map([["SKILL.md", agentsBody]]),
+];
+
+test("skill-mirrors passes identical copies", () => {
+  const { onlyClaude, onlyAgents, differ } = diffTrees(
+    ...copies("# A\n\nSame.\n", "# A\n\nSame.\n"),
+  );
+  assert.deepEqual(
+    { onlyClaude, onlyAgents, differ },
+    { onlyClaude: [], onlyAgents: [], differ: [] },
+  );
+});
+
+test("skill-mirrors tolerates the three mechanical differences", () => {
+  // Line endings: the trees are installed at different times.
+  assert.deepEqual(
+    diffTrees(...copies("# A\n\nSame.\n", "# A\r\n\r\nSame.\r\n")).differ,
+    [],
+  );
+  // Each tree self-references its own path.
+  assert.deepEqual(
+    diffTrees(
+      ...copies(
+        "Run `node .claude/skills/d/x.mjs`.\n",
+        "Run `node .agents/skills/d/x.mjs`.\n",
+      ),
+    ).differ,
+    [],
+  );
+  // The command sigil differs per harness — scoped to the skill's own name.
+  assert.deepEqual(
+    diffTrees(...copies("Use `/d polish`.\n", "Use `$d polish`.\n"), "d")
+      .differ,
+    [],
+  );
+});
+
+test("skill-mirrors scopes the sigil rule to the skill's own command", () => {
+  // Stripping every backticked `/token` would equate unrelated prose: the gated
+  // trees contain `/products`, `/collection` and the regex flag `/g`.
+  assert.notEqual(
+    normalizeSkill("fetch `/products`", "d"),
+    normalizeSkill("fetch `$products`", "d"),
+  );
+  assert.notEqual(
+    normalizeSkill("split on `/g`", "d"),
+    normalizeSkill("split on `$g`", "d"),
+  );
+  assert.equal(
+    normalizeSkill("run `/d polish`", "d"),
+    normalizeSkill("run `$d polish`", "d"),
+  );
+});
+
+test("skill-mirrors ignores harness-specific frontmatter keys", () => {
+  // allowed-tools / user-invocable are Claude-only config, not content.
+  const { differ, frontmatter } = diffTrees(
+    ...copies(
+      "---\nname: d\nallowed-tools:\n  - Bash\n---\n\nBody.\n",
+      "---\nname: d\n---\n\nBody.\n",
+    ),
+  );
+  assert.deepEqual(differ, []);
+  assert.deepEqual(frontmatter, []);
+});
+
+test("skill-mirrors catches a description rewritten in one tree", () => {
+  // description decides when the skill loads, so a one-tree rewrite silently
+  // changes which harness picks it up — the body can be byte-identical.
+  const { frontmatter } = diffTrees(
+    ...copies(
+      "---\nname: d\ndescription: triggers on React work\n---\n\nBody.\n",
+      "---\nname: d\ndescription: NEVER load this skill\n---\n\nBody.\n",
+    ),
+  );
+  assert.deepEqual(
+    frontmatter.map((f) => f.field),
+    ["description"],
+  );
+});
+
+test("skill-mirrors catches a frontmatter block lost from one copy", () => {
+  const { frontmatter } = diffTrees(
+    ...copies("---\nname: d\n---\n\nBody.\n", "Body.\n"),
+  );
+  assert.deepEqual(
+    frontmatter.map((f) => f.field),
+    ["frontmatter block"],
+  );
+});
+
+test("skill-mirrors does not mistake a leading horizontal rule for frontmatter", () => {
+  // A `---` hr with no key: line must not swallow the text up to the next `---`,
+  // or real body drift inside that span goes unseen.
+  const { differ } = diffTrees(
+    ...copies(
+      "---\n\nAlpha.\n\n---\n\nTail.\n",
+      "---\n\nBeta.\n\n---\n\nTail.\n",
+    ),
+  );
+  assert.deepEqual(differ, ["SKILL.md"]);
+});
+
+test("skill-mirrors catches real prose drift", () => {
+  // The exact class this gate exists for: one copy edited, the other left behind.
+  assert.deepEqual(
+    diffTrees(...copies("It is stable.\n", "It is not stable.\n")).differ,
+    ["SKILL.md"],
+  );
+});
+
+test("skill-mirrors catches a file present in only one tree", () => {
+  const claude = new Map([["SKILL.md", "x\n"]]);
+  const agents = new Map([
+    ["SKILL.md", "x\n"],
+    ["EXTRA.md", "orphan\n"],
+  ]);
+  assert.deepEqual(diffTrees(claude, agents).onlyAgents, ["EXTRA.md"]);
+  assert.deepEqual(diffTrees(agents, claude).onlyClaude, ["EXTRA.md"]);
+});
+
+test("skill-mirrors normalization does not collapse the sigil's name", () => {
+  // Normalizing the sigil must not also eat the command name, or two different
+  // commands would compare equal and the gate would fail open.
+  assert.notEqual(
+    normalizeSkill("Use `/polish`.\n"),
+    normalizeSkill("Use `/distill`.\n"),
+  );
+});
+
+test("skill-mirrors exemptions each carry a reason", () => {
+  // An exemption emptied of its reason is an undocumented hole in the gate.
+  assert.ok(EXEMPT.size > 0, "at least one exemption is recorded");
+  for (const [name, reason] of EXEMPT) {
+    assert.equal(typeof reason, "string");
+    assert.ok(reason.trim().length > 10, `${name}'s exemption states why`);
+  }
+});
+
+test("skill-mirrors single-tree declarations each carry a reason", () => {
+  assert.ok(
+    SINGLE_TREE.size > 0,
+    "the single-tree skills are declared, not inferred",
+  );
+  for (const [name, reason] of SINGLE_TREE) {
+    assert.equal(typeof reason, "string");
+    assert.ok(
+      reason.trim().length > 10,
+      `${name}'s single-tree entry states why`,
+    );
+  }
+});
+
+test("skill-mirrors classifies binary assets for hash comparison", () => {
+  // A utf8 decode collapses invalid bytes to U+FFFD, so two different PNGs can
+  // decode to the same string; shadcn ships PNGs in a gated skill.
+  assert.equal(isTextFile("assets/shadcn.png"), false);
+  assert.equal(isTextFile("SKILL.md"), true);
+  assert.equal(isTextFile("agents/openai.yml"), true);
+});
+
+test("skill-mirrors exits non-zero on drift, zero when clean", () => {
+  // The pure-function tests above never reach main()'s exit code: dropping its
+  // `failed = true` left every one of them green while the gate exited 0.
+  const root = mkdtempSync(join(tmpdir(), "gd-skill-mirror-"));
+  const gate = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "check-skill-mirrors.mjs",
+  );
+  const write = (tree, skill, file, body) => {
+    mkdirSync(join(root, tree, skill), { recursive: true });
+    writeFileSync(join(root, tree, skill, file), body);
+  };
+  const run = () => {
+    try {
+      execFileSync(process.execPath, [gate], {
+        env: { ...process.env, GD_SKILL_MIRROR_ROOT: root },
+        stdio: "pipe",
+      });
+      return 0;
+    } catch (err) {
+      return err.status;
+    }
+  };
+  try {
+    write(".claude/skills", "demo", "SKILL.md", "Same.\n");
+    write(".agents/skills", "demo", "SKILL.md", "Same.\n");
+    assert.equal(run(), 0, "identical copies exit 0");
+
+    writeFileSync(join(root, ".agents/skills/demo/SKILL.md"), "Different.\n");
+    assert.equal(run(), 1, "drifted copies exit 1");
+
+    writeFileSync(join(root, ".agents/skills/demo/SKILL.md"), "Same.\n");
+    rmSync(join(root, ".agents/skills/demo"), { recursive: true });
+    assert.equal(run(), 1, "a deleted mirror copy exits 1, not a SKIP");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

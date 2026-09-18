@@ -359,11 +359,11 @@ export function Markdown({
       setActiveMarkdownRefs(null);
     }
   }, [children, hljsVersion, refs?.provider, refs?.repoPath, refs?.lens]);
-  // React 19 diffs `dangerouslySetInnerHTML` by the WRAPPER OBJECT's identity,
-  // not the string inside (probed live: commitUpdate re-set an equal-content
-  // innerHTML on every re-render, replacing every injected node — which
-  // detached the hovercard's anchor and cycled it closed). One object per parse
-  // keeps the body's DOM stable across unrelated state changes.
+  // React <=19.2 diffs `dangerouslySetInnerHTML` by the WRAPPER OBJECT's
+  // identity, not the string inside (probed live: commitUpdate re-set an
+  // equal-content innerHTML on every re-render, replacing every injected node —
+  // which detached the hovercard's anchor and cycled it closed). 19.3 compares
+  // the string first; one object per parse keeps the body's DOM stable on both.
   const htmlProp = useMemo(() => ({ __html: html }), [html]);
 
   // The preview card's own state, deliberately apart from the click path's

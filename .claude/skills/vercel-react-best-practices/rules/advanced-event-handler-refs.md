@@ -37,7 +37,7 @@ function useWindowEvent(event: string, handler: (e) => void) {
 }
 ```
 
-**Alternative: use `useEffectEvent` if you're on latest React:**
+**Alternative: use `useEffectEvent` (stable from React 19.2.0):**
 
 ```tsx
 import { useEffectEvent } from 'react'
@@ -52,4 +52,4 @@ function useWindowEvent(event: string, handler: (e) => void) {
 }
 ```
 
-`useEffectEvent` provides a cleaner API for the same pattern: it creates a stable function reference that always calls the latest version of the handler.
+`useEffectEvent` provides a cleaner API for the same pattern: the Effect Event always calls the latest version of the handler. Its identity is deliberately **not** stable — `updateEvent` returns a fresh closure every render (all of them routing through one shared internal ref), so keep it out of dependency arrays and out of props handed to memoized children. See `advanced-effect-event-deps` for the deps rule.

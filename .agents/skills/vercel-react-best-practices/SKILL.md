@@ -1,6 +1,6 @@
 ---
 name: vercel-react-best-practices
-description: React and Next.js performance optimization guidelines from Vercel Engineering. This skill should be used when writing, reviewing, or refactoring React/Next.js code to ensure optimal performance patterns. Triggers on tasks involving React components, Next.js pages, data fetching, bundle optimization, or performance improvements.
+description: React best-practice and performance rules from Vercel Engineering — 70 rules spanning eliminating waterfalls, bundle size, server/client data fetching, re-renders, and memoization. Use whenever writing, reviewing, or refactoring ANY React component, hook, effect, or data-fetching code — this covers plain React apps (NOT just Next.js) and everyday component work, not only explicit performance passes. Consult it before and while implementing so the patterns shape the code, rather than as an after-the-fact review.
 license: MIT
 metadata:
   author: vercel
@@ -10,6 +10,26 @@ metadata:
 # Vercel React Best Practices
 
 Comprehensive performance optimization guide for React and Next.js applications, maintained by Vercel. Contains 70 rules across 8 categories, prioritized by impact to guide automated refactoring and code generation.
+
+## Applicability in this repo (GitDesktop)
+
+> **GitDesktop is a Tauri 2 + Vite + React 19 desktop SPA — there is no Next.js,
+> no SSR, no React Server Components, and no server actions.** Data comes from the
+> Rust backend over Tauri IPC (`@tauri-apps/api`, surfaced through react-query),
+> never from server-side fetching or an RSC boundary.
+>
+> - **Skip entirely:** the **`server-`** section (all 9 rules — RSC/SSR/server
+>   actions, `React.cache()`, `after()`, cross-boundary prop serialization) and
+>   the **`rendering-hydration-*`** rules (`rendering-hydration-no-flicker`,
+>   `rendering-hydration-suppress-warning`) — hydration only exists with SSR.
+> - **Apply normally:** `async-`, `bundle-`, `client-`, `rerender-`, `rendering-`
+>   (except the two hydration rules above), `js-`, and `advanced-`. These are
+>   general React/Vite guidance and are the reason to load this skill.
+> - **Translate bundler references:** where a `bundle-`/`rendering-` rule cites a
+>   Next.js API as its example (`next/dynamic`, `next/script`, resource hints),
+>   the underlying principle still holds — use the Vite/React equivalent
+>   (`React.lazy()` + dynamic `import()`, `<link rel="preload">`, etc.). Don't
+>   discard a rule just because its example names Next.js.
 
 ## When to Apply
 
