@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 jobs:
-  # BLOCKING. The six scripts are Node-stdlib-only by design, so this job
+  # BLOCKING. The seven scripts are Node-stdlib-only by design, so this job
   # needs no install step and stays a seconds-long gate on every PR.
   guards:
     runs-on: ubuntu-latest

@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 // Drift gate for the skills that ship in TWO trees by design: `.claude/skills/`
-// (Claude Code) and `.agents/skills/` (the codex / opencode lanes). Nothing
-// reads both, so a fix applied to one tree is invisible in the other — and that
-// already happened: the repo-tuned "Applicability in this repo (GitDesktop)"
-// section lived only in the `.claude` copy of vercel-react-best-practices,
-// leaving the other lane reading upstream text that tells it to apply RSC, SSR
-// and hydration rules to a Tauri SPA.
+// (the Claude store) and `.agents/skills/` (the vendor-neutral store the codex /
+// opencode lanes read). They are separate committed copies, nothing propagates an
+// edit from one to the other, and a lane that resolves only the copy you did not
+// edit silently gets stale text. That already happened: the repo-tuned
+// "Applicability in this repo (GitDesktop)" section lived only in the `.claude`
+// copy of vercel-react-best-practices, leaving the other store on upstream text
+// that tells an agent to apply RSC, SSR and hydration rules to a Tauri SPA.
+// (Which store a given CLI loads is the CLI's own business and is NOT asserted
+// here — `skill_dirs` in src-tauri/src/instructions.rs enumerates both for
+// GitDesktop's own skill surfacing, `.agents` first so it wins dedup, which is a
+// different question from what each CLI reads at startup.)
 //
 // EQUALITY, not presence — the opposite of check-rule-mirrors.mjs, and for the
 // opposite reason: these carriers are copies of one upstream document, so any
@@ -18,8 +23,10 @@
 //      `.claude/skills/…`);
 //   3. the command-invocation sigil, which differs per harness (`/skill` in
 //      Claude, `$skill` elsewhere).
-// YAML frontmatter is excluded entirely: it carries harness-specific keys
-// (`user-invocable`, `allowed-tools`, `argument-hint`) that only one tree honors.
+// YAML frontmatter is compared key by key, minus the handful only one harness
+// honors (`user-invocable`, `allowed-tools`, `argument-hint`) — the rest is
+// content: `name`/`description` decide discovery and load timing, and the vercel
+// rule files rank themselves with `impact`/`impactDescription`/`tags`.
 //
 // Gating is by INTERSECTION, discovered at run time rather than listed: a skill
 // added to both trees is gated automatically, and one that exists in a single
@@ -43,11 +50,12 @@ export const AGENTS_TREE = ".agents/skills";
 
 /**
  * Skills whose two copies are deliberately NOT identical, with the reason.
- * `impeccable` ships per-harness rewrites of its own instructions — 17 reference
- * files phrase the same step for a different tool ("call the AskUserQuestion
- * tool" vs "use Codex's structured user-input/question tool") and the `.agents`
- * copy carries agent definitions (`agents/*.toml`, `agents/openai.yaml`) that
- * have no Claude counterpart. Gating it would fail on every legitimate edit.
+ * `impeccable` ships per-harness rewrites of its own instructions — 17 files
+ * (16 under reference/, plus SKILL.md) phrase the same step for a different tool
+ * ("call the AskUserQuestion tool" vs "use Codex's structured user-input/question
+ * tool") and the `.agents` copy carries agent definitions (`agents/*.toml`,
+ * `agents/openai.yaml`) that have no Claude counterpart. Gating it would fail on
+ * every legitimate edit. Note this exempts the skill WHOLE, frontmatter included.
  */
 export const EXEMPT = new Map([
   [
@@ -70,6 +78,10 @@ export const SINGLE_TREE = new Map([
   [
     "gd-conventions",
     "Claude-only repo playbook, preloaded into the Claude subagents",
+  ],
+  [
+    "logo-creator",
+    "gitignored local junction mount (.gitignore), present only on a machine that mounts it",
   ],
 ]);
 
@@ -97,40 +109,63 @@ export const isTextFile = (relPath) =>
   TEXT_EXTENSIONS.has(extname(relPath).toLowerCase() || ".");
 
 /**
- * Splits a leading YAML frontmatter block from the body. A block counts only if
- * it holds at least one `key:` line — otherwise a document opening with a `---`
- * horizontal rule would have everything up to the next `---` swallowed as
- * frontmatter, hiding real body drift.
+ * Splits a leading YAML frontmatter block from the body. Every non-blank,
+ * non-comment line must be a `key:` or an indented continuation, so a document
+ * opening with a `---` horizontal rule does not have its prose swallowed up to
+ * the next `---`, hiding real body drift.
+ *
+ * Known limit, deliberately accepted: a single `Word: some prose.` line inside
+ * an hr-opened span IS valid YAML and is indistinguishable from frontmatter, so
+ * it still parses as a block. The stricter discriminator that would catch it —
+ * requiring the block to open on a key line rather than a blank one — was tried
+ * and reverted: it rejected real frontmatter in the gated set (measured, 178
+ * files with frontmatter fell to 176; `rules/rerender-memo-with-default-value.md`
+ * in both trees opens `---`, blank line, then `title:`).
  */
 export function splitFrontmatter(text) {
   const match = text.match(/^---\n([\s\S]*?)\n---\n/);
-  if (!match || !/^[A-Za-z_][\w-]*:/m.test(match[1]))
-    return { frontmatter: null, body: text };
+  if (!match) return { frontmatter: null, body: text };
+  const lines = match[1]
+    .split("\n")
+    .filter((l) => l.trim() !== "" && !l.trimStart().startsWith("#"));
+  const yamlish =
+    lines.length > 0 && lines.every((l) => /^(\s+\S|[A-Za-z_][\w-]*:)/.test(l));
+  if (!yamlish) return { frontmatter: null, body: text };
   return { frontmatter: match[1], body: text.slice(match[0].length) };
 }
 
+/** Frontmatter keys only one harness honors, so a one-tree value is not drift. */
+const HARNESS_ONLY_KEYS = new Set([
+  "allowed-tools",
+  "user-invocable",
+  "argument-hint",
+]);
+
 /**
- * The frontmatter fields that are CONTENT rather than harness config. `name` and
- * `description` drive whether a skill is discovered and when it loads, so a
- * one-tree rewrite of either is real drift; `allowed-tools`, `user-invocable`
- * and `argument-hint` are Claude-only keys and are ignored.
+ * Frontmatter compared as CONTENT: every top-level key except the harness-only
+ * ones. `name`/`description` decide discovery and load timing, and the vercel
+ * rule files carry `impact`/`impactDescription`/`tags` that rank them — gating
+ * only the first two would leave the rest free to drift silently.
  */
 export function gatedFields(frontmatter) {
   if (frontmatter === null) return { present: false };
-  const field = (key) =>
-    frontmatter
-      .match(
-        new RegExp(
-          `^${key}:[ \\t]*([\\s\\S]*?)(?=\\n[A-Za-z_][\\w-]*:|$)`,
-          "m",
-        ),
-      )?.[1]
-      ?.trim() ?? null;
-  return {
-    present: true,
-    name: field("name"),
-    description: field("description"),
-  };
+  const fields = new Map();
+  // A key owns every following indented/blank line, so folded (`>`), literal
+  // (`|`) and list values compare whole instead of truncating to their indicator.
+  const keyLine = /^([A-Za-z_][\w-]*):[ \t]*(.*)$/;
+  let current = null;
+  for (const line of frontmatter.split("\n")) {
+    const m = line.match(keyLine);
+    if (m) {
+      current = m[1];
+      fields.set(current, m[2].trim());
+      continue;
+    }
+    if (current !== null)
+      fields.set(current, `${fields.get(current)}\n${line.trim()}`.trim());
+  }
+  for (const key of HARNESS_ONLY_KEYS) fields.delete(key);
+  return { present: true, fields };
 }
 
 /**
@@ -187,9 +222,20 @@ export function diffTrees(claudeFiles, agentsFiles, skillName = null) {
       continue;
     }
     if (!a.present) continue;
-    for (const key of ["name", "description"])
-      if (a[key] !== b[key])
+    for (const key of [
+      ...new Set([...a.fields.keys(), ...b.fields.keys()]),
+    ].sort()) {
+      if (!a.fields.has(key) || !b.fields.has(key)) {
+        frontmatter.push({
+          file: f,
+          field: key,
+          reason: "key present in only one copy",
+        });
+        continue;
+      }
+      if (a.fields.get(key) !== b.fields.get(key))
         frontmatter.push({ file: f, field: key, reason: "values differ" });
+    }
   }
   return { onlyClaude, onlyAgents, differ, frontmatter };
 }
@@ -267,7 +313,27 @@ function main() {
   for (const name of mirrored) {
     const reason = EXEMPT.get(name);
     if (reason) {
-      process.stdout.write(`skill-mirrors: SKIP ${name} (exempt: ${reason})\n`);
+      // An exemption that no longer suppresses anything is a silent hole: the
+      // skill it covered may have been reconciled. Say so, without failing —
+      // removing it is a judgement call, not a defect.
+      const stillDiverges = (() => {
+        const d = diffTrees(
+          readTree(join(claudeDir, name)),
+          readTree(join(agentsDir, name)),
+          name,
+        );
+        return (
+          d.differ.length > 0 ||
+          d.onlyClaude.length > 0 ||
+          d.onlyAgents.length > 0 ||
+          d.frontmatter.length > 0
+        );
+      })();
+      process.stdout.write(
+        stillDiverges
+          ? `skill-mirrors: SKIP ${name} (exempt: ${reason})\n`
+          : `skill-mirrors: NOTE ${name} is exempt but its copies now match — drop the exemption\n`,
+      );
       continue;
     }
     const { onlyClaude, onlyAgents, differ, frontmatter } = diffTrees(
@@ -291,7 +357,7 @@ function main() {
     for (const { file, field, reason } of frontmatter) {
       process.stderr.write(`  frontmatter ${field} ${reason}: ${file}\n`);
       process.stderr.write(
-        "    name and description decide when the skill loads — keep them equal\n",
+        `    give both copies the same \`${field}\`, or add it to HARNESS_ONLY_KEYS if only one harness honors it\n`,
       );
     }
     for (const f of differ) {

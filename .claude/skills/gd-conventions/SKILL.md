@@ -543,6 +543,17 @@ release time; one file per change keeps parallel branches conflict-free. The
 `src-tauri/` change needs a fragment, the `no-changelog` label, or
 `skip-changelog` in the PR title.
 
+**Skills ship in TWO trees — edit both.** `.claude/skills/<name>` (the Claude
+store) and `.agents/skills/<name>` (the vendor-neutral store the codex and
+opencode lanes read) are separate committed copies, and nothing propagates an
+edit between them, so a lane resolving the copy you did not edit gets stale
+text. `scripts/check-skill-mirrors.mjs` gates every skill present in both trees
+and is a required `guards` step; the skips it declares (`EXEMPT` for per-harness
+rewrites, `SINGLE_TREE` for one-tree skills) each carry their reason. Line
+endings, each tree's own `.claude/`-vs-`.agents/` self-references, the
+`/cmd`-vs-`$cmd` sigil, and harness-only frontmatter keys are normalized away —
+everything else must match.
+
 **In a delegated package the spec's `Docs-sync:` field is authoritative:**
 apply exactly what it lists (those files are thereby in scope); "orchestrator
 handles" → skip docs; silent spec + user-facing change → flag the gap in your

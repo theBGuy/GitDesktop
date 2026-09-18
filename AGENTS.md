@@ -38,6 +38,14 @@ context: the standing brief and the repo playbook of conventions and gotchas.
 - **Never edit `src/components/ui/`** — vendored shadcn/Base UI primitives; fix
   at the feature or call site (that folder's `README.md` inventories the
   sanctioned local deltas).
+- **A skill edited in one tree is edited in both.** The skills you load from
+  `.agents/skills/<name>` have a committed twin at `.claude/skills/<name>`, and
+  nothing propagates an edit between them — editing only the copy you read
+  leaves the other store stale. `scripts/check-skill-mirrors.mjs` is a required
+  `guards` step and fails on any difference beyond line endings, each tree's own
+  `.claude/`-vs-`.agents/` self-references, the `/cmd`-vs-`$cmd` sigil, and
+  harness-only frontmatter keys. Skills it deliberately skips are declared in
+  that script with their reason.
 - **No tree-wide rewrites.** `pnpm lint` is `biome check --write` over `src/`
   AND `site/` — a rewrite, not a check; the check form is `pnpm exec biome check
   ./src/`. In a task worktree even that tree-wide check false-fails on CRLF, so

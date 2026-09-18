@@ -123,13 +123,10 @@ delta too, so check both of its markers.
 If one of these has to be re-created, confirm it is still needed. Verify
 first, then decide. Suspicion alone is not grounds for dropping one.
 
-1. **React's Activity visibility walk.** It styles only the topmost host
-   element per fiber path (react-dom latches on the first host it finds and
-   skips deeper ones), and a portal's DOM sits outside that element, so the
-   style never reaches it. If react-dom starts styling portal hosts too,
-   body-level portals would conceal on their own. Containment would still
-   carry draft preservation and stacking, so that weakens the argument
-   rather than ending it.
+1. **React's Activity visibility walk.** react-dom 19.3 reaches portal hosts
+   (a hidden `<Activity>` now conceals body-level portal contents itself), so
+   visibility is no longer what these deltas buy. Draft preservation and
+   stacking still are — judge a re-apply against those two grounds alone.
 2. **Base UI gaining container-scoped modality**, or a modal that tracks
    visibility. That would subsume the `modal` flip and the dismissal
    suppression in `dialog.tsx` and `sheet.tsx`, though not the container

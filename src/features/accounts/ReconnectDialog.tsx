@@ -114,8 +114,8 @@ function ReconnectFlow({
       : `${isGitHub ? "gh" : "glab"} auth login --hostname ${hostArg} --web`;
 
   // Handle streamed events without re-subscribing the channel on every render:
-  // useEffectEvent reads the latest closures (invalidate/settings) but stays
-  // referentially stable, so the start effect below runs exactly once.
+  // useEffectEvent keeps the reads (invalidate/onClose) fresh without being a
+  // dependency — the start effect's own deps are what make it run exactly once.
   const onEvent = useEffectEvent((event: ReconnectEvent) => {
     if (event.type === "code") {
       setPhase({ kind: "code", code: event.code, url: event.url });

@@ -3443,11 +3443,81 @@ test("skill-mirrors catches a file present in only one tree", () => {
 
 test("skill-mirrors normalization does not collapse the sigil's name", () => {
   // Normalizing the sigil must not also eat the command name, or two different
-  // commands would compare equal and the gate would fail open.
+  // commands would compare equal and the gate would fail open. The skill name
+  // must be PASSED — without it the sigil branch never runs and the assertion
+  // holds no matter what the regex does.
   assert.notEqual(
-    normalizeSkill("Use `/polish`.\n"),
-    normalizeSkill("Use `/distill`.\n"),
+    normalizeSkill("Use `/polish`.\n", "polish"),
+    normalizeSkill("Use `/distill`.\n", "polish"),
   );
+});
+
+test("skill-mirrors gates frontmatter keys beyond name/description", () => {
+  // The vercel rule files rank themselves with impact/tags; gating only
+  // name+description would let those drift silently.
+  const { frontmatter } = diffTrees(
+    ...copies(
+      "---\nname: d\nimpact: HIGH\ntags: a, b\n---\n\nBody.\n",
+      "---\nname: d\nimpact: LOW\ntags:\n---\n\nBody.\n",
+    ),
+  );
+  assert.deepEqual(
+    frontmatter.map((f) => f.field),
+    ["impact", "tags"],
+  );
+});
+
+test("skill-mirrors ignores harness-only frontmatter keys", () => {
+  const { frontmatter } = diffTrees(
+    ...copies(
+      "---\nname: d\nallowed-tools:\n  - Bash\nuser-invocable: true\n---\n\nBody.\n",
+      "---\nname: d\n---\n\nBody.\n",
+    ),
+  );
+  assert.deepEqual(frontmatter, []);
+});
+
+test("skill-mirrors compares a folded description whole, not its indicator", () => {
+  // `description: >` + indented lines truncated to ">" under a lazy field regex,
+  // so two opposite descriptions compared equal.
+  const { frontmatter } = diffTrees(
+    ...copies(
+      "---\nname: d\ndescription: >\n  Loads on React work.\n---\n\nBody.\n",
+      "---\nname: d\ndescription: >\n  NEVER load this.\n---\n\nBody.\n",
+    ),
+  );
+  assert.deepEqual(
+    frontmatter.map((f) => f.field),
+    ["description"],
+  );
+});
+
+test("skill-mirrors accepts frontmatter that opens with a blank line", () => {
+  // Real, and in the gated set: rules/rerender-memo-with-default-value.md opens
+  // `---`, blank line, then `title:`. An opener that demanded a key line on the
+  // first row rejected it, dropping its frontmatter into the body comparison
+  // where the harness-only-key exemption no longer applies.
+  const { frontmatter, differ } = diffTrees(
+    ...copies(
+      "---\n\ntitle: T\nallowed-tools:\n  - Bash\n---\n\nBody.\n",
+      "---\n\ntitle: T\n---\n\nBody.\n",
+    ),
+  );
+  assert.deepEqual(frontmatter, [], "harness-only key is still exempt here");
+  assert.deepEqual(differ, [], "the block parsed as frontmatter, not body");
+});
+
+test("skill-mirrors does not treat an hr-opened prose block as frontmatter", () => {
+  // Prose after a `---` horizontal rule must not be swallowed up to the next
+  // `---`. A `Word: prose` line is genuinely ambiguous YAML and is a documented
+  // limit; a colon-free line is not, and is the shape this catches.
+  const { differ } = diffTrees(
+    ...copies(
+      "---\n\nAlpha text here.\n\n---\n\nTail.\n",
+      "---\n\nBeta text here.\n\n---\n\nTail.\n",
+    ),
+  );
+  assert.deepEqual(differ, ["SKILL.md"]);
 });
 
 test("skill-mirrors exemptions each carry a reason", () => {
@@ -3505,8 +3575,14 @@ test("skill-mirrors exits non-zero on drift, zero when clean", () => {
     }
   };
   try {
-    write(".claude/skills", "demo", "SKILL.md", "Same.\n");
-    write(".agents/skills", "demo", "SKILL.md", "Same.\n");
+    // TWO mirrored skills, so removing one leaves the intersection non-empty:
+    // with only `demo`, deleting its twin empties the intersection and the run
+    // exits 1 at the VACUITY guard instead of the single-tree branch under test —
+    // the whole SINGLE_TREE mechanism could be deleted and this still passed.
+    for (const tree of [".claude/skills", ".agents/skills"]) {
+      write(tree, "demo", "SKILL.md", "Same.\n");
+      write(tree, "keeper", "SKILL.md", "Kept.\n");
+    }
     assert.equal(run(), 0, "identical copies exit 0");
 
     writeFileSync(join(root, ".agents/skills/demo/SKILL.md"), "Different.\n");
@@ -3515,6 +3591,11 @@ test("skill-mirrors exits non-zero on drift, zero when clean", () => {
     writeFileSync(join(root, ".agents/skills/demo/SKILL.md"), "Same.\n");
     rmSync(join(root, ".agents/skills/demo"), { recursive: true });
     assert.equal(run(), 1, "a deleted mirror copy exits 1, not a SKIP");
+
+    // …and prove the previous assertion came from the single-tree branch, not
+    // the vacuity guard: restoring the twin must go green again.
+    write(".agents/skills", "demo", "SKILL.md", "Same.\n");
+    assert.equal(run(), 0, "restoring the deleted mirror copy exits 0");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
