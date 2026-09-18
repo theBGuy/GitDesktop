@@ -254,6 +254,8 @@ export const forgeBbPipelineScheduleDelete = (repoPath: string, uuid: string) =>
 export const forgeBbEnvironments = (repoPath: string) =>
   invoke<BbEnvironment[]>("forge_bb_environments", { repoPath });
 
+// ── GitHub repo settings ─────────────────────────────────────────────────────
+
 export const ghRepoSettingsGet = (repoPath: string) =>
   invoke<RepoSettings>("gh_repo_settings_get", { repoPath });
 

@@ -81,6 +81,8 @@ export const forgeReconnect = (args: {
 export const forgeReconnectCancel = (sessionId: string) =>
   invoke<void>("forge_reconnect_cancel", { sessionId });
 
+// ── GitLab review-bot token ──────────────────────────────────────────────────
+
 // The GitLab review-bot token — a second GitLab token so batch reviews / bot
 // comments post under a distinct identity. Status returns the bot login when one
 // is configured (null otherwise); the token itself is never returned. Cold-start
@@ -95,6 +97,8 @@ export const forgeGitlabReviewTokenSet = (token: string) =>
 
 export const forgeGitlabReviewTokenClear = () =>
   invoke<void>("forge_gitlab_review_token_clear", {});
+
+// ── GitHub accounts & token scopes ───────────────────────────────────────────
 
 export const ghAccounts = () => invoke<GhAccounts>("gh_accounts");
 

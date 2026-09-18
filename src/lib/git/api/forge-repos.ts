@@ -100,6 +100,8 @@ export const forgeRepoReadme = (
 export const forgeProviderFeatures = (provider: ForgeProvider) =>
   invoke<ForgeProviderFeatures>("forge_provider_features", { provider });
 
+// ── The open repo (fork, star) & the viewer's own repos ──────────────────────
+
 /** Remove the project's fork relationship (detach from the fork network) —
  *  GitLab-only. Requires the Owner role; open MRs to the parent are closed. */
 export const forgeGlRemoveForkRelationship = (repoPath: string) =>
