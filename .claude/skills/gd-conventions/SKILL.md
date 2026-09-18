@@ -395,9 +395,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   mutation with its options frozen instead. Callers must consume the promise
   (`mutateAsync`), since the observer's `isPending`/`data` go idle at the
   switch. Exemplar: `useCreateIssue`; a plain `useMutation` spells the same pin
-  `mutationKey:`. Guard: `mutation-identity-pinning` ratchets the create-family
-  and cache-seeding sites, following delegation one level inside a module; the
-  wider class stays a review concern.
+  `mutationKey:`. Guard: `mutation-identity-pinning` ratchets the cache-seeding
+  sites and the create-family ones it can see by NAME, following delegation one
+  level inside a module; the wider class stays a review concern.
 - **Plugin-store open/reload** — an app-data store opens via
   `memoizedStoreLoader` and re-reads via `reloadToleratingEmptyStore`
   (`src/lib/plugin-store.ts`), never a hand-rolled `??= load(storeName(…))` or a

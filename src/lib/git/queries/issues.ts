@@ -23,7 +23,7 @@ import type {
   RemoteListFilter,
 } from "../types";
 import { remoteListFilterKey } from "../types";
-import { keepPreviousDataForKeyAxes } from "./core";
+import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
 import { invalidateProjectBoards, useRepoMutation } from "./internal";
 
 export function useIssueList(
@@ -825,12 +825,30 @@ export function useIssueRelations(
   });
 }
 
-export function useAddSubIssue(repo: string, lens: RemoteLens) {
-  return useRepoMutation(
-    repo,
-    (args: { parentId: string; subNumber: number }) =>
-      api.ghIssueAddSubIssue(repo, args.parentId, args.subNumber, lens),
-  );
+/** The link target rides the VARIABLES, never this hook's scope: the create dialog
+ *  fires it after an await, so a switch in that window would retarget the write —
+ *  and node ids are global, so the parent would still resolve while `subNumber`
+ *  picked the newly-live repo's unrelated issue and adopted it. */
+export function useAddSubIssue() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      repo: string;
+      parentId: string;
+      subNumber: number;
+      lens: RemoteLens;
+    }) =>
+      api.ghIssueAddSubIssue(
+        args.repo,
+        args.parentId,
+        args.subNumber,
+        args.lens,
+      ),
+    // Follows the variables' repo, so the refresh lands where the write did.
+    onSettled: (_d, _e, args) => {
+      void queryClient.invalidateQueries({ queryKey: repoKeys.all(args.repo) });
+    },
+  });
 }
 
 /** An issue's blocked-by / blocking dependencies. */

@@ -521,13 +521,19 @@ export function CreatePrDialog({
             persist: true,
           });
         }
-        // Name the target repo in the toast so "Opened PR #N in owner/repo" is
-        // unambiguous for a fork contribution.
-        const where = targetSlug ? ` in ${targetSlug}` : "";
-        toast.success(`Opened ${prNoun} #${number}${where}`, {
-          description: url,
-          action: { label: "View", onClick: () => openUrl(url) },
-        });
+        // Where it landed: the target slug for a fork contribution, else the
+        // repository itself once this settles somewhere the user no longer is.
+        // The slug arm is the narrow one — both remote reads behind it are gated
+        // on the fork lens, so a plain repo never resolves one.
+        const landedIn =
+          targetSlug || (stillHere() ? null : repoNameFromPath(repoPath));
+        toast.success(
+          `Opened ${prNoun} #${number}${landedIn ? ` in ${landedIn}` : ""}`,
+          {
+            description: url,
+            action: { label: "View", onClick: () => openUrl(url) },
+          },
+        );
         // This dialog is panel-hosted under <Activity>, so the success path must
         // only close — never setRepoTab/selectPr, which would conceal this panel
         // mid-close and defer the close and unmount until it is next shown. Want
@@ -581,7 +587,19 @@ export function CreatePrDialog({
         // Armed with the entry's OWN startedAt: a fresh clock read would let
         // this watcher settle a later create that re-claimed the head.
         if (outcome === "error") {
-          settlePrCreate(repoPath, value.head, "error");
+          // "error" latches to protect the retained draft, so it has to still
+          // have one: a seed for another repo, or this mount moving on to
+          // another head, already destroyed it, and latching over that strands
+          // an entry the next open for this pair would spend on nothing.
+          // "release" frees the lane and leaves other mounts' latches standing.
+          const draftAlive =
+            draftRepoRef.current === repoPath &&
+            form.state.values.head === value.head;
+          settlePrCreate(
+            repoPath,
+            value.head,
+            draftAlive ? "error" : "release",
+          );
         } else if (created) {
           const startedAt = prCreateStartedAt(repoPath, value.head);
           if (startedAt !== null)
@@ -632,9 +650,10 @@ export function CreatePrDialog({
     }
     // The reset below destroys the draft this mount was holding, so the latch
     // waiting on it goes with it — keyed to that draft's OWN repo, which is how
-    // a latch stops outliving a repo switch. Keyed rather than blanket because
-    // this dialog is mounted on the Compare tab too: that mount's own waiting
-    // draft is untouched here, and its latch has to survive.
+    // a latch stops outliving a repo switch. Keyed rather than blanket so the
+    // Compare tab's mount keeps its own waiting latch, which holds while its
+    // head differs from this one; on a shared head the two are one key and this
+    // spends it, as they always have.
     consumeLastFailed(draftRepoRef.current ?? repoPath, retained);
     seededRef.current = true;
     draftRepoRef.current = repoPath;

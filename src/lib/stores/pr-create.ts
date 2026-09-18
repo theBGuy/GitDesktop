@@ -51,16 +51,17 @@ export const usePrCreateStore = create<PrCreateState>()(() => ({
 /** Repo+head pairs whose most recent create FAILED. Read once and cleared by
  *  {@link consumeLastFailed}: it exists only so the dialog that reopens after a
  *  background failure knows not to blank what the user typed. Keyed per HEAD as
- *  well as repo because CreatePrDialog is mounted twice over (the Compare and
- *  Pulls tabs, both retained under <Activity>), so two typed drafts can
- *  legitimately be waiting at once — and a failure on one branch must not
- *  preserve its draft in a dialog opened for another. What bounds the set is
- *  that every seed retires the key of the draft it destroys, under that draft's
- *  OWN repo: an entry can then only ever match the open it was minted for,
- *  never a later one in the repo the user switched to. The lane has several
- *  writers but only CreatePrDialog holds a draft this can protect, so it is the
- *  only one that latches; see the outcome union on {@link settlePrCreate}. Not
- *  store state: nothing renders it. */
+ *  well as repo, so a failure on one branch can't preserve its draft in a dialog
+ *  opened for another — though CreatePrDialog's two mounts (the Compare and
+ *  Pulls tabs, both retained under <Activity>) stay independent here only while
+ *  their heads differ; both seed the current branch, so the common case is one
+ *  shared key that either mount's read can spend. Two rules bound the set: a
+ *  seed retires the key of the draft it destroys, and {@link settlePrCreate}
+ *  latches only while the submitting dialog still holds that draft. What gets
+ *  past both is one self-consuming entry — a mount torn down mid-flight leaves
+ *  one, and the next open for that repo+head spends it, skipping a seed it would
+ *  otherwise have run. Only CreatePrDialog latches; see the outcome union on
+ *  {@link settlePrCreate}. Not store state: nothing renders it. */
 const lastFailed = new Set<string>();
 
 // NUL is the one separator neither a path nor a ref name can contain, so
@@ -160,16 +161,19 @@ export function markPrCreated(
  * Releases the lane. The outcome says what the caller owes
  * {@link consumeLastFailed}, and who may speak for it at all:
  * - `"error"` latches, so a reopen after a failure the user never saw keeps
- *   their draft. CreatePrDialog's form is the only draft this protects, and
- *   that failure is the ONLY outcome either dialog settles.
+ *   their draft. CreatePrDialog's form is the only draft this protects, which
+ *   makes it the caller's job to have one: it settles a failure as `"error"`
+ *   only while its form still holds the draft it submitted, and as `"release"`
+ *   otherwise — a latch minted over a destroyed draft is one nothing consumes.
  * - `"success"` belongs to the hand-off watcher alone (`pr-create-handoff`, or
  *   its timeout): the lane ends when the list contains the PR, not when the
  *   forge answers. It clears the latch, as {@link markPrCreated} already did at
  *   the phase flip, so the outcome stays meaningful for any caller that could
  *   reach it without one.
  * - `"release"` is for a lane holder with no draft to protect —
- *   PromoteLocalPrDialog's failed-before-create path. It only frees the entry,
- *   leaving an earlier create's latch standing.
+ *   PromoteLocalPrDialog's failed-before-create path, and CreatePrDialog's own
+ *   failure once a seed has taken its draft. It only frees the entry, leaving
+ *   any other latch standing.
  */
 export function settlePrCreate(
   repoPath: string,

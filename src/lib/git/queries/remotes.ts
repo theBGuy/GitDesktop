@@ -33,6 +33,12 @@ export function usePublishRepo(repo: string) {
         args.topics,
         args.workspace,
       ),
+    {
+      // Pinned: the publish and its repo-subtree invalidation close over `repo`, and
+      // the dialog survives a repo switch — without the key a switch mid-publish
+      // refreshes the newly-live repo and leaves the fresh remote unseen.
+      identity: ["publish-repo", repo],
+    },
   );
 }
 

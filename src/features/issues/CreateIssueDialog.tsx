@@ -105,7 +105,7 @@ export function CreateIssueDialog({
   subIssueParentId?: string;
 }) {
   const createIssue = useCreateIssue(repoPath, lens);
-  const addSubIssue = useAddSubIssue(repoPath, lens);
+  const addSubIssue = useAddSubIssue();
   const repoLabels = useRepoLabels(repoPath, open, lens);
   // Under the upstream lens the issue is created ON THE PARENT; name that repo
   // (the parent slug) so the create framing is unambiguous.
@@ -294,8 +294,10 @@ export function CreateIssueDialog({
       if (subIssueParentId && number > 0) {
         try {
           await addSubIssue.mutateAsync({
+            repo: repoPath,
             parentId: subIssueParentId,
             subNumber: number,
+            lens,
           });
           subIssueLinked = true;
         } catch (e) {

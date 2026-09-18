@@ -219,7 +219,7 @@ export function IssueSubIssues({
   disabledReason?: string;
 }) {
   const relations = useIssueRelations(repoPath, number, lens);
-  const addSub = useAddSubIssue(repoPath, lens);
+  const addSub = useAddSubIssue();
   const removeSub = useRemoveSubIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const [mode, setMode] = useState<null | "existing">(null);
@@ -245,7 +245,12 @@ export function IssueSubIssues({
 
   async function pickExisting(n: number) {
     try {
-      await addSub.mutateAsync({ parentId: issueId, subNumber: n });
+      await addSub.mutateAsync({
+        repo: repoPath,
+        parentId: issueId,
+        subNumber: n,
+        lens,
+      });
     } catch (e) {
       onError(e);
       return;

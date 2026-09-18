@@ -19,6 +19,7 @@ import { providerLabel } from "@/lib/git/types";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import {
   LANE_BLOCKED_HINT,
   markPrCreated,
@@ -148,17 +149,23 @@ export function PromoteLocalPrDialog({
           ],
         }),
       });
-      toast.success(`Opened ${prNoun} #${number}`, {
-        description: url,
-        action: { label: "View", onClick: () => openUrl(url) },
-      });
+      // One read for both halves: the toast is unconditional and names the repo
+      // when it isn't the one on screen, while the navigation below only lands
+      // when it is. That navigation is the lens flip plus the selection plus the
+      // close, and this continuation outlives the host's unmount on a repo
+      // switch: landed elsewhere they would close a dialog the user reopened
+      // there and point that repo's Pulls tab at a number belonging to this one.
+      const live = useUiStore.getState().repoPath === repoPath;
+      toast.success(
+        `Opened ${prNoun} #${number}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}`,
+        {
+          description: url,
+          action: { label: "View", onClick: () => openUrl(url) },
+        },
+      );
       // The promoted PR lives on the fork (origin) — force the origin lens so the
       // Pulls tab shows it (clearing any stale remote selection) before selecting.
-      // All three are one navigation into THIS repo, and this continuation
-      // outlives the host's unmount on a repo switch: landed elsewhere they would
-      // close a dialog the user reopened there and point that repo's Pulls tab at
-      // a number belonging to this one. The toast above stays unconditional.
-      if (useUiStore.getState().repoPath === repoPath) {
+      if (live) {
         onOpenChange(false);
         setLens("origin");
         selectPr({ kind: "remote", id: String(number) });

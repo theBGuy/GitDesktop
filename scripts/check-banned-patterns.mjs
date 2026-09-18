@@ -1300,9 +1300,11 @@ export const CHECKS = [
     // create landing in the wrong repo, and a response seeded into the wrong repo's
     // cache. The rest stay a review concern, not an exempted one.
     // Within that boundary the scan still has named gaps (message lists them): it
-    // follows delegation only to a `use…` wrapper in the SAME file, and only from a
-    // create hook — a seeding wrapper reached solely from non-create hooks is not
-    // seen. Widen here rather than allowlisting the consequences.
+    // recognizes a create by NAME, so the `Add…`/`Submit…`/`Publish…`/`Fork…`
+    // spellings of one are invisible; and it follows delegation only to a `use…`
+    // wrapper in the SAME file, and only from a create hook. Widening the name
+    // heuristic makes each newly-seen site a pin-or-allowlist decision, so it is a
+    // deliberate follow-up — widen here rather than allowlisting the consequences.
     appliesTo: (file) =>
       (file.startsWith(QUERIES_DIR) && file.endsWith(".ts")) ||
       file === JIRA_QUERIES,
@@ -1322,7 +1324,7 @@ export const CHECKS = [
       hint: `${QUERIES_DIR}*.ts + ${JIRA_QUERIES}`,
     },
     message:
-      "a repo-scoped create or cache-seeding mutation must pin its identity (gd-conventions, 'Mutation identity pinning') — react-query re-pushes a hook's options onto its PENDING mutation on every render, so without a mutation key a repo switch mid-flight retargets the call, its callbacks and its cache writes to the newly-live repo; pass `identity: [\"<op>\", repo, …]` on useRepoMutation or `mutationKey: [\"<op>\", repo, …]` on a plain useMutation, naming exactly the hook-scope values the call closes over, and make sure every caller takes its continuation from `await mutateAsync` (a detached mutation's observer goes idle, so `isPending`/`data`/`error` reads stop tracking it) — or add an allowlist entry with rationale. This scan does NOT see three shapes inside its own boundary, so review them by hand: a mutation built through a wrapper in another MODULE, one built through a helper not named `use…`, and a cache-seeding wrapper reached only from non-create hooks",
+      "a repo-scoped create or cache-seeding mutation must pin its identity (gd-conventions, 'Mutation identity pinning') — react-query re-pushes a hook's options onto its PENDING mutation on every render, so without a mutation key a repo switch mid-flight retargets the call, its callbacks and its cache writes to the newly-live repo; pass `identity: [\"<op>\", repo, …]` on useRepoMutation or `mutationKey: [\"<op>\", repo, …]` on a plain useMutation, naming exactly the hook-scope values the call closes over, and make sure every caller takes its continuation from `await mutateAsync` (a detached mutation's observer goes idle, so `isPending`/`data`/`error` reads stop tracking it) — or add an allowlist entry with rationale. This scan does NOT see four shapes inside its own boundary, so review them by hand: a create whose NAME lacks 'Create' (the `Add…`/`Submit…`/`Publish…`/`Fork…` spellings — useAddRemote, useSubmitReview, useForkRepo and their siblings are all live), a mutation built through a wrapper in another MODULE, one built through a helper not named `use…`, and a cache-seeding wrapper reached only from non-create hooks",
   },
 ];
 
