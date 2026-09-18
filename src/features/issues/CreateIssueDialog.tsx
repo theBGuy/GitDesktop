@@ -54,6 +54,7 @@ import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useRemoteSlug } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -149,6 +150,11 @@ export function CreateIssueDialog({
   const [pickedProjects, setPickedProjects] = useState<ProjectV2Ref[]>([]);
   /** The lens the metadata pickers below were filled under. */
   const stateLensRef = useRef(lens);
+  // Which repo's draft the form holds — stamped on every open transition, ahead
+  // of the seed's skip arms (those hold a seed off only for a draft already this
+  // repo's). A dialog left open across a repo switch never re-seeds, so this
+  // still reads the submit's repo and the settle's close is the right one.
+  const draftRepoRef = useRef(repoPath);
 
   // The Projects row is GitHub-only and ORIGIN-only. `!isGitLab` would be the wrong
   // gate on both counts: Bitbucket mounts issue surfaces in some states and has no
@@ -248,9 +254,9 @@ export function CreateIssueDialog({
       const { number, url } = created;
       const action = { label: "View", onClick: () => openUrl(url) };
       /** Open the new issue — but only if the app is still where it was created.
-       *  Every path below sits after at least one await, and the dialog is closed
-       *  by then; this one doesn't register the modal gate, so a chord can switch
-       *  repos inside that window. `selectIssue` carries NO repo identity, so it
+       *  Every path below sits after at least one await, and this dialog doesn't
+       *  register the modal gate, so a chord can switch repos inside that
+       *  window. `selectIssue` carries NO repo identity, so it
        *  would select this NUMBER in whatever repo is active now — somewhere else
        *  that is an unrelated issue, or a missing-issue view. The guard is the
        *  continuation rule's own shape, and the same one `CreateDiscussionDialog`
@@ -296,14 +302,23 @@ export function CreateIssueDialog({
           failed.push(`${LINK_FAILED["sub-issue"]}: ${errorMessage(e)}`);
         }
       }
-      // Closed either way: the issue exists, and leaving the dialog open over a
-      // draft that already shipped is a duplicate factory.
-      onOpenChange(false);
+      // Navigation and the toast's origin note read the LIVE repo: this dialog is
+      // retained across a switch, so both would otherwise land on the repo the
+      // user moved to.
+      const stillHere = useUiStore.getState().repoPath === repoPath;
+      const originNote = stillHere
+        ? undefined
+        : `In ${repoNameFromPath(repoPath)}`;
+      // Closed whenever the form still holds THIS submit's draft: the issue
+      // exists, and leaving that draft open is a duplicate factory. A seed under
+      // another repo has already replaced it with one that isn't ours to close.
+      if (draftRepoRef.current === repoPath) onOpenChange(false);
       if (failed.length > 0) {
         // Every failure in one message, so a run that lost both links doesn't
         // report one and hide the other.
         toast.error(`Created issue #${number}, but ${failed.join("; ")}`, {
           duration: 10000,
+          description: originNote,
           action,
         });
         // The issue EXISTS whatever the links did, so it still opens — the same
@@ -316,12 +331,15 @@ export function CreateIssueDialog({
         // Stay on the parent so the new issue appears in its sub-issue list
         // (GitHub's own behavior) — no navigate.
         toast.success(`Created sub-issue #${number}`, {
-          description: url,
+          description: originNote ? `${originNote} · ${url}` : url,
           action,
         });
         return;
       }
-      toast.success(`Opened issue #${number}`, { description: url, action });
+      toast.success(`Opened issue #${number}`, {
+        description: originNote ? `${originNote} · ${url}` : url,
+        action,
+      });
       openCreatedIssue();
     },
   });
@@ -334,6 +352,7 @@ export function CreateIssueDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // reset values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
+    draftRepoRef.current = repoPath;
     // The only host that seeds this dialog clears its request at close, so a
     // draft present here is always a fresh explicit ask (duplicate, reference)
     // and outranks any waiting or streaming run.

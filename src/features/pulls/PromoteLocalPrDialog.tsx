@@ -71,8 +71,10 @@ export function PromoteLocalPrDialog({
   // catch-up window after the forge answers, not just while the call runs, so
   // the hint reads the PHASE — a non-null one IS the lane. `!pending` narrows
   // to the RE-ENTRY case: promote claims the lane synchronously, so a phase is
-  // also present during this dialog's own run, where `pending` is the honest
-  // thing to show.
+  // also present during this dialog's own run, where `pending` is what to show —
+  // up to a cross-repo navigation that re-renders this view in place, which
+  // detaches the pinned create mutation: `pending` goes idle there while the
+  // promote runs on, and the phase read here is the new repo's.
   const lanePhase = usePrCreatePhase(repoPath, pr.head);
   const creatingElsewhere = lanePhase !== null && !pending;
   const laneHint = creatingElsewhere
@@ -150,11 +152,17 @@ export function PromoteLocalPrDialog({
         description: url,
         action: { label: "View", onClick: () => openUrl(url) },
       });
-      onOpenChange(false);
       // The promoted PR lives on the fork (origin) — force the origin lens so the
       // Pulls tab shows it (clearing any stale remote selection) before selecting.
-      setLens("origin");
-      selectPr({ kind: "remote", id: String(number) });
+      // All three are one navigation into THIS repo, and this continuation
+      // outlives the host's unmount on a repo switch: landed elsewhere they would
+      // close a dialog the user reopened there and point that repo's Pulls tab at
+      // a number belonging to this one. The toast above stays unconditional.
+      if (useUiStore.getState().repoPath === repoPath) {
+        onOpenChange(false);
+        setLens("origin");
+        selectPr({ kind: "remote", id: String(number) });
+      }
     } catch (e) {
       if (created === null) {
         // The create itself failed — retrying is correct, keep the dialog open.

@@ -52,6 +52,12 @@ export function useCreateBranch(repo: string) {
         args.startPoint,
         args.noTrack,
       ),
+    {
+      // Pinned: the call and its invalidation close over `repo`, and the dialog and
+      // panel hosts survive a repo switch — without the key a switch retargets the
+      // pending create, branching the wrong repo.
+      identity: ["create-branch", repo],
+    },
   );
 }
 

@@ -1,7 +1,14 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent, useId, useMemo, useState } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
@@ -27,6 +34,7 @@ import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraCreateIssue, useJiraIssueTypes } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import {
@@ -88,7 +96,17 @@ export function CreateJiraIssueDialog({
   const issueTypeSelectId = useId();
   // A Jira validation error the create command surfaced (field-level messages
   // the Rust side joins readably) — shown inline under the form, not a toast.
-  const [createError, setCreateError] = useState<string | null>(null);
+  // Stamped with the repo it fired in: this dialog is retained across repo
+  // switches, so a late failure must not render in a reopened foreign draft.
+  const [createError, setCreateError] = useState<{
+    repo: string;
+    message: string;
+  } | null>(null);
+  // Which repo's draft the form holds — stamped on every open transition, ahead
+  // of the seed's skip arm (which holds a seed off only for a draft already this
+  // repo's). A dialog left open across a repo switch never re-seeds, so this
+  // still reads the submit's repo and the settle's close is the right one.
+  const draftRepoRef = useRef(repoPath);
 
   const form = useAppForm({
     defaultValues: { summary: "", body: "" },
@@ -100,15 +118,25 @@ export function CreateJiraIssueDialog({
           summary: value.summary.trim(),
           descriptionMd: value.body.trim() || undefined,
         });
+        // The create can settle after a repo switch, and this dialog is retained
+        // across one: the selection below answers to the live repo, the close to
+        // the draft's. The toast fires either way, naming where it was filed.
+        const stillHere = useUiStore.getState().repoPath === repoPath;
+        const originNote = stillHere
+          ? undefined
+          : `In ${repoNameFromPath(repoPath)}`;
         toast.success(`Created ${key}`, {
-          description: url,
+          description: originNote ? `${originNote} · ${url}` : url,
           action: { label: "View", onClick: () => openUrl(url) },
         });
-        onOpenChange(false);
-        selectIssue({ kind: "jira", id: key });
+        // Closed whenever the form still holds THIS submit's draft — leaving an
+        // already-filed draft open is a duplicate factory. The selection is a
+        // global write, so it takes the live-repo guard instead.
+        if (draftRepoRef.current === repoPath) onOpenChange(false);
+        if (stillHere) selectIssue({ kind: "jira", id: key });
       } catch (e) {
         // Keep the dialog open so the draft survives; surface the reason inline.
-        setCreateError(errorMessage(e));
+        setCreateError({ repo: repoPath, message: errorMessage(e) });
       }
     },
   });
@@ -120,6 +148,7 @@ export function CreateJiraIssueDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the reset
   // values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
+    draftRepoRef.current = repoPath;
     // The previous attempt's error is stale on every open transition, guarded or
     // not — it must clear even when the draft below is kept.
     setCreateError(null);
@@ -320,8 +349,10 @@ export function CreateJiraIssueDialog({
               )}
             </form.AppField>
 
-            {createError && (
-              <p className="text-xs text-destructive">{createError}</p>
+            {/* Only this repo's failure: a create that fails after a switch
+                belongs to the repo it fired in, not the draft on screen. */}
+            {createError && createError.repo === repoPath && (
+              <p className="text-xs text-destructive">{createError.message}</p>
             )}
           </div>
 

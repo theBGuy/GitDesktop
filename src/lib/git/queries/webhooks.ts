@@ -14,12 +14,19 @@ export function useWebhooks(repo: string, enabled: boolean) {
   });
 }
 
+/** `op` names the write for the mutation key — the five hooks below share this
+ *  wrapper, so without it they would collide on one identity. */
 function useWebhookMutation<TArgs, TData>(
   repo: string,
+  op: string,
   mutationFn: (args: TArgs) => Promise<TData>,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call and the list invalidation close over `repo`, and the settings
+    // dialog survives a repo switch — without the key a switch retargets the pending
+    // write and refreshes the wrong repo's hooks.
+    mutationKey: ["webhook", op, repo],
     mutationFn,
     // Refetch the list so created/edited hooks and ping/test delivery results
     // (last response) show immediately.
@@ -29,27 +36,36 @@ function useWebhookMutation<TArgs, TData>(
 }
 
 export function useCreateWebhook(repo: string) {
-  return useWebhookMutation(repo, (input: WebhookInput) =>
+  return useWebhookMutation(repo, "create", (input: WebhookInput) =>
     api.ghHookCreate(repo, input),
   );
 }
 
 export function useUpdateWebhook(repo: string) {
-  return useWebhookMutation(repo, (args: { id: number; input: WebhookInput }) =>
-    api.ghHookUpdate(repo, args.id, args.input),
+  return useWebhookMutation(
+    repo,
+    "update",
+    (args: { id: number; input: WebhookInput }) =>
+      api.ghHookUpdate(repo, args.id, args.input),
   );
 }
 
 export function useDeleteWebhook(repo: string) {
-  return useWebhookMutation(repo, (id: number) => api.ghHookDelete(repo, id));
+  return useWebhookMutation(repo, "delete", (id: number) =>
+    api.ghHookDelete(repo, id),
+  );
 }
 
 export function usePingWebhook(repo: string) {
-  return useWebhookMutation(repo, (id: number) => api.ghHookPing(repo, id));
+  return useWebhookMutation(repo, "ping", (id: number) =>
+    api.ghHookPing(repo, id),
+  );
 }
 
 export function useTestWebhook(repo: string) {
-  return useWebhookMutation(repo, (id: number) => api.ghHookTest(repo, id));
+  return useWebhookMutation(repo, "test", (id: number) =>
+    api.ghHookTest(repo, id),
+  );
 }
 
 const deliveriesKey = (repo: string, hookId: number) =>
@@ -87,6 +103,10 @@ export function useWebhookDelivery(
 export function useRedeliverWebhook(repo: string, hookId: number) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call and the deliveries invalidation close over `repo`/`hookId`,
+    // and the settings dialog survives a repo switch — without the key a switch
+    // retargets the pending redelivery.
+    mutationKey: ["webhook-redeliver", repo, hookId],
     mutationFn: (deliveryId: string) =>
       api.ghHookRedeliver(repo, hookId, deliveryId),
     onSettled: () =>

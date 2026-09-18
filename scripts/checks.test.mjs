@@ -99,6 +99,7 @@ const inlineRepoIdentityQuery = scanner("inline-repo-identity-query");
 const queriesInternalImport = scanner("queries-internal-import");
 const queriesBarrelInternal = scanner("queries-barrel-internal-reference");
 const queriesInternalReexport = scanner("queries-internal-reexport");
+const unpinnedMutationIdentity = scanner("mutation-identity-pinning");
 
 test("hover-reveal catches every Tailwind spelling of the idiom", () => {
   for (const classes of [
@@ -2042,6 +2043,190 @@ test("queries-barrel-internal-reference is pinned to the barrel file only", () =
   assert.equal(appliesTo("src/lib/git/queries/internal.ts"), false);
   // And no other barrel in the repo is this one.
   assert.equal(appliesTo("src/lib/settings/index.ts"), false);
+});
+
+test("mutation-identity-pinning flags an unpinned repo-scoped create", () => {
+  // The pre-fix shape every create-family hook had: the call and its invalidation
+  // both closing over the hook's `repo`, with nothing pinning the mutation key.
+  const plain = [
+    "export function useCreateRuleset(repo: string) {",
+    "  const queryClient = useQueryClient();",
+    "  return useMutation({",
+    "    mutationFn: (body: Record<string, unknown>) =>",
+    "      api.ghRulesetCreate(repo, body),",
+    "    onSettled: () =>",
+    "      queryClient.invalidateQueries({ queryKey: rulesetsKey(repo) }),",
+    "  });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unpinnedMutationIdentity(plain), [3]);
+  // The useRepoMutation form must fail the same way — six of the pinned sites are
+  // plain useMutation, so a useRepoMutation-only scan would miss half the class.
+  const viaHelper = [
+    "export function useCreateTag(repo: string) {",
+    "  return useRepoMutation(repo, (args: { name: string; hash: string }) =>",
+    "    api.gitTag(repo, args.name, args.hash),",
+    "  );",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unpinnedMutationIdentity(viaHelper), [2]);
+  // The seed arm: not create-named, but a response written into a hook-scope key
+  // on success — the settings-seed defect, which a retarget cannot roll back.
+  const seed = [
+    "export function useUpdateGlRepoSettings(repo: string) {",
+    "  const queryClient = useQueryClient();",
+    "  return useMutation({",
+    "    mutationFn: (input: GitLabRepoSettingsInput) =>",
+    "      api.forgeGlRepoSettingsUpdate(repo, input),",
+    "    onSuccess: (data) =>",
+    "      queryClient.setQueryData(glRepoSettingsKey(repo), data),",
+    "  });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unpinnedMutationIdentity(seed), [3]);
+});
+
+test("mutation-identity-pinning accepts a key wrapped across lines", () => {
+  // THE formatting the guard has to survive: biome wraps a four-axis key onto its
+  // own lines, so the literal lands on the line AFTER `mutationKey: [`. A
+  // single-line anchor reads this exact (pinned) site as unpinned.
+  const wrapped = [
+    "export function useJiraCreateIssue(",
+    "  repo: string,",
+    "  link: JiraLink | null | undefined,",
+    ") {",
+    "  const queryClient = useQueryClient();",
+    "  return useMutation({",
+    "    mutationKey: [",
+    '      "jira-create-issue",',
+    "      repo,",
+    "      link?.siteHost ?? null,",
+    "      link?.projectKey ?? null,",
+    "    ],",
+    "    mutationFn: (args: { issueTypeId: string }) =>",
+    "      jiraIssueCreate((link as JiraLink).siteHost, args.issueTypeId),",
+    "    onSettled: () => invalidateJiraForRepo(queryClient, repo),",
+    "  });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unpinnedMutationIdentity(wrapped), []);
+  // Both spellings pin, on both call forms, wrapped or not.
+  for (const source of [
+    'export function useCreateDiscussion(repo: string) {\n  return useRepoMutation(repo, (a) => api.create(repo, a), {\n    identity: ["create-discussion", repo],\n  });\n}',
+    'export function useCreatePr(repo: string) {\n  return useRepoMutation(\n    repo,\n    (a) => api.prCreate(repo, a),\n    {\n      identity: [\n        "create-pr",\n        repo,\n      ],\n    },\n  );\n}',
+    'export function useCreateWebhook(repo: string) {\n  return useMutation({\n    mutationKey: ["webhook", "create", repo],\n    mutationFn: (i: WebhookInput) => api.ghHookCreate(repo, i),\n  });\n}',
+  ])
+    assert.deepEqual(
+      unpinnedMutationIdentity(source),
+      [],
+      `should accept ${source}`,
+    );
+});
+
+test("mutation-identity-pinning leaves mutations with no repo closure alone", () => {
+  for (const source of [
+    // The other valid remedy: the write target rides the VARIABLES, so the hook
+    // has no repo in scope for a switch to redirect (useMoveBoardCard's shape).
+    "export function useMoveBoardCard() {\n  return useMutation({\n    mutationFn: (args: { repo: string }) => api.move(args.repo),\n  });\n}",
+    // Account-scoped, and a non-create name with no cache seed.
+    "export function useGhPublishOwners(enabled: boolean) {\n  return useMutation({\n    mutationFn: () => api.publish(),\n  });\n}",
+    // Repo-scoped but neither create nor seed: the convention still governs it,
+    // this ratchet deliberately does not (see the check's appliesTo note).
+    "export function useCheckoutBranch(repo: string) {\n  return useRepoMutation(repo, (n: string) => api.checkout(repo, n));\n}",
+    // The export gate, pinned by a name CREATE_HOOK_RE does match: a private
+    // helper no exported hook delegates to is not a mutation the package ships.
+    "function useCreateThing(repo: string) {\n  return useMutation({ mutationFn: (a) => api.create(repo, a) });\n}",
+    // Comment stripping keeps the convention's own prose out of the scan.
+    '// useCreateThing(repo) must pass identity: ["create-thing", repo]',
+  ])
+    assert.deepEqual(
+      unpinnedMutationIdentity(source),
+      [],
+      `should ignore ${source}`,
+    );
+});
+
+test("mutation-identity-pinning follows a create hook into its private wrapper", () => {
+  // webhooks.ts's real shape: the exported create hook builds nothing itself, it
+  // delegates, so the key has to live on the WRAPPER. Scanning only the exported
+  // hook's own body reads this whole five-hook family as clean.
+  const wrapper = (key) =>
+    [
+      "function useWebhookMutation<TArgs, TData>(",
+      "  repo: string,",
+      "  op: string,",
+      "  mutationFn: (args: TArgs) => Promise<TData>,",
+      ") {",
+      "  const queryClient = useQueryClient();",
+      "  return useMutation({",
+      ...(key ? [`    mutationKey: ["webhook", op, repo],`] : []),
+      "    mutationFn,",
+      "    onSettled: () =>",
+      "      queryClient.invalidateQueries({ queryKey: webhooksKey(repo) }),",
+      "  });",
+      "}",
+      "",
+      "export function useCreateWebhook(repo: string) {",
+      '  return useWebhookMutation(repo, "create", (input: WebhookInput) =>',
+      "    api.ghHookCreate(repo, input),",
+      "  );",
+      "}",
+    ].join("\n");
+  // Unkeyed wrapper: reported at the wrapper's own useMutation, which is where the
+  // fix goes — not at the delegating hook.
+  assert.deepEqual(unpinnedMutationIdentity(wrapper(false)), [7]);
+  assert.deepEqual(unpinnedMutationIdentity(wrapper(true)), []);
+});
+
+test("mutation-identity-pinning sees through a generic parameter list", () => {
+  // `function useX<T>(` puts a `<` where the anchor wants a `(`; an anchor that
+  // demands the paren swallows every generic declaration without a sound.
+  const generic = [
+    "export function useCreateThing<TArgs, TData>(repo: string) {",
+    "  return useMutation({",
+    "    mutationFn: (a: TArgs) => api.create(repo, a),",
+    "  });",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unpinnedMutationIdentity(generic), [2]);
+  // A constraint carrying an arrow type must not end the generic list early.
+  const constrained =
+    "export function useCreateThing<T extends (a: string) => void>(repo: string) {\n  return useMutation({ mutationFn: (a: T) => api.create(repo, a) });\n}";
+  assert.deepEqual(unpinnedMutationIdentity(constrained), [2]);
+});
+
+test("mutation-identity-pinning is scoped to the query modules, with one allowlisted file", () => {
+  const check = CHECKS.find((c) => c.name === "mutation-identity-pinning");
+  assert.equal(check.appliesTo("src/lib/git/queries/branches.ts"), true);
+  assert.equal(check.appliesTo("src/lib/jira/queries.ts"), true);
+  // Feature files declare no query hooks; .tsx never enters the scope.
+  assert.equal(check.appliesTo("src/features/pulls/CreatePrDialog.tsx"), false);
+  assert.equal(check.appliesTo("src/lib/settings/queries.ts"), false);
+  // The single exception, and the reason it is a whole file rather than a line.
+  assert.deepEqual(check.allowlist, ["src/lib/git/queries/pr-write.ts"]);
+  // An allowlisted file is SCANNED, so the entry only stays legitimate while its
+  // site is still unpinned — pin useStackCreate and the entry reports stale.
+  const flagged =
+    "export function useStackCreate(repo: string, lens: RemoteLens) {\n  return useRepoMutation(repo, (prs: number[]) =>\n    api.forgeStackCreate(repo, prs, lens),\n  );\n}";
+  assert.deepEqual(unpinnedMutationIdentity(flagged), [2]);
+  // End to end: the allowlisted file's hit is suppressed and its entry stays live,
+  // while the same shape in a sibling module is a violation.
+  const files = [
+    "src/lib/git/queries/pr-write.ts",
+    "src/lib/git/queries/branches.ts",
+  ];
+  const views = new Map([
+    ["src/lib/git/queries/pr-write.ts", view(flagged)],
+    [
+      "src/lib/git/queries/branches.ts",
+      view(
+        "export function useCreateBranch(repo: string) {\n  return useRepoMutation(repo, (n: string) => api.gitCreateBranch(repo, n));\n}",
+      ),
+    ],
+  ]);
+  const { violations, stale } = runCheck(check, files, views);
+  assert.deepEqual(violations, ["src/lib/git/queries/branches.ts:2"]);
+  assert.deepEqual(stale, []);
 });
 
 test("an allowlist entry whose file no longer has the pattern is stale", () => {

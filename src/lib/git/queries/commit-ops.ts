@@ -39,8 +39,16 @@ export function useCherryPickOnto(repo: string) {
 }
 
 export function useCreateTag(repo: string) {
-  return useRepoMutation(repo, (args: { name: string; hash: string }) =>
-    api.gitTag(repo, args.name, args.hash),
+  return useRepoMutation(
+    repo,
+    (args: { name: string; hash: string }) =>
+      api.gitTag(repo, args.name, args.hash),
+    {
+      // Pinned: the call and its invalidation close over `repo`, and the history/tags
+      // hosts survive a repo switch — without the key a switch retargets the pending
+      // create, tagging the wrong repo.
+      identity: ["create-tag", repo],
+    },
   );
 }
 

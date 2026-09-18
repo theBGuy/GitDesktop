@@ -379,6 +379,10 @@ export function useCheckRunApps(repo: string, enabled: boolean) {
 export function useCreateRuleset(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call and the rulesets invalidation close over `repo`, and the
+    // settings dialog survives a repo switch — without the key a switch retargets the
+    // pending create.
+    mutationKey: ["create-ruleset", repo],
     mutationFn: (body: Record<string, unknown>) =>
       api.ghRulesetCreate(repo, body),
     onSettled: () =>

@@ -312,6 +312,10 @@ export function useJiraComment(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call closes over the link's site and the seed below over `repo`
+    // and the site, and the issue view survives a repo switch — without the key a
+    // switch appends this comment to another repo's cached issue.
+    mutationKey: ["jira-comment", repo, link?.siteHost ?? null],
     mutationFn: (args: { issueKey: string; bodyMd: string }) =>
       jiraIssueComment((link as JiraLink).siteHost, args.issueKey, args.bodyMd),
     onSuccess: (comment, args) => {
@@ -762,6 +766,10 @@ export function useJiraCommentEdit(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call, the optimistic patch, its rollback and the seed all close
+    // over `repo`/the link's site, and the issue view survives a repo switch —
+    // without the key a switch patches another repo's cached issue.
+    mutationKey: ["jira-comment-edit", repo, link?.siteHost ?? null],
     mutationFn: (args: {
       issueKey: string;
       commentId: string;
@@ -860,6 +868,15 @@ export function useJiraCreateIssue(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call closes over the link's site/project and the invalidation over
+    // `repo`, and the dialog hosts survive a repo switch — without the key a switch
+    // (or a relink) retargets the pending create to another project.
+    mutationKey: [
+      "jira-create-issue",
+      repo,
+      link?.siteHost ?? null,
+      link?.projectKey ?? null,
+    ],
     mutationFn: (args: {
       issueTypeId: string;
       summary: string;

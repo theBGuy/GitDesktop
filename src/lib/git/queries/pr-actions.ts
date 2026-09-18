@@ -64,6 +64,10 @@ export const prTasksKey = (repo: string, number: number) =>
 export function useCreatePrTask(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call and the tasks-key invalidation close over `repo`, and the PR
+    // panel survives a repo switch — without the key a switch retargets the pending
+    // create.
+    mutationKey: ["create-pr-task", repo],
     mutationFn: (args: { number: number; text: string }) =>
       api.forgeBbPrTaskCreate(repo, args.number, args.text),
     onSettled: (_d, _e, args) =>

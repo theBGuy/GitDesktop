@@ -50,11 +50,17 @@ export const usePrCreateStore = create<PrCreateState>()(() => ({
 
 /** Repo+head pairs whose most recent create FAILED. Read once and cleared by
  *  {@link consumeLastFailed}: it exists only so the dialog that reopens after a
- *  background failure knows not to blank what the user typed. Per HEAD, not per
- *  repo — a failure on one branch must not preserve its draft in a dialog the
- *  user opened for another. The lane has several writers but only CreatePrDialog
- *  holds a draft this can protect, so it is the only one that latches; see the
- *  outcome union on {@link settlePrCreate}. Not store state: nothing renders it. */
+ *  background failure knows not to blank what the user typed. Keyed per HEAD as
+ *  well as repo because CreatePrDialog is mounted twice over (the Compare and
+ *  Pulls tabs, both retained under <Activity>), so two typed drafts can
+ *  legitimately be waiting at once — and a failure on one branch must not
+ *  preserve its draft in a dialog opened for another. What bounds the set is
+ *  that every seed retires the key of the draft it destroys, under that draft's
+ *  OWN repo: an entry can then only ever match the open it was minted for,
+ *  never a later one in the repo the user switched to. The lane has several
+ *  writers but only CreatePrDialog holds a draft this can protect, so it is the
+ *  only one that latches; see the outcome union on {@link settlePrCreate}. Not
+ *  store state: nothing renders it. */
 const lastFailed = new Set<string>();
 
 // NUL is the one separator neither a path nor a ref name can contain, so
@@ -213,7 +219,11 @@ export function prCreateStartedAt(
   );
 }
 
-/** Reads and clears the failed-create latch for one repo+head. */
+/** Reads and clears the failed-create latch for one repo+head: the read a reopen
+ *  makes, and the retire a seed makes for the draft it is about to destroy. Key
+ *  it to the repo the DRAFT belongs to — a dialog retained across a repo switch
+ *  holds the previous repo's head, and asking under the live repo would spend a
+ *  latch that was never formed for it. */
 export function consumeLastFailed(repoPath: string, head: string): boolean {
   return lastFailed.delete(failKey(repoPath, head));
 }

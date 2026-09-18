@@ -651,6 +651,10 @@ const commitCommentsKey = (repo: string, sha: string, lens: RemoteLens) =>
 export function useCreateCommitComment(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call, the optimistic patch, its rollback and the invalidation all
+    // close over `repo`/`lens`, and the comment hosts survive a repo switch — without
+    // the key a switch retargets the pending create and writes the row elsewhere.
+    mutationKey: ["create-commit-comment", repo, lens],
     mutationFn: (args: {
       sha: string;
       body: string;
@@ -778,6 +782,11 @@ export function useDeleteCommitComment(repo: string, lens: RemoteLens) {
 export function useCreateReviewThread(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call, the optimistic patch, its rollback and the invalidation all
+    // close over `repo`/`lens`, and the composer's host survives a repo switch —
+    // without the key a switch retargets the pending create and writes the thread
+    // elsewhere.
+    mutationKey: ["create-review-thread", repo, lens],
     mutationFn: (args: {
       number: number;
       path: string;

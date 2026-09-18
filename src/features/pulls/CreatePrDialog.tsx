@@ -52,12 +52,13 @@ import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
 import {
+  applyRepoLens,
   useLensGate,
   useRemoteSlug,
-  useSetRepoLens,
 } from "@/lib/repo-lens/queries";
 import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import {
   consumeLastFailed,
   markPrCreated,
@@ -150,7 +151,6 @@ export function CreatePrDialog({
   const status = useRepoStatus(repoPath);
   const defaultBranch = useDefaultBranch(repoPath);
   const createPr = useCreatePr(repoPath);
-  const setRepoLens = useSetRepoLens(repoPath);
   const forge = useForgeStatus(repoPath);
   const queryClient = useQueryClient();
 
@@ -275,6 +275,12 @@ export function CreatePrDialog({
   // Whether THIS mount has seeded, so the skip below can tell a reopen (form
   // state may hold a draft the user typed) from a fresh mount (it cannot).
   const seededRef = useRef(false);
+  // Which repo the retained draft belongs to — the repo whose seed last wrote
+  // the form. The dialog is retained across a repo switch (the host re-renders
+  // it with a new `repoPath`), so this is what tells a reopen here from a
+  // reopen holding the previous repo's draft. Both sides are the ui store's own
+  // string, so `===` is the identity test.
+  const draftRepoRef = useRef<string | null>(null);
 
   const currentName = status.data?.branch?.name ?? null;
   // Branch options with per-branch worktree chips; drops the app-internal
@@ -348,6 +354,11 @@ export function CreatePrDialog({
           : undefined,
     },
     onSubmit: async ({ value }) => {
+      // This submit belongs to the repo it fired in: the form's options are
+      // re-applied every render, so `repoPath` here is pinned to that repo while
+      // the retained dialog goes on serving whichever one is on screen. Every
+      // write to GLOBAL state past an await asks this first.
+      const stillHere = () => useUiStore.getState().repoPath === repoPath;
       // The probe speaks only for duplicates it has FRESHLY seen: a submit during
       // its first fetch, or on a page cached before the PR was opened on the forge,
       // would push a head the forge then refuses. One awaited re-check closes that
@@ -481,7 +492,13 @@ export function CreatePrDialog({
                 queryKey: ["repo", repoPath, "pr", createLens, number],
               });
             } catch {
-              toast.error("PR created — posting reviewer notes failed.");
+              // Fires wherever the user is by then, so it names the repo it
+              // belongs to when that isn't the one on screen.
+              toast.error("PR created — posting reviewer notes failed.", {
+                description: stillHere()
+                  ? undefined
+                  : `In ${repoNameFromPath(repoPath)}`,
+              });
             }
           }
           // Consume the deposit regardless of whether the comment posted — the
@@ -490,7 +507,20 @@ export function CreatePrDialog({
         }
         // Creating on the parent means the PR lives under the upstream lens — flip
         // the persisted lens so the PRs tab shows it (no-op when already "upstream").
-        if (createLens === "upstream") setRepoLens("upstream");
+        // The disk write and the cache write are this repo's own and land whatever
+        // is on screen; the interaction epoch and the selection clears are GLOBAL,
+        // so off-screen they would cancel the live repo's in-flight navigation and
+        // drop its selected pull request instead. Noted before the apply, as
+        // `useSetRepoLens` does: a settling navigation would otherwise land its
+        // lens over this one.
+        if (createLens === "upstream") {
+          const live = stillHere();
+          if (live) useUiStore.getState().noteUserInteraction();
+          applyRepoLens(queryClient, repoPath, "upstream", {
+            clearSelections: live,
+            persist: true,
+          });
+        }
         // Name the target repo in the toast so "Opened PR #N in owner/repo" is
         // unambiguous for a fork contribution.
         const where = targetSlug ? ` in ${targetSlug}` : "";
@@ -502,7 +532,10 @@ export function CreatePrDialog({
         // only close — never setRepoTab/selectPr, which would conceal this panel
         // mid-close and defer the close and unmount until it is next shown. Want
         // navigation? Hoist it to RepositoryView first, like CreateLocalPrDialog.
-        onOpenChange(false);
+        // `open` is the host's ONE state across repos (a switch already closed
+        // this dialog), so a close landing off-screen would shut whatever the
+        // user has open where they are now.
+        if (stillHere()) onOpenChange(false);
         // Draft gate: a draft PR fires no review unless the user opted into reviewing
         // drafts. A gated-out draft is NOT a lost review — an in-app Mark-ready fires
         // pr-open directly, and an EXTERNAL ready flip rides the catch-up poller's
@@ -527,12 +560,18 @@ export function CreatePrDialog({
         // Name the branch when the CREATE is what failed: two creates can be
         // stacked, and a bare forge error doesn't say which one died. A throw
         // from a step after the PR exists keeps the bare toast — that PR was
-        // created, whatever followed it.
+        // created, whatever followed it. Unconditional, guard or no guard: the
+        // failure happened, so a landing in another repo names the one it
+        // belongs to rather than going unsaid.
+        const away = stillHere() ? null : repoNameFromPath(repoPath);
         if (outcome === "error")
           toastErrorWithNote(
             e,
-            `The ${prNoun} for ${value.head} wasn't created.`,
+            away
+              ? `In ${away}, the ${prNoun} for ${value.head} wasn't created.`
+              : `The ${prNoun} for ${value.head} wasn't created.`,
           );
+        else if (away) toastErrorWithNote(e, `In ${away}`);
         else toastError(e);
       } finally {
         // The lane is also the duplicate-create admission guard, so the watcher
@@ -564,6 +603,9 @@ export function CreatePrDialog({
   // seeded values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
     const h = defaultHead ?? currentName ?? names[0] ?? "";
+    // What the form is holding, which is what the retire below is keyed on. On
+    // a fresh mount the form holds its defaults, so this is just `h`.
+    const retained = form.state.values.head || h;
     // A generation still streaming — or one that settled while the dialog was
     // closed — and a create still RUNNING in the background, or one that failed
     // while closed, all leave everything the user typed in form state, and this
@@ -571,28 +613,31 @@ export function CreatePrDialog({
     // opposite case: the PR shipped, so the submitted draft must not come back.
     // The draft's identity is the RETAINED form head, not this open's default:
     // the user may have submitted a head that differs from the branch they are
-    // on now. The `||` short-circuit is deliberate — while a generation or
-    // create is in flight the pr-create latches stay unconsumed, so a later
-    // reopen after a failure still preserves the draft. A run discarded by a
-    // repo switch skips those arms entirely: the retained head is the OLD
-    // repo's, so keying this repo's latches on it would spend a latch that was
-    // never formed for it.
+    // on now. The `||` short-circuit is deliberate — while a create is in flight
+    // the failed-create latch stays unconsumed, so a reopen after a later
+    // failure still preserves the draft. Both lane arms are gated on the draft
+    // being THIS repo's: keyed on a head retained from the repo the user just
+    // left, they would read this repo's lane and spend its latch whenever the
+    // two repos share a branch name. `shouldSkipSeed` stays ungated — it owns
+    // its own repo check, and a foreign open has to reach it to retire the AI
+    // draft this seed is about to destroy.
     if (seededRef.current) {
-      const retained = form.state.values.head || h;
       if (
         surface.shouldSkipSeed(generating) ||
-        (!surface.runDiscardedBySwitch() &&
+        (draftRepoRef.current === repoPath &&
           (prCreatePhase(repoPath, retained) === "creating" ||
             consumeLastFailed(repoPath, retained)))
       )
         return;
-    } else {
-      // A fresh mount holds no draft (form state died with the last one), so it
-      // always seeds — and disposes the latch for the head it is seeding, whose
-      // draft the unmount already destroyed.
-      consumeLastFailed(repoPath, h);
     }
+    // The reset below destroys the draft this mount was holding, so the latch
+    // waiting on it goes with it — keyed to that draft's OWN repo, which is how
+    // a latch stops outliving a repo switch. Keyed rather than blanket because
+    // this dialog is mounted on the Compare tab too: that mount's own waiting
+    // draft is untouched here, and its latch has to survive.
+    consumeLastFailed(draftRepoRef.current ?? repoPath, retained);
     seededRef.current = true;
+    draftRepoRef.current = repoPath;
     aiDescriptionRef.current = false;
     setReviewers([]);
     setLabels(new Set());

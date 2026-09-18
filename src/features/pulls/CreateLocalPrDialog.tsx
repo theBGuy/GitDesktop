@@ -30,6 +30,7 @@ import { updateLocalPr } from "@/lib/pulls/local";
 import { useCreateLocalPr } from "@/lib/pulls/queries";
 import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
@@ -162,10 +163,21 @@ export function CreateLocalPrDialog({
           // Consume the deposit — the create consumed the note. Best-effort.
           void deleteReviewNote(repoPath, value.head).catch(() => undefined);
         }
-        toast.success(`Created local PR: ${pr.title}`);
-        setRepoTab("pulls");
-        selectPr({ kind: "local", id: pr.id });
-        onOpenChange(false);
+        // This dialog is retained across repo switches, so a create settling
+        // after one would aim the tab, the selection, and the close at whatever
+        // repo is live now. The toast fires either way, naming its origin.
+        const stillHere = useUiStore.getState().repoPath === repoPath;
+        const originNote = stillHere
+          ? undefined
+          : `In ${repoNameFromPath(repoPath)}`;
+        toast.success(`Created local PR: ${pr.title}`, {
+          description: originNote,
+        });
+        if (stillHere) {
+          setRepoTab("pulls");
+          selectPr({ kind: "local", id: pr.id });
+          onOpenChange(false);
+        }
         // Local PRs have no draft concept — always fire. The event carries the
         // notes (the runner's marker-comment fetchers are remote-only, so for a
         // local PR this is the sole path the review sees them).

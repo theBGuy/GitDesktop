@@ -189,11 +189,6 @@ export function useFinishAndSurface(
 ): {
   /** Report a run settling; ok = a non-null result landed. */
   noteRunSettled: (ok: boolean) => void;
-  /** Whether the run in flight was discarded by an identity switch — a read,
-   *  never a consume. Callers whose seed guard has further arms keyed on the
-   *  form's retained values use it to skip them: those values are the old
-   *  identity's. */
-  runDiscardedBySwitch: () => boolean;
   /** Seed-guard predicate: true ⇒ the caller's seedOnOpen must return without
    *  reseeding. A live run justifies the skip only while it still belongs here —
    *  one discarded by an identity switch does not; failing that, a settled-unseen
@@ -297,7 +292,6 @@ export function useFinishAndSurface(
           : undefined,
       });
     },
-    runDiscardedBySwitch: () => abortedBySwitchRef.current,
     shouldSkipSeed: (generating: boolean) => {
       // The latch stays unconsumed behind this short-circuit: a run that is
       // still ours will settle and latch, and that latch is for a later open.

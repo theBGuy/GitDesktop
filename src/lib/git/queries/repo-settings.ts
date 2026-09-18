@@ -24,6 +24,10 @@ export function useRepoSettings(repo: string, enabled: boolean) {
 export function useUpdateRepoSettings(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the PATCH, the cache seed below and the invalidation all close over
+    // `repo`, and the settings dialog survives a repo switch — without the key a
+    // switch seeds the newly-live repo's settings with this repo's response.
+    mutationKey: ["update-repo-settings", repo],
     mutationFn: (input: RepoSettingsInput) =>
       api.ghRepoSettingsUpdate(repo, input),
     // The PATCH returns the fresh settings — seed the cache, then refetch.
@@ -52,6 +56,10 @@ export function useGlRepoSettings(repo: string, enabled: boolean) {
 export function useUpdateGlRepoSettings(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the PUT, the seed below and the invalidation all close over `repo`,
+    // and the settings dialog survives a repo switch — without the key a switch
+    // seeds the newly-live repo's settings with this repo's response.
+    mutationKey: ["update-gl-repo-settings", repo],
     mutationFn: (input: GitLabRepoSettingsInput) =>
       api.forgeGlRepoSettingsUpdate(repo, input),
     // The PUT returns the fresh settings — seed the cache, then refetch.
@@ -124,6 +132,10 @@ export function useGlHooks(repo: string, enabled: boolean) {
 export function useGlCreateHook(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the call and the hooks-list invalidation close over `repo`, and the
+    // settings dialog survives a repo switch — without the key a switch retargets
+    // the pending create.
+    mutationKey: ["gl-create-hook", repo],
     mutationFn: (input: GitLabHookInput) => api.forgeGlHookCreate(repo, input),
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: glHooksKey(repo) }),
@@ -344,6 +356,10 @@ export function useBbRepoSettings(repo: string, enabled: boolean) {
 export function useBbUpdateRepoSettings(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    // Pinned: the PUT, the seed below and the invalidation all close over `repo`,
+    // and the settings dialog survives a repo switch — without the key a switch
+    // seeds the newly-live repo's settings with this repo's response.
+    mutationKey: ["bb-update-repo-settings", repo],
     mutationFn: (input: BitbucketRepoSettingsInput) =>
       api.forgeBbRepoSettingsUpdate(repo, input),
     // The PUT returns the fresh settings — seed the cache, then refetch.
@@ -416,7 +432,13 @@ export function useBbCreateBranchRestriction(repo: string) {
     repo,
     (a: { kind: string; pattern: string; value: number | null }) =>
       api.forgeBbBranchRestrictionCreate(repo, a.kind, a.pattern, a.value),
-    { invalidate: [bbBranchRestrictionsKey(repo)] },
+    {
+      invalidate: [bbBranchRestrictionsKey(repo)],
+      // Pinned: the call and the narrowed invalidation close over `repo`, and the
+      // settings dialog survives a repo switch — without the key a switch retargets
+      // the pending create.
+      identity: ["bb-create-branch-restriction", repo],
+    },
   );
 }
 
@@ -484,6 +506,10 @@ export function useBbVariables(repo: string, enabled: boolean) {
 // reconcile the real server row/uuid. Delete keeps its immediate invalidate below.
 export function useBbCreateVariable(repo: string) {
   return useMutation({
+    // Pinned: the call closes over `repo` and the variables section survives a repo
+    // switch — without the key a switch retargets the pending create, writing the
+    // variable to the newly-live repo.
+    mutationKey: ["bb-create-variable", repo],
     mutationFn: (a: { key: string; value: string; secured: boolean }) =>
       api.forgeBbPipelineVariableCreate(repo, a.key, a.value, a.secured),
   });
@@ -523,6 +549,10 @@ export function useBbSchedules(repo: string, enabled: boolean) {
 // Toggle/delete keep their immediate invalidate below.
 export function useBbCreateSchedule(repo: string) {
   return useMutation({
+    // Pinned: the call closes over `repo` and the schedules section survives a repo
+    // switch — without the key a switch retargets the pending create, scheduling
+    // against the newly-live repo.
+    mutationKey: ["bb-create-schedule", repo],
     mutationFn: (a: {
       refName: string;
       cronPattern: string;
@@ -570,7 +600,13 @@ export function useBbCreateHook(repo: string) {
   return useRepoMutation(
     repo,
     (input: BitbucketHookInput) => api.forgeBbHookCreate(repo, input),
-    { invalidate: [bbHooksKey(repo)] },
+    {
+      invalidate: [bbHooksKey(repo)],
+      // Pinned: the call and the narrowed invalidation close over `repo`, and the
+      // settings dialog survives a repo switch — without the key a switch retargets
+      // the pending create.
+      identity: ["bb-create-hook", repo],
+    },
   );
 }
 

@@ -876,8 +876,16 @@ export function useIssueDevelopment(
 }
 
 export function useCreateLinkedBranch(repo: string, lens: RemoteLens) {
-  return useRepoMutation(repo, (args: { issueId: string; name: string }) =>
-    api.ghIssueCreateLinkedBranch(repo, args.issueId, args.name, lens),
+  return useRepoMutation(
+    repo,
+    (args: { issueId: string; name: string }) =>
+      api.ghIssueCreateLinkedBranch(repo, args.issueId, args.name, lens),
+    {
+      // Pinned: the call closes over `repo`/`lens` and its invalidation over `repo`,
+      // and the issue panel survives a repo switch — without the key a switch
+      // retargets the pending create.
+      identity: ["create-linked-branch", repo, lens],
+    },
   );
 }
 

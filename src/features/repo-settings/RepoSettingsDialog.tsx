@@ -436,11 +436,17 @@ export function RepoSettingsDialog({
                 exit={{ opacity: 0 }}
                 transition={reduceMotion ? { duration: 0 } : quickTransition}
               >
+                {/* Keyed by repo: the dialog stays open across a repo switch,
+                    so a section reconciled in place keeps the previous repo's
+                    editing state while its mutations re-bind to the new one. */}
                 <GenerateActionContext value={generate.sink}>
-                  {Body && <Body repoPath={repoPath} open={open} />}
+                  {Body && (
+                    <Body key={repoPath} repoPath={repoPath} open={open} />
+                  )}
                 </GenerateActionContext>
                 {activeSection === "danger" && (
                   <DangerZone
+                    key={repoPath}
                     repoPath={repoPath}
                     open={open}
                     provider={provider}

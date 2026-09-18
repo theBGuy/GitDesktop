@@ -1,7 +1,7 @@
 import { SparkleIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,8 @@ import {
 } from "@/lib/git/queries";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { repoNameFromPath } from "@/lib/stores/notifications";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -151,6 +153,11 @@ export function PublishDialog({
     readyDescription: "It's waiting in the dialog.",
     reopen: () => onOpenChange(true),
   });
+  // Which repo's draft the form holds — stamped on every open transition, ahead
+  // of the seed's skip arm (which holds a seed off only for a draft already this
+  // repo's). A dialog left open across a repo switch never re-seeds, so this
+  // still reads the submit's repo and the settle's close is the right one.
+  const draftRepoRef = useRef(repoPath);
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
   const isGitHub = provider === "github";
@@ -232,11 +239,20 @@ export function PublishDialog({
           topics: parseTopics(value.topics),
           workspace: isBitbucket ? value.workspace : undefined,
         });
+        // The publish can settle after a repo switch, and the header keeps this
+        // dialog mounted across one, so the close below answers to the draft's
+        // repo. The toast fires either way, naming the repo that was published.
+        const stillHere = useUiStore.getState().repoPath === repoPath;
+        const originNote = stillHere
+          ? undefined
+          : `In ${repoNameFromPath(repoPath)}`;
         toast.success(`Published ${target}`, {
-          description: url,
+          description: originNote ? `${originNote} · ${url}` : url,
           action: { label: "View", onClick: () => openUrl(url) },
         });
-        onOpenChange(false);
+        // Closed whenever the form still holds THIS submit's draft — leaving an
+        // already-published draft open is a duplicate factory.
+        if (draftRepoRef.current === repoPath) onOpenChange(false);
       } catch (e) {
         toastError(e);
       }
@@ -265,6 +281,7 @@ export function PublishDialog({
   const nameWarning = ghPickerActive ? ghNameWarning : NAME_WARNINGS[provider];
 
   const seedOnOpen = useEffectEvent(() => {
+    draftRepoRef.current = repoPath;
     // A generation still streaming — or one that settled while the dialog was
     // closed — leaves the description and topics in form state, which this
     // reset would blank on reopen.

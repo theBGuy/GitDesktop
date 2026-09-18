@@ -83,6 +83,11 @@ export function useCreateDiscussion(repo: string) {
         args.title,
         args.body,
       ),
+    {
+      // Pinned: the call and its invalidation close over `repo`, and the dialog host
+      // survives a repo switch — without the key a switch retargets the pending create.
+      identity: ["create-discussion", repo],
+    },
   );
 }
 
