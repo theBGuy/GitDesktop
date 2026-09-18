@@ -31,14 +31,26 @@ const aiCount = page.data.filter((p) => p.data.ai).length;
 
 // Page 1 promotes the newest post to a featured card when it has one; the
 // slot degrades to a plain row on later pages or a cardless post.
-const featured =
-  page.currentPage === 1 && page.data[0]?.data.ogImage
-    ? page.data[0]
-    : undefined;
+const featuredOg =
+  page.currentPage === 1 ? page.data[0]?.data.ogImage : undefined;
+const featured = featuredOg ? page.data[0] : undefined;
 const listed = featured ? page.data.slice(1) : page.data;
-const featuredCard = featured
-  ? base.replace(/\/$/, "") + featured.data.ogImage
-  : undefined;
+
+// Mirrors Head.astro's withBase contract for the same field: absolute URLs
+// pass through, base-prefixed values aren't double-joined.
+const withBase = (p: string) =>
+  /^https?:/i.test(p) || p.startsWith(base)
+    ? p
+    : base.replace(/\/$/, "") + (p.startsWith("/") ? p : `/${p}`);
+const featuredCard = featuredOg ? withBase(featuredOg) : undefined;
+// og-blog.mjs always derives the .webp beside the .png, and site.yml's
+// reference check fails a PR when either is missing — the <source> swap
+// rides that pair. The gate covers PRs only (direct master pushes skip it;
+// site.yml records that gap). Absolute-URL cards get the plain <img>.
+const featuredWebp =
+  featuredCard?.endsWith(".png") && !/^https?:/i.test(featuredCard)
+    ? featuredCard.replace(/\.png$/, ".webp")
+    : undefined;
 ---
 
 <SiteLayout
@@ -89,14 +101,16 @@ const featuredCard = featured
         ) : (
           <>
             {featured && (
-              /* The card art restates the title, so the image is decorative
-                 here (alt="") — the link's own text names the post. An AI
-                 featured post hides whole in Just Git; list-only is that
-                 view's fallback, same honesty line as the rows. */
+              /* The image is decorative here (alt="") — the anchor's own
+                 title and description name the destination, so the card adds
+                 no accessible information. An AI featured post hides whole in
+                 Just Git; list-only is that view's fallback, same honesty
+                 line as the rows. No border-b of its own: the list's border-y
+                 is the divider, and doubling it would 2px this seam only. */
               <a
                 href={postUrl(featured)}
                 data-view={featured.data.ai ? "ai" : undefined}
-                class="group grid gap-8 border-b border-line py-10 lg:grid-cols-2 lg:items-center"
+                class="group grid gap-8 py-10 lg:grid-cols-2 lg:items-center"
               >
                 <div>
                   <p class="text-sm text-faint">
@@ -127,15 +141,20 @@ const featuredCard = featured
                   </p>
                 </div>
                 <figure class="overflow-hidden rounded-lg border border-line bg-surface">
-                  <img
-                    src={featuredCard}
-                    alt=""
-                    width="1200"
-                    height="630"
-                    loading="eager"
-                    decoding="async"
-                    class="block h-auto w-full"
-                  />
+                  <picture>
+                    {featuredWebp && (
+                      <source srcset={featuredWebp} type="image/webp" />
+                    )}
+                    <img
+                      src={featuredCard}
+                      alt=""
+                      width="1200"
+                      height="630"
+                      loading="eager"
+                      decoding="async"
+                      class="block h-auto w-full"
+                    />
+                  </picture>
                 </figure>
               </a>
             )}
@@ -157,7 +176,10 @@ const featuredCard = featured
             )}
 
             {/* A ruled list, not a card grid: this system reserves boxes and
-                shadows for .window, i.e. real product screenshots. */}
+                shadows for .window (real product screenshots) and the one
+                featured-card figure above — a designed artifact in a hairline
+                frame, not a per-row treatment. */}
+            {listed.length > 0 && (
             <ul class="divide-y divide-line border-y border-line">
               {listed.map((post) => (
                 <li data-view={post.data.ai ? "ai" : undefined}>
@@ -189,6 +211,7 @@ const featuredCard = featured
                 </li>
               ))}
             </ul>
+            )}
           </>
         )
       }

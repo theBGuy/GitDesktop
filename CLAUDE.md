@@ -112,12 +112,14 @@ unprompted, the same way feature work updates its docs:
    (2400x1256, the LinkedIn master), `cover-1200.png`, and `cover-devto.png`
    (1000x420). The shared canvas, the series motifs, and the class names the
    kit reserves are all in `design/linkedin/README.md`.
-3. **The OG card** — run `node site/scripts/og-blog.mjs` (from `site/`) to
-   derive `site/public/og/<slug>.png` from the cover, and commit it — public/
-   is in the repo even though its design/ source isn't. The post's frontmatter
-   carries the matching `ogImage` + `ogImageAlt` pair (the alt describes the
-   card's artwork); the newest carded post also becomes the blog index's
-   featured slot automatically.
+3. **The OG card** — run `node scripts/og-blog.mjs` from `site/` to derive
+   `site/public/og/<slug>.png` plus its `.webp` sibling from the cover, and
+   commit both — public/ is in the repo even though its design/ source isn't
+   (CI re-runs the script's reference check, so a missing card fails the
+   `site build` gate). The post's frontmatter carries the matching `ogImage` +
+   `ogImageAlt` pair (the alt describes the card's artwork). When the newest
+   post carries a card it becomes the blog index's featured slot; skipping
+   this step leaves the slot empty — there is no fallback to an older card.
 4. **Verify the site still builds** — `cd site && pnpm build`.
 
 No changelog fragment: the blog is site-only work, and steps 1–3 are the
