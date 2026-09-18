@@ -105,12 +105,13 @@ this standard in passing is welcome.
 
 ### Convention checks
 
-Five dependency-free Node scripts guard convention classes a past audit already
+Six dependency-free Node scripts guard convention classes a past audit already
 paid to close once. Run them before pushing:
 
 ```sh
-# banned patterns · Rust invariants · IPC surface drift ·
-# rule-mirror drift · Tauri npm/crate parity · guard self-tests
+# banned patterns · Rust invariants · OG card references ·
+# IPC surface drift · rule-mirror drift · Tauri npm/crate parity ·
+# guard self-tests
 pnpm run checks
 ```
 
@@ -119,6 +120,8 @@ a required check on master, and cover banned frontend UI and state patterns
 (hover-revealed row actions, hand-rolled modifier keys, bare `.mutate(` calls
 in the converted trees, `setQueryData(key, undefined)`, inline clip-measured
 tooltips), the Rust refspec-argv and sync-`#[tauri::command]` invariants,
+blog OG-card references (every post's `ogImage` must resolve to a committed
+card plus its `.webp` sibling — a missing file ships as a 404 social card),
 Tauri IPC drift (every registered command needs a caller, every `invoke()`
 a registration), drift between the files that restate the git-whitelist hard
 rule, and the major.minor parity of each Tauri package's npm and crate halves,

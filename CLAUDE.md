@@ -115,11 +115,12 @@ unprompted, the same way feature work updates its docs:
 3. **The OG card** — run `node scripts/og-blog.mjs` from `site/` to derive
    `site/public/og/<slug>.png` plus its `.webp` sibling from the cover, and
    commit both — public/ is in the repo even though its design/ source isn't
-   (CI re-runs the script's reference check, so a missing card fails the
-   `site build` gate). The post's frontmatter carries the matching `ogImage` +
-   `ogImageAlt` pair (the alt describes the card's artwork). When the newest
-   post carries a card it becomes the blog index's featured slot; skipping
-   this step leaves the slot empty — there is no fallback to an older card.
+   (the required `guards` check re-runs the reference check via
+   `scripts/check-og-cards.mjs`, so a missing card fails every PR). The post's
+   frontmatter carries the matching `ogImage` + `ogImageAlt` pair (the alt
+   describes the card's artwork). When the newest post carries a card it
+   becomes the blog index's featured slot; skipping this step leaves the slot
+   empty — there is no fallback to an older card.
 4. **Verify the site still builds** — `cd site && pnpm build`.
 
 No changelog fragment: the blog is site-only work, and steps 1–3 are the

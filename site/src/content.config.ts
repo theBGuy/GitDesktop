@@ -64,9 +64,19 @@ const blog = defineCollection({
         message: "heroImage requires heroAlt (WCAG AA)",
         path: ["heroAlt"],
       })
+      // Symmetric on purpose: a lone heroAlt is dead frontmatter.
+      .refine((d) => !d.heroAlt || !!d.heroImage, {
+        message: "heroAlt without heroImage describes nothing",
+        path: ["heroImage"],
+      })
       .refine((d) => !d.ogImage || !!d.ogImageAlt, {
         message: "ogImage requires ogImageAlt (WCAG AA)",
         path: ["ogImageAlt"],
+      })
+      // Symmetric on purpose: alt without a card would describe og-default.
+      .refine((d) => !d.ogImageAlt || !!d.ogImage, {
+        message: "ogImageAlt without ogImage describes the default card",
+        path: ["ogImage"],
       }),
 });
 

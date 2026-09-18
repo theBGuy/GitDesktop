@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 jobs:
-  # BLOCKING. The five scripts are Node-stdlib-only by design, so this job
+  # BLOCKING. The six scripts are Node-stdlib-only by design, so this job
   # needs no install step and stays a seconds-long gate on every PR.
   guards:
     runs-on: ubuntu-latest
@@ -44,7 +44,7 @@ jobs:
           node-version: 24
 
       # One step per script so a failure names its own check in the UI. The same
-      # five scripts plus the self-tests below run locally via package.json's
+      # six scripts plus the self-tests below run locally via package.json's
       # `checks` alias — a new guard is added in BOTH places. Exception: a guard
       # needing a built artifact (check-built-whitespace.mjs) runs from the
       # workflow that builds it, and reaches this job only via its fixtures.
@@ -53,6 +53,9 @@ jobs:
 
       - name: Rust invariants
         run: node scripts/check-rust-invariants.mjs
+
+      - name: OG card references
+        run: node scripts/check-og-cards.mjs
 
       - name: IPC surface drift
         run: node scripts/check-dead-surface.mjs

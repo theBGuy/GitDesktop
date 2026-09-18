@@ -61,12 +61,6 @@ jobs:
       - name: Build the marketing site
         run: pnpm --filter site build
 
-      # design/ is gitignored so CI derives nothing — this run is purely the
-      # reference check: every frontmatter ogImage must resolve to a committed
-      # card (plus its .webp sibling), or the would-be 404 fails the gate.
-      - name: Assert every referenced OG card exists
-        run: node site/scripts/og-blog.mjs
-
       # The predicate lives in scripts/ with the other guards so its fixtures run
       # in quality.yml — a scanner's worst failure is a silent fail-open. It is
       # invoked here rather than from the `checks` alias because it reads a built

@@ -43,10 +43,10 @@ const withBase = (p: string) =>
     ? p
     : base.replace(/\/$/, "") + (p.startsWith("/") ? p : `/${p}`);
 const featuredCard = featuredOg ? withBase(featuredOg) : undefined;
-// og-blog.mjs always derives the .webp beside the .png, and site.yml's
-// reference check fails a PR when either is missing — the <source> swap
-// rides that pair. The gate covers PRs only (direct master pushes skip it;
-// site.yml records that gap). Absolute-URL cards get the plain <img>.
+// og-blog.mjs always derives the .webp beside the .png, and the required
+// `guards` check (scripts/check-og-cards.mjs) fails any PR — and re-validates
+// direct master pushes — when either file is missing, so the <source> swap
+// rides that pair. Absolute-URL cards get the plain <img>.
 const featuredWebp =
   featuredCard?.endsWith(".png") && !/^https?:/i.test(featuredCard)
     ? featuredCard.replace(/\.png$/, ".webp")
@@ -180,37 +180,37 @@ const featuredWebp =
                 featured-card figure above — a designed artifact in a hairline
                 frame, not a per-row treatment. */}
             {listed.length > 0 && (
-            <ul class="divide-y divide-line border-y border-line">
-              {listed.map((post) => (
-                <li data-view={post.data.ai ? "ai" : undefined}>
-                  <a href={postUrl(post)} class="group block py-7">
-                    <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted">
-                      <time datetime={isoDate(post.data.pubDate)}>
-                        {formatDate(post.data.pubDate)}
-                      </time>
-                      <span aria-hidden="true" class="text-faint">
-                        ·
-                      </span>
-                      <span>{readingTime(post)} min read</span>
-                      {post.data.ai && (
-                        <span class="key-chip">
-                          <span class="text-mint" aria-hidden="true">
-                            ✦
-                          </span>
-                          AI
+              <ul class="divide-y divide-line border-y border-line">
+                {listed.map((post) => (
+                  <li data-view={post.data.ai ? "ai" : undefined}>
+                    <a href={postUrl(post)} class="group block py-7">
+                      <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted">
+                        <time datetime={isoDate(post.data.pubDate)}>
+                          {formatDate(post.data.pubDate)}
+                        </time>
+                        <span aria-hidden="true" class="text-faint">
+                          ·
                         </span>
-                      )}
-                    </div>
-                    <h2 class="mt-2 max-w-[36ch] text-xl font-semibold tracking-tight underline decoration-line-2 underline-offset-4 transition-colors group-hover:decoration-mint sm:text-2xl">
-                      {post.data.title}
-                    </h2>
-                    <p class="mt-3 max-w-[68ch] text-[15px] leading-relaxed text-body">
-                      {post.data.description}
-                    </p>
-                  </a>
-                </li>
-              ))}
-            </ul>
+                        <span>{readingTime(post)} min read</span>
+                        {post.data.ai && (
+                          <span class="key-chip">
+                            <span class="text-mint" aria-hidden="true">
+                              ✦
+                            </span>
+                            AI
+                          </span>
+                        )}
+                      </div>
+                      <h2 class="mt-2 max-w-[36ch] text-xl font-semibold tracking-tight underline decoration-line-2 underline-offset-4 transition-colors group-hover:decoration-mint sm:text-2xl">
+                        {post.data.title}
+                      </h2>
+                      <p class="mt-3 max-w-[68ch] text-[15px] leading-relaxed text-body">
+                        {post.data.description}
+                      </p>
+                    </a>
+                  </li>
+                ))}
+              </ul>
             )}
           </>
         )

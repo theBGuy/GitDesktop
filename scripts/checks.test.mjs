@@ -35,6 +35,12 @@ import {
   staleAllowlistEntries as staleCommandEntries,
 } from "./check-dead-surface.mjs";
 import {
+  cardRefOf,
+  frontmatterOf,
+  isAbsoluteRef,
+  servedRelPathsFor,
+} from "./check-og-cards.mjs";
+import {
   CARRIERS,
   MOUNTED_CARRIERS,
   missingSentinels,
@@ -3222,5 +3228,60 @@ test("mismatchedPairs skips a half with no counterpart", () => {
   assert.deepEqual(
     splitCrates([["tauri", "2.11.5"]], [["@tauri-apps/cli", "1.0.0"]]),
     [],
+  );
+});
+
+// og-card gate: the reference check is only as good as its frontmatter parse,
+// and its historical failure mode is fail-open (a quoting form the regex
+// missed skipped the check entirely and the run stayed green).
+
+test("cardRefOf reads every YAML quoting form", () => {
+  assert.equal(cardRefOf('ogImage: "/og/a.png"'), "/og/a.png");
+  assert.equal(cardRefOf("ogImage: '/og/b.png'"), "/og/b.png");
+  assert.equal(cardRefOf("ogImage: /og/c.png"), "/og/c.png");
+  assert.equal(
+    cardRefOf("ogImage: https://cdn.example/d.png"),
+    "https://cdn.example/d.png",
+  );
+});
+
+test("cardRefOf does not fire on other keys or mid-line mentions", () => {
+  assert.equal(cardRefOf('heroImage: "/og/e.png"'), undefined);
+  assert.equal(cardRefOf("description: set ogImage: later"), undefined);
+  assert.equal(cardRefOf(""), undefined);
+});
+
+test("frontmatterOf is total and CRLF-safe", () => {
+  assert.equal(frontmatterOf("# heading only, no frontmatter\n"), "");
+  assert.equal(
+    cardRefOf(frontmatterOf('---\r\nogImage: "/og/x.png"\r\n---\r\nbody')),
+    "/og/x.png",
+  );
+});
+
+test("servedRelPathsFor obligates the webp sibling for png cards only", () => {
+  assert.deepEqual(servedRelPathsFor("/og/a.png"), ["og/a.png", "og/a.webp"]);
+  assert.deepEqual(servedRelPathsFor("/og/a.jpg"), ["og/a.jpg"]);
+  assert.deepEqual(servedRelPathsFor("https://cdn.example/a.png"), []);
+});
+
+test("isAbsoluteRef exempts http(s) in any case, nothing else", () => {
+  assert.equal(isAbsoluteRef("HTTPS://cdn.example/a.png"), true);
+  assert.equal(isAbsoluteRef("http://cdn.example/a.png"), true);
+  assert.equal(isAbsoluteRef("/og/a.png"), false);
+});
+
+test("og-blog.mjs's shared-predicate import resolves on disk", () => {
+  // The derive tool has no CI execution of its own, so a renamed guard would
+  // otherwise surface only on the author's next local run.
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const ogBlog = join(root, "site/scripts/og-blog.mjs");
+  const spec = readFileSync(ogBlog, "utf8").match(
+    /from "(\.\.[^"]*check-og-cards\.mjs)"/,
+  )?.[1];
+  assert.ok(spec, "og-blog.mjs imports the shared og-card predicates");
+  assert.ok(
+    existsSync(resolve(dirname(ogBlog), spec)),
+    `og-blog.mjs's import "${spec}" resolves to a real file`,
   );
 });

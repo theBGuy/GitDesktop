@@ -24,6 +24,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
+// Shared with the CI gate so the derive tool and the guard can never drift
+// on what counts as a card reference; fixtures in scripts/checks.test.mjs.
+import {
+  cardRefOf,
+  frontmatterOf,
+  servedRelPathsFor,
+} from "../../scripts/check-og-cards.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const site = path.resolve(here, "..");
 
@@ -48,13 +56,9 @@ const failures = [];
 for (const slug of slugs) {
   const source = path.join(designDir, slug, "cover.png");
   const outPng = path.join(outDir, `${slug}.png`);
-  const frontmatter =
-    (await readFile(path.join(blogDir, `${slug}.md`), "utf8")).split(
-      /^---\s*$/m,
-    )[1] ?? "";
-  // Quote-agnostic on purpose: a plain or single-quoted YAML scalar must not
-  // slip past the reference check (a scanner's worst failure is fail-open).
-  const cardRef = frontmatter.match(/^ogImage:\s*['"]?([^'"\s]+)/m)?.[1];
+  const cardRef = cardRefOf(
+    frontmatterOf(await readFile(path.join(blogDir, `${slug}.md`), "utf8")),
+  );
 
   if (existsSync(source)) {
     const resized = sharp(source).resize(WIDTH, HEIGHT, {
@@ -70,25 +74,23 @@ for (const slug of slugs) {
       .webp({ quality: 82 })
       .toFile(path.join(outDir, `${slug}.webp`));
     derived++;
-    if (!cardRef)
-      console.warn(`note: ${slug} has a cover but no ogImage frontmatter`);
   } else if (existsSync(outPng)) {
     kept++;
   }
 
+  if (!cardRef) {
+    // Card on disk (or derivable) with no frontmatter = an empty featured
+    // slot the build accepts silently.
+    if (existsSync(source) || existsSync(outPng))
+      console.warn(`note: ${slug} has a card but no ogImage frontmatter`);
+    continue;
+  }
+
   // The reference check runs on the frontmatter VALUE, not the slug: a
   // typo'd path 404s even when <slug>.png derived fine.
-  if (cardRef && !/^https?:/i.test(cardRef)) {
-    const served = path.join(site, "public", cardRef.replace(/^\//, ""));
-    if (!existsSync(served)) {
-      failures.push(`${slug}: ogImage "${cardRef}" has no file under public/`);
-    } else if (
-      served.endsWith(".png") &&
-      !existsSync(served.replace(/\.png$/, ".webp"))
-    ) {
-      failures.push(
-        `${slug}: "${cardRef}" is missing the .webp sibling the featured slot serves`,
-      );
+  for (const rel of servedRelPathsFor(cardRef)) {
+    if (!existsSync(path.join(site, "public", rel))) {
+      failures.push(`${slug}: ogImage "${cardRef}" needs public/${rel}`);
     }
   }
 }
@@ -98,5 +100,6 @@ console.log(
 );
 if (failures.length > 0) {
   for (const f of failures) console.error(`error: ${f}`);
-  process.exit(1);
 }
+// exitCode, never process.exit — pending stderr writes must flush.
+process.exitCode = failures.length > 0 ? 1 : 0;
