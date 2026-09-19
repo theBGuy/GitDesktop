@@ -759,8 +759,11 @@ function paramListOpen(text, from) {
 
 /** A parameter or argument list split on its TOP-LEVEL commas. `<`/`>` are not
  *  counted as brackets — `=> Promise<T>` would otherwise drive the depth negative
- *  and misplace every later comma. The residual: a top-level comma inside a generic
- *  (`Map<string, number>`) over-counts, which can only make this check MISS. */
+ *  and misplace every later comma. The residual is a comma inside a generic
+ *  (`Promise<Record<string, unknown>>`), which over-counts in BOTH directions: an
+ *  over-counted ARGUMENT list can hide a missing key, and an over-counted PARAMETER
+ *  list raises the required index so a call that does pass the key trips the check.
+ *  Zero-instance in the scanned modules today; a real generic parser is the fix. */
 function splitTopLevel(list) {
   const out = [];
   let depth = 0;
@@ -779,23 +782,25 @@ function splitTopLevel(list) {
   return out.map((s) => s.trim()).filter(Boolean);
 }
 
+/** Both spellings of a conditional key spread, the same name required on each side
+ *  so an unrelated pair can't match: `...(x ? { mutationKey: x } : {})` and
+ *  `...(x && { mutationKey: x })`. */
+const CONDITIONAL_KEY_SPREAD_RE =
+  /\.\.\.\(\s*([A-Za-z_$][\w$]*)\s*(?:\?\s*\{\s*mutationKey\s*:\s*\1\s*\}\s*:\s*\{\s*\}|&&\s*\{\s*mutationKey\s*:\s*\1\s*\})\s*\)/;
+
 /**
  * The index of the wrapper parameter its mutation key is CONDITIONAL on — the
- * `...(identity ? { mutationKey: identity } : {})` spread the local PR/issue
- * wrappers use — or -1 when the key is unconditional. `MUTATION_KEYED_RE` sees that
- * spread and reads the wrapper as pinned no matter what its delegators pass, so the
- * obligation moves to the delegating call: it has to supply the argument.
+ * spread the local PR/issue wrappers use — or -1 when the key is unconditional.
+ * `MUTATION_KEYED_RE` sees that spread and reads the wrapper as pinned no matter
+ * what its delegators pass, so the obligation moves to the delegating call: it has
+ * to supply the argument.
  */
 function conditionalKeyParam(wrapper, text) {
   for (const call of wrapper.body.matchAll(MUTATION_CALL_RE)) {
     const open = wrapper.bodyOpen + call.index + call[0].length - 1;
     const close = balancedEnd(text, open, "(", ")");
     if (close < 0) continue;
-    const spread = text
-      .slice(open, close)
-      .match(
-        /\.\.\.\(\s*([A-Za-z_$][\w$]*)\s*\?\s*\{\s*mutationKey\s*:\s*\1\s*\}\s*:\s*\{\s*\}\s*\)/,
-      );
+    const spread = text.slice(open, close).match(CONDITIONAL_KEY_SPREAD_RE);
     if (!spread) continue;
     const index = wrapper.params.findIndex((p) =>
       new RegExp(`^${spread[1]}\\s*[?:]`).test(p),
@@ -867,11 +872,12 @@ const unpinnedMutationIdentity = ({ text, starts }) => {
     for (const wrapper of wrappers) {
       const delegation = new RegExp(`\\b${wrapper.name}\\s*\\(`, "g");
       let delegates = false;
+      // A conditionally-keyed wrapper is only pinned if the delegating call passes
+      // the argument the key hangs on; the wrapper body reads pinned either way.
+      // Depends on the wrapper alone, so it is resolved once per wrapper.
+      const needed = conditionalKeyParam(wrapper, text);
       for (const call of hook.body.matchAll(delegation)) {
         delegates = true;
-        // A conditionally-keyed wrapper is only pinned if THIS call passes the
-        // argument the key hangs on; the wrapper body reads pinned either way.
-        const needed = conditionalKeyParam(wrapper, text);
         if (needed < 0) continue;
         const callOpen = hook.bodyOpen + call.index + call[0].length - 1;
         const callClose = balancedEnd(text, callOpen, "(", ")");

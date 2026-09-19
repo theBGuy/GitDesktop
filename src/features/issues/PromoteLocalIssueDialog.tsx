@@ -36,6 +36,15 @@ import { cn } from "@/lib/utils";
 
 type Destination = "forge" | "jira";
 
+/** Where a settle landed, from ONE store read: `live` is this repo still being the
+ *  one on screen, `away` the ` in <repo>` a toast title carries when it isn't.
+ *  Both derive from that single read, so the navigation gate and the copy can never
+ *  disagree about where the work ended up. Call it AFTER the await, never before. */
+function landedIn(repoPath: string): { live: boolean; away: string } {
+  const live = originNoteFor(repoPath) === undefined;
+  return { live, away: live ? "" : ` in ${repoNameFromPath(repoPath)}` };
+}
+
 /**
  * Publishes a local issue to a real tracker — the repo's forge (GitHub or
  * GitLab) or the linked Jira project — opening a real issue with the same
@@ -159,9 +168,7 @@ export function PromoteLocalIssueDialog({
       // when it isn't the one on screen, while the navigation below only lands
       // when it is — landed elsewhere it would close a dialog the user reopened
       // there and point that repo's Issues tab at a number belonging to this one.
-      const origin = originNoteFor(repoPath);
-      const live = origin === undefined;
-      const away = live ? "" : ` in ${repoNameFromPath(repoPath)}`;
+      const { live, away } = landedIn(repoPath);
       toast.success(`Opened issue #${number}${away}`, {
         description: url,
         action: { label: "View", onClick: () => openUrl(url) },
@@ -189,11 +196,9 @@ export function PromoteLocalIssueDialog({
       // dialog the user opened for something else.
       const { number, url } = created;
       const ui = useUiStore.getState();
-      const origin = originNoteFor(repoPath);
+      const { live, away } = landedIn(repoPath);
       // The close needs the subject too; the toast names only the REPO, since that
       // is the part the user can't see for themselves.
-      const live = origin === undefined;
-      const away = live ? "" : ` in ${repoNameFromPath(repoPath)}`;
       const onThisIssue =
         live &&
         ui.selectedIssue?.kind === "local" &&
@@ -233,9 +238,7 @@ export function PromoteLocalIssueDialog({
       // selection and close only land while that repo is the one on screen. The
       // pinned `useJiraCreateIssue` means this continuation outlives the detach a
       // switch causes, so it has to answer for where it ended up.
-      const origin = originNoteFor(repoPath);
-      const live = origin === undefined;
-      const away = live ? "" : ` in ${repoNameFromPath(repoPath)}`;
+      const { live, away } = landedIn(repoPath);
       toast.success(`Created ${key}${away}`, {
         description: url,
         action: { label: "View", onClick: () => openUrl(url) },
@@ -254,9 +257,7 @@ export function PromoteLocalIssueDialog({
       // would shut a confirm the user opened for a different issue.
       const { key, url } = created;
       const ui = useUiStore.getState();
-      const origin = originNoteFor(repoPath);
-      const live = origin === undefined;
-      const away = live ? "" : ` in ${repoNameFromPath(repoPath)}`;
+      const { live, away } = landedIn(repoPath);
       const onThisIssue =
         live &&
         ui.selectedIssue?.kind === "local" &&

@@ -2251,6 +2251,43 @@ test("mutation-identity-pinning requires the identity ARGUMENT at a conditionall
   // at its own line (16) — the wrapper body is not where the fix goes.
   assert.deepEqual(unpinnedMutationIdentity(mod(true)), []);
   assert.deepEqual(unpinnedMutationIdentity(mod(false)), [16]);
+  // The `&&` spelling of the same spread has to behave identically — recognizing
+  // only the ternary was its own fail-open: MUTATION_KEYED_RE reads the wrapper as
+  // pinned, and a delegator dropping the key would have gone unreported.
+  const andForm = (identityArg) =>
+    [
+      "function useLocalPrMutation<TArgs, TData>(",
+      "  repo: string,",
+      "  fn: (args: TArgs) => Promise<TData>,",
+      "  identity?: readonly unknown[],",
+      ") {",
+      "  return useMutation({",
+      "    ...(identity && { mutationKey: identity }),",
+      "    mutationFn: fn,",
+      "  });",
+      "}",
+      "",
+      "export function useCreateLocalPr(repo: string) {",
+      "  return useLocalPrMutation(",
+      "    repo,",
+      "    (input: { title: string }) => createLocalPr(repo, input),",
+      ...(identityArg ? ['    ["local-pr", "create", repo],'] : []),
+      "  );",
+      "}",
+    ].join("\n");
+  assert.deepEqual(unpinnedMutationIdentity(andForm(true)), []);
+  assert.deepEqual(unpinnedMutationIdentity(andForm(false)), [13]);
+  // The two sides of the spread must name the SAME binding, or an unrelated pair
+  // would read as a conditional key and move the obligation to the call.
+  assert.deepEqual(
+    unpinnedMutationIdentity(
+      andForm(false).replace(
+        "{ mutationKey: identity })",
+        "{ mutationKey: other })",
+      ),
+    ),
+    [],
+  );
   // An unconditional key (useWebhookMutation's shape) is unaffected: there is no
   // optional parameter for the call to have to supply.
   const unconditional = [
