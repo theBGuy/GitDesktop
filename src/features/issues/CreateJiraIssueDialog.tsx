@@ -37,6 +37,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
+import { toastErrorWithNote } from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
@@ -95,9 +96,10 @@ export function CreateJiraIssueDialog({
   const [issueTypeId, setIssueTypeId] = useState<string>("");
   const issueTypeSelectId = useId();
   // A Jira validation error the create command surfaced (field-level messages
-  // the Rust side joins readably) — shown inline under the form, not a toast.
-  // Stamped with the repo it fired in: this dialog is retained across repo
-  // switches, so a late failure must not render in a reopened foreign draft.
+  // the Rust side joins readably). Stamped with the repo it fired in, because
+  // this dialog is retained across repo switches: the inline message belongs to
+  // that repo's draft and renders only there, while a failure that lands once
+  // the user has moved on rides a toast from the catch instead, naming it.
   const [createError, setCreateError] = useState<{
     repo: string;
     message: string;
@@ -142,6 +144,11 @@ export function CreateJiraIssueDialog({
       } catch (e) {
         // Keep the dialog open so the draft survives; surface the reason inline.
         setCreateError({ repo: repoPath, message: errorMessage(e) });
+        // The inline message renders only in the repo this fired in, so a
+        // failure landing after a switch would be silent — the toast is the one
+        // surface that still reaches the user, and it names that repo.
+        const originNote = originNoteFor(repoPath);
+        if (originNote) toastErrorWithNote(e, originNote);
       }
     },
   });

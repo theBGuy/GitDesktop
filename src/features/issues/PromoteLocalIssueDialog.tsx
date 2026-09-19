@@ -159,14 +159,13 @@ export function PromoteLocalIssueDialog({
       // when it isn't the one on screen, while the navigation below only lands
       // when it is — landed elsewhere it would close a dialog the user reopened
       // there and point that repo's Issues tab at a number belonging to this one.
-      const live = originNoteFor(repoPath) === undefined;
-      toast.success(
-        `Opened issue #${number}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}`,
-        {
-          description: url,
-          action: { label: "View", onClick: () => openUrl(url) },
-        },
-      );
+      const origin = originNoteFor(repoPath);
+      const live = origin === undefined;
+      const away = live ? "" : ` in ${repoNameFromPath(repoPath)}`;
+      toast.success(`Opened issue #${number}${away}`, {
+        description: url,
+        action: { label: "View", onClick: () => openUrl(url) },
+      });
       // The promoted issue lives on the fork (origin) — force the origin lens so
       // the Issues tab shows it (and any stale remote selection is cleared) before
       // navigating to it.
@@ -181,11 +180,25 @@ export function PromoteLocalIssueDialog({
         toastError(e);
         return;
       }
+      // The remote issue already exists. Close the dialog (leaving it open on this
+      // issue is a duplicate factory — the local issue wasn't closed, so it still
+      // reads as promotable) and disclose what was created and what failed. The
+      // close names its SUBJECT as well as its repo: the host keeps one
+      // `promoteOpen` state and already blanks it when the selection moves, so a
+      // close landing on another issue's confirm protects nothing here and shuts a
+      // dialog the user opened for something else.
       const { number, url } = created;
-      const away = originNoteFor(repoPath)
-        ? ` in ${repoNameFromPath(repoPath)}`
-        : "";
-      onOpenChange(false);
+      const ui = useUiStore.getState();
+      const origin = originNoteFor(repoPath);
+      // The close needs the subject too; the toast names only the REPO, since that
+      // is the part the user can't see for themselves.
+      const live = origin === undefined;
+      const away = live ? "" : ` in ${repoNameFromPath(repoPath)}`;
+      const onThisIssue =
+        live &&
+        ui.selectedIssue?.kind === "local" &&
+        ui.selectedIssue.id === issue.id;
+      if (onThisIssue) onOpenChange(false);
       toast.error(
         `Created issue #${number}${away}, but ${failedStep} failed: ${errorMessage(e)}`,
         {
@@ -220,14 +233,13 @@ export function PromoteLocalIssueDialog({
       // selection and close only land while that repo is the one on screen. The
       // pinned `useJiraCreateIssue` means this continuation outlives the detach a
       // switch causes, so it has to answer for where it ended up.
-      const live = originNoteFor(repoPath) === undefined;
-      toast.success(
-        `Created ${key}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}`,
-        {
-          description: url,
-          action: { label: "View", onClick: () => openUrl(url) },
-        },
-      );
+      const origin = originNoteFor(repoPath);
+      const live = origin === undefined;
+      const away = live ? "" : ` in ${repoNameFromPath(repoPath)}`;
+      toast.success(`Created ${key}${away}`, {
+        description: url,
+        action: { label: "View", onClick: () => openUrl(url) },
+      });
       if (live) {
         onOpenChange(false);
         selectIssue({ kind: "jira", id: key });
@@ -237,11 +249,19 @@ export function PromoteLocalIssueDialog({
         toastError(e);
         return;
       }
+      // Same subject-and-repo close as the forge path: one `promoteOpen` for the
+      // whole view, blanked when the selection moves, so closing it from here
+      // would shut a confirm the user opened for a different issue.
       const { key, url } = created;
-      const away = originNoteFor(repoPath)
-        ? ` in ${repoNameFromPath(repoPath)}`
-        : "";
-      onOpenChange(false);
+      const ui = useUiStore.getState();
+      const origin = originNoteFor(repoPath);
+      const live = origin === undefined;
+      const away = live ? "" : ` in ${repoNameFromPath(repoPath)}`;
+      const onThisIssue =
+        live &&
+        ui.selectedIssue?.kind === "local" &&
+        ui.selectedIssue.id === issue.id;
+      if (onThisIssue) onOpenChange(false);
       toast.error(
         `Created ${key}${away}, but ${failedStep} failed: ${errorMessage(e)}`,
         {

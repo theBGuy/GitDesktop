@@ -2185,9 +2185,12 @@ test("mutation-identity-pinning stops at its documented boundary", () => {
   // Pinned as a fixture so widening the rule fails HERE, loudly, instead of quietly
   // turning every such wrapper into a new pin-or-allowlist decision.
   const seedingWrapper = [
+    // Four parameters, matching the real useTimeTrackingMutation this pins, so the
+    // fixture stays greppable against its site.
     "function useTimeTrackingMutation(",
     "  repo: string,",
     "  statsKey: (repo: string, number: number) => readonly unknown[],",
+    "  viewKey: (repo: string, number: number) => readonly unknown[],",
     "  mutationFn: (args: { number: number }) => Promise<GitLabTimeStats>,",
     ") {",
     "  const queryClient = useQueryClient();",
@@ -2200,7 +2203,7 @@ test("mutation-identity-pinning stops at its documented boundary", () => {
     "}",
     "",
     "export function useAddMrSpentTime(repo: string) {",
-    "  return useTimeTrackingMutation(repo, mrTimeStatsKey, (args) =>",
+    "  return useTimeTrackingMutation(repo, mrTimeStatsKey, mrViewKey, (args) =>",
     "    api.forgeGlMrAddSpentTime(repo, args.number),",
     "  );",
     "}",
@@ -2210,10 +2213,63 @@ test("mutation-identity-pinning stops at its documented boundary", () => {
   // the line the boundary actually draws.
   assert.deepEqual(
     unpinnedMutationIdentity(
-      `${seedingWrapper}\n\nexport function useCreateSpentTime(repo: string) {\n  return useTimeTrackingMutation(repo, mrTimeStatsKey, (a) => api.x(repo, a));\n}`,
+      `${seedingWrapper}\n\nexport function useCreateSpentTime(repo: string) {\n  return useTimeTrackingMutation(repo, k, v, (a) => api.x(repo, a));\n}`,
     ),
-    [7],
+    [8],
   );
+});
+
+test("mutation-identity-pinning requires the identity ARGUMENT at a conditionally-keyed delegation", () => {
+  // The local PR/issue wrappers' shape. `MUTATION_KEYED_RE` sees the spread and
+  // reads the wrapper as pinned however it is called, so the obligation is the
+  // delegating call's: without this the key can be dropped and checks stay green.
+  const mod = (identityArg) =>
+    [
+      "function useLocalPrMutation<TArgs, TData>(",
+      "  repo: string,",
+      "  fn: (args: TArgs) => Promise<TData>,",
+      "  identity?: readonly unknown[],",
+      ") {",
+      "  const queryClient = useQueryClient();",
+      "  return useMutation({",
+      "    ...(identity ? { mutationKey: identity } : {}),",
+      "    mutationFn: fn,",
+      "    onSettled: () =>",
+      "      queryClient.invalidateQueries({ queryKey: localPrKey(repo) }),",
+      "  });",
+      "}",
+      "",
+      "export function useCreateLocalPr(repo: string) {",
+      "  return useLocalPrMutation(",
+      "    repo,",
+      "    (input: { title: string }) => createLocalPr(repo, input),",
+      ...(identityArg ? ['    ["local-pr", "create", repo],'] : []),
+      "  );",
+      "}",
+    ].join("\n");
+  // Passing it: clean. Omitting it: the delegating call is the violation, reported
+  // at its own line (16) — the wrapper body is not where the fix goes.
+  assert.deepEqual(unpinnedMutationIdentity(mod(true)), []);
+  assert.deepEqual(unpinnedMutationIdentity(mod(false)), [16]);
+  // An unconditional key (useWebhookMutation's shape) is unaffected: there is no
+  // optional parameter for the call to have to supply.
+  const unconditional = [
+    "function useWebhookMutation<TArgs, TData>(",
+    "  repo: string,",
+    "  op: string,",
+    "  mutationFn: (args: TArgs) => Promise<TData>,",
+    ") {",
+    "  return useMutation({",
+    '    mutationKey: ["webhook", op, repo],',
+    "    mutationFn,",
+    "  });",
+    "}",
+    "",
+    "export function useCreateWebhook(repo: string) {",
+    '  return useWebhookMutation(repo, "create", (i) => api.create(repo, i));',
+    "}",
+  ].join("\n");
+  assert.deepEqual(unpinnedMutationIdentity(unconditional), []);
 });
 
 test("mutation-identity-pinning sees through a generic parameter list", () => {

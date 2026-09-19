@@ -57,10 +57,15 @@ export function CreateLocalIssueDialog({
    *  never re-seeds, so this still reads the submit's repo and the settle's close
    *  is the right one. */
   const draftRepoRef = useRef(repoPath);
+  /** Which draft the form holds, bumped only where the seed actually reseeds. A
+   *  repo check can't tell drafts apart within one repo: closing and reopening
+   *  mid-create puts a fresh draft behind the same path. */
+  const seedGenRef = useRef(0);
 
   const form = useAppForm({
     defaultValues: { title: "", body: "" },
     onSubmit: async ({ value }) => {
+      const submitGen = seedGenRef.current;
       try {
         const issue = await createIssue.mutateAsync({
           title: value.title.trim(),
@@ -74,9 +79,14 @@ export function CreateLocalIssueDialog({
         toast.success(`Created local issue: ${issue.title}`, {
           description: originNote,
         });
-        // Closed whenever the form still holds THIS submit's draft — a seed under
-        // another repo has already replaced it with one that isn't ours to close.
-        if (draftRepoRef.current === repoPath) onOpenChange(false);
+        // Both axes of "still THIS submit's draft": the repo, since a seed under
+        // another one already replaced it, and the generation, since a close and
+        // reopen in this same repo reseeds a fresh draft behind the same path.
+        if (
+          draftRepoRef.current === repoPath &&
+          seedGenRef.current === submitGen
+        )
+          onOpenChange(false);
         if (stillHere) selectIssue({ kind: "local", id: issue.id });
       } catch (e) {
         // The failure names its repo too, so one that landed away from the live
@@ -113,6 +123,7 @@ export function CreateLocalIssueDialog({
       // blank on reopen.
       return;
     }
+    seedGenRef.current += 1;
     form.reset(
       { title: initialDraft?.title ?? "", body: initialDraft?.body ?? "" },
       { keepDefaultValues: true },

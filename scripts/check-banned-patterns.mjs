@@ -686,8 +686,8 @@ const QUERIES_BARREL = `${QUERIES_DIR}index.ts`;
 const QUERIES_INTERNAL = `${QUERIES_DIR}internal.ts`;
 const JIRA_QUERIES = "src/lib/jira/queries.ts";
 /** The local-entity query modules. Same repo-scoped create shape as the git
- *  package, in their own directories — out of scope, the ratchet cannot see the
- *  local PR and local issue creates at all. */
+ *  package, in their own directories, so they are named into scope one by one
+ *  rather than reached by a directory prefix. */
 const LOCAL_QUERIES = ["src/lib/pulls/queries.ts", "src/lib/issues/queries.ts"];
 
 // The mutation-identity family. Anchors are deliberately structural rather than
@@ -757,6 +757,54 @@ function paramListOpen(text, from) {
   return text[i] === "(" ? i : -1;
 }
 
+/** A parameter or argument list split on its TOP-LEVEL commas. `<`/`>` are not
+ *  counted as brackets — `=> Promise<T>` would otherwise drive the depth negative
+ *  and misplace every later comma. The residual: a top-level comma inside a generic
+ *  (`Map<string, number>`) over-counts, which can only make this check MISS. */
+function splitTopLevel(list) {
+  const out = [];
+  let depth = 0;
+  let cur = "";
+  for (const ch of list) {
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) depth--;
+    if (ch === "," && depth === 0) {
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * The index of the wrapper parameter its mutation key is CONDITIONAL on — the
+ * `...(identity ? { mutationKey: identity } : {})` spread the local PR/issue
+ * wrappers use — or -1 when the key is unconditional. `MUTATION_KEYED_RE` sees that
+ * spread and reads the wrapper as pinned no matter what its delegators pass, so the
+ * obligation moves to the delegating call: it has to supply the argument.
+ */
+function conditionalKeyParam(wrapper, text) {
+  for (const call of wrapper.body.matchAll(MUTATION_CALL_RE)) {
+    const open = wrapper.bodyOpen + call.index + call[0].length - 1;
+    const close = balancedEnd(text, open, "(", ")");
+    if (close < 0) continue;
+    const spread = text
+      .slice(open, close)
+      .match(
+        /\.\.\.\(\s*([A-Za-z_$][\w$]*)\s*\?\s*\{\s*mutationKey\s*:\s*\1\s*\}\s*:\s*\{\s*\}\s*\)/,
+      );
+    if (!spread) continue;
+    const index = wrapper.params.findIndex((p) =>
+      new RegExp(`^${spread[1]}\\s*[?:]`).test(p),
+    );
+    if (index >= 0) return index;
+  }
+  return -1;
+}
+
 /** Every `function use…` in the file that takes a `repo`, as body spans. */
 function repoScopedHooks(text) {
   const out = [];
@@ -773,6 +821,7 @@ function repoScopedHooks(text) {
     out.push({
       name: decl[2],
       exported: Boolean(decl[1]),
+      params: splitTopLevel(text.slice(paramOpen + 1, paramClose)),
       bodyOpen,
       body: text.slice(bodyOpen, bodyClose),
     });
@@ -788,10 +837,11 @@ function repoScopedHooks(text) {
  *
  * Delegation is resolved ONE level: a create hook that builds its mutation through a
  * private wrapper in the same file (useCreateWebhook → useWebhookMutation) is checked
- * at the wrapper, which is where the key has to go. Residual blind spots, all
- * zero-instance today and named in the check's message: a wrapper imported from
- * ANOTHER module, a helper not named `use…`, and a wrapper that seeds the cache but
- * is reached only from non-create hooks.
+ * at the wrapper, which is where the key has to go — and when that wrapper's key
+ * rides a conditional spread on an optional parameter, at the DELEGATING CALL too,
+ * which is the only place the difference is visible. The shapes this still cannot
+ * see are listed in the check's `message`, which is the single inventory; some of
+ * them are live, so a green run is not a clean bill for the whole class.
  */
 const unpinnedMutationIdentity = ({ text, starts }) => {
   const hits = new Set();
@@ -815,8 +865,23 @@ const unpinnedMutationIdentity = ({ text, starts }) => {
     unpinned(hook, (args) => isCreate || ONSUCCESS_SEED_RE.test(args));
     if (!isCreate) continue;
     for (const wrapper of wrappers) {
-      if (!new RegExp(`\\b${wrapper.name}\\s*\\(`).test(hook.body)) continue;
-      unpinned(wrapper, () => true);
+      const delegation = new RegExp(`\\b${wrapper.name}\\s*\\(`, "g");
+      let delegates = false;
+      for (const call of hook.body.matchAll(delegation)) {
+        delegates = true;
+        // A conditionally-keyed wrapper is only pinned if THIS call passes the
+        // argument the key hangs on; the wrapper body reads pinned either way.
+        const needed = conditionalKeyParam(wrapper, text);
+        if (needed < 0) continue;
+        const callOpen = hook.bodyOpen + call.index + call[0].length - 1;
+        const callClose = balancedEnd(text, callOpen, "(", ")");
+        if (callClose < 0) continue;
+        const passed = splitTopLevel(
+          text.slice(callOpen + 1, callClose),
+        ).length;
+        if (passed <= needed) hits.add(lineAt(starts, callOpen));
+      }
+      if (delegates) unpinned(wrapper, () => true);
     }
   }
   return [...hits];
@@ -1310,6 +1375,11 @@ export const CHECKS = [
     // wrapper in the SAME file, and only from a create hook. Widening the name
     // heuristic makes each newly-seen site a pin-or-allowlist decision, so it is a
     // deliberate follow-up — widen here rather than allowlisting the consequences.
+    // The local-entity wrappers keep their key OPTIONAL on purpose: making it
+    // mandatory would pin their update/delete hooks too, and those callers read
+    // `isPending` as a re-entry guard that a detach silently opens. That migration
+    // (isPending → a local submitting flag) is the recorded follow-up; until it
+    // lands, the delegating-call check above is what holds the create half.
     appliesTo: (file) =>
       (file.startsWith(QUERIES_DIR) && file.endsWith(".ts")) ||
       file === JIRA_QUERIES ||
@@ -1330,7 +1400,7 @@ export const CHECKS = [
       hint: `${QUERIES_DIR}*.ts + ${JIRA_QUERIES} + ${LOCAL_QUERIES.join(" + ")}`,
     },
     message:
-      "a repo-scoped create or cache-seeding mutation must pin its identity (gd-conventions, 'Mutation identity pinning') — react-query re-pushes a hook's options onto its PENDING mutation on every render, so without a mutation key a repo switch mid-flight retargets the call, its callbacks and its cache writes to the newly-live repo; pass `identity: [\"<op>\", repo, …]` on useRepoMutation or `mutationKey: [\"<op>\", repo, …]` on a plain useMutation, naming exactly the hook-scope values the call closes over, and make sure every caller takes its continuation from `await mutateAsync` (a detached mutation's observer goes idle, so `isPending`/`data`/`error` reads stop tracking it) — or add an allowlist entry with rationale. This scan does NOT see six shapes inside its own boundary, so review them by hand: a create whose NAME lacks 'Create' (the `Add…`/`Submit…`/`Publish…`/`Fork…` spellings — useAddRemote, useSubmitReview, useForkRepo and their siblings are all live), a mutation built through a wrapper in another MODULE, one built through a helper not named `use…`, a cache-seeding wrapper reached only from non-create hooks, a hook declared as `export const useX = (repo) => …` (the declaration anchor requires the `function` keyword), and one whose return type is an inline object literal (`): { … } {` — the body scan would take the return type as the body). The last two are zero-instance in the scanned modules today, so adding either shape means teaching this scanner first",
+      "a repo-scoped create or cache-seeding mutation must pin its identity (gd-conventions, 'Mutation identity pinning') — react-query re-pushes a hook's options onto its PENDING mutation on every render, so without a mutation key a repo switch mid-flight retargets the call, its callbacks and its cache writes to the newly-live repo; pass `identity: [\"<op>\", repo, …]` on useRepoMutation or `mutationKey: [\"<op>\", repo, …]` on a plain useMutation, naming exactly the hook-scope values the call closes over, and make sure every caller takes its continuation from `await mutateAsync` (a detached mutation's observer goes idle, so `isPending`/`data`/`error` reads stop tracking it) — or add an allowlist entry with rationale. This scan does NOT see seven shapes inside its own boundary, so review them by hand: a create whose NAME lacks 'Create' (the `Add…`/`Submit…`/`Publish…`/`Fork…` spellings — useAddRemote, useSubmitReview, useForkRepo and their siblings are all live), a mutation built through a wrapper in another MODULE, one built through a helper not named `use…`, a cache-seeding wrapper reached only from non-create hooks, a conditionally-keyed wrapper whose delegating call DOES pass the identity argument but passes something undefined or keyless in it (the call-site check counts arguments, it cannot evaluate them — src/lib/pulls/queries.ts and src/lib/issues/queries.ts are the live pair), a hook declared as `export const useX = (repo) => …` (the declaration anchor requires the `function` keyword), and one whose return type is an inline object literal (`): { … } {` — the body scan would take the return type as the body). The last two are zero-instance in the scanned modules today, so adding either shape means teaching this scanner first",
   },
 ];
 
