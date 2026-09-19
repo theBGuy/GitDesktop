@@ -550,9 +550,10 @@ edit between them, so a lane resolving the copy you did not edit gets stale
 text. `scripts/check-skill-mirrors.mjs` gates every skill present in both trees
 and is a required `guards` step; the skips it declares (`EXEMPT` for per-harness
 rewrites, `SINGLE_TREE` for one-tree skills) each carry their reason. Line
-endings, each tree's own `.claude/`-vs-`.agents/` self-references, the
+endings, the two trees' `.claude/`-vs-`.agents/` path references, the
 `/cmd`-vs-`$cmd` sigil, and harness-only frontmatter keys are normalized away —
-everything else must match.
+everything else must match. The path rewrite is symmetric, so byte-identical
+copies always compare equal; the script header records what that costs.
 
 **In a delegated package the spec's `Docs-sync:` field is authoritative:**
 apply exactly what it lists (those files are thereby in scope); "orchestrator

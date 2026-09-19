@@ -18,7 +18,7 @@ Comprehensive performance optimization guide for React and Next.js applications,
 > Rust backend over Tauri IPC (`@tauri-apps/api`, surfaced through react-query),
 > never from server-side fetching or an RSC boundary.
 >
-> - **Skip entirely:** the **`server-`** section (all 9 rules — RSC/SSR/server
+> - **Skip entirely:** the **`server-`** section (all 10 rules — RSC/SSR/server
 >   actions, `React.cache()`, `after()`, cross-boundary prop serialization) and
 >   the **`rendering-hydration-*`** rules (`rendering-hydration-no-flicker`,
 >   `rendering-hydration-suppress-warning`) — hydration only exists with SSR.

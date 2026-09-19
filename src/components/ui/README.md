@@ -144,9 +144,11 @@ first, then decide. Suspicion alone is not grounds for dropping one.
    stacking still are — judge a re-apply against those two grounds alone.
    Measured on the same probe against both versions: a node portalled to
    `<body>` from inside a hidden `<Activity>` keeps `display: block` on
-   19.2.8 and gets `display: none !important` on 19.3.0. The portal has to
-   sit inside a host element for this to mean anything, because the walk
-   styles the first host it finds per fiber path and skips deeper ones.
+   19.2.8 and gets `display: none !important` on 19.3.0. If you re-run that
+   probe, keep a host element between the `<Activity>` and the portal, as a
+   real panel has. With the portal as a direct child of `<Activity>` the walk
+   reaches its fiber directly and 19.2.8 conceals it too, so the comparison
+   stops discriminating and reports the same verdict for the wrong reason.
 2. **Base UI gaining container-scoped modality**, or a modal that tracks
    visibility. That would subsume the `modal` flip and the dismissal
    suppression in `dialog.tsx` and `sheet.tsx`, though not the container

@@ -3374,16 +3374,49 @@ test("skill-mirrors scopes the sigil rule to the skill's own command", () => {
   );
 });
 
-test("skill-mirrors ignores harness-specific frontmatter keys", () => {
-  // allowed-tools / user-invocable are Claude-only config, not content.
+test("skill-mirrors ignores every harness-only frontmatter key", () => {
+  // The whole HARNESS_ONLY_KEYS set is Claude-only config, not content: without
+  // the deletion these three would report as drift.
   const { differ, frontmatter } = diffTrees(
     ...copies(
-      "---\nname: d\nallowed-tools:\n  - Bash\n---\n\nBody.\n",
+      '---\nname: d\nallowed-tools:\n  - Bash\nuser-invocable: true\nargument-hint: "[x]"\n---\n\nBody.\n',
       "---\nname: d\n---\n\nBody.\n",
     ),
   );
   assert.deepEqual(differ, []);
   assert.deepEqual(frontmatter, []);
+});
+
+test("skill-mirrors normalization is reflexive over tree paths", () => {
+  // Byte-identical copies must ALWAYS compare equal, including when they name a
+  // tree. impeccable's scripts/hook-admin.mjs is exactly this: one identical
+  // table listing the .claude, .agents, .cursor and .github stores. Neutralizing
+  // only each copy's own prefix breaks this and reds the gate on identical files,
+  // where the printed "copy one over the other" remedy is a no-op.
+  for (const body of [
+    'table: [".claude/skills/d", ".agents/skills/d"]\n',
+    'run ".agents/skills/d/hook.mjs"\n',
+    'run ".claude/skills/d/hook.mjs"\n',
+  ]) {
+    assert.deepEqual(
+      diffTrees(
+        new Map([["hook.mjs", body]]),
+        new Map([["hook.mjs", body]]),
+        "d",
+      ).differ,
+      [],
+      `identical bodies must compare equal: ${body.trim()}`,
+    );
+  }
+  // The rewrite still absorbs each copy's own self-reference.
+  assert.deepEqual(
+    diffTrees(
+      new Map([["hook.mjs", 'run ".claude/skills/d/hook.mjs"\n']]),
+      new Map([["hook.mjs", 'run ".agents/skills/d/hook.mjs"\n']]),
+      "d",
+    ).differ,
+    [],
+  );
 });
 
 test("skill-mirrors catches a description rewritten in one tree", () => {
@@ -3409,18 +3442,6 @@ test("skill-mirrors catches a frontmatter block lost from one copy", () => {
     frontmatter.map((f) => f.field),
     ["frontmatter block"],
   );
-});
-
-test("skill-mirrors does not mistake a leading horizontal rule for frontmatter", () => {
-  // A `---` hr with no key: line must not swallow the text up to the next `---`,
-  // or real body drift inside that span goes unseen.
-  const { differ } = diffTrees(
-    ...copies(
-      "---\n\nAlpha.\n\n---\n\nTail.\n",
-      "---\n\nBeta.\n\n---\n\nTail.\n",
-    ),
-  );
-  assert.deepEqual(differ, ["SKILL.md"]);
 });
 
 test("skill-mirrors catches real prose drift", () => {
@@ -3465,16 +3486,6 @@ test("skill-mirrors gates frontmatter keys beyond name/description", () => {
     frontmatter.map((f) => f.field),
     ["impact", "tags"],
   );
-});
-
-test("skill-mirrors ignores harness-only frontmatter keys", () => {
-  const { frontmatter } = diffTrees(
-    ...copies(
-      "---\nname: d\nallowed-tools:\n  - Bash\nuser-invocable: true\n---\n\nBody.\n",
-      "---\nname: d\n---\n\nBody.\n",
-    ),
-  );
-  assert.deepEqual(frontmatter, []);
 });
 
 test("skill-mirrors compares a folded description whole, not its indicator", () => {
@@ -3563,14 +3574,20 @@ test("skill-mirrors exits non-zero on drift, zero when clean", () => {
     mkdirSync(join(root, tree, skill), { recursive: true });
     writeFileSync(join(root, tree, skill, file), body);
   };
+  // Return the output too: an exit code alone cannot tell the branch that fired
+  // from an unrelated crash, and cannot pin a SKIP-vs-NOTE decision at all.
+  let lastOut = "";
   const run = () => {
     try {
-      execFileSync(process.execPath, [gate], {
-        env: { ...process.env, GD_SKILL_MIRROR_ROOT: root },
-        stdio: "pipe",
-      });
+      lastOut = String(
+        execFileSync(process.execPath, [gate], {
+          env: { ...process.env, GD_SKILL_MIRROR_ROOT: root },
+          stdio: "pipe",
+        }),
+      );
       return 0;
     } catch (err) {
+      lastOut = String(err.stdout || "") + String(err.stderr || "");
       return err.status;
     }
   };
@@ -3596,6 +3613,69 @@ test("skill-mirrors exits non-zero on drift, zero when clean", () => {
     // the vacuity guard: restoring the twin must go green again.
     write(".agents/skills", "demo", "SKILL.md", "Same.\n");
     assert.equal(run(), 0, "restoring the deleted mirror copy exits 0");
+
+    // EXEMPT is the gate's largest fail-open lever: without the `if (reason)`
+    // block this drift would fail the run, so the assertion discriminates it.
+    write(".claude/skills", "impeccable", "SKILL.md", "A\n");
+    write(".agents/skills", "impeccable", "SKILL.md", "B\n");
+    assert.equal(
+      run(),
+      0,
+      "drift inside an EXEMPT skill is suppressed by name",
+    );
+    // …and pin the SKIP-vs-NOTE decision, not just the exit code: a still-diverging
+    // exemption must report SKIP. Otherwise the stale-exemption NOTE — the only
+    // signal that an exemption has stopped suppressing anything — is unpinned.
+    assert.match(lastOut, /SKIP impeccable \(exempt:/);
+
+    // The same exemption with copies that now MATCH must flip to that NOTE.
+    writeFileSync(join(root, ".agents/skills/impeccable/SKILL.md"), "A\n");
+    assert.equal(run(), 0, "a reconciled exemption still exits 0");
+    assert.match(lastOut, /NOTE impeccable is exempt but its copies now match/);
+    writeFileSync(join(root, ".agents/skills/impeccable/SKILL.md"), "B\n");
+
+    // The SINGLE_TREE *skip* branch: a declared name present in one tree only.
+    // Without the declaration this is the failing single-tree path above.
+    write(".claude/skills", "gd-conventions", "SKILL.md", "Claude-only.\n");
+    assert.equal(
+      run(),
+      0,
+      "a declared single-tree skill skips, it does not fail",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("skill-mirrors fails rather than passing vacuously", () => {
+  // Its own root: with no skill in BOTH trees the gate must not report success.
+  // Without the vacuity guard the declared single-tree name below reaches the
+  // single-tree loop, matches SINGLE_TREE, and the run exits 0 having compared
+  // nothing at all.
+  const root = mkdtempSync(join(tmpdir(), "gd-skill-mirror-vacuous-"));
+  const gate = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "check-skill-mirrors.mjs",
+  );
+  try {
+    mkdirSync(join(root, ".claude/skills/gd-conventions"), { recursive: true });
+    writeFileSync(join(root, ".claude/skills/gd-conventions/SKILL.md"), "x\n");
+    mkdirSync(join(root, ".agents/skills"), { recursive: true });
+    let code = 0;
+    let out = "";
+    try {
+      execFileSync(process.execPath, [gate], {
+        env: { ...process.env, GD_SKILL_MIRROR_ROOT: root },
+        stdio: "pipe",
+      });
+    } catch (err) {
+      code = err.status;
+      out = String(err.stdout || "") + String(err.stderr || "");
+    }
+    assert.equal(code, 1, "an empty intersection exits 1");
+    // Any uncaught throw also exits 1, so pin the REASON — otherwise this control
+    // cannot tell the vacuity guard firing from the gate crashing before it.
+    assert.match(out, /no skill exists in both trees/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -42,10 +42,11 @@ context: the standing brief and the repo playbook of conventions and gotchas.
   `.agents/skills/<name>` have a committed twin at `.claude/skills/<name>`, and
   nothing propagates an edit between them — editing only the copy you read
   leaves the other store stale. `scripts/check-skill-mirrors.mjs` is a required
-  `guards` step and fails on any difference beyond line endings, each tree's own
-  `.claude/`-vs-`.agents/` self-references, the `/cmd`-vs-`$cmd` sigil, and
+  `guards` step and fails on any difference beyond line endings, the two trees'
+  `.claude/`-vs-`.agents/` path references, the `/cmd`-vs-`$cmd` sigil, and
   harness-only frontmatter keys. Skills it deliberately skips are declared in
-  that script with their reason.
+  that script with their reason, and its header states the one difference the
+  path rewrite cannot see.
 - **No tree-wide rewrites.** `pnpm lint` is `biome check --write` over `src/`
   AND `site/` — a rewrite, not a check; the check form is `pnpm exec biome check
   ./src/`. In a task worktree even that tree-wide check false-fails on CRLF, so

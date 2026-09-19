@@ -29,9 +29,10 @@
 // rule files rank themselves with `impact`/`impactDescription`/`tags`.
 //
 // Gating is by INTERSECTION, discovered at run time rather than listed: a skill
-// added to both trees is gated automatically, and one that exists in a single
-// tree (delegate, gd-conventions — Claude-only by design) is reported and
-// skipped. That way a new mirrored skill cannot be added ungated.
+// added to both trees is gated automatically, so a new mirrored skill cannot be
+// added ungated. One that exists in a single tree is skipped only if SINGLE_TREE
+// declares it, and FAILS otherwise — "exists in one tree" is also exactly what a
+// deleted mirror copy looks like.
 //
 // Run: node scripts/check-skill-mirrors.mjs
 // GD_SKILL_MIRROR_ROOT points the check at a copy of the tree, for an ad-hoc
@@ -85,7 +86,13 @@ export const SINGLE_TREE = new Map([
   ],
 ]);
 
-/** Extensions compared as text; everything else is compared by content hash. */
+/**
+ * Extensions compared as text; everything else is compared by content hash.
+ * This is an allowlist, so an unlisted TEXT format (`.mdx`, `.svg`, `.xml`) is
+ * hashed byte-exact and therefore skips EOL normalization — it would false-fail
+ * on a pure CRLF/LF difference. Add the extension here rather than debugging a
+ * phantom "differs". Only `.png` lands in the hash path today.
+ */
 const TEXT_EXTENSIONS = new Set([
   ".md",
   ".txt",
@@ -173,6 +180,17 @@ export function gatedFields(frontmatter) {
  * scopes the command-sigil rule to the skill's OWN command: stripping every
  * backticked `/token` would also equate unrelated prose such as `/products`
  * with `$products`, and a backticked regex flag `/g` with `$g`.
+ *
+ * The tree rewrite maps BOTH copies the same way, which keeps normalization
+ * reflexive: byte-identical files always compare equal. Known limit accepted
+ * for that: a copy that hard-codes the OTHER tree's path reads as clean, since
+ * it normalizes to what the other copy's own self-reference normalizes to.
+ * Neutralizing only each copy's own prefix would catch that, and was tried and
+ * reverted — it makes identical bytes compare UNEQUAL whenever a file names
+ * either tree, which `impeccable`'s `scripts/hook-admin.mjs` does by design
+ * (a byte-identical table listing the .claude, .agents, .cursor and .github
+ * stores). That failure has no valid remedy: the two copies already match, so
+ * the gate's own "copy one over the other" advice is a no-op.
  */
 export const normalize = (text, skillName = null) => {
   let out = splitFrontmatter(text.replace(/\r\n/g, "\n")).body.replaceAll(
