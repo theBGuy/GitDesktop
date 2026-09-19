@@ -72,6 +72,9 @@ export const EXEMPT = new Map([
  * allowlist rather than an inference, because "exists in one tree" is also what
  * a DELETED mirror copy looks like — the largest drift there is. Anything
  * single-tree and unlisted fails.
+ *
+ * An entry that is a gitignored junction mount also goes in `EXPECTED_ABSENT`,
+ * or its absence NOTEs on every run that does not mount it.
  */
 export const SINGLE_TREE = new Map([
   [
@@ -120,7 +123,7 @@ const TEXT_EXTENSIONS = new Set([
   ".html",
   ".sh",
   ".ps1",
-  ".",
+  ".", // extensionless files (LICENSE, .gitignore): isTextFile maps them here
 ]);
 
 export const isTextFile = (relPath) =>

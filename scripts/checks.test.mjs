@@ -3640,12 +3640,19 @@ test("skill-mirrors exits non-zero on drift, zero when clean", () => {
     writeFileSync(join(root, ".agents/skills/impeccable/SKILL.md"), "A\n");
     assert.equal(run(), 0, "a reconciled exemption still exits 0");
     assert.match(lastOut, /NOTE impeccable is exempt but its copies now match/);
-    writeFileSync(join(root, ".agents/skills/impeccable/SKILL.md"), "B\n");
 
-    // Neither gitignored mount is written into this temp root, so if their NOTE
-    // were still unconditional it would fire here — which is what made the line
-    // useless as a staleness signal on every CI run.
+    // The stale-skip NOTE needs BOTH directions or it is unpinned: the negative
+    // alone stays green if the whole loop is deleted. `gd-conventions` is the
+    // committed single-tree entry and is not in this root yet, so its NOTE must
+    // fire; the two gitignored mounts must stay quiet, which is what made the
+    // line useless as a signal when it fired on every CI run.
+    assert.match(
+      lastOut,
+      /NOTE gd-conventions is declared in SINGLE_TREE but absent/,
+    );
     assert.doesNotMatch(lastOut, /NOTE (delegate|logo-creator)/);
+
+    writeFileSync(join(root, ".agents/skills/impeccable/SKILL.md"), "B\n");
 
     // The SINGLE_TREE *skip* branch: a declared name present in one tree only.
     // Without the declaration this is the failing single-tree path above.
