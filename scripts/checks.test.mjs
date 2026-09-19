@@ -66,6 +66,7 @@ import {
 import {
   diffTrees,
   EXEMPT,
+  EXPECTED_ABSENT,
   isTextFile,
   normalize as normalizeSkill,
   SINGLE_TREE,
@@ -3545,6 +3546,13 @@ test("skill-mirrors single-tree declarations each carry a reason", () => {
     SINGLE_TREE.size > 0,
     "the single-tree skills are declared, not inferred",
   );
+  for (const name of EXPECTED_ABSENT)
+    assert.ok(
+      SINGLE_TREE.has(name),
+      // A typo here silently suppresses a real stale-skip NOTE, which is the
+      // only signal that a declaration has stopped describing anything.
+      `${name} is expected-absent but not declared in SINGLE_TREE`,
+    );
   for (const [name, reason] of SINGLE_TREE) {
     assert.equal(typeof reason, "string");
     assert.ok(
@@ -3633,6 +3641,11 @@ test("skill-mirrors exits non-zero on drift, zero when clean", () => {
     assert.equal(run(), 0, "a reconciled exemption still exits 0");
     assert.match(lastOut, /NOTE impeccable is exempt but its copies now match/);
     writeFileSync(join(root, ".agents/skills/impeccable/SKILL.md"), "B\n");
+
+    // Neither gitignored mount is written into this temp root, so if their NOTE
+    // were still unconditional it would fire here — which is what made the line
+    // useless as a staleness signal on every CI run.
+    assert.doesNotMatch(lastOut, /NOTE (delegate|logo-creator)/);
 
     // The SINGLE_TREE *skip* branch: a declared name present in one tree only.
     // Without the declaration this is the failing single-tree path above.

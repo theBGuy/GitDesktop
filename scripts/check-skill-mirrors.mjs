@@ -19,8 +19,10 @@
 // difference are legitimate and mechanical:
 //   1. line endings — the two trees were installed at different times, so one
 //      copy can be CRLF and the other LF with identical content;
-//   2. each tree's self-referencing paths (`.agents/skills/…` vs
-//      `.claude/skills/…`);
+//   2. the `.claude/`-vs-`.agents/` path prefix, rewritten the SAME way in both
+//      copies so normalization stays reflexive — which means a copy that
+//      hard-codes the OTHER tree's path reads as clean (see `normalize`'s
+//      docstring for why that tradeoff was taken);
 //   3. the command-invocation sigil, which differs per harness (`/skill` in
 //      Claude, `$skill` elsewhere).
 // YAML frontmatter is compared key by key, minus the handful only one harness
@@ -85,6 +87,15 @@ export const SINGLE_TREE = new Map([
     "gitignored local junction mount (.gitignore), present only on a machine that mounts it",
   ],
 ]);
+
+/**
+ * SINGLE_TREE entries that are gitignored junction mounts, so being absent from
+ * BOTH trees is their normal state everywhere except the machine that mounts
+ * them. Without this the stale-skip NOTE fires for them on every CI run, which
+ * would train readers to ignore the one line that reports a genuinely stale
+ * declaration. Every name here must also be a SINGLE_TREE key (pinned by test).
+ */
+export const EXPECTED_ABSENT = new Set(["delegate", "logo-creator"]);
 
 /**
  * Extensions compared as text; everything else is compared by content hash.
@@ -426,7 +437,11 @@ function main() {
   }
 
   for (const name of SINGLE_TREE.keys())
-    if (!claudeSkills.includes(name) && !agentsSkills.includes(name))
+    if (
+      !claudeSkills.includes(name) &&
+      !agentsSkills.includes(name) &&
+      !EXPECTED_ABSENT.has(name)
+    )
       process.stdout.write(
         `skill-mirrors: NOTE ${name} is declared in SINGLE_TREE but absent\n`,
       );

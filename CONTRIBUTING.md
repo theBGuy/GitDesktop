@@ -141,10 +141,13 @@ the site removes its entry too.
 Skill-mirror drift declares its skips rather than allowlisting sites: the ones
 rewritten per harness, and the ones living in a single tree, each entry naming
 the reason it belongs there. Those two lists do **not** ratchet the way the
-allowlists above do. The gate reports some stale skips as a `NOTE` — a declared
-single-tree skill absent from both trees, or an exempt skill whose copies now
-match exactly — but a skip can go stale without any signal, so treat the two
-lists as reviewed prose that a reader has to re-justify, not as self-cleaning.
+allowlists above do. The gate reports some stale skips as a `NOTE`: a *committed*
+single-tree skill that has gone absent from both trees, or an exempt skill whose
+copies now match exactly. Entries that are gitignored junction mounts are listed
+in `EXPECTED_ABSENT` and stay quiet, since being absent is their normal state off
+the machine that mounts them. A skip can still go stale with no signal at all, so
+treat both lists as reviewed prose a reader has to re-justify, not as
+self-cleaning.
 
 `knip` and `jscpd` run in the same workflow's `advisory` job — non-blocking on
 purpose. The job publishes unused-export and duplicate-code reports to the run
