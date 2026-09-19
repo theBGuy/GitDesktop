@@ -28,6 +28,7 @@ import {
   useJiraPermissions,
 } from "@/lib/jira/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
+import { originNoteFor, repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -154,16 +155,26 @@ export function PromoteLocalIssueDialog({
       await closeLocalWithBackLink(
         `Promoted to ${remoteLabel} issue [#${number}](${url}).`,
       );
-      toast.success(`Opened issue #${number}`, {
-        description: url,
-        action: { label: "View", onClick: () => openUrl(url) },
-      });
-      onOpenChange(false);
+      // One read for both halves: the toast is unconditional and names the repo
+      // when it isn't the one on screen, while the navigation below only lands
+      // when it is — landed elsewhere it would close a dialog the user reopened
+      // there and point that repo's Issues tab at a number belonging to this one.
+      const live = originNoteFor(repoPath) === undefined;
+      toast.success(
+        `Opened issue #${number}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}`,
+        {
+          description: url,
+          action: { label: "View", onClick: () => openUrl(url) },
+        },
+      );
       // The promoted issue lives on the fork (origin) — force the origin lens so
       // the Issues tab shows it (and any stale remote selection is cleared) before
       // navigating to it.
-      setLens("origin");
-      selectIssue({ kind: "remote", id: String(number) });
+      if (live) {
+        onOpenChange(false);
+        setLens("origin");
+        selectIssue({ kind: "remote", id: String(number) });
+      }
     } catch (e) {
       if (created === null) {
         // The create itself failed — retrying is correct, keep the dialog open.
@@ -171,9 +182,12 @@ export function PromoteLocalIssueDialog({
         return;
       }
       const { number, url } = created;
+      const away = originNoteFor(repoPath)
+        ? ` in ${repoNameFromPath(repoPath)}`
+        : "";
       onOpenChange(false);
       toast.error(
-        `Created issue #${number}, but ${failedStep} failed: ${errorMessage(e)}`,
+        `Created issue #${number}${away}, but ${failedStep} failed: ${errorMessage(e)}`,
         {
           duration: 10000,
           action: { label: "View", onClick: () => openUrl(url) },
@@ -202,21 +216,34 @@ export function PromoteLocalIssueDialog({
       }
       failedStep = "closing the local issue";
       await closeLocalWithBackLink(`Promoted to Jira issue [${key}](${url}).`);
-      toast.success(`Created ${key}`, {
-        description: url,
-        action: { label: "View", onClick: () => openUrl(url) },
-      });
-      onOpenChange(false);
-      selectIssue({ kind: "jira", id: key });
+      // Same one read as the forge path: the toast names its repo either way, the
+      // selection and close only land while that repo is the one on screen. The
+      // pinned `useJiraCreateIssue` means this continuation outlives the detach a
+      // switch causes, so it has to answer for where it ended up.
+      const live = originNoteFor(repoPath) === undefined;
+      toast.success(
+        `Created ${key}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}`,
+        {
+          description: url,
+          action: { label: "View", onClick: () => openUrl(url) },
+        },
+      );
+      if (live) {
+        onOpenChange(false);
+        selectIssue({ kind: "jira", id: key });
+      }
     } catch (e) {
       if (created === null) {
         toastError(e);
         return;
       }
       const { key, url } = created;
+      const away = originNoteFor(repoPath)
+        ? ` in ${repoNameFromPath(repoPath)}`
+        : "";
       onOpenChange(false);
       toast.error(
-        `Created ${key}, but ${failedStep} failed: ${errorMessage(e)}`,
+        `Created ${key}${away}, but ${failedStep} failed: ${errorMessage(e)}`,
         {
           duration: 10000,
           action: { label: "View", onClick: () => openUrl(url) },

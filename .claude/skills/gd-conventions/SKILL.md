@@ -397,7 +397,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   switch. Exemplar: `useCreateIssue`; a plain `useMutation` spells the same pin
   `mutationKey:`. Guard: `mutation-identity-pinning` ratchets the cache-seeding
   sites and the create-family ones it can see by NAME, following delegation one
-  level inside a module; the wider class stays a review concern.
+  level inside a module. It scans the git-queries package, `lib/jira/queries.ts`
+  and the local PR/issue query modules — a repo-scoped create written anywhere
+  else is unratcheted, and the wider class stays a review concern.
 - **Plugin-store open/reload** — an app-data store opens via
   `memoizedStoreLoader` and re-reads via `reloadToleratingEmptyStore`
   (`src/lib/plugin-store.ts`), never a hand-rolled `??= load(storeName(…))` or a

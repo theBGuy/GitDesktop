@@ -2178,6 +2178,44 @@ test("mutation-identity-pinning follows a create hook into its private wrapper",
   assert.deepEqual(unpinnedMutationIdentity(wrapper(true)), []);
 });
 
+test("mutation-identity-pinning stops at its documented boundary", () => {
+  // A seeding wrapper reached ONLY from non-create hooks — useTimeTrackingMutation's
+  // shape. Inside the check's stated class (a response seeded into a hook-scope key)
+  // but outside what it follows, since delegation is resolved from create hooks only.
+  // Pinned as a fixture so widening the rule fails HERE, loudly, instead of quietly
+  // turning every such wrapper into a new pin-or-allowlist decision.
+  const seedingWrapper = [
+    "function useTimeTrackingMutation(",
+    "  repo: string,",
+    "  statsKey: (repo: string, number: number) => readonly unknown[],",
+    "  mutationFn: (args: { number: number }) => Promise<GitLabTimeStats>,",
+    ") {",
+    "  const queryClient = useQueryClient();",
+    "  return useMutation({",
+    "    mutationFn,",
+    "    onSuccess: (stats, args) => {",
+    "      queryClient.setQueryData(statsKey(repo, args.number), stats);",
+    "    },",
+    "  });",
+    "}",
+    "",
+    "export function useAddMrSpentTime(repo: string) {",
+    "  return useTimeTrackingMutation(repo, mrTimeStatsKey, (args) =>",
+    "    api.forgeGlMrAddSpentTime(repo, args.number),",
+    "  );",
+    "}",
+  ].join("\n");
+  assert.deepEqual(unpinnedMutationIdentity(seedingWrapper), []);
+  // The same wrapper IS reached once a create-named hook delegates to it, which is
+  // the line the boundary actually draws.
+  assert.deepEqual(
+    unpinnedMutationIdentity(
+      `${seedingWrapper}\n\nexport function useCreateSpentTime(repo: string) {\n  return useTimeTrackingMutation(repo, mrTimeStatsKey, (a) => api.x(repo, a));\n}`,
+    ),
+    [7],
+  );
+});
+
 test("mutation-identity-pinning sees through a generic parameter list", () => {
   // `function useX<T>(` puts a `<` where the anchor wants a `(`; an anchor that
   // demands the paren swallows every generic declaration without a sound.
@@ -2199,6 +2237,12 @@ test("mutation-identity-pinning is scoped to the query modules, with one allowli
   const check = CHECKS.find((c) => c.name === "mutation-identity-pinning");
   assert.equal(check.appliesTo("src/lib/git/queries/branches.ts"), true);
   assert.equal(check.appliesTo("src/lib/jira/queries.ts"), true);
+  // The local-entity modules: same repo-scoped create shape, own directories.
+  assert.equal(check.appliesTo("src/lib/pulls/queries.ts"), true);
+  assert.equal(check.appliesTo("src/lib/issues/queries.ts"), true);
+  // Their neighbours are not swept in with them.
+  assert.equal(check.appliesTo("src/lib/pulls/local.ts"), false);
+  assert.equal(check.appliesTo("src/lib/issues/local.ts"), false);
   // Feature files declare no query hooks; .tsx never enters the scope.
   assert.equal(check.appliesTo("src/features/pulls/CreatePrDialog.tsx"), false);
   assert.equal(check.appliesTo("src/lib/settings/queries.ts"), false);

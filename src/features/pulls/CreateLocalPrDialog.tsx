@@ -1,7 +1,7 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { useEffectEvent } from "react";
+import { useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { Button } from "@/components/ui/button";
@@ -30,9 +30,9 @@ import { updateLocalPr } from "@/lib/pulls/local";
 import { useCreateLocalPr } from "@/lib/pulls/queries";
 import { deleteReviewNote } from "@/lib/review-notes/store";
 import { useAiEnabled } from "@/lib/settings/queries";
-import { repoNameFromPath } from "@/lib/stores/notifications";
+import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -88,6 +88,10 @@ export function CreateLocalPrDialog({
   const selectPr = useUiStore((s) => s.selectPr);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const queryClient = useQueryClient();
+  // Which draft the form holds, bumped only where the seed actually reseeds. A
+  // repo check can't tell drafts apart within one repo: closing and reopening
+  // mid-create puts a fresh draft behind the same path.
+  const seedGenRef = useRef(0);
 
   const currentName = status.data?.branch?.name ?? null;
   // Retained on `open`, not on the values: an unseeded next open must resync to
@@ -114,6 +118,7 @@ export function CreateLocalPrDialog({
         value.head === value.base ? "Pick two different branches." : undefined,
     },
     onSubmit: async ({ value }) => {
+      const submitGen = seedGenRef.current;
       try {
         // Append the linked-issue chips as their exact keyword lines via the
         // shared composer (the single ref-block composition every create/edit
@@ -166,17 +171,17 @@ export function CreateLocalPrDialog({
         // This dialog is retained across repo switches, so a create settling
         // after one would aim the tab, the selection, and the close at whatever
         // repo is live now. The toast fires either way, naming its origin.
-        const stillHere = useUiStore.getState().repoPath === repoPath;
-        const originNote = stillHere
-          ? undefined
-          : `In ${repoNameFromPath(repoPath)}`;
+        const originNote = originNoteFor(repoPath);
+        const stillHere = originNote === undefined;
         toast.success(`Created local PR: ${pr.title}`, {
           description: originNote,
         });
         if (stillHere) {
           setRepoTab("pulls");
           selectPr({ kind: "local", id: pr.id });
-          onOpenChange(false);
+          // The generation pins the DRAFT: a close+reopen in this same repo
+          // reseeds the form, and this settle must not close that new draft.
+          if (seedGenRef.current === submitGen) onOpenChange(false);
         }
         // Local PRs have no draft concept — always fire. The event carries the
         // notes (the runner's marker-comment fetchers are remote-only, so for a
@@ -195,7 +200,11 @@ export function CreateLocalPrDialog({
           reviewNotes: notes || undefined,
         });
       } catch (e) {
-        toastError(e);
+        // Read at the failure, not before it: a create that fails after a repo
+        // switch has to name the repo it belongs to, same as the success arm.
+        const originNote = originNoteFor(repoPath);
+        if (originNote) toastErrorWithNote(e, originNote);
+        else toastError(e);
       }
     },
   });
@@ -207,6 +216,7 @@ export function CreateLocalPrDialog({
     // closed — leaves the whole draft in form state, which this reset would blank
     // on reopen.
     if (surface.shouldSkipSeed(generating)) return;
+    seedGenRef.current += 1;
     // Reset the linked-issue chips (and their dismissed/probed refs) to empty —
     // the dialog opens with no seeded body refs; extraction/AI seeding then
     // repopulates from the head branch + commits.

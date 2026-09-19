@@ -34,7 +34,7 @@ import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraCreateIssue, useJiraIssueTypes } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
 import { useAiEnabled } from "@/lib/settings/queries";
-import { repoNameFromPath } from "@/lib/stores/notifications";
+import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { errorMessage } from "@/lib/tauri/invoke";
 import {
@@ -107,10 +107,15 @@ export function CreateJiraIssueDialog({
   // repo's). A dialog left open across a repo switch never re-seeds, so this
   // still reads the submit's repo and the settle's close is the right one.
   const draftRepoRef = useRef(repoPath);
+  // Which draft the form holds, bumped only where the seed actually reseeds. The
+  // repo stamp can't tell drafts apart within one repo: an A→B→A round trip
+  // restores the same path behind different content.
+  const seedGenRef = useRef(0);
 
   const form = useAppForm({
     defaultValues: { summary: "", body: "" },
     onSubmit: async ({ value }) => {
+      const submitGen = seedGenRef.current;
       setCreateError(null);
       try {
         const { key, url } = await create.mutateAsync({
@@ -121,10 +126,8 @@ export function CreateJiraIssueDialog({
         // The create can settle after a repo switch, and this dialog is retained
         // across one: the selection below answers to the live repo, the close to
         // the draft's. The toast fires either way, naming where it was filed.
-        const stillHere = useUiStore.getState().repoPath === repoPath;
-        const originNote = stillHere
-          ? undefined
-          : `In ${repoNameFromPath(repoPath)}`;
+        const originNote = originNoteFor(repoPath);
+        const stillHere = originNote === undefined;
         toast.success(`Created ${key}`, {
           description: originNote ? `${originNote} · ${url}` : url,
           action: { label: "View", onClick: () => openUrl(url) },
@@ -132,7 +135,9 @@ export function CreateJiraIssueDialog({
         // Closed whenever the form still holds THIS submit's draft — leaving an
         // already-filed draft open is a duplicate factory. The selection is a
         // global write, so it takes the live-repo guard instead.
-        if (draftRepoRef.current === repoPath) onOpenChange(false);
+        const ourDraft =
+          draftRepoRef.current === repoPath && seedGenRef.current === submitGen;
+        if (ourDraft) onOpenChange(false);
         if (stillHere) selectIssue({ kind: "jira", id: key });
       } catch (e) {
         // Keep the dialog open so the draft survives; surface the reason inline.
@@ -156,6 +161,7 @@ export function CreateJiraIssueDialog({
     // closed — leaves the whole draft in form state, which this reset would blank
     // on reopen.
     if (surface.shouldSkipSeed(generating)) return;
+    seedGenRef.current += 1;
     form.reset({ summary: "", body: "" }, { keepDefaultValues: true });
   });
   useSeedOnOpen(open, seedOnOpen);

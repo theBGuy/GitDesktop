@@ -160,8 +160,11 @@ export function applyRepoLens(
  *  door: the interaction is noted FIRST, or a settling navigation lands and applies ITS
  *  lens over the choice just made. One exception: a call from inside a navigator's
  *  `beforeSelect` (the branch-chip route) is covered by that navigator's own
- *  request-time epoch bump instead. Direct {@link applyRepoLens} callers stay silent —
- *  navigation-owned, and each is re-checked by its navigator's `stillValid`. */
+ *  request-time epoch bump instead. Navigation-owned direct {@link applyRepoLens}
+ *  callers stay silent — each is re-checked by its navigator's `stillValid`. A create
+ *  continuation that flips the lens itself (CreatePrDialog's upstream arm) does note
+ *  the interaction, but only while its repo is the live one: off-screen the epoch and
+ *  the selection clears would hit the repo the user moved to instead. */
 export function useSetRepoLens(repo: string) {
   const queryClient = useQueryClient();
   const noteUserInteraction = useUiStore((s) => s.noteUserInteraction);

@@ -685,6 +685,10 @@ const QUERIES_DIR = "src/lib/git/queries/";
 const QUERIES_BARREL = `${QUERIES_DIR}index.ts`;
 const QUERIES_INTERNAL = `${QUERIES_DIR}internal.ts`;
 const JIRA_QUERIES = "src/lib/jira/queries.ts";
+/** The local-entity query modules. Same repo-scoped create shape as the git
+ *  package, in their own directories — out of scope, the ratchet cannot see the
+ *  local PR and local issue creates at all. */
+const LOCAL_QUERIES = ["src/lib/pulls/queries.ts", "src/lib/issues/queries.ts"];
 
 // The mutation-identity family. Anchors are deliberately structural rather than
 // textual: react-query re-pushes a hook's options onto its PENDING mutation on
@@ -1293,7 +1297,8 @@ export const CHECKS = [
   },
   {
     name: "mutation-identity-pinning",
-    // The two modules that declare repo-scoped mutation hooks. The check is
+    // The modules that declare repo-scoped mutation hooks: the git queries
+    // package, the Jira queries, and the two local-entity modules. The check is
     // deliberately NARROWER than the convention it serves: the convention governs
     // every mutation whose callbacks close over repo/lens, which is ~200 sites here,
     // while this ratchet covers the two where a retarget is not self-healing — a
@@ -1307,7 +1312,8 @@ export const CHECKS = [
     // deliberate follow-up — widen here rather than allowlisting the consequences.
     appliesTo: (file) =>
       (file.startsWith(QUERIES_DIR) && file.endsWith(".ts")) ||
-      file === JIRA_QUERIES,
+      file === JIRA_QUERIES ||
+      LOCAL_QUERIES.includes(file),
     scan: unpinnedMutationIdentity,
     allowlist: [
       // useStackCreate renders a failed write inline off the mutation's OWN `error`
@@ -1317,14 +1323,14 @@ export const CHECKS = [
       // create hook added HERE is masked — split the entry if that changes.
       `${QUERIES_DIR}pr-write.ts`,
     ],
-    // Floor near the real module count (31): a low floor would let a typo in
+    // Floor near the real module count (33): a low floor would let a typo in
     // QUERIES_DIR leave the scan almost entirely inert and still pass.
     expectScanned: {
-      atLeast: 25,
-      hint: `${QUERIES_DIR}*.ts + ${JIRA_QUERIES}`,
+      atLeast: 27,
+      hint: `${QUERIES_DIR}*.ts + ${JIRA_QUERIES} + ${LOCAL_QUERIES.join(" + ")}`,
     },
     message:
-      "a repo-scoped create or cache-seeding mutation must pin its identity (gd-conventions, 'Mutation identity pinning') — react-query re-pushes a hook's options onto its PENDING mutation on every render, so without a mutation key a repo switch mid-flight retargets the call, its callbacks and its cache writes to the newly-live repo; pass `identity: [\"<op>\", repo, …]` on useRepoMutation or `mutationKey: [\"<op>\", repo, …]` on a plain useMutation, naming exactly the hook-scope values the call closes over, and make sure every caller takes its continuation from `await mutateAsync` (a detached mutation's observer goes idle, so `isPending`/`data`/`error` reads stop tracking it) — or add an allowlist entry with rationale. This scan does NOT see four shapes inside its own boundary, so review them by hand: a create whose NAME lacks 'Create' (the `Add…`/`Submit…`/`Publish…`/`Fork…` spellings — useAddRemote, useSubmitReview, useForkRepo and their siblings are all live), a mutation built through a wrapper in another MODULE, one built through a helper not named `use…`, and a cache-seeding wrapper reached only from non-create hooks",
+      "a repo-scoped create or cache-seeding mutation must pin its identity (gd-conventions, 'Mutation identity pinning') — react-query re-pushes a hook's options onto its PENDING mutation on every render, so without a mutation key a repo switch mid-flight retargets the call, its callbacks and its cache writes to the newly-live repo; pass `identity: [\"<op>\", repo, …]` on useRepoMutation or `mutationKey: [\"<op>\", repo, …]` on a plain useMutation, naming exactly the hook-scope values the call closes over, and make sure every caller takes its continuation from `await mutateAsync` (a detached mutation's observer goes idle, so `isPending`/`data`/`error` reads stop tracking it) — or add an allowlist entry with rationale. This scan does NOT see six shapes inside its own boundary, so review them by hand: a create whose NAME lacks 'Create' (the `Add…`/`Submit…`/`Publish…`/`Fork…` spellings — useAddRemote, useSubmitReview, useForkRepo and their siblings are all live), a mutation built through a wrapper in another MODULE, one built through a helper not named `use…`, a cache-seeding wrapper reached only from non-create hooks, a hook declared as `export const useX = (repo) => …` (the declaration anchor requires the `function` keyword), and one whose return type is an inline object literal (`): { … } {` — the body scan would take the return type as the body). The last two are zero-instance in the scanned modules today, so adding either shape means teaching this scanner first",
   },
 ];
 

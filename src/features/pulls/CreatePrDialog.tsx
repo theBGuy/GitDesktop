@@ -281,6 +281,9 @@ export function CreatePrDialog({
   // reopen holding the previous repo's draft. Both sides are the ui store's own
   // string, so `===` is the identity test.
   const draftRepoRef = useRef<string | null>(null);
+  // Counts drafts, not opens: bumped only where the seed actually resets the
+  // form, so a reopen that skips the seed keeps the number its submit captured.
+  const seedGenRef = useRef(0);
 
   const currentName = status.data?.branch?.name ?? null;
   // Branch options with per-branch worktree chips; drops the app-internal
@@ -359,6 +362,7 @@ export function CreatePrDialog({
       // the retained dialog goes on serving whichever one is on screen. Every
       // write to GLOBAL state past an await asks this first.
       const stillHere = () => useUiStore.getState().repoPath === repoPath;
+      const submitGen = seedGenRef.current;
       // The probe speaks only for duplicates it has FRESHLY seen: a submit during
       // its first fetch, or on a page cached before the PR was opened on the forge,
       // would push a head the forge then refuses. One awaited re-check closes that
@@ -540,8 +544,11 @@ export function CreatePrDialog({
         // navigation? Hoist it to RepositoryView first, like CreateLocalPrDialog.
         // `open` is the host's ONE state across repos (a switch already closed
         // this dialog), so a close landing off-screen would shut whatever the
-        // user has open where they are now.
-        if (stillHere()) onOpenChange(false);
+        // user has open where they are now. The generation is what `stillHere`
+        // cannot see: a round trip away and back reseeds the form in THIS repo,
+        // and closing then would shut the dialog holding that newer draft.
+        if (stillHere() && seedGenRef.current === submitGen)
+          onOpenChange(false);
         // Draft gate: a draft PR fires no review unless the user opted into reviewing
         // drafts. A gated-out draft is NOT a lost review — an in-app Mark-ready fires
         // pr-open directly, and an EXTERNAL ready flip rides the catch-up poller's
@@ -657,6 +664,7 @@ export function CreatePrDialog({
     consumeLastFailed(draftRepoRef.current ?? repoPath, retained);
     seededRef.current = true;
     draftRepoRef.current = repoPath;
+    seedGenRef.current += 1;
     aiDescriptionRef.current = false;
     setReviewers([]);
     setLabels(new Set());

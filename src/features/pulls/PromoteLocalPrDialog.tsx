@@ -176,13 +176,24 @@ export function PromoteLocalPrDialog({
         toastError(e);
         return;
       }
-      // The remote PR already exists. Close the dialog (leaving it open is a
-      // duplicate factory) and disclose what was created and what failed. The
-      // local PR is left untouched so the user can reconcile manually.
+      // The remote PR already exists. Close the dialog (leaving it open on this
+      // pull request is a duplicate factory — the local PR wasn't closed, so it
+      // still reads as promotable) and disclose what was created and what
+      // failed. The local PR is left untouched so the user can reconcile
+      // manually. The close names its SUBJECT as well as its repo: the host
+      // keeps one `promoteOpen` state and already blanks it when the selection
+      // moves, so a close landing on another pull request's confirm protects
+      // nothing here and shuts a dialog the user opened for something else.
       const { number, url } = created;
-      onOpenChange(false);
+      const ui = useUiStore.getState();
+      const live = ui.repoPath === repoPath;
+      // The close needs the subject too; the toast names only the REPO, since
+      // that is the part the user can't see for themselves.
+      const onThisPr =
+        live && ui.selectedPr?.kind === "local" && ui.selectedPr.id === pr.id;
+      if (onThisPr) onOpenChange(false);
       toast.error(
-        `Created ${prNoun} #${number}, but ${failedStep} failed: ${errorMessage(e)}`,
+        `Created ${prNoun} #${number}${live ? "" : ` in ${repoNameFromPath(repoPath)}`}, but ${failedStep} failed: ${errorMessage(e)}`,
         {
           duration: 10000,
           action: { label: "View", onClick: () => openUrl(url) },

@@ -1,6 +1,8 @@
 import { create } from "zustand";
+import { normPath } from "@/lib/git/path";
 import type { RemoteLens } from "@/lib/git/types";
 import { memoizedStoreLoader } from "@/lib/plugin-store";
+import { useUiStore } from "@/lib/stores/ui";
 
 /** Semantic tone for a notification's glyph — paired with an icon + word in the
  *  UI so state never rides on color alone (WCAG AA). */
@@ -374,6 +376,18 @@ export function useNotifications(): AppNotification[] {
 export function repoNameFromPath(repoPath: string): string {
   const parts = repoPath.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? repoPath;
+}
+
+/** The origin-repo note a toast carries when its operation settles somewhere
+ *  else — `undefined` while `repoPath` IS the live repo, so a same-repo toast
+ *  stays bare and the undefined doubles as the still-here test. Normalized on
+ *  both sides: callers pass paths from sources the store's own string need not
+ *  match byte-for-byte. Read at settle time, never before the await. */
+export function originNoteFor(repoPath: string): string | undefined {
+  const live = useUiStore.getState().repoPath ?? "";
+  return normPath(live) === normPath(repoPath)
+    ? undefined
+    : `In ${repoNameFromPath(repoPath)}`;
 }
 
 export const markNotificationRead = (id: string): void =>
