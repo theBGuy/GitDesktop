@@ -491,46 +491,142 @@ pub struct WorkingLineStats {
     pub unstaged: Vec<DiffStatEntry>,
 }
 
-/// git's own binary sniff window: a NUL among a file's first 8000 bytes is what
-/// makes git report `-` counts, so an untracked file is judged the same way.
+/// git's own binary sniff window: with no `.gitattributes` diff override in play, a
+/// NUL among a file's first 8000 bytes is what makes git report `-` counts, so an
+/// untracked file falls back to the same test.
 const BINARY_SNIFF_BYTES: usize = 8000;
 /// git's `core.bigFileThreshold` default, past which git itself treats a file as
 /// binary in diffs — one this large is reported binary instead of being read.
 const BIG_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// Ceiling on bytes one call may read across untracked files, spent in `ls-files`
-/// order — it bounds the 5s poll's I/O on a tree full of not-yet-ignored files.
+/// order — it bounds the 5s poll's I/O on a tree full of not-yet-ignored files. A
+/// hard ceiling, not an accounting one: the reader carries what is left of it as its
+/// own cap, so a file that grows after its size check still cannot read past it.
 const UNTRACKED_READ_BUDGET: u64 = 64 * 1024 * 1024;
 /// Read window for the line count: the only memory a file's size can influence,
 /// so no untracked file is ever held whole.
 const LINE_COUNT_CHUNK: usize = 64 * 1024;
 
-/// Counts `\n` bytes through a bounded buffer, plus the final unterminated line,
-/// and reports the bytes it actually consumed so the caller charges its budget for
-/// reads rather than for file sizes. The bytes are counted raw — numstat reports
-/// the worktree's own line endings, so a CRLF file still has one `\n` per line and
-/// nothing is converted here. A NUL inside the sniff window returns `(0, true, …)`
-/// straight away, the shape a `-` numstat row takes.
+/// A path's `diff` attribute, for the paths `.gitattributes` decides. Anything it
+/// leaves unspecified — including a custom diff-driver name, where git would run
+/// that driver rather than answer the question — carries no verdict and sniffs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffAttr {
+    /// `-diff`: git diffs the path as binary whatever its bytes are.
+    Binary,
+    /// `diff`: forced text, so a NUL in the content must not flip the verdict.
+    ForcedText,
+}
+
+/// Parses `check-attr -z` output: `path NUL attr NUL value NUL` triples. A stream
+/// that does not divide into whole triples yields an EMPTY map, so a shape this
+/// does not understand degrades every path to the sniff rather than mis-verdicting.
+fn parse_diff_attrs(text: &str) -> std::collections::HashMap<String, DiffAttr> {
+    let mut tokens: Vec<&str> = text.split('\0').collect();
+    // `-z` terminates every token, so the split's last element is empty.
+    if tokens.last() == Some(&"") {
+        tokens.pop();
+    }
+    let mut attrs = std::collections::HashMap::new();
+    if !tokens.len().is_multiple_of(3) {
+        return attrs;
+    }
+    for record in tokens.chunks_exact(3) {
+        if record[1] != "diff" {
+            continue;
+        }
+        let verdict = match record[2] {
+            "unset" => DiffAttr::Binary,
+            "set" => DiffAttr::ForcedText,
+            _ => continue,
+        };
+        attrs.insert(record[0].to_string(), verdict);
+    }
+    attrs
+}
+
+/// The `diff` attribute of every enumerated path, in one batched spawn. Non-fatal
+/// by contract: a failed spawn, a non-zero exit or an unparsable stream leaves the
+/// map empty and every path falls back to the content sniff.
+async fn untracked_diff_attrs(
+    repo_path: &str,
+    paths: &[&str],
+) -> std::collections::HashMap<String, DiffAttr> {
+    if paths.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let stdin: String = paths.iter().map(|p| format!("{p}\0")).collect();
+    match crate::git::runner::run_git_input(
+        Some(repo_path),
+        &["check-attr", "--stdin", "-z", "diff"],
+        Some(&stdin),
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(out) => parse_diff_attrs(&out.stdout_lossy()),
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+/// What one untracked file's read produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadOutcome {
+    Counted {
+        added: u32,
+        is_binary: bool,
+    },
+    /// The byte cap was reached with the file unfinished; the count would be partial,
+    /// so the caller emits nothing.
+    Incomplete,
+}
+
+/// Counts `\n` bytes through a bounded buffer, plus the final unterminated line.
+/// The bytes are counted raw — numstat reports the worktree's own line endings, so a
+/// CRLF file still has one `\n` per line and nothing is converted here. With `sniff`
+/// on, a NUL inside the sniff window answers binary straight away, the shape a `-`
+/// numstat row takes; a path forced to text by `.gitattributes` passes `false`, since
+/// numstat counts its lines regardless.
+///
+/// `max_bytes` is a HARD cap, enforced per read: a file that grew since its size
+/// check cannot read past it, and reaching it with bytes left over is `Incomplete`
+/// rather than a truncated count. The consumed count rides alongside EVERY outcome,
+/// including the I/O error, so the caller's budget is charged for work that happened.
 fn count_untracked_lines(
     file: &mut std::fs::File,
     buf: &mut [u8],
-) -> std::io::Result<(u32, bool, u64)> {
+    sniff: bool,
+    max_bytes: u64,
+) -> (std::io::Result<ReadOutcome>, u64) {
     use std::io::Read;
 
-    let mut sniff_left = BINARY_SNIFF_BYTES;
+    let mut sniff_left = if sniff { BINARY_SNIFF_BYTES } else { 0 };
     let mut lines: u32 = 0;
     let mut last: Option<u8> = None;
     let mut consumed: u64 = 0;
-    loop {
-        let read = file.read(buf)?;
+    while consumed < max_bytes {
+        let room = usize::try_from(max_bytes - consumed)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        let read = match file.read(&mut buf[..room]) {
+            Ok(read) => read,
+            Err(err) => return (Err(err), consumed),
+        };
         if read == 0 {
-            break;
+            return (Ok(counted(lines, last)), consumed);
         }
         consumed = consumed.saturating_add(read as u64);
         let chunk = &buf[..read];
         if sniff_left > 0 {
             let window = &chunk[..read.min(sniff_left)];
             if window.contains(&0) {
-                return Ok((0, true, consumed));
+                return (
+                    Ok(ReadOutcome::Counted {
+                        added: 0,
+                        is_binary: true,
+                    }),
+                    consumed,
+                );
             }
             sniff_left -= window.len();
         }
@@ -538,10 +634,26 @@ fn count_untracked_lines(
         lines = lines.saturating_add(u32::try_from(newlines).unwrap_or(u32::MAX));
         last = chunk.last().copied();
     }
-    if last.is_some_and(|b| b != b'\n') {
-        lines = lines.saturating_add(1);
+    // At the cap: whether the file ended here is a question `fstat` answers without
+    // spending a byte, so the cap stays exact even when the file fits it precisely.
+    match file.metadata() {
+        Ok(meta) if consumed >= meta.len() => (Ok(counted(lines, last)), consumed),
+        Ok(_) => (Ok(ReadOutcome::Incomplete), consumed),
+        Err(err) => (Err(err), consumed),
     }
-    Ok((lines, false, consumed))
+}
+
+/// numstat counts a final unterminated line, so content not ending in `\n` gets one
+/// more than it has `\n` bytes.
+fn counted(lines: u32, last: Option<u8>) -> ReadOutcome {
+    ReadOutcome::Counted {
+        added: if last.is_some_and(|b| b != b'\n') {
+            lines.saturating_add(1)
+        } else {
+            lines
+        },
+        is_binary: false,
+    }
 }
 
 /// Line counts for the untracked paths `git ls-files --others -z` named, as
@@ -555,7 +667,13 @@ fn count_untracked_lines(
 /// `budget` is the bytes this call may still read; only a file whose size fits what
 /// is left is opened, so no count is ever truncated, and a file too big for the
 /// remainder is skipped ALONE — later, smaller files still get their counts.
-fn untracked_line_stats(repo_path: &str, ls_files_z: &str, mut budget: u64) -> Vec<DiffStatEntry> {
+/// `attrs` carries the `.gitattributes` diff verdicts, which outrank the sniff.
+fn untracked_line_stats(
+    repo_path: &str,
+    ls_files_z: &str,
+    mut budget: u64,
+    attrs: &std::collections::HashMap<String, DiffAttr>,
+) -> Vec<DiffStatEntry> {
     let root = std::path::Path::new(repo_path);
     let mut buf = vec![0u8; LINE_COUNT_CHUNK];
     let mut entries = Vec::new();
@@ -577,6 +695,17 @@ fn untracked_line_stats(repo_path: &str, ls_files_z: &str, mut budget: u64) -> V
         if !meta.is_file() {
             continue;
         }
+        // `-diff` is the first content decision: numstat answers `-  -` from the
+        // attribute alone, even for an empty file, so neither a read nor a budget
+        // charge happens and the size checks below govern the other two verdicts.
+        let sniff = match attrs.get(rel) {
+            Some(DiffAttr::Binary) => {
+                entries.push(entry(0, true));
+                continue;
+            }
+            Some(DiffAttr::ForcedText) => false,
+            None => true,
+        };
         let len = meta.len();
         if len == 0 {
             // git numstat reports `0 0` for an empty file once staged.
@@ -593,13 +722,15 @@ fn untracked_line_stats(repo_path: &str, ls_files_z: &str, mut budget: u64) -> V
         let Ok(mut file) = std::fs::File::open(&path) else {
             continue;
         };
-        let Ok((added, is_binary, consumed)) = count_untracked_lines(&mut file, &mut buf) else {
-            continue;
-        };
-        // A file that grew since its stat can overshoot the remainder; saturating
-        // keeps the budget monotonic instead of wrapping.
+        let (outcome, consumed) = count_untracked_lines(&mut file, &mut buf, sniff, budget);
+        // Charged whatever the outcome: a refused or failed read still spent the I/O.
         budget = budget.saturating_sub(consumed);
-        entries.push(entry(added, is_binary));
+        match outcome {
+            Ok(ReadOutcome::Counted { added, is_binary }) => entries.push(entry(added, is_binary)),
+            // A partial read and a failed one both leave the row blank rather than
+            // report a count the file does not have.
+            Ok(ReadOutcome::Incomplete) | Err(_) => {}
+        }
     }
     entries
 }
@@ -609,7 +740,9 @@ fn untracked_line_stats(repo_path: &str, ls_files_z: &str, mut budget: u64) -> V
 /// shared or summed count). Read-only and lock-free like `status_core`, so it
 /// can ride the same 5s poll. Untracked paths join the unstaged side with every
 /// line counted as an addition, read from the worktree because numstat reports
-/// tracked changes alone.
+/// tracked changes alone; their text-or-binary verdict comes from the path's
+/// `.gitattributes` diff attribute, falling back to a content sniff when none
+/// applies, so a row agrees with the diff pane git renders for the same file.
 #[tauri::command]
 pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineStats> {
     let (staged, unstaged, untracked) = tokio::try_join!(
@@ -642,10 +775,12 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
         }
     )?;
     let mut unstaged_entries = parse_numstat_z(&unstaged.stdout_lossy());
+    let paths: Vec<&str> = untracked.split('\0').filter(|p| !p.is_empty()).collect();
+    let attrs = untracked_diff_attrs(&repo_path, &paths).await;
     // Counting lines is blocking file I/O, kept off the async workers this poll
     // shares with every other repo operation.
     let counted = tauri::async_runtime::spawn_blocking(move || {
-        untracked_line_stats(&repo_path, &untracked, UNTRACKED_READ_BUDGET)
+        untracked_line_stats(&repo_path, &untracked, UNTRACKED_READ_BUDGET, &attrs)
     })
     .await
     .unwrap_or_default();
@@ -1024,6 +1159,111 @@ mod tests {
         assert_eq!((entry.added, entry.deleted), (3, 0));
     }
 
+    /// A `.gitattributes` diff override outranks the content sniff AND emptiness, so
+    /// an untracked row agrees with the diff pane git renders for the same file:
+    /// `-diff` reads `bin` on text content and on an empty file (numstat reports
+    /// `-  -` for a staged one), a forced `diff` counts the lines of NUL-bearing
+    /// content, and a path no rule names still sniffs (the two control files, whose
+    /// bytes are the same as their attribute-marked twins').
+    #[tokio::test]
+    async fn working_line_stats_honors_gitattributes_diff_overrides() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-attrs-test-").await;
+
+        std::fs::write(dir.join(".gitattributes"), "*.dat -diff\n*.forced diff\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(
+            Some(&repo),
+            &["commit", "-qm", "attributes"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        std::fs::write(dir.join("text.dat"), "a\nb\nc\n").unwrap();
+        std::fs::write(dir.join("empty.dat"), "").unwrap();
+        std::fs::write(dir.join("bin.forced"), b"a\0b\nc\n").unwrap();
+        std::fs::write(dir.join("plain.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(dir.join("plain.bin"), b"a\0b\nc\n").unwrap();
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        let seen = |name: &str| {
+            let e = stats
+                .unstaged
+                .iter()
+                .find(|e| e.path == name)
+                .unwrap_or_else(|| panic!("{name} is counted"));
+            (e.added, e.deleted, e.is_binary)
+        };
+        assert_eq!(seen("text.dat"), (0, 0, true), "`-diff` beats text content");
+        assert_eq!(seen("empty.dat"), (0, 0, true), "`-diff` beats emptiness");
+        assert_eq!(
+            seen("bin.forced"),
+            (2, 0, false),
+            "a forced `diff` beats a NUL"
+        );
+        assert_eq!(seen("plain.txt"), (3, 0, false));
+        assert_eq!(seen("plain.bin"), (0, 0, true));
+    }
+
+    /// The reader's hard cap. A file bigger than the cap stops at exactly the cap and
+    /// answers `Incomplete` — never a truncated count — while a cap the file fits
+    /// under, INCLUDING one equal to its size, reads it whole. The consumed count is
+    /// what the caller charges, so it must be exact in both directions.
+    #[test]
+    fn count_untracked_lines_stops_at_its_byte_cap() {
+        let tmp = tempfile::Builder::new()
+            .prefix("gd-line-cap-test-")
+            .tempdir()
+            .expect("create temp dir");
+        let path = tmp.path().join("grown.txt");
+        std::fs::write(&path, "a\nb\nc\nd\n").unwrap();
+        let mut buf = vec![0u8; LINE_COUNT_CHUNK];
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let (outcome, consumed) = count_untracked_lines(&mut file, &mut buf, true, 5);
+        assert_eq!(consumed, 5, "the cap is exact, not a buffer boundary");
+        assert_eq!(outcome.unwrap(), ReadOutcome::Incomplete);
+
+        // A cap AT the file's size is not a partial read — the file ends there.
+        for cap in [8, 64] {
+            let mut file = std::fs::File::open(&path).unwrap();
+            let (outcome, consumed) = count_untracked_lines(&mut file, &mut buf, true, cap);
+            assert_eq!(consumed, 8, "cap {cap} reads the whole 8-byte file");
+            assert_eq!(
+                outcome.unwrap(),
+                ReadOutcome::Counted {
+                    added: 4,
+                    is_binary: false
+                }
+            );
+        }
+    }
+
+    /// The `check-attr -z` grammar this depends on: whole `path NUL attr NUL value
+    /// NUL` triples, only `unset`/`set` carrying a verdict. A stream that does not
+    /// divide into triples maps NOTHING, so an unfamiliar shape sniffs everywhere
+    /// rather than verdicting half a file list.
+    #[test]
+    fn parses_check_attr_triples_and_refuses_a_malformed_stream() {
+        let valid = "a.dat\0diff\0unset\0b.forced\0diff\0set\0c.txt\0diff\0unspecified\0";
+        let attrs = parse_diff_attrs(valid);
+        assert_eq!(attrs.get("a.dat"), Some(&DiffAttr::Binary));
+        assert_eq!(attrs.get("b.forced"), Some(&DiffAttr::ForcedText));
+        assert_eq!(attrs.get("c.txt"), None, "`unspecified` carries no verdict");
+        assert_eq!(attrs.len(), 2);
+
+        // A custom driver name is a verdict this cannot read — git would run that
+        // driver — so it sniffs like an unspecified path.
+        let driver = parse_diff_attrs("d.png\0diff\0exif\0");
+        assert!(driver.is_empty());
+
+        let malformed = parse_diff_attrs("a.dat\0diff\0");
+        assert!(malformed.is_empty(), "a partial triple maps nothing");
+        assert!(parse_diff_attrs("").is_empty());
+    }
+
     /// The read budget, spent in `ls-files` order (which git emits sorted). A file
     /// too big for what is left is skipped ALONE — `b-oversized.txt` sits between
     /// two small files and only it loses its entry — and the budget is charged for
@@ -1049,7 +1289,7 @@ mod tests {
 
         // 6 bytes: a-first spends 2, b-oversized (100) cannot fit the remaining 4,
         // c-fits spends the last 4, and d-after is never opened.
-        let entries = untracked_line_stats(&repo, &listed, 6);
+        let entries = untracked_line_stats(&repo, &listed, 6, &Default::default());
         let counted: Vec<_> = entries.iter().map(|e| (e.path.as_str(), e.added)).collect();
         assert_eq!(counted, vec![("a-first.txt", 1), ("c-fits.txt", 2)]);
     }
