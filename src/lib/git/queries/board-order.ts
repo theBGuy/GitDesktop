@@ -132,7 +132,8 @@ export function reorderBoardItem(
  *  place. A cached id the payload never named leaves the lens exactly as it is —
  *  the payload covers the board's first 100 items, and ordering a cache against a
  *  list that doesn't contain all of it would be a guess. Those lenses reconcile on
- *  the stale mark {@link rechunkPages}'s caller leaves behind. */
+ *  the stale mark `writeThroughBoards` (this function's caller, in
+ *  queries/projects.ts) leaves behind. */
 export function applyBoardOrder(
   data: InfiniteData<BoardItems, string | null> | undefined,
   order: BoardOrder,

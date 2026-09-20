@@ -266,6 +266,11 @@ const NO_REORDER: Record<ReorderDirection, ReorderPlan> = {
  *  refetch dropped it while the menu was open). One held row, not four "already
  *  first"/"already last" rows that would contradict each other. */
 const CARD_GONE_REASON = "This card is no longer on the board";
+/** One shared id for every reorder-refusal toast: key auto-repeat drives the burst
+ *  (no e.repeat gate), so a held direction would otherwise mint a fresh toast per
+ *  repeat — sonner updates the one in place instead. Only one refusal is on screen
+ *  at a time, so a single id is correct. */
+const REORDER_REFUSAL_TOAST_ID = "board-reorder-refused";
 
 /**
  * One card per membership, LAST occurrence winning, applied where the pages flatten
@@ -1270,7 +1275,7 @@ export function ProjectsBoardPanel({
     const held = reorderHeldFor(item.itemId);
     if (held !== undefined) {
       announce(held);
-      toast(held);
+      toast(held, { id: REORDER_REFUSAL_TOAST_ID });
       return;
     }
     const plan = planReorder({
@@ -1293,7 +1298,7 @@ export function ProjectsBoardPanel({
     }
     if (plan.kind === "held") {
       announce(TRUNCATED_ORDER_REASON);
-      toast(TRUNCATED_ORDER_REASON);
+      toast(TRUNCATED_ORDER_REASON, { id: REORDER_REFUSAL_TOAST_ID });
       return;
     }
     // The board and the lens this write belongs to travel WITH it, the rule

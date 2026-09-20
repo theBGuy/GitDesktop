@@ -2039,10 +2039,11 @@ GitDesktop writes where the card finally rests rather than every step it passed 
 If GitHub refuses the write, the card goes back and a message says why.
 
 A row that would change nothing is greyed out — the top card can't go up, the bottom one
-can't go down. On a board that's still paging in, the downward moves are greyed with
-**(load more first)** on the row: the rest of the column may be in a page that hasn't
-arrived, so moving it past the loaded end would be a guess. The keyboard route says the
-same in full — **Load more cards to move past the loaded end**. Under a saved view that
+can't go down. On a board that's still paging in, **Move to bottom** is greyed with
+**(load more first)**, and so is **Move down** on the column's last card: the rest of the
+column may be in a page that hasn't arrived, so moving it past the loaded end would be a
+guess. The keyboard route says the same in full — **Load more cards to move past the
+loaded end**. Under a saved view that
 **sorts**, the whole section says **This view orders cards by its sort** — the columns are
 drawn in the sort's order there, not the board's own, so **Clear view** (or a view without
 a sort) is what brings the project order back. Reordering needs the same write access and
