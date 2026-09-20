@@ -511,7 +511,8 @@ const LINE_COUNT_CHUNK: usize = 64 * 1024;
 
 /// A path's `diff` attribute, for the paths `.gitattributes` decides. A custom driver
 /// name resolves through its `diff.<name>.binary` config; only an unconfigured driver,
-/// or a path no rule names, carries no verdict and falls back to the content sniff.
+/// one set to `binary = auto`, or a path no rule names carries no verdict and falls
+/// back to the content sniff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiffAttr {
     /// `-diff`, or a driver with `binary = true`: git diffs the path as binary
@@ -550,9 +551,11 @@ fn git_config_bool(value: Option<&str>) -> Option<bool> {
 /// `<driver>` is everything between the prefix and the suffix, so a dotted driver name
 /// survives intact. `None` = the stream is not the shape this asked git for (a key
 /// outside the queried pattern), which is a probe FAILURE rather than an empty answer.
-/// Two cases skip their own entry instead: a value that is simply not a bool, since git
-/// fatals there and per-entry degrading is the gentler read, and an EMPTY driver name,
-/// since `[diff ""]` is legal config whose key is in-pattern.
+/// Three cases skip their own entry instead: `auto`, the attribute's third tristate
+/// value, which asks for a content decision and so CLEARS any verdict an earlier scope
+/// set; any OTHER non-bool value, since git fatals on those and per-entry degrading is
+/// the gentler read; and an EMPTY driver name, since `[diff ""]` is legal config whose
+/// key is in-pattern.
 fn parse_diff_driver_binary(text: &str) -> Option<std::collections::HashMap<String, bool>> {
     let mut flags = std::collections::HashMap::new();
     for entry in text.split('\0').filter(|e| !e.is_empty()) {
@@ -567,6 +570,13 @@ fn parse_diff_driver_binary(text: &str) -> Option<std::collections::HashMap<Stri
         // An empty subsection names no driver any `diff` attribute value could
         // reference — check-attr never answers with an empty string.
         if name.is_empty() {
+            continue;
+        }
+        // The attribute is a TRISTATE: `auto` means decide by content, which is what
+        // the sniff already does, and as a later match it CLEARS an earlier scope's
+        // verdict rather than leaving it standing.
+        if value.is_some_and(|value| value.eq_ignore_ascii_case("auto")) {
+            flags.remove(name);
             continue;
         }
         let Some(binary) = git_config_bool(value) else {
@@ -1468,16 +1478,22 @@ mod tests {
         std::fs::write(
             dir.join(".gitattributes"),
             "*.dat -diff\n*.forced diff\n*.byes diff=binyes\n*.bno diff=binno\n\
-             *.b2 diff=bintwo\n*.plain diff=plaindrv\n",
+             *.b2 diff=bintwo\n*.bauto diff=binauto\n*.plain diff=plaindrv\n",
         )
         .unwrap();
         // `yes` and `2` rather than `true` so the parity assertions hold the bool parse
-        // to git's whole alphabet, named and integer; `plaindrv` deliberately gets no
-        // `binary` setting, since an unconfigured driver is the arm that must sniff.
+        // to git's whole alphabet, named and integer; `binauto` pins the tristate's
+        // third value; `plaindrv` deliberately gets no `binary` setting, since an
+        // unconfigured driver is the arm that must sniff.
         for args in [
             vec!["config", "diff.binyes.binary", "yes"],
             vec!["config", "diff.binno.binary", "false"],
             vec!["config", "diff.bintwo.binary", "2"],
+            vec!["config", "diff.binauto.binary", "true"],
+            // Repeated key, `true` then `auto`: the stream carries both, and the later
+            // one has to clear the earlier verdict the way git's own last-match read
+            // does. A lone `auto` would pass whether or not it clears anything.
+            vec!["config", "--add", "diff.binauto.binary", "auto"],
         ] {
             run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
         }
@@ -1500,6 +1516,7 @@ mod tests {
         std::fs::write(dir.join("clean.byes"), "a\nb\n").unwrap();
         std::fs::write(dir.join("binfile.bno"), b"a\0b\nc\n").unwrap();
         std::fs::write(dir.join("clean.b2"), "a\nb\n").unwrap();
+        std::fs::write(dir.join("clean.bauto"), "a\nb\n").unwrap();
         std::fs::write(dir.join("clean.plain"), "a\nb\n").unwrap();
 
         let stats = git_working_line_stats(repo.clone()).await.unwrap();
@@ -1536,6 +1553,11 @@ mod tests {
             "a driver's integer `binary = 2` is true like any non-zero"
         );
         assert_eq!(
+            seen("clean.bauto"),
+            (2, 0, false),
+            "a driver's `binary = auto` asks for the content decision"
+        );
+        assert_eq!(
             seen("clean.plain"),
             (2, 0, false),
             "an unconfigured driver leaves the sniff in charge"
@@ -1553,6 +1575,7 @@ mod tests {
                 "clean.byes",
                 "binfile.bno",
                 "clean.b2",
+                "clean.bauto",
                 "clean.plain",
             ],
         )
@@ -1904,6 +1927,35 @@ mod tests {
             parse_diff_driver_binary("core.autocrlf\nfalse\0"),
             None,
             "a key this query cannot return means the stream is unreadable"
+        );
+
+        // `auto` is the attribute's third tristate value: decide by content, which is
+        // the sniff. As a LATER match it clears what an earlier scope set; an earlier
+        // one is simply overwritten by the later verdict.
+        assert_eq!(
+            read("diff.dauto.binary\nauto\0").get("dauto"),
+            None,
+            "`auto` alone asks for the content decision"
+        );
+        assert_eq!(
+            read("diff.dover.binary\ntrue\0diff.dover.binary\nauto\0").get("dover"),
+            None,
+            "a later `auto` clears an earlier scope's verdict"
+        );
+        assert_eq!(
+            read("diff.dover.binary\nfalse\0diff.dover.binary\nauto\0").get("dover"),
+            None,
+            "it clears a `false` the same way"
+        );
+        assert_eq!(
+            read("diff.dover.binary\nauto\0diff.dover.binary\ntrue\0").get("dover"),
+            Some(&true),
+            "a later verdict still wins over an earlier `auto`"
+        );
+        assert_eq!(
+            read("diff.dcase.binary\nAUTO\0").get("dcase"),
+            None,
+            "the tristate spelling is case-insensitive like the bools"
         );
 
         // `[diff ""]` is legal config and in-pattern: it names no driver and skips its
