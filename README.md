@@ -666,21 +666,23 @@ stands in for them.
 On a **Bitbucket** repo the tab reads the **Code Insights** reports
 published against your branch's tip commit (falling back to the default
 branch, and saying so), a section per report: its title, what it covers,
-the reporter, its result chip (Passed, Failed, or Pending), its metrics
-strip (numbers, durations, percentages, dates, and pass/fail flags, each
-formatted for its own type), and its **annotations** worst-first with
-severity and `path:line`. A provenance strip names the commit and ref the
-reports came from, linking the commit where Bitbucket gives a URL. That
-strip shows above the no-reports card too, so a commit with nothing
-published still says which commit and ref were read. Select an annotation
-for its type, location, reporter, result, and full text, and where the
-scanner attached a link, open it at the source it points to (an advisory
-page, the rule's docs), named by its host rather than by the forge.
-Coverage and test reports carry no annotations, so their section is the
-header and metrics — and where no scanner has published anything yet, or a
-report's annotations couldn't be read, the tab says which rather than
-showing a clean list. Any pipe that writes Code Insights puts its results
-here, so a Bitbucket Pipelines scanner needs nothing extra to show up.
+the reporter, its result chip (Passed, Failed, Pending, or Unspecified
+when the tool posted none), its metrics strip (numbers, durations,
+percentages, dates, and pass/fail flags, each formatted for its own type),
+its description where the report carries one, and its **annotations**
+worst-first with severity and `path:line`. A provenance strip names the
+commit and ref the reports came from, linking the commit where Bitbucket
+gives a URL. That strip shows above the no-reports card too, so a commit
+with nothing published still says which commit and ref were read. Select
+an annotation for its type, location, reporter, result, and full text, and
+where the scanner attached a link, open it at the source it points to (an
+advisory page, the rule's docs), named by its host rather than by the
+forge. Coverage and test reports carry no annotations, so their section is
+the header, metrics, and description — and where no scanner has published
+anything yet, or a report's annotations couldn't be read, the tab says
+which rather than showing a clean list. Any pipe that writes Code Insights
+puts its results here, so a Bitbucket Pipelines scanner needs nothing
+extra to show up.
 
 ### Insights
 

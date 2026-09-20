@@ -199,11 +199,16 @@ impl BbErrorBody {
 /// itself (e.g. [`bb_get_text_status`]) produces the identical error for statuses it
 /// doesn't special-case.
 pub(crate) fn http_error(status: u16, body: &str) -> AppError {
-    AppError::Bitbucket(bb_error_detail(status, body))
+    AppError::Bitbucket(bb_error_detail(status, body, BbOpKind::Write))
+}
+
+pub(crate) enum BbOpKind {
+    Read,
+    Write,
 }
 
 /// Shared Bitbucket status guidance, API envelope detail, or a bounded text snippet.
-pub(crate) fn bb_error_detail(status: u16, body: &str) -> String {
+pub(crate) fn bb_error_detail(status: u16, body: &str, op: BbOpKind) -> String {
     // Prefer the API's own message when the body is the JSON error envelope.
     let api_msg = serde_json::from_str::<BbErrorEnvelope>(body)
         .ok()
@@ -217,13 +222,22 @@ pub(crate) fn bb_error_detail(status: u16, body: &str) -> String {
                 .into()
         }
         429 => "Bitbucket rate limit reached (429). Wait a moment and try again.".into(),
-        // A 403 whose body names Bitbucket's "privilege scopes" is a missing-write-scope
+        // A 403 whose body names Bitbucket's "privilege scopes" is a missing-scope
         // token (a bad token is a 401); other 403s fall through to the envelope message.
         403 if body.contains("privilege scopes") => {
-            "Bitbucket rejected the request (403) — your API token is missing a required \
-             write scope. Reconnect it in Settings → Accounts with pull request / \
-             repository / pipeline write scopes."
-                .into()
+            match op {
+                BbOpKind::Read => {
+                    "Bitbucket rejected the request (403) — your API token is missing a scope \
+                     this read needs. Reconnect it in Settings → Accounts with repository read access."
+                        .into()
+                }
+                BbOpKind::Write => {
+                    "Bitbucket rejected the request (403) — your API token is missing a required \
+                     write scope. Reconnect it in Settings → Accounts with pull request / \
+                     repository / pipeline write scopes."
+                        .into()
+                }
+            }
         }
         _ => api_msg.unwrap_or_else(|| {
             let trimmed = body.trim();
@@ -312,7 +326,7 @@ pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
     path_or_url: &str,
     what: &str,
 ) -> AppResult<T> {
-    let (status, body) = bb_get_classified(creds, path_or_url).await?;
+    let (status, body) = bb_get_status(creds, path_or_url, true).await?;
     if !(200..300).contains(&status) {
         return Err(http_error(status, &body));
     }

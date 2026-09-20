@@ -653,7 +653,9 @@ function BbAnnotationDetail({
           ) : null}
           {/* The report's own description, which nothing else surfaces. A
               tolerated empty string is falsy, so it drops the row like a null. */}
-          {report.details ? <Row label="Report">{report.details}</Row> : null}
+          {report.details ? (
+            <Row label="Report details">{report.details}</Row>
+          ) : null}
           {/* The annotation's own verdict and the report's are separate states,
               so neither ever stands in for the other under one label. */}
           {annotation.result ? (

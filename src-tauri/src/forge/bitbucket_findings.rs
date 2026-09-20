@@ -222,9 +222,13 @@ fn classify(status: u16, body: &str) -> Result<(), Failure> {
         200..=299 => Ok(()),
         401 | 403 => Err((
             BbFindingsAvailability::Forbidden,
-            http::bb_error_detail(status, body),
+            http::bb_error_detail(status, body, http::BbOpKind::Read),
         )),
-        _ => Err(indeterminate(http::bb_error_detail(status, body))),
+        _ => Err(indeterminate(http::bb_error_detail(
+            status,
+            body,
+            http::BbOpKind::Read,
+        ))),
     }
 }
 
@@ -298,6 +302,8 @@ fn parse_items<T: serde::de::DeserializeOwned, O>(
     (parsed, unreadable)
 }
 
+/// Units stay separate: a lost report or annotation list hides an unknown number
+/// of annotation rows, so folding them into a row count would understate the loss.
 fn partial_detail(
     reports: usize,
     annotation_lists: usize,
@@ -454,6 +460,7 @@ where
         out.reports = reports;
         let mut unreadable_lists = 0;
         let mut unreadable_rows = 0;
+        let mut first_annotation_failure = None;
         for report in &mut out.reports {
             let url = format!(
                 "{base}/commit/{}/reports/{}/annotations?pagelen=100",
@@ -468,14 +475,18 @@ where
                     report.annotations_unreadable = unreadable > 0;
                     unreadable_rows += unreadable;
                 }
-                Err(_) => {
+                Err((_, detail)) => {
                     report.annotations_unreadable = true;
                     unreadable_lists += 1;
+                    first_annotation_failure.get_or_insert(detail);
                 }
             }
         }
         out.availability = BbFindingsAvailability::Available;
         out.detail = partial_detail(unreadable_reports, unreadable_lists, unreadable_rows);
+        if let (Some(summary), Some(detail)) = (&mut out.detail, first_annotation_failure) {
+            summary.push_str(&format!(" — first failure: {detail}"));
+        }
         return Ok(());
     }
     if out.commit_sha.is_some() {
@@ -723,10 +734,10 @@ mod tests {
     #[tokio::test]
     async fn annotation_failure_preserves_available_reports_and_separate_counts() {
         for (rows, expected) in [
-            (REPORT, "1 annotation list couldn't be read"),
+            (REPORT, "1 annotation list couldn't be read — first failure: HTTP 403: unknown body"),
             (
                 r#"{"values":[{"uuid":"r1"},{"title":"missing uuid"}]}"#,
-                "1 report and 1 annotation list couldn't be read",
+                "1 report and 1 annotation list couldn't be read — first failure: HTTP 403: unknown body",
             ),
         ] {
             let out = scripted_findings(
@@ -749,6 +760,29 @@ mod tests {
             assert!(out.reports[0].annotations_unreadable);
             assert!(out.reports[0].annotations.is_empty());
             assert!(!out.reports[0].annotations_truncated);
+        }
+    }
+
+    #[tokio::test]
+    async fn annotation_failures_disclose_the_first_rate_limit_detail() {
+        for (reports, second_failure, expected) in [
+            (REPORT, false, "1 annotation list couldn't be read — first failure: Bitbucket rate limit reached (429). Wait a moment and try again."),
+            (r#"{"values":[{"uuid":"r1"},{"uuid":"r2"}]}"#, true, "2 annotation lists couldn't be read — first failure: Bitbucket rate limit reached (429). Wait a moment and try again."),
+        ] {
+            let mut responses = vec![
+                ("", 200, REPO),
+                ("/refs/branches/topic", 200, TIP),
+                ("/commit/abc/reports?pagelen=100", 200, reports),
+                ("/commit/abc/reports/r1/annotations?pagelen=100", 429, "rate limited"),
+            ];
+            if second_failure {
+                responses.push(("/commit/abc/reports/r2/annotations?pagelen=100", 403, "privilege scopes"));
+            }
+            let out = scripted_findings("topic", None, responses).await;
+            assert_eq!(out.availability, BbFindingsAvailability::Available);
+            assert_eq!(out.detail.as_deref(), Some(expected));
+            assert_eq!(out.reports.len(), if second_failure { 2 } else { 1 });
+            assert!(out.reports.iter().all(|report| report.annotations_unreadable && report.annotations.is_empty()));
         }
     }
 
@@ -789,7 +823,7 @@ mod tests {
             assert_eq!(out.availability, BbFindingsAvailability::Available);
             assert_eq!(
                 out.detail.as_deref(),
-                Some("1 report, 1 annotation list and 1 annotation row couldn't be read")
+                Some("1 report, 1 annotation list and 1 annotation row couldn't be read — first failure: HTTP 403: unreadable list")
             );
             assert_eq!(out.reports.len(), 2);
             let report = &out.reports[0];
@@ -1032,7 +1066,7 @@ mod tests {
                 403,
                 r#"{"error":{"message":"Your credentials lack one or more required privilege scopes."}}"#,
                 BbFindingsAvailability::Forbidden,
-                "Bitbucket rejected the request (403) — your API token is missing a required write scope. Reconnect it in Settings → Accounts with pull request / repository / pipeline write scopes.",
+                "Bitbucket rejected the request (403) — your API token is missing a scope this read needs. Reconnect it in Settings → Accounts with repository read access.",
             ),
             (
                 404,
@@ -1048,8 +1082,13 @@ mod tests {
             ),
         ] {
             assert_eq!(classify(status, body), Err((availability, expected.into())));
+            let write_expected = if status == 403 && body.contains("privilege scopes") {
+                "Bitbucket rejected the request (403) — your API token is missing a required write scope. Reconnect it in Settings → Accounts with pull request / repository / pipeline write scopes."
+            } else {
+                expected
+            };
             match http::http_error(status, body) {
-                crate::error::AppError::Bitbucket(detail) => assert_eq!(detail, expected),
+                crate::error::AppError::Bitbucket(detail) => assert_eq!(detail, write_expected),
                 other => panic!("expected Bitbucket error, got {other:?}"),
             }
             let out = scripted_findings(

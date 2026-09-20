@@ -382,8 +382,10 @@ impl<T> Default for BbPage<T> {
 }
 
 /// Page bound shared by every `next`-following read — a hard stop so a pathological
-/// repo can't stall a panel behind unbounded requests. Pages past it are dropped
-/// silently: no error, no truncation flag, so the caller can't tell.
+/// repo can't stall a panel behind unbounded requests. This module's walkers drop
+/// pages past it silently: no error, no flag, so the caller can't tell.
+/// `bitbucket_findings::walk` is the exception — it returns a remaining `next`
+/// as its `truncated` verdict.
 pub(super) const BB_MAX_PAGES: usize = 5;
 
 /// The next page's URL, or `None` when there is no page to follow. Three cases stop

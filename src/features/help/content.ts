@@ -2293,8 +2293,9 @@ when the tool posted none). Where the report carries a link, a button beside the
 opens it, named for the site it lands on (**Open on sonarcloud.io**, say) rather
 than for Bitbucket, since a Code Insights link goes wherever the scanner pointed
 it. Hover the button to preview the full URL. Under the header sits the report's
-**metrics** — counts, durations, percentages, dates, and pass/fail flags, each
-formatted for the type the report declared.
+**metrics** (counts, durations, percentages, dates, and pass/fail flags, each
+formatted for the type the report declared), and its **description** where the
+report carries one.
 
 The report's **annotations** are the rows: worst severity first, then by path, each with
 its **severity**, what it reports (**Vulnerability**, **Code smell**, or **Bug**), and

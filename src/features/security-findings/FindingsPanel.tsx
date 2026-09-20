@@ -1385,7 +1385,15 @@ function BbDataStrip({ data }: { data: BbReportDataOut[] }) {
  * a repository-wide store, so the strip is what keeps the list honest about how
  * current it is. In normal layout flow (never floating) so it can't cover a row.
  */
-function BbCommitProvenance({ data }: { data: BbFindingsOut }) {
+function BbCommitProvenance({
+  data,
+  reportsShown = true,
+}: {
+  data: BbFindingsOut;
+  /** False where the strip sits above a card saying nothing was published:
+   *  the fallback ref was read, but none of its reports are on screen. */
+  reportsShown?: boolean;
+}) {
   const sha = data.commitSha;
   if (!sha) return null;
   const commitUrl = data.commitWebUrl;
@@ -1395,16 +1403,18 @@ function BbCommitProvenance({ data }: { data: BbFindingsOut }) {
     data.usedFallback || isUnnamedRef(data.requestedRef)
       ? data.fallbackRef
       : data.requestedRef;
+  const name = data.fallbackRef || "the default branch";
+  const tail = reportsShown ? `showing ${name}.` : `read ${name} instead.`;
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
       {data.usedFallback ? (
         <p className="w-full">
           {isUnnamedRef(data.requestedRef)
-            ? `No named branch checked out — showing ${data.fallbackRef || "the default branch"}.`
+            ? `No named branch checked out — ${tail}`
             : // Covers BOTH fallback causes (branch unresolved remotely, or its
               // tip has no reports) — the wire doesn't say which, so the copy
               // must not claim the commit was missing.
-              `No reports on ${data.requestedRef} — showing ${data.fallbackRef || "the default branch"}.`}
+              `No reports on ${data.requestedRef} — ${tail}`}
         </p>
       ) : null}
       <p className="min-w-0 flex-1 truncate">
@@ -1472,8 +1482,9 @@ function BbUnavailableCard({
       <>
         {/* This state resolved a commit, so the strip names which one was read
             and which ref it came from. The other three states have no commit,
-            and the strip renders nothing for them. */}
-        <BbCommitProvenance data={data} />
+            and the strip renders nothing for them. `reportsShown={false}` is
+            what keeps a fallback from promising rows the card then denies. */}
+        <BbCommitProvenance data={data} reportsShown={false} />
         <ReasonCard
           icon={ShieldSlashIcon}
           message="No Code Insights reports on this commit — most likely no scanner or pipe is set up yet."
@@ -1604,6 +1615,9 @@ function BbReportSectionView({
   const { report, label, rows } = section;
   const loaded = report.annotations.length;
   const reportLink = report.link;
+  const typeLabel = report.reportType
+    ? bbReportTypeLabel(report.reportType)
+    : null;
   return (
     <>
       <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-3 py-1.5">
@@ -1617,13 +1631,15 @@ function BbReportSectionView({
         </h3>
         <BbResultChip className="shrink-0" result={report.result} />
         {/* What the report covers — a COVERAGE section reads as one rather than
-            as a security report that found nothing. */}
-        {report.reportType ? (
+            as a security report that found nothing. Wears SectionHeader's quiet
+            uppercase so it reads as a category, not as another name field
+            running on from the reporter beside it. */}
+        {typeLabel ? (
           <span
-            className="min-w-0 max-w-[20%] shrink truncate text-[11px] text-muted-foreground"
-            title={bbReportTypeLabel(report.reportType)}
+            className="min-w-0 max-w-[20%] shrink truncate text-[10px] tracking-wide text-muted-foreground uppercase"
+            title={typeLabel}
           >
-            {bbReportTypeLabel(report.reportType)}
+            {typeLabel}
           </span>
         ) : null}
         {/* Suppressed when the label already fell back to it — one string, said
