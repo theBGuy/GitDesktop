@@ -308,11 +308,11 @@ export function ChangesPanel({
   // Each row reads its OWN side, never a shared or summed number: a file staged
   // and then re-edited shows index-vs-HEAD counts on its Staged row and
   // worktree-vs-index counts on its Changes row. The kind gate lives here alone —
-  // numstat can't see untracked paths, and emits duplicate noise rows for
-  // conflicted ones, so both render a blank slot.
+  // numstat emits duplicate noise rows for conflicted paths, so those render a
+  // blank slot. Untracked files are counted backend-side onto the unstaged side.
   function statFor(entry: FileEntry, staged: boolean) {
     const kind = staged ? entry.staged : entry.unstaged;
-    if (kind === "untracked" || kind === "conflicted") return undefined;
+    if (kind === "conflicted") return undefined;
     return (staged ? stagedStats : unstagedStats).get(entry.path);
   }
 

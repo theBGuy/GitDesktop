@@ -30,7 +30,9 @@ export interface DiffStatEntry {
 }
 
 /** Per-file line counts for the working tree, one list per diff side. Untracked
- *  paths appear on neither side — numstat only reports tracked changes. */
+ *  paths report on the unstaged side with every line counted as an addition —
+ *  numstat reports tracked changes alone, so those counts are read from the
+ *  worktree. */
 export interface WorkingLineStats {
   /** Index vs HEAD — what the Staged section's rows show. */
   staged: DiffStatEntry[];

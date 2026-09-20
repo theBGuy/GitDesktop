@@ -491,14 +491,128 @@ pub struct WorkingLineStats {
     pub unstaged: Vec<DiffStatEntry>,
 }
 
+/// git's own binary sniff window: a NUL among a file's first 8000 bytes is what
+/// makes git report `-` counts, so an untracked file is judged the same way.
+const BINARY_SNIFF_BYTES: usize = 8000;
+/// git's `core.bigFileThreshold` default, past which git itself treats a file as
+/// binary in diffs — one this large is reported binary instead of being read.
+const BIG_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// Ceiling on bytes one call may read across untracked files, spent in `ls-files`
+/// order — it bounds the 5s poll's I/O on a tree full of not-yet-ignored files.
+const UNTRACKED_READ_BUDGET: u64 = 64 * 1024 * 1024;
+/// Read window for the line count: the only memory a file's size can influence,
+/// so no untracked file is ever held whole.
+const LINE_COUNT_CHUNK: usize = 64 * 1024;
+
+/// Counts `\n` bytes through a bounded buffer, plus the final unterminated line,
+/// and reports the bytes it actually consumed so the caller charges its budget for
+/// reads rather than for file sizes. The bytes are counted raw — numstat reports
+/// the worktree's own line endings, so a CRLF file still has one `\n` per line and
+/// nothing is converted here. A NUL inside the sniff window returns `(0, true, …)`
+/// straight away, the shape a `-` numstat row takes.
+fn count_untracked_lines(
+    file: &mut std::fs::File,
+    buf: &mut [u8],
+) -> std::io::Result<(u32, bool, u64)> {
+    use std::io::Read;
+
+    let mut sniff_left = BINARY_SNIFF_BYTES;
+    let mut lines: u32 = 0;
+    let mut last: Option<u8> = None;
+    let mut consumed: u64 = 0;
+    loop {
+        let read = file.read(buf)?;
+        if read == 0 {
+            break;
+        }
+        consumed = consumed.saturating_add(read as u64);
+        let chunk = &buf[..read];
+        if sniff_left > 0 {
+            let window = &chunk[..read.min(sniff_left)];
+            if window.contains(&0) {
+                return Ok((0, true, consumed));
+            }
+            sniff_left -= window.len();
+        }
+        let newlines = chunk.iter().filter(|b| **b == b'\n').count();
+        lines = lines.saturating_add(u32::try_from(newlines).unwrap_or(u32::MAX));
+        last = chunk.last().copied();
+    }
+    if last.is_some_and(|b| b != b'\n') {
+        lines = lines.saturating_add(1);
+    }
+    Ok((lines, false, consumed))
+}
+
+/// Line counts for the untracked paths `git ls-files --others -z` named, as
+/// unstaged entries whose every line is an addition — the shape numstat reports
+/// for the same file once it is staged. Blocking reads, so callers run it off the
+/// async workers. Anything that is not a readable regular file is skipped instead
+/// of followed (a directory is a nested repo; a symlink must not be read through),
+/// as is any file whose read fails — a path deleted or locked mid-poll keeps the
+/// blank slot rather than failing the whole command.
+///
+/// `budget` is the bytes this call may still read; only a file whose size fits what
+/// is left is opened, so no count is ever truncated, and a file too big for the
+/// remainder is skipped ALONE — later, smaller files still get their counts.
+fn untracked_line_stats(repo_path: &str, ls_files_z: &str, mut budget: u64) -> Vec<DiffStatEntry> {
+    let root = std::path::Path::new(repo_path);
+    let mut buf = vec![0u8; LINE_COUNT_CHUNK];
+    let mut entries = Vec::new();
+
+    for rel in ls_files_z.split('\0').filter(|p| !p.is_empty()) {
+        if budget == 0 {
+            break;
+        }
+        let entry = |added: u32, is_binary: bool| DiffStatEntry {
+            path: rel.to_string(),
+            added,
+            deleted: 0,
+            is_binary,
+        };
+        let path = root.join(rel);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let len = meta.len();
+        if len == 0 {
+            // git numstat reports `0 0` for an empty file once staged.
+            entries.push(entry(0, false));
+            continue;
+        }
+        if len > BIG_FILE_BYTES {
+            entries.push(entry(0, true));
+            continue;
+        }
+        if len > budget {
+            continue;
+        }
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let Ok((added, is_binary, consumed)) = count_untracked_lines(&mut file, &mut buf) else {
+            continue;
+        };
+        // A file that grew since its stat can overshoot the remainder; saturating
+        // keeps the budget monotonic instead of wrapping.
+        budget = budget.saturating_sub(consumed);
+        entries.push(entry(added, is_binary));
+    }
+    entries
+}
+
 /// Line counts for the Changes panel's file rows, split by side so a file that
 /// is BOTH staged and re-edited reports each row's own numbers (never one
 /// shared or summed count). Read-only and lock-free like `status_core`, so it
-/// can ride the same 5s poll. Untracked paths appear on neither side: numstat
-/// only reports tracked changes, and those rows deliberately show no counts.
+/// can ride the same 5s poll. Untracked paths join the unstaged side with every
+/// line counted as an addition, read from the worktree because numstat reports
+/// tracked changes alone.
 #[tauri::command]
 pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineStats> {
-    let (staged, unstaged) = tokio::try_join!(
+    let (staged, unstaged, untracked) = tokio::try_join!(
         run_git(
             Some(&repo_path),
             &["diff", "--cached", "--numstat", "-z"],
@@ -508,11 +622,37 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
             Some(&repo_path),
             &["diff", "--numstat", "-z"],
             DEFAULT_TIMEOUT,
-        )
+        ),
+        // Enumerating untracked paths is the one arm allowed to fail: an error or a
+        // timeout here degrades to blank untracked slots, while a numstat failure is
+        // still an error, since blanking every tracked count is the worse answer.
+        // `ls-files` names paths relative to the CWD, so `repo_path` must be the
+        // worktree toplevel — `validate_repo` resolves it — or the entries mis-key.
+        async {
+            Ok::<String, AppError>(
+                run_git(
+                    Some(&repo_path),
+                    &["ls-files", "--others", "--exclude-standard", "-z"],
+                    DEFAULT_TIMEOUT,
+                )
+                .await
+                .map(|out| out.stdout_lossy())
+                .unwrap_or_default(),
+            )
+        }
     )?;
+    let mut unstaged_entries = parse_numstat_z(&unstaged.stdout_lossy());
+    // Counting lines is blocking file I/O, kept off the async workers this poll
+    // shares with every other repo operation.
+    let counted = tauri::async_runtime::spawn_blocking(move || {
+        untracked_line_stats(&repo_path, &untracked, UNTRACKED_READ_BUDGET)
+    })
+    .await
+    .unwrap_or_default();
+    unstaged_entries.extend(counted);
     Ok(WorkingLineStats {
         staged: parse_numstat_z(&staged.stdout_lossy()),
-        unstaged: parse_numstat_z(&unstaged.stdout_lossy()),
+        unstaged: unstaged_entries,
     })
 }
 
@@ -748,7 +888,8 @@ mod tests {
 
     /// Sets up a temp git repo with a deterministic identity. `core.autocrlf` is
     /// pinned because these tests count LINES — an inherited global setting must
-    /// not reshape the fixture.
+    /// not reshape the fixture — and `core.excludesFile` is emptied so
+    /// `--exclude-standard` cannot consult the developer's global ignore file.
     async fn init_line_stats_repo(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
         let tmp = tempfile::Builder::new()
             .prefix(prefix)
@@ -761,6 +902,7 @@ mod tests {
             vec!["config", "user.email", "t@t.local"],
             vec!["config", "user.name", "T"],
             vec!["config", "core.autocrlf", "false"],
+            vec!["config", "core.excludesFile", ""],
         ] {
             run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
         }
@@ -769,9 +911,10 @@ mod tests {
 
     /// The panel's core invariant: a file that is staged AND re-edited reports
     /// DIFFERENT counts per side — staged is index vs HEAD, unstaged is working
-    /// tree vs index. Untracked files appear on neither side.
+    /// tree vs index. An untracked file rides the unstaged side alone, every
+    /// line an addition.
     #[tokio::test]
-    async fn working_line_stats_splits_sides_and_skips_untracked() {
+    async fn working_line_stats_splits_sides_and_counts_untracked() {
         let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-test-").await;
 
         std::fs::write(dir.join("file.txt"), "a\nb\nc\n").unwrap();
@@ -806,12 +949,140 @@ mod tests {
             .expect("unstaged side reports the file");
         assert_eq!((unstaged.added, unstaged.deleted), (3, 1));
 
-        for side in [&stats.staged, &stats.unstaged] {
-            assert!(
-                !side.iter().any(|e| e.path == "untracked.txt"),
-                "numstat never reports untracked paths"
-            );
-        }
+        let untracked = stats
+            .unstaged
+            .iter()
+            .find(|e| e.path == "untracked.txt")
+            .expect("the unstaged side counts the untracked file");
+        assert_eq!((untracked.added, untracked.deleted), (2, 0));
+        assert!(!untracked.is_binary);
+        assert!(
+            !stats.staged.iter().any(|e| e.path == "untracked.txt"),
+            "nothing untracked belongs on the staged side"
+        );
+    }
+
+    /// A NUL in the sniff window makes the entry read `bin` in the panel — the
+    /// exact shape numstat's `-\t-` row parses to.
+    #[tokio::test]
+    async fn working_line_stats_reports_untracked_binary() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-binary-test-").await;
+
+        std::fs::write(dir.join("blob.bin"), b"PNG\x00\x01\x02rest\nof it\n").unwrap();
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        let entry = stats
+            .unstaged
+            .iter()
+            .find(|e| e.path == "blob.bin")
+            .expect("the binary file still gets an entry");
+        assert_eq!((entry.added, entry.deleted), (0, 0));
+        assert!(entry.is_binary);
+    }
+
+    /// numstat counts a final unterminated line, so a file with no trailing
+    /// newline reports one more line than it has `\n` bytes. An empty file is
+    /// its own case: present, with zero counts, and NOT binary.
+    #[tokio::test]
+    async fn working_line_stats_counts_final_line_and_empty_untracked() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-final-line-test-").await;
+
+        std::fs::write(dir.join("unterminated.txt"), "x\ny").unwrap();
+        std::fs::write(dir.join("empty.txt"), "").unwrap();
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        let unterminated = stats
+            .unstaged
+            .iter()
+            .find(|e| e.path == "unterminated.txt")
+            .expect("a file without a final newline is counted");
+        assert_eq!((unterminated.added, unterminated.deleted), (2, 0));
+        let empty = stats
+            .unstaged
+            .iter()
+            .find(|e| e.path == "empty.txt")
+            .expect("an empty file gets an entry of its own");
+        assert_eq!((empty.added, empty.deleted), (0, 0));
+        assert!(!empty.is_binary);
+    }
+
+    /// The entry's path is the repo-relative, forward-slashed string `status
+    /// --untracked-files=all` reports, which is how the panel's rows find it.
+    #[tokio::test]
+    async fn working_line_stats_reports_nested_untracked_path() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-nested-test-").await;
+
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("inner.txt"), "a\nb\nc\n").unwrap();
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        let entry = stats
+            .unstaged
+            .iter()
+            .find(|e| e.path == "sub/inner.txt")
+            .expect("the nested path is reported with forward slashes");
+        assert_eq!((entry.added, entry.deleted), (3, 0));
+    }
+
+    /// The read budget, spent in `ls-files` order (which git emits sorted). A file
+    /// too big for what is left is skipped ALONE — `b-oversized.txt` sits between
+    /// two small files and only it loses its entry — and the budget is charged for
+    /// bytes actually read, so `c-fits.txt` drives it to exactly zero and
+    /// `d-after.txt` gets nothing.
+    #[tokio::test]
+    async fn working_line_stats_spends_its_untracked_read_budget_in_order() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-budget-test-").await;
+
+        std::fs::write(dir.join("a-first.txt"), "x\n").unwrap();
+        std::fs::write(dir.join("b-oversized.txt"), "y\n".repeat(50)).unwrap();
+        std::fs::write(dir.join("c-fits.txt"), "p\nq\n").unwrap();
+        std::fs::write(dir.join("d-after.txt"), "r\n").unwrap();
+
+        let listed = run_git(
+            Some(&repo),
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
+
+        // 6 bytes: a-first spends 2, b-oversized (100) cannot fit the remaining 4,
+        // c-fits spends the last 4, and d-after is never opened.
+        let entries = untracked_line_stats(&repo, &listed, 6);
+        let counted: Vec<_> = entries.iter().map(|e| (e.path.as_str(), e.added)).collect();
+        assert_eq!(counted, vec![("a-first.txt", 1), ("c-fits.txt", 2)]);
+    }
+
+    /// `--exclude-standard` keeps ignored files out of the count entirely: they
+    /// are not rows in the panel, so they must not be entries either.
+    #[tokio::test]
+    async fn working_line_stats_skips_ignored_files() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-ignored-test-").await;
+
+        std::fs::write(dir.join(".gitignore"), "ignored.txt\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(
+            Some(&repo),
+            &["commit", "-qm", "ignore rules"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        std::fs::write(dir.join("ignored.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("seen.txt"), "one\n").unwrap();
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        assert!(
+            !stats.unstaged.iter().any(|e| e.path == "ignored.txt"),
+            "an ignored file is never an untracked row"
+        );
+        assert!(
+            stats.unstaged.iter().any(|e| e.path == "seen.txt"),
+            "the control file is still counted"
+        );
     }
 
     /// A brand-new repo with no commits still reports its staged counts — `git
