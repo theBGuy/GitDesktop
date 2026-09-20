@@ -8,6 +8,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import { useEditPrLabels, useRepoLabels } from "@/lib/git/queries";
 import type { RemoteLens, RepoLabel } from "@/lib/git/types";
+import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { cn } from "@/lib/utils";
 import { LabelChip } from "./Thread";
 
 /**
@@ -50,7 +52,22 @@ export function LabelsPopover({
   const editLabels = useEditPrLabels(repoPath, lens);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Set<string>>(new Set());
+  const [activeId, setActiveId] = useState<string | null>(null);
   const portalContainer = usePanelPortalContainer();
+
+  const rows = repoLabels.data ?? [];
+  const navIndexByName = new Map(rows.map((label, i) => [label.name, i]));
+  const activeIndex =
+    activeId === null ? -1 : (navIndexByName.get(activeId) ?? -1);
+  // Nothing active yet (or the active row vanished on a refetch) parks the single
+  // tab stop on the first row.
+  const focusIndex = activeIndex === -1 ? 0 : activeIndex;
+  const onRowKeyDown = listKeyboardNav({
+    items: rows,
+    activeIndex,
+    onActivate: (label) => setActiveId(label.name),
+    rowKey: (label) => label.name,
+  });
 
   function toggleDraft(name: string, on: boolean) {
     setDraft((prev) => {
@@ -124,34 +141,55 @@ export function LabelsPopover({
           className="isolate z-50"
         >
           <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-            <p className="px-1 pb-1.5 text-xs font-medium">Labels</p>
-            {(repoLabels.data ?? []).length === 0 && (
+            {/* The caption IS the popup's accessible name: Popover.Popup takes its
+                `aria-labelledby` from whatever Title registers, and a bare element
+                leaves the dialog unnamed. `render` keeps the <p> it has always been
+                — Title's own default element is an <h2>. */}
+            <Popover.Title
+              render={<p />}
+              className="px-1 pb-1.5 text-xs font-medium"
+            >
+              Labels
+            </Popover.Title>
+            {rows.length === 0 && (
               <p className="px-1 py-1 text-xs text-muted-foreground">
                 {repoLabels.isPending
                   ? "Loading labels…"
                   : "This repository has no labels."}
               </p>
             )}
-            {(repoLabels.data ?? []).map((label) => (
-              <label
-                key={label.name}
-                className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
-              >
-                <Checkbox
-                  checked={draft.has(label.name)}
-                  onCheckedChange={(v) => toggleDraft(label.name, v === true)}
-                />
-                <span
-                  aria-hidden
-                  className="size-2 shrink-0 rounded-full"
-                  style={{ backgroundColor: `#${label.color}` }}
-                />
-                <span className="flex-1 truncate" title={label.name}>
-                  {label.name}
-                </span>
-              </label>
-            ))}
-            {(repoLabels.data ?? []).length > 0 && (
+            {/* Unstyled but NOT removable: it hosts the key handler, and
+                `listKeyboardNav` finds the row to focus by querying within it. */}
+            <div onKeyDown={onRowKeyDown}>
+              {rows.map((label) => (
+                <label
+                  key={label.name}
+                  className={cn(
+                    "flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60",
+                    activeId === label.name && "bg-muted/60",
+                  )}
+                >
+                  <Checkbox
+                    data-row={label.name}
+                    tabIndex={
+                      navIndexByName.get(label.name) === focusIndex ? 0 : -1
+                    }
+                    checked={draft.has(label.name)}
+                    onCheckedChange={(v) => toggleDraft(label.name, v === true)}
+                    onFocus={() => setActiveId(label.name)}
+                  />
+                  <span
+                    aria-hidden
+                    className="size-2 shrink-0 rounded-full"
+                    style={{ backgroundColor: `#${label.color}` }}
+                  />
+                  <span className="flex-1 truncate" title={label.name}>
+                    {label.name}
+                  </span>
+                </label>
+              ))}
+            </div>
+            {rows.length > 0 && (
               <p className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
                 Changes apply when this closes.
               </p>

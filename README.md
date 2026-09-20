@@ -305,9 +305,11 @@ in one click.
   squash on all three; rebase on GitHub, fast-forward on Bitbucket) without
   the browser. Labels and assignees on GitHub & GitLab (set them when you
   open a PR/MR or any time after), request reviewers across GitHub, GitLab &
-  Bitbucket, see, link, and unlink an open PR's **GitHub Projects** in its
-  header and set each board's **Status**, **Priority**, **Iteration** and
-  custom fields right there, flip a PR between **draft and ready for review**
+  Bitbucket, see, link, and unlink a PR's **GitHub Projects** in its header
+  (open, closed, and merged alike) and set each board's **Status**,
+  **Priority**, **Iteration** and custom fields right there, with **Edit
+  projects…** and **Edit project fields…** in the command palette opening
+  either popup, flip a PR between **draft and ready for review**
   either way on all three, and **create new PRs as drafts by default**
   (Settings → General). A new PR is visible in the list it's headed for from
   the moment you start creating it: a **pending entry** holds its place with
@@ -522,18 +524,20 @@ templates), react with emoji, and manage the shared metadata: labels,
 assignees, and milestones. On GitHub, add **projects** (GitHub Projects,
 repo and owner level) and set each board's **Status**, **Priority**,
 **Iteration**, dates and custom fields from the rail — a line per board
-below the chips, and one popup that edits every field on every board.
-Also on GitHub: issue type, sub-issues, dependencies (blocked-by /
-blocking), and development links (linked and closing PRs and branches, plus
-create-a-branch); on GitLab, related issues. Close or reopen with a comment
-you've drafted posted alongside; duplicate, transfer (called *move* on
-GitLab), pin/unpin (GitHub), lock/unlock, or delete. On a **fork**, the
-same **Fork | Upstream** lens as the PR tab browses the parent repository's
-issues (creating one under the Upstream lens opens it **on the parent**),
-and a fork with issues turned off offers a one-click switch to Upstream
-instead of a dead end. An **All | Mine** switch in the list toolbar scopes
-the list to the issues **assigned to you**, and the funnel beside it narrows
-the whole repository's issues by **author** or **label** (GitHub & GitLab).
+below the chips, and one popup that edits every field on every board, with
+**Edit projects…** and **Edit project fields…** in the command palette
+opening either one. Also on GitHub: issue type, sub-issues, dependencies
+(blocked-by / blocking), and development links (linked and closing PRs and
+branches, plus create-a-branch); on GitLab, related issues. Close or reopen
+with a comment you've drafted posted alongside; duplicate, transfer (called
+*move* on GitLab), pin/unpin (GitHub), lock/unlock, or delete. On a
+**fork**, the same **Fork | Upstream** lens as the PR tab browses the
+parent repository's issues (creating one under the Upstream lens opens it
+**on the parent**), and a fork with issues turned off offers a one-click
+switch to Upstream instead of a dead end. An **All | Mine** switch in the
+list toolbar scopes the list to the issues **assigned to you**, and the
+funnel beside it narrows the whole repository's issues by **author** or
+**label** (GitHub & GitLab).
 
 **Activity feed**: an issue's timeline events interleave with its comments,
 date-sorted oldest-to-newest — labels, assignees, milestones, title renames,

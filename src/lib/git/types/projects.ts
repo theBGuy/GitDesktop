@@ -15,6 +15,15 @@ export interface ProjectItemRef {
   project: ProjectV2Ref;
 }
 
+/** One item's board memberships. `truncated` reports that the item's
+ *  `projectItems` connection had more pages than the read asked for, so the
+ *  picker says the list is partial rather than implying it is the whole set —
+ *  the same claim {@link AvailableProjects} makes about the catalog. */
+export interface ItemProjects {
+  items: ProjectItemRef[];
+  truncated: boolean;
+}
+
 /** The projects an item could be added to — the repo's plus its owner's. */
 export interface AvailableProjects {
   projects: ProjectV2Ref[];
@@ -97,6 +106,15 @@ export interface ItemProjectFieldValues {
   itemId: string;
   project: ProjectV2Ref;
   values: ProjectFieldValue[];
+}
+
+/** One item's per-board field values. `truncated` is the same claim
+ *  {@link ItemProjects} makes, off the same capped `projectItems` connection:
+ *  both reads page it identically, so a truncated membership list means a
+ *  truncated value list too. */
+export interface ItemFieldValues {
+  items: ItemProjectFieldValues[];
+  truncated: boolean;
 }
 
 /** One option a board's single/multi-select field offers. */

@@ -1071,8 +1071,9 @@ visible after the reviewer leaves the pending-request list. A pull request that 
 merges cleanly says so under its header, and **Resolve conflicts** settles it without
 leaving the app — see *Conflicts with the base branch* below.
 
-An open pull request gets a **Projects** picker alongside its **labels**, **assignees**, and
-**reviewers**: chips for the **GitHub Projects** it belongs to, and a popup to link or
+Every pull request gets a **Projects** picker alongside its **labels**, **assignees**, and
+**reviewers**, closed and merged ones included (a board keeps its finished items in a Done
+column): chips for the **GitHub Projects** it belongs to, and a popup to link or
 unlink it. Alongside the chips, a **Project fields** row reads out where the pull
 request stands on each of those boards, and its trigger opens the editor that sets
 them (see *Issues*).
@@ -1763,7 +1764,14 @@ duplicates, and same-project mentions.
   the trigger: it opens one popup holding every field you can set on every board the issue is
   on, filled in or not, and any field that already holds a value carries a **Clear** to empty
   it again. Like the pickers above it, the popup drafts your edits and writes them when it
-  closes — one write per board. GitHub only, and changing anything needs the \`project\`
+  closes — one write per board. The command palette opens either popup without the mouse:
+  **Edit projects…** and **Edit project fields…**, on an issue or a pull request alike
+  (palette-only by default — bind a key in Settings if you want one). GitHub hands back
+  only so much at a time, and a muted note says when a list is partial rather than letting
+  it read as complete: *Some projects aren't shown* under the picker's rows means the
+  boards on offer are cut short, while *Some of this item's projects aren't shown* means
+  the item sits on more boards than came back, so one of its chips, rows or field lines may
+  be missing. GitHub only, and changing anything needs the \`project\`
   scope: with just \`read:project\` the boards still show but every row is locked, and with
   neither the picker says so and helps you get it — when your sign-in's scopes are readable,
   that's a one-click **Reconnect GitHub…** plus a copyable \`gh auth refresh\` command

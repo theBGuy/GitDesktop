@@ -168,6 +168,7 @@ export function IssueSidebar({
   lens,
   pickerDisabledReason,
   writeItemReason,
+  paletteEnabled = false,
 }: {
   repoPath: string;
   number: number;
@@ -193,6 +194,10 @@ export function IssueSidebar({
   /** The compact WRITE-axis reason for the rail's one push-tier affordance
    *  (Development → create a linked branch), which triage doesn't cover. */
   writeItemReason?: string;
+  /** Whether the view hosting this rail owns the current selection, so its
+   *  Projects popups may answer the palette. The provider/access term is the
+   *  rows' own `when` gate, which is what decides they mount at all. */
+  paletteEnabled?: boolean;
 }) {
   const setAssignees = useSetIssueAssignees(repoPath, lens);
   const setMilestone = useSetIssueMilestone(repoPath, lens);
@@ -276,6 +281,7 @@ export function IssueSidebar({
           contentId={issue.id}
           lens={lens}
           disabledReason={pickerDisabledReason}
+          paletteEnabled={paletteEnabled}
         />
       ),
     },
@@ -290,6 +296,7 @@ export function IssueSidebar({
           number={number}
           lens={lens}
           disabledReason={pickerDisabledReason}
+          paletteEnabled={paletteEnabled}
         />
       ),
     },

@@ -18,6 +18,15 @@ pub struct ItemProjectFieldValues {
     pub values: Vec<ProjectFieldValue>,
 }
 
+/// Per-board field values for one issue/PR, plus whether the capped read left some out.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemFieldValues {
+    pub items: Vec<ItemProjectFieldValues>,
+    /// The item's `projectItems(first:20)` connection reported another page.
+    pub truncated: bool,
+}
+
 #[derive(Serialize)]
 #[serde(
     tag = "kind",
@@ -399,7 +408,7 @@ fn item_field_values_query(field: &str) -> String {
     format!(
         "query($owner:String!,$name:String!,$number:Int!){{ \
          repository(owner:$owner,name:$name){{ {field}(number:$number){{ \
-         projectItems(first:20, includeArchived:true){{ nodes{{ id project{{ {PROJECT_FIELDS} }} \
+         projectItems(first:20, includeArchived:true){{ pageInfo{{ hasNextPage }} nodes{{ id project{{ {PROJECT_FIELDS} }} \
          fieldValues(first:50){{ nodes{{ {values} \
          }} }} }} }} }} }} }}"
     )
@@ -522,8 +531,8 @@ pub(super) fn parse_field_value(node: &Value) -> ProjectFieldValue {
     }
 }
 
-fn parse_item_field_values(value: &Value, field: &str) -> Vec<ItemProjectFieldValues> {
-    value
+fn parse_item_field_values(value: &Value, field: &str) -> ItemFieldValues {
+    let items = value
         .pointer(&format!("/data/repository/{field}/projectItems/nodes"))
         .into_iter()
         .flat_map(array)
@@ -537,7 +546,16 @@ fn parse_item_field_values(value: &Value, field: &str) -> Vec<ItemProjectFieldVa
                     .collect(),
             })
         })
-        .collect()
+        .collect();
+    ItemFieldValues {
+        items,
+        truncated: value
+            .pointer(&format!(
+                "/data/repository/{field}/projectItems/pageInfo/hasNextPage"
+            ))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
 }
 
 fn field_options(value: &Value) -> Vec<FieldOptionDef> {
@@ -631,7 +649,7 @@ pub async fn gh_item_field_values(
     kind: String,
     number: u64,
     lens: Option<String>,
-) -> AppResult<Vec<ItemProjectFieldValues>> {
+) -> AppResult<ItemFieldValues> {
     let field = match kind.as_str() {
         "issue" => "issue",
         "pr" => "pullRequest",
@@ -699,6 +717,54 @@ pub async fn gh_project_fields(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn item_field_values_truncation_follows_the_selected_entity_page_info() {
+        for field in ["issue", "pullRequest"] {
+            let other = if field == "issue" {
+                "pullRequest"
+            } else {
+                "issue"
+            };
+            for (connection, expected) in [
+                (
+                    serde_json::json!({"nodes":[], "pageInfo":{"hasNextPage":true}}),
+                    true,
+                ),
+                (
+                    serde_json::json!({"nodes":[], "pageInfo":{"hasNextPage":false}}),
+                    false,
+                ),
+                (serde_json::json!({"nodes":[]}), false),
+                (serde_json::json!({"nodes":[], "pageInfo":null}), false),
+                (
+                    serde_json::json!({"nodes":[], "pageInfo":{"hasNextPage":"true"}}),
+                    false,
+                ),
+                (Value::Null, false),
+            ] {
+                let response = serde_json::json!({"data":{"repository":{
+                    field:{"projectItems":connection},
+                    other:{"projectItems":{"pageInfo":{"hasNextPage":!expected}}}
+                }}});
+                let out = parse_item_field_values(&response, field);
+                assert!(out.items.is_empty());
+                assert_eq!(out.truncated, expected, "{field}: {response}");
+            }
+        }
+    }
+
+    #[test]
+    fn item_field_values_envelope_serializes_with_camel_case_keys() {
+        for truncated in [false, true] {
+            let response = serde_json::json!({"data":{"repository":{"issue":{"projectItems":{
+                "nodes":[], "pageInfo":{"hasNextPage":truncated}
+            }}}}});
+            let wire = serde_json::to_value(parse_item_field_values(&response, "issue"))
+                .expect("envelope serializes");
+            assert_eq!(wire, serde_json::json!({"items":[], "truncated":truncated}));
+        }
+    }
 
     fn custom_values() -> Value {
         json!([
@@ -1408,7 +1474,9 @@ mod tests {
                 {"id":"item-a","project":{"id":"project-a","title":"Roadmap","number":3,"closed":false,"viewerCanUpdate":true},"fieldValues":{"nodes":custom_values()}},
                 {"id":"item-b","project":{"id":"project-b","title":"Backlog","number":4,"closed":true,"viewerCanUpdate":false},"fieldValues":{"nodes":[]}}
             ]}}}}});
-            let items = parse_item_field_values(&response, field);
+            let out = parse_item_field_values(&response, field);
+            assert!(!out.truncated);
+            let items = out.items;
             assert_eq!(items.len(), 2);
             assert_eq!(items[0].item_id, "item-a");
             assert_eq!(items[0].project.id, "project-a");
@@ -1435,7 +1503,9 @@ mod tests {
             json!({"data":{"repository":null}}),
             Value::Null,
         ] {
-            assert!(parse_item_field_values(&response, "issue").is_empty());
+            let out = parse_item_field_values(&response, "issue");
+            assert!(out.items.is_empty());
+            assert!(!out.truncated);
         }
         for response in [
             json!({"data":{"node":{"fields":{"nodes":[]}}}}),
@@ -1489,7 +1559,9 @@ mod tests {
             {"id":"item","project":{"id":"project","title":null}},
             {"id":"missing-project"}, {"project":{"id":"missing-item"}}, null
         ]}}}}});
-        let items = parse_item_field_values(&response, "issue");
+        let out = parse_item_field_values(&response, "issue");
+        assert!(!out.truncated);
+        let items = out.items;
         assert_eq!(items.len(), 1);
         assert!(items[0].project.title.is_empty());
         assert!(items[0].values.is_empty());
@@ -1620,6 +1692,7 @@ mod tests {
                 &query,
                 &[
                     &format!("/data/repository/{field}/projectItems/nodes"),
+                    &format!("/data/repository/{field}/projectItems/pageInfo/hasNextPage"),
                     "/id",
                     "/project/id",
                     "/project/title",
@@ -1648,7 +1721,9 @@ mod tests {
                 ],
             );
             assert!(query.contains(PROJECT_FIELDS));
-            assert!(query.contains("projectItems(first:20, includeArchived:true)"));
+            assert!(query.contains(
+                "projectItems(first:20, includeArchived:true){ pageInfo{ hasNextPage }"
+            ));
             assert!(query.contains("fieldValues(first:50)"));
             for fragment in [
                 "... on IssueFieldTextValue{ text: value }",

@@ -1178,6 +1178,7 @@ export function RemoteIssueView({
           // hold until details are fresh — triage first, since it outlasts the wait.
           pickerDisabledReason={triageReason ?? staleReason}
           writeItemReason={writeItemReason}
+          paletteEnabled={isSelectedIssue}
         />
       </div>
       {/* Below the thread AND the rail: the conversation is the widest thing on

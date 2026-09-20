@@ -24,6 +24,7 @@ import {
   useMilestones,
 } from "@/lib/git/queries";
 import type { ForgeUserRef, IssueType, RemoteLens } from "@/lib/git/types";
+import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
 
 /** GitHub issue-type color NAMES → a swatch hex (matches GitHub's palette). */
@@ -94,6 +95,7 @@ export function AssigneesPopover({
   const ghHost = useForgeGhHost(repoPath);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Map<string, ForgeUserRef>>(new Map());
+  const [activeId, setActiveId] = useState<string | null>(null);
   const portalContainer = usePanelPortalContainer();
   // Per-toggle mode reads `value`; commit-on-close mode reads the local draft
   // (seeded from `value` on open). Compare by the provider's stable id.
@@ -138,6 +140,18 @@ export function AssigneesPopover({
   }
 
   const loaded = users.data ?? [];
+  const navIndexById = new Map(loaded.map((user, i) => [user.id, i]));
+  const activeIndex =
+    activeId === null ? -1 : (navIndexById.get(activeId) ?? -1);
+  // Nothing active yet (or the active row vanished on a refetch) parks the single
+  // tab stop on the first row.
+  const focusIndex = activeIndex === -1 ? 0 : activeIndex;
+  const onRowKeyDown = listKeyboardNav({
+    items: loaded,
+    activeIndex,
+    onActivate: (user) => setActiveId(user.id),
+    rowKey: (user) => user.id,
+  });
 
   const trigger = (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
@@ -162,27 +176,46 @@ export function AssigneesPopover({
           className="isolate z-50"
         >
           <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-            <p className="px-1 pb-1.5 text-xs font-medium">Assignees</p>
+            {/* The caption IS the popup's accessible name: Popover.Popup takes its
+                `aria-labelledby` from whatever Title registers, and a bare element
+                leaves the dialog unnamed. `render` keeps the <p> it has always been
+                — Title's own default element is an <h2>. */}
+            <Popover.Title
+              render={<p />}
+              className="px-1 pb-1.5 text-xs font-medium"
+            >
+              Assignees
+            </Popover.Title>
             {loaded.length === 0 && (
               <p className="px-1 py-1 text-xs text-muted-foreground">
                 {users.isPending ? "Loading…" : "No assignable users."}
               </p>
             )}
-            {loaded.map((user) => (
-              <label
-                key={user.id}
-                className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
-              >
-                <Checkbox
-                  checked={checkedIds.has(user.id)}
-                  onCheckedChange={(v) => toggle(user, v === true)}
-                />
-                <ForgeUserAvatar user={user} ghHost={ghHost} />
-                <span className="flex-1 truncate" title={user.label}>
-                  {user.label}
-                </span>
-              </label>
-            ))}
+            {/* Unstyled but NOT removable: it hosts the key handler, and
+                `listKeyboardNav` finds the row to focus by querying within it. */}
+            <div onKeyDown={onRowKeyDown}>
+              {loaded.map((user) => (
+                <label
+                  key={user.id}
+                  className={cn(
+                    "flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60",
+                    activeId === user.id && "bg-muted/60",
+                  )}
+                >
+                  <Checkbox
+                    data-row={user.id}
+                    tabIndex={navIndexById.get(user.id) === focusIndex ? 0 : -1}
+                    checked={checkedIds.has(user.id)}
+                    onCheckedChange={(v) => toggle(user, v === true)}
+                    onFocus={() => setActiveId(user.id)}
+                  />
+                  <ForgeUserAvatar user={user} ghHost={ghHost} />
+                  <span className="flex-1 truncate" title={user.label}>
+                    {user.label}
+                  </span>
+                </label>
+              ))}
+            </div>
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>

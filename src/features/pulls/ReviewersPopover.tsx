@@ -9,6 +9,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { useForgeGhHost } from "@/lib/git/host";
 import { useReviewerCandidates } from "@/lib/git/queries";
 import type { ForgeUserRef, RemoteLens } from "@/lib/git/types";
+import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { cn } from "@/lib/utils";
 
 /**
  * A short, stable disambiguator for a reviewer whose label collides with a
@@ -87,6 +89,7 @@ export function ReviewersPopover({
   const ghHost = useForgeGhHost(repoPath);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Map<string, ForgeUserRef>>(new Map());
+  const [activeId, setActiveId] = useState<string | null>(null);
   const portalContainer = usePanelPortalContainer();
 
   // Collision universe for the candidate rows: candidates ∪ current value, so a
@@ -96,6 +99,18 @@ export function ReviewersPopover({
   const loaded = candidates.data ?? [];
   const rowUniverse = [...loaded, ...value];
   const chipUniverse = loaded.length > 0 ? [...value, ...loaded] : value;
+  const navIndexById = new Map(loaded.map((user, i) => [user.id, i]));
+  const activeIndex =
+    activeId === null ? -1 : (navIndexById.get(activeId) ?? -1);
+  // Nothing active yet (or the active row vanished on a refetch) parks the single
+  // tab stop on the first row.
+  const focusIndex = activeIndex === -1 ? 0 : activeIndex;
+  const onRowKeyDown = listKeyboardNav({
+    items: loaded,
+    activeIndex,
+    onActivate: (user) => setActiveId(user.id),
+    rowKey: (user) => user.id,
+  });
 
   function toggle(user: ForgeUserRef, on: boolean) {
     setDraft((prev) => {
@@ -149,7 +164,16 @@ export function ReviewersPopover({
           className="isolate z-50"
         >
           <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-            <p className="px-1 pb-1.5 text-xs font-medium">Reviewers</p>
+            {/* The caption IS the popup's accessible name: Popover.Popup takes its
+                `aria-labelledby` from whatever Title registers, and a bare element
+                leaves the dialog unnamed. `render` keeps the <p> it has always been
+                — Title's own default element is an <h2>. */}
+            <Popover.Title
+              render={<p />}
+              className="px-1 pb-1.5 text-xs font-medium"
+            >
+              Reviewers
+            </Popover.Title>
             {(candidates.data ?? []).length === 0 && (
               <p className="px-1 py-1 text-xs text-muted-foreground">
                 {candidates.isPending
@@ -159,31 +183,43 @@ export function ReviewersPopover({
                     : "No eligible reviewers — the workspace has no other members."}
               </p>
             )}
-            {loaded.map((user) => {
-              const hint = userRefHint(user, rowUniverse);
-              return (
-                <label
-                  key={user.id}
-                  title={hint ? `${user.label} (${hint})` : undefined}
-                  className="flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60"
-                >
-                  <Checkbox
-                    checked={draft.has(user.id)}
-                    onCheckedChange={(v) => toggle(user, v === true)}
-                  />
-                  <ForgeUserAvatar user={user} ghHost={ghHost} />
-                  <span
-                    className="flex-1 truncate"
-                    title={hint ? `${user.label} (${hint})` : user.label}
-                  >
-                    {user.label}
-                    {hint && (
-                      <span className="text-muted-foreground"> · {hint}</span>
+            {/* Unstyled but NOT removable: it hosts the key handler, and
+                `listKeyboardNav` finds the row to focus by querying within it. */}
+            <div onKeyDown={onRowKeyDown}>
+              {loaded.map((user) => {
+                const hint = userRefHint(user, rowUniverse);
+                return (
+                  <label
+                    key={user.id}
+                    title={hint ? `${user.label} (${hint})` : undefined}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60",
+                      activeId === user.id && "bg-muted/60",
                     )}
-                  </span>
-                </label>
-              );
-            })}
+                  >
+                    <Checkbox
+                      data-row={user.id}
+                      tabIndex={
+                        navIndexById.get(user.id) === focusIndex ? 0 : -1
+                      }
+                      checked={draft.has(user.id)}
+                      onCheckedChange={(v) => toggle(user, v === true)}
+                      onFocus={() => setActiveId(user.id)}
+                    />
+                    <ForgeUserAvatar user={user} ghHost={ghHost} />
+                    <span
+                      className="flex-1 truncate"
+                      title={hint ? `${user.label} (${hint})` : user.label}
+                    >
+                      {user.label}
+                      {hint && (
+                        <span className="text-muted-foreground"> · {hint}</span>
+                      )}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>

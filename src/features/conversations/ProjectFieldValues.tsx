@@ -263,6 +263,7 @@ export function ProjectFieldValues({
   lens,
   disabledReason,
   cells = false,
+  paletteEnabled = false,
 }: {
   repoPath: string;
   /** Gates the reads, matching the Projects picker's own gate — the real gate is
@@ -281,6 +282,10 @@ export function ProjectFieldValues({
    *  label/value grid. Default renders the rail form, which labels itself above
    *  the lines. */
   cells?: boolean;
+  /** Whether the host surface owns the current selection, forwarded to the field
+   *  editor so it can answer the palette. The editor registers only where it
+   *  mounts, which is only where the item is on a board. */
+  paletteEnabled?: boolean;
 }) {
   const host = useActiveGhHost();
   const scopes = useGhScopes(host);
@@ -293,7 +298,7 @@ export function ProjectFieldValues({
   // above owning that failure's wording and its Retry. Boardless is the common
   // case, so gating the values query here is also what keeps it from spawning a
   // `gh` call per issue nobody has put on a board.
-  const boardsKnown = (memberships.data?.length ?? 0) > 0;
+  const boardsKnown = (memberships.data?.items.length ?? 0) > 0;
   const values = useItemFieldValues(
     repoPath,
     kind,
@@ -306,14 +311,16 @@ export function ProjectFieldValues({
   // failed background refetch flips the status to error while the data it already
   // served is still good.
   const membershipIds = new Set(
-    (memberships.data ?? []).map((item) => item.project.id),
+    (memberships.data?.items ?? []).map((item) => item.project.id),
   );
   // Gated on live memberships AND the scope gate, because a cache outlives the
   // gate that filled it: either one going away disables this query, which an
   // invalidate can then neither refetch nor clear. The picker's chips and its
   // scope-gap block are what the rail has to agree with.
   const entries = canRead
-    ? (values.data ?? []).filter((entry) => membershipIds.has(entry.project.id))
+    ? (values.data?.items ?? []).filter((entry) =>
+        membershipIds.has(entry.project.id),
+      )
     : [];
   const lines = entries
     .map((entry) => ({ entry, parts: renderableParts(entry) }))
@@ -368,6 +375,16 @@ export function ProjectFieldValues({
         return null;
     }
   })();
+  // Stands alone after the lines, as the editor's own field-cap note does: a board
+  // past the read's cap has no line here at all, so the lines above would read as
+  // the whole story. The picker's wording verbatim — it is the same claim about the
+  // same capped connection.
+  const truncatedNote =
+    values.data?.truncated === true ? (
+      <p className="text-[11px] text-muted-foreground">
+        Some of this item's projects aren't shown.
+      </p>
+    ) : null;
 
   // The editor rides the same gate the VALUES do: a boardless item has nothing to
   // edit, so it gets no trigger and — the null contract below — no heading either.
@@ -381,7 +398,7 @@ export function ProjectFieldValues({
   const entryByProject = new Map(
     entries.map((entry) => [entry.project.id, entry]),
   );
-  const boards = (memberships.data ?? [])
+  const boards = (memberships.data?.items ?? [])
     .map((item) => entryByProject.get(item.project.id))
     .filter((entry): entry is ItemProjectFieldValues => entry !== undefined);
   const unsettledReason = (() => {
@@ -405,6 +422,7 @@ export function ProjectFieldValues({
       boards={boards}
       disabledReason={disabledReason}
       unsettledReason={unsettledReason}
+      paletteEnabled={paletteEnabled}
     />
   ) : null;
 
@@ -421,6 +439,7 @@ export function ProjectFieldValues({
           </p>
         )}
         {content}
+        {truncatedNote}
       </div>
     );
   return (
@@ -428,10 +447,11 @@ export function ProjectFieldValues({
       {heading ?? <MetaFieldLabel>{FIELD_LABEL}</MetaFieldLabel>}
       <MetaValueCell
         label={FIELD_LABEL}
-        empty={content === null}
+        empty={content === null && truncatedNote === null}
         busy={lines.length === 0 && loading}
       >
         {content}
+        {truncatedNote}
       </MetaValueCell>
     </>
   );

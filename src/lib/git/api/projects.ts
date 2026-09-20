@@ -7,10 +7,10 @@ import type {
   BoardItems,
   BoardOrder,
   ConvertedDraft,
-  ItemProjectFieldValues,
+  ItemFieldValues,
+  ItemProjects,
   ProjectFieldDefs,
   ProjectFieldValueUpdate,
-  ProjectItemRef,
   ProjectItemRemove,
   ProjectViews,
   RemoteLens,
@@ -22,14 +22,15 @@ import type {
 export const ghProjectsAvailable = (repoPath: string, lens: RemoteLens) =>
   invoke<AvailableProjects>("gh_projects_available", { repoPath, lens });
 
-/** The boards one issue/PR currently belongs to, with each membership's item id. */
+/** The boards one issue/PR currently belongs to, with each membership's item id,
+ *  and whether the item's capped memberships connection held more. */
 export const ghItemProjects = (
   repoPath: string,
   kind: "issue" | "pr",
   number: number,
   lens: RemoteLens,
 ) =>
-  invoke<ProjectItemRef[]>("gh_item_projects", {
+  invoke<ItemProjects>("gh_item_projects", {
     repoPath,
     kind,
     number,
@@ -45,7 +46,7 @@ export const ghItemFieldValues = (
   number: number,
   lens: RemoteLens,
 ) =>
-  invoke<ItemProjectFieldValues[]>("gh_item_field_values", {
+  invoke<ItemFieldValues>("gh_item_field_values", {
     repoPath,
     kind,
     number,

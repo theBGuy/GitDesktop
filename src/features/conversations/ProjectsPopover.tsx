@@ -28,6 +28,7 @@ import type {
   ProjectV2Ref,
   RemoteLens,
 } from "@/lib/git/types";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
@@ -94,6 +95,7 @@ export function ProjectsPopover({
   lens,
   disabledReason,
   cells = false,
+  paletteEnabled = false,
 }: {
   repoPath: string;
   /** Gates the reads. Both call sites pass `true`; the real gate is upstream, and
@@ -116,6 +118,10 @@ export function ProjectsPopover({
    *  inline row, so a caller's label/value grid can place each in its own
    *  column. Default renders the inline row. */
   cells?: boolean;
+  /** Whether the host surface owns the current selection, so this instance may
+   *  answer the palette's "Edit projects…". Off by default: a mount with no
+   *  selection of its own (a create dialog) registers nothing. */
+  paletteEnabled?: boolean;
 }) {
   const host = useActiveGhHost();
   const scopes = useGhScopes(host);
@@ -167,7 +173,7 @@ export function ProjectsPopover({
     }
   })();
 
-  const items = memberships.data ?? [];
+  const items = memberships.data?.items ?? [];
   // Rows = the open catalog plus every membership, so a board beyond the server's
   // cap — or a closed one — is still there to be unlinked. OPEN catalog entries win
   // the dedup, that list being the authority on `viewerCanUpdate`; a closed board is
@@ -218,6 +224,10 @@ export function ProjectsPopover({
   // catalog, so it stands either way.
   const showApplyNote = rows.length > 0 && rowLockedReason === undefined;
   const showTruncated = available.data?.truncated === true;
+  // A separate claim from the catalog's: the CATALOG cap hides boards the item
+  // could join, this one hides boards it is already on — so an unlink the user
+  // came for may not have a row at all.
+  const showMembershipsTruncated = memberships.data?.truncated === true;
   // Both scope gaps ask for the same scope, so both remedy blocks fire the same
   // reconnect.
   const reconnectForProjectScope = () =>
@@ -291,6 +301,18 @@ export function ProjectsPopover({
     }
   }
 
+  // Registered HERE, not in the parent views: the action's enabled state IS the
+  // trigger's hold, and only this component derives that. A parent's own gate
+  // can't see `heldReason`, so a palette row would outlive the disabled trigger.
+  useHotkeyAction(
+    "edit-projects",
+    () => {
+      if (open || heldReason !== undefined) return;
+      handleOpenChange(true);
+    },
+    paletteEnabled && heldReason === undefined,
+  );
+
   // Trigger first, so it never shifts as chips come and go.
   const trigger = (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
@@ -321,7 +343,16 @@ export function ProjectsPopover({
           className="isolate z-50"
         >
           <Popover.Popup className="w-80 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-            <p className="px-1 pb-1.5 text-xs font-medium">Projects</p>
+            {/* The caption IS the popup's accessible name: Popover.Popup takes its
+                `aria-labelledby` from whatever Title registers, and a bare element
+                leaves the dialog unnamed. `render` keeps the <p> it has always been
+                — Title's own default element is an <h2>. */}
+            <Popover.Title
+              render={<p />}
+              className="px-1 pb-1.5 text-xs font-medium"
+            >
+              Projects
+            </Popover.Title>
             {classicMissing ? (
               <ScopeGapBlock host={host} onReconnect={reconnectForProjectScope}>
                 Projects need the <span className="font-mono">project</span>{" "}
@@ -397,10 +428,15 @@ export function ProjectsPopover({
                 {/* The truncation note stands alone: a 50-cap catalog of only
                       CLOSED boards renders zero rows, where a bare "no projects"
                       would be a lie. */}
-                {(showApplyNote || showTruncated) && (
+                {(showApplyNote ||
+                  showTruncated ||
+                  showMembershipsTruncated) && (
                   <div className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground">
                     {showApplyNote && <p>Changes apply when this closes.</p>}
                     {showTruncated && <p>Some projects aren't shown.</p>}
+                    {showMembershipsTruncated && (
+                      <p>Some of this item's projects aren't shown.</p>
+                    )}
                   </div>
                 )}
               </>

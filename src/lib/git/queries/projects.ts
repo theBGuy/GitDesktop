@@ -17,12 +17,12 @@ import type {
   BoardItemContent,
   BoardItems,
   BoardOrder,
-  ItemProjectFieldValues,
+  ItemFieldValues,
+  ItemProjects,
   ProjectFieldDef,
   ProjectFieldOptionDef,
   ProjectFieldValue,
   ProjectFieldValueUpdate,
-  ProjectItemRef,
   ProjectItemRemove,
   ProjectV2Ref,
   RemoteLens,
@@ -71,7 +71,9 @@ const itemProjectsKey = (
 ) => [...itemProjectsFamilyKey(repo), lens, kind, number] as const;
 
 /** One issue/PR's board memberships. Shorter staleTime than the catalog: the
- *  memberships are what the picker edits, the catalog only what it offers. */
+ *  memberships are what the picker edits, the catalog only what it offers. The
+ *  ENVELOPE is the data — callers unwrap `items` and read `truncated`, which no
+ *  `select` may drop: the picker has to say when the list is partial. */
 export function useItemProjects(
   repo: string,
   kind: "issue" | "pr",
@@ -105,7 +107,8 @@ const itemFieldValuesKey = (
  *  same token scope, so a missing `project` scope fails both the same way and no
  *  retry fixes it. No `placeholderData` either: the rail can't show one item's
  *  fields under another's, so a retained set would have to be suppressed on
- *  arrival, leaving only the stale copy it pins in cache. */
+ *  arrival, leaving only the stale copy it pins in cache. Envelope-valued for the
+ *  reason {@link useItemProjects} states. */
 export function useItemFieldValues(
   repo: string,
   kind: "issue" | "pr",
@@ -151,23 +154,34 @@ export function useEditItemProjects(
       ),
     onMutate: async (args) => {
       await queryClient.cancelQueries({ queryKey: key });
-      const prev = queryClient.getQueryData<ProjectItemRef[]>(key);
+      const prev = queryClient.getQueryData<ItemProjects>(key);
       if (prev) {
-        const removed = new Set(args.removes.map((r) => r.itemId));
-        const kept = prev.filter((item) => !removed.has(item.itemId));
-        // An add for a board the item is already on would otherwise render a
-        // second chip until the refetch reconciles it. The write is idempotent,
-        // so skipping the placeholder is enough.
-        const onBoard = new Set(kept.map((item) => item.project.id));
-        queryClient.setQueryData<ProjectItemRef[]>(key, [
-          ...kept,
-          ...args.adds
-            .filter((project) => !onBoard.has(project.id))
-            .map((project) => ({
-              itemId: `pending:${project.id}`,
-              project,
-            })),
-        ]);
+        // `items` alone is patched: `truncated` is the READ's claim about the
+        // server's cap on this item's memberships, which a local link or unlink
+        // has no answer for — only the settle refetch does.
+        queryClient.setQueryData<ItemProjects>(key, (current) => {
+          if (current === undefined) return current;
+          const removed = new Set(args.removes.map((r) => r.itemId));
+          const kept = current.items.filter(
+            (item) => !removed.has(item.itemId),
+          );
+          // An add for a board the item is already on would otherwise render a
+          // second chip until the refetch reconciles it. The write is idempotent,
+          // so skipping the placeholder is enough.
+          const onBoard = new Set(kept.map((item) => item.project.id));
+          return {
+            ...current,
+            items: [
+              ...kept,
+              ...args.adds
+                .filter((project) => !onBoard.has(project.id))
+                .map((project) => ({
+                  itemId: `pending:${project.id}`,
+                  project,
+                })),
+            ],
+          };
+        });
       }
       return { prev };
     },
@@ -175,7 +189,7 @@ export function useEditItemProjects(
     // that fires this closes as it does, and react-query drops mutate-scoped
     // callbacks once the observer loses its listeners.
     onError: (e, _args, ctx) => {
-      if (ctx?.prev) queryClient.setQueryData<ProjectItemRef[]>(key, ctx.prev);
+      if (ctx?.prev) queryClient.setQueryData<ItemProjects>(key, ctx.prev);
       toastError(e);
     },
     // RETURNED, not voided: react-query holds `isPending` until this promise
@@ -1597,16 +1611,22 @@ export function useSetItemFieldValues(
       ),
     onMutate: async (args) => {
       await queryClient.cancelQueries({ queryKey: fieldsKey });
-      const prev =
-        queryClient.getQueryData<ItemProjectFieldValues[]>(fieldsKey);
+      const prev = queryClient.getQueryData<ItemFieldValues>(fieldsKey);
       if (prev) {
-        queryClient.setQueryData<ItemProjectFieldValues[]>(
-          fieldsKey,
-          prev.map((entry) =>
-            entry.project.id === args.projectId
-              ? { ...entry, values: args.values }
-              : entry,
-          ),
+        // `items` alone is patched, as the memberships patch does: `truncated`
+        // is the read's claim about the cap on this item's boards, which a field
+        // write doesn't move.
+        queryClient.setQueryData<ItemFieldValues>(fieldsKey, (current) =>
+          current === undefined
+            ? current
+            : {
+                ...current,
+                items: current.items.map((entry) =>
+                  entry.project.id === args.projectId
+                    ? { ...entry, values: args.values }
+                    : entry,
+                ),
+              },
         );
       }
       return { prev };
@@ -1617,7 +1637,7 @@ export function useSetItemFieldValues(
     // through `mutateAsync`, which is what stops its per-board chain.
     onError: (e, args, ctx) => {
       if (ctx?.prev)
-        queryClient.setQueryData<ItemProjectFieldValues[]>(fieldsKey, ctx.prev);
+        queryClient.setQueryData<ItemFieldValues>(fieldsKey, ctx.prev);
       if (args.unwritten === 0) {
         toastError(e);
         return;

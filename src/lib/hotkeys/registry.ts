@@ -376,6 +376,23 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  // Registered by the issue view and the PR one alike — the two Projects popups
+  // are the same controls on both surfaces, and the dispatcher runs whichever
+  // registrant is enabled. Filed here rather than under Pull requests because
+  // `matchesActionText` searches the category too, so the PR-only spelling would
+  // make an issue-flavoured query miss.
+  {
+    id: "edit-projects",
+    label: "Edit projects…",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "edit-project-fields",
+    label: "Edit project fields…",
+    category: "Repository",
+    defaultBinding: null,
+  },
   // The board answers Alt+Arrow on the card you're on, which is a chord only the
   // board itself can gate — "focus is on a card" is a DOM question, and a global
   // binding can't ask it. These four are the palette's way in to the same routine.

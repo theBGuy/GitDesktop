@@ -32,6 +32,15 @@ pub struct ProjectItemRef {
     pub project: ProjectV2Ref,
 }
 
+/// One issue/PR's board memberships, plus whether the capped read left some out.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemProjects {
+    pub items: Vec<ProjectItemRef>,
+    /// The item's `projectItems(first:20)` connection reported another page.
+    pub truncated: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableProjects {
@@ -222,15 +231,15 @@ fn item_projects_query(field: &str) -> String {
     format!(
         "query($owner:String!,$name:String!,$number:Int!){{ \
          repository(owner:$owner,name:$name){{ {field}(number:$number){{ \
-         projectItems(first:20, includeArchived:true){{ nodes{{ id project{{ {PROJECT_FIELDS} }} }} }} \
+         projectItems(first:20, includeArchived:true){{ pageInfo{{ hasNextPage }} nodes{{ id project{{ {PROJECT_FIELDS} }} }} }} \
          }} }} }}"
     )
 }
 
 /// Archived items are read as ordinary memberships — GitHub still shows the item
 /// on the issue, and unlinking it is the same `deleteProjectV2Item` call.
-fn parse_item_projects(value: &Value, field: &str) -> Vec<ProjectItemRef> {
-    value
+fn parse_item_projects(value: &Value, field: &str) -> ItemProjects {
+    let items = value
         .pointer(&format!("/data/repository/{field}/projectItems/nodes"))
         .and_then(Value::as_array)
         .map(|arr| {
@@ -243,7 +252,16 @@ fn parse_item_projects(value: &Value, field: &str) -> Vec<ProjectItemRef> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    ItemProjects {
+        items,
+        truncated: value
+            .pointer(&format!(
+                "/data/repository/{field}/projectItems/pageInfo/hasNextPage"
+            ))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
 }
 
 /// An issue's or PR's current project memberships. `kind` is "issue" or "pr".
@@ -253,7 +271,7 @@ pub async fn gh_item_projects(
     kind: String,
     number: u64,
     lens: Option<String>,
-) -> AppResult<Vec<ProjectItemRef>> {
+) -> AppResult<ItemProjects> {
     let field = match kind.as_str() {
         "issue" => "issue",
         "pr" => "pullRequest",
@@ -346,6 +364,54 @@ pub async fn gh_edit_item_projects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_projects_truncation_follows_the_selected_entity_page_info() {
+        for field in ["issue", "pullRequest"] {
+            let other = if field == "issue" {
+                "pullRequest"
+            } else {
+                "issue"
+            };
+            for (connection, expected) in [
+                (
+                    serde_json::json!({"nodes":[], "pageInfo":{"hasNextPage":true}}),
+                    true,
+                ),
+                (
+                    serde_json::json!({"nodes":[], "pageInfo":{"hasNextPage":false}}),
+                    false,
+                ),
+                (serde_json::json!({"nodes":[]}), false),
+                (serde_json::json!({"nodes":[], "pageInfo":null}), false),
+                (
+                    serde_json::json!({"nodes":[], "pageInfo":{"hasNextPage":"true"}}),
+                    false,
+                ),
+                (Value::Null, false),
+            ] {
+                let response = serde_json::json!({"data":{"repository":{
+                    field:{"projectItems":connection},
+                    other:{"projectItems":{"pageInfo":{"hasNextPage":!expected}}}
+                }}});
+                let out = parse_item_projects(&response, field);
+                assert!(out.items.is_empty());
+                assert_eq!(out.truncated, expected, "{field}: {response}");
+            }
+        }
+    }
+
+    #[test]
+    fn item_projects_envelope_serializes_with_camel_case_keys() {
+        for truncated in [false, true] {
+            let response = serde_json::json!({"data":{"repository":{"issue":{"projectItems":{
+                "nodes":[], "pageInfo":{"hasNextPage":truncated}
+            }}}}});
+            let wire = serde_json::to_value(parse_item_projects(&response, "issue"))
+                .expect("envelope serializes");
+            assert_eq!(wire, serde_json::json!({"items":[], "truncated":truncated}));
+        }
+    }
 
     fn remove(project_id: &str, item_id: &str) -> ProjectItemRemove {
         ProjectItemRemove {
@@ -620,6 +686,9 @@ mod tests {
         // Same drift risk on the item read, whose pointer is built per `kind`.
         for field in ["issue", "pullRequest"] {
             let query = item_projects_query(field);
+            assert!(query.contains(
+                "projectItems(first:20, includeArchived:true){ pageInfo{ hasNextPage }"
+            ));
             for segment in ["repository", field, "projectItems"] {
                 assert!(
                     query.contains(&format!("{segment}(")),
@@ -655,11 +724,15 @@ mod tests {
             ]}}}}}"#,
         )
         .expect("valid JSON");
-        let items = parse_item_projects(&value, "pullRequest");
+        let out = parse_item_projects(&value, "pullRequest");
+        assert!(!out.truncated);
+        let items = out.items;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].item_id, "PVTI_a");
         assert_eq!(items[0].project.id, "PVT_one");
         // The query field is the pointer key, so the issue arm can't read a PR's.
-        assert!(parse_item_projects(&value, "issue").is_empty());
+        let out = parse_item_projects(&value, "issue");
+        assert!(out.items.is_empty());
+        assert!(!out.truncated);
     }
 }

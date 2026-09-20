@@ -635,6 +635,12 @@ export function RemotePrView({
   // The composer/thread-create side of the forge detection: a strict provider key
   // (default "github" — gh is the authoritative default for an unrecognized host).
   const providerKey: ForgeProvider = provider ?? "github";
+  // Whether the header carries the GitHub Projects picker and its field-values row.
+  // ELIMINATION, never a provider equality check: a not-yet-identified provider may
+  // mount them for one contained read. Closed and merged pull requests keep them —
+  // boards hold closed items in their Done columns, as the issue side's rows do.
+  const showProjectCells =
+    providerKey !== "gitlab" && providerKey !== "bitbucket";
 
   // Palette-only PR actions — mounted here so they live only while a remote PR is
   // open. Every one whose enablement reads `details.data` also gates on
@@ -2454,10 +2460,9 @@ export function RemotePrView({
       </Fragment>,
     );
   }
-  // GitHub Projects membership (GitHub-only). Unlike labels/assignees it has no
-  // read-only fallback: its chips come from their own query rather than from
-  // `pr`, so a closed PR would pay a fetch to show them.
-  if (isOpen && providerKey === "github") {
+  // GitHub Projects membership. Unlike labels/assignees there is no read-only
+  // fallback: the picker is the whole field, on any PR state (`showProjectCells`).
+  if (showProjectCells) {
     metaCells.push(
       <ProjectsPopover
         key={`projects-${entityKey}`}
@@ -2469,6 +2474,9 @@ export function RemotePrView({
         contentId={pr.id}
         lens={lens}
         disabledReason={pickerReason}
+        // The cells term of the palette gate is this branch; the trigger's own
+        // hold is the rest, and each component derives that for itself.
+        paletteEnabled={isSelectedPr}
       />,
     );
     // Field values under the picker, on the same gate: they come from the same
@@ -2484,6 +2492,7 @@ export function RemotePrView({
         number={number}
         lens={lens}
         disabledReason={pickerReason}
+        paletteEnabled={isSelectedPr}
       />,
     );
   }
