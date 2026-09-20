@@ -325,6 +325,30 @@ pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| bb_unreadable(what, format!("could not parse Bitbucket {what}: {e}")))
 }
 
+/// GET that returns (status, body) for ANY status instead of mapping non-2xx
+/// to AppError — the Code Insights classifier discriminates on both.
+pub async fn bb_get_classified(
+    creds: &BbCredentials,
+    path_or_url: &str,
+) -> AppResult<(u16, String)> {
+    let url = resolve_url(path_or_url);
+    let resp = client()
+        .get(&url)
+        .basic_auth(&creds.email, Some(&creds.token))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|e| AppError::Bitbucket(format!("Bitbucket request failed: {e}")))?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.map_err(|e| {
+        bb_unreadable(
+            "the response",
+            format!("could not read Bitbucket response: {e}"),
+        )
+    })?;
+    Ok((status, body))
+}
+
 /// The low-level write primitive: send `method` to `path_or_url` with an optional JSON
 /// `body` and HTTP Basic auth, returning the raw `(status, location_header, body_text)`
 /// WITHOUT turning a non-2xx into an error — the caller decides. Used directly by the

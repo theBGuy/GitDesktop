@@ -8,6 +8,17 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import type {
+  BbAnnotationOut,
+  BbReportOut,
+} from "@/lib/bitbucket/security-findings";
+import {
+  bbAnnotationTypeLabel,
+  bbReportLabel,
+  bbResultLabel,
+  linkOutLabel,
+  useBitbucketFindings,
+} from "@/lib/bitbucket/security-findings";
 import { forgeReady, forgeSupports, useForgeStatus } from "@/lib/git/queries";
 import type {
   CodeScanningAlertOut,
@@ -57,6 +68,7 @@ function DetailShell({
   chip,
   htmlUrl,
   linkLabel = "View on GitHub",
+  linkTitle,
   meta,
   children,
 }: {
@@ -67,6 +79,10 @@ function DetailShell({
   htmlUrl: string;
   /** What the link-out opens, when it isn't the finding's page on GitHub. */
   linkLabel?: string;
+  /** Hover preview of the destination, for a link whose label can't name it
+   *  outright. Left unset elsewhere: a blank `title` would suppress an
+   *  ancestor's tooltip, so the attribute must be absent, never empty. */
+  linkTitle?: string;
   meta: ReactNode;
   children: ReactNode;
 }) {
@@ -82,6 +98,7 @@ function DetailShell({
               variant="outline"
               size="sm"
               className="ml-auto"
+              title={linkTitle}
               onClick={() => openUrl(htmlUrl)}
             >
               <ArrowSquareOutIcon data-icon="inline-start" />
@@ -586,6 +603,82 @@ function GlQualityDetail({
   );
 }
 
+/**
+ * One Code Insights annotation. The heading names the report it came from — the
+ * same string the panel's section header shows — so the summary can own the body
+ * at whatever length Bitbucket's 450-character cap allows.
+ */
+function BbAnnotationDetail({
+  report,
+  annotation,
+}: {
+  report: BbReportOut;
+  annotation: BbAnnotationOut;
+}) {
+  return (
+    <DetailShell
+      title={bbReportLabel(report)}
+      // Omitted outright when the report stated no severity: every rung the chip
+      // could name would be a claim the report never made.
+      chip={
+        annotation.severity ? (
+          <SeverityChip severity={annotation.severity} />
+        ) : null
+      }
+      // The annotation's own link only: the report's points at the tool that
+      // published it, so falling back would open a page about the scanner
+      // instead of about this finding. `||`, not `??` — the tolerant parse
+      // degrades a missing link to an empty string, which means no button.
+      htmlUrl={annotation.link || ""}
+      linkLabel={linkOutLabel(annotation.link)}
+      // The label names only the host; the full URL is what says where this
+      // actually lands, so it previews on hover.
+      linkTitle={annotation.link || undefined}
+      meta={
+        <>
+          {annotation.annotationType ? (
+            <Row label="Type">
+              {bbAnnotationTypeLabel(annotation.annotationType)}
+            </Row>
+          ) : null}
+          {annotation.path ? (
+            <Row label="Location">
+              <span className="font-mono">
+                {locationText(annotation.path, annotation.line)}
+              </span>
+            </Row>
+          ) : null}
+          {report.reporter ? (
+            <Row label="Reporter">{report.reporter}</Row>
+          ) : null}
+          {/* The annotation's own verdict and the report's are separate states,
+              so neither ever stands in for the other under one label. */}
+          {annotation.result ? (
+            <Row label="Result">{bbResultLabel(annotation.result)}</Row>
+          ) : null}
+          {report.result ? (
+            <Row label="Report result">{bbResultLabel(report.result)}</Row>
+          ) : null}
+          {annotation.createdOn && parseableDate(annotation.createdOn) ? (
+            <Row label="Created">
+              <RelativeTime date={annotation.createdOn} />
+            </Row>
+          ) : null}
+        </>
+      }
+    >
+      {annotation.summary ? (
+        <p className="text-xs wrap-break-word">{annotation.summary}</p>
+      ) : null}
+      {annotation.details ? (
+        <p className="mt-3 text-xs wrap-break-word text-muted-foreground">
+          {annotation.details}
+        </p>
+      ) : null}
+    </DetailShell>
+  );
+}
+
 export function FindingDetailView({
   repoPath,
   active,
@@ -628,10 +721,16 @@ export function FindingDetailView({
     active,
     limits.gitlab,
   );
+  const bb = useBitbucketFindings(
+    repoPath,
+    enabled && provider === "bitbucket",
+    active,
+    limits.bitbucket,
+  );
 
   // Only the selected finding's own category decides the pending/error state —
   // a sibling category failing must not blank a finding that loaded fine. Typed
-  // to what's read here, since the five categories carry different data shapes.
+  // to what's read here, since the six categories carry different data shapes.
   const queryByType: Record<
     SelectedFinding["type"],
     { isPending: boolean; isError: boolean }
@@ -641,6 +740,7 @@ export function FindingDetailView({
     secretScanning: secrets,
     advisory: advisories,
     glFinding: gl,
+    bbFinding: bb,
   };
   const query = selectedFinding ? queryByType[selectedFinding.type] : alerts;
 
@@ -710,6 +810,15 @@ export function FindingDetailView({
           />
         );
     }
+  } else if (selectedFinding?.type === "bbFinding" && bb.data) {
+    const report = bb.data.reports.find(
+      (r) => r.uuid === selectedFinding.reportUuid,
+    );
+    const annotation = report?.annotations.find(
+      (a) => a.uuid === selectedFinding.annotationUuid,
+    );
+    if (report && annotation)
+      return <BbAnnotationDetail report={report} annotation={annotation} />;
   }
 
   return (

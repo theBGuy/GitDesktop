@@ -184,6 +184,8 @@ const FINDING_KEY: {
   secretScanning: (f) => `s${f.number}`,
   glFinding: (f) => `gl:${f.category}:${f.id}`,
   advisory: (f) => `g${f.ghsaId}`,
+  // Both halves: an annotation uuid is unique only within its own report.
+  bbFinding: (f) => `bb:${f.reportUuid}:${f.annotationUuid}`,
 };
 
 // TS reduces the indexed union of entries to an uncallable intersection, so the

@@ -69,12 +69,9 @@ pub struct Capabilities {
     pub ci: bool,
     pub webhooks: bool,
     pub approvals: bool,
-    /// Reading the repo's vulnerability findings — from each platform's own
-    /// source: GitHub's alert APIs (Dependabot, code scanning, secret scanning +
-    /// repository advisories), and on GitLab the SAST / secret-detection /
-    /// code-quality report artifacts a CI pipeline publishes (readable on every
-    /// tier, unlike GitLab's own Ultimate-gated dashboard). Bitbucket Cloud has
-    /// no analogue.
+    /// Findings from GitHub's alert APIs, GitLab's pipeline report artifacts
+    /// (readable on every tier), or Bitbucket Cloud's commit Code Insights
+    /// reports and annotations. Availability is classified by each reader.
     pub security_findings: bool,
 }
 
@@ -119,7 +116,7 @@ impl Capabilities {
             // discussions; PRs/CI(pipelines)/webhooks/approvals do work. Draft PRs
             // ARE supported (since 2024, the `draft` bool on the PR object). The
             // native issue tracker is being deleted platform-wide 2026-08-20, so
-            // issues is false.
+            // issues is false. Findings use commit Code Insights reports.
             Provider::Bitbucket => Self {
                 pull_requests: true,
                 draft_prs: true,
@@ -132,7 +129,7 @@ impl Capabilities {
                 ci: true,
                 webhooks: true,
                 approvals: true,
-                security_findings: false,
+                security_findings: true,
             },
         }
     }
@@ -1291,7 +1288,7 @@ mod tests {
     fn bitbucket_drops_unsupported_features() {
         let c = Capabilities::for_provider(Provider::Bitbucket);
         assert!(!c.labels && !c.milestones && !c.stars && !c.reactions && !c.discussions);
-        assert!(!c.security_findings);
+        assert!(c.security_findings);
         // Issues are off — the native tracker sunsets 2026-08-20.
         assert!(!c.issues);
         // …but the core flow still works, and draft PRs are supported.

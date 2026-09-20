@@ -1,6 +1,8 @@
 import {
   ArrowClockwiseIcon,
   ArrowSquareOutIcon,
+  CheckCircleIcon,
+  CircleIcon,
   ClockIcon,
   GearSixIcon,
   InfoIcon,
@@ -9,6 +11,7 @@ import {
   ShieldCheckIcon,
   ShieldSlashIcon,
   WarningCircleIcon,
+  XCircleIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -29,6 +32,21 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { LoadMoreRow, PAGE_SIZE } from "@/features/conversations/LoadMoreRow";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
+import type {
+  BbAnnotationOut,
+  BbFindingsAvailability,
+  BbFindingsOut,
+  BbReportDataOut,
+  BbReportOut,
+} from "@/lib/bitbucket/security-findings";
+import {
+  bbAnnotationTypeLabel,
+  bbReportLabel,
+  bbResultLabel,
+  bbResultLevel,
+  linkOutLabel,
+  useBitbucketFindings,
+} from "@/lib/bitbucket/security-findings";
 import {
   forgeFeatureReady,
   forgeReady,
@@ -36,6 +54,7 @@ import {
   useForgeStatus,
   useRepoAdmin,
 } from "@/lib/git/queries";
+import type { ForgeProvider } from "@/lib/git/types";
 import { providerLabel } from "@/lib/git/types";
 import type {
   CodeScanningAlertOut,
@@ -69,7 +88,7 @@ import {
   type SelectedFinding,
   useUiStore,
 } from "@/lib/stores/ui";
-import { parseableDate } from "@/lib/time";
+import { formatDuration, parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import {
   CodeScanningChip,
@@ -85,11 +104,22 @@ import {
 } from "./severity";
 
 /** Ceiling for a category's row limit. MUST stay in lockstep with `clamp_limit`
- *  in BOTH src-tauri/src/github/security_findings.rs and
- *  src-tauri/src/forge/gitlab_findings.rs, which are the source of truth: they
- *  clamp every fetch to 500, so growing the limit past this would re-read the
- *  same 500 rows and leave "Load more" permanently offered. */
+ *  in ALL THREE of src-tauri/src/github/security_findings.rs,
+ *  src-tauri/src/forge/gitlab_findings.rs and
+ *  src-tauri/src/forge/bitbucket_findings.rs, which are the source of truth:
+ *  they clamp every fetch to 500, so growing the limit past this would re-read
+ *  the same 500 rows and leave "Load more" permanently offered. */
 const FINDINGS_LIMIT_CAP = 500;
+
+/** Each provider's filter cue names the fields its own rows actually carry — the
+ *  three read entirely different sources. GitHub's also words the wait while a
+ *  repo's provider is still resolving. */
+const FILTER_PLACEHOLDERS: Record<ForgeProvider, string> = {
+  github: "Filter by package, rule, secret type, summary, GHSA, or CVE",
+  gitlab:
+    "Filter by rule, secret type, check, file, severity, description, or identifier",
+  bitbucket: "Filter by annotation, report, or file",
+};
 
 interface AlertRow {
   /** Unique per rendered row: the alert number, or an index fallback for a
@@ -317,11 +347,20 @@ function sameFinding(a: SelectedFinding, b: SelectedFinding): boolean {
   // finding can share one — so the category is part of the comparison.
   if (a.type === "glFinding")
     return b.type === "glFinding" && b.category === a.category && b.id === a.id;
+  // A Bitbucket annotation's uuid is unique only within its report, so both
+  // halves of the pair have to match.
+  if (a.type === "bbFinding")
+    return (
+      b.type === "bbFinding" &&
+      b.reportUuid === a.reportUuid &&
+      b.annotationUuid === a.annotationUuid
+    );
   // The three numbered categories keep separate number sequences, so the type
   // tag has to match too — alert #4 is not code scanning alert #4.
   return (
     b.type !== "advisory" &&
     b.type !== "glFinding" &&
+    b.type !== "bbFinding" &&
     b.type === a.type &&
     b.number === a.number
   );
@@ -556,18 +595,22 @@ function LoadFailed({
 }
 
 /** `"HEAD"` is the wire's sentinel for a ref we cannot name: a detached checkout,
- *  and equally a branch read that failed or came back empty — the backend degrades
- *  both to it and never queries pipelines under that name. No copy may therefore
- *  claim a result *for* it; sentences name the ref actually listed instead. */
+ *  and equally a branch read that failed or came back empty — both backends
+ *  degrade to it and never query under that name. No copy may therefore claim a
+ *  result *for* it; sentences name the ref actually listed instead. */
 const isUnnamedRef = (ref: string): boolean => ref === "HEAD";
 
 /** The refs that were looked at, for copy that would otherwise claim something
  *  project-wide. Built from `requestedRef` + `defaultRef` — NOT `fallbackRef`,
- *  which is set only when a default-branch pipeline was actually used and so can
+ *  which is set only when a default-branch result was actually used and so can
  *  never name the second ref in the state this serves. The sentinel contributes
  *  nothing (never queried under a name) and a branch that IS the default is named
- *  once; null when neither can be named. */
-function checkedRefs(data: GlFindingsOut): string | null {
+ *  once; null when neither can be named. Structural, so the GitLab and Bitbucket
+ *  envelopes — which spell these three fields identically — share one rule. */
+function checkedRefs(data: {
+  requestedRef: string;
+  defaultRef: string | null;
+}): string | null {
   const names = [
     isUnnamedRef(data.requestedRef) ? null : data.requestedRef,
     data.defaultRef && data.defaultRef !== data.requestedRef
@@ -1157,6 +1200,468 @@ function GlFindingsSection({
   );
 }
 
+// ── Bitbucket Code Insights ──────────────────────────────────────────────────
+
+interface BbAnnotationRow {
+  /** Unique per rendered row: an annotation uuid repeats across reports, so the
+   *  report's is part of it — duplicate `data-row` values would misdirect the
+   *  arrow-key focus. Matches the stored selection's identity pair. */
+  id: string;
+  annotation: BbAnnotationOut;
+}
+
+interface BbReportSection {
+  report: BbReportOut;
+  label: string;
+  /** Annotations that survived the filter, worst-first. */
+  rows: BbAnnotationRow[];
+}
+
+const bbRowId = (reportUuid: string, annotationUuid: string): string =>
+  `bb-${reportUuid}-${annotationUuid}`;
+
+/** Newest report first. Server order is unpinned, so the panel applies recency
+ *  itself; `createdOn` is ISO-8601, so a string compare is a date compare. An
+ *  undated report sinks below every dated one rather than jumping the list. */
+const byBbReportRecency = (a: BbReportOut, b: BbReportOut) =>
+  Number(!a.createdOn) - Number(!b.createdOn) ||
+  (b.createdOn ?? "").localeCompare(a.createdOn ?? "");
+
+/** Worst-first, then by location. A null severity ranks with `unknown`, i.e.
+ *  last, and a row with no path sinks below located ones on the same rung —
+ *  there is nothing to order it against. */
+const byBbAnnotation = (a: BbAnnotationOut, b: BbAnnotationOut) =>
+  SEVERITY_RANK[severityLevel(a.severity)] -
+    SEVERITY_RANK[severityLevel(b.severity)] ||
+  Number(!a.path) - Number(!b.path) ||
+  (a.path ?? "").localeCompare(b.path ?? "");
+
+/** The report's own name matches too, so filtering by it keeps that whole
+ *  section's rows rather than emptying a section the query named. */
+const matchesBbAnnotation = (a: BbAnnotationOut, label: string, q: string) =>
+  !q ||
+  label.toLowerCase().includes(q) ||
+  (a.summary?.toLowerCase().includes(q) ?? false) ||
+  (a.path?.toLowerCase().includes(q) ?? false);
+
+function buildBbSections(
+  reports: BbReportOut[],
+  query: string,
+): BbReportSection[] {
+  return reports.toSorted(byBbReportRecency).map((report) => {
+    const label = bbReportLabel(report);
+    return {
+      report,
+      label,
+      rows: report.annotations
+        .filter((a) => matchesBbAnnotation(a, label, query))
+        .toSorted(byBbAnnotation)
+        .map((annotation) => ({
+          id: bbRowId(report.uuid, annotation.uuid),
+          annotation,
+        })),
+    };
+  });
+}
+
+/** A report's result tone and glyph. The label always rides alongside, so the
+ *  state never reaches the user by color or glyph alone. */
+const BB_RESULT_TONE: Record<ReturnType<typeof bbResultLevel>, string> = {
+  passed: "text-success",
+  failed: "text-destructive",
+  pending: "text-muted-foreground",
+  unknown: "text-muted-foreground",
+};
+
+const BB_RESULT_ICON: Record<
+  ReturnType<typeof bbResultLevel>,
+  typeof CheckCircleIcon
+> = {
+  passed: CheckCircleIcon,
+  failed: XCircleIcon,
+  pending: ClockIcon,
+  unknown: CircleIcon,
+};
+
+function BbResultChip({
+  result,
+  className,
+}: {
+  result: string | null;
+  className?: string;
+}) {
+  const level = bbResultLevel(result);
+  const Icon = BB_RESULT_ICON[level];
+  return (
+    <Badge
+      variant="outline"
+      className={cn("gap-1", BB_RESULT_TONE[level], className)}
+    >
+      <Icon weight={level === "failed" ? "fill" : "regular"} />
+      {bbResultLabel(result)}
+    </Badge>
+  );
+}
+
+/** One `data` item as display text, or null when it carries nothing readable.
+ *  The values are third-party JSON, so each type guards what it needs and an
+ *  unexpected shape degrades instead of throwing — one malformed item must not
+ *  blank the strip. Never rendered as a link: only the gated `link` fields are. */
+function bbDataText(item: BbReportDataOut): string | null {
+  const value = item.value;
+  const asNumber =
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  switch (item.type?.toUpperCase()) {
+    case "NUMBER":
+      return asNumber === null
+        ? bbPlainValue(value)
+        : asNumber.toLocaleString();
+    case "DURATION":
+      // Atlassian documents a DURATION value as a count of milliseconds.
+      return asNumber === null ? bbPlainValue(value) : formatDuration(asNumber);
+    case "BOOLEAN":
+      return typeof value === "boolean"
+        ? value
+          ? "✓"
+          : "✗"
+        : bbPlainValue(value);
+    case "PERCENTAGE":
+      return asNumber === null ? bbPlainValue(value) : `${asNumber}%`;
+    default:
+      return bbPlainValue(value);
+  }
+}
+
+/** A value with no type to format it by. Objects and arrays return null rather
+ *  than "[object Object]": a shape we can't read is dropped, never faked. */
+function bbPlainValue(value: unknown): string | null {
+  if (typeof value === "string") return value || null;
+  if (typeof value === "number")
+    return Number.isFinite(value) ? String(value) : null;
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  return null;
+}
+
+/** A report's metrics, under its header. Each item is title + formatted value;
+ *  the ones that carry no readable value drop out rather than showing a blank. */
+function BbDataStrip({ data }: { data: BbReportDataOut[] }) {
+  const items = data
+    .map((item, i) => ({
+      key: `${item.title ?? ""}-${i}`,
+      title: item.title,
+      text: bbDataText(item),
+    }))
+    .filter((item) => item.text !== null);
+  if (items.length === 0) return null;
+  return (
+    <p className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-3 py-1 text-[11px] text-muted-foreground">
+      {items.map((item) => (
+        <span
+          key={item.key}
+          className="inline-flex min-w-0 items-baseline gap-1"
+        >
+          {item.title ? (
+            <span className="shrink-0 text-foreground">{item.title}</span>
+          ) : null}
+          <span className="min-w-0 truncate tabular-nums">{item.text}</span>
+        </span>
+      ))}
+    </p>
+  );
+}
+
+/**
+ * Which commit these reports came from. Code Insights hangs off one commit, not
+ * a repository-wide store, so the strip is what keeps the list honest about how
+ * current it is. In normal layout flow (never floating) so it can't cover a row.
+ */
+function BbCommitProvenance({ data }: { data: BbFindingsOut }) {
+  const sha = data.commitSha;
+  if (!sha) return null;
+  const commitUrl = data.commitWebUrl;
+  // Name only a ref that was actually consulted: on the "HEAD" sentinel and on
+  // a fallback, that is the default branch rather than the checkout itself.
+  const shownRef =
+    data.usedFallback || isUnnamedRef(data.requestedRef)
+      ? data.fallbackRef
+      : data.requestedRef;
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+      {data.usedFallback ? (
+        <p className="w-full">
+          {isUnnamedRef(data.requestedRef)
+            ? `No named branch checked out — showing ${data.fallbackRef || "the default branch"}.`
+            : `No commit found on ${data.requestedRef} — showing ${data.fallbackRef || "the default branch"}.`}
+        </p>
+      ) : null}
+      <p className="min-w-0 flex-1 truncate">
+        Commit{" "}
+        {commitUrl ? (
+          <button
+            type="button"
+            onClick={() => openUrl(commitUrl)}
+            className="cursor-pointer font-mono hover:underline"
+          >
+            {sha.slice(0, 7)}
+          </button>
+        ) : (
+          <span className="font-mono">{sha.slice(0, 7)}</span>
+        )}
+        {shownRef ? (
+          <>
+            {" · "}
+            <span className="font-mono">{shownRef}</span>
+          </>
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
+/** A partial-read disclosure on a commit whose reports ARE available: part of
+ *  the walk failed, so the sections below are incomplete. Quiet by design — the
+ *  data is usable, just not whole. */
+function BbPartialDetail({ detail }: { detail: string | null }) {
+  if (!detail) return null;
+  return (
+    <p className="px-3 py-2 text-[11px] text-muted-foreground">{detail}</p>
+  );
+}
+
+/**
+ * The card for any envelope that isn't `"available"`. `data` rides along so the
+ * ref-not-found copy can name the refs that were actually looked at; `state` is
+ * passed separately so the exhaustiveness net below has a union without
+ * `"available"` to close over.
+ */
+function BbUnavailableCard({
+  state,
+  data,
+  onRetry,
+}: {
+  state: Exclude<BbFindingsAvailability, "available">;
+  data: BbFindingsOut;
+  onRetry: () => void;
+}) {
+  const retryAction = (
+    <Button variant="outline" size="sm" onClick={onRetry}>
+      <ArrowClockwiseIcon data-icon="inline-start" />
+      Retry
+    </Button>
+  );
+
+  if (state === "noReports") {
+    // No settings deep link: Bitbucket has no Code Insights toggle to open —
+    // publishing reports means adding a pipe to the pipelines file. Hedged
+    // deliberately: a scanner that ran and failed publishes nothing either, and
+    // the wire can't tell that from never-configured.
+    return (
+      <ReasonCard
+        icon={ShieldSlashIcon}
+        message="No Code Insights reports on this commit — most likely no scanner or pipe is set up yet."
+        detail={data.detail}
+        action={retryAction}
+      />
+    );
+  }
+  if (state === "refNotFound") {
+    const refs = checkedRefs(data);
+    return (
+      <ReasonCard
+        icon={WarningCircleIcon}
+        message={
+          refs
+            ? `Couldn't find a commit on ${refs}.`
+            : "Couldn't find a commit to read reports from."
+        }
+        detail={data.detail}
+        action={retryAction}
+      />
+    );
+  }
+  if (state === "forbidden") {
+    return (
+      <ReasonCard
+        icon={LockKeyIcon}
+        message="Your Bitbucket sign-in can't read this repository's reports."
+        detail={data.detail}
+      />
+    );
+  }
+  if (state === "indeterminate") {
+    return (
+      <ReasonCard
+        icon={QuestionIcon}
+        message="Couldn't check findings for this repository."
+        detail={data.detail}
+        action={retryAction}
+      />
+    );
+  }
+  // A new BbFindingsAvailability variant fails to compile here instead of
+  // silently rendering nothing at all.
+  const _exhaustive: never = state;
+  return _exhaustive;
+}
+
+/** One report's annotations. The section header carries the report, so each row
+ *  leads with what the annotation itself says. */
+function BbAnnotationRows({
+  section,
+  selectedRowId,
+  onSelect,
+}: {
+  section: BbReportSection;
+  selectedRowId: string | null;
+  onSelect: (finding: SelectedFinding) => void;
+}) {
+  return (
+    <>
+      {section.rows.map(({ id, annotation: a }) => {
+        // Never invented prose: an annotation with neither stays identifiable by
+        // its section header, and the button takes an accessible name instead.
+        const label = a.summary || a.externalId || "";
+        return (
+          <button
+            type="button"
+            key={id}
+            data-row={id}
+            aria-label={label ? undefined : "Annotation with no summary"}
+            className={cn(
+              "block w-full border-b px-3 py-2 text-left",
+              selectedRowId === id
+                ? "bg-accent text-accent-foreground"
+                : "hover:bg-muted/60",
+            )}
+            onClick={() =>
+              onSelect({
+                type: "bbFinding",
+                reportUuid: section.report.uuid,
+                annotationUuid: a.uuid,
+              })
+            }
+          >
+            <p className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              {/* Omitted outright when the report stated no severity — a chip
+                  would have to name a rung, and every rung would be a claim. */}
+              {a.severity ? <SeverityChip severity={a.severity} /> : null}
+              {a.annotationType ? (
+                <span className="shrink-0">
+                  {bbAnnotationTypeLabel(a.annotationType)}
+                </span>
+              ) : null}
+              {a.path ? <PathLabel path={a.path} line={a.line} /> : null}
+            </p>
+            {label ? (
+              <p className="mt-1 truncate text-xs font-medium" title={label}>
+                {label}
+              </p>
+            ) : null}
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
+/** One report's section: its header, metrics strip, and annotations. A report
+ *  with no annotations (a coverage or test report, typically) is not an empty
+ *  state — the header and strip are its content, so it says so quietly. */
+function BbReportSectionView({
+  section,
+  limits,
+  setLimits,
+  loading,
+  selectedRowId,
+  onSelect,
+}: {
+  section: BbReportSection;
+  limits: FindingsLimits;
+  setLimits: (limits: FindingsLimits) => void;
+  loading: boolean;
+  selectedRowId: string | null;
+  onSelect: (finding: SelectedFinding) => void;
+}) {
+  const { report, label, rows } = section;
+  const loaded = report.annotations.length;
+  const reportLink = report.link;
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-3 py-1.5">
+        <span
+          className="min-w-0 flex-1 truncate text-xs font-semibold"
+          title={label}
+        >
+          {label}
+        </span>
+        <BbResultChip className="shrink-0" result={report.result} />
+        {/* Suppressed when the label already fell back to it — one string, said
+            once. The width cap is what gives the title priority: `flex-1` bases
+            the title at zero, so without it a long reporter holds its full
+            content width and the report name truncates first. */}
+        {report.reporter && report.reporter !== label ? (
+          <span
+            className="min-w-0 max-w-[30%] shrink truncate text-[11px] text-muted-foreground"
+            title={report.reporter}
+          >
+            {report.reporter}
+          </span>
+        ) : null}
+        {reportLink ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            // The label names only the host; the full URL is what says where
+            // this actually lands, so it previews on hover.
+            title={reportLink}
+            onClick={() => openUrl(reportLink)}
+          >
+            <ArrowSquareOutIcon data-icon="inline-start" />
+            {linkOutLabel(reportLink)}
+          </Button>
+        ) : null}
+      </div>
+      <BbDataStrip data={report.data} />
+      {rows.length > 0 ? (
+        <BbAnnotationRows
+          section={section}
+          selectedRowId={selectedRowId}
+          onSelect={onSelect}
+        />
+      ) : loaded > 0 ? (
+        <p className="px-3 py-4 text-xs text-muted-foreground">
+          No annotations match the filter.
+        </p>
+      ) : report.annotationsUnreadable ? null : (
+        <p className="px-3 py-2 text-xs text-muted-foreground">
+          No annotations.
+        </p>
+      )}
+      {/* A failed annotation walk must never read as a clean report, so it says
+          what was lost whether or not any rows came through. */}
+      {report.annotationsUnreadable ? (
+        <p className="px-3 py-2 text-[11px] text-muted-foreground">
+          {loaded > 0
+            ? "Some of this report's annotations couldn't be read."
+            : "This report's annotations couldn't be read."}
+        </p>
+      ) : null}
+      {/* Outside the empty branch, gated on truncation alone: filtering to zero
+          matches must not strip the only way to reach rows past the window. */}
+      <FindingsTruncationTail
+        truncated={report.annotationsTruncated}
+        loaded={loaded}
+        noun="annotations"
+        limits={limits}
+        limitKey="bitbucket"
+        setLimits={setLimits}
+        loading={loading}
+      />
+    </>
+  );
+}
+
 export function FindingsPanel({
   repoPath,
   active,
@@ -1165,10 +1670,11 @@ export function FindingsPanel({
   active: boolean;
 }) {
   const forge = useForgeStatus(repoPath);
-  // Two different findings models behind one capability: GitHub's four
-  // repository-wide alert stores, and GitLab's per-pipeline report artifacts.
-  // The capability gates whether the tab has anything at all; the provider picks
-  // which set of queries runs, so the other provider's fire not at all.
+  // Three different findings models behind one capability: GitHub's four
+  // repository-wide alert stores, GitLab's per-pipeline report artifacts, and
+  // Bitbucket's Code Insights reports published against one commit. The
+  // capability gates whether the tab has anything at all; the provider picks
+  // which set of queries runs, so the other providers' fire not at all.
   const provider = forge.data?.provider;
   const ready = forgeReady(forge.data);
   const supported = forgeSupports(forge.data, "securityFindings");
@@ -1211,6 +1717,12 @@ export function FindingsPanel({
     enabled && provider === "gitlab",
     active,
     limits.gitlab,
+  );
+  const bb = useBitbucketFindings(
+    repoPath,
+    enabled && provider === "bitbucket",
+    active,
+    limits.bitbucket,
   );
 
   const [filterText, setFilterText] = useState("");
@@ -1265,6 +1777,9 @@ export function FindingsPanel({
     allGlQuality.filter((f) => matchesGlQuality(f, query)),
   );
 
+  const bbOut = bb.data;
+  const bbSections = buildBbSections(bbOut?.reports ?? [], query);
+
   const alertsShown =
     !alerts.isError && alertsOut?.availability === "available";
   const codeScanningShown =
@@ -1289,6 +1804,7 @@ export function FindingsPanel({
     glFound && glOut?.secretDetection.availability === "available";
   const glQualityShown =
     glFound && glOut?.codeQuality.availability === "available";
+  const bbShown = !bb.isError && bbOut?.availability === "available";
 
   // Flat, document-order nav list: the grouped rows of each section in the order
   // the sections render. Group headers and the Load-more buttons are skipped.
@@ -1373,6 +1889,22 @@ export function FindingsPanel({
       }
     }
   }
+  // Section order, so arrows cross from one report into the next exactly as they
+  // cross GitHub's package groups.
+  if (bbShown) {
+    for (const section of bbSections) {
+      for (const row of section.rows) {
+        navRows.push({
+          id: row.id,
+          finding: {
+            type: "bbFinding",
+            reportUuid: section.report.uuid,
+            annotationUuid: row.annotation.uuid,
+          },
+        });
+      }
+    }
+  }
 
   // Resolved against the rendered rows (not rebuilt from the selection) so the
   // highlight uses the same identity the nav list and `data-row` do.
@@ -1392,7 +1924,8 @@ export function FindingsPanel({
     codeScanning.isFetching ||
     secrets.isFetching ||
     advisories.isFetching ||
-    gl.isFetching;
+    gl.isFetching ||
+    bb.isFetching;
   const refreshReason = enabled
     ? "Refresh findings"
     : !supported && ready
@@ -1433,9 +1966,9 @@ export function FindingsPanel({
           value={filterText}
           onChange={(e) => setFilterText(e.target.value)}
           placeholder={
-            provider === "gitlab"
-              ? "Filter by rule, secret type, check, file, severity, description, or identifier"
-              : "Filter by package, rule, secret type, summary, GHSA, or CVE"
+            provider
+              ? FILTER_PLACEHOLDERS[provider]
+              : FILTER_PLACEHOLDERS.github
           }
           className="h-7"
           autoComplete="off"
@@ -1453,6 +1986,53 @@ export function FindingsPanel({
           <p className="px-3 py-6 text-center text-xs text-muted-foreground">
             Security findings aren't available on this repository's host.
           </p>
+        ) : provider === "bitbucket" ? (
+          bb.isError ? (
+            <LoadFailed category="findings" onRetry={() => bb.refetch()} />
+          ) : !bbOut ? (
+            <RowSkeletons name="security findings" />
+          ) : bbOut.availability !== "available" ||
+            bbOut.reports.length === 0 ? (
+            /* Zero reports is `noReports` on the wire, so the second arm only
+               catches a backend that ever sends "available" with none — a blank
+               region would be the one reading of an empty list that claims the
+               commit is clean. */
+            <BbUnavailableCard
+              state={
+                bbOut.availability === "available"
+                  ? "noReports"
+                  : bbOut.availability
+              }
+              data={bbOut}
+              onRetry={() => bb.refetch()}
+            />
+          ) : (
+            <div onKeyDown={onListKeyDown}>
+              <BbCommitProvenance data={bbOut} />
+              <BbPartialDetail detail={bbOut.detail} />
+              {bbSections.map((section) => (
+                <BbReportSectionView
+                  key={section.report.uuid}
+                  section={section}
+                  limits={limits}
+                  setLimits={setFindingsLimits}
+                  loading={bb.isFetching}
+                  selectedRowId={selectedRowId}
+                  onSelect={selectFinding}
+                />
+              ))}
+              {/* States the cap without offering to lift it: the report walk is
+                  bounded server-side independently of `limit`, so a Load-more
+                  here would refetch the same reports. Each report's annotation
+                  tail below does grow — those limits are real. */}
+              {bbOut.truncated ? (
+                <p className="border-t px-3 py-3 text-xs text-muted-foreground">
+                  Showing the first {bbOut.reports.length.toLocaleString()}{" "}
+                  reports.
+                </p>
+              ) : null}
+            </div>
+          )
         ) : provider === "gitlab" ? (
           gl.isError ? (
             <LoadFailed category="findings" onRetry={() => gl.refetch()} />

@@ -107,7 +107,11 @@ export type SelectedFinding =
       type: "glFinding";
       category: "sast" | "secretDetection" | "codeQuality";
       id: string;
-    };
+    }
+  /** Bitbucket Code Insights annotations. Both uuids are server-guaranteed, and
+   *  an annotation's is unique only within its report, so the pair is what
+   *  identifies one row. */
+  | { type: "bbFinding"; reportUuid: string; annotationUuid: string };
 
 /** How many rows each Findings category has asked for. In the store (not panel
  *  state) so the list and the detail pane build identical query keys and share
@@ -119,6 +123,8 @@ export interface FindingsLimits {
   advisories: number;
   /** Shared by GitLab's three categories — they come from one pipeline query. */
   gitlab: number;
+  /** Bounds annotations per Bitbucket report — one query. */
+  bitbucket: number;
 }
 
 /** One page per category — matches the shared LoadMoreRow PAGE_SIZE. */
@@ -128,6 +134,7 @@ const DEFAULT_FINDINGS_LIMITS: FindingsLimits = {
   secretScanning: 100,
   advisories: 100,
   gitlab: 100,
+  bitbucket: 100,
 };
 
 export interface SelectedFile {

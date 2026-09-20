@@ -98,8 +98,9 @@ scroll position are all where you left them when you expand it again.
 
 Switch tabs with the number keys ({{kbd:tab-changes}} through {{kbd:tab-insights}}; see
 *Keyboard & navigation*). Issues, Discussions, Actions, and Tags need \`gh\` and a
-GitHub remote; **Findings** works on a GitHub remote with \`gh\` or a GitLab one with
-\`glab\`{{ai}}; the **Agent** tab appears only when AI features are enabled{{/ai}}.
+GitHub remote; **Findings** works on a GitHub remote with \`gh\`, a GitLab one with
+\`glab\`, or a Bitbucket one with an Atlassian API token{{ai}}; the **Agent** tab appears
+only when AI features are enabled{{/ai}}.
 
 > Tip: press {{kbd:command-palette}} anytime for the command palette — the fastest way
 > to find a feature when you don't know where it lives — or {{kbd:show-help}} to reopen
@@ -2202,8 +2203,8 @@ successes and failures, only the failures, or only the successes
 
 The **Findings** tab (in the More ▾ menu; palette-only by default — bind a key in
 **Settings → Keyboard**) collects what your repository's security scanning has turned up, so you
-can read it without opening the browser. It covers **GitHub** and **GitLab**
-repositories; on a Bitbucket repo the tab says so instead.
+can read it without opening the browser. It covers **GitHub**, **GitLab**, and
+**Bitbucket** repositories, each read the way that host publishes results.
 
 ## On a GitHub repository
 
@@ -2275,6 +2276,43 @@ stands in for them:
 An empty section only reads as clean once a report was actually parsed, and when part
 of a pipeline's output couldn't be read, a quiet line above the rows says so — a short
 list is never passed off as a whole one.
+
+## On a Bitbucket repository
+
+Bitbucket keeps findings as **Code Insights** reports attached to a **commit**, so the
+tab reads the tip of your checked-out branch — falling back to the **default branch**
+when your branch's tip has no reports, and saying so. A line above the list names the
+**commit** and the **ref** they came from, and links the commit where Bitbucket gives a
+URL. Anything that writes Code Insights lands here, so a scanner already running in
+your pipeline needs nothing extra.
+
+Each report gets its own section, newest first, headed by its **title**, the
+**reporter** that published it, and a **Passed** / **Failed** / **Pending** chip. Where
+the report carries a link, a button beside them opens it, named for the site it lands on
+(**Open on sonarcloud.io**, say) rather than for Bitbucket, since a Code Insights link
+goes wherever the scanner pointed it. Hover the button to preview the full URL. Under
+the header sits the report's **metrics**
+— counts, durations, percentages, and pass/fail flags, each formatted for the type the
+report declared.
+
+The report's **annotations** are the rows: worst severity first, then by path, each with
+its **severity**, what it reports (**Vulnerability**, **Code smell**, or **Bug**), and
+the **file and line** where the report gives one. An annotation with no severity carries
+no chip rather than being assigned a rung Bitbucket never claimed. Move through them
+with **↑ / ↓**, across report sections as well as within one, and select a row for its
+full text, location, reporter, and result. Where the scanner attached a link to the
+annotation, the detail opens it the same way, named for the host it lands on (an advisory
+page, the rule's own docs) and previewing the full URL on hover. A report's own link
+stays with the report, in its section header.
+
+Sections say what they are rather than looking clean. A **coverage** or **test** report
+carries no annotations at all, so its section is the header and its metrics, marked as
+such. When nothing has been published against the commit, the tab says so (most likely
+no scanner or pipe is set up yet) and offers a **Retry**. When neither your branch nor
+the default branch could be resolved, it names both; when your Bitbucket sign-in can't
+read the repository's reports, it says so; and when some or all of a report's annotations
+couldn't be read, a line under that section says so, so a short list is never passed off
+as a complete one.
 
 The tab fetches when you open it — use the refresh button for the current state.`,
   },

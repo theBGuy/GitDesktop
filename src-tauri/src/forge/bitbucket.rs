@@ -141,7 +141,7 @@ impl Forge for BitbucketForge {
 }
 
 /// The workspace + repo slug (`{workspace}/{slug}`) from the repo's origin remote.
-async fn workspace_slug(repo_path: &str) -> AppResult<(String, String)> {
+pub(super) async fn workspace_slug(repo_path: &str) -> AppResult<(String, String)> {
     let url =
         crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
     let path = crate::forge::remote_path(&url).ok_or_else(|| {
@@ -359,11 +359,11 @@ struct BbCloneLink {
 /// the same bound — the many single-page reads deserialize the envelope and ignore it,
 /// per the module's pagination policy.
 #[derive(Deserialize)]
-struct BbPage<T> {
+pub(super) struct BbPage<T> {
     #[serde(default = "Vec::new")]
-    values: Vec<T>,
+    pub(super) values: Vec<T>,
     #[serde(default)]
-    next: Option<String>,
+    pub(super) next: Option<String>,
     /// Total items matching the query, on the endpoints that document one (pipelines
     /// does; several others omit it) — `None` everywhere it's absent.
     #[serde(default)]
@@ -390,7 +390,7 @@ const BB_MAX_PAGES: usize = 5;
 /// the walk: an ABSENT `next`, an EMPTY one, and one pointing anywhere but
 /// [`BB_API_BASE`] — the last because every request attaches the user's Basic
 /// credentials, so a server-supplied URL must never carry them off-host. Pure.
-fn next_page_url(next: Option<String>) -> Option<String> {
+pub(super) fn next_page_url(next: Option<String>) -> Option<String> {
     next.filter(|url| url.starts_with(BB_API_BASE))
 }
 

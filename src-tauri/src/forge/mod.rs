@@ -8,6 +8,7 @@
 //! provider is declared in `model.rs::Implemented`.
 
 pub mod bitbucket;
+pub mod bitbucket_findings;
 pub mod github;
 pub mod gitlab;
 pub mod gitlab_findings;
@@ -3760,6 +3761,18 @@ pub async fn forge_gl_pipeline_findings(
     gl_only!(
         repo_path,
         gitlab_findings::pipeline_findings(&repo_path, limit)
+    )
+}
+
+/// Code Insights reports on the remote branch tip, with default-branch fallback.
+#[tauri::command]
+pub async fn forge_bb_commit_findings(
+    repo_path: String,
+    limit: Option<u32>,
+) -> AppResult<bitbucket_findings::BbFindingsOut> {
+    bb_only!(
+        repo_path,
+        bitbucket_findings::commit_findings(&repo_path, limit)
     )
 }
 
