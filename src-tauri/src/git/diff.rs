@@ -572,9 +572,8 @@ fn parse_diff_driver_binary(text: &str) -> Option<std::collections::HashMap<Stri
         let Some(binary) = git_config_bool(value) else {
             continue;
         };
-        // One key can appear once per scope. `--get-regexp` lists them in git's own
-        // precedence order, so overwriting leaves the last — the most specific — which
-        // is the value git itself would use.
+        // `--get-regexp` lists matches in git's own read order and `--get` documents
+        // taking the last one, so overwriting leaves the value git itself would use.
         flags.insert(name.to_string(), binary);
     }
     Some(flags)
