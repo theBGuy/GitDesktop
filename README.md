@@ -674,12 +674,11 @@ from, linking the commit where Bitbucket gives a URL. Select an annotation
 for its type, location, reporter, result, and full text, and where the
 scanner attached a link, open it at the source it points to (an advisory
 page, the rule's docs), named by its host rather than by the forge.
-Coverage and test reports carry no annotations, so their
-section is the header and metrics — and where no scanner has published
-anything yet, or a report's annotations couldn't be read, the tab says
-which rather than showing a clean list. Any pipe that writes Code Insights
-puts its results here, so a Bitbucket Pipelines scanner needs nothing extra
-to show up.
+Coverage and test reports carry no annotations, so their section is the
+header and metrics — and where no scanner has published anything yet, or a
+report's annotations couldn't be read, the tab says which rather than
+showing a clean list. Any pipe that writes Code Insights puts its results
+here, so a Bitbucket Pipelines scanner needs nothing extra to show up.
 
 ### Insights
 

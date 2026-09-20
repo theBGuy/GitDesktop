@@ -1391,7 +1391,10 @@ function BbCommitProvenance({ data }: { data: BbFindingsOut }) {
         <p className="w-full">
           {isUnnamedRef(data.requestedRef)
             ? `No named branch checked out — showing ${data.fallbackRef || "the default branch"}.`
-            : `No commit found on ${data.requestedRef} — showing ${data.fallbackRef || "the default branch"}.`}
+            : // Covers BOTH fallback causes (branch unresolved remotely, or its
+              // tip has no reports) — the wire doesn't say which, so the copy
+              // must not claim the commit was missing.
+              `No reports on ${data.requestedRef} — showing ${data.fallbackRef || "the default branch"}.`}
         </p>
       ) : null}
       <p className="min-w-0 flex-1 truncate">

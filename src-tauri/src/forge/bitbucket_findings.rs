@@ -449,7 +449,7 @@ where
             match walk(get, url, cap).await {
                 Ok((items, truncated)) => {
                     let (annotations, unreadable) = parse_items(items, annotation_out);
-                    report.annotations_truncated = truncated && !annotations.is_empty();
+                    report.annotations_truncated = truncated;
                     report.annotations = annotations;
                     report.annotations_unreadable = unreadable > 0;
                     unreadable_rows += unreadable;
@@ -743,7 +743,8 @@ mod tests {
         for (limit, with_next, kept, truncated) in [
             (None, false, 2, false),
             (Some(3), true, 2, true),
-            (Some(1), false, 0, false),
+            (Some(1), false, 0, true),
+            (Some(1), true, 0, true),
         ] {
             let mut fixture: Value = serde_json::from_str(ANNOTATION_FIXTURE).unwrap();
             fixture["values"][0]["line"] = json!("12");
