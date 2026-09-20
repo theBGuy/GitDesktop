@@ -253,13 +253,19 @@ const REORDER_LANDING: Record<
   top: () => 0,
   bottom: (_index, count) => count - 1,
 };
-/** Every direction refused, for a menu whose card the board no longer draws. */
+/** Placeholder plans for a menu whose card the board no longer draws — never
+ *  rendered, since that case shows the single {@link CARD_GONE_REASON} held row
+ *  instead of the per-direction rows, but the prop is a total Record. */
 const NO_REORDER: Record<ReorderDirection, ReorderPlan> = {
   up: { kind: "noop" },
   down: { kind: "noop" },
   top: { kind: "noop" },
   bottom: { kind: "noop" },
 };
+/** Why the Position section is held when the menu's card has left the board (a
+ *  refetch dropped it while the menu was open). One held row, not four "already
+ *  first"/"already last" rows that would contradict each other. */
+const CARD_GONE_REASON = "This card is no longer on the board";
 
 /**
  * One card per membership, LAST occurrence winning, applied where the pages flatten
@@ -1258,9 +1264,13 @@ export function ProjectsBoardPanel({
     const item = column?.items[from.idx];
     if (column === undefined || item === undefined || projectId === null)
       return;
+    // A held reason is surprising on a keyboard/palette route with no row to grey
+    // out, so it both announces (SR) and toasts (sighted). The truncated-loaded-end
+    // hold below is the same class and gets the same pair.
     const held = reorderHeldFor(item.itemId);
     if (held !== undefined) {
       announce(held);
+      toast(held);
       return;
     }
     const plan = planReorder({
@@ -1270,11 +1280,20 @@ export function ProjectsBoardPanel({
       direction,
       truncated: pagesTruncated(),
     });
-    // Nothing to say: the card is already at that end of its column, and the
-    // keypress is already swallowed.
-    if (plan.kind === "noop") return;
+    // A boundary no-op announces (SR) but does NOT toast: the card visibly not
+    // moving is feedback enough for a sighted user, and a toast per blocked arrow
+    // would be noise. Up/top hit the column's first card, down/bottom its last.
+    if (plan.kind === "noop") {
+      announce(
+        direction === "up" || direction === "top"
+          ? "Already first"
+          : "Already last",
+      );
+      return;
+    }
     if (plan.kind === "held") {
       announce(TRUNCATED_ORDER_REASON);
+      toast(TRUNCATED_ORDER_REASON);
       return;
     }
     // The board and the lens this write belongs to travel WITH it, the rule
@@ -1696,8 +1715,14 @@ export function ProjectsBoardPanel({
   const menuPos =
     menuTarget === null ? null : findCard(columns, menuTarget.item.itemId);
   const reorderPlans = menuPos === null ? NO_REORDER : reorderPlansFor(menuPos);
+  // A card the board no longer draws holds the whole section with one reason, ahead
+  // of the per-direction plans; otherwise the usual gate.
   const reorderHeldReason =
-    menuTarget === null ? undefined : reorderHeldFor(menuTarget.item.itemId);
+    menuTarget === null
+      ? undefined
+      : menuPos === null
+        ? CARD_GONE_REASON
+        : reorderHeldFor(menuTarget.item.itemId);
 
   const body = (() => {
     switch (true) {

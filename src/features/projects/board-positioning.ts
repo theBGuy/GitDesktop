@@ -43,11 +43,12 @@ function landBefore(order: readonly string[], beforeId: string): ReorderPlan {
  * Where moving `column[index]` in `direction` puts it, as an `afterId` for
  * GitHub's position mutation.
  *
- * Moving DOWN or to the BOTTOM of a column whose last card is on screen is only a
- * no-op when the board is fully loaded: with pages still unfetched, more of this
- * column may live past the loaded end, so the plan is held rather than guessing a
- * tail position. Moving UP never has that problem — everything above a drawn card
- * is drawn.
+ * Moving DOWN one slot is safe even on a truncated board — its anchor is always a
+ * loaded neighbour — so it holds only at the loaded end. Moving to the BOTTOM is
+ * held for ANY card on a truncated board: the true bottom lives past the loaded
+ * end, so `column[last]` (the last LOADED card) would leave the card mid-column
+ * after `Load more`. Moving UP or to the TOP never has that problem — everything
+ * above a drawn card is drawn.
  *
  * Under a FILTERED view `order` is that lens's own loaded list, so the plan is
  * exact in the view and approximate in global interleave: items the filter hides
@@ -80,7 +81,11 @@ export function planReorder(args: {
       return { kind: "move", afterId: column[index + 1] };
     }
     case "bottom": {
-      if (index === last) return truncated ? HELD_TRUNCATED : NOOP;
+      // Held whenever the board is truncated, not only at the last index: the true
+      // bottom is past the loaded end, so `column[last]` would land the card
+      // mid-column once the rest pages in.
+      if (truncated) return HELD_TRUNCATED;
+      if (index === last) return NOOP;
       return { kind: "move", afterId: column[last] };
     }
     case "up": {

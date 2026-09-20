@@ -114,6 +114,15 @@ test("to bottom on the column's last card is HELD while pages are unloaded", () 
   });
 });
 
+test("to bottom on a NON-last card is HELD on a truncated board", () => {
+  // The true bottom lives past the loaded end, so column[last] would land the card
+  // mid-column after Load more — held regardless of the card's index.
+  assert.deepEqual(plan(COL_A, 0, "bottom", { truncated: true }), {
+    kind: "held",
+    reason: "truncated",
+  });
+});
+
 // ------------------------------------------------------- degenerate columns
 
 test("a single-card column has nowhere to go in any direction", () => {

@@ -589,10 +589,10 @@ the cards, and its grouping seeds **Group by** while you stay free to
 regroup. Table and roadmap views are drawn as a board, and **Clear view**
 brings the whole item set back in the board's own order with the chips off,
 leaving the grouping where you last put it. Nothing here writes to the view.
-Adding, moving, editing a draft, converting, archiving and removing all need
-write access to the board and the `project` sign-in scope; reading one needs
-only the `project` or `read:project` scope the Projects picker already asks
-for.
+Adding, moving, reordering, editing a draft, converting, archiving and removing
+all need write access to the board and the `project` sign-in scope; reading one
+needs only the `project` or `read:project` scope the Projects picker already
+asks for.
 
 ### Code TODOs
 

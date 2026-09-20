@@ -2039,9 +2039,10 @@ GitDesktop writes where the card finally rests rather than every step it passed 
 If GitHub refuses the write, the card goes back and a message says why.
 
 A row that would change nothing is greyed out — the top card can't go up, the bottom one
-can't go down. On a board that's still paging in, the downward moves say **Load more cards
-to move past the loaded end** instead: the rest of the column may be in a page that hasn't
-arrived, so moving it past the loaded end would be a guess. Under a saved view that
+can't go down. On a board that's still paging in, the downward moves are greyed with
+**(load more first)** on the row: the rest of the column may be in a page that hasn't
+arrived, so moving it past the loaded end would be a guess. The keyboard route says the
+same in full — **Load more cards to move past the loaded end**. Under a saved view that
 **sorts**, the whole section says **This view orders cards by its sort** — the columns are
 drawn in the sort's order there, not the board's own, so **Clear view** (or a view without
 a sort) is what brings the project order back. Reordering needs the same write access and
@@ -2090,14 +2091,14 @@ reading a card's dates asks nothing of the board.
 The board is fully keyboard-operable: **↑ / ↓** move through a column, **← / →** step to
 the next column at the same height, **Home / End** jump to a column's first or last card,
 **Enter** opens the card you're on and {{key:space}} peeks at its details; on Windows and
-Linux, {{key:shift+f10}} opens its menu. Hold {{key:alt}} with those same four keys and
-the card moves instead of the cursor (above). Collapsing the sidebar ({{kbd:toggle-sidebar}})
+Linux, {{key:shift+f10}} opens its menu. Hold {{key:alt}} with **↑ / ↓** or **Home / End**
+and the card moves instead of the cursor (above). Collapsing the sidebar ({{kbd:toggle-sidebar}})
 hands the board its width.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
 and offers a one-click **Reconnect GitHub…**, which requests \`project\`. Every write here
-(adding, moving, editing a draft, converting, archiving, removing) needs the full
+(adding, moving, reordering, editing a draft, converting, archiving, removing) needs the full
 \`project\` scope, so a \`read:project\` sign-in draws the board with those controls held.`,
   },
   {

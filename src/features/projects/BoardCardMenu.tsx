@@ -9,7 +9,7 @@ import {
 import { OptionValue } from "@/features/conversations/ProjectFieldValues";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { BoardItem } from "@/lib/git/types";
-import type { BoardColumnModel } from "./board-model";
+import { type BoardColumnModel, TRUNCATED_ROW_REASON } from "./board-model";
 import type { ReorderDirection, ReorderPlan } from "./board-positioning";
 
 /** What the board's one shared context menu acts on, recorded on right-click or
@@ -67,14 +67,14 @@ const REORDER_ROWS: {
     direction: "down",
     label: "Move down",
     noopReason: "already last",
-    truncatedReason: "load more first",
+    truncatedReason: TRUNCATED_ROW_REASON,
   },
   { direction: "top", label: "Move to top", noopReason: "already first" },
   {
     direction: "bottom",
     label: "Move to bottom",
     noopReason: "already last",
-    truncatedReason: "load more first",
+    truncatedReason: TRUNCATED_ROW_REASON,
   },
 ];
 
