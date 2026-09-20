@@ -1140,7 +1140,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<RunIdArg>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        crate::forge::forge_ci_run_rerun(self.repo.clone(), args.run_id.as_string(), true)
+        crate::forge::forge_ci_run_rerun(self.repo.clone(), args.run_id.as_string(), true, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "run_id": args.run_id.as_string(), "action": "rerun" }))

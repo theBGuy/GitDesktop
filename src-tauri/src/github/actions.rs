@@ -503,22 +503,26 @@ fn run_rerun_args<'a>(slug: &'a str, id: &'a str, failed: bool) -> Vec<&'a str> 
 }
 
 /// Re-runs a completed run — all jobs, or only the failed ones.
-pub async fn gh_run_rerun(repo_path: String, run_id: u64, failed: bool) -> AppResult<()> {
+/// Lens-scoped because the PR checks strip renders under `upstream` too,
+/// where the run belongs to the parent repo.
+pub async fn gh_run_rerun(
+    repo_path: String,
+    run_id: u64,
+    failed: bool,
+    lens: Option<String>,
+) -> AppResult<()> {
     let id = run_id.to_string();
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let args = run_rerun_args(&slug, &id, failed);
     run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
     Ok(())
 }
 
-/// Approves a run that GitHub is withholding pending maintainer approval — the
-/// gate on a first-time contributor's fork PR. There is no `gh run` verb for it,
-/// so it goes through the REST endpoint directly. Distinct from
+/// Maintainer approval gates a contributor's fork PR run — distinct from
 /// `pending_deployments`, which gates environment protection rules, not the run.
-///
-/// Lens-scoped, unlike its origin-pinned `gh_run_*` siblings: its surface is the
-/// PR checks strip, which renders under the `upstream` lens too, where the held
-/// run lives on the PARENT repo and an origin slug would 404.
+/// Uses REST because `gh run` has no approval verb. Lens-scoped like re-run: the
+/// PR checks strip can render under `upstream`, where the held run belongs to
+/// the parent repo.
 pub async fn gh_run_approve(repo_path: String, run_id: u64, lens: Option<String>) -> AppResult<()> {
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     run_gh(

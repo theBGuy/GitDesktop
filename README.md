@@ -367,7 +367,10 @@ in one click.
   its current step inline and a live step checklist when expanded;
   finished **GitHub Actions** and **GitLab pipeline** jobs peek their logs
   inline; **Bitbucket** build statuses and other external checks link out
-  (name/state/URL, no fetchable logs).
+  (name/state/URL, no fetchable logs). A failing rollup offers the re-run
+  right on its summary line — **Re-run failed jobs** on GitHub, **Retry
+  pipeline** on GitLab, and **Re-run failed checks** in the command palette
+  (Bitbucket has no pull-request-scoped re-run).
 - **Line-anchored review comments**, from Copilot, CodeRabbit, or humans:
   rendered grouped by file in the Conversation and at their exact line in
   the Files diff, with reply-in-thread, resolve/unresolve, and edit/delete

@@ -422,8 +422,13 @@ pub async fn job_logs(repo_path: &str, job_id: u64) -> AppResult<String> {
     crate::github::actions::gh_job_logs(repo_path.to_string(), job_id).await
 }
 
-pub async fn rerun_run(repo_path: &str, run_id: u64, failed: bool) -> AppResult<()> {
-    crate::github::actions::gh_run_rerun(repo_path.to_string(), run_id, failed).await
+pub async fn rerun_run(
+    repo_path: &str,
+    run_id: u64,
+    failed: bool,
+    lens: Option<String>,
+) -> AppResult<()> {
+    crate::github::actions::gh_run_rerun(repo_path.to_string(), run_id, failed, lens).await
 }
 
 pub async fn cancel_run(repo_path: &str, run_id: u64) -> AppResult<()> {

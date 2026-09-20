@@ -4,6 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import type { RemoteLens } from "@/lib/git/types";
 import { invoke } from "@/lib/tauri/invoke";
 
 // ── Types (mirror the Rust structs in github/actions.rs) ─────────────────────
@@ -135,15 +136,21 @@ export const forgeCiRunPage = (
 export const forgeCiRunView = (repoPath: string, runId: number | string) =>
   invoke<RunDetail>("forge_ci_run_view", { repoPath, runId: String(runId) });
 
+/** Re-run a finished run (`failed` = its failed jobs only). Ids stay strings over
+ *  IPC — they exceed JS's safe-integer range. `lens` is GitHub-only (fork
+ *  identity) and picks which repository the re-run targets; callers on a
+ *  repo-wide CI surface omit it. */
 export const forgeCiRunRerun = (
   repoPath: string,
-  runId: number,
+  runId: number | string,
   failed: boolean,
+  lens?: RemoteLens,
 ) =>
   invoke<void>("forge_ci_run_rerun", {
     repoPath,
     runId: String(runId),
     failed,
+    lens,
   });
 
 export const forgeCiRunCancel = (repoPath: string, runId: number) =>
@@ -425,8 +432,10 @@ function useActionsMutation<TArgs>(
 }
 
 export function useRerunRun(repo: string) {
-  return useActionsMutation(repo, (args: { runId: number; failed: boolean }) =>
-    forgeCiRunRerun(repo, args.runId, args.failed),
+  return useActionsMutation(
+    repo,
+    (args: { runId: number | string; failed: boolean; lens?: RemoteLens }) =>
+      forgeCiRunRerun(repo, args.runId, args.failed, args.lens),
   );
 }
 

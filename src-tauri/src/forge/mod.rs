@@ -2388,18 +2388,22 @@ pub async fn forge_ci_job_logs(repo_path: String, job_id: String) -> AppResult<S
     }
 }
 
-/// Re-run a finished CI run, behind the abstraction. GitHub re-runs all jobs or
-/// (`failed`) just the failed ones; GitLab's retry restarts failed + canceled jobs
-/// only — its single semantic — so the GitLab arm ignores `failed` (the UI only
-/// offers the retry button there; "re-run all" stays GitHub-only).
+/// GitHub re-runs all jobs or (`failed`) just failed ones; GitLab retries failed
+/// and canceled jobs only, ignoring `failed` (the UI offers only retry there;
+/// "re-run all" stays GitHub-only). The lens is honored by the GitHub arm only.
 #[tauri::command]
-pub async fn forge_ci_run_rerun(repo_path: String, run_id: String, failed: bool) -> AppResult<()> {
+pub async fn forge_ci_run_rerun(
+    repo_path: String,
+    run_id: String,
+    failed: bool,
+    lens: Option<String>,
+) -> AppResult<()> {
     let run_id = parse_ci_id("run", &run_id)?;
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::retry_run(&repo_path, run_id).await,
         // Bitbucket has no rerun-failed-only; a re-run re-triggers the run's branch.
         Some((Provider::Bitbucket, _)) => bitbucket::rerun_run(&repo_path, run_id).await,
-        _ => github::rerun_run(&repo_path, run_id, failed).await,
+        _ => github::rerun_run(&repo_path, run_id, failed, lens).await,
     }
 }
 

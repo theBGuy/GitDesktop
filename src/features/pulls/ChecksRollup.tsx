@@ -1,4 +1,5 @@
 import {
+  ArrowClockwiseIcon,
   ArrowSquareOutIcon,
   CaretDownIcon,
   CaretRightIcon,
@@ -9,6 +10,7 @@ import {
   WarningIcon,
   XCircleIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type Dispatch,
@@ -18,15 +20,25 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { RunDuration } from "@/components/elapsed-time";
 import { LogBlock } from "@/components/LogBlock";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { StatusIcon, statusLabel } from "@/features/actions/status";
+import {
+  checksRerunOffer,
+  isPipelineProvider,
+  RERUN_TITLES,
+  rerunSuccessMessage,
+  StatusIcon,
+  statusLabel,
+} from "@/features/actions/status";
 import { clipTitle } from "@/lib/clip-title";
 import {
+  forgeFeatureReady,
   useApproveWorkflowRun,
+  useForgeStatus,
   useRepoWriteAccess,
   writeAccessReason,
 } from "@/lib/git/queries";
@@ -35,9 +47,11 @@ import {
   isRunActive,
   type RunJob,
   useJobLogs,
+  useRerunRun,
   useRunDetail,
   useRunFailedLogs,
 } from "@/lib/github/actions";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -45,6 +59,7 @@ import { formatDurationBetween } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { checkPresentation, isOutstanding } from "./check-presentation";
+import { PR_SWITCH_LOADING_REASON } from "./PrMergeabilityBanner";
 
 /** The one wording for releasing a held workflow run — this strip and the Actions
  *  run view both ask through it, so the two prompts can't drift apart. It lives
@@ -55,6 +70,12 @@ export const APPROVE_RUN_CONFIRM = {
   body: "This runs the contributor's workflow code in this repository's CI.",
   confirmLabel: "Approve and run",
 } as const;
+
+/** How long a started re-run waits before re-reading the PR's checks. The
+ *  mutation's own invalidation races the forge's attempt transition and can cache
+ *  an EMPTY rollup, and PR details refetch on focus only — so without this second
+ *  pass the checks section stays blank until the window is focused again. */
+const CHECKS_REPAIR_DELAY_MS = 4500;
 
 /** A GitHub Actions check that hasn't finished: a parsed run id, GitHub, no
  *  `completedAt`, AND a still-pending status. The bucket check guards a
@@ -439,6 +460,7 @@ export function ChecksRollup({
   repoPath,
   provider,
   crossRepository,
+  stale,
   unmetRequiredContexts = [],
 }: {
   checks: PrCheckOut[];
@@ -450,6 +472,10 @@ export function ChecksRollup({
    *  Only the approval strip uses it: GitHub holds runs for approval on fork PRs
    *  alone, so the affordance is fork-scoped by design. */
   crossRepository: boolean;
+  /** True while the host view doesn't own the selection or the details are the
+   *  previous PR's placeholder — suppresses every mutating affordance in the
+   *  rollup, which would otherwise act on a PR the user never opened. */
+  stale: boolean;
   /** The base branch's required contexts the PR's checks haven't satisfied, exactly
    *  as the caller's blocked-merge join computes them. GitHub blocked-by-rules PRs
    *  only — absent or empty everywhere else, and the rollup never reads the rules
@@ -523,9 +549,33 @@ export function ChecksRollup({
   }, [attention]);
 
   const approveRun = useApproveWorkflowRun(repoPath);
-  // Own busy state: the batch spans several sequential mutations, so the
-  // mutation's own `isPending` would flicker between them.
+  const rerun = useRerunRun(repoPath);
+  // Own busy state: each batch spans several sequential mutations, so the
+  // mutations' own `isPending` would flicker between them.
   const [approving, setApproving] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
+  // Run ids re-run from this rollup that still read failed — the one refetch
+  // onSettled fires can land before the forge flips them, and usePrDetails is
+  // focus-only after that, so the offer must retire locally. An id leaves the
+  // latch when it leaves the failed set (it flipped to pending, or vanished),
+  // so a later genuine re-failure of the same run re-offers.
+  const [recentlyRerun, setRecentlyRerun] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  // The re-run button unmounts the moment its offer retires, so a keyboard batch
+  // started there would drop focus to `<body>`; the summary disclosure is the
+  // stable neighbour that catches it.
+  const rerunButtonRef = useRef<HTMLButtonElement>(null);
+  const summaryRef = useRef<HTMLButtonElement>(null);
+  // The pending repair pass — one per batch, so a second batch resets it.
+  const queryClient = useQueryClient();
+  const repairTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (repairTimer.current !== null) clearTimeout(repairTimer.current);
+    },
+    [],
+  );
   // The blocked runs this rollup can approve. A run GitHub holds before it starts
   // may not reach the check rollup at all — that shape is unverified — so an empty
   // list renders nothing rather than an approval offer with nothing to approve.
@@ -544,21 +594,92 @@ export function ChecksRollup({
         ].filter((id) => Number.isSafeInteger(id))
       : [];
 
-  // Approving is a repo write, so an explicitly read-only viewer keeps the button
-  // (disabled, with the reason). Probed only when the strip renders — the id list
-  // already carries the fork + GitHub gate — and on the same lens the rest of the
-  // PR view uses, so it shares that query's cache entry.
+  // The re-run arm asks the forge probe itself rather than the `provider` prop:
+  // that prop is a default-to-github guess until the probe answers, and a GitLab
+  // MR must never be offered GitHub's wording. `undefined` = still pending.
+  const forge = useForgeStatus(repoPath);
+  const rerunProvider = forge.isPending ? undefined : forge.data?.provider;
+  const canRerun =
+    rerunProvider !== undefined &&
+    (!isPipelineProvider(rerunProvider) ||
+      forgeFeatureReady(forge.data, "ciRerun"));
+
+  // The distinct run ids of the still-running GitHub Actions checks. Two
+  // consumers: one run-detail query mounts per id while the rollup is OPEN
+  // (React Query dedupes rows sharing a run, so a collapsed rollup fires
+  // nothing), and the GitHub re-run arm subtracts them — GitHub refuses a run
+  // still in progress, and that gate is not open-scoped.
+  const runningRunIds = [
+    ...new Set(
+      checks
+        .filter((c) => isRunningActionsCheck(c, provider))
+        .map((c) => c.runId as string),
+    ),
+  ];
+  // The runs a failed check sits on. `completedAt` is required: a StatusContext
+  // whose `targetUrl` happens to parse as an Actions-run URL arrives FAILURE with
+  // no timestamps, and that id could name another repository's run (the parse is
+  // slug-blind). GitLab job checks always carry a finish time, so the term costs
+  // them nothing.
+  const failedRunIds = [
+    ...new Set(
+      checks
+        .filter(
+          (c) =>
+            checkPresentation(c.status, provider).bucket === "failed" &&
+            c.runId &&
+            c.completedAt,
+        )
+        .map((c) => c.runId as string),
+    ),
+  ];
+  // Membership alone decides whether a latched id still belongs, and the array
+  // itself is rebuilt every render — so the prune keys on a primitive.
+  const failedKey = failedRunIds.join(" ");
+  useEffect(() => {
+    const live = new Set(failedKey ? failedKey.split(" ") : []);
+    setRecentlyRerun((prev) => {
+      const next = new Set([...prev].filter((id) => live.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [failedKey]);
+  // GitHub refuses to re-run a run that is still in progress, and one run can
+  // hold a failed check while a sibling job runs on. GitLab gets no such gate:
+  // it collapses running/pending/manual into one PENDING check status, so an
+  // activity gate would hide the offer forever on a pipeline with a manual job —
+  // a mid-run retry it rejects surfaces as that run's own error toast instead.
+  const rerunnable = (
+    rerunProvider === "github"
+      ? failedRunIds.filter((id) => !runningRunIds.includes(id))
+      : failedRunIds
+  ).filter((id) => !recentlyRerun.has(id));
+  // The one offer this rollup makes, or null when any gate closes — the button
+  // and the palette action both read it, so no gate can hold for one and not the
+  // other.
+  const rerunOffer =
+    canRerun && !stale && rerunnable.length > 0
+      ? checksRerunOffer(rerunProvider)
+      : null;
+
+  // Approving and re-running are repo writes, so an explicitly read-only viewer
+  // keeps the buttons (disabled, with the reason). Probed only when one of them
+  // renders — the id lists already carry their provider gates — and on the same
+  // lens the rest of the PR view uses, so it shares that query's cache entry.
   const lens = useRepoLens(repoPath);
   const writeAccess = useRepoWriteAccess(
     repoPath,
     lens,
-    blockedRunIds.length > 0,
+    blockedRunIds.length > 0 || rerunOffer !== null,
   );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
+  // A permission reason outranks the switch window: it stays true once the
+  // switch lands, while the transient wording doesn't.
+  const heldReason =
+    writeReason ?? (stale ? PR_SWITCH_LOADING_REASON : undefined);
 
   async function approveBlockedRuns() {
-    if (writeBlocked) return;
+    if (writeBlocked || stale) return;
     const ok = await useConfirm.getState().ask(APPROVE_RUN_CONFIRM);
     if (!ok) return;
     setApproving(true);
@@ -577,6 +698,58 @@ export function ChecksRollup({
     }
   }
 
+  async function rerunFailedChecks() {
+    if (writeBlocked || stale) return;
+    // Read before the first await: the button may be gone by the end of the
+    // batch, and `activeElement` then reads `<body>` for a palette run and a
+    // button run alike.
+    const fromButton =
+      rerunButtonRef.current !== null &&
+      document.activeElement === rerunButtonRef.current;
+    setRerunning(true);
+    let started = 0;
+    try {
+      // Sequential, and each failure is reported on its own: one run raced to
+      // "in progress" by the forge must not strand the rest of the batch.
+      for (const id of rerunnable) {
+        try {
+          await rerun.mutateAsync({ runId: id, failed: true, lens });
+          started += 1;
+          setRecentlyRerun((prev) => new Set(prev).add(id));
+        } catch (e) {
+          toastError(e);
+        }
+      }
+      if (started > 0) {
+        toast.success(rerunSuccessMessage(rerunProvider, true));
+        if (repairTimer.current !== null) clearTimeout(repairTimer.current);
+        repairTimer.current = setTimeout(() => {
+          repairTimer.current = null;
+          // The same two keys the mutation invalidates, re-read once the attempt
+          // transition has settled; unawaited, like the mutation's own pass.
+          void queryClient.invalidateQueries({
+            queryKey: ["repo", repoPath, "pr"],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["repo", repoPath, "pr-ci"],
+          });
+        }, CHECKS_REPAIR_DELAY_MS);
+      }
+    } finally {
+      setRerunning(false);
+    }
+    // Every id latched means the offer retires with its button; anything short
+    // of that leaves the button standing, and focus stays where the user put it.
+    if (fromButton && started === rerunnable.length)
+      summaryRef.current?.focus();
+  }
+
+  useHotkeyAction(
+    "pr-rerun-failed-checks",
+    () => void rerunFailedChecks(),
+    rerunOffer !== null && !writeBlocked && !rerunning,
+  );
+
   // Failures first, then the required contexts still holding the merge, then
   // pending, passed, and skipped (least interesting); stable within a rank.
   const bucketRank = { failed: 0, pending: 2, passed: 3, skipped: 4 } as const;
@@ -585,17 +758,6 @@ export function ChecksRollup({
       ? 1
       : bucketRank[checkPresentation(c.status, provider).bucket];
   const sorted = [...checks].sort((a, b) => rank(a) - rank(b));
-
-  // The distinct run ids of the still-running GitHub Actions checks — one
-  // run-detail query mounts per id below (React Query dedupes rows sharing a run),
-  // and only while the rollup is OPEN, so a collapsed rollup fires nothing.
-  const runningRunIds = [
-    ...new Set(
-      checks
-        .filter((c) => isRunningActionsCheck(c, provider))
-        .map((c) => c.runId as string),
-    ),
-  ];
 
   // Roving focus: the "active" row is whichever element holds DOM focus, keyed by
   // `data-row` = the sorted index (a check `name` isn't unique — GitHub allows two
@@ -671,8 +833,8 @@ export function ChecksRollup({
           <DisabledReasonButton
             variant="outline"
             size="xs"
-            disabled={approving || writeBlocked}
-            reason={writeReason}
+            disabled={approving || writeBlocked || stale}
+            reason={heldReason}
             onClick={() => void approveBlockedRuns()}
           >
             {approving ? (
@@ -684,33 +846,58 @@ export function ChecksRollup({
           </DisabledReasonButton>
         </div>
       )}
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex cursor-pointer items-center gap-2 text-muted-foreground hover:text-foreground"
-      >
-        {open ? (
-          <CaretDownIcon className="size-3 shrink-0" />
-        ) : (
-          <CaretRightIcon className="size-3 shrink-0" />
-        )}
-        <span className="flex items-center gap-x-2.5">
-          {summary.map((s, i) => (
-            <span key={s.key} className="flex items-center gap-x-2.5">
-              {i > 0 && (
-                <span aria-hidden className="text-muted-foreground">
-                  ·
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <button
+          ref={summaryRef}
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex cursor-pointer items-center gap-2 text-muted-foreground hover:text-foreground"
+        >
+          {open ? (
+            <CaretDownIcon className="size-3 shrink-0" />
+          ) : (
+            <CaretRightIcon className="size-3 shrink-0" />
+          )}
+          <span className="flex items-center gap-x-2.5">
+            {summary.map((s, i) => (
+              <span key={s.key} className="flex items-center gap-x-2.5">
+                {i > 0 && (
+                  <span aria-hidden className="text-muted-foreground">
+                    ·
+                  </span>
+                )}
+                <span className={cn("flex items-center gap-1", s.tone)}>
+                  <s.Icon
+                    className="size-3 shrink-0"
+                    weight="fill"
+                    aria-hidden
+                  />
+                  {s.count} {s.word}
                 </span>
-              )}
-              <span className={cn("flex items-center gap-1", s.tone)}>
-                <s.Icon className="size-3 shrink-0" weight="fill" aria-hidden />
-                {s.count} {s.word}
               </span>
-            </span>
-          ))}
-        </span>
-      </button>
+            ))}
+          </span>
+        </button>
+        {rerunOffer ? (
+          <DisabledReasonButton
+            ref={rerunButtonRef}
+            variant="outline"
+            size="xs"
+            disabled={rerunning || writeBlocked}
+            reason={writeReason}
+            title={RERUN_TITLES[rerunOffer.kind]}
+            onClick={() => void rerunFailedChecks()}
+          >
+            {rerunning ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <ArrowClockwiseIcon data-icon="inline-start" />
+            )}
+            {rerunOffer.label}
+          </DisabledReasonButton>
+        ) : null}
+      </div>
       {open && (
         <>
           {/* Headless: one run-detail query per distinct running Actions run, only

@@ -992,6 +992,12 @@ export const ACTIONS = [
     category: "Pull requests",
     defaultBinding: null,
   },
+  {
+    id: "pr-rerun-failed-checks",
+    label: "Re-run failed checks",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
 
   // Actions
   {

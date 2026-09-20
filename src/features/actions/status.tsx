@@ -46,6 +46,15 @@ export type RerunOffer = {
   label: string;
 };
 
+/** What each re-run offer is called. Every surface that offers a re-run reads
+ *  these, so no two can spell the same operation differently. */
+export const RERUN_LABELS: Record<RerunOffer["kind"], string> = {
+  all: "Re-run all jobs",
+  failed: "Re-run failed jobs",
+  retry: "Retry pipeline",
+  "bb-rerun": "Rerun pipeline",
+};
+
 /**
  * The re-run offers for a run, in render order. Shared by the run detail view
  * and the runs-list context menu so the two can't drift on which offers a
@@ -61,22 +70,36 @@ export function rerunOffers(
   // both conclusions and has no "all jobs" analogue.
   if (provider === "gitlab") {
     return isFailureConclusion(conclusion) || conclusion === "cancelled"
-      ? [{ kind: "retry", label: "Retry pipeline" }]
+      ? [{ kind: "retry", label: RERUN_LABELS.retry }]
       : [];
   }
   // Bitbucket has no rerun endpoint — its "rerun" re-triggers the branch
   // pipeline, which makes sense on any finished run (success included).
   if (provider === "bitbucket") {
     return !isRunActive(status) && conclusion !== ""
-      ? [{ kind: "bb-rerun", label: "Rerun pipeline" }]
+      ? [{ kind: "bb-rerun", label: RERUN_LABELS["bb-rerun"] }]
       : [];
   }
   if (isRunActive(status)) return [];
-  const offers: RerunOffer[] = [{ kind: "all", label: "Re-run all jobs" }];
+  const offers: RerunOffer[] = [{ kind: "all", label: RERUN_LABELS.all }];
   if (isFailureConclusion(conclusion)) {
-    offers.push({ kind: "failed", label: "Re-run failed jobs" });
+    offers.push({ kind: "failed", label: RERUN_LABELS.failed });
   }
   return offers;
+}
+
+/** The single re-run the PR checks rollup offers when failed checks exist:
+ *  failed-only on GitHub, pipeline retry on GitLab, nothing on Bitbucket (its
+ *  rerun re-triggers the branch pipeline — wrong from a PR row). Reads the same
+ *  labels rerunOffers renders so the surfaces can't drift. */
+export function checksRerunOffer(
+  provider: ForgeProvider | null | undefined,
+): RerunOffer | null {
+  if (provider === "gitlab")
+    return { kind: "retry", label: RERUN_LABELS.retry };
+  if (provider === "github")
+    return { kind: "failed", label: RERUN_LABELS.failed };
+  return null;
 }
 
 /** Hover copy per re-run offer, for the two whose label doesn't say what the
