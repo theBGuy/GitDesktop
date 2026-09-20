@@ -508,21 +508,109 @@ const UNTRACKED_READ_BUDGET: u64 = 64 * 1024 * 1024;
 /// so no untracked file is ever held whole.
 const LINE_COUNT_CHUNK: usize = 64 * 1024;
 
-/// A path's `diff` attribute, for the paths `.gitattributes` decides. Anything it
-/// leaves unspecified — including a custom diff-driver name, where git would run
-/// that driver rather than answer the question — carries no verdict and sniffs.
+/// A path's `diff` attribute, for the paths `.gitattributes` decides. A custom driver
+/// name resolves through its `diff.<name>.binary` config; only an unconfigured driver,
+/// or a path no rule names, carries no verdict and falls back to the content sniff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiffAttr {
-    /// `-diff`: git diffs the path as binary whatever its bytes are.
+    /// `-diff`, or a driver with `binary = true`: git diffs the path as binary
+    /// whatever its bytes are.
     Binary,
-    /// `diff`: forced text, so a NUL in the content must not flip the verdict.
+    /// `diff`, or a driver with `binary = false`: forced text, so a NUL in the
+    /// content must not flip the verdict.
     ForcedText,
 }
 
-/// Parses `check-attr -z` output: `path NUL attr NUL value NUL` triples. A stream
-/// that does not divide into whole triples yields an EMPTY map, so a shape this
-/// does not understand degrades every path to the sniff rather than mis-verdicting.
-fn parse_diff_attrs(text: &str) -> std::collections::HashMap<String, DiffAttr> {
+/// git's config-bool alphabet, case-insensitive: the named spellings, a VALUELESS key
+/// (`None`) as true, an empty value as false, and any INTEGER, where non-zero is true.
+/// A value outside it is not a bool git can parse either — git FATALS the diff rather
+/// than choosing — so dropping the entry and letting the content sniff decide is
+/// strictly more graceful than what git itself does.
+fn git_config_bool(value: Option<&str>) -> Option<bool> {
+    let Some(value) = value else {
+        return Some(true);
+    };
+    let value = value.to_ascii_lowercase();
+    match value.as_str() {
+        "true" | "yes" | "on" | "1" => return Some(true),
+        "false" | "no" | "off" | "0" | "" => return Some(false),
+        _ => {}
+    }
+    // git reads an integer value as a bool by its zero-ness, and its scale suffixes
+    // multiply, so a non-zero numeric part cannot scale to zero — only that part is
+    // read here. (`0` and `1` answer above; both routes agree on them.)
+    let numeric = value.strip_suffix(['k', 'm', 'g']).unwrap_or(&value);
+    numeric.parse::<i64>().ok().map(|n| n != 0)
+}
+
+/// Parses `git config -z --get-regexp` output: NUL separates ENTRIES, and a newline
+/// separates each entry's key from its value — a valueless key carries no newline at
+/// all. Only a `diff.<driver>.binary` key whose value is a git bool carries a verdict;
+/// `<driver>` is everything between the prefix and the suffix, so a dotted driver name
+/// survives intact.
+fn parse_diff_driver_binary(text: &str) -> std::collections::HashMap<String, bool> {
+    let mut flags = std::collections::HashMap::new();
+    for entry in text.split('\0').filter(|e| !e.is_empty()) {
+        let (key, value) = match entry.split_once('\n') {
+            Some((key, value)) => (key, Some(value)),
+            None => (entry, None),
+        };
+        let Some(name) = key
+            .strip_prefix("diff.")
+            .and_then(|rest| rest.strip_suffix(".binary"))
+        else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let Some(binary) = git_config_bool(value) else {
+            continue;
+        };
+        flags.insert(name.to_string(), binary);
+    }
+    flags
+}
+
+/// Every `diff.<driver>.binary` the repo configures. Non-fatal like its siblings, and
+/// a non-zero exit is the NORMAL answer here — `--get-regexp` reports "no match" that
+/// way — so any failure leaves the map empty and every driver sniffs.
+async fn diff_driver_binary_flags(repo_path: &str) -> std::collections::HashMap<String, bool> {
+    run_git(
+        Some(repo_path),
+        &["config", "-z", "--get-regexp", r"^diff\..*\.binary$"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .map(|out| parse_diff_driver_binary(&out.stdout_lossy()))
+    .unwrap_or_default()
+}
+
+/// What `.gitattributes` says about one untracked path. The default — no `diff`
+/// verdict, no conversion — is what a path no rule names carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PathAttrs {
+    diff: Option<DiffAttr>,
+    /// `filter` or `working-tree-encoding` carries a value, so what git stores is a
+    /// CONVERSION of the worktree bytes and any count taken from them is another
+    /// file's.
+    converts: bool,
+}
+
+/// The attributes requested per path, in the order [`untracked_attr_output`] asks for
+/// them; `check-attr` answers one triple per attribute per path.
+const REQUESTED_ATTRS: [&str; 3] = ["diff", "working-tree-encoding", "filter"];
+
+/// Parses `check-attr -z` output: `path NUL attr NUL value NUL` triples, one per
+/// requested attribute per path. A stream that does not divide into whole triples
+/// yields an EMPTY map, so a shape this does not understand degrades every path to the
+/// sniff rather than mis-verdicting. `drivers` resolves a value that names a custom
+/// diff driver; one the repo does not configure stays unresolved, since only git knows
+/// what running it would decide.
+fn parse_path_attrs(
+    text: &str,
+    drivers: &std::collections::HashMap<String, bool>,
+) -> std::collections::HashMap<String, PathAttrs> {
     let mut tokens: Vec<&str> = text.split('\0').collect();
     // `-z` terminates every token, so the split's last element is empty.
     if tokens.last() == Some(&"") {
@@ -533,41 +621,48 @@ fn parse_diff_attrs(text: &str) -> std::collections::HashMap<String, DiffAttr> {
         return attrs;
     }
     for record in tokens.as_chunks::<3>().0 {
-        if record[1] != "diff" {
-            continue;
+        let (path, attr, value) = (record[0], record[1], record[2]);
+        match attr {
+            "diff" => {
+                let verdict = match value {
+                    "unset" => DiffAttr::Binary,
+                    "set" => DiffAttr::ForcedText,
+                    "unspecified" => continue,
+                    driver => match drivers.get(driver) {
+                        Some(true) => DiffAttr::Binary,
+                        Some(false) => DiffAttr::ForcedText,
+                        None => continue,
+                    },
+                };
+                attrs.entry(path.to_string()).or_default().diff = Some(verdict);
+            }
+            // A set-but-valueless `filter` reads `set` and still converts; only
+            // `-filter` / `-working-tree-encoding` (`unset`) leave content alone.
+            "working-tree-encoding" | "filter" => {
+                if value != "unspecified" && value != "unset" {
+                    attrs.entry(path.to_string()).or_default().converts = true;
+                }
+            }
+            _ => {}
         }
-        let verdict = match record[2] {
-            "unset" => DiffAttr::Binary,
-            "set" => DiffAttr::ForcedText,
-            _ => continue,
-        };
-        attrs.insert(record[0].to_string(), verdict);
     }
     attrs
 }
 
-/// The `diff` attribute of every enumerated path, in one batched spawn. Non-fatal
-/// by contract: a failed spawn, a non-zero exit or an unparsable stream leaves the
-/// map empty and every path falls back to the content sniff.
-async fn untracked_diff_attrs(
-    repo_path: &str,
-    paths: &[&str],
-) -> std::collections::HashMap<String, DiffAttr> {
+/// `check-attr`'s raw `-z` stream for every enumerated path, in one batched spawn.
+/// Non-fatal by contract: a failed spawn or a non-zero exit yields an empty stream,
+/// which maps to no verdicts at all, so every path falls back to the content sniff.
+async fn untracked_attr_output(repo_path: &str, paths: &[&str]) -> String {
     if paths.is_empty() {
-        return std::collections::HashMap::new();
+        return String::new();
     }
     let stdin: String = paths.iter().map(|p| format!("{p}\0")).collect();
-    match crate::git::runner::run_git_input(
-        Some(repo_path),
-        &["check-attr", "--stdin", "-z", "diff"],
-        Some(&stdin),
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    {
-        Ok(out) => parse_diff_attrs(&out.stdout_lossy()),
-        Err(_) => std::collections::HashMap::new(),
-    }
+    let mut args = vec!["check-attr", "--stdin", "-z"];
+    args.extend(REQUESTED_ATTRS);
+    crate::git::runner::run_git_input(Some(repo_path), &args, Some(&stdin), DEFAULT_TIMEOUT)
+        .await
+        .map(|out| out.stdout_lossy())
+        .unwrap_or_default()
 }
 
 /// What one untracked file's read produced.
@@ -692,7 +787,7 @@ fn untracked_line_stats(
     ls_files_z: &str,
     mut budget: u64,
     big_file_bytes: u64,
-    attrs: &std::collections::HashMap<String, DiffAttr>,
+    attrs: &std::collections::HashMap<String, PathAttrs>,
 ) -> Vec<DiffStatEntry> {
     let root = std::path::Path::new(repo_path);
     let mut buf = vec![0u8; LINE_COUNT_CHUNK];
@@ -715,10 +810,11 @@ fn untracked_line_stats(
         if !meta.is_file() {
             continue;
         }
+        let path_attrs = attrs.get(rel).copied().unwrap_or_default();
         // `-diff` is the first content decision: numstat answers `-  -` from the
-        // attribute alone, even for an empty file, so neither a read nor a budget
-        // charge happens.
-        let sniff = match attrs.get(rel) {
+        // attribute alone, even for an empty file or one a filter would rewrite, so
+        // neither a read nor a budget charge happens.
+        let sniff = match path_attrs.diff {
             Some(DiffAttr::Binary) => {
                 entries.push(entry(0, true));
                 continue;
@@ -726,6 +822,15 @@ fn untracked_line_stats(
             Some(DiffAttr::ForcedText) => false,
             None => true,
         };
+        // Content-affecting attributes split two ways. Count-CHANGING ones (`filter`,
+        // `working-tree-encoding`) make git store a conversion of these bytes, so any
+        // count taken here would be a different file's and the row stays blank.
+        // Count-NEUTRAL ones (`text`/`eol`/`ident`) preserve line counts — CRLF→LF and
+        // ident expansion rewrite bytes within a line — so the raw count already
+        // matches and nothing is needed for them.
+        if path_attrs.converts {
+            continue;
+        }
         let len = meta.len();
         if len == 0 {
             // git numstat reports `0 0` for an empty file once staged.
@@ -800,14 +905,16 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
     )?;
     let mut unstaged_entries = parse_numstat_z(&unstaged.stdout_lossy());
     let paths: Vec<&str> = untracked.split('\0').filter(|p| !p.is_empty()).collect();
-    // Neither probe matters without untracked paths, so an empty set spawns neither.
+    // No probe matters without untracked paths, so an empty set spawns none of them.
     let (attrs, big_file_bytes) = if paths.is_empty() {
         (std::collections::HashMap::new(), BIG_FILE_BYTES_DEFAULT)
     } else {
-        tokio::join!(
-            untracked_diff_attrs(&repo_path, &paths),
-            untracked_big_file_threshold(&repo_path)
-        )
+        let (attr_output, big_file_bytes, drivers) = tokio::join!(
+            untracked_attr_output(&repo_path, &paths),
+            untracked_big_file_threshold(&repo_path),
+            diff_driver_binary_flags(&repo_path)
+        );
+        (parse_path_attrs(&attr_output, &drivers), big_file_bytes)
     };
     // Counting lines is blocking file I/O, kept off the async workers this poll
     // shares with every other repo operation.
@@ -1248,13 +1355,29 @@ mod tests {
     /// an untracked row agrees with the diff pane git renders for the same file:
     /// `-diff` reads `bin` on text content and on an empty file (numstat reports
     /// `-  -` for a staged one), a forced `diff` counts the lines of NUL-bearing
-    /// content, and a path no rule names still sniffs (the two control files, whose
-    /// bytes are the same as their attribute-marked twins').
+    /// content, and a path no rule names still sniffs (the control files, whose bytes
+    /// are the same as their attribute-marked twins'). A custom driver goes by its
+    /// `diff.<name>.binary` setting, and an unconfigured driver sniffs.
     #[tokio::test]
     async fn working_line_stats_honors_gitattributes_diff_overrides() {
         let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-attrs-test-").await;
 
-        std::fs::write(dir.join(".gitattributes"), "*.dat -diff\n*.forced diff\n").unwrap();
+        std::fs::write(
+            dir.join(".gitattributes"),
+            "*.dat -diff\n*.forced diff\n*.byes diff=binyes\n*.bno diff=binno\n\
+             *.b2 diff=bintwo\n*.plain diff=plaindrv\n",
+        )
+        .unwrap();
+        // `yes` and `2` rather than `true` so the parity assertions hold the bool parse
+        // to git's whole alphabet, named and integer; `plaindrv` deliberately gets no
+        // `binary` setting, since an unconfigured driver is the arm that must sniff.
+        for args in [
+            vec!["config", "diff.binyes.binary", "yes"],
+            vec!["config", "diff.binno.binary", "false"],
+            vec!["config", "diff.bintwo.binary", "2"],
+        ] {
+            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+        }
         run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
@@ -1271,6 +1394,10 @@ mod tests {
         std::fs::write(dir.join("bin.forced"), b"a\0b\nc\n").unwrap();
         std::fs::write(dir.join("plain.txt"), "a\nb\nc\n").unwrap();
         std::fs::write(dir.join("plain.bin"), b"a\0b\nc\n").unwrap();
+        std::fs::write(dir.join("clean.byes"), "a\nb\n").unwrap();
+        std::fs::write(dir.join("binfile.bno"), b"a\0b\nc\n").unwrap();
+        std::fs::write(dir.join("clean.b2"), "a\nb\n").unwrap();
+        std::fs::write(dir.join("clean.plain"), "a\nb\n").unwrap();
 
         let stats = git_working_line_stats(repo.clone()).await.unwrap();
         let seen = |name: &str| {
@@ -1290,6 +1417,26 @@ mod tests {
         );
         assert_eq!(seen("plain.txt"), (3, 0, false));
         assert_eq!(seen("plain.bin"), (0, 0, true));
+        assert_eq!(
+            seen("clean.byes"),
+            (0, 0, true),
+            "a driver's `binary = true` beats clean content"
+        );
+        assert_eq!(
+            seen("binfile.bno"),
+            (2, 0, false),
+            "a driver's `binary = false` beats a NUL"
+        );
+        assert_eq!(
+            seen("clean.b2"),
+            (0, 0, true),
+            "a driver's integer `binary = 2` is true like any non-zero"
+        );
+        assert_eq!(
+            seen("clean.plain"),
+            (2, 0, false),
+            "an unconfigured driver leaves the sniff in charge"
+        );
 
         assert_untracked_matches_staged(
             &repo,
@@ -1300,9 +1447,72 @@ mod tests {
                 "bin.forced",
                 "plain.txt",
                 "plain.bin",
+                "clean.byes",
+                "binfile.bno",
+                "clean.b2",
+                "clean.plain",
             ],
         )
         .await;
+    }
+
+    /// A path whose content git CONVERTS on the way in — `working-tree-encoding` or a
+    /// `filter` — keeps the blank slot: the poll refuses to run conversions (arbitrary
+    /// user commands from a read-only 5s poll), and counting the unconverted worktree
+    /// bytes would report a different file's lines. `-diff` still wins over that,
+    /// since its `(0, 0, bin)` comes from the attribute without reading content.
+    #[tokio::test]
+    async fn working_line_stats_blanks_converted_paths() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-convert-test-").await;
+
+        std::fs::write(
+            dir.join(".gitattributes"),
+            "*.u16 working-tree-encoding=UTF-16\n*.lfs filter=fake\nboth.dat -diff filter=fake\n",
+        )
+        .unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(
+            Some(&repo),
+            &["commit", "-qm", "attributes"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        // UTF-16LE with a BOM: NUL-interleaved, so the content sniff would call it
+        // binary while numstat counts the lines of git's UTF-8 conversion.
+        let mut utf16 = vec![0xFF, 0xFE];
+        for byte in "alpha\nbeta\ngamma\n".bytes() {
+            utf16.push(byte);
+            utf16.push(0);
+        }
+        std::fs::write(dir.join("doc.u16"), &utf16).unwrap();
+        std::fs::write(dir.join("data.lfs"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("both.dat"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("plain.txt"), "one\ntwo\n").unwrap();
+
+        let stats = git_working_line_stats(repo).await.unwrap();
+        let found = |name: &str| stats.unstaged.iter().find(|e| e.path == name);
+        assert!(
+            found("doc.u16").is_none(),
+            "an encoded path keeps its blank slot, got {:?}",
+            found("doc.u16")
+        );
+        assert!(
+            found("data.lfs").is_none(),
+            "a filtered path keeps its blank slot, got {:?}",
+            found("data.lfs")
+        );
+        let both = found("both.dat").expect("`-diff` answers without reading content");
+        assert_eq!(
+            (both.added, both.deleted, both.is_binary),
+            (0, 0, true),
+            "`-diff` outranks the conversion blank"
+        );
+        let plain = found("plain.txt").expect("the control file is still counted");
+        assert_eq!((plain.added, plain.deleted), (2, 0));
     }
 
     /// The reader's hard cap. A file bigger than the cap stops at exactly the cap and
@@ -1334,26 +1544,154 @@ mod tests {
     }
 
     /// The `check-attr -z` grammar this depends on: whole `path NUL attr NUL value
-    /// NUL` triples, only `unset`/`set` carrying a verdict. A stream that does not
+    /// NUL` triples, one per REQUESTED attribute per path. A stream that does not
     /// divide into triples maps NOTHING, so an unfamiliar shape sniffs everywhere
     /// rather than verdicting half a file list.
     #[test]
     fn parses_check_attr_triples_and_refuses_a_malformed_stream() {
+        let none = std::collections::HashMap::new();
+        let binary = PathAttrs {
+            diff: Some(DiffAttr::Binary),
+            converts: false,
+        };
+        let forced = PathAttrs {
+            diff: Some(DiffAttr::ForcedText),
+            converts: false,
+        };
+
         let valid = "a.dat\0diff\0unset\0b.forced\0diff\0set\0c.txt\0diff\0unspecified\0";
-        let attrs = parse_diff_attrs(valid);
-        assert_eq!(attrs.get("a.dat"), Some(&DiffAttr::Binary));
-        assert_eq!(attrs.get("b.forced"), Some(&DiffAttr::ForcedText));
+        let attrs = parse_path_attrs(valid, &none);
+        assert_eq!(attrs.get("a.dat"), Some(&binary));
+        assert_eq!(attrs.get("b.forced"), Some(&forced));
         assert_eq!(attrs.get("c.txt"), None, "`unspecified` carries no verdict");
         assert_eq!(attrs.len(), 2);
 
-        // A custom driver name is a verdict this cannot read — git would run that
-        // driver — so it sniffs like an unspecified path.
-        let driver = parse_diff_attrs("d.png\0diff\0exif\0");
-        assert!(driver.is_empty());
+        // A driver the repo configures resolves; an unconfigured one sniffs, since
+        // only running it would say what it decides.
+        let drivers = std::collections::HashMap::from([
+            ("binyes".to_string(), true),
+            ("binno".to_string(), false),
+        ]);
+        let resolved = parse_path_attrs(
+            "a.byes\0diff\0binyes\0b.bno\0diff\0binno\0c.png\0diff\0exif\0",
+            &drivers,
+        );
+        assert_eq!(resolved.get("a.byes"), Some(&binary));
+        assert_eq!(resolved.get("b.bno"), Some(&forced));
+        assert_eq!(resolved.get("c.png"), None, "an unconfigured driver sniffs");
+        assert!(parse_path_attrs("d.png\0diff\0exif\0", &none).is_empty());
 
-        let malformed = parse_diff_attrs("a.dat\0diff\0");
+        let malformed = parse_path_attrs("a.dat\0diff\0", &none);
         assert!(malformed.is_empty(), "a partial triple maps nothing");
-        assert!(parse_diff_attrs("").is_empty());
+        assert!(parse_path_attrs("", &none).is_empty());
+    }
+
+    /// All three requested attributes come back per path, so one path's triples are
+    /// folded into one verdict. `filter` and `working-tree-encoding` mark a path as
+    /// converting on ANY value — including a valueless `set` — while `unspecified`
+    /// and an explicit `unset` leave the content alone.
+    #[test]
+    fn folds_multi_attribute_check_attr_rows_per_path() {
+        let none = std::collections::HashMap::new();
+        let folded = parse_path_attrs(
+            "doc.u16\0diff\0unspecified\0doc.u16\0working-tree-encoding\0UTF-16\0\
+             doc.u16\0filter\0unspecified\0\
+             both.dat\0diff\0unset\0both.dat\0working-tree-encoding\0unspecified\0\
+             both.dat\0filter\0fake\0",
+            &none,
+        );
+        assert_eq!(
+            folded.get("doc.u16"),
+            Some(&PathAttrs {
+                diff: None,
+                converts: true
+            }),
+            "an encoding alone converts without deciding text-or-binary"
+        );
+        assert_eq!(
+            folded.get("both.dat"),
+            Some(&PathAttrs {
+                diff: Some(DiffAttr::Binary),
+                converts: true
+            }),
+            "a path's triples fold into ONE verdict"
+        );
+        assert_eq!(folded.len(), 2);
+
+        let valueless = parse_path_attrs("a.lfs\0filter\0set\0", &none);
+        assert_eq!(
+            valueless.get("a.lfs").map(|a| a.converts),
+            Some(true),
+            "a set-but-valueless filter still converts"
+        );
+
+        let inert = parse_path_attrs(
+            "b.txt\0filter\0unset\0b.txt\0working-tree-encoding\0unspecified\0",
+            &none,
+        );
+        assert!(
+            inert.is_empty(),
+            "`-filter` and an unspecified encoding convert nothing"
+        );
+    }
+
+    /// The `git config -z --get-regexp` grammar: NUL between entries, a newline
+    /// between each key and its value, and NO newline at all for a valueless key.
+    /// The value alphabet is git's own, case-insensitive — a valueless key is true, an
+    /// empty value is false, and any integer goes by its zero-ness — and a dotted
+    /// driver name survives whole.
+    #[test]
+    fn parses_diff_driver_binary_config() {
+        // `1`/`0` sit in both the named alphabet and the integer rule; the two agree.
+        for spelling in [
+            "true", "yes", "on", "1", "TRUE", "Yes", "ON", "2", "-1", "1k",
+        ] {
+            let flags = parse_diff_driver_binary(&format!("diff.d.binary\n{spelling}\0"));
+            assert_eq!(flags.get("d"), Some(&true), "{spelling} reads as true");
+        }
+        for spelling in ["false", "no", "off", "0", "False", "NO", "Off", "0k", "0M"] {
+            let flags = parse_diff_driver_binary(&format!("diff.d.binary\n{spelling}\0"));
+            assert_eq!(flags.get("d"), Some(&false), "{spelling} reads as false");
+        }
+        for spelling in ["maybe", "1.5", "k", "1kk"] {
+            let flags = parse_diff_driver_binary(&format!("diff.d.binary\n{spelling}\0"));
+            assert!(flags.is_empty(), "{spelling} is not a bool git could read");
+        }
+        let valueless = parse_diff_driver_binary("diff.dvalueless.binary\0");
+        assert_eq!(
+            valueless.get("dvalueless"),
+            Some(&true),
+            "a key with no newline at all is git's valueless true"
+        );
+        let empty_value = parse_diff_driver_binary("diff.dempty.binary\n\0");
+        assert_eq!(
+            empty_value.get("dempty"),
+            Some(&false),
+            "an empty value is git's false"
+        );
+
+        let mixed = parse_diff_driver_binary(
+            "diff.binyes.binary\nyes\0diff.binno.binary\nfalse\0diff.my.tool.binary\ntrue\0",
+        );
+        assert_eq!(mixed.get("binyes"), Some(&true));
+        assert_eq!(mixed.get("binno"), Some(&false));
+        assert_eq!(
+            mixed.get("my.tool"),
+            Some(&true),
+            "a dotted driver name is the whole middle"
+        );
+        assert_eq!(mixed.len(), 3);
+
+        let junk = parse_diff_driver_binary("diff.odd.binary\nmaybe\0diff.two.binary\n2\0");
+        assert_eq!(
+            junk.get("two"),
+            Some(&true),
+            "a non-zero integer is true beside an unreadable sibling"
+        );
+        assert_eq!(junk.get("odd"), None, "a non-bool value carries no verdict");
+        assert_eq!(junk.len(), 1);
+        assert!(parse_diff_driver_binary("").is_empty());
+        assert!(parse_diff_driver_binary("core.autocrlf\nfalse\0").is_empty());
     }
 
     /// The read budget, spent in `ls-files` order (which git emits sorted). A file
