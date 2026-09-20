@@ -39,6 +39,19 @@ export const UNSET_COLUMN_ID = "__unset__";
  *  and the edit dialog's footer say it, and a copy each is a copy that can drift. */
 export const CARD_WRITE_REASON = "Finishing your last card change…";
 
+/** Why a card can't be repositioned under a saved view that sorts: the columns are
+ *  drawn in the sort's order, so the board's own manual order — the only thing a
+ *  position write addresses — isn't what is on screen. Shared by the menu's held
+ *  row and the keyboard route's announcement, for {@link CARD_WRITE_REASON}'s
+ *  reason. */
+export const SORTED_VIEW_REASON = "This view orders cards by its sort";
+
+/** Why a downward move is refused at the loaded end: more of the column may live
+ *  in pages the board hasn't fetched, so the card's real neighbour there is
+ *  unknown. Shared by the same two surfaces. */
+export const TRUNCATED_ORDER_REASON =
+  "Load more cards to move past the loaded end";
+
 /** The option a board item sits under for `field`, or null when the field is
  *  unset on it. Matched on `optionId`, never the name: options are renamable.
  *  Exported so a surface acting on the VALUE reads it the same way the bucketing
@@ -248,6 +261,17 @@ export function sortColumnItems(
       return 0;
     })
     .map((row) => row.item);
+}
+
+/** Whether `view` orders the cards itself. ONE reading for both consumers: the
+ *  columns apply {@link sortColumnItems} exactly when this is true, and a
+ *  reposition is refused exactly then — the board's own POSITION order is what a
+ *  position write addresses, and a sorted view doesn't draw it. A type predicate
+ *  so the sorting branch keeps the view narrowed. */
+export function lensSorted(
+  view: ProjectViewDef | null,
+): view is ProjectViewDef {
+  return view !== null && view.sortBy.length > 0;
 }
 
 /**

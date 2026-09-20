@@ -29,6 +29,7 @@ export const BoardColumn = memo(function BoardColumn({
   column,
   columnIndex,
   activeIndex,
+  activeItemId,
   busyItemId,
   peekItemId,
   tabStopIndex,
@@ -44,6 +45,12 @@ export const BoardColumn = memo(function BoardColumn({
   columnIndex: number;
   /** The keyboard cursor's row in THIS column, or null when it sits elsewhere. */
   activeIndex: number | null;
+  /** WHICH card {@link activeIndex} means, when the caller can say. A focus claim
+   *  resolves the index against the DOM, and an optimistic reorder lands a frame
+   *  or two after the cursor moves — so the node at that index can still be the
+   *  neighbour the moved card just swapped past. Null keeps the index-only
+   *  behaviour for callers whose cursor moves are pure navigation. */
+  activeItemId: string | null;
   /** The card a write is changing in place, wherever it is on the board — the
    *  item ID rather than an index, since this column may not hold it at all. A
    *  primitive on purpose: this component is memoized, and the comparison is the
@@ -124,13 +131,25 @@ export const BoardColumn = memo(function BoardColumn({
     if (activeIndex === null || !unseen) return;
     virtualizer.scrollToIndex(activeIndex, { align: "auto" });
     let frame = 0;
-    let tries = 3;
+    // Enough frames for an optimistic reorder to reach the DOM: its splice lands
+    // behind an awaited `cancelQueries` and then a notify-batched render, so the
+    // right card can be two macrotask hops away rather than one frame.
+    let tries = 6;
     const claim = () => {
       tries -= 1;
       const card = scrollEl?.querySelector<HTMLElement>(
         `[data-card-index="${activeIndex}"]`,
       );
-      if (card) {
+      // A node at the right index carrying the WRONG card counts as not rendered
+      // yet: the rows are keyed by item id, so a pending reorder leaves the
+      // neighbour answering to this index until the splice commits. Focusing it
+      // would land the user on the card their own move just swapped past — so the
+      // retries run out in silence instead, leaving focus where it is with the
+      // cursor already correct.
+      if (
+        card &&
+        (activeItemId === null || card.dataset.itemId === activeItemId)
+      ) {
         card.focus();
         // Both axes: the card's own column scrolls vertically, and the board
         // region it sits in scrolls horizontally.
@@ -142,7 +161,7 @@ export const BoardColumn = memo(function BoardColumn({
     };
     frame = requestAnimationFrame(claim);
     return () => cancelAnimationFrame(frame);
-  }, [activeIndex, focusNonce, scrollEl, virtualizer]);
+  }, [activeIndex, activeItemId, focusNonce, scrollEl, virtualizer]);
 
   const countLabel = `${items.length} ${items.length === 1 ? "item" : "items"}`;
   return (

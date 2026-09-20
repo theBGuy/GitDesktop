@@ -40,6 +40,15 @@ pub struct ConvertedDraft {
     pub item: BoardItem,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardOrder {
+    /// Item ids in the board's new project-global order, first page (100).
+    pub item_ids: Vec<String>,
+    /// True when the project holds more items than the payload page carries.
+    pub truncated: bool,
+}
+
 const ITEM_EDITS_SCOPE_HINT: &str =
     "GitHub project item edits need the project scope. Run:  gh auth refresh -s project";
 
@@ -51,6 +60,7 @@ const ISSUE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){ rep
 // Add-board takes issue/PR content ids; add-draft returns both PVTI_ and DI_ ids.
 const ARCHIVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ archiveProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ item{ id } } }";
 const REMOVE_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!){ deleteProjectV2Item(input:{projectId:$projectId,itemId:$itemId}){ deletedItemId } }";
+const POSITION_MUTATION: &str = "mutation($projectId:ID!,$itemId:ID!,$afterId:ID){ updateProjectV2ItemPosition(input:{projectId:$projectId,itemId:$itemId,afterId:$afterId}){ items(first:100){ pageInfo{hasNextPage} nodes{id} } } }";
 
 const SEARCH_POINTER: &str = "/data/search";
 const CANDIDATE_REPOSITORY_POINTER: &str = "/repository/nameWithOwner";
@@ -62,6 +72,7 @@ const CONVERT_POINTER: &str = "/data/convertProjectV2DraftIssueItemToIssue/item"
 const UPDATE_DRAFT_POINTER: &str = "/data/updateProjectV2DraftIssue/draftIssue";
 const ARCHIVE_POINTER: &str = "/data/archiveProjectV2Item";
 const REMOVE_POINTER: &str = "/data/deleteProjectV2Item";
+const ORDER_POINTER: &str = "/data/updateProjectV2ItemPosition/items";
 
 fn map_scope_error(e: AppError) -> AppError {
     if let AppError::Gh(ref msg) = e {
@@ -96,6 +107,13 @@ fn draft_input(project_id: &str, title: &str, body: &str) -> String {
     graphql_input(
         &add_draft_mutation(),
         json!({"projectId": project_id, "title": title, "body": body}),
+    )
+}
+
+fn position_input(project_id: &str, item_id: &str, after_id: Option<&str>) -> String {
+    graphql_input(
+        POSITION_MUTATION,
+        json!({"projectId": project_id, "itemId": item_id, "afterId": after_id}),
     )
 }
 
@@ -302,6 +320,39 @@ fn parse_converted(value: &Value) -> AppResult<ConvertedDraft> {
     })
 }
 
+fn parse_board_order(value: &Value) -> AppResult<BoardOrder> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PageInfo {
+        has_next_page: bool,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Page {
+        nodes: Option<Vec<Value>>,
+        page_info: PageInfo,
+    }
+    let page: Page =
+        serde_json::from_value(value.pointer(ORDER_POINTER).cloned().unwrap_or(Value::Null))
+            .map_err(|e| {
+                gh_unreadable("the board's new order", format!("could not parse items: {e}"))
+            })?;
+    Ok(BoardOrder {
+        item_ids: page
+            .nodes
+            .into_iter()
+            .flatten()
+            .filter_map(|node| {
+                node["id"]
+                    .as_str()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string)
+            })
+            .collect(),
+        truncated: page.page_info.has_next_page,
+    })
+}
+
 fn response_item(value: &Value, pointer: &str, surface: &str) -> AppResult<BoardItem> {
     let node = value.pointer(pointer).cloned().unwrap_or(Value::Null);
     parse_board_item(node).map_err(|detail| gh_unreadable(surface, detail))
@@ -462,6 +513,20 @@ pub async fn gh_remove_board_item(
         .await
         .map_err(map_scope_error)?;
     require_payload(&value, REMOVE_POINTER, "the removed project item")
+}
+
+#[tauri::command]
+pub async fn gh_set_item_position(
+    repo_path: String,
+    project_id: String,
+    item_id: String,
+    after_id: Option<String>,
+) -> AppResult<BoardOrder> {
+    let input = position_input(&project_id, &item_id, after_id.as_deref());
+    let value = request(&repo_path, &input, "the board's new order")
+        .await
+        .map_err(map_scope_error)?;
+    parse_board_order(&value)
 }
 
 #[tauri::command]
@@ -648,6 +713,7 @@ mod tests {
                 json!({"projectId":hostile,"contentId":hostile}),
             ),
             update_draft_input(&hostile, &hostile, &hostile, Some(&[hostile.clone()])),
+            position_input(&hostile, &hostile, Some(&hostile)),
         ] {
             let payload: Value = serde_json::from_str(&input).unwrap();
             assert!(!payload["query"].as_str().unwrap().contains(&hostile));
@@ -663,6 +729,79 @@ mod tests {
 
     fn page(nodes: Value, truncated: bool) -> Value {
         json!({"data":{"search":{"nodes":nodes,"pageInfo":{"hasNextPage":truncated}}}})
+    }
+
+    fn order_page(nodes: Value, truncated: bool) -> Value {
+        json!({"data":{"updateProjectV2ItemPosition":{"items":{
+            "nodes":nodes,"pageInfo":{"hasNextPage":truncated}
+        }}}})
+    }
+
+    #[test]
+    fn position_variables_use_null_for_top_and_an_id_for_after() {
+        for after_id in [None, Some("PVTI_after")] {
+            let input: Value =
+                serde_json::from_str(&position_input("PVT_one", "PVTI_one", after_id)).unwrap();
+            assert_eq!(
+                input,
+                json!({"query": POSITION_MUTATION, "variables": {
+                    "projectId":"PVT_one", "itemId":"PVTI_one", "afterId":after_id
+                }}),
+            );
+        }
+    }
+
+    #[test]
+    fn board_order_preserves_payload_order_and_truncation() {
+        for truncated in [false, true] {
+            let value = order_page(json!([{"id":"PVTI_two"}, {"id":"PVTI_one"}]), truncated);
+            let order = parse_board_order(&value).unwrap();
+            assert_eq!(order.item_ids, ["PVTI_two", "PVTI_one"]);
+            assert_eq!(order.truncated, truncated);
+        }
+    }
+
+    #[test]
+    fn board_order_skips_malformed_nodes() {
+        let order = parse_board_order(&order_page(
+            json!([{"id":"PVTI_two"}, null, {}, {"id":42}, {"id":" "},
+                "bad", {"id":"PVTI_one"}]),
+            false,
+        ))
+        .unwrap();
+        assert_eq!(order.item_ids, ["PVTI_two", "PVTI_one"]);
+        for nodes in [json!([]), Value::Null] {
+            assert!(parse_board_order(&order_page(nodes, false))
+                .unwrap()
+                .item_ids
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn board_order_requires_items_and_page_info() {
+        for value in [
+            Value::Null,
+            json!({"data":{"updateProjectV2ItemPosition":{}}}),
+            json!({"data":{"updateProjectV2ItemPosition":{"items":null}}}),
+            json!({"data":{"updateProjectV2ItemPosition":{"items":{"nodes":[]}}}}),
+            order_page(json!({"bad":"shape"}), false),
+        ] {
+            let error = parse_board_order(&value).err().unwrap();
+            assert_single_read_error(&error, "the board's new order");
+        }
+    }
+
+    #[test]
+    fn board_order_wire_keys_are_camel_case() {
+        assert_keys(
+            serde_json::to_value(BoardOrder {
+                item_ids: vec![],
+                truncated: false,
+            })
+            .unwrap(),
+            &["itemIds", "truncated"],
+        );
     }
 
     fn assert_keys(value: Value, expected: &[&str]) {
@@ -721,9 +860,16 @@ mod tests {
             (convert_mutation().as_str(), CONVERT_POINTER),
             (ARCHIVE_MUTATION, ARCHIVE_POINTER),
             (REMOVE_MUTATION, REMOVE_POINTER),
+            (POSITION_MUTATION, ORDER_POINTER),
         ] {
             assert_pointer(doc, pointer);
         }
+        for suffix in ["/nodes/id", "/pageInfo/hasNextPage"] {
+            assert_pointer(POSITION_MUTATION, &format!("{ORDER_POINTER}{suffix}"));
+        }
+        assert!(POSITION_MUTATION.contains("items(first:100)"));
+        assert!(POSITION_MUTATION.contains("afterId:$afterId"));
+        assert!(!POSITION_MUTATION.contains("orderBy"));
         for doc in [convert_mutation().as_str(), ARCHIVE_MUTATION, REMOVE_MUTATION] {
             assert!(doc.contains("itemId:$itemId"));
             assert!(!doc.contains("draftIssueId"));

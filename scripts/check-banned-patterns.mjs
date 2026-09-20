@@ -1222,8 +1222,8 @@ export const CHECKS = [
       [EDITABLE_GUARD_RE, TYPEAHEAD_GUARD_RE, TYPEAHEAD_KEY_RE],
       onlyWhen(PREVENT_DEFAULT_RE, perLine(EVENT_TO_BINDING_RE)),
     ),
-    // Neither entry dispatches a REBINDABLE binding, which is what the guards
-    // protect; both are keyed per file, like every other entry here.
+    // No entry here dispatches a REBINDABLE binding, which is what the guards
+    // protect; each is keyed per file, like every other entry here.
     allowlist: [
       // The shortcut RECORDER: capturing and swallowing every key, guards
       // included, is precisely its contract — a guard would make keys
@@ -1232,6 +1232,11 @@ export const CHECKS = [
       // Its `eventToBinding` call tests a HARDCODED mod+enter submit chord, not
       // a user binding, so there is no rebindable dispatch to guard.
       "src/components/mention-autocomplete.tsx",
+      // Its `eventToBinding` call tests four hardcoded Alt reorder chords
+      // against a fixed table, not a user binding, and the handler's DOM
+      // containment check already pins focus to a board card — the board
+      // holds no editable or typeahead targets for the guards to protect.
+      "src/features/projects/ProjectsBoardPanel.tsx",
     ],
     message:
       "a path that matches eventToBinding(e) against a user binding and preventDefaults it must apply the same clause the global listener does — isEditableTarget, isTypeaheadTarget, and isTypeaheadKey (src/lib/hotkeys/binding.ts) — or a single-key binding steals keystrokes from text fields or typeahead lists, and named keys stop reaching the surfaces that should still get them; any subset leaves the case the missing predicate covers, and a file that dispatches no rebindable binding needs an allowlist entry with rationale",

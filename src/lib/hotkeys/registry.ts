@@ -376,6 +376,33 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  // The board answers Alt+Arrow on the card you're on, which is a chord only the
+  // board itself can gate — "focus is on a card" is a DOM question, and a global
+  // binding can't ask it. These four are the palette's way in to the same routine.
+  {
+    id: "move-card-up",
+    label: "Move board card up",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "move-card-down",
+    label: "Move board card down",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "move-card-top",
+    label: "Move board card to top of column",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
+    id: "move-card-bottom",
+    label: "Move board card to bottom of column",
+    category: "Repository",
+    defaultBinding: null,
+  },
   {
     id: "create-discussion",
     label: "Create discussion",

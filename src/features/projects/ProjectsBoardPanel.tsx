@@ -71,6 +71,7 @@ import {
   useProjectItems,
   useProjectViews,
   useRemoveBoardItem,
+  useReorderBoardCard,
   useUpdateDraftItem,
 } from "@/lib/git/queries";
 import {
@@ -81,6 +82,7 @@ import {
   type ProjectViewDef,
   providerLabel,
 } from "@/lib/git/types";
+import { eventToBinding } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -98,10 +100,18 @@ import {
   chipFieldDefs,
   firstCardPosition,
   groupableFields,
+  lensSorted,
   optionIdFor,
+  SORTED_VIEW_REASON,
   sortColumnItems,
+  TRUNCATED_ORDER_REASON,
   UNSET_COLUMN_ID,
 } from "./board-model";
+import {
+  planReorder,
+  type ReorderDirection,
+  type ReorderPlan,
+} from "./board-positioning";
 
 /** Where an issue or pull request on this board lands, per kind: the tab that
  *  owns it in-app, and the web path a CROSS-REPO card falls back to (GitHub's own
@@ -155,6 +165,7 @@ const UNTITLED_VIEW = "Untitled view";
  *  still counts as a board write for pagination, and says so generically. */
 const CARD_WRITE_KINDS: ReadonlySet<BoardWriteKind> = new Set([
   "move",
+  "reorder",
   "convert",
   "archive",
   "remove",
@@ -210,10 +221,44 @@ const FLAT_FALLBACK_NOTE: Partial<Record<ProjectViewDef["layout"], string>> = {
   roadmap: "Roadmap view, shown as a board",
   unknown: "Shown as a board",
 };
+/** Zero-width space, built from its code point rather than written literally so no
+ *  invisible byte sits in source. Toggled into the live region to force a
+ *  textContent change when an announcement repeats. */
+const ZWSP = String.fromCharCode(0x200b);
 /** The switcher row's muted qualifier, for the layouts that aren't this one. */
 const VIEW_LAYOUT_WORD: Partial<Record<ProjectViewDef["layout"], string>> = {
   table: "table",
   roadmap: "roadmap",
+};
+/** The board's reposition chords, as CANONICAL bindings (`eventToBinding`'s own
+ *  spelling). Alt+Arrow moves the CARD where the bare arrow moves the cursor, and
+ *  Alt+Home/End are that column's ends — the same pairing the bare keys already
+ *  keep. Feature-local rather than registry bindings: what makes these safe is
+ *  that focus is on a card, which is a DOM question only this handler can ask. */
+const REORDER_CHORDS: Partial<Record<string, ReorderDirection>> = {
+  "alt+up": "up",
+  "alt+down": "down",
+  "alt+home": "top",
+  "alt+end": "bottom",
+};
+/** Where the optimistic splice leaves the card, as an index in its own column: the
+ *  grouping field is untouched by a reposition, so the card never changes column
+ *  and the landing is arithmetic rather than a search. */
+const REORDER_LANDING: Record<
+  ReorderDirection,
+  (index: number, count: number) => number
+> = {
+  up: (index) => index - 1,
+  down: (index) => index + 1,
+  top: () => 0,
+  bottom: (_index, count) => count - 1,
+};
+/** Every direction refused, for a menu whose card the board no longer draws. */
+const NO_REORDER: Record<ReorderDirection, ReorderPlan> = {
+  up: { kind: "noop" },
+  down: { kind: "noop" },
+  top: { kind: "noop" },
+  bottom: { kind: "noop" },
 };
 
 /**
@@ -499,13 +544,12 @@ export function ProjectsBoardPanel({
   // which column a card lands in is the grouping's answer alone. With no sort the
   // columns are untouched, board POSITION order and all.
   const grouped = buildColumns(loaded, groupField);
-  const columns =
-    view === null || view.sortBy.length === 0
-      ? grouped
-      : grouped.map((column) => ({
-          ...column,
-          items: sortColumnItems(column.items, view.sortBy, fieldDefs),
-        }));
+  const columns = lensSorted(view)
+    ? grouped.map((column) => ({
+        ...column,
+        items: sortColumnItems(column.items, view.sortBy, fieldDefs),
+      }))
+    : grouped;
   // Identity-stable for the memoized cards: a fresh array per render would
   // re-render every mounted card whenever the keyboard cursor moves. Every input
   // is stable in its own right — the query's own array or the shared empty, and
@@ -527,6 +571,23 @@ export function ProjectsBoardPanel({
     null,
   );
   const [focusNonce, setFocusNonce] = useState(0);
+  // WHICH card the current nonce means, or null where the claim is about a SLOT
+  // rather than a card (the landing after a card leaves the board). Set at every
+  // nonce bump and nowhere else — the columns resolve a focus claim by index, and
+  // an index alone can resolve to the neighbour while an optimistic reorder is
+  // still a frame from the DOM.
+  const [focusItemId, setFocusItemId] = useState<string | null>(null);
+  // What the KEYBOARD route just did, or why it refused. Only that route needs a
+  // voice: the menu's rows carry their reasons on themselves, and a card moving
+  // under the pointer is its own feedback. The seq bumps on every announce so an
+  // identical message (the same held reason twice, or the same "N of M") still
+  // changes the live region's textContent and re-announces — a plain equal set
+  // would be a no-op the screen reader never hears.
+  const [announcement, setAnnouncement] = useState({ text: "", seq: 0 });
+  const announce = useCallback(
+    (text: string) => setAnnouncement((prev) => ({ text, seq: prev.seq + 1 })),
+    [],
+  );
   const onCardFocus = useCallback(
     (col: number, idx: number) => setCursor({ col, idx }),
     [],
@@ -638,6 +699,20 @@ export function ProjectsBoardPanel({
     if (from === null) return;
     const column = columns[from.col];
     if (column === undefined || column.items.length === 0) return;
+    // The reposition chords BEFORE the bare-key switch below, which tests `e.key`
+    // alone: the same four keys move the CURSOR unmodified and the CARD with Alt
+    // held, so a chord must never fall through to the plain key's arm. Matched on
+    // the canonical binding rather than the raw flags, which is what makes Ctrl,
+    // Cmd and Shift exclude themselves and AltGraph read as the character input it
+    // is (`eventToBinding` answers null there). Everything else falls through
+    // untouched.
+    const chord = eventToBinding(e);
+    const direction = chord === null ? undefined : REORDER_CHORDS[chord];
+    if (direction !== undefined) {
+      e.preventDefault();
+      reorderCard(from, direction);
+      return;
+    }
     const last = column.items.length - 1;
     let next = from;
     switch (e.key) {
@@ -672,6 +747,7 @@ export function ProjectsBoardPanel({
     e.preventDefault();
     if (next.col === from.col && next.idx === from.idx) return;
     setCursor(next);
+    setFocusItemId(columns[next.col].items[next.idx]?.itemId ?? null);
     setFocusNonce((n) => n + 1);
   }
 
@@ -683,6 +759,10 @@ export function ProjectsBoardPanel({
   // newer invocation settling first would drop the older one's flag and un-hold
   // everything while it was still in flight.
   const move = useMoveBoardCard();
+  // The one exception to the single-flight contract above, and it owns its own:
+  // repeated presses are the point, so the hook coalesces them per card rather
+  // than the panel holding the route.
+  const reorder = useReorderBoardCard();
   const convertDraft = useConvertDraftItem();
   const updateDraft = useUpdateDraftItem();
   const archiveItem = useArchiveBoardItem();
@@ -817,6 +897,8 @@ export function ProjectsBoardPanel({
     const frame = requestAnimationFrame(() => {
       chasedRef.current = stamp;
       setCursor({ col: chaseCol, idx: chaseIdx });
+      // The chased card itself: the index came from finding it in these columns.
+      setFocusItemId(chase);
       setFocusNonce((n) => n + 1);
       if (settled) setChase(null);
     });
@@ -894,6 +976,9 @@ export function ProjectsBoardPanel({
     }
     setRetired(null);
     setCursor({ col: landingCol, idx: landingIdx });
+    // A SLOT, not a card: the landing is wherever the departed card's place fell
+    // to, so the claim is index-only by design.
+    setFocusItemId(null);
     setFocusNonce((n) => n + 1);
   }, [retiredGone, retiredDead, landingCol, landingIdx]);
 
@@ -990,6 +1075,45 @@ export function ProjectsBoardPanel({
         return undefined;
     }
   })();
+  /** Why `itemId` can't be repositioned, or undefined when it can. Per CARD rather
+   *  than board-wide, and it deliberately ignores a reposition already in flight on
+   *  that card: the mutation coalesces those itself, which is what makes a burst of
+   *  presses land. Any OTHER write to the same card does hold — a convert or a
+   *  draft edit rewrites the very card a position would address.
+   *
+   *  Ranked like the card actions: the permission arms first (true whatever is on
+   *  screen), then the view's own sort, then the two that clear on their own. */
+  function reorderHeldFor(itemId: string): string | undefined {
+    switch (true) {
+      case projectScopeReadOnly(scopes.data):
+        return BOARD_READ_ONLY_SCOPE_REASON;
+      case project !== null && !project.viewerCanUpdate:
+        return NO_ACCESS_REASON;
+      // A sorted view draws the columns in the SORT's order, so the board's own
+      // position sequence — the only thing a position write addresses — isn't what
+      // is on screen, and a card would land somewhere the user never saw.
+      case lensSorted(view):
+        return SORTED_VIEW_REASON;
+      case lensLoading:
+        return LENS_LOADING_REASON;
+      case pendingWrites.some(
+        (w) =>
+          w.itemId === itemId &&
+          w.kind !== null &&
+          w.kind !== "reorder" &&
+          CARD_WRITE_KINDS.has(w.kind),
+      ):
+        return CARD_WRITE_REASON;
+      // A reposition settles through the same cancel every board write does, and
+      // query-core's cancel REVERTS an in-flight fetch — so starting one now would
+      // silently undo the page the user just asked for.
+      case items.isFetchingNextPage:
+        return LOADING_PAGE_REASON;
+      default:
+        return undefined;
+    }
+  }
+
   /** Why the toolbar's Add item is held. The same two permission arms the card
    *  actions take, plus the page-fetch one for the same reason a move takes it —
    *  an add's settle cancels this board's reads, and query-core's cancel REVERTS
@@ -1083,6 +1207,97 @@ export function ProjectsBoardPanel({
       option,
       query: lensQuery,
     });
+  }
+
+  /** The ids the position math reads: the project's own global order as the board
+   *  has loaded it, minus the ARCHIVED cards. GitHub refuses an archived item as a
+   *  position anchor ("The item to be positioned after is archived and cannot be
+   *  used to update the position of this item", VALIDATION, measured 2026-09-19),
+   *  and archived cards interleave freely on a real board — so filtering here is
+   *  what makes every anchor the plan can emit positionable by construction. The
+   *  landing then walks back to the nearest non-archived predecessor, which is the
+   *  same slot the board and github.com both draw. */
+  function loadedOrder(): string[] {
+    return loaded.filter((card) => !card.isArchived).map((card) => card.itemId);
+  }
+
+  /** The last loaded page's own flag: with more pages behind it, the column's real
+   *  tail may not be on screen. */
+  function pagesTruncated(): boolean {
+    return items.data?.pages.at(-1)?.truncated ?? false;
+  }
+
+  /** What each direction would do to the card at `from`, for the menu's rows. */
+  function reorderPlansFor(from: {
+    col: number;
+    idx: number;
+  }): Record<ReorderDirection, ReorderPlan> {
+    const shared = {
+      order: loadedOrder(),
+      column: columns[from.col]?.items.map((card) => card.itemId) ?? [],
+      index: from.idx,
+      truncated: pagesTruncated(),
+    };
+    return {
+      up: planReorder({ ...shared, direction: "up" }),
+      down: planReorder({ ...shared, direction: "down" }),
+      top: planReorder({ ...shared, direction: "top" }),
+      bottom: planReorder({ ...shared, direction: "bottom" }),
+    };
+  }
+
+  /** Move the card at `from` inside its own column, writing the project's global
+   *  order. The gates are re-checked here rather than trusted from whatever fired:
+   *  the chord and the palette both reach this with no row to disable, and a press
+   *  racing the render that derived a hold must not get through either. */
+  function reorderCard(
+    from: { col: number; idx: number },
+    direction: ReorderDirection,
+  ) {
+    const column = columns[from.col];
+    const item = column?.items[from.idx];
+    if (column === undefined || item === undefined || projectId === null)
+      return;
+    const held = reorderHeldFor(item.itemId);
+    if (held !== undefined) {
+      announce(held);
+      return;
+    }
+    const plan = planReorder({
+      order: loadedOrder(),
+      column: column.items.map((card) => card.itemId),
+      index: from.idx,
+      direction,
+      truncated: pagesTruncated(),
+    });
+    // Nothing to say: the card is already at that end of its column, and the
+    // keypress is already swallowed.
+    if (plan.kind === "noop") return;
+    if (plan.kind === "held") {
+      announce(TRUNCATED_ORDER_REASON);
+      return;
+    }
+    // The board and the lens this write belongs to travel WITH it, the rule
+    // `moveCard` states: `onMutate` pins this lens's key into the context its
+    // rollback and its settle read.
+    reorder.mutate({
+      repo: repoPath,
+      projectId,
+      itemId: item.itemId,
+      afterId: plan.afterId,
+      query: lensQuery,
+    });
+    // The cursor rides the card to where the optimistic splice puts it; the
+    // column's own focus machinery does the rest off the nonce. The moved card's
+    // id travels with it — that splice lands a frame or two later, so until it
+    // does the new index still resolves to the neighbour being swapped past.
+    const idx = REORDER_LANDING[direction](from.idx, column.items.length);
+    setCursor({ col: from.col, idx });
+    setFocusItemId(item.itemId);
+    setFocusNonce((n) => n + 1);
+    announce(
+      `Moved to ${idx + 1} of ${column.items.length} in ${column.label}`,
+    );
   }
 
   /** Put one searched issue or pull request on the board. Owned here rather than in
@@ -1475,6 +1690,15 @@ export function ProjectsBoardPanel({
       });
   }
 
+  // Where the menu's card sits RIGHT NOW, re-derived with the columns rather than
+  // recorded at open: the board can re-draw under an open menu, and the rows have
+  // to describe the place the card is in when one is clicked.
+  const menuPos =
+    menuTarget === null ? null : findCard(columns, menuTarget.item.itemId);
+  const reorderPlans = menuPos === null ? NO_REORDER : reorderPlansFor(menuPos);
+  const reorderHeldReason =
+    menuTarget === null ? undefined : reorderHeldFor(menuTarget.item.itemId);
+
   const body = (() => {
     switch (true) {
       // A failed forge probe is not "still detecting": without this arm the
@@ -1632,6 +1856,7 @@ export function ProjectsBoardPanel({
                   column={column}
                   columnIndex={i}
                   activeIndex={liveCursor?.col === i ? liveCursor.idx : null}
+                  activeItemId={liveCursor?.col === i ? focusItemId : null}
                   busyItemId={busyItemId}
                   peekItemId={peekItemId}
                   tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
@@ -1662,6 +1887,8 @@ export function ProjectsBoardPanel({
                 openLabel={openLabelFor(menuTarget?.item, repoSlug)}
                 heldReason={moveHeldReason}
                 actionHeldReason={cardActionHeldReason}
+                reorderHeldReason={reorderHeldReason}
+                reorderPlans={reorderPlans}
                 actions={{
                   open: () => {
                     if (menuTarget !== null) openItem(menuTarget.item);
@@ -1673,6 +1900,12 @@ export function ProjectsBoardPanel({
                   move: (columnIndex) => {
                     if (menuTarget !== null)
                       moveCard(menuTarget.item, columnIndex);
+                  },
+                  // By POSITION, not by item: the reposition math addresses the
+                  // card's slot in its column, which `menuPos` re-derives from the
+                  // columns this render drew.
+                  reorder: (direction) => {
+                    if (menuPos !== null) reorderCard(menuPos, direction);
                   },
                   // Each reads `menuTarget` at CLICK time and hands the item down
                   // by value: the menu closes as it fires, and the prompt or dialog
@@ -1728,6 +1961,14 @@ export function ProjectsBoardPanel({
       });
     } else if (write.kind === "edit-draft") {
       pendingLines.push({ key: write.mutationId, label: "Saving a draft…" });
+    } else if (write.kind === "reorder") {
+      // A line despite the splice already being on screen, unlike a move: a burst
+      // of presses converges through several round trips, so this write can still
+      // be reaching GitHub long after the card settled where the user left it.
+      pendingLines.push({
+        key: write.mutationId,
+        label: "Repositioning a card…",
+      });
     }
   }
 
@@ -1751,6 +1992,39 @@ export function ProjectsBoardPanel({
     "new-board-draft",
     () => switchAddDialog("draft"),
     active && canAdd,
+  );
+  // The four reposition rows, from the palette. Palette-ONLY on purpose: the chord
+  // that drives these lives on the board itself, because "focus is on a card" is a
+  // DOM question the global binding layer can't ask. Live wherever the keyboard
+  // cursor is on a real card; the routine re-checks every gate and says what it
+  // did, so a held board answers the palette the same way it answers the chord.
+  useHotkeyAction(
+    "move-card-up",
+    () => {
+      if (liveCursor !== null) reorderCard(liveCursor, "up");
+    },
+    active && liveCursor !== null,
+  );
+  useHotkeyAction(
+    "move-card-down",
+    () => {
+      if (liveCursor !== null) reorderCard(liveCursor, "down");
+    },
+    active && liveCursor !== null,
+  );
+  useHotkeyAction(
+    "move-card-top",
+    () => {
+      if (liveCursor !== null) reorderCard(liveCursor, "top");
+    },
+    active && liveCursor !== null,
+  );
+  useHotkeyAction(
+    "move-card-bottom",
+    () => {
+      if (liveCursor !== null) reorderCard(liveCursor, "bottom");
+    },
+    active && liveCursor !== null,
   );
   // The content node ids of every card LOADED so far, for the add dialog's
   // already-on-this-board rows. Off `items.data` rather than the derived `loaded`
@@ -2133,6 +2407,16 @@ export function ProjectsBoardPanel({
           ))}
         </div>
       )}
+      {/* What the keyboard route just did, or why it refused. Mounted
+          unconditionally so each result announces as a live update, and sr-only
+          because the board itself is the visual answer: the card is already in its
+          new slot with focus on it. A zero-width space toggled by the announce seq
+          keeps the textContent changing when the message repeats, so a screen
+          reader re-announces an identical held reason or "N of M". */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {announcement.text}
+        {ZWSP.repeat(announcement.seq % 2)}
+      </span>
       {body}
       {/* Mounted only with a board to add to — both dialogs address one by id, and
           `projectId` is what the whole toolbar is gated on anyway. KEYED on it as

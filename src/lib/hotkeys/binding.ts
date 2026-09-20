@@ -87,6 +87,8 @@ const DISPLAY_NAMES: Record<string, string> = {
   backspace: "Backspace",
   delete: "Delete",
   tab: "Tab",
+  home: "Home",
+  end: "End",
   up: "↑",
   down: "↓",
   left: "←",

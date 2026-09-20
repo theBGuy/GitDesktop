@@ -5,6 +5,7 @@ import type {
   BoardItem,
   BoardItemContent,
   BoardItems,
+  BoardOrder,
   ConvertedDraft,
   ItemProjectFieldValues,
   ProjectFieldDefs,
@@ -108,6 +109,25 @@ export const ghSetItemFieldValues = (
     itemId,
     updates,
     clears,
+  });
+
+/** Moves one card within the project's own item order, landing it directly after
+ *  `afterId`. Null is the TOP of the board — the key rides EXPLICITLY, since the
+ *  backend reads a dropped key and a null as the same `Option::None` only when the
+ *  serializer is the one deciding. Answers with the board's new order rather than
+ *  nothing, which is what lets the settle re-assert it without a read GitHub's
+ *  replicas can lag. */
+export const ghSetItemPosition = (
+  repoPath: string,
+  projectId: string,
+  itemId: string,
+  afterId: string | null,
+) =>
+  invoke<BoardOrder>("gh_set_item_position", {
+    repoPath,
+    projectId,
+    itemId,
+    afterId,
   });
 
 /** Issues and pull requests in THIS repository a board could take, matching

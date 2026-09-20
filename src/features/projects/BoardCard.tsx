@@ -491,6 +491,10 @@ export const BoardCard = memo(function BoardCard({
   const content = item.content;
   const shared = {
     "data-card-index": index,
+    // WHICH card this node is, beside where it sits. A focus claim resolves an
+    // INDEX, and the rows are keyed by item id — so a node that has since slid to
+    // a neighbouring slot answers to the old index while carrying the wrong card.
+    "data-item-id": item.itemId,
     role: "option",
     "aria-selected": active,
     "aria-setsize": setSize,

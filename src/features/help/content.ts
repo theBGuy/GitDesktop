@@ -2024,6 +2024,30 @@ access to the board, and when the board is grouped by one of GitHub's own issue 
 are edited on GitHub). An ungrouped board has no columns to move between, so its cards carry
 no **Move to** section, and a card whose contents you can't see carries none either.
 
+## Ordering a card inside its column
+
+A column's cards sit in the **project order** — the one GitHub keeps for the board itself,
+shared with everyone who opens it. {{key:alt+up}} and {{key:alt+down}} move the card you're
+on one place along that order; {{key:alt+home}} and {{key:alt+end}} send it to the top or
+the bottom of its column. The card's menu carries the same four as **Move up**, **Move
+down**, **Move to top** and **Move to bottom**, and so does the command palette for the
+card you're on (**Move board card up**, and its three siblings). Your keyboard place
+follows the card each time, and the board says where it landed.
+
+Hold the keys down and the board keeps up: the cards move as fast as you press, and
+GitDesktop writes where the card finally rests rather than every step it passed through.
+If GitHub refuses the write, the card goes back and a message says why.
+
+A row that would change nothing is greyed out — the top card can't go up, the bottom one
+can't go down. On a board that's still paging in, the downward moves say **Load more cards
+to move past the loaded end** instead: the rest of the column may be in a page that hasn't
+arrived, so moving it past the loaded end would be a guess. Under a saved view that
+**sorts**, the whole section says **This view orders cards by its sort** — the columns are
+drawn in the sort's order there, not the board's own, so **Clear view** (or a view without
+a sort) is what brings the project order back. Reordering needs the same write access and
+\`project\` scope every other board write does, and waits the same way while another change
+to that card, or a **Load more** page, is still finishing.
+
 ## Editing, converting, archiving and removing
 
 Below **Move to**, the same menu holds the rows that change what a card is. The last three
@@ -2066,7 +2090,8 @@ reading a card's dates asks nothing of the board.
 The board is fully keyboard-operable: **↑ / ↓** move through a column, **← / →** step to
 the next column at the same height, **Home / End** jump to a column's first or last card,
 **Enter** opens the card you're on and {{key:space}} peeks at its details; on Windows and
-Linux, {{key:shift+f10}} opens its menu. Collapsing the sidebar ({{kbd:toggle-sidebar}})
+Linux, {{key:shift+f10}} opens its menu. Hold {{key:alt}} with those same four keys and
+the card moves instead of the cursor (above). Collapsing the sidebar ({{kbd:toggle-sidebar}})
 hands the board its width.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the

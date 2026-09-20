@@ -15,7 +15,12 @@
   creates it). Either way the card is there as the write lands, drawn from GitHub's own
   answer to it. Right-click a card (Shift+F10 on Windows and Linux) to **move it to
   another column**: the board re-draws where it lands and your keyboard place goes with
-  it while the write reaches GitHub behind you. The same menu **edits a draft** (its
+  it while the write reaches GitHub behind you. **Order a column from the keyboard**,
+  too: **Alt/Option+↑ / ↓** move the card you're on one place, **Alt/Option+Home / End**
+  send it to the column's top or bottom, and the card's menu and the command palette
+  carry the same four. That's the **project's own order**, the one GitHub shows
+  everyone, and holding the keys down is fine: the board keeps up and writes where the
+  card finally lands. The same menu **edits a draft** (its
   title, its Markdown notes and its assignees, saved with **Ctrl/Cmd+Enter**),
   **converts a draft into a real issue**, **archives** a card (GitHub's archived items
   hold it for you), and **removes** one from the project, the last three confirming

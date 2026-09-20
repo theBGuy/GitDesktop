@@ -580,6 +580,7 @@ pub fn run() {
             github::project_item_edits::gh_convert_draft_item,
             github::project_item_edits::gh_archive_board_item,
             github::project_item_edits::gh_remove_board_item,
+            github::project_item_edits::gh_set_item_position,
             github::project_item_edits::gh_add_issue_to_projects,
             github::project_fields::gh_item_field_values,
             github::project_fields::gh_project_fields,

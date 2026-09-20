@@ -291,6 +291,16 @@ export interface BoardItems {
   endCursor: string | null;
 }
 
+/** The board's own item order as a reposition answers with it: the project's
+ *  items in their NEW global order, capped at the first 100 with `truncated`
+ *  saying the rest weren't reached. The mutation's payload rather than a re-read
+ *  because GitHub answers item READS off replicas that lag their own writes by
+ *  seconds, where the payload is transactionally fresh. */
+export interface BoardOrder {
+  itemIds: string[];
+  truncated: boolean;
+}
+
 /** One issue or pull request the board could take, as the add-existing search
  *  reports it. `id` is the CONTENT node id an add addresses — never a
  *  {@link BoardItem}'s `itemId`, which only exists once the item is on a board.

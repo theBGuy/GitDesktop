@@ -335,7 +335,7 @@ export const capabilities: Capability[] = [
   {
     group: "Issues & discussions",
     label:
-      "Project boards — a GitHub Project as a kanban, grouped by any of its single-select fields, with right-click move between columns and its saved views as read-only lenses (GitHub applies the filter; the board honors the sort and shows the view's fields as chips). Add existing issues and pull requests or write Markdown drafts from the toolbar and the card is there as the write lands, edit a draft's title, notes and assignees, convert a draft to a real issue, archive or remove a card, peek at an issue or pull request card's details with Space, and pick boards for a new issue as you create it",
+      "Project boards — a GitHub Project as a kanban, grouped by any of its single-select fields, with right-click move between columns, keyboard reordering inside a column (Alt/Option+↑↓ to step, Alt/Option+Home/End for the ends, also on the card menu and in the command palette) that writes the project's own card order, and its saved views as read-only lenses (GitHub applies the filter; the board honors the sort and shows the view's fields as chips). Add existing issues and pull requests or write Markdown drafts from the toolbar and the card is there as the write lands, edit a draft's title, notes and assignees, convert a draft to a real issue, archive or remove a card, peek at an issue or pull request card's details with Space, and pick boards for a new issue as you create it",
     highlight: true,
   },
   {
