@@ -209,10 +209,10 @@ fn clamp_limit(limit: Option<u32>) -> usize {
 // twelve concurrent reports accepted), so the bound is fetch cost, not a
 // platform limit; past it the walk reports truncated and the cap sentence shows.
 const BB_MAX_REPORTS: usize = 100;
-type Failure = (BbFindingsAvailability, String);
+type Failure = (BbFindingsAvailability, String, Option<u16>);
 
 fn indeterminate(detail: impl Into<String>) -> Failure {
-    (BbFindingsAvailability::Indeterminate, detail.into())
+    (BbFindingsAvailability::Indeterminate, detail.into(), None)
 }
 
 fn classify(status: u16, body: &str) -> Result<(), Failure> {
@@ -223,12 +223,13 @@ fn classify(status: u16, body: &str) -> Result<(), Failure> {
         401 | 403 => Err((
             BbFindingsAvailability::Forbidden,
             http::bb_error_detail(status, body, http::BbOpKind::Read),
+            Some(status),
         )),
-        _ => Err(indeterminate(http::bb_error_detail(
-            status,
-            body,
-            http::BbOpKind::Read,
-        ))),
+        _ => Err((
+            BbFindingsAvailability::Indeterminate,
+            http::bb_error_detail(status, body, http::BbOpKind::Read),
+            Some(status),
+        )),
     }
 }
 
@@ -461,7 +462,8 @@ where
         let mut unreadable_lists = 0;
         let mut unreadable_rows = 0;
         let mut first_annotation_failure = None;
-        for report in &mut out.reports {
+        let mut pending_reports = out.reports.iter_mut();
+        while let Some(report) = pending_reports.next() {
             let url = format!(
                 "{base}/commit/{}/reports/{}/annotations?pagelen=100",
                 encode_query_value(out.commit_sha.as_deref().expect("resolved commit")),
@@ -475,10 +477,17 @@ where
                     report.annotations_unreadable = unreadable > 0;
                     unreadable_rows += unreadable;
                 }
-                Err((_, detail)) => {
+                Err((availability, detail, status)) => {
                     report.annotations_unreadable = true;
                     unreadable_lists += 1;
                     first_annotation_failure.get_or_insert(detail);
+                    if status == Some(429) || availability == BbFindingsAvailability::Forbidden {
+                        for pending in pending_reports.by_ref() {
+                            pending.annotations_unreadable = true;
+                            unreadable_lists += 1;
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -509,7 +518,7 @@ where
     Fut: Future<Output = AppResult<(u16, String)>>,
 {
     let mut out = empty_out(requested_ref);
-    if let Err((availability, detail)) =
+    if let Err((availability, detail, _)) =
         read_findings(get, base, clamp_limit(limit), &mut out).await
     {
         out.availability = availability;
@@ -765,24 +774,101 @@ mod tests {
 
     #[tokio::test]
     async fn annotation_failures_disclose_the_first_rate_limit_detail() {
-        for (reports, second_failure, expected) in [
-            (REPORT, false, "1 annotation list couldn't be read — first failure: Bitbucket rate limit reached (429). Wait a moment and try again."),
-            (r#"{"values":[{"uuid":"r1"},{"uuid":"r2"}]}"#, true, "2 annotation lists couldn't be read — first failure: Bitbucket rate limit reached (429). Wait a moment and try again."),
+        for (reports, count, expected) in [
+            (REPORT, 1, "1 annotation list couldn't be read — first failure: Bitbucket rate limit reached (429). Wait a moment and try again."),
+            (r#"{"values":[{"uuid":"r1"},{"uuid":"r2"}]}"#, 2, "2 annotation lists couldn't be read — first failure: Bitbucket rate limit reached (429). Wait a moment and try again."),
+            (r#"{"values":[{"uuid":"r1"},{"uuid":"r2"},{"uuid":"r3"}]}"#, 3, "3 annotation lists couldn't be read — first failure: Bitbucket rate limit reached (429). Wait a moment and try again."),
         ] {
-            let mut responses = vec![
+            let responses = vec![
                 ("", 200, REPO),
                 ("/refs/branches/topic", 200, TIP),
                 ("/commit/abc/reports?pagelen=100", 200, reports),
                 ("/commit/abc/reports/r1/annotations?pagelen=100", 429, "rate limited"),
             ];
-            if second_failure {
-                responses.push(("/commit/abc/reports/r2/annotations?pagelen=100", 403, "privilege scopes"));
-            }
             let out = scripted_findings("topic", None, responses).await;
             assert_eq!(out.availability, BbFindingsAvailability::Available);
             assert_eq!(out.detail.as_deref(), Some(expected));
-            assert_eq!(out.reports.len(), if second_failure { 2 } else { 1 });
+            assert_eq!(out.reports.len(), count);
             assert!(out.reports.iter().all(|report| report.annotations_unreadable && report.annotations.is_empty()));
+        }
+    }
+
+    #[tokio::test]
+    async fn annotation_auth_failures_stop_remaining_reads_and_keep_completed_lists() {
+        for status in [401, 403] {
+            let out = scripted_findings(
+                "topic",
+                None,
+                vec![
+                    ("", 200, REPO),
+                    ("/refs/branches/topic", 200, TIP),
+                    (
+                        "/commit/abc/reports?pagelen=100",
+                        200,
+                        r#"{"values":[{"uuid":"r1"},{"uuid":"r2"},{"uuid":"r3"}]}"#,
+                    ),
+                    (
+                        "/commit/abc/reports/r1/annotations?pagelen=100",
+                        200,
+                        ANNOTATION_FIXTURE,
+                    ),
+                    (
+                        "/commit/abc/reports/r2/annotations?pagelen=100",
+                        status,
+                        "privilege scopes",
+                    ),
+                ],
+            )
+            .await;
+            assert_eq!(out.availability, BbFindingsAvailability::Available);
+            assert_eq!(out.reports[0].annotations.len(), 3);
+            assert!(!out.reports[0].annotations_unreadable);
+            assert!(out.reports[1..]
+                .iter()
+                .all(|report| report.annotations_unreadable && report.annotations.is_empty()));
+            let expected = format!(
+                "2 annotation lists couldn't be read — first failure: {}",
+                http::bb_error_detail(status, "privilege scopes", http::BbOpKind::Read)
+            );
+            assert_eq!(out.detail.as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn other_annotation_failures_allow_later_lists_to_be_read() {
+        for (status, body) in [(500, "upstream unavailable"), (200, "not json")] {
+            let out = scripted_findings(
+                "topic",
+                None,
+                vec![
+                    ("", 200, REPO),
+                    ("/refs/branches/topic", 200, TIP),
+                    (
+                        "/commit/abc/reports?pagelen=100",
+                        200,
+                        r#"{"values":[{"uuid":"r1"},{"uuid":"r2"}]}"#,
+                    ),
+                    (
+                        "/commit/abc/reports/r1/annotations?pagelen=100",
+                        status,
+                        body,
+                    ),
+                    (
+                        "/commit/abc/reports/r2/annotations?pagelen=100",
+                        200,
+                        ANNOTATION_FIXTURE,
+                    ),
+                ],
+            )
+            .await;
+            assert_eq!(out.availability, BbFindingsAvailability::Available);
+            assert!(out.reports[0].annotations_unreadable);
+            assert!(!out.reports[1].annotations_unreadable);
+            assert_eq!(out.reports[1].annotations.len(), 3);
+            assert!(out
+                .detail
+                .unwrap()
+                .starts_with("1 annotation list couldn't be read — first failure: "));
         }
     }
 
@@ -1081,7 +1167,7 @@ mod tests {
                 "report-service.report.not-found",
             ),
         ] {
-            assert_eq!(classify(status, body), Err((availability, expected.into())));
+            assert_eq!(classify(status, body), Err((availability, expected.into(), Some(status))));
             let write_expected = if status == 403 && body.contains("privilege scopes") {
                 "Bitbucket rejected the request (403) — your API token is missing a required write scope. Reconnect it in Settings → Accounts with pull request / repository / pipeline write scopes."
             } else {
@@ -1105,12 +1191,32 @@ mod tests {
         }
         assert_eq!(classify(204, ""), Ok(()));
         assert_eq!(classify(299, ""), Ok(()));
-        assert_eq!(classify(500, ""), Err(indeterminate("HTTP 500")));
+        assert_eq!(
+            classify(500, ""),
+            Err((
+                BbFindingsAvailability::Indeterminate,
+                "HTTP 500".into(),
+                Some(500)
+            ))
+        );
         let long_body = format!("  {}  ", "é".repeat(301));
         assert_eq!(
             classify(500, &long_body),
-            Err(indeterminate(format!("HTTP 500: {}", "é".repeat(300))))
+            Err((
+                BbFindingsAvailability::Indeterminate,
+                format!("HTTP 500: {}", "é".repeat(300)),
+                Some(500)
+            ))
         );
+        assert_eq!(indeterminate("unknown").2, None);
+        assert_eq!(parse_json::<Value>("not json").unwrap_err().2, None);
+        assert_eq!(parse_page("{}").err().unwrap().2, None);
+        let mut get = |_: String| {
+            ready(Err(crate::error::AppError::Bitbucket(
+                "transport failure".into(),
+            )))
+        };
+        assert_eq!(fetch(&mut get, "unused".into()).await.unwrap_err().2, None);
     }
 
     #[test]

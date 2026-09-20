@@ -198,6 +198,9 @@ impl BbErrorBody {
 /// request header). Exposed to the provider so a caller that inspects the status
 /// itself (e.g. [`bb_get_text_status`]) produces the identical error for statuses it
 /// doesn't special-case.
+/// Assumes a write operation for the privilege-scope 403; a read path that wants
+/// read-scope guidance calls `bb_error_detail` with `BbOpKind::Read` directly,
+/// as `bitbucket_findings::classify` does.
 pub(crate) fn http_error(status: u16, body: &str) -> AppError {
     AppError::Bitbucket(bb_error_detail(status, body, BbOpKind::Write))
 }
@@ -208,6 +211,8 @@ pub(crate) enum BbOpKind {
 }
 
 /// Shared Bitbucket status guidance, API envelope detail, or a bounded text snippet.
+/// `op` picks the 403 privilege-scope guidance: `Read` asks for repository read
+/// access, `Write` for the write scopes.
 pub(crate) fn bb_error_detail(status: u16, body: &str, op: BbOpKind) -> String {
     // Prefer the API's own message when the body is the JSON error envelope.
     let api_msg = serde_json::from_str::<BbErrorEnvelope>(body)

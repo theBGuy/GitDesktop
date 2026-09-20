@@ -1404,7 +1404,7 @@ function BbCommitProvenance({
       ? data.fallbackRef
       : data.requestedRef;
   const name = data.fallbackRef || "the default branch";
-  const tail = reportsShown ? `showing ${name}.` : `read ${name} instead.`;
+  const tail = reportsShown ? `showing ${name}.` : `${name} was read instead.`;
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
       {data.usedFallback ? (
@@ -1447,7 +1447,11 @@ function BbCommitProvenance({
 function BbPartialDetail({ detail }: { detail: string | null }) {
   if (!detail) return null;
   return (
-    <p className="px-3 py-2 text-[11px] text-muted-foreground">{detail}</p>
+    // wrap-break-word matches ReasonCard's detail: the string can carry up to
+    // 300 chars of raw API body, which may be one unbroken token.
+    <p className="wrap-break-word px-3 py-2 text-[11px] text-muted-foreground">
+      {detail}
+    </p>
   );
 }
 
