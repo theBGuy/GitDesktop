@@ -547,73 +547,77 @@ fn git_config_bool(value: Option<&str>) -> Option<bool> {
 /// separates each entry's key from its value — a valueless key carries no newline at
 /// all. Only a `diff.<driver>.binary` key whose value is a git bool carries a verdict;
 /// `<driver>` is everything between the prefix and the suffix, so a dotted driver name
-/// survives intact.
-fn parse_diff_driver_binary(text: &str) -> std::collections::HashMap<String, bool> {
+/// survives intact. `None` = the stream is not the shape this asked git for (a key
+/// outside the queried pattern), which is a probe FAILURE rather than an empty answer;
+/// a value that is simply not a bool still skips its own entry, since git fatals there
+/// and per-entry degrading is the gentler read.
+fn parse_diff_driver_binary(text: &str) -> Option<std::collections::HashMap<String, bool>> {
     let mut flags = std::collections::HashMap::new();
     for entry in text.split('\0').filter(|e| !e.is_empty()) {
         let (key, value) = match entry.split_once('\n') {
             Some((key, value)) => (key, Some(value)),
             None => (entry, None),
         };
-        let Some(name) = key
+        let name = key
             .strip_prefix("diff.")
             .and_then(|rest| rest.strip_suffix(".binary"))
-        else {
-            continue;
-        };
-        if name.is_empty() {
-            continue;
-        }
+            .filter(|name| !name.is_empty())?;
         let Some(binary) = git_config_bool(value) else {
             continue;
         };
         flags.insert(name.to_string(), binary);
     }
-    flags
+    Some(flags)
 }
 
-/// Every `diff.<driver>.binary` the repo configures. Non-fatal like its siblings, and
-/// a non-zero exit is the NORMAL answer here — `--get-regexp` reports "no match" that
-/// way — so any failure leaves the map empty and every driver sniffs.
-async fn diff_driver_binary_flags(repo_path: &str) -> std::collections::HashMap<String, bool> {
-    run_git(
+/// Every `diff.<driver>.binary` the repo configures. `None` = the probe FAILED (spawn,
+/// timeout, or an exit this cannot read as an answer) and the caller blanks the whole
+/// untracked lane; exit 1 is git's "no match" and answers with an empty map. Read
+/// through the raw runner because `run_git` folds every non-zero exit into one error,
+/// which would make the expected no-match indistinguishable from a real failure.
+async fn diff_driver_binary_flags(
+    repo_path: &str,
+) -> Option<std::collections::HashMap<String, bool>> {
+    let out = run_git_raw(
         Some(repo_path),
         &["config", "-z", "--get-regexp", r"^diff\..*\.binary$"],
         DEFAULT_TIMEOUT,
     )
     .await
-    .map(|out| parse_diff_driver_binary(&out.stdout_lossy()))
-    .unwrap_or_default()
+    .ok()?;
+    match out.code {
+        0 => parse_diff_driver_binary(&out.stdout_lossy()),
+        1 => Some(std::collections::HashMap::new()),
+        _ => None,
+    }
 }
 
 /// Parses `git config -z --name-only --get-regexp` output: NUL-separated KEYS with no
 /// values. A `filter.<driver>.clean`/`.process` key is what makes a `filter` attribute
 /// value name a real driver; `<driver>` is everything between the prefix and the
-/// suffix, so a dotted driver name survives intact.
-fn parse_configured_filters(text: &str) -> std::collections::HashSet<String> {
+/// suffix, so a dotted driver name survives intact. `None` = a key outside the queried
+/// pattern, which means the stream is not the shape this asked for — a probe FAILURE,
+/// not an empty answer.
+fn parse_configured_filters(text: &str) -> Option<std::collections::HashSet<String>> {
     let mut names = std::collections::HashSet::new();
     for key in text.split('\0').filter(|k| !k.is_empty()) {
-        let Some(rest) = key.strip_prefix("filter.") else {
-            continue;
-        };
-        let Some(name) = rest
-            .strip_suffix(".clean")
-            .or_else(|| rest.strip_suffix(".process"))
-        else {
-            continue;
-        };
-        if !name.is_empty() {
-            names.insert(name.to_string());
-        }
+        let name = key
+            .strip_prefix("filter.")
+            .and_then(|rest| {
+                rest.strip_suffix(".clean")
+                    .or_else(|| rest.strip_suffix(".process"))
+            })
+            .filter(|name| !name.is_empty())?;
+        names.insert(name.to_string());
     }
-    names
+    Some(names)
 }
 
-/// The filter drivers the repo actually configures. Non-fatal like its siblings, and a
-/// non-zero exit is the NORMAL answer here — `--get-regexp` reports "no match" that way
-/// — so any failure leaves the set empty and no `filter` attribute resolves.
-async fn configured_filter_drivers(repo_path: &str) -> std::collections::HashSet<String> {
-    run_git(
+/// The filter drivers the repo actually configures. `None` = the probe FAILED and the
+/// caller blanks the whole untracked lane; exit 1 is git's "no match" and answers with
+/// an empty set. Raw runner for the same reason as [`diff_driver_binary_flags`].
+async fn configured_filter_drivers(repo_path: &str) -> Option<std::collections::HashSet<String>> {
+    let out = run_git_raw(
         Some(repo_path),
         &[
             "config",
@@ -625,8 +629,12 @@ async fn configured_filter_drivers(repo_path: &str) -> std::collections::HashSet
         DEFAULT_TIMEOUT,
     )
     .await
-    .map(|out| parse_configured_filters(&out.stdout_lossy()))
-    .unwrap_or_default()
+    .ok()?;
+    match out.code {
+        0 => parse_configured_filters(&out.stdout_lossy()),
+        1 => Some(std::collections::HashSet::new()),
+        _ => None,
+    }
 }
 
 /// What `.gitattributes` says about one untracked path. The default — no `diff`
@@ -645,24 +653,26 @@ struct PathAttrs {
 const REQUESTED_ATTRS: [&str; 3] = ["diff", "working-tree-encoding", "filter"];
 
 /// Parses `check-attr -z` output: `path NUL attr NUL value NUL` triples, one per
-/// requested attribute per path. A stream that does not divide into whole triples
-/// yields an EMPTY map, so a shape this does not understand degrades every path to the
-/// sniff rather than mis-verdicting. `drivers` resolves a value that names a custom
-/// diff driver and `filters` a value that names a content filter; one the repo does not
-/// configure stays unresolved, since only git knows what running it would decide.
+/// requested attribute per path. `None` = the stream does not divide into whole
+/// triples, a shape this cannot read, which is a probe FAILURE — the caller blanks the
+/// lane rather than letting sniff verdicts stand in for git's. An empty map is a
+/// legitimate answer (every triple `unspecified`). `drivers` resolves a value that
+/// names a custom diff driver and `filters` a value that names a content filter; one
+/// the repo does not configure stays unresolved, since only git knows what running it
+/// would decide.
 fn parse_path_attrs(
     text: &str,
     drivers: &std::collections::HashMap<String, bool>,
     filters: &std::collections::HashSet<String>,
-) -> std::collections::HashMap<String, PathAttrs> {
+) -> Option<std::collections::HashMap<String, PathAttrs>> {
     let mut tokens: Vec<&str> = text.split('\0').collect();
     // `-z` terminates every token, so the split's last element is empty.
     if tokens.last() == Some(&"") {
         tokens.pop();
     }
-    let mut attrs = std::collections::HashMap::new();
+    let mut attrs: std::collections::HashMap<String, PathAttrs> = std::collections::HashMap::new();
     if !tokens.len().is_multiple_of(3) {
-        return attrs;
+        return None;
     }
     for record in tokens.as_chunks::<3>().0 {
         let (path, attr, value) = (record[0], record[1], record[2]);
@@ -688,29 +698,37 @@ fn parse_path_attrs(
             // A `filter` converts only when it names a driver the repo CONFIGURES: git
             // resolves the name to `filter.<name>.clean`/`.process`, and an unknown one
             // (or a valueless `set`, which names nothing) stores the bytes verbatim.
-            "filter" if filters.contains(value) => {
+            // check-attr's reserved answers are excluded first, since a repo may also
+            // configure a driver literally called `set` or `unspecified`.
+            "filter"
+                if value != "unspecified"
+                    && value != "unset"
+                    && value != "set"
+                    && filters.contains(value) =>
+            {
                 attrs.entry(path.to_string()).or_default().converts = true;
             }
             _ => {}
         }
     }
-    attrs
+    Some(attrs)
 }
 
 /// `check-attr`'s raw `-z` stream for every enumerated path, in one batched spawn.
-/// Non-fatal by contract: a failed spawn or a non-zero exit yields an empty stream,
-/// which maps to no verdicts at all, so every path falls back to the content sniff.
-async fn untracked_attr_output(repo_path: &str, paths: &[&str]) -> String {
+/// `None` = the probe FAILED — `check-attr` has no expected non-zero exit, so `run_git`
+/// folding spawn, timeout and non-zero alike into one error is exactly the distinction
+/// this needs.
+async fn untracked_attr_output(repo_path: &str, paths: &[&str]) -> Option<String> {
     if paths.is_empty() {
-        return String::new();
+        return Some(String::new());
     }
     let stdin: String = paths.iter().map(|p| format!("{p}\0")).collect();
     let mut args = vec!["check-attr", "--stdin", "-z"];
     args.extend(REQUESTED_ATTRS);
     crate::git::runner::run_git_input(Some(repo_path), &args, Some(&stdin), DEFAULT_TIMEOUT)
         .await
+        .ok()
         .map(|out| out.stdout_lossy())
-        .unwrap_or_default()
 }
 
 /// What one untracked file's read produced.
@@ -726,10 +744,11 @@ enum ReadOutcome {
 }
 
 /// The repo's effective `core.bigFileThreshold`. `--type=int` normalizes the `k`/`m`/`g`
-/// suffixes a user may have written and `--default` answers for an unset key; any
-/// failure or unreadable value falls back to git's own default rather than leaving the
-/// verdict resting on a half-read config.
-async fn untracked_big_file_threshold(repo_path: &str) -> u64 {
+/// suffixes a user may have written and `--default` answers for an unset key. `None` =
+/// the probe FAILED: `--default` means an empty or unparsable answer is not something
+/// git should ever produce here, so reading one is a malformed result rather than a
+/// reason to fall back to the default.
+async fn untracked_big_file_threshold(repo_path: &str) -> Option<u64> {
     let default = BIG_FILE_BYTES_DEFAULT.to_string();
     run_git(
         Some(repo_path),
@@ -746,7 +765,6 @@ async fn untracked_big_file_threshold(repo_path: &str) -> u64 {
     .await
     .ok()
     .and_then(|out| out.stdout_lossy().trim().parse::<u64>().ok())
-    .unwrap_or(BIG_FILE_BYTES_DEFAULT)
 }
 
 /// Counts `\n` bytes through a bounded buffer, plus the final unterminated line.
@@ -959,8 +977,10 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
     let mut unstaged_entries = parse_numstat_z(&unstaged.stdout_lossy());
     let paths: Vec<&str> = untracked.split('\0').filter(|p| !p.is_empty()).collect();
     // No probe matters without untracked paths, so an empty set spawns none of them.
-    let (attrs, big_file_bytes) = if paths.is_empty() {
-        (std::collections::HashMap::new(), BIG_FILE_BYTES_DEFAULT)
+    // A FAILED probe must not substitute sniff semantics for git's: every path this
+    // tick keeps the blank slot it had before the feature, and the 5s poll retries.
+    let resolved = if paths.is_empty() {
+        Some((std::collections::HashMap::new(), BIG_FILE_BYTES_DEFAULT))
     } else {
         let (attr_output, big_file_bytes, drivers, filters) = tokio::join!(
             untracked_attr_output(&repo_path, &paths),
@@ -968,25 +988,30 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
             diff_driver_binary_flags(&repo_path),
             configured_filter_drivers(&repo_path)
         );
-        (
-            parse_path_attrs(&attr_output, &drivers, &filters),
-            big_file_bytes,
-        )
+        match (attr_output, big_file_bytes, drivers, filters) {
+            (Some(attr_output), Some(big_file_bytes), Some(drivers), Some(filters)) => {
+                parse_path_attrs(&attr_output, &drivers, &filters)
+                    .map(|attrs| (attrs, big_file_bytes))
+            }
+            _ => None,
+        }
     };
-    // Counting lines is blocking file I/O, kept off the async workers this poll
-    // shares with every other repo operation.
-    let untracked_entries = tauri::async_runtime::spawn_blocking(move || {
-        untracked_line_stats(
-            &repo_path,
-            &untracked,
-            UNTRACKED_READ_BUDGET,
-            big_file_bytes,
-            &attrs,
-        )
-    })
-    .await
-    .unwrap_or_default();
-    unstaged_entries.extend(untracked_entries);
+    if let Some((attrs, big_file_bytes)) = resolved {
+        // Counting lines is blocking file I/O, kept off the async workers this poll
+        // shares with every other repo operation.
+        let untracked_entries = tauri::async_runtime::spawn_blocking(move || {
+            untracked_line_stats(
+                &repo_path,
+                &untracked,
+                UNTRACKED_READ_BUDGET,
+                big_file_bytes,
+                &attrs,
+            )
+        })
+        .await
+        .unwrap_or_default();
+        unstaged_entries.extend(untracked_entries);
+    }
     Ok(WorkingLineStats {
         staged: parse_numstat_z(&staged.stdout_lossy()),
         unstaged: unstaged_entries,
@@ -1256,17 +1281,19 @@ mod tests {
     }
 
     /// The feature's real contract: an untracked row must already say what numstat
-    /// will say about the same file once it is staged. Stages everything, then
-    /// compares each named path's staged row with the entry captured while it was
-    /// untracked. `core.autocrlf` is pinned in the fixture, so staging shifts nothing.
+    /// will say about the same file once it is staged. Stages the named paths, then
+    /// compares each one's staged row with the entry captured while it was untracked.
+    /// `core.autocrlf` is pinned in the fixture, so staging shifts nothing. Staging is
+    /// SCOPED to those names so a test can leave a path unstaged on purpose — a
+    /// converted one whose filter or encoder must not run here.
     async fn assert_untracked_matches_staged(
         repo: &str,
         untracked: &[DiffStatEntry],
         names: &[&str],
     ) {
-        run_git(Some(repo), &["add", "-A"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut args = vec!["add", "-A", "--"];
+        args.extend(names);
+        run_git(Some(repo), &args, DEFAULT_TIMEOUT).await.unwrap();
         let staged = run_git(
             Some(repo),
             &["diff", "--cached", "--numstat", "-z"],
@@ -1641,7 +1668,7 @@ mod tests {
         };
 
         let valid = "a.dat\0diff\0unset\0b.forced\0diff\0set\0c.txt\0diff\0unspecified\0";
-        let attrs = parse_path_attrs(valid, &none, &no_filters);
+        let attrs = parse_path_attrs(valid, &none, &no_filters).expect("a whole-triple stream");
         assert_eq!(attrs.get("a.dat"), Some(&binary));
         assert_eq!(attrs.get("b.forced"), Some(&forced));
         assert_eq!(attrs.get("c.txt"), None, "`unspecified` carries no verdict");
@@ -1657,15 +1684,29 @@ mod tests {
             "a.byes\0diff\0binyes\0b.bno\0diff\0binno\0c.png\0diff\0exif\0",
             &drivers,
             &no_filters,
-        );
+        )
+        .expect("a whole-triple stream");
         assert_eq!(resolved.get("a.byes"), Some(&binary));
         assert_eq!(resolved.get("b.bno"), Some(&forced));
         assert_eq!(resolved.get("c.png"), None, "an unconfigured driver sniffs");
-        assert!(parse_path_attrs("d.png\0diff\0exif\0", &none, &no_filters).is_empty());
+        assert_eq!(
+            parse_path_attrs("d.png\0diff\0exif\0", &none, &no_filters),
+            Some(std::collections::HashMap::new()),
+            "no verdicts is a legitimate answer, not a failure"
+        );
 
-        let malformed = parse_path_attrs("a.dat\0diff\0", &none, &no_filters);
-        assert!(malformed.is_empty(), "a partial triple maps nothing");
-        assert!(parse_path_attrs("", &none, &no_filters).is_empty());
+        // A stream that does not divide into triples is a probe FAILURE, not an empty
+        // answer: the caller blanks the lane rather than sniffing every path.
+        assert_eq!(
+            parse_path_attrs("a.dat\0diff\0", &none, &no_filters),
+            None,
+            "a partial triple is unreadable"
+        );
+        assert_eq!(
+            parse_path_attrs("", &none, &no_filters),
+            Some(std::collections::HashMap::new()),
+            "an empty stream is empty, not malformed"
+        );
     }
 
     /// All three requested attributes come back per path, so one path's triples are
@@ -1675,7 +1716,9 @@ mod tests {
     #[test]
     fn folds_multi_attribute_check_attr_rows_per_path() {
         let none = std::collections::HashMap::new();
-        let filters = std::collections::HashSet::from(["fake".to_string()]);
+        // `set` is in the set on purpose: check-attr's reserved answers must never
+        // reach the driver lookup, however a repo happens to name its drivers.
+        let filters = std::collections::HashSet::from(["fake".to_string(), "set".to_string()]);
         let folded = parse_path_attrs(
             "doc.u16\0diff\0unspecified\0doc.u16\0working-tree-encoding\0UTF-16\0\
              doc.u16\0filter\0unspecified\0\
@@ -1683,7 +1726,8 @@ mod tests {
              both.dat\0filter\0fake\0",
             &none,
             &filters,
-        );
+        )
+        .expect("a whole-triple stream");
         assert_eq!(
             folded.get("doc.u16"),
             Some(&PathAttrs {
@@ -1706,7 +1750,8 @@ mod tests {
             "a.lfs\0filter\0set\0b.lfs\0filter\0ghost\0",
             &none,
             &filters,
-        );
+        )
+        .expect("a whole-triple stream");
         assert!(
             unresolved.is_empty(),
             "a valueless filter names nothing and an unconfigured one runs nothing"
@@ -1716,7 +1761,8 @@ mod tests {
             "b.txt\0filter\0unset\0b.txt\0working-tree-encoding\0unspecified\0",
             &none,
             &filters,
-        );
+        )
+        .expect("a whole-triple stream");
         assert!(
             inert.is_empty(),
             "`-filter` and an unspecified encoding convert nothing"
@@ -1724,14 +1770,15 @@ mod tests {
     }
 
     /// The `--name-only` key stream that says which filter drivers the repo really
-    /// configures: either half of the pair counts, a dotted driver name survives whole,
-    /// and a `filter.*` key that is neither half names no driver.
+    /// configures: either half of the pair counts and a dotted driver name survives
+    /// whole. A key the queried pattern could not have produced means the stream is not
+    /// what this asked for — a probe FAILURE, not an empty answer.
     #[test]
     fn parses_configured_filter_driver_names() {
         let names = parse_configured_filters(
-            "filter.fake.clean\0filter.streamed.process\0filter.my.lfs.clean\0\
-             filter.fake.smudge\0filter.fake.required\0core.autocrlf\0",
-        );
+            "filter.fake.clean\0filter.streamed.process\0filter.my.lfs.clean\0",
+        )
+        .expect("keys the queried pattern produces");
         assert!(names.contains("fake"));
         assert!(
             names.contains("streamed"),
@@ -1741,52 +1788,66 @@ mod tests {
             names.contains("my.lfs"),
             "a dotted driver name is the whole middle"
         );
+        assert_eq!(names.len(), 3);
+
+        for off_pattern in [
+            "filter.fake.smudge\0",
+            "filter.fake.required\0",
+            "core.autocrlf\0",
+            "filter..clean\0",
+        ] {
+            assert_eq!(
+                parse_configured_filters(off_pattern),
+                None,
+                "{off_pattern:?} is not a key this query can return"
+            );
+        }
         assert_eq!(
-            names.len(),
-            3,
-            "smudge/required/unrelated keys name no driver"
+            parse_configured_filters(""),
+            Some(std::collections::HashSet::new()),
+            "no matches is an empty answer, not a failure"
         );
-        assert!(parse_configured_filters("").is_empty());
     }
 
     /// The `git config -z --get-regexp` grammar: NUL between entries, a newline
     /// between each key and its value, and NO newline at all for a valueless key.
     /// The value alphabet is git's own, case-insensitive — a valueless key is true, an
     /// empty value is false, and any integer goes by its zero-ness — and a dotted
-    /// driver name survives whole.
+    /// driver name survives whole. A junk VALUE skips its own entry; a key outside the
+    /// queried pattern means the stream is unreadable, which is a probe FAILURE.
     #[test]
     fn parses_diff_driver_binary_config() {
+        let read = |text: &str| parse_diff_driver_binary(text).expect("keys the query produces");
         // `1`/`0` sit in both the named alphabet and the integer rule; the two agree.
         for spelling in [
             "true", "yes", "on", "1", "TRUE", "Yes", "ON", "2", "-1", "1k",
         ] {
-            let flags = parse_diff_driver_binary(&format!("diff.d.binary\n{spelling}\0"));
+            let flags = read(&format!("diff.d.binary\n{spelling}\0"));
             assert_eq!(flags.get("d"), Some(&true), "{spelling} reads as true");
         }
         for spelling in ["false", "no", "off", "0", "False", "NO", "Off", "0k", "0M"] {
-            let flags = parse_diff_driver_binary(&format!("diff.d.binary\n{spelling}\0"));
+            let flags = read(&format!("diff.d.binary\n{spelling}\0"));
             assert_eq!(flags.get("d"), Some(&false), "{spelling} reads as false");
         }
         for spelling in ["maybe", "1.5", "k", "1kk"] {
-            let flags = parse_diff_driver_binary(&format!("diff.d.binary\n{spelling}\0"));
+            let flags = read(&format!("diff.d.binary\n{spelling}\0"));
             assert!(flags.is_empty(), "{spelling} is not a bool git could read");
         }
-        let valueless = parse_diff_driver_binary("diff.dvalueless.binary\0");
+        let valueless = read("diff.dvalueless.binary\0");
         assert_eq!(
             valueless.get("dvalueless"),
             Some(&true),
             "a key with no newline at all is git's valueless true"
         );
-        let empty_value = parse_diff_driver_binary("diff.dempty.binary\n\0");
+        let empty_value = read("diff.dempty.binary\n\0");
         assert_eq!(
             empty_value.get("dempty"),
             Some(&false),
             "an empty value is git's false"
         );
 
-        let mixed = parse_diff_driver_binary(
-            "diff.binyes.binary\nyes\0diff.binno.binary\nfalse\0diff.my.tool.binary\ntrue\0",
-        );
+        let mixed =
+            read("diff.binyes.binary\nyes\0diff.binno.binary\nfalse\0diff.my.tool.binary\ntrue\0");
         assert_eq!(mixed.get("binyes"), Some(&true));
         assert_eq!(mixed.get("binno"), Some(&false));
         assert_eq!(
@@ -1796,7 +1857,7 @@ mod tests {
         );
         assert_eq!(mixed.len(), 3);
 
-        let junk = parse_diff_driver_binary("diff.odd.binary\nmaybe\0diff.two.binary\n2\0");
+        let junk = read("diff.odd.binary\nmaybe\0diff.two.binary\n2\0");
         assert_eq!(
             junk.get("two"),
             Some(&true),
@@ -1804,8 +1865,17 @@ mod tests {
         );
         assert_eq!(junk.get("odd"), None, "a non-bool value carries no verdict");
         assert_eq!(junk.len(), 1);
-        assert!(parse_diff_driver_binary("").is_empty());
-        assert!(parse_diff_driver_binary("core.autocrlf\nfalse\0").is_empty());
+
+        assert_eq!(
+            parse_diff_driver_binary(""),
+            Some(std::collections::HashMap::new()),
+            "no matches is an empty answer, not a failure"
+        );
+        assert_eq!(
+            parse_diff_driver_binary("core.autocrlf\nfalse\0"),
+            None,
+            "a key this query cannot return means the stream is unreadable"
+        );
     }
 
     /// The read budget, spent in `ls-files` order (which git emits sorted). A file

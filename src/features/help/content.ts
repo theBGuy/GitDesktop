@@ -475,8 +475,8 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
   count per side, so a file you staged and then edited again shows what's staged on
   its Staged row and what's still outside it on its Changes row. Binary files read
   \`bin\`; untracked files count every line as an addition from the moment they
-  appear (files Git converts as it stores them, Git LFS say, wait until they're
-  staged), and conflicted rows show none while the conflict is unresolved.
+  appear (files Git converts as it stores them, such as Git LFS files, wait until
+  they're staged), and conflicted rows show none while the conflict is unresolved.
 - **Hunk-level staging** — in a file's diff, each hunk has its own Stage / Unstage /
   Discard buttons.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,
