@@ -198,6 +198,7 @@ impl BbErrorBody {
 /// request header). Exposed to the provider so a caller that inspects the status
 /// itself (e.g. [`bb_get_text_status`]) produces the identical error for statuses it
 /// doesn't special-case.
+///
 /// Assumes a write operation for the privilege-scope 403; a read path that wants
 /// read-scope guidance calls `bb_error_detail` with `BbOpKind::Read` directly,
 /// as `bitbucket_findings::classify` does.

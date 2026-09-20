@@ -680,9 +680,9 @@ advisory page, the rule's docs), named by its host rather than by the
 forge. Coverage and test reports carry no annotations, so their section is
 the header, metrics, and description — and where no scanner has published
 anything yet, or a report's annotations couldn't be read, the tab says
-which rather than showing a clean list. Any pipe that writes Code Insights
-puts its results here, so a Bitbucket Pipelines scanner needs nothing
-extra to show up.
+which of those it is rather than showing a clean list. Any pipe that
+writes Code Insights puts its results here, so a Bitbucket Pipelines
+scanner needs nothing extra to show up.
 
 ### Insights
 
