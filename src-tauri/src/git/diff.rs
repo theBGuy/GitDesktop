@@ -496,8 +496,9 @@ pub struct WorkingLineStats {
 /// untracked file falls back to the same test.
 const BINARY_SNIFF_BYTES: usize = 8000;
 /// git's DEFAULT `core.bigFileThreshold`, past which git diffs a file as binary. The
-/// repo's effective value is resolved per call, since a repo may override it; this is
-/// the fallback whenever that resolution cannot produce a number.
+/// repo's effective value is resolved per call, and this reaches git as that read's
+/// `--default` for an unset key; a read that answers nothing readable blanks the
+/// untracked lane rather than falling back here.
 const BIG_FILE_BYTES_DEFAULT: u64 = 512 * 1024 * 1024;
 /// Ceiling on bytes one call may read across untracked files, spent in `ls-files`
 /// order — it bounds the 5s poll's I/O on a tree full of not-yet-ignored files. A
@@ -548,9 +549,10 @@ fn git_config_bool(value: Option<&str>) -> Option<bool> {
 /// all. Only a `diff.<driver>.binary` key whose value is a git bool carries a verdict;
 /// `<driver>` is everything between the prefix and the suffix, so a dotted driver name
 /// survives intact. `None` = the stream is not the shape this asked git for (a key
-/// outside the queried pattern), which is a probe FAILURE rather than an empty answer;
-/// a value that is simply not a bool still skips its own entry, since git fatals there
-/// and per-entry degrading is the gentler read.
+/// outside the queried pattern), which is a probe FAILURE rather than an empty answer.
+/// Two cases skip their own entry instead: a value that is simply not a bool, since git
+/// fatals there and per-entry degrading is the gentler read, and an EMPTY driver name,
+/// since `[diff ""]` is legal config whose key is in-pattern.
 fn parse_diff_driver_binary(text: &str) -> Option<std::collections::HashMap<String, bool>> {
     let mut flags = std::collections::HashMap::new();
     for entry in text.split('\0').filter(|e| !e.is_empty()) {
@@ -558,13 +560,21 @@ fn parse_diff_driver_binary(text: &str) -> Option<std::collections::HashMap<Stri
             Some((key, value)) => (key, Some(value)),
             None => (entry, None),
         };
+        // An off-pattern key means the stream is not what this asked for.
         let name = key
             .strip_prefix("diff.")
-            .and_then(|rest| rest.strip_suffix(".binary"))
-            .filter(|name| !name.is_empty())?;
+            .and_then(|rest| rest.strip_suffix(".binary"))?;
+        // An empty subsection names no driver any `diff` attribute value could
+        // reference — check-attr never answers with an empty string.
+        if name.is_empty() {
+            continue;
+        }
         let Some(binary) = git_config_bool(value) else {
             continue;
         };
+        // One key can appear once per scope. `--get-regexp` lists them in git's own
+        // precedence order, so overwriting leaves the last — the most specific — which
+        // is the value git itself would use.
         flags.insert(name.to_string(), binary);
     }
     Some(flags)
@@ -597,17 +607,22 @@ async fn diff_driver_binary_flags(
 /// value name a real driver; `<driver>` is everything between the prefix and the
 /// suffix, so a dotted driver name survives intact. `None` = a key outside the queried
 /// pattern, which means the stream is not the shape this asked for — a probe FAILURE,
-/// not an empty answer.
+/// not an empty answer. An EMPTY driver name is not that case: `[filter ""]` is legal
+/// config and canonicalizes to an in-pattern key, so it skips its own entry and leaves
+/// the rest of the stream readable.
 fn parse_configured_filters(text: &str) -> Option<std::collections::HashSet<String>> {
     let mut names = std::collections::HashSet::new();
     for key in text.split('\0').filter(|k| !k.is_empty()) {
-        let name = key
-            .strip_prefix("filter.")
-            .and_then(|rest| {
-                rest.strip_suffix(".clean")
-                    .or_else(|| rest.strip_suffix(".process"))
-            })
-            .filter(|name| !name.is_empty())?;
+        // An off-pattern key means the stream is not what this asked for.
+        let name = key.strip_prefix("filter.").and_then(|rest| {
+            rest.strip_suffix(".clean")
+                .or_else(|| rest.strip_suffix(".process"))
+        })?;
+        // An empty subsection names no driver any `filter` attribute value could
+        // reference — check-attr never answers with an empty string.
+        if name.is_empty() {
+            continue;
+        }
         names.insert(name.to_string());
     }
     Some(names)
@@ -1652,8 +1667,8 @@ mod tests {
 
     /// The `check-attr -z` grammar this depends on: whole `path NUL attr NUL value
     /// NUL` triples, one per REQUESTED attribute per path. A stream that does not
-    /// divide into triples maps NOTHING, so an unfamiliar shape sniffs everywhere
-    /// rather than verdicting half a file list.
+    /// divide into triples is unreadable rather than empty, so the caller blanks the
+    /// untracked lane instead of verdicting half a file list.
     #[test]
     fn parses_check_attr_triples_and_refuses_a_malformed_stream() {
         let none = std::collections::HashMap::new();
@@ -1794,7 +1809,6 @@ mod tests {
             "filter.fake.smudge\0",
             "filter.fake.required\0",
             "core.autocrlf\0",
-            "filter..clean\0",
         ] {
             assert_eq!(
                 parse_configured_filters(off_pattern),
@@ -1802,6 +1816,22 @@ mod tests {
                 "{off_pattern:?} is not a key this query can return"
             );
         }
+
+        // `[filter ""]` is legal config and canonicalizes to a key the query DOES
+        // return, so it is in-pattern: it names no driver and skips its own entry
+        // rather than condemning the stream.
+        assert_eq!(
+            parse_configured_filters("filter..clean\0"),
+            Some(std::collections::HashSet::new()),
+            "an empty subsection names no driver"
+        );
+        let beside = parse_configured_filters("filter..clean\0filter.real.clean\0")
+            .expect("an empty subsection is in-pattern");
+        assert_eq!(
+            beside,
+            std::collections::HashSet::from(["real".to_string()]),
+            "a real driver beside it still resolves"
+        );
         assert_eq!(
             parse_configured_filters(""),
             Some(std::collections::HashSet::new()),
@@ -1875,6 +1905,20 @@ mod tests {
             parse_diff_driver_binary("core.autocrlf\nfalse\0"),
             None,
             "a key this query cannot return means the stream is unreadable"
+        );
+
+        // `[diff ""]` is legal config and in-pattern: it names no driver and skips its
+        // own entry, leaving the rest of the stream readable.
+        assert_eq!(
+            parse_diff_driver_binary("diff..binary\ntrue\0"),
+            Some(std::collections::HashMap::new()),
+            "an empty subsection names no driver"
+        );
+        let beside = read("diff..binary\ntrue\0diff.real.binary\ntrue\0");
+        assert_eq!(
+            beside,
+            std::collections::HashMap::from([("real".to_string(), true)]),
+            "a real driver beside it still resolves"
         );
     }
 
