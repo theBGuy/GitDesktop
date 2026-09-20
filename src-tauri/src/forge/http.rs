@@ -199,6 +199,11 @@ impl BbErrorBody {
 /// itself (e.g. [`bb_get_text_status`]) produces the identical error for statuses it
 /// doesn't special-case.
 pub(crate) fn http_error(status: u16, body: &str) -> AppError {
+    AppError::Bitbucket(bb_error_detail(status, body))
+}
+
+/// Shared Bitbucket status guidance, API envelope detail, or a bounded text snippet.
+pub(crate) fn bb_error_detail(status: u16, body: &str) -> String {
     // Prefer the API's own message when the body is the JSON error envelope.
     let api_msg = serde_json::from_str::<BbErrorEnvelope>(body)
         .ok()
@@ -206,35 +211,30 @@ pub(crate) fn http_error(status: u16, body: &str) -> AppError {
         .map(BbErrorBody::best_message)
         .filter(|m| !m.trim().is_empty());
     match status {
-        401 => AppError::Bitbucket(
+        401 => {
             "Bitbucket rejected the request (401) — your API token may be expired or \
              revoked. Reconnect it in Settings → Accounts."
-                .into(),
-        ),
-        429 => AppError::Bitbucket(
-            "Bitbucket rate limit reached (429). Wait a moment and try again.".into(),
-        ),
+                .into()
+        }
+        429 => "Bitbucket rate limit reached (429). Wait a moment and try again.".into(),
         // A 403 whose body names Bitbucket's "privilege scopes" is a missing-write-scope
         // token (a bad token is a 401); other 403s fall through to the envelope message.
-        403 if body.contains("privilege scopes") => AppError::Bitbucket(
+        403 if body.contains("privilege scopes") => {
             "Bitbucket rejected the request (403) — your API token is missing a required \
              write scope. Reconnect it in Settings → Accounts with pull request / \
              repository / pipeline write scopes."
-                .into(),
-        ),
-        _ => {
-            let detail = api_msg.unwrap_or_else(|| {
-                let trimmed = body.trim();
-                if trimmed.is_empty() {
-                    format!("HTTP {status}")
-                } else {
-                    // Plain-text (non-envelope) body — keep it short.
-                    let snippet: String = trimmed.chars().take(300).collect();
-                    format!("HTTP {status}: {snippet}")
-                }
-            });
-            AppError::Bitbucket(detail)
+                .into()
         }
+        _ => api_msg.unwrap_or_else(|| {
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                format!("HTTP {status}")
+            } else {
+                // Plain-text (non-envelope) body — keep it short.
+                let snippet: String = trimmed.chars().take(300).collect();
+                format!("HTTP {status}: {snippet}")
+            }
+        }),
     }
 }
 
@@ -258,10 +258,22 @@ pub async fn bb_get_text_status(
     creds: &BbCredentials,
     path_or_url: &str,
 ) -> AppResult<(u16, String)> {
+    bb_get_status(creds, path_or_url, false).await
+}
+
+async fn bb_get_status(
+    creds: &BbCredentials,
+    path_or_url: &str,
+    json: bool,
+) -> AppResult<(u16, String)> {
     let url = resolve_url(path_or_url);
-    let resp = client()
+    let mut req = client()
         .get(&url)
-        .basic_auth(&creds.email, Some(&creds.token))
+        .basic_auth(&creds.email, Some(&creds.token));
+    if json {
+        req = req.header(reqwest::header::ACCEPT, "application/json");
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| AppError::Bitbucket(format!("Bitbucket request failed: {e}")))?;
@@ -300,24 +312,7 @@ pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
     path_or_url: &str,
     what: &str,
 ) -> AppResult<T> {
-    let url = resolve_url(path_or_url);
-    let resp = client()
-        .get(&url)
-        .basic_auth(&creds.email, Some(&creds.token))
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .map_err(|e| AppError::Bitbucket(format!("Bitbucket request failed: {e}")))?;
-    let status = resp.status().as_u16();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| {
-            bb_unreadable(
-                "the response",
-                format!("could not read Bitbucket response: {e}"),
-            )
-        })?;
+    let (status, body) = bb_get_classified(creds, path_or_url).await?;
     if !(200..300).contains(&status) {
         return Err(http_error(status, &body));
     }
@@ -331,22 +326,7 @@ pub async fn bb_get_classified(
     creds: &BbCredentials,
     path_or_url: &str,
 ) -> AppResult<(u16, String)> {
-    let url = resolve_url(path_or_url);
-    let resp = client()
-        .get(&url)
-        .basic_auth(&creds.email, Some(&creds.token))
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .map_err(|e| AppError::Bitbucket(format!("Bitbucket request failed: {e}")))?;
-    let status = resp.status().as_u16();
-    let body = resp.text().await.map_err(|e| {
-        bb_unreadable(
-            "the response",
-            format!("could not read Bitbucket response: {e}"),
-        )
-    })?;
-    Ok((status, body))
+    bb_get_status(creds, path_or_url, true).await
 }
 
 /// The low-level write primitive: send `method` to `path_or_url` with an optional JSON

@@ -384,7 +384,7 @@ impl<T> Default for BbPage<T> {
 /// Page bound shared by every `next`-following read — a hard stop so a pathological
 /// repo can't stall a panel behind unbounded requests. Pages past it are dropped
 /// silently: no error, no truncation flag, so the caller can't tell.
-const BB_MAX_PAGES: usize = 5;
+pub(super) const BB_MAX_PAGES: usize = 5;
 
 /// The next page's URL, or `None` when there is no page to follow. Three cases stop
 /// the walk: an ABSENT `next`, an EMPTY one, and one pointing anywhere but

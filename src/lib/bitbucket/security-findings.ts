@@ -60,8 +60,9 @@ export interface BbReportOut {
   annotations: BbAnnotationOut[];
   /** More annotations exist on this report than the limit asked for. */
   annotationsTruncated: boolean;
-  /** The annotation walk failed outright, so the rows shown are not the whole
-   *  report — distinct from a report that genuinely carries none. */
+  /** This report's annotation read failed outright, or lost rows to unreadable
+   *  entries — either way the rows shown are not the whole report, which is
+   *  distinct from a report that genuinely carries none. */
   annotationsUnreadable: boolean;
 }
 
@@ -142,6 +143,23 @@ export function linkOutLabel(url: string | null): string {
     return host ? `Open on ${host}` : "Open link";
   } catch {
     return "Open link";
+  }
+}
+
+/** What a report covers, in words. Bitbucket documents four kinds; one it adds
+ *  later shows as it arrived rather than being dropped or relabeled. */
+export function bbReportTypeLabel(reportType: string): string {
+  switch (reportType.toUpperCase()) {
+    case "SECURITY":
+      return "Security";
+    case "COVERAGE":
+      return "Coverage";
+    case "TEST":
+      return "Test";
+    case "BUG":
+      return "Bug";
+    default:
+      return reportType;
   }
 }
 

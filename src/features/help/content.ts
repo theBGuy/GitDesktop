@@ -2286,14 +2286,15 @@ when your branch's tip has no reports, and saying so. A line above the list name
 URL. Anything that writes Code Insights lands here, so a scanner already running in
 your pipeline needs nothing extra.
 
-Each report gets its own section, newest first, headed by its **title**, the
-**reporter** that published it, and a **Passed** / **Failed** / **Pending** chip. Where
-the report carries a link, a button beside them opens it, named for the site it lands on
-(**Open on sonarcloud.io**, say) rather than for Bitbucket, since a Code Insights link
-goes wherever the scanner pointed it. Hover the button to preview the full URL. Under
-the header sits the report's **metrics**
-— counts, durations, percentages, and pass/fail flags, each formatted for the type the
-report declared.
+Each report gets its own section, newest first, headed by its **title**, what it
+covers (**Security**, **Coverage**, **Test**, or **Bug**), the **reporter** that
+published it, and a **Passed** / **Failed** / **Pending** chip (or **Unspecified**
+when the tool posted none). Where the report carries a link, a button beside them
+opens it, named for the site it lands on (**Open on sonarcloud.io**, say) rather
+than for Bitbucket, since a Code Insights link goes wherever the scanner pointed
+it. Hover the button to preview the full URL. Under the header sits the report's
+**metrics** — counts, durations, percentages, dates, and pass/fail flags, each
+formatted for the type the report declared.
 
 The report's **annotations** are the rows: worst severity first, then by path, each with
 its **severity**, what it reports (**Vulnerability**, **Code smell**, or **Bug**), and
@@ -2378,6 +2379,9 @@ Once connected:
   forks, and a **More on Bitbucket** card that links out to the
   **Commits**, **Branches**, **Pipelines**, and **Deployments** pages (these only render on
   the web). GitHub-only cards (community, traffic, dependencies) stay hidden.
+- **Code Insights** — the **Findings** tab lists the reports published against your
+  branch's tip commit, a section each, with their metrics and annotations (see
+  *Findings*).
 - **Publish a local repo** — a repo with no remote can be published to Bitbucket. From
   the sync bar's **Publish repository…** (or the not-ready panel), pick **Bitbucket**,
   choose a **workspace**, give it a name (which becomes the URL slug), and optionally a

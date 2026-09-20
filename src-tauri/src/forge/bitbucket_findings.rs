@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri_plugin_http::reqwest::Url;
 
-use super::bitbucket::{next_page_url, workspace_slug, BbPage};
+use super::bitbucket::{next_page_url, workspace_slug, BbPage, BB_MAX_PAGES};
 use super::{encode_query_value, http};
 use crate::error::AppResult;
 
@@ -205,8 +205,10 @@ fn clamp_limit(limit: Option<u32>) -> usize {
     limit.unwrap_or(100).clamp(1, 500) as usize
 }
 
-// Mirrors bitbucket::BB_MAX_PAGES without widening its private API.
-const BB_MAX_PAGES: usize = 5;
+// One full page. The old ten-per-commit write cap is gone (probed 2026-09-20:
+// twelve concurrent reports accepted), so the bound is fetch cost, not a
+// platform limit; past it the walk reports truncated and the cap sentence shows.
+const BB_MAX_REPORTS: usize = 100;
 type Failure = (BbFindingsAvailability, String);
 
 fn indeterminate(detail: impl Into<String>) -> Failure {
@@ -214,13 +216,15 @@ fn indeterminate(detail: impl Into<String>) -> Failure {
 }
 
 fn classify(status: u16, body: &str) -> Result<(), Failure> {
+    // Findings routes 401/403 to sign-in and other failures to Retry;
+    // shared Bitbucket detail keeps reconnect and rate-limit guidance consistent.
     match status {
-        200 => Ok(()),
-        403 => Err((BbFindingsAvailability::Forbidden, body.trim().to_string())),
-        _ => Err(indeterminate(format!(
-            "Bitbucket HTTP {status}: {}",
-            body.trim()
-        ))),
+        200..=299 => Ok(()),
+        401 | 403 => Err((
+            BbFindingsAvailability::Forbidden,
+            http::bb_error_detail(status, body),
+        )),
+        _ => Err(indeterminate(http::bb_error_detail(status, body))),
     }
 }
 
@@ -299,16 +303,24 @@ fn partial_detail(
     annotation_lists: usize,
     annotation_rows: usize,
 ) -> Option<String> {
-    (reports > 0 || annotation_lists > 0 || annotation_rows > 0).then(|| {
-        let mut detail =
-            format!("{reports} reports and {annotation_lists} annotation lists couldn't be read");
-        if annotation_rows > 0 {
-            detail.push_str(&format!(
-                "; {annotation_rows} annotation rows couldn't be read"
-            ));
-        }
-        detail
+    let parts: Vec<String> = [
+        (reports, "report", "reports"),
+        (annotation_lists, "annotation list", "annotation lists"),
+        (annotation_rows, "annotation row", "annotation rows"),
+    ]
+    .into_iter()
+    .filter(|(count, _, _)| *count > 0)
+    .map(|(count, singular, plural)| {
+        format!("{count} {}", if count == 1 { singular } else { plural })
     })
+    .collect();
+    let (last, rest) = parts.split_last()?;
+    let units = if rest.is_empty() {
+        last.clone()
+    } else {
+        format!("{} and {last}", rest.join(", "))
+    };
+    Some(format!("{units} couldn't be read"))
 }
 
 fn missing_refs_detail(branches: &[String]) -> String {
@@ -337,6 +349,8 @@ where
     F: FnMut(String) -> Fut,
     Fut: Future<Output = AppResult<(u16, String)>>,
 {
+    // Bitbucket accepts both %2F-encoded and literal-slash branch names (live probe
+    // 2026-09-20: both returned 200 with the same target); the encoded form is test-pinned.
     let url = format!("{base}/refs/branches/{}", encode_query_value(branch));
     let (status, body) = fetch(get, url).await?;
     if status == 404
@@ -421,7 +435,7 @@ where
                     .expect("resolve_ref validates hash")
             )
         );
-        let (items, truncated) = walk(get, reports_url, usize::MAX).await?;
+        let (items, truncated) = walk(get, reports_url, BB_MAX_REPORTS).await?;
         out.truncated = truncated;
         let (reports, unreadable_reports) = parse_items(items, report_out);
         if reports.is_empty() {
@@ -709,10 +723,10 @@ mod tests {
     #[tokio::test]
     async fn annotation_failure_preserves_available_reports_and_separate_counts() {
         for (rows, expected) in [
-            (REPORT, "0 reports and 1 annotation lists couldn't be read"),
+            (REPORT, "1 annotation list couldn't be read"),
             (
                 r#"{"values":[{"uuid":"r1"},{"title":"missing uuid"}]}"#,
-                "1 reports and 1 annotation lists couldn't be read",
+                "1 report and 1 annotation list couldn't be read",
             ),
         ] {
             let out = scripted_findings(
@@ -773,9 +787,10 @@ mod tests {
             )
             .await;
             assert_eq!(out.availability, BbFindingsAvailability::Available);
-            assert_eq!(out.detail.as_deref(), Some(
-                "1 reports and 1 annotation lists couldn't be read; 1 annotation rows couldn't be read"
-            ));
+            assert_eq!(
+                out.detail.as_deref(),
+                Some("1 report, 1 annotation list and 1 annotation row couldn't be read")
+            );
             assert_eq!(out.reports.len(), 2);
             let report = &out.reports[0];
             assert!(report.annotations_unreadable);
@@ -945,6 +960,7 @@ mod tests {
     #[tokio::test]
     async fn unreadable_windows_and_response_failures_never_become_empty_success() {
         for (status, body) in [
+            (204, ""),
             (200, "not json"),
             (200, "{}"),
             (200, r#"{"values":null}"#),
@@ -973,25 +989,148 @@ mod tests {
                 }
             );
             if status == 403 {
-                assert_eq!(out.detail.as_deref(), Some("unmeasured reason"));
+                assert_eq!(out.detail.as_deref(), Some("HTTP 403: unmeasured reason"));
             }
             if body.contains("missing uuid") {
-                assert_eq!(
-                    out.detail.as_deref(),
-                    Some("1 reports and 0 annotation lists couldn't be read")
-                );
+                assert_eq!(out.detail.as_deref(), Some("1 report couldn't be read"));
             }
             assert!(out.reports.is_empty());
             assert_eq!(out.default_ref.as_deref(), Some("main"));
         }
         let out = scripted_findings("topic", None, vec![("", 403, " raw body ")]).await;
         assert_eq!(out.availability, BbFindingsAvailability::Forbidden);
-        assert_eq!(out.detail.as_deref(), Some("raw body"));
+        assert_eq!(out.detail.as_deref(), Some("HTTP 403: raw body"));
         let mut get =
             |_: String| ready(Err(crate::error::AppError::Bitbucket("read failed".into())));
         let out = findings_with(&mut get, BASE, "topic".into(), None).await;
         assert_eq!(out.availability, BbFindingsAvailability::Indeterminate);
         assert!(out.detail.unwrap().contains("read failed"));
+    }
+
+    #[tokio::test]
+    async fn classification_uses_shared_bitbucket_guidance_and_envelope_messages() {
+        for (status, body, availability, expected) in [
+            (
+                401,
+                "expired token",
+                BbFindingsAvailability::Forbidden,
+                "Bitbucket rejected the request (401) — your API token may be expired or revoked. Reconnect it in Settings → Accounts.",
+            ),
+            (
+                429,
+                "too many requests",
+                BbFindingsAvailability::Indeterminate,
+                "Bitbucket rate limit reached (429). Wait a moment and try again.",
+            ),
+            (
+                403,
+                r#"{"error":{"message":"You do not have access to this repository."}}"#,
+                BbFindingsAvailability::Forbidden,
+                "You do not have access to this repository.",
+            ),
+            (
+                403,
+                r#"{"error":{"message":"Your credentials lack one or more required privilege scopes."}}"#,
+                BbFindingsAvailability::Forbidden,
+                "Bitbucket rejected the request (403) — your API token is missing a required write scope. Reconnect it in Settings → Accounts with pull request / repository / pipeline write scopes.",
+            ),
+            (
+                404,
+                r#"{"error":{"message":"There is no API hosted at this URL"}}"#,
+                BbFindingsAvailability::Indeterminate,
+                "There is no API hosted at this URL",
+            ),
+            (
+                404,
+                r#"{"error":{"message":"Not found","detail":"report-service.report.not-found"}}"#,
+                BbFindingsAvailability::Indeterminate,
+                "report-service.report.not-found",
+            ),
+        ] {
+            assert_eq!(classify(status, body), Err((availability, expected.into())));
+            match http::http_error(status, body) {
+                crate::error::AppError::Bitbucket(detail) => assert_eq!(detail, expected),
+                other => panic!("expected Bitbucket error, got {other:?}"),
+            }
+            let out = scripted_findings(
+                "topic",
+                None,
+                vec![
+                    ("", 200, REPO),
+                    ("/refs/branches/topic", 200, TIP),
+                    ("/commit/abc/reports?pagelen=100", status, body),
+                ],
+            ).await;
+            assert_eq!(out.availability, availability);
+            assert_eq!(out.detail.as_deref(), Some(expected));
+        }
+        assert_eq!(classify(204, ""), Ok(()));
+        assert_eq!(classify(299, ""), Ok(()));
+        assert_eq!(classify(500, ""), Err(indeterminate("HTTP 500")));
+        let long_body = format!("  {}  ", "é".repeat(301));
+        assert_eq!(
+            classify(500, &long_body),
+            Err(indeterminate(format!("HTTP 500: {}", "é".repeat(300))))
+        );
+    }
+
+    #[test]
+    fn partial_detail_filters_zero_counts_and_pluralizes_each_unit() {
+        for (counts, expected) in [
+            ((0, 0, 0), None),
+            ((1, 0, 0), Some("1 report couldn't be read")),
+            ((0, 1, 0), Some("1 annotation list couldn't be read")),
+            ((0, 0, 1), Some("1 annotation row couldn't be read")),
+            (
+                (2, 0, 3),
+                Some("2 reports and 3 annotation rows couldn't be read"),
+            ),
+            (
+                (0, 2, 1),
+                Some("2 annotation lists and 1 annotation row couldn't be read"),
+            ),
+            (
+                (2, 3, 4),
+                Some("2 reports, 3 annotation lists and 4 annotation rows couldn't be read"),
+            ),
+        ] {
+            assert_eq!(
+                partial_detail(counts.0, counts.1, counts.2).as_deref(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn report_cap_bounds_annotation_requests_and_discloses_remaining_reports() {
+        // Fixture arithmetic derives from the const so a cap change can't
+        // silently skew the boundary — the pin records the probed basis.
+        assert_eq!(BB_MAX_REPORTS, 100);
+        for (count, has_next, truncated) in [
+            (BB_MAX_REPORTS, false, false),
+            (BB_MAX_REPORTS, true, true),
+            (BB_MAX_REPORTS + 1, false, true),
+        ] {
+            let mut page = json!({"values": (0..count).map(|i| json!({"uuid":format!("r{i}")})).collect::<Vec<_>>()});
+            if has_next {
+                page["next"] = json!("https://api.bitbucket.org/2.0/reports?page=2");
+            }
+            let body = page.to_string();
+            let annotation_urls: Vec<String> = (0..BB_MAX_REPORTS)
+                .map(|i| format!("/commit/abc/reports/r{i}/annotations?pagelen=100"))
+                .collect();
+            let mut responses = vec![
+                ("", 200, REPO),
+                ("/refs/branches/topic", 200, TIP),
+                ("/commit/abc/reports?pagelen=100", 200, &body),
+            ];
+            responses.extend(annotation_urls.iter().map(|url| (url.as_str(), 200, EMPTY)));
+            let out = scripted_findings("topic", None, responses).await;
+            assert_eq!(out.availability, BbFindingsAvailability::Available);
+            assert_eq!(out.reports.len(), BB_MAX_REPORTS);
+            assert_eq!(out.truncated, truncated);
+            assert!(out.detail.is_none());
+        }
     }
 
     #[test]

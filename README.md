@@ -665,12 +665,14 @@ stands in for them.
 
 On a **Bitbucket** repo the tab reads the **Code Insights** reports
 published against your branch's tip commit (falling back to the default
-branch, and saying so), a section per report: its title, the reporter, a
-**Passed** / **Failed** / **Pending** result chip, its metrics strip
-(numbers, durations, percentages, and pass/fail flags, each formatted for
-its own type), and its **annotations** worst-first with severity and
-`path:line`. A provenance strip names the commit and ref the reports came
-from, linking the commit where Bitbucket gives a URL. Select an annotation
+branch, and saying so), a section per report: its title, what it covers,
+the reporter, its result chip (Passed, Failed, or Pending), its metrics
+strip (numbers, durations, percentages, dates, and pass/fail flags, each
+formatted for its own type), and its **annotations** worst-first with
+severity and `path:line`. A provenance strip names the commit and ref the
+reports came from, linking the commit where Bitbucket gives a URL. That
+strip shows above the no-reports card too, so a commit with nothing
+published still says which commit and ref were read. Select an annotation
 for its type, location, reporter, result, and full text, and where the
 scanner attached a link, open it at the source it points to (an advisory
 page, the rule's docs), named by its host rather than by the forge.

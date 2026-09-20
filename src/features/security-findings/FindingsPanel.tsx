@@ -38,10 +38,12 @@ import type {
   BbFindingsOut,
   BbReportDataOut,
   BbReportOut,
+  BbResultLevel,
 } from "@/lib/bitbucket/security-findings";
 import {
   bbAnnotationTypeLabel,
   bbReportLabel,
+  bbReportTypeLabel,
   bbResultLabel,
   bbResultLevel,
   linkOutLabel,
@@ -88,7 +90,7 @@ import {
   type SelectedFinding,
   useUiStore,
 } from "@/lib/stores/ui";
-import { formatDuration, parseableDate } from "@/lib/time";
+import { formatDuration, parseableDate, validEpochMs } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import {
   CodeScanningChip,
@@ -112,8 +114,8 @@ import {
 const FINDINGS_LIMIT_CAP = 500;
 
 /** Each provider's filter cue names the fields its own rows actually carry — the
- *  three read entirely different sources. GitHub's also words the wait while a
- *  repo's provider is still resolving. */
+ *  three read entirely different sources. The github entry doubles as the
+ *  fallback while the provider is still undefined. */
 const FILTER_PLACEHOLDERS: Record<ForgeProvider, string> = {
   github: "Filter by package, rule, secret type, summary, GHSA, or CVE",
   gitlab:
@@ -1237,11 +1239,14 @@ const byBbAnnotation = (a: BbAnnotationOut, b: BbAnnotationOut) =>
   (a.path ?? "").localeCompare(b.path ?? "");
 
 /** The report's own name matches too, so filtering by it keeps that whole
- *  section's rows rather than emptying a section the query named. */
+ *  section's rows rather than emptying a section the query named. `externalId`
+ *  is matched because it stands in as the row's visible label when the
+ *  annotation carries no summary — typing what you see has to find it. */
 const matchesBbAnnotation = (a: BbAnnotationOut, label: string, q: string) =>
   !q ||
   label.toLowerCase().includes(q) ||
   (a.summary?.toLowerCase().includes(q) ?? false) ||
+  (a.externalId?.toLowerCase().includes(q) ?? false) ||
   (a.path?.toLowerCase().includes(q) ?? false);
 
 function buildBbSections(
@@ -1266,17 +1271,14 @@ function buildBbSections(
 
 /** A report's result tone and glyph. The label always rides alongside, so the
  *  state never reaches the user by color or glyph alone. */
-const BB_RESULT_TONE: Record<ReturnType<typeof bbResultLevel>, string> = {
+const BB_RESULT_TONE: Record<BbResultLevel, string> = {
   passed: "text-success",
   failed: "text-destructive",
   pending: "text-muted-foreground",
   unknown: "text-muted-foreground",
 };
 
-const BB_RESULT_ICON: Record<
-  ReturnType<typeof bbResultLevel>,
-  typeof CheckCircleIcon
-> = {
+const BB_RESULT_ICON: Record<BbResultLevel, typeof CheckCircleIcon> = {
   passed: CheckCircleIcon,
   failed: XCircleIcon,
   pending: ClockIcon,
@@ -1326,7 +1328,15 @@ function bbDataText(item: BbReportDataOut): string | null {
           : "✗"
         : bbPlainValue(value);
     case "PERCENTAGE":
-      return asNumber === null ? bbPlainValue(value) : `${asNumber}%`;
+      return asNumber === null
+        ? bbPlainValue(value)
+        : `${asNumber.toLocaleString()}%`;
+    case "DATE":
+      // Atlassian documents a DATE value as epoch milliseconds; `validEpochMs`
+      // is what keeps an out-of-range number out of `new Date`.
+      return asNumber !== null && validEpochMs(asNumber)
+        ? new Date(asNumber).toLocaleDateString()
+        : bbPlainValue(value);
     default:
       return bbPlainValue(value);
   }
@@ -1459,12 +1469,18 @@ function BbUnavailableCard({
     // deliberately: a scanner that ran and failed publishes nothing either, and
     // the wire can't tell that from never-configured.
     return (
-      <ReasonCard
-        icon={ShieldSlashIcon}
-        message="No Code Insights reports on this commit — most likely no scanner or pipe is set up yet."
-        detail={data.detail}
-        action={retryAction}
-      />
+      <>
+        {/* This state resolved a commit, so the strip names which one was read
+            and which ref it came from. The other three states have no commit,
+            and the strip renders nothing for them. */}
+        <BbCommitProvenance data={data} />
+        <ReasonCard
+          icon={ShieldSlashIcon}
+          message="No Code Insights reports on this commit — most likely no scanner or pipe is set up yet."
+          detail={data.detail}
+          action={retryAction}
+        />
+      </>
     );
   }
   if (state === "refNotFound") {
@@ -1591,13 +1607,25 @@ function BbReportSectionView({
   return (
     <>
       <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-3 py-1.5">
-        <span
+        {/* A heading, matching the <h3> every GitHub/GitLab category header
+            uses, so screen-reader heading navigation reaches each report. */}
+        <h3
           className="min-w-0 flex-1 truncate text-xs font-semibold"
           title={label}
         >
           {label}
-        </span>
+        </h3>
         <BbResultChip className="shrink-0" result={report.result} />
+        {/* What the report covers — a COVERAGE section reads as one rather than
+            as a security report that found nothing. */}
+        {report.reportType ? (
+          <span
+            className="min-w-0 max-w-[20%] shrink truncate text-[11px] text-muted-foreground"
+            title={bbReportTypeLabel(report.reportType)}
+          >
+            {bbReportTypeLabel(report.reportType)}
+          </span>
+        ) : null}
         {/* Suppressed when the label already fell back to it — one string, said
             once. The width cap is what gives the title priority: `flex-1` bases
             the title at zero, so without it a long reporter holds its full
@@ -1626,6 +1654,17 @@ function BbReportSectionView({
         ) : null}
       </div>
       <BbDataStrip data={report.data} />
+      {/* The report's own description renders at the section, not only in an
+          annotation's detail — a zero-annotation report has no row to select,
+          and its details are often the whole explanation. */}
+      {report.details ? (
+        <p
+          className="truncate border-b px-3 py-1.5 text-[11px] text-muted-foreground"
+          title={report.details}
+        >
+          {report.details}
+        </p>
+      ) : null}
       {rows.length > 0 ? (
         <BbAnnotationRows
           section={section}
